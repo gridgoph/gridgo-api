@@ -16,9 +16,6 @@ if (!fs.existsSync(STORE)) {
   spawnSync(process.execPath, [path.join(__dirname, "seed.js"), "--reset"], { stdio: "inherit" });
 }
 
-function load() {
-  return JSON.parse(fs.readFileSync(STORE, "utf8"));
-}
 function save(store) {
   fs.writeFileSync(STORE, JSON.stringify(store, null, 2));
 }
@@ -99,9 +96,30 @@ function dropoffFor(address, zone) {
   };
 }
 
+/** True when a map point already has usable coordinates (do not overwrite). */
+function hasCoords(point) {
+  return (
+    point != null &&
+    typeof point.lat === "number" &&
+    typeof point.lng === "number" &&
+    Number.isFinite(point.lat) &&
+    Number.isFinite(point.lng)
+  );
+}
+
+/** Default shop for suppliers that predate geography (stable Davao downtown pin). */
+function defaultShopFor(supplier) {
+  const name = supplier.supplierName || supplier.name || "Supplier";
+  return {
+    lat: 7.064,
+    lng: 125.6085,
+    label: `${name}, C.M. Recto St`,
+  };
+}
+
 /** Pickup from supplier shop; null when no supplier assigned yet. */
 function pickupFromSupplier(supplier) {
-  if (!supplier?.shop) return null;
+  if (!supplier?.shop || !hasCoords(supplier.shop)) return null;
   return {
     lat: supplier.shop.lat,
     lng: supplier.shop.lng,
@@ -116,6 +134,46 @@ function setOrderPickup(order, store) {
   }
   const supplier = store.users.find((u) => u.id === order.supplierId);
   order.pickup = pickupFromSupplier(supplier);
+}
+
+/**
+ * Idempotent geography backfill for stores that predate pickup/dropoff/shop.
+ * Only fills missing coords; never overwrites existing ones. Returns true if mutated.
+ */
+function backfillGeography(store) {
+  let changed = false;
+
+  for (const u of store.users || []) {
+    if (u.role === "supplier" && !hasCoords(u.shop)) {
+      u.shop = defaultShopFor(u);
+      changed = true;
+    }
+  }
+
+  for (const order of store.orders || []) {
+    if (!hasCoords(order.dropoff)) {
+      order.dropoff = dropoffFor(order.address, order.zone || "davao_central");
+      changed = true;
+    }
+    if (order.supplierId && !hasCoords(order.pickup)) {
+      const supplier = (store.users || []).find((u) => u.id === order.supplierId);
+      const pickup = pickupFromSupplier(supplier);
+      if (pickup) {
+        order.pickup = pickup;
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
+function load() {
+  const store = JSON.parse(fs.readFileSync(STORE, "utf8"));
+  if (backfillGeography(store)) {
+    save(store);
+  }
+  return store;
 }
 
 function canViewOrderLocation(user, order) {

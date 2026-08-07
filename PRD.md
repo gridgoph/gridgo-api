@@ -69,6 +69,8 @@ Additive fields on every order (do not remove `address` / `zone`):
 
 Supplier user record may include fixed `shop: { lat, lng, label }`. New orders get `dropoff` from delivery `zone` + deterministic address offset (Davao neighbourhood anchors).
 
+Stores that predate geography are backfilled on load (idempotent): suppliers missing `shop` get a default Davao pin; orders missing `dropoff` get one from `zone`/`address`; orders with a supplier and missing `pickup` get the supplier shop. Existing coordinates are never overwritten. Prefer this over `npm run reset` when preserving live demo data.
+
 ## Rider location read
 
 | Method | Path | Who | Response |

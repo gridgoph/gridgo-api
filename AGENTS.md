@@ -30,6 +30,8 @@ Rider tracking:
 
 Seed via `npm run reset` (`src/seed.js` → `data/store.json`).
 
+**Existing live stores:** `data/store.json` is gitignored. On every `load()`, an idempotent backfill fills missing `shop` / `dropoff` / `pickup` only — it never overwrites coords that already exist and does not require `npm run reset` (which would wipe captain demo orders).
+
 ## Maintaining this file
 
 Record only durable project knowledge useful to almost every future session. Prefer pointers to authoritative files over copying detail. Keep entries short.
