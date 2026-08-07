@@ -58,9 +58,12 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | POST | `/credits/authorize` | client | reserve/spend for order |
 | GET | `/dispatch/offers` | rider | open delivery offers |
 | POST | `/dispatch/:id/accept` | rider | accept job |
-| POST | `/dispatch/:id/location` | rider | location ping |
+| POST | `/dispatch/:id/location` | assigned rider | location ping (while in transit) |
+| GET | `/dispatch/:id/location` | rider / client / supplier / ops | latest ping or `{ ping: null }` |
 | POST | `/dispatch/:id/proof` | rider | pickup/delivery/COD proof |
 | GET | `/notifications` | any | in-app alerts |
+
+Orders include map points: `pickup` (supplier shop or `null`) and `dropoff` (`{ lat, lng, label }`). Coords are Davao City; `address` / `zone` stay as text.
 
 ## Replace later
 

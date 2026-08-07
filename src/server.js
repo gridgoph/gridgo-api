@@ -16,9 +16,6 @@ if (!fs.existsSync(STORE)) {
   spawnSync(process.execPath, [path.join(__dirname, "seed.js"), "--reset"], { stdio: "inherit" });
 }
 
-function load() {
-  return JSON.parse(fs.readFileSync(STORE, "utf8"));
-}
 function save(store) {
   fs.writeFileSync(STORE, JSON.stringify(store, null, 2));
 }
@@ -69,6 +66,123 @@ function publicUser(u) {
   if (!u) return null;
   const { password, ...rest } = u;
   return rest;
+}
+
+/** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
+const ZONE_COORDS = {
+  davao_central: { lat: 7.0865, lng: 125.6135 }, // Bajada / JP Laurel
+  davao_south: { lat: 7.0495, lng: 125.5875 }, // Matina Crossing
+  davao_north: { lat: 7.1165, lng: 125.6452 }, // Lanang
+  davao_west: { lat: 7.0380, lng: 125.5450 }, // Toril side
+  davao_east: { lat: 7.0950, lng: 125.6500 }, // Buhangin / Sasa
+};
+
+function hashString(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+/** Deterministic dropoff near the zone so new orders do not stack on one pin. */
+function dropoffFor(address, zone) {
+  const base = ZONE_COORDS[zone] || { lat: 7.0731, lng: 125.6128 };
+  const h = hashString(`${zone}|${address || ""}`);
+  const dLat = ((h % 200) - 100) * 0.00003;
+  const dLng = ((((h / 200) | 0) % 200) - 100) * 0.00003;
+  return {
+    lat: Math.round((base.lat + dLat) * 1e6) / 1e6,
+    lng: Math.round((base.lng + dLng) * 1e6) / 1e6,
+    label: address || zone || "Davao City",
+  };
+}
+
+/** True when a map point already has usable coordinates (do not overwrite). */
+function hasCoords(point) {
+  return (
+    point != null &&
+    typeof point.lat === "number" &&
+    typeof point.lng === "number" &&
+    Number.isFinite(point.lat) &&
+    Number.isFinite(point.lng)
+  );
+}
+
+/** Default shop for suppliers that predate geography (stable Davao downtown pin). */
+function defaultShopFor(supplier) {
+  const name = supplier.supplierName || supplier.name || "Supplier";
+  return {
+    lat: 7.064,
+    lng: 125.6085,
+    label: `${name}, C.M. Recto St`,
+  };
+}
+
+/** Pickup from supplier shop; null when no supplier assigned yet. */
+function pickupFromSupplier(supplier) {
+  if (!supplier?.shop || !hasCoords(supplier.shop)) return null;
+  return {
+    lat: supplier.shop.lat,
+    lng: supplier.shop.lng,
+    label: supplier.shop.label || supplier.supplierName || supplier.name,
+  };
+}
+
+function setOrderPickup(order, store) {
+  if (!order.supplierId) {
+    order.pickup = null;
+    return;
+  }
+  const supplier = store.users.find((u) => u.id === order.supplierId);
+  order.pickup = pickupFromSupplier(supplier);
+}
+
+/**
+ * Idempotent geography backfill for stores that predate pickup/dropoff/shop.
+ * Only fills missing coords; never overwrites existing ones. Returns true if mutated.
+ */
+function backfillGeography(store) {
+  let changed = false;
+
+  for (const u of store.users || []) {
+    if (u.role === "supplier" && !hasCoords(u.shop)) {
+      u.shop = defaultShopFor(u);
+      changed = true;
+    }
+  }
+
+  for (const order of store.orders || []) {
+    if (!hasCoords(order.dropoff)) {
+      order.dropoff = dropoffFor(order.address, order.zone || "davao_central");
+      changed = true;
+    }
+    if (order.supplierId && !hasCoords(order.pickup)) {
+      const supplier = (store.users || []).find((u) => u.id === order.supplierId);
+      const pickup = pickupFromSupplier(supplier);
+      if (pickup) {
+        order.pickup = pickup;
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
+function load() {
+  const store = JSON.parse(fs.readFileSync(STORE, "utf8"));
+  if (backfillGeography(store)) {
+    save(store);
+  }
+  return store;
+}
+
+function canViewOrderLocation(user, order) {
+  if (!user || !order) return false;
+  if (user.role === "ops_admin" || user.role === "super_admin") return true;
+  if (user.role === "rider" && order.riderId === user.id) return true;
+  if (user.role === "client" && order.clientId === user.id) return true;
+  if (user.role === "supplier" && order.supplierId === user.id) return true;
+  return false;
 }
 
 function ordersFor(user, store) {
@@ -245,6 +359,8 @@ const server = http.createServer(async (req, res) => {
       const totalMinor = (product?.basePriceMinor || 10000) * qty;
       const deliveryFeeMinor = Number(body.deliveryFeeMinor || 15000);
       const ts = now();
+      const address = body.address || "";
+      const zone = body.zone || "davao_central";
       const order = {
         id: id("ord"),
         clientId: user.id,
@@ -257,8 +373,10 @@ const server = http.createServer(async (req, res) => {
         size: body.size || "",
         material: body.material || "",
         deadline: body.deadline || null,
-        address: body.address || "",
-        zone: body.zone || "davao_central",
+        address,
+        zone,
+        pickup: null,
+        dropoff: dropoffFor(address, zone),
         totalMinor,
         deliveryFeeMinor,
         paymentMethod: null,
@@ -301,10 +419,16 @@ const server = http.createServer(async (req, res) => {
         order.supplierId = order.supplierId || user.id;
         order.promisedDate = body.promisedDate || order.deadline;
         if (body.finalTotalMinor) order.totalMinor = Number(body.finalTotalMinor);
+        setOrderPickup(order, store);
+      }
+      if (next === "supplier_assigned" && body.supplierId) {
+        order.supplierId = body.supplierId;
+        setOrderPickup(order, store);
       }
       if (next === "approved_for_matching" && order.state === "supplier_assigned" && user.role === "supplier") {
         // treat as decline
         order.supplierId = null;
+        order.pickup = null;
       }
       if (next === "rider_assigned") {
         order.riderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
@@ -369,6 +493,18 @@ const server = http.createServer(async (req, res) => {
       store.locationPings.push(ping);
       save(store);
       return send(res, 201, { ping });
+    }
+
+    // Latest rider location for tracking (assigned rider, client, supplier, ops/super).
+    if (req.method === "GET" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((o) => o.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (!canViewOrderLocation(user, order)) return send(res, 403, { error: "forbidden" });
+      const pings = store.locationPings.filter((p) => p.orderId === orderId);
+      if (!pings.length) return send(res, 200, { ping: null });
+      const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
+      return send(res, 200, { ping });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/proof$/.test(pathname)) {

@@ -17,9 +17,51 @@ function now() {
   return new Date().toISOString();
 }
 
+/** Plausible Davao City zone anchors (real neighbourhoods, not Manila / null island). */
+const ZONE_COORDS = {
+  davao_central: { lat: 7.0865, lng: 125.6135 }, // Bajada / JP Laurel
+  davao_south: { lat: 7.0495, lng: 125.5875 }, // Matina Crossing
+  davao_north: { lat: 7.1165, lng: 125.6452 }, // Lanang
+  davao_west: { lat: 7.0380, lng: 125.5450 }, // Toril side
+  davao_east: { lat: 7.0950, lng: 125.6500 }, // Buhangin / Sasa
+};
+
+function hashString(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+/** Deterministic dropoff near the zone centre so new orders do not stack on one pin. */
+function dropoffFor(address, zone) {
+  const base = ZONE_COORDS[zone] || { lat: 7.0731, lng: 125.6128 };
+  const h = hashString(`${zone}|${address || ""}`);
+  const dLat = ((h % 200) - 100) * 0.00003;
+  const dLng = ((((h / 200) | 0) % 200) - 100) * 0.00003;
+  return {
+    lat: Math.round((base.lat + dLat) * 1e6) / 1e6,
+    lng: Math.round((base.lng + dLng) * 1e6) / 1e6,
+    label: address || zone || "Davao City",
+  };
+}
+
+const supplierShop = {
+  lat: 7.0640,
+  lng: 125.6085,
+  label: "PrintRight Davao, C.M. Recto St",
+};
+
 const users = [
   { id: "user_client", email: "client@gridgo.local", password: "demo", name: "Ana Client", role: "client", orgName: "Davao Events Co." },
-  { id: "user_supplier", email: "supplier@gridgo.local", password: "demo", name: "Ben Supplier", role: "supplier", supplierName: "PrintRight Davao" },
+  {
+    id: "user_supplier",
+    email: "supplier@gridgo.local",
+    password: "demo",
+    name: "Ben Supplier",
+    role: "supplier",
+    supplierName: "PrintRight Davao",
+    shop: supplierShop,
+  },
   { id: "user_rider", email: "rider@gridgo.local", password: "demo", name: "Carlo Rider", role: "rider" },
   { id: "user_ops", email: "ops@gridgo.local", password: "demo", name: "Dina Ops", role: "ops_admin" },
   { id: "user_admin", email: "admin@gridgo.local", password: "demo", name: "Eli Admin", role: "super_admin" },
@@ -34,6 +76,12 @@ const catalog = [
 ];
 
 const t = now();
+const pickupSupplier = {
+  lat: supplierShop.lat,
+  lng: supplierShop.lng,
+  label: supplierShop.label,
+};
+
 const orders = [
   {
     id: "ord_demo_1",
@@ -49,6 +97,8 @@ const orders = [
     deadline: "2026-08-12T10:00:00+08:00",
     address: "JP Laurel Ave, Bajada, Davao City",
     zone: "davao_central",
+    pickup: pickupSupplier,
+    dropoff: dropoffFor("JP Laurel Ave, Bajada, Davao City", "davao_central"),
     totalMinor: 120000,
     deliveryFeeMinor: 15000,
     paymentMethod: null,
@@ -74,6 +124,8 @@ const orders = [
     deadline: "2026-08-10T09:00:00+08:00",
     address: "Matina Crossing, Davao City",
     zone: "davao_south",
+    pickup: pickupSupplier,
+    dropoff: dropoffFor("Matina Crossing, Davao City", "davao_south"),
     totalMinor: 85000,
     deliveryFeeMinor: 10000,
     paymentMethod: "pilot_credit",
