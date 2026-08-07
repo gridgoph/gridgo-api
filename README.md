@@ -72,3 +72,13 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | Simulated COD/credits | Pilot credits ledger + PayMongo adapter |
 
 Keep route shapes stable so mobile apps do not need a rewrite when you swap.
+
+## Android emulator API URL
+
+From the **Android emulator**, `127.0.0.1` is the emulator itself. Use:
+
+```bash
+EXPO_PUBLIC_API_URL=http://10.0.2.2:8787 npm start
+```
+
+Physical device / Expo Go on phone: use the host LAN IP (e.g. `http://192.168.1.55:8787`).
