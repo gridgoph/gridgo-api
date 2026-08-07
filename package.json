@@ -1,0 +1,16 @@
+{
+  "name": "gridgo-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GRIDGO local demo API — temporary, replaceable backend for all GRIDGO apps",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "seed": "node src/seed.js",
+    "reset": "node src/seed.js --reset"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
