@@ -55,11 +55,23 @@ Client users have explicit `accountType`: `"individual"` | `"business"`. Returne
 
 **Audit vs timeline:** `order.timeline` is per-order lifecycle; `auditLog` is platform-wide for ops/super (roles, grants, taxonomy, verification, claims).
 
-## Seed & backfill
+## Seed, backfill & fixture convergence
 
-Seed via `npm run reset` (`src/seed.js` → `data/store.json`).
+Seed via `npm run reset` (`src/seed.js` → `data/store.json`). Demo user identities live in `src/demo-fixtures.js` (shared by seed + server).
 
-**Existing live stores:** `data/store.json` is gitignored. On every `load()`, idempotent backfill fills missing geography, platform collections (`taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`), **and** client `accountType` (default `"individual"`) — it never overwrites existing coords/records and does not require `npm run reset` (which would wipe captain demo orders).
+**Two different load-time migrations — do not conflate them:**
+
+| | Backfill | Fixture convergence |
+|---|---|---|
+| Purpose | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
+| Scope | geography, platform arrays, missing client `accountType` → `"individual"` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Overwrite? | No — never overwrites existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`) |
+| Creates? | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.local`) |
+| Never touches | captain orders / real data | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
+
+**Fixture boundary:** match by exact fixture email, else stable seed id — never by role or bare `@gridgo.local` domain. Getting this wrong is how a migration eats captain work.
+
+**Existing live stores:** both run idempotently on every `load()`. Prefer them over `npm run reset` (reset wipes captain demo orders).
 
 ## Constraints
 
