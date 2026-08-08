@@ -31,11 +31,28 @@ Temporary, **replaceable** local backend used by every GRIDGO surface (client, s
 
 | Role | Demo login | App |
 |---|---|---|
-| client | client@gridgo.local / demo | gridgo-client |
+| client (business) | client@gridgo.local / demo | gridgo-client — `accountType: "business"` |
+| client (individual) | individual@gridgo.local / demo | gridgo-client — `accountType: "individual"` |
 | supplier | supplier@gridgo.local / demo | gridgo-supplier + portal catalogue |
 | rider | rider@gridgo.local / demo | gridgo-rider |
 | ops_admin | ops@gridgo.local / demo | web Operations |
 | super_admin | admin@gridgo.local / demo | web Super Admin |
+
+## Client account type
+
+Authoritative field on **client** users for logo lockup (plain **GRIDGO** vs **GRIDGO Business**). Exposed through `publicUser` on login, `/auth/me`, and user list/detail.
+
+| Field | Values | Notes |
+|---|---|---|
+| `accountType` | `"individual"` \| `"business"` | **Not** inferred from `orgName` |
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Default when missing | `"individual"` | Business branding is opt-in; consumers never see `undefined` |
+| API write this pilot | none (seed / store only) | Fixed demo identities; avoid incomplete admin UX. Revisit when client onboarding needs self-serve |
+| Non-client roles | field omitted | Same role-specific pattern as `orgName` / `shop` |
+
+Backfill on `load()`: any client without a valid `accountType` gets `"individual"`; existing valid values are never overwritten.
 
 ## Ecosystem (from supplier presentation)
 
@@ -148,6 +165,7 @@ No server-side staleness flag — callers use `ping.at`.
 - platform: `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`
 - supplier `verificationStatus` (demo supplier → approved when missing)
 - empty services → seed PrintRight live lines for demo supplier
+- client `accountType` → `"individual"` when missing/invalid (never overwrite valid value)
 
 Never requires `npm run reset` (which would wipe captain demo orders).
 
@@ -171,6 +189,7 @@ Never requires `npm run reset` (which would wipe captain demo orders).
 - [x] Client issue report in window + ops resolve
 - [x] Platform audit log
 - [x] Idempotent backfill without data loss
+- [x] Client `accountType` (`individual` \| `business`) via publicUser; backfill default individual
 - [ ] Idempotency keys on writes
 - [ ] Persistent file/artwork storage adapter
 - [ ] Webhook-shaped payment events for future PayMongo

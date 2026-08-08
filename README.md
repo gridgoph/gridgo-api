@@ -16,17 +16,37 @@ Health: `GET /health`
 
 ## Demo accounts
 
-| Email | Password | Role |
-|---|---|---|
-| `client@gridgo.local` | `demo` | client |
-| `supplier@gridgo.local` | `demo` | supplier (verification: approved) |
-| `rider@gridgo.local` | `demo` | rider (verification: approved) |
-| `ops@gridgo.local` | `demo` | ops_admin |
-| `admin@gridgo.local` | `demo` | super_admin |
+| Email | Password | Role | Notes |
+|---|---|---|---|
+| `client@gridgo.local` | `demo` | client | **business** — GRIDGO Business lockup (`accountType: "business"`, orgName set) |
+| `individual@gridgo.local` | `demo` | client | **individual** — plain GRIDGO lockup (`accountType: "individual"`) |
+| `supplier@gridgo.local` | `demo` | supplier | verification: approved |
+| `rider@gridgo.local` | `demo` | rider | verification: approved |
+| `ops@gridgo.local` | `demo` | ops_admin | |
+| `admin@gridgo.local` | `demo` | super_admin | |
 
 Login: `POST /auth/login` `{ "email", "password" }` → `{ token, user }`
 
 Send `Authorization: Bearer <token>` on subsequent requests.
+
+### Client `accountType` (branding)
+
+Client users expose an explicit, authoritative `accountType` on every public user payload (`/auth/login`, `/auth/me`, `GET /users…`):
+
+| Value | App branding |
+|---|---|
+| `"individual"` | plain **GRIDGO** mark |
+| `"business"` | **GRIDGO Business** lockup |
+
+**Do not infer business-ness from `orgName`.** An individual may set an organisation label; a business may leave it blank. Apps must read `accountType` only.
+
+| Decision | Choice | Why |
+|---|---|---|
+| Missing type on legacy clients | resolves to `"individual"` | Business branding is opt-in; never leave the field undefined for consumers |
+| Mutability this pilot | **seed / store only** (no write API) | Demo accounts are fixed; avoids a half-finished admin surface. Ops can edit `data/store.json` or reset seed if needed |
+| Non-client roles | field **absent** | Same pattern as `orgName` / `shop` — suppliers and riders have no client account type |
+
+Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
 
 ## Mobile apps
 
@@ -173,7 +193,7 @@ Client report auto-creates a `payout_held` claim. Order stays in `issue_window_o
 
 ## Existing stores (no reset)
 
-`data/store.json` is gitignored. On every `load()`, idempotent backfill adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, and geography fields **without** wiping captain demo orders.
+`data/store.json` is gitignored. On every `load()`, idempotent backfill adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, and client `accountType` (default `"individual"`) **without** wiping captain demo orders.
 
 ## Replace later
 
