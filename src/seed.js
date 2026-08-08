@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, "..", "data");
@@ -45,59 +46,20 @@ function dropoffFor(address, zone) {
   };
 }
 
-const supplierShop = {
-  lat: 7.0640,
-  lng: 125.6085,
-  label: "PrintRight Davao, C.M. Recto St",
-};
+const supplierShop = DEMO_SUPPLIER_SHOP;
 
 const t = now();
 
-const users = [
-  {
-    id: "user_client",
-    email: "client@gridgo.local",
-    password: "demo",
-    name: "Ana Client",
-    role: "client",
-    accountType: "business",
-    orgName: "Davao Events Co.",
-  },
-  {
-    id: "user_client_individual",
-    email: "individual@gridgo.local",
-    password: "demo",
-    name: "Ivy Individual",
-    role: "client",
-    accountType: "individual",
-  },
-  {
-    id: "user_supplier",
-    email: "supplier@gridgo.local",
-    password: "demo",
-    name: "Ben Supplier",
-    role: "supplier",
-    supplierName: "PrintRight Davao",
-    shop: supplierShop,
-    verificationStatus: "approved",
-    verificationNote: "Pilot accredited",
-    verifiedAt: t,
-    verifiedBy: "user_admin",
-  },
-  {
-    id: "user_rider",
-    email: "rider@gridgo.local",
-    password: "demo",
-    name: "Carlo Rider",
-    role: "rider",
-    verificationStatus: "approved",
-    verificationNote: "Pilot accredited",
-    verifiedAt: t,
-    verifiedBy: "user_admin",
-  },
-  { id: "user_ops", email: "ops@gridgo.local", password: "demo", name: "Dina Ops", role: "ops_admin" },
-  { id: "user_admin", email: "admin@gridgo.local", password: "demo", name: "Eli Admin", role: "super_admin" },
-];
+/** Seed users = fixtures + verification timestamps for approved supplier/rider. */
+const users = DEMO_USERS.map((u) => {
+  const copy = { ...u, shop: u.shop ? { ...u.shop } : undefined };
+  if (copy.shop === undefined) delete copy.shop;
+  if (u.verificationStatus === "approved") {
+    copy.verifiedAt = t;
+    copy.verifiedBy = u.verifiedBy || "user_admin";
+  }
+  return copy;
+});
 
 const catalog = [
   { id: "prod_tarpaulin", name: "Tarpaulin / Banner", family: "banner", basePriceMinor: 45000, unit: "sqm" },

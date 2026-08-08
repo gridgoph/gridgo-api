@@ -48,6 +48,8 @@ Client users expose an explicit, authoritative `accountType` on every public use
 
 Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
 
+**Demo fixture convergence (separate from backfill):** on every `load()`, seed demo accounts (`*@gridgo.local` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. Captain-created users and all non-user collections (orders, credits, …) are never touched. Password for every demo account remains `demo`.
+
 ## Mobile apps
 
 ```bash
@@ -193,7 +195,12 @@ Client report auto-creates a `payout_held` claim. Order stays in `issue_window_o
 
 ## Existing stores (no reset)
 
-`data/store.json` is gitignored. On every `load()`, idempotent backfill adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, and client `accountType` (default `"individual"`) **without** wiping captain demo orders.
+`data/store.json` is gitignored. On every `load()`:
+
+1. **Backfill** adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, and client `accountType` (default `"individual"` only when missing/invalid) **without** wiping captain demo orders.
+2. **Fixture convergence** ensures seed demo accounts from `src/demo-fixtures.js` exist and match their defined identity fields (so a live store that predated `individual@gridgo.local` or still has `client@` as `individual` is fixed without `npm run reset`).
+
+Fixture convergence only mutates allowlisted demo users; orders, credits, proofs, claims, issues, sessions, and location pings stay byte-stable.
 
 ## Replace later
 

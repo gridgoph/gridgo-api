@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { DEMO_USERS } from "./demo-fixtures.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -286,6 +287,9 @@ function backfillGeography(store) {
  * Idempotent backfill: every client user gets accountType.
  * Missing → "individual" (safe default; never overwrite an existing valid value).
  * Non-clients are left unchanged (field absent). Returns true if mutated.
+ *
+ * Distinct from convergeDemoFixtures: this only fills missing/invalid types and
+ * never upgrades a recorded "individual" to "business".
  */
 function backfillAccountType(store) {
   let changed = false;
@@ -296,6 +300,86 @@ function backfillAccountType(store) {
       changed = true;
     }
   }
+  return changed;
+}
+
+/** Structural equality for fixture scalars and small plain objects (e.g. shop). */
+function fixtureValueEqual(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return a === b;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function cloneFixtureValue(value) {
+  if (value == null || typeof value !== "object") return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * Bring seed demo accounts (fixtures) up to their defined state on an existing store.
+ *
+ * Fixture boundary (must stay tight — wrong match eats captain data):
+ * - Only emails/ids listed in DEMO_USERS from demo-fixtures.js are fixtures.
+ * - Match by exact email first, else by stable seed id. Never by role or domain alone.
+ * - Create a fixture user when missing; converge only attributes defined on the fixture.
+ * - Never renumber an existing user's id (orders/credits FK safety).
+ * - Never touch orders, credits, proofs, claims, issues, sessions, locationPings,
+ *   notifications, catalog, taxonomy, zones, supplierServices, or auditLog.
+ * - Never create/modify non-fixture users (captain-created accounts).
+ *
+ * Distinct from backfillAccountType: backfill only fills *missing* accountType with
+ * "individual"; fixture convergence *overwrites* fixture fields so client@ becomes
+ * business as the seed defines, even when a prior backfill left "individual".
+ *
+ * Returns true if the store was mutated.
+ */
+function convergeDemoFixtures(store) {
+  let changed = false;
+  if (!Array.isArray(store.users)) {
+    store.users = [];
+    changed = true;
+  }
+
+  for (const fixture of DEMO_USERS) {
+    let user = store.users.find((u) => u.email === fixture.email);
+    if (!user) {
+      user = store.users.find((u) => u.id === fixture.id);
+    }
+
+    if (!user) {
+      const created = {};
+      for (const [key, value] of Object.entries(fixture)) {
+        created[key] = cloneFixtureValue(value);
+      }
+      // Approved supplier/rider fixtures need verification timestamps once on create.
+      if (created.verificationStatus === "approved" && created.verifiedAt == null) {
+        created.verifiedAt = now();
+      }
+      store.users.push(created);
+      changed = true;
+      continue;
+    }
+
+    // Converge fixture-owned attributes only. Leave id and any extra keys alone.
+    for (const [key, value] of Object.entries(fixture)) {
+      if (key === "id") continue;
+      if (!fixtureValueEqual(user[key], value)) {
+        user[key] = cloneFixtureValue(value);
+        changed = true;
+      }
+    }
+    // If fixture requires approved verification but store never recorded a stamp, set once.
+    if (
+      fixture.verificationStatus === "approved" &&
+      user.verificationStatus === "approved" &&
+      user.verifiedAt == null
+    ) {
+      user.verifiedAt = now();
+      changed = true;
+    }
+  }
+
   return changed;
 }
 
@@ -448,6 +532,9 @@ function load() {
   if (backfillGeography(store)) changed = true;
   if (backfillPlatform(store)) changed = true;
   if (backfillAccountType(store)) changed = true;
+  // Fixtures last so seed-defined demo identity wins over fill-missing defaults
+  // (e.g. client@ accountType business after a prior individual backfill).
+  if (convergeDemoFixtures(store)) changed = true;
   if (changed) save(store);
   return store;
 }
