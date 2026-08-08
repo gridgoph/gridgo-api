@@ -8,8 +8,10 @@ Local **custom** demo backend for all GRIDGO apps.
 - JSON store (no Supabase)
 - Pilot Credits + COD only (no PayMongo)
 - Replaceable: keep route contracts stable
+- Platform-governed **service taxonomy** + supplier services (blueprint §4.2)
+- Ops/super: users, roles, verification, zones, grants, claims, issues, audit
 
-See `PRD.md` and `README.md`.
+See `PRD.md` and `README.md` for full route tables and field shapes.
 
 ## Geography (map / OSRM)
 
@@ -28,9 +30,33 @@ Rider tracking:
   - Allowed: assigned rider, order client, assigned supplier, ops/super admin
   - Else `403` `{ error: "forbidden" }`
 
+## Platform data (ops / super / matching)
+
+- `GET /taxonomy` — capability categories, materials, finishes (super manages via POST/PATCH)
+- `GET|POST|PATCH /supplier-services…` — supplier catalogue; states `draft|pending_verification|live|suspended|withdrawn`
+- `GET /orders/:id/eligible-suppliers` — ops matching support (no auto-assign)
+- `GET /users?role=` — publicUser only (never passwords)
+- `PATCH /users/:id/role` — super_admin; audited
+- `POST /users/:id/verification` — ops/super for supplier/rider
+- `GET|POST|PATCH /zones` — delivery fees by zone code
+- `POST /credits/grant` — super_admin Pilot Credits grant
+- `GET|POST /claims…` + hold/release — payout holds; blocks `payout_released` while held
+- `POST /orders/:id/issues` — client report in `issue_window_open` → auto claim hold
+- `GET /audit` — platform audit log (separate from per-order `timeline`)
+
+**Audit vs timeline:** `order.timeline` is per-order lifecycle; `auditLog` is platform-wide for ops/super (roles, grants, taxonomy, verification, claims).
+
+## Seed & backfill
+
 Seed via `npm run reset` (`src/seed.js` → `data/store.json`).
 
-**Existing live stores:** `data/store.json` is gitignored. On every `load()`, an idempotent backfill fills missing `shop` / `dropoff` / `pickup` only — it never overwrites coords that already exist and does not require `npm run reset` (which would wipe captain demo orders).
+**Existing live stores:** `data/store.json` is gitignored. On every `load()`, idempotent backfill fills missing geography **and** platform collections (`taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`) — it never overwrites existing coords/records and does not require `npm run reset` (which would wipe captain demo orders).
+
+## Constraints
+
+- No npm dependencies; plain `node:http` only
+- Do not change order state machine edges/role rules (payout hold is a soft `409` guard only)
+- Authorisation on every route; `{ error: "snake_case" }`
 
 ## Maintaining this file
 

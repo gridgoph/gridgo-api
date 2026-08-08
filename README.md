@@ -1,6 +1,6 @@
 # gridgo-api
 
-**Local demo backend for every GRIDGO app** (client, supplier, rider, and later ops).
+**Local demo backend for every GRIDGO app** (client, supplier, rider, ops, super admin).
 
 Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. JSON file storage on disk. Swap later by keeping the same route contracts and pointing the apps at a real backend.
 
@@ -8,7 +8,7 @@ Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. JSON
 
 ```bash
 npm install   # no runtime deps today — pure Node
-npm run reset # seed demo users + sample orders
+npm run reset # seed demo users + sample orders + platform data
 npm run dev   # http://127.0.0.1:8787
 ```
 
@@ -19,8 +19,8 @@ Health: `GET /health`
 | Email | Password | Role |
 |---|---|---|
 | `client@gridgo.local` | `demo` | client |
-| `supplier@gridgo.local` | `demo` | supplier |
-| `rider@gridgo.local` | `demo` | rider |
+| `supplier@gridgo.local` | `demo` | supplier (verification: approved) |
+| `rider@gridgo.local` | `demo` | rider (verification: approved) |
 | `ops@gridgo.local` | `demo` | ops_admin |
 | `admin@gridgo.local` | `demo` | super_admin |
 
@@ -42,28 +42,138 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 - **Money in PHP minor units** (centavos as integers)
 - **Pilot payments only** — Pilot Credits + COD ≤ ₱1,500; no live PayMongo
 - **Order state machine** matches the PRD (simplified transitions for demo)
+- **Platform-governed service taxonomy** — suppliers select codes; Super Admin owns codes
 - **Replaceable** — apps should only talk through `lib/api.ts`; swapping providers means a new server that honors the same routes
 
 ## Main routes
+
+### Auth & session
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
 | POST | `/auth/login` | public | issue token |
 | GET | `/auth/me` | any | current user + role |
-| GET | `/catalog` | client | product catalog |
+| POST | `/auth/logout` | any | revoke token |
+
+### Catalog, orders, credits, dispatch (existing)
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/catalog` | public | product catalog |
 | GET | `/orders` | role-scoped | list orders/jobs |
+| GET | `/orders/:id` | role-scoped | order detail |
 | POST | `/orders` | client | create draft/submit request |
 | POST | `/orders/:id/transition` | role-gated | advance state |
-| GET | `/credits/balance` | client | pilot credit balance |
+| GET | `/credits/balance` | client (own) / ops / super | pilot credit balance + ledger |
 | POST | `/credits/authorize` | client | reserve/spend for order |
-| GET | `/dispatch/offers` | rider | open delivery offers |
+| POST | `/credits/grant` | super_admin | grant Pilot Credits (not a purchase) |
+| GET | `/dispatch/offers` | rider / ops / super | open delivery offers |
 | POST | `/dispatch/:id/accept` | rider | accept job |
 | POST | `/dispatch/:id/location` | assigned rider | location ping (while in transit) |
 | GET | `/dispatch/:id/location` | rider / client / supplier / ops | latest ping or `{ ping: null }` |
 | POST | `/dispatch/:id/proof` | rider | pickup/delivery/COD proof |
+| GET | `/jobs` | supplier | assigned jobs alias |
 | GET | `/notifications` | any | in-app alerts |
 
-Orders include map points: `pickup` (supplier shop or `null`) and `dropoff` (`{ lat, lng, label }`). Coords are Davao City; `address` / `zone` stay as text.
+### Service taxonomy (platform-governed)
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/taxonomy` | any auth | categories, materials, finishes |
+| POST | `/taxonomy/categories` | super_admin | add capability category |
+| PATCH | `/taxonomy/categories/:id` | super_admin | update category (id or code) |
+| POST | `/taxonomy/materials` | super_admin | add material code |
+| PATCH | `/taxonomy/materials/:id` | super_admin | update material |
+| POST | `/taxonomy/finishes` | super_admin | add finish code |
+| PATCH | `/taxonomy/finishes/:id` | super_admin | update finish |
+
+### Supplier services (catalogue)
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/supplier-services` | supplier (own) / ops / super | list; ops may `?supplierId=` `?state=` |
+| GET | `/supplier-services/:id` | owner supplier / ops / super | detail |
+| POST | `/supplier-services` | supplier | create **draft** |
+| PATCH | `/supplier-services/:id` | owner supplier | edit parameters; capability expansion on live → `pending_verification` |
+| POST | `/supplier-services/:id/submit` | owner supplier | request verification (`pending_verification`) |
+| POST | `/supplier-services/:id/verify` | ops / super | set `live` (supplier must be verification-approved) |
+| POST | `/supplier-services/:id/suspend` | ops / super | suspend for quality risk (`reason` required) |
+| POST | `/supplier-services/:id/withdraw` | owner supplier | withdraw from **new** matching only |
+
+Lifecycle: `draft` → `pending_verification` → `live` | `suspended` | `withdrawn`. Withdrawal never cancels in-flight orders.
+
+### Matching support
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/orders/:id/eligible-suppliers` | ops / super | explainable eligibility (no auto-assign) |
+
+Returns candidates with `eligible`, `reasons`, `matchingServiceIds`, and ranking inputs. Assign still uses `POST /orders/:id/transition` `{ "state": "supplier_assigned", "supplierId" }` (optional `matchingServiceIds`).
+
+### Users, roles, verification
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/users` | ops / super | directory; optional `?role=` |
+| GET | `/users/:id` | ops / super | public user (never password) |
+| PATCH | `/users/:id/role` | super_admin | change platform role (`reason` audited) |
+| POST | `/users/:id/verification` | ops / super | set supplier/rider verification status |
+
+Verification statuses: `unverified` | `pending` | `approved` | `suspended` | `rejected`. Suspending a supplier suspends their live services for new matching.
+
+### Zones & fees
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/zones` | any auth | delivery zones + `deliveryFeeMinor` |
+| POST | `/zones` | super_admin | create zone |
+| PATCH | `/zones/:id` | super_admin | update zone (id or code) |
+
+Orders still store `zone` (code string) and `deliveryFeeMinor` snapshot. New orders default fee from the zone record when body omits it.
+
+### Claims & payout holds
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/claims` | ops / super | list; `?orderId=` `?status=` |
+| GET | `/claims/:id` | ops / super | detail |
+| POST | `/claims` | ops / super | raise claim (`orderId`, `reason`); holds payout by default |
+| POST | `/claims/:id/hold` | ops / super | hold payout (`reason` required) |
+| POST | `/claims/:id/release` | ops / super | release hold (`reason` required) |
+
+`completed` → `payout_released` returns `409 { error: "payout_held" }` while an active hold exists.
+
+### Issue reports (24h window)
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/issues` | client (own) / supplier (own orders) / ops / super | list; filters `?orderId=` `?status=` |
+| GET | `/issues/:id` | role-scoped | detail |
+| POST | `/orders/:id/issues` | client | report material issue while `issue_window_open` |
+| POST | `/issues/:id/resolve` | ops / super | resolve/dismiss; optional `releasePayout` |
+
+Client report auto-creates a `payout_held` claim. Order stays in `issue_window_open` (state machine unchanged).
+
+### Audit trail
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/audit` | ops / super | platform audit log; filters `entityType`, `entityId`, `orderId`, `actorId`, `action`, `limit` |
+
+**Why separate from `order.timeline`:** per-order timeline is the lifecycle history every party sees on that order. `auditLog` is the platform-wide immutable record (role changes, credit grants, taxonomy, verification, claims, matching) that Operations and Super Admin need across entities.
+
+## Money & geography
+
+- All PHP values are **minor units** (centavos).
+- Orders include map points: `pickup` (supplier shop or `null`) and `dropoff` (`{ lat, lng, label }`). Coords are Davao City; `address` / `zone` stay as text.
+
+## Seed data highlights
+
+`npm run reset` loads taxonomy (4 categories), Davao zones, PrintRight live services, credit grant ledger, open issue + claim samples, and audit entries so portal screens are not empty.
+
+## Existing stores (no reset)
+
+`data/store.json` is gitignored. On every `load()`, idempotent backfill adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, and geography fields **without** wiping captain demo orders.
 
 ## Replace later
 
