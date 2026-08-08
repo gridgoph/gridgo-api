@@ -62,9 +62,28 @@ function authUser(req, store) {
   return store.users.find((u) => u.id === session.userId) || null;
 }
 
+/** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
+const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business"]);
+
+/**
+ * Safe default when a client has no recorded type: individual.
+ * Business branding must be explicit opt-in, never accidental from orgName or legacy data.
+ */
+function resolveClientAccountType(u) {
+  if (u && CLIENT_ACCOUNT_TYPES.has(u.accountType)) return u.accountType;
+  return "individual";
+}
+
 function publicUser(u) {
   if (!u) return null;
   const { password, ...rest } = u;
+  // Clients always expose an authoritative accountType (never undefined for consumers).
+  // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
+  if (u.role === "client") {
+    rest.accountType = resolveClientAccountType(u);
+  } else {
+    delete rest.accountType;
+  }
   return rest;
 }
 
@@ -264,6 +283,23 @@ function backfillGeography(store) {
 }
 
 /**
+ * Idempotent backfill: every client user gets accountType.
+ * Missing → "individual" (safe default; never overwrite an existing valid value).
+ * Non-clients are left unchanged (field absent). Returns true if mutated.
+ */
+function backfillAccountType(store) {
+  let changed = false;
+  for (const u of store.users || []) {
+    if (u.role !== "client") continue;
+    if (!CLIENT_ACCOUNT_TYPES.has(u.accountType)) {
+      u.accountType = "individual";
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * Idempotent backfill for ops/super-admin platform records (taxonomy, services, zones,
  * claims, issues, audit). Never overwrites existing arrays/objects; never deletes orders.
  */
@@ -411,6 +447,7 @@ function load() {
   let changed = false;
   if (backfillGeography(store)) changed = true;
   if (backfillPlatform(store)) changed = true;
+  if (backfillAccountType(store)) changed = true;
   if (changed) save(store);
   return store;
 }

@@ -30,6 +30,15 @@ Rider tracking:
   - Allowed: assigned rider, order client, assigned supplier, ops/super admin
   - Else `403` `{ error: "forbidden" }`
 
+## Client account type (branding)
+
+Client users have explicit `accountType`: `"individual"` | `"business"`. Returned via `publicUser` on login, `/auth/me`, and user directory. **Never infer from `orgName`.**
+
+- Missing/legacy clients backfill to `"individual"` (safe default; business is opt-in)
+- Pilot: seed/store only — no write API for `accountType`
+- Non-client roles: field absent (not null)
+- Demo: `client@gridgo.local` = business; `individual@gridgo.local` = individual
+
 ## Platform data (ops / super / matching)
 
 - `GET /taxonomy` — capability categories, materials, finishes (super manages via POST/PATCH)
@@ -50,7 +59,7 @@ Rider tracking:
 
 Seed via `npm run reset` (`src/seed.js` → `data/store.json`).
 
-**Existing live stores:** `data/store.json` is gitignored. On every `load()`, idempotent backfill fills missing geography **and** platform collections (`taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`) — it never overwrites existing coords/records and does not require `npm run reset` (which would wipe captain demo orders).
+**Existing live stores:** `data/store.json` is gitignored. On every `load()`, idempotent backfill fills missing geography, platform collections (`taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`), **and** client `accountType` (default `"individual"`) — it never overwrites existing coords/records and does not require `npm run reset` (which would wipe captain demo orders).
 
 ## Constraints
 

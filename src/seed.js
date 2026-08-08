@@ -54,7 +54,23 @@ const supplierShop = {
 const t = now();
 
 const users = [
-  { id: "user_client", email: "client@gridgo.local", password: "demo", name: "Ana Client", role: "client", orgName: "Davao Events Co." },
+  {
+    id: "user_client",
+    email: "client@gridgo.local",
+    password: "demo",
+    name: "Ana Client",
+    role: "client",
+    accountType: "business",
+    orgName: "Davao Events Co.",
+  },
+  {
+    id: "user_client_individual",
+    email: "individual@gridgo.local",
+    password: "demo",
+    name: "Ivy Individual",
+    role: "client",
+    accountType: "individual",
+  },
   {
     id: "user_supplier",
     email: "supplier@gridgo.local",
