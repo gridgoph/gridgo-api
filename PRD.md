@@ -26,6 +26,7 @@ Temporary, **replaceable** local backend used by every GRIDGO surface (client, s
 7. Order geography for maps: `pickup` / `dropoff` coords (Davao pilot) so apps do not geocode at runtime.
 8. **Platform-governed supplier service catalogue** and matching eligibility for Operations.
 9. **Ops / Super Admin surface**: users, roles, verification, zones/fees, credit grants, claims/holds, issues, audit.
+10. Private MinIO files for artwork, supplier proofs, delivery photos, and supplier-service images: streamed API uploads, explicit file-ID attach, and authorized short-lived presigned GETs.
 
 ## Roles served
 
@@ -166,6 +167,7 @@ No server-side staleness flag — callers use `ping.at`.
 - supplier `verificationStatus` (demo supplier → approved when missing)
 - empty services → seed PrintRight live lines for demo supplier
 - client `accountType` → `"individual"` when missing/invalid (never overwrite valid value)
+- top-level `files: []`, order file-ID arrays, and supplier-service `imageFileIds: []` when missing (never synthesize an object from legacy `artworkName`)
 
 Never requires `npm run reset` (which would wipe captain demo orders).
 
@@ -191,7 +193,7 @@ Never requires `npm run reset` (which would wipe captain demo orders).
 - [x] Idempotent backfill without data loss
 - [x] Client `accountType` (`individual` \| `business`) via publicUser; backfill default individual
 - [ ] Idempotency keys on writes
-- [ ] Persistent file/artwork storage adapter
+- [x] Persistent private MinIO storage + streamed file/attach/presigned-GET contract (`docs/STORAGE_API.md`)
 - [ ] Webhook-shaped payment events for future PayMongo
 
 ## Replace map

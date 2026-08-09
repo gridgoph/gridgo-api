@@ -1,0 +1,64 @@
+services:
+  minio-bind-check:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    environment:
+      MINIO_BIND_ADDRESS: ${MINIO_BIND_ADDRESS:-127.0.0.1}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        case "$${MINIO_BIND_ADDRESS}" in
+          ""|"0.0.0.0"|*[!0-9.]* ) echo "MINIO_BIND_ADDRESS must be 127.0.0.1 or one exact trusted-LAN IPv4 address; wildcard publishing is forbidden" >&2; exit 1 ;;
+        esac
+        old_ifs="$${IFS}"; IFS=.; set -- $${MINIO_BIND_ADDRESS}; IFS="$${old_ifs}"
+        [ "$${#}" -eq 4 ] || { echo "MINIO_BIND_ADDRESS must contain four IPv4 octets" >&2; exit 1; }
+        for octet in "$${@}"; do [ "$${octet}" -ge 0 ] 2>/dev/null && [ "$${octet}" -le 255 ] || { echo "MINIO_BIND_ADDRESS has an invalid IPv4 octet" >&2; exit 1; }; done
+        [ "$${1}" -eq 0 ] && [ "$${2}" -eq 0 ] && [ "$${3}" -eq 0 ] && [ "$${4}" -eq 0 ] && { echo "MINIO_BIND_ADDRESS cannot be the IPv4 wildcard" >&2; exit 1; }
+        exit 0
+    restart: "no"
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gridgo_root_4e39b7a1}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ggo_root_86c7e0a5d9124fb3}
+    ports:
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - gridgo_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 3s
+    restart: unless-stopped
+    depends_on:
+      minio-bind-check:
+        condition: service_completed_successfully
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gridgo_root_4e39b7a1}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ggo_root_86c7e0a5d9124fb3}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-gridgo_api_7f3a91c2}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ggo_api_m1n10_9f41b7c3e68a2d55}
+    volumes:
+      - ./docker/minio/gridgo-api-policy.json:/gridgo-api-policy.json:ro
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing local/gridgo-uploads
+        mc admin user info local "$${MINIO_ACCESS_KEY}" >/dev/null 2>&1 || mc admin user add local "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
+        mc admin policy create local gridgo-api /gridgo-api-policy.json
+        mc admin policy attach local gridgo-api --user "$${MINIO_ACCESS_KEY}"
+    restart: "no"
+
+volumes:
+  gridgo_minio_data:

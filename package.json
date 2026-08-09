@@ -7,10 +7,14 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "test": "node --test tests/*.test.js",
     "seed": "node src/seed.js",
     "reset": "node src/seed.js --reset"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "minio": "8.0.7"
   }
 }
