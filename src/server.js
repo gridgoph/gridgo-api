@@ -5,20 +5,52 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { DEMO_USERS } from "./demo-fixtures.js";
+import {
+  AttachmentError,
+  attachFileReference,
+  applyProofDecision,
+  authorizeFileAttach,
+  authorizeFileAttachOwner,
+  authorizeFileRead,
+  authorizeFileUpload,
+  authorizeProofPaymentTransition,
+  backfillFiles,
+  createPendingFile,
+  findFile,
+  markFileDeleted,
+  markFileDeletePending,
+  markFileReady,
+  parseMultipartStream,
+  publicFile,
+  recordProofUpload,
+  resolveFileTarget,
+  validateUpload,
+} from "./attachments.js";
+import { createMutationQueue } from "./mutation-queue.js";
+import { createObjectStorage } from "./object-storage.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
-const STORE = path.join(ROOT, "data", "store.json");
+const DEFAULT_STORE = path.join(ROOT, "data", "store.json");
+const STORE = process.env.STORE_PATH ? path.resolve(process.env.STORE_PATH) : DEFAULT_STORE;
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
+const objectStorage = createObjectStorage(process.env);
+const enqueueMutation = createMutationQueue();
+let storageInitializing = true;
 
 // Auto-seed if missing
 if (!fs.existsSync(STORE)) {
+  if (STORE !== DEFAULT_STORE) {
+    throw new Error(`STORE_PATH does not exist: ${STORE}`);
+  }
   spawnSync(process.execPath, [path.join(__dirname, "seed.js"), "--reset"], { stdio: "inherit" });
 }
 
 function save(store) {
-  fs.writeFileSync(STORE, JSON.stringify(store, null, 2));
+  const temporary = `${STORE}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(store, null, 2));
+  fs.renameSync(temporary, STORE);
 }
 function id(prefix) {
   return `${prefix}_${crypto.randomBytes(6).toString("hex")}`;
@@ -27,30 +59,83 @@ function now() {
   return new Date().toISOString();
 }
 
+async function compensatePendingFile(fileId, objectKey) {
+  try {
+    await objectStorage.deleteObject(objectKey);
+    await enqueueMutation(async () => {
+      const latestStore = load();
+      const latestFile = findFile(latestStore, fileId);
+      if (latestFile?.state !== "pending_upload") return;
+      markFileDeleted(latestFile, now());
+      save(latestStore);
+    });
+  } catch {
+    // The pending record is the durable reconciliation marker for the next successful boot.
+  }
+}
+
 function send(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   });
   res.end(payload);
 }
 
 function readBody(req) {
+  if (Object.hasOwn(req, "gridgoParsedBody")) return Promise.resolve(req.gridgoParsedBody);
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024 && !tooLarge) {
+        tooLarge = true;
+        chunks.length = 0;
+        reject(
+          new AttachmentError(
+            413,
+            "request_body_too_large",
+            "This request body is larger than 1 MiB. Remove extra data and try again.",
+            { maxBytes: 1024 * 1024 },
+          ),
+        );
+      } else if (!tooLarge) {
+        chunks.push(chunk);
+      }
+    });
     req.on("end", () => {
-      if (!chunks.length) return resolve({});
+      if (tooLarge) return;
+      if (!chunks.length) {
+        req.gridgoParsedBody = {};
+        return resolve(req.gridgoParsedBody);
+      }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch (e) {
-        reject(new Error("invalid JSON body"));
+        req.gridgoParsedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        resolve(req.gridgoParsedBody);
+      } catch {
+        reject(
+          new AttachmentError(
+            400,
+            "invalid_json",
+            "The request body is not valid JSON. Fix the JSON syntax and try again.",
+          ),
+        );
       }
     });
     req.on("error", reject);
+  });
+}
+
+function sendDomainError(res, error) {
+  return send(res, error.status || 500, {
+    error: error.code || "server_error",
+    message: error.message,
+    ...(error.details || {}),
   });
 }
 
@@ -531,6 +616,7 @@ function load() {
   let changed = false;
   if (backfillGeography(store)) changed = true;
   if (backfillPlatform(store)) changed = true;
+  if (backfillFiles(store)) changed = true;
   if (backfillAccountType(store)) changed = true;
   // Fixtures last so seed-defined demo identity wins over fill-missing defaults
   // (e.g. client@ accountType business after a prior individual backfill).
@@ -562,6 +648,12 @@ function ordersFor(user, store) {
 
 function orderVisible(user, order, store) {
   return ordersFor(user, store).some((o) => o.id === order.id);
+}
+
+function publicOrder(order) {
+  if (!order) return null;
+  const { attachments: _legacyAttachments, ...publicRecord } = order;
+  return publicRecord;
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -747,6 +839,7 @@ function summarizeService(s) {
     withdrawnAt: s.withdrawnAt,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
+    imageFileIds: s.imageFileIds || [],
   };
 }
 
@@ -779,7 +872,12 @@ const TRANSITIONS = {
     supplier_accepted: ["supplier"],
     approved_for_matching: ["supplier"], // decline -> rematch
   },
-  supplier_accepted: { awaiting_payment: ["supplier", "ops_admin", "super_admin"] },
+  supplier_accepted: {}, // proof attachment advances to supplier_proof_review
+  supplier_proof_review: {
+    supplier_proof_changes_requested: ["client"],
+    supplier_proof_approved: ["client"],
+  },
+  supplier_proof_approved: { awaiting_payment: ["supplier", "ops_admin", "super_admin"] },
   awaiting_payment: { payment_authorized: ["client", "ops_admin", "super_admin"] },
   payment_authorized: { production: ["supplier"] },
   production: { supplier_self_qc: ["supplier"] },
@@ -796,7 +894,7 @@ const TRANSITIONS = {
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   try {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
@@ -805,7 +903,13 @@ const server = http.createServer(async (req, res) => {
     const store = load();
 
     if (req.method === "GET" && pathname === "/health") {
-      return send(res, 200, { ok: true, service: "gridgo-api", version: store.version, at: now() });
+      return send(res, 200, {
+        ok: true,
+        service: "gridgo-api",
+        version: store.version,
+        storage: objectStorage.health(),
+        at: now(),
+      });
     }
 
     // ---- auth ----
@@ -844,7 +948,193 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { catalog: store.catalog });
     }
 
-    if (!user) return send(res, 401, { error: "unauthorized" });
+    if (!user) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    const needsInitializedStorage =
+      (req.method === "POST" && pathname === "/files") ||
+      (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
+      (req.method === "GET" && /^\/files\/[^/]+\/download-url$/.test(pathname)) ||
+      (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
+    if (storageInitializing && needsInitializedStorage) {
+      throw new AttachmentError(
+        503,
+        "storage_initializing",
+        "MinIO file recovery is still finishing. Wait a moment, then try the file action again.",
+      );
+    }
+
+    // ---- private files: streamed upload control plane + presigned MinIO download plane ----
+    if (req.method === "POST" && pathname === "/files") {
+      req.setTimeout(Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 15 * 60 * 1000));
+      const { fields, file } = await parseMultipartStream(req, req.headers["content-type"], {
+        tempDir: path.join(ROOT, ".tmp", "uploads"),
+      });
+      try {
+        const unexpectedFields = Object.keys(fields).filter((name) => name !== "purpose");
+        if (unexpectedFields.length) {
+          throw new AttachmentError(
+            400,
+            "unexpected_form_field",
+            `Remove the unsupported upload form field: ${unexpectedFields[0]}. Send only \`purpose\` and \`file\`.`,
+            { field: unexpectedFields[0] },
+          );
+        }
+        const purpose = String(fields.purpose || "");
+        authorizeFileUpload(user, purpose);
+        const detectedContentType = validateUpload(file, purpose);
+        const fileId = id("file");
+        const createdAt = now();
+        const datePath = createdAt.slice(0, 10).replaceAll("-", "/");
+        const extension = path.extname(file.originalFilename).toLowerCase();
+        const objectKey = `${purpose}/${datePath}/${fileId}${extension}`;
+        const pending = createPendingFile({
+          fileId,
+          objectKey,
+          user,
+          purpose,
+          file,
+          detectedContentType,
+          at: createdAt,
+        });
+
+        await enqueueMutation(async () => {
+          const latestStore = load();
+          const latestUser = authUser(req, latestStore);
+          if (!latestUser) {
+            throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
+          }
+          authorizeFileUpload(latestUser, purpose);
+          latestStore.files.push(pending);
+          save(latestStore);
+        });
+
+        try {
+          await objectStorage.ensureBucket();
+          await objectStorage.putObject({
+            key: objectKey,
+            body: fs.createReadStream(file.tempPath),
+            contentType: detectedContentType,
+            size: file.size,
+          });
+        } catch (error) {
+          await compensatePendingFile(fileId, objectKey);
+          throw error;
+        }
+        try {
+          const ready = await enqueueMutation(async () => {
+            const latestStore = load();
+            const latestUser = authUser(req, latestStore);
+            const latestFile = findFile(latestStore, fileId);
+            if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
+              throw new AttachmentError(
+                401,
+                "unauthorized",
+                "Your sign-in expired while the file was uploading. Sign in and upload the file again.",
+              );
+            }
+            markFileReady(latestFile, now());
+            save(latestStore);
+            return latestFile;
+          });
+          // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
+          return send(res, 201, { file: publicFile(ready) });
+        } catch (error) {
+          await compensatePendingFile(fileId, objectKey);
+          throw error;
+        }
+      } finally {
+        await fs.promises.unlink(file.tempPath).catch(() => {});
+      }
+    }
+
+    if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
+      const file = findFile(store, pathname.split("/")[2]);
+      authorizeFileRead(user, store, file);
+      return send(res, 200, { file: publicFile(file) });
+    }
+
+    if (req.method === "GET" && /^\/files\/[^/]+\/download-url$/.test(pathname)) {
+      const file = findFile(store, pathname.split("/")[2]);
+      authorizeFileRead(user, store, file);
+      const stat = await objectStorage.statObject(file.objectKey);
+      if (stat.size !== file.size) {
+        throw new AttachmentError(
+          409,
+          "storage_object_mismatch",
+          "The stored object size does not match its file record. Upload the file again before using it.",
+        );
+      }
+      const signed = await objectStorage.presignGet(file.objectKey);
+      return send(res, 200, { fileId: file.fileId, ...signed });
+    }
+
+    if (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) {
+      const fileId = pathname.split("/")[2];
+      const body = await readBody(req);
+      const file = findFile(store, fileId);
+      authorizeFileAttachOwner(user, file);
+      const target = resolveFileTarget(store, file.purpose, body);
+      authorizeFileAttach(user, file, target);
+      const stat = await objectStorage.statObject(file.objectKey);
+      if (stat.size !== file.size) {
+        throw new AttachmentError(
+          409,
+          "storage_object_mismatch",
+          "The stored object size does not match its file record. Upload the file again before attaching it.",
+        );
+      }
+      return await enqueueMutation(async () => {
+        const latestStore = load();
+        const latestUser = authUser(req, latestStore);
+        if (!latestUser) {
+          throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
+        }
+        const latestFile = findFile(latestStore, fileId);
+        authorizeFileAttachOwner(latestUser, latestFile);
+        const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body);
+        authorizeFileAttach(latestUser, latestFile, latestTarget);
+        attachFileReference(latestFile, latestTarget);
+        const attachedAt = now();
+        latestTarget.record.updatedAt = attachedAt;
+        if (latestTarget.type === "order") {
+          if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
+          if (latestFile.purpose === "proof") recordProofUpload(latestTarget.record, latestUser, latestFile, attachedAt);
+          save(latestStore);
+          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record) });
+        }
+        save(latestStore);
+        return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
+      });
+    }
+
+    if (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname)) {
+      const fileId = pathname.split("/")[2];
+      const pending = await enqueueMutation(async () => {
+        const latestStore = load();
+        const latestUser = authUser(req, latestStore);
+        if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
+        const latestFile = findFile(latestStore, fileId);
+        const alreadyDeleted = latestFile?.state === "deleted";
+        markFileDeletePending(latestFile, latestUser, now());
+        save(latestStore);
+        return { alreadyDeleted, file: latestFile, objectKey: latestFile.objectKey };
+      });
+      if (pending.alreadyDeleted) return send(res, 200, { file: publicFile(pending.file) });
+      await objectStorage.deleteObject(pending.objectKey);
+      const deleted = await enqueueMutation(async () => {
+        const latestStore = load();
+        const latestFile = findFile(latestStore, fileId);
+        markFileDeleted(latestFile, now());
+        save(latestStore);
+        return latestFile;
+      });
+      return send(res, 200, { file: publicFile(deleted) });
+    }
 
     // ---- notifications ----
     if (req.method === "GET" && pathname === "/notifications") {
@@ -897,7 +1187,7 @@ const server = http.createServer(async (req, res) => {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Pilot Credits authorized" });
       save(store);
-      return send(res, 200, { order, balanceMinor: acct.balanceMinor });
+      return send(res, 200, { order: publicOrder(order), balanceMinor: acct.balanceMinor });
     }
 
     // Super Admin grants Pilot Credits (not a purchase; non-cash, non-transferable)
@@ -1234,6 +1524,7 @@ const server = http.createServer(async (req, res) => {
         suspendedBy: null,
         suspendReason: null,
         withdrawnAt: null,
+        imageFileIds: [],
         createdAt: ts,
         updatedAt: ts,
       };
@@ -1800,7 +2091,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---- orders list / create ----
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: ordersFor(user, store) });
+      return send(res, 200, { orders: ordersFor(user, store).map(publicOrder) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -1812,7 +2103,7 @@ const server = http.createServer(async (req, res) => {
         if (!order) return send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
-        return send(res, 200, { order });
+        return send(res, 200, { order: publicOrder(order) });
       }
     }
 
@@ -1853,13 +2144,16 @@ const server = http.createServer(async (req, res) => {
         promisedDate: null,
         matchingServiceIds: null,
         artworkName: body.artworkName || null,
+        artworkFileIds: [],
+        proofFileIds: [],
+        deliveryPhotoFileIds: [],
         createdAt: ts,
         updatedAt: ts,
         timeline: [{ at: ts, state: body.submit ? "submitted" : "draft", by: user.id, note: body.submit ? "Submitted" : "Draft saved" }],
       };
       store.orders.unshift(order);
       save(store);
-      return send(res, 201, { order });
+      return send(res, 201, { order: publicOrder(order) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -1868,9 +2162,23 @@ const server = http.createServer(async (req, res) => {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if (next === "supplier_proof_changes_requested" || next === "supplier_proof_approved") {
+        applyProofDecision(order, user, { state: next, reason: body.reason }, now());
+        save(store);
+        return send(res, 200, { order: publicOrder(order) });
+      }
+      if (order.state === "supplier_proof_approved" && next === "awaiting_payment" && user.role === "supplier") {
+        authorizeProofPaymentTransition(order, user);
+      }
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
-        return send(res, 409, { error: "transition_not_allowed", from: order.state, to: next, role: user.role });
+        return send(res, 409, {
+          error: "transition_not_allowed",
+          message: "This order cannot move to the requested state from its current step. Refresh the order and use an available action.",
+          from: order.state,
+          to: next,
+          role: user.role,
+        });
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
@@ -1939,13 +2247,13 @@ const server = http.createServer(async (req, res) => {
         order.state = "issue_window_open";
         order.timeline.push({ at: now(), state: "issue_window_open", by: "system", note: "24h issue window opened" });
         save(store);
-        return send(res, 200, { order });
+        return send(res, 200, { order: publicOrder(order) });
       }
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       save(store);
-      return send(res, 200, { order });
+      return send(res, 200, { order: publicOrder(order) });
     }
 
     // ---- dispatch (rider) ----
@@ -1954,7 +2262,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 403, { error: "forbidden" });
       }
       const offers = store.orders.filter((o) => o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id));
-      return send(res, 200, { offers });
+      return send(res, 200, { offers: offers.map(publicOrder) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
@@ -1967,7 +2275,7 @@ const server = http.createServer(async (req, res) => {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
       save(store);
-      return send(res, 200, { order });
+      return send(res, 200, { order: publicOrder(order) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
@@ -2035,23 +2343,101 @@ const server = http.createServer(async (req, res) => {
       }
       order.updatedAt = now();
       save(store);
-      return send(res, 201, { proof, order });
+      return send(res, 201, { proof, order: publicOrder(order) });
     }
 
     // ---- supplier jobs helper alias ----
     if (req.method === "GET" && pathname === "/jobs") {
       if (user.role !== "supplier") return send(res, 403, { error: "forbidden" });
-      return send(res, 200, { jobs: store.orders.filter((o) => o.supplierId === user.id || o.state === "supplier_assigned") });
+      return send(res, 200, {
+        jobs: store.orders
+          .filter((o) => o.supplierId === user.id || o.state === "supplier_assigned")
+          .map(publicOrder),
+      });
     }
 
     return send(res, 404, { error: "not_found", path: pathname });
   } catch (err) {
+    if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
+      return sendDomainError(res, err);
+    }
     console.error(err);
-    return send(res, 500, { error: "server_error", message: String(err.message || err) });
+    return send(res, 500, {
+      error: "server_error",
+      message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues.",
+    });
   }
+}
+
+const server = http.createServer((req, res) => {
+  const pathname = String(req.url || "").split("?", 1)[0];
+  const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
+  // File transfers and MinIO calls stay outside the mutation queue. File routes
+  // acquire the queue only for short load -> validate -> mutate -> atomic-save commits.
+  const isSelfQueuedFileMutation =
+    (req.method === "POST" && pathname === "/files") ||
+    (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
+    (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
+  if (isSelfQueuedFileMutation) {
+    void handleRequest(req, res);
+    return;
+  }
+  if (mutatesStore) {
+    void readBody(req)
+      .then(() => enqueueMutation(() => handleRequest(req, res)))
+      .catch((error) => {
+        if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+          sendDomainError(res, error);
+          return;
+        }
+        send(res, 500, {
+          error: "server_error",
+          message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
+        });
+      });
+    return;
+  }
+  void handleRequest(req, res);
 });
+
+server.requestTimeout = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
+
+async function reconcileInterruptedFiles() {
+  const candidates = load().files.filter(
+    (file) => ["pending_upload", "delete_pending"].includes(file.state) && file.objectKey,
+  );
+  for (const candidate of candidates) {
+    try {
+      await objectStorage.deleteObject(candidate.objectKey);
+      await enqueueMutation(async () => {
+        const latestStore = load();
+        const latestFile = findFile(latestStore, candidate.fileId);
+        if (!latestFile || !["pending_upload", "delete_pending"].includes(latestFile.state)) return;
+        markFileDeleted(latestFile, now());
+        save(latestStore);
+      });
+    } catch {
+      // Leave the durable pending state for the next boot; non-file routes remain usable.
+    }
+  }
+}
+
+// Complete additive/idempotent backfill before accepting concurrent requests.
+load();
 
 server.listen(PORT, HOST, () => {
   console.log(`gridgo-api listening on http://${HOST}:${PORT}`);
   console.log(`health: http://127.0.0.1:${PORT}/health`);
+  objectStorage
+    .ensureBucket()
+    .then(async () => {
+      await reconcileInterruptedFiles();
+      console.log(`MinIO ready: ${objectStorage.health().bucket}`);
+    })
+    .catch(() => {
+      console.warn("MinIO unavailable; non-file routes remain available. Start it with `docker compose up -d`.");
+    })
+    .finally(() => {
+      storageInitializing = false;
+    });
 });

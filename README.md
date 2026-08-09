@@ -2,17 +2,33 @@
 
 **Local demo backend for every GRIDGO app** (client, supplier, rider, ops, super admin).
 
-Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. JSON file storage on disk. Swap later by keeping the same route contracts and pointing the apps at a real backend.
+Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. Domain records use the JSON store; private files use local MinIO. Swap later by keeping the same route contracts and pointing the apps at a real backend.
 
 ## Quick start
 
 ```bash
-npm install   # no runtime deps today — pure Node
-npm run reset # seed demo users + sample orders + platform data
+npm install
+cp .env.example .env
+docker compose up -d --wait
+set -a; source .env; set +a
 npm run dev   # http://127.0.0.1:8787
 ```
 
 Health: `GET /health`
+
+MinIO API: `http://127.0.0.1:9000`; console: `http://127.0.0.1:9001`. Both bind only to host loopback by default. The one-shot `minio-init` service idempotently creates the private `gridgo-uploads` bucket and a bucket-scoped API user; the API never uses MinIO root credentials.
+
+**Security boundary:** Docker-published ports bypass host `ufw` rules. Never use a bare port mapping or `0.0.0.0`, and never publish this datastore to the internet. Compose accepts only one explicit IPv4 bind address and rejects wildcard/IPv6 forms before starting MinIO. Change the generated development credentials in `.env` before use. The safe default is loopback. Physical-phone testing requires an explicit LAN-only opt-in: bind only to the machine's exact trusted-LAN IPv4 with `MINIO_BIND_ADDRESS`, and set `MINIO_PUBLIC_URL` to that same origin. The console remains loopback-only. See `docs/STORAGE_API.md` for the exact setup and why signed URLs cannot be rewritten.
+
+Stop MinIO without deleting uploaded files:
+
+```bash
+docker compose down
+```
+
+The named `gridgo_minio_data` volume survives `docker compose down` and restarts. Do not add `--volumes` unless intentionally discarding local uploads.
+
+If MinIO is stopped, the API still starts and serves every non-file route, and `GET /files/:id` can still return authorized JSON metadata. Storage-dependent file operations return `503 minio_unavailable` with the recovery command; during the brief boot recovery gate they return `503 storage_initializing`. See [the exact mobile storage contract](docs/STORAGE_API.md).
 
 ## Demo accounts
 
@@ -43,7 +59,7 @@ Client users expose an explicit, authoritative `accountType` on every public use
 | Decision | Choice | Why |
 |---|---|---|
 | Missing type on legacy clients | resolves to `"individual"` | Business branding is opt-in; never leave the field undefined for consumers |
-| Mutability this pilot | **seed / store only** (no write API) | Demo accounts are fixed; avoids a half-finished admin surface. Ops can edit `data/store.json` or reset seed if needed |
+| Mutability this pilot | **seed / store only** (no write API) | Demo accounts are fixed; avoids a half-finished admin surface. Change fixture definitions for future fresh stores; never reset a live/demo store |
 | Non-client roles | field **absent** | Same pattern as `orgName` / `shop` — suppliers and riders have no client account type |
 
 Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
@@ -86,6 +102,11 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | GET | `/orders/:id` | role-scoped | order detail |
 | POST | `/orders` | client | create draft/submit request |
 | POST | `/orders/:id/transition` | role-gated | advance state |
+| POST | `/files` | purpose role | stream one multipart upload into the private file registry |
+| POST | `/files/:id/attach` | file owner + parent owner | revalidate and attach a ready `fileId` |
+| GET | `/files/:id` | owner/parent-scoped | authorized file metadata |
+| GET | `/files/:id/download-url` | owner/parent-scoped | short-lived MinIO presigned GET |
+| DELETE | `/files/:id` | owner / ops, unreferenced only | durable two-phase deletion |
 | GET | `/credits/balance` | client (own) / ops / super | pilot credit balance + ledger |
 | POST | `/credits/authorize` | client | reserve/spend for order |
 | POST | `/credits/grant` | super_admin | grant Pilot Credits (not a purchase) |
@@ -191,13 +212,13 @@ Client report auto-creates a `payout_held` claim. Order stays in `issue_window_o
 
 ## Seed data highlights
 
-`npm run reset` loads taxonomy (4 categories), Davao zones, PrintRight live services, credit grant ledger, open issue + claim samples, and audit entries so portal screens are not empty.
+`src/seed.js` defines the fresh-store fixtures: taxonomy, Davao zones, PrintRight live services, a credit grant ledger, issue/claim samples, and audit entries. The checked-out `data/store.json` may be live demo data; do not replace it just to pick up new fields.
 
 ## Existing stores (no reset)
 
 `data/store.json` is gitignored. On every `load()`:
 
-1. **Backfill** adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, and client `accountType` (default `"individual"` only when missing/invalid) **without** wiping captain demo orders.
+1. **Backfill** adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, the top-level `files` registry, parent file-ID arrays, and client `accountType` (default `"individual"` only when missing/invalid) **without** wiping captain demo orders.
 2. **Fixture convergence** ensures seed demo accounts from `src/demo-fixtures.js` exist and match their defined identity fields (so a live store that predated `individual@gridgo.local` or still has `client@` as `individual` is fixed without `npm run reset`).
 
 Fixture convergence only mutates allowlisted demo users; orders, credits, proofs, claims, issues, sessions, and location pings stay byte-stable.
@@ -208,6 +229,7 @@ Fixture convergence only mutates allowlisted demo users; orders, credits, proofs
 |---|---|
 | Bearer token in JSON store | Clerk session + role claim |
 | `data/store.json` | Supabase Postgres + RLS |
+| MinIO + API-controlled streamed uploads + short-lived signed GETs | Managed object storage honoring `docs/STORAGE_API.md` |
 | In-process transitions | Edge Functions + idempotency keys |
 | Simulated COD/credits | Pilot credits ledger + PayMongo adapter |
 

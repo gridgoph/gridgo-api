@@ -57,27 +57,33 @@ Client users have explicit `accountType`: `"individual"` | `"business"`. Returne
 
 ## Seed, backfill & fixture convergence
 
-Seed via `npm run reset` (`src/seed.js` → `data/store.json`). Demo user identities live in `src/demo-fixtures.js` (shared by seed + server).
+Fresh-store fixture definitions live in `src/seed.js`; demo user identities live in `src/demo-fixtures.js` (shared by seed + server). Treat reset as destructive and use load-time migration for existing stores.
 
 **Two different load-time migrations — do not conflate them:**
 
 | | Backfill | Fixture convergence |
 |---|---|---|
 | Purpose | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
-| Scope | geography, platform arrays, missing client `accountType` → `"individual"` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
 | Overwrite? | No — never overwrites existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`) |
 | Creates? | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.local`) |
-| Never touches | captain orders / real data | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
+| Never touches | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
 
 **Fixture boundary:** match by exact fixture email, else stable seed id — never by role or bare `@gridgo.local` domain. Getting this wrong is how a migration eats captain work.
 
-**Existing live stores:** both run idempotently on every `load()`. Prefer them over `npm run reset` (reset wipes captain demo orders).
+**Existing live stores:** both run idempotently on every `load()`. Never reset a live/demo store to acquire new fields; reset wipes captain demo orders.
 
 ## Constraints
 
-- No npm dependencies; plain `node:http` only
-- Do not change order state machine edges/role rules (payout hold is a soft `409` guard only)
+- Plain `node:http` only except the `minio` S3 SDK, approved for streamed object storage and presigned SigV4 URLs so signing is never hand-rolled; add no other direct npm dependencies
+- Do not change unrelated order state edges/role rules; the proof path in `docs/STORAGE_API.md` replaces direct `supplier_accepted -> awaiting_payment` (payout hold remains a soft `409` guard only)
 - Authorisation on every route; `{ error: "snake_case" }`
+
+## Object storage and supplier proofs
+
+- The authoritative mobile contract is `docs/STORAGE_API.md`; the API streams uploads and authorizes short-lived presigned MinIO GETs. `MINIO_ENDPOINT` and fixed `MINIO_PUBLIC_URL` are separate.
+- Supplier proof states are `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved`; attaching a ready proof file enters/re-enters review.
+- Files use `pending_upload|ready|delete_pending|deleted`; top-level metadata owns the private `objectKey`, while orders/services reference opaque `fileId` values only. Legacy `order.artworkName` stays valid and is never file identity.
 
 ## Maintaining this file
 

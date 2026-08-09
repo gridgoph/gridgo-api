@@ -1,82 +1,36 @@
 # Storage and supplier-proof design
 
-## Scope and constraints
+The authoritative, app-facing specification is `docs/STORAGE_API.md`. This note records the design boundary; it must not be used as a substitute for that contract.
 
-GRIDGO will add durable private object storage without changing its replaceable JSON-domain model. MinIO is the development S3 service, accessed only through `@aws-sdk/client-s3`. The API must keep serving non-file routes when MinIO is absent. Existing `data/store.json` is live demo data: migrations only fill missing attachment arrays and never reset, delete, or fabricate objects for legacy `artworkName` values.
+## Selected architecture
 
-The existing server has an Operations QA state named `proof_approval`. Supplier proofs therefore use distinct `supplier_proof_*` states so the two workflows remain unambiguous.
+- API control plane: authenticate; stream multipart to disk; count bytes; inspect magic bytes; enforce purpose policy; create and mutate metadata; authorize attach/read/delete.
+- MinIO upload data path: after a durable `pending_upload` row exists, the API streams the temp file to private MinIO with the bucket-scoped API credential.
+- MinIO download data plane: the API authorizes and stats a ready object, then signs a five-minute GET using fixed `MINIO_PUBLIC_URL`.
+- Domain references: top-level `files` owns opaque `fileId` plus private `objectKey`; orders and supplier services contain only purpose-specific file-ID arrays. `artworkName` remains a display-only compatibility mirror.
 
-## Considered approaches
+This supersedes the earlier proxy-download/10 MiB proposal after the legacy server and mobile audits showed that real artwork reaches 50–200 MiB, whole-file buffering exhausts mobile memory, signed URLs must use a phone-reachable origin, and object/metadata partial failures need an explicit lifecycle.
 
-1. **One attachment API with private byte reads (selected).** `POST /attachments` accepts the same multipart shape for all four kinds; `GET /attachments/:id` authorizes against the parent record before streaming bytes. This gives all three apps one client implementation and keeps bucket details private.
-2. Resource-specific upload routes. These make URLs self-describing but duplicate multipart, validation, response, and future migration behavior four times.
-3. Presigned S3 URLs. These scale well in production but expose storage choreography to mobile clients, complicate local MinIO networking, and weaken the requested API-authorized read boundary.
+## File lifecycle
 
-## External contract
+`pending_upload -> ready -> delete_pending -> deleted`.
 
-`POST /attachments` requires `multipart/form-data` with exactly one binary `file` part and text fields:
+The pending row is saved before `PutObject`. A file ID is returned only after object storage and the ready metadata commit both succeed. A post-put metadata failure triggers compensating deletion; pending/delete markers are reconciled on a later successful-storage boot. Referenced evidence cannot be deleted.
 
-- `kind`: `artwork`, `proof`, `delivery_photo`, or `service_image`
-- `orderId`: required for the first three kinds
-- `supplierServiceId`: required for `service_image`
+Upload and attach are separate. Attach repeats owner, purpose, policy, target ownership/state, lifecycle, and metadata checks and stats the object immediately before the queued commit. This prevents a valid upload from being rebound as another user's artwork/proof/photo/service image.
 
-Accepted part content types are `image/jpeg`, `image/png`, `image/webp`, and `application/pdf`. Maximum file size is 10 MiB (`10485760` bytes). The response is `201 { "attachment": Attachment, "order": Order }` for order kinds and `201 { "attachment": Attachment, "supplierService": SupplierService }` for a service image. Expo Image Picker and Document Picker use form field `file` with `{ uri, name, type }`, which produces this exact multipart shape.
+## Streaming and validation
 
-`GET /attachments/:id` returns the original bytes with recorded `Content-Type`, `Content-Length`, and a safe `Content-Disposition: inline; filename="..."`. It never redirects and never returns a bucket URL.
+The `node:http` multipart parser holds only boundary tail and signature bytes in memory, writes one file part to a private temporary path, and streams that path to MinIO. It accepts Expo `FormData` from a file URI. Extension, any specific declared MIME, and magic bytes must agree; empty/generic iOS MIME is tolerated only when extension and magic agree. HEIC/HEIF is rejected explicitly.
 
-Public attachment metadata is:
+Purpose limits are 200 MiB for artwork/proof and 20 MiB for delivery/service images. Artwork/proof accept JPEG, PNG, WebP, and PDF; the two photo/image purposes accept JPEG, PNG, and WebP.
 
-```json
-{
-  "id": "att_...",
-  "kind": "artwork",
-  "originalFilename": "opening-banner.pdf",
-  "contentType": "application/pdf",
-  "size": 48231,
-  "uploaderId": "user_client",
-  "uploadedAt": "2026-08-09T00:00:00.000Z"
-}
-```
+## Authorization and proofs
 
-The stored record additionally carries an internal `objectKey`; API serializers must remove it. Orders expose `attachments: Attachment[]`; supplier services expose the same field. On artwork upload, `order.artworkName` becomes the uploaded original filename for legacy clients.
+Upload role is purpose-gated; attach adds file ownership plus current parent ownership/assignment and state. Downloads are authorized from owner, operations role, or current domain relationships. Live service images are readable by authenticated catalogue users.
 
-## Authorization
+Proof attach moves `supplier_accepted` or `supplier_proof_changes_requested` to `supplier_proof_review` and appends a timeline entry carrying `fileId`. The order client requests changes with a reason or approves. Only the assigned supplier or operations can continue approved proof to payment.
 
-- `artwork`: only the order's client uploads. The order client, assigned supplier, and ops/super may read it.
-- `proof`: only the assigned supplier uploads. The order client, assigned supplier, and ops/super may read it.
-- `delivery_photo`: only the assigned rider uploads. The order client, assigned supplier, assigned rider, and ops/super may read it.
-- `service_image`: only the service's supplier uploads. That supplier and ops/super may read it.
+## Development security
 
-Unknown parents return `404`; known but unauthorized parents return `403`. This prevents record existence from being inferred through attachment lookup: an unauthorized attachment read is always `403` once its parent is found.
-
-## Supplier-proof lifecycle
-
-Uploading a `proof` is the state-changing action, so a state cannot claim that a proof exists without a stored object:
-
-```text
-supplier_accepted --supplier proof upload--> supplier_proof_review
-supplier_proof_review --client request_changes + reason--> supplier_proof_changes_requested
-supplier_proof_changes_requested --supplier proof upload--> supplier_proof_review
-supplier_proof_review --client approve--> supplier_proof_approved
-supplier_proof_approved --existing transition endpoint--> awaiting_payment
-```
-
-Client decisions use the existing `POST /orders/:id/transition` shape with `state` set to `supplier_proof_changes_requested` or `supplier_proof_approved`. `reason` is mandatory for requested changes. Only the order client may make either decision. Each state change appends a timeline entry with actor, time, state, and a concrete note. Proof upload entries also include `attachmentId`.
-
-The pre-existing direct `supplier_accepted -> awaiting_payment` edge remains for compatibility, as required by the repository constraint not to remove state-machine edges.
-
-## Storage availability and errors
-
-The API creates an S3 client and idempotently ensures the configured bucket at boot. Boot-time failure only marks storage unavailable and logs a concise warning; the HTTP server still starts. Every file operation retries bucket availability. `/health` exposes `storage.status` as `checking`, `available`, or `unavailable`.
-
-File-route failures use `{ error, message, ...details }`. Stable codes include `multipart_required`, `invalid_multipart`, `file_required`, `invalid_attachment_kind`, `attachment_target_required`, `content_type_not_allowed`, `file_too_large`, `file_empty`, `proof_upload_not_allowed`, `reason_required`, `forbidden`, `attachment_not_found`, and `minio_unavailable`. Messages name the problem and the recovery action; SDK exceptions are never returned.
-
-## Persistence and rollback behavior
-
-An object is written before its metadata is added to JSON. A failed object write leaves the domain record unchanged. A JSON write failure can leave an unreachable object, which is acceptable for this local demo and can be garbage-collected later. Reads authorize entirely from durable parent metadata before touching MinIO.
-
-`backfillAttachments(store)` only assigns `[]` when an order or supplier service lacks an attachment array. It does not modify existing valid arrays, legacy names, timelines, or any other collection. Running `load()` twice must produce an identical file on the second run.
-
-## Test strategy
-
-Pure Node tests cover multipart binary parsing, content-type and size policy, upload/read authorization, parent lookup, metadata redaction, attachment backfill idempotency, and supplier-proof state rules. End-to-end curl validation runs a separate API process and a copied store on a spare port. It uploads and reads all kinds, checks negative authorization and validation errors, walks the full proof loop, restarts/stops MinIO, and compares canonical checksums of untouched collections.
+Pinned MinIO and `mc` images run with a named volume. A one-shot initializer creates the private bucket and a bucket-scoped API user distinct from root. Ports bind to loopback by default. Physical-device signed downloads require explicit exact-LAN-IP binding and matching `MINIO_PUBLIC_URL`; `0.0.0.0`, bare port mappings, Host-derived signing, and post-sign rewriting are prohibited.
