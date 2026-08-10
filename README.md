@@ -36,12 +36,12 @@ If MinIO is stopped, the API still starts and serves every non-file route, and `
 
 | Email | Password | Role | Notes |
 |---|---|---|---|
-| `client@gridgo.local` | `demo` | client | **business** — GRIDGO Business lockup (`accountType: "business"`, orgName set) |
-| `individual@gridgo.local` | `demo` | client | **individual** — plain GRIDGO lockup (`accountType: "individual"`) |
-| `supplier@gridgo.local` | `demo` | supplier | verification: approved |
-| `rider@gridgo.local` | `demo` | rider | verification: approved |
-| `ops@gridgo.local` | `demo` | ops_admin | |
-| `admin@gridgo.local` | `demo` | super_admin | |
+| `client@gridgo.local` | `Ilovegridgo-0990` | client | **business** — GRIDGO Business lockup (`accountType: "business"`, orgName set) |
+| `individual@gridgo.local` | `Ilovegridgo-0990` | client | **individual** — plain GRIDGO lockup (`accountType: "individual"`) |
+| `supplier@gridgo.local` | `Ilovegridgo-0990` | supplier | verification: approved |
+| `rider@gridgo.local` | `Ilovegridgo-0990` | rider | verification: approved |
+| `ops@gridgo.local` | `Ilovegridgo-0990` | ops_admin | |
+| `admin@gridgo.local` | `Ilovegridgo-0990` | super_admin | |
 
 Login: `POST /auth/login` `{ "email", "password" }` → `{ token, user }`
 
@@ -67,7 +67,9 @@ Client users expose an explicit, authoritative `accountType` on every public use
 
 Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
 
-**Demo fixture convergence (separate from backfill):** on every `load()`, seed demo accounts (`*@gridgo.local` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. Captain-created users and all non-user collections (orders, credits, …) are never touched. Password for every demo account remains `demo`.
+**Demo fixture convergence (separate from backfill):** on every `load()`, seed demo accounts (`*@gridgo.local` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. The retired shipped password is rotated to `Ilovegridgo-0990`; a password that has already diverged is preserved. Captain-created users and all non-user collections (orders, credits, …) are never touched.
+
+`Ilovegridgo-0990` is a repository-visible pilot credential, not a secret. Do not reuse it for any real account or environment.
 
 ## Mobile apps
 

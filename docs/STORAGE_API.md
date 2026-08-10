@@ -55,13 +55,13 @@ Login helpers used below:
 ```bash
 API=http://127.0.0.1:18787
 CLIENT_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"client@gridgo.local","password":"demo"}' | jq -r .token)
+  --data '{"email":"client@gridgo.local","password":"Ilovegridgo-0990"}' | jq -r .token)
 SUPPLIER_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"supplier@gridgo.local","password":"demo"}' | jq -r .token)
+  --data '{"email":"supplier@gridgo.local","password":"Ilovegridgo-0990"}' | jq -r .token)
 RIDER_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"rider@gridgo.local","password":"demo"}' | jq -r .token)
+  --data '{"email":"rider@gridgo.local","password":"Ilovegridgo-0990"}' | jq -r .token)
 OPS_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"ops@gridgo.local","password":"demo"}' | jq -r .token)
+  --data '{"email":"ops@gridgo.local","password":"Ilovegridgo-0990"}' | jq -r .token)
 ```
 
 ## File metadata and parent references
