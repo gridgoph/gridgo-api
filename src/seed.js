@@ -63,6 +63,7 @@ const t = now();
 const users = DEMO_USERS.map((u) => {
   const copy = { ...u, shop: u.shop ? { ...u.shop } : undefined };
   if (copy.shop === undefined) delete copy.shop;
+  if (copy.role === "supplier") copy.verificationDocumentFileIds = [];
   if (u.verificationStatus === "approved") {
     copy.verifiedAt = t;
     copy.verifiedBy = u.verifiedBy || "user_admin";

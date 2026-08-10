@@ -33,7 +33,9 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/credits/authorize` | authenticated | retired: always `410 payment_route_retired` |
 | POST | `/credits/grant` | super | non-cash pilot grant; audited |
 | GET | `/users[?role=]` | ops/super | public-user directory |
-| GET | `/users/:id` | ops/super | one public user |
+| GET | `/users/:id` | ops/super | one public user; supplier detail also includes verification documents |
+| PATCH | `/users/:id/shop` | owning supplier; ops/super any supplier | replace supplier shop pin; existing orders are unchanged |
+| GET | `/users/:id/verification-documents` | owning supplier; ops/super any supplier | private attached verification-document metadata |
 | PATCH | `/users/:id/role` | super | role change; audited |
 | POST | `/users/:id/verification` | ops/super | supplier/rider approval decision |
 | GET | `/zones` | authenticated | legacy address-zone records; fees are not used for v2 pricing |
@@ -138,7 +140,67 @@ Rider adds:
 
 The response user has `verificationStatus: "pending"`. Success for every role is `201 {token,user}`. Duplicate email is `409 email_already_registered`.
 
+Supplier signup also creates an authenticated session immediately: the `201` response token is valid while `verificationStatus` remains `pending`. The supplier uses that token to upload and attach the required business permit, valid ID, and sample-work photos after the account exists. Pending status does not block profile/document setup, but it continues to block matching and accepting work.
+
 Approval is the existing `POST /users/:id/verification` body `{ "status": "approved", "reason": "..." }`. Pending suppliers cannot be assigned by the transition endpoint; pending riders cannot list, accept, or transition into dispatch assignment.
+
+## Supplier shop and verification profile
+
+### `PATCH /users/:id/shop`
+
+Auth: an authenticated supplier may update only their own user ID. `ops_admin` and `super_admin` may update any supplier. Clients, riders, and a different supplier receive `403 forbidden`.
+
+Request body (replace the complete shop point):
+
+```json
+{
+  "shop": {
+    "lat": 7.0701,
+    "lng": 125.6202,
+    "label": "New supplier building, Davao City"
+  }
+}
+```
+
+`lat` and `lng` must be JSON numbers, finite, and within `-90..90` and `-180..180`. Numeric strings are rejected. `label` must be a non-empty string after trimming.
+
+Success: `200 { "user": PublicUser }`; the returned `user.shop` is the saved point and `shopUpdatedAt` is set. The change is audited as `user.shop_update`.
+
+Errors:
+
+| Status | `error` | Meaning and fix |
+|---:|---|---|
+| 400 | `invalid_shop_coordinates` | Send finite numeric latitude/longitude inside Earth bounds. |
+| 400 | `shop_label_required` | Add a non-empty address or landmark label. |
+| 400 | `shop_requires_supplier` | Operations targeted a non-supplier user; choose a supplier. |
+| 403 | `forbidden` | The caller is not Operations/Super Admin and does not own this supplier profile. |
+| 404 | `user_not_found` | Refresh users and use an existing supplier ID. |
+
+Moving a shop does **not** rewrite any existing order, including `pickup`, `deliveryDistanceMeters`, `deliveryFeeMinor`, totals, or installment amounts. Those values are order snapshots. This prevents a profile correction from silently changing a price the client accepted. Future supplier assignments snapshot the new shop; an assigned supplier that has not yet accepted/finalized an order still uses the then-current profile when final pricing runs.
+
+### Verification documents on the approval surface
+
+File bytes use `purpose=verification_document` and the upload/attach contract in `docs/STORAGE_API.md`.
+
+`GET /users/:id/verification-documents` is authorized only for that supplier or Operations/Super Admin. Success:
+
+```json
+{
+  "userId": "user_supplier",
+  "verificationDocuments": [
+    {
+      "fileId": "file_8c9f61e4b2aa",
+      "purpose": "verification_document",
+      "verificationDocumentType": "valid_id",
+      "state": "ready"
+    }
+  ]
+}
+```
+
+Each array item is the complete public `File` metadata object; the abbreviated example highlights identifying fields. A supplier cannot request another supplier's list. Clients and riders cannot request any list. All denied calls return `403 {"error":"forbidden","message":"..."}`; a non-supplier target returns `400 verification_documents_require_supplier`; an unknown target returns `404 user_not_found`.
+
+The existing Operations/Super Admin `GET /users/:id` approval response is now `{ "user": PublicUser, "verificationDocuments": File[] }` for a supplier. The same array is returned by `POST /users/:id/verification`, so the decision response remains a complete approval surface. General `PublicUser` values—including `/users`, login, `/auth/me`, matching, and catalogue projections—never contain `verificationDocumentFileIds`.
 
 ## Settings and distance fee
 
@@ -472,5 +534,7 @@ Load-time `backfillOperationalModel()` is idempotent:
 - maps old COD payment records to `digital_manual_legacy`, removes `codEligible`, and creates coherent installment status from lifecycle progress;
 - maps supplier-proof/old payment entry states to `awaiting_downpayment` and creates the assignment notification once;
 - preserves `proofFileIds`, file objects, uploaded object metadata, artwork names, and every unrelated collection.
+
+The structural file backfill also adds missing `verificationDocumentFileIds: []` only to supplier users. It never replaces an existing array or document metadata and is byte-idempotent on the second run.
 
 See `docs/V2_MIGRATION_CHECKSUMS.md` for the copied-live-store proof and exact hashes.

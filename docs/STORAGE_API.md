@@ -1,6 +1,6 @@
 # GRIDGO Storage API contract
 
-This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, and supplier-service images. Field names, states, status codes, and error codes are stable and case-sensitive.
+This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
 
@@ -88,6 +88,8 @@ A public file object has exactly this shape:
 }
 ```
 
+For `purpose: "verification_document"`, the attached file object additionally contains `verificationDocumentType: "business_permit" | "valid_id" | "sample_work"`, and its user reference contains the same value as `documentType`. That field is absent before attachment and for every other purpose.
+
 The durable internal record additionally has a server-generated `objectKey`. It is never returned as a standalone metadata field. The authorized presigned URL necessarily encodes the bucket and key in its signed path; clients must treat the complete URL as an opaque, expiring capability and never parse those internals. `purpose` is the retention and authorization tag; it is not inferred from a target.
 
 Parents contain IDs only:
@@ -98,6 +100,7 @@ Parents contain IDs only:
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
+| `verification_document` | `supplier.verificationDocumentFileIds: string[]` (private; never part of `PublicUser`) |
 
 Legacy orders may still return `proofFileIds` containing retired supplier-proof files. They remain readable evidence but the `proof` upload purpose and supplier-proof workflow no longer accept writes.
 
@@ -113,6 +116,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `fulfilment_proof` | assigned supplier or rider | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
+| `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 
 Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload.
 
@@ -120,7 +124,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo`.
+Auth: `client` for `artwork`; `supplier` for `service_image` and `verification_document`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo`. A pending supplier may upload verification documents using the token returned by supplier signup. Clients, riders, Operations, and Super Admin cannot upload documents on a supplier's behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -165,6 +169,9 @@ DELIVERY_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $RID
 
 SERVICE_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
   -F 'purpose=service_image' -F 'file=@./press.webp;type=image/webp' | tee /tmp/service-upload.json | jq -r .file.fileId)
+
+VERIFICATION_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
+  -F 'purpose=verification_document' -F 'file=@./business-permit.pdf;type=application/pdf' | tee /tmp/verification-upload.json | jq -r .file.fileId)
 ```
 
 ## POST /files/:fileId/attach — bind to a domain record
@@ -177,12 +184,21 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
+| `verification_document` | `{ "documentType": "business_permit" }` or `{ "documentType": "sample_work", "replaceFileId": "..." }` | caller is a supplier; target is always derived from the token and cannot be supplied |
 
 Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
 
-Success: `200 { "file": File, "order": Order }` for order purposes, or `200 { "file": File, "supplierService": SupplierService }`. The returned parent already contains the ID. A POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention` because both gates use the same delivery evidence.
+Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. A POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention` because both gates use the same delivery evidence.
 
-Curl for all four targets:
+Verification-document attachment rules:
+
+- `documentType` is required and must be exactly `business_permit`, `valid_id`, or `sample_work`.
+- The API derives the supplier account from the bearer token. `userId`, `supplierId`, and all other target fields are rejected with `400 unexpected_target_field`; a supplier cannot target another account.
+- Attaching `business_permit` or `valid_id` automatically replaces every prior attachment in that singleton slot. Replaced files become unreferenced but remain private and readable to their owner/Operations/Super Admin until the owner deletes them.
+- `sample_work` without `replaceFileId` appends another photo/document. To replace one sample, send its currently attached `fileId` as `replaceFileId` with `documentType: "sample_work"`.
+- `replaceFileId` may also select the current permit or ID explicitly. It must be attached to the caller in the same type slot or the API returns `409 verification_document_replacement_mismatch`.
+
+Curl for all five targets:
 
 ```bash
 curl -fsS -X POST "$API/files/$ARTWORK_FILE_ID/attach" -H "Authorization: Bearer $CLIENT_TOKEN" \
@@ -196,11 +212,16 @@ curl -fsS -X POST "$API/files/$DELIVERY_FILE_ID/attach" -H "Authorization: Beare
 
 curl -fsS -X POST "$API/files/$SERVICE_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
   -H 'Content-Type: application/json' --data '{"supplierServiceId":"svc_demo_print"}' | jq
+
+curl -fsS -X POST "$API/files/$VERIFICATION_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
+  -H 'Content-Type: application/json' --data '{"documentType":"business_permit"}' | jq
 ```
 
 ## GET /files/:fileId — metadata
 
-Auth: file owner, `ops_admin`, `super_admin`, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached files are visible only to owner and ops/super.
+Auth for ordinary purposes: file owner, `ops_admin`, `super_admin`, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super.
+
+Auth for `verification_document` is intentionally stricter and never inherits order/service visibility: only the supplier owner, `ops_admin`, or `super_admin` may read metadata or request a download URL. Another supplier, client, and rider always receive `403 forbidden`, even if a malformed legacy reference points at one of their orders/services. Supplier document lists use `GET /users/:id/verification-documents` as specified in `docs/OPERATIONAL_MODEL_V2_API.md`.
 
 Success: `200 { "file": File }`.
 
@@ -234,7 +255,7 @@ cmp ./artwork.pdf ./artwork-readback.pdf
 
 ## DELETE /files/:fileId — unreferenced file deletion
 
-Auth: owner, `ops_admin`, or `super_admin`. Only a `ready` file with `references: []` may be deleted. Attached artwork, proofs, service images, and delivery evidence return `409 file_in_use`; deletion never silently removes evidence.
+Auth: owner, `ops_admin`, or `super_admin` for ordinary purposes. A `verification_document` may be deleted only by its supplier owner. Only a `ready` file with `references: []` may be deleted. Attached artwork, proofs, service images, delivery evidence, and current verification documents return `409 file_in_use`; deletion never silently removes evidence. Replace a verification slot first, then the supplier may delete the now-unreferenced old file.
 
 The API first persists `delete_pending`, then deletes MinIO, then persists `deleted`. If MinIO is unavailable, the durable `delete_pending` marker remains and startup reconciliation retries it.
 
@@ -285,6 +306,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 400 | `attachment_target_required` | Attach body lacks `orderId`, `milestoneCode`, or `supplierServiceId`; send the purpose-specific fields. |
 | 400 | `unexpected_target_field` | Attach JSON includes a field other than the purpose-specific target; remove it. |
 | 400 | `invalid_milestone_code` | POF target is not printing, packaging/QC, or delivered; choose the stage represented by the file. |
+| 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, or `sample_work`. |
 | 400 | `invalid_json` | Attach/transition JSON is malformed; fix JSON. |
 | 401 | `unauthorized` | Token absent, invalid, or expired; sign in and retry. |
 | 403 | `forbidden` | Wrong role, file owner, parent owner/assignee, or read relationship; open the caller's own record. |
@@ -297,6 +319,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 409 | `file_metadata_invalid` | Purpose/media/key/size metadata is internally inconsistent; upload again. |
 | 409 | `file_in_use` | File has domain references; do not delete lifecycle evidence. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
+| 409 | `verification_document_replacement_mismatch` | `replaceFileId` is not attached to the caller in the requested document slot; refresh the supplier's documents and choose the matching file. |
 | 409 | `transition_not_allowed` | Requested order step is not reachable from the current state/role; refresh and use an available action. |
 | 409 | `storage_object_missing` | Ready metadata has no MinIO object; upload and attach a replacement. |
 | 409 | `storage_object_mismatch` | MinIO byte size differs from metadata; upload and attach a replacement. |

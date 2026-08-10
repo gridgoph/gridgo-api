@@ -14,6 +14,7 @@ let tempDir;
 let storePath;
 let secondClientToken;
 let secondSupplierToken;
+let secondSupplierId;
 
 async function freeHighPort() {
   while (true) {
@@ -37,6 +38,18 @@ function fixtureStore() {
       { id: "user_ops", email: "ops@gridgo.local", password: "demo", name: "Dina Ops", role: "ops_admin" },
       { id: "user_admin", email: "admin@gridgo.local", password: "demo", name: "Eli Admin", role: "super_admin" },
       { id: "client-existing", email: "existing@example.test", password: "secret123", name: "Existing", role: "client", accountType: "individual" },
+      {
+        id: "user_supplier",
+        email: "supplier@gridgo.local",
+        password: "demo",
+        name: "Ben Supplier",
+        role: "supplier",
+        supplierName: "PrintRight Davao",
+        shop: { lat: 7.064, lng: 125.6085, label: "PrintRight" },
+        categoryRanks: [{ categoryCode: "marketing_collateral", rank: 1 }],
+        verificationStatus: "approved",
+        verificationDocumentFileIds: ["file-verification-id"],
+      },
     ],
     sessions: {},
     catalog: [{ id: "prod_flyer", name: "Flyers", family: "flyer", basePriceMinor: 25_000, unit: "pack" }],
@@ -108,7 +121,32 @@ function fixtureStore() {
         updatedAt: at,
       },
     ],
-    files: [],
+    files: [
+      {
+        fileId: "file-verification-id",
+        objectKey: "verification_document/test/private-id.pdf",
+        ownerId: "user_supplier",
+        purpose: "verification_document",
+        verificationDocumentType: "valid_id",
+        originalFilename: "supplier-id.pdf",
+        declaredContentType: "application/pdf",
+        detectedContentType: "application/pdf",
+        size: 64,
+        state: "ready",
+        createdAt: at,
+        readyAt: at,
+        deleteRequestedAt: null,
+        deletedAt: null,
+        references: [
+          {
+            type: "user",
+            id: "user_supplier",
+            field: "verificationDocumentFileIds",
+            documentType: "valid_id",
+          },
+        ],
+      },
+    ],
     credits: {},
     claims: [],
     issues: [],
@@ -207,6 +245,7 @@ test("all three roles self-sign up with exact profiles and pending approval gate
   });
   assert.equal(supplier.status, 201, JSON.stringify(supplier.body));
   secondSupplierToken = supplier.body.token;
+  secondSupplierId = supplier.body.user.id;
   assert.equal(supplier.body.user.verificationStatus, "pending");
   assert.deepEqual(supplier.body.user.categoryRanks.map((item) => item.rank), [1, 2]);
 
@@ -299,6 +338,41 @@ test("all three roles self-sign up with exact profiles and pending approval gate
   assert.equal(offersAfter.body.offers.some((order) => order.id === "ord-offer"), true);
 });
 
+test("supplier verification documents stay private and appear on the Operations approval surface", async () => {
+  const ownerToken = await login("supplier@gridgo.local");
+  const opsToken = await login("ops@gridgo.local");
+  const superToken = await login("admin@gridgo.local");
+  const riderToken = await login("rider@gridgo.local");
+
+  const ownDocuments = await request("/users/user_supplier/verification-documents", { token: ownerToken });
+  assert.equal(ownDocuments.status, 200, JSON.stringify(ownDocuments.body));
+  assert.equal(ownDocuments.body.verificationDocuments.length, 1);
+  assert.equal(ownDocuments.body.verificationDocuments[0].verificationDocumentType, "valid_id");
+
+  const approvalSurface = await request("/users/user_supplier", { token: opsToken });
+  assert.equal(approvalSurface.status, 200);
+  assert.equal(approvalSurface.body.verificationDocuments[0].fileId, "file-verification-id");
+  assert.equal("verificationDocumentFileIds" in approvalSurface.body.user, false);
+
+  for (const token of [opsToken, superToken]) {
+    const response = await request("/files/file-verification-id", { token });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+  }
+  for (const token of [secondSupplierToken, secondClientToken, riderToken]) {
+    const metadata = await request("/files/file-verification-id", { token });
+    assert.equal(metadata.status, 403, JSON.stringify(metadata.body));
+    assert.equal(metadata.body.error, "forbidden");
+    const documents = await request("/users/user_supplier/verification-documents", { token });
+    assert.equal(documents.status, 403, JSON.stringify(documents.body));
+    assert.equal(documents.body.error, "forbidden");
+  }
+  const anotherSupplierDownload = await request("/files/file-verification-id/download-url", {
+    token: secondSupplierToken,
+  });
+  assert.equal(anotherSupplierDownload.status, 403);
+  assert.equal(anotherSupplierDownload.body.error, "forbidden");
+});
+
 test("assignment calculates final price, notifies the client, and never leaks commission to clients", async () => {
   const clientToken = await login("existing@example.test", "secret123");
   const supplierToken = await login("supplier@gridgo.local");
@@ -386,6 +460,98 @@ test("assignment calculates final price, notifies the client, and never leaks co
     ),
     true,
   );
+});
+
+test("suppliers move only their own shop, Operations can move any, and in-flight orders keep agreed pricing", async () => {
+  const opsToken = await login("ops@gridgo.local");
+  const superToken = await login("admin@gridgo.local");
+  const demoSupplierToken = await login("supplier@gridgo.local");
+
+  const ownMove = await request(`/users/${secondSupplierId}/shop`, {
+    method: "PATCH",
+    token: secondSupplierToken,
+    body: { shop: { lat: 7.0701, lng: 125.6202, label: "New supplier building" } },
+  });
+  assert.equal(ownMove.status, 200, JSON.stringify(ownMove.body));
+  assert.deepEqual(ownMove.body.user.shop, { lat: 7.0701, lng: 125.6202, label: "New supplier building" });
+
+  const otherMove = await request("/users/user_supplier/shop", {
+    method: "PATCH",
+    token: secondSupplierToken,
+    body: { shop: { lat: 7.071, lng: 125.621, label: "Not my shop" } },
+  });
+  assert.equal(otherMove.status, 403);
+  assert.equal(otherMove.body.error, "forbidden");
+  const clientMove = await request(`/users/${secondSupplierId}/shop`, {
+    method: "PATCH",
+    token: secondClientToken,
+    body: { shop: { lat: 7.071, lng: 125.621, label: "Clients cannot move supplier pins" } },
+  });
+  assert.equal(clientMove.status, 403);
+
+  for (const shop of [
+    { lat: "7.07", lng: 125.62, label: "Numeric strings are not coordinates" },
+    { lat: 91, lng: 125.62, label: "Outside Earth" },
+    { lat: 7.07, lng: 181, label: "Outside Earth" },
+    { lat: null, lng: 125.62, label: "Missing latitude" },
+  ]) {
+    const invalid = await request(`/users/${secondSupplierId}/shop`, {
+      method: "PATCH",
+      token: secondSupplierToken,
+      body: { shop },
+    });
+    assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
+    assert.equal(invalid.body.error, "invalid_shop_coordinates");
+  }
+  const blankLabel = await request(`/users/${secondSupplierId}/shop`, {
+    method: "PATCH",
+    token: secondSupplierToken,
+    body: { shop: { lat: 7.07, lng: 125.62, label: "   " } },
+  });
+  assert.equal(blankLabel.status, 400);
+  assert.equal(blankLabel.body.error, "shop_label_required");
+
+  const before = await request("/orders/ord-match", { token: opsToken });
+  const agreedSnapshot = {
+    pickup: before.body.order.pickup,
+    deliveryDistanceMeters: before.body.order.deliveryDistanceMeters,
+    deliveryFeeMinor: before.body.order.deliveryFeeMinor,
+    totalMinor: before.body.order.totalMinor,
+    downpaymentMinor: before.body.order.downpaymentMinor,
+    balanceMinor: before.body.order.balanceMinor,
+  };
+  const operationsMove = await request("/users/user_supplier/shop", {
+    method: "PATCH",
+    token: opsToken,
+    body: { shop: { lat: 7.1901, lng: 125.4102, label: "Relocated PrintRight" } },
+  });
+  assert.equal(operationsMove.status, 200, JSON.stringify(operationsMove.body));
+  const afterMove = await request("/orders/ord-match", { token: opsToken });
+  assert.deepEqual(
+    {
+      pickup: afterMove.body.order.pickup,
+      deliveryDistanceMeters: afterMove.body.order.deliveryDistanceMeters,
+      deliveryFeeMinor: afterMove.body.order.deliveryFeeMinor,
+      totalMinor: afterMove.body.order.totalMinor,
+      downpaymentMinor: afterMove.body.order.downpaymentMinor,
+      balanceMinor: afterMove.body.order.balanceMinor,
+    },
+    agreedSnapshot,
+  );
+
+  const superMove = await request(`/users/${secondSupplierId}/shop`, {
+    method: "PATCH",
+    token: superToken,
+    body: { shop: { lat: 7.072, lng: 125.622, label: "Supervised supplier pin" } },
+  });
+  assert.equal(superMove.status, 200, JSON.stringify(superMove.body));
+
+  const demoSupplierCannotMoveAnother = await request(`/users/${secondSupplierId}/shop`, {
+    method: "PATCH",
+    token: demoSupplierToken,
+    body: { shop: { lat: 7.08, lng: 125.63, label: "Still not my shop" } },
+  });
+  assert.equal(demoSupplierCannotMoveAnother.status, 403);
 });
 
 test("Operations and Super Admin can change the one global issue window and provisional distance bands", async () => {

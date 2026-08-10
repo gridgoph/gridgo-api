@@ -5,8 +5,10 @@ import path from "node:path";
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
 export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
 
-const KINDS = new Set(["artwork", "fulfilment_proof", "delivery_photo", "service_image"]);
+const KINDS = new Set(["artwork", "fulfilment_proof", "delivery_photo", "service_image", "verification_document"]);
 const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
+export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
+const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
   artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
@@ -19,6 +21,11 @@ export const PURPOSE_POLICIES = Object.freeze({
     roles: ["supplier"],
     maxBytes: 20 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  verification_document: {
+    roles: ["supplier"],
+    maxBytes: 20 * 1024 * 1024,
+    contentTypes: [...CONTENT_TYPES],
   },
 });
 const GENERIC_CONTENT_TYPES = new Set(["", "application/octet-stream"]);
@@ -283,7 +290,7 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
 export function validateUpload(file, purpose = "artwork") {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
-    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, or service_image.", {
+    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, service_image, or verification_document.", {
       allowedPurposes: Object.keys(PURPOSE_POLICIES),
     });
   }
@@ -379,14 +386,14 @@ function sniffContentType(bytes) {
 }
 
 function forbidden() {
-  fail(403, "forbidden", "This file belongs to another order or service. Open a file attached to one of your own records.");
+  fail(403, "forbidden", "This file belongs to another account or record. Open a file attached to one of your own records.");
 }
 
 // File registry contract. Parent records contain only opaque file IDs; object keys never cross the API boundary.
 export function authorizeFileUpload(user, purpose) {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
-    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, or service_image.", {
+    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, service_image, or verification_document.", {
       allowedPurposes: Object.keys(PURPOSE_POLICIES),
     });
   }
@@ -424,7 +431,11 @@ export function markFileReady(file, at) {
 
 export function markFileDeletePending(file, user, at) {
   if (!file) fail(404, "file_not_found", "That file no longer exists. Refresh your uploads and try again.");
-  if (!user || (user.id !== file.ownerId && !["ops_admin", "super_admin"].includes(user.role))) forbidden();
+  if (file.purpose === "verification_document") {
+    if (!user || user.role !== "supplier" || user.id !== file.ownerId) forbidden();
+  } else if (!user || (user.id !== file.ownerId && !["ops_admin", "super_admin"].includes(user.role))) {
+    forbidden();
+  }
   if (file.state === "deleted" || file.state === "delete_pending") return file;
   if (file.state !== "ready") {
     fail(409, "file_state_conflict", "This file is not ready to delete. Refresh its status and try again.");
@@ -463,6 +474,7 @@ export function publicFile(file) {
     deleteRequestedAt: file.deleteRequestedAt,
     deletedAt: file.deletedAt,
     references: (file.references || []).map((reference) => ({ ...reference })),
+    ...(file.verificationDocumentType ? { verificationDocumentType: file.verificationDocumentType } : {}),
   };
 }
 
@@ -470,11 +482,13 @@ export function findFile(store, fileId) {
   return (store.files || []).find((file) => file.fileId === fileId) || null;
 }
 
-export function resolveFileTarget(store, purpose, body) {
+export function resolveFileTarget(store, purpose, body, user = null) {
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
-  const allowedFields = purpose === "service_image"
+  const allowedFields = purpose === "verification_document"
+    ? ["documentType", "replaceFileId"]
+    : purpose === "service_image"
     ? ["supplierServiceId"]
     : purpose === "fulfilment_proof"
       ? ["orderId", "milestoneCode"]
@@ -488,6 +502,47 @@ export function resolveFileTarget(store, purpose, body) {
       `Remove \`${unexpectedField}\`. This file purpose accepts only: ${allowedFields.join(", ")}.`,
       { field: unexpectedField, allowedFields },
     );
+  }
+  if (purpose === "verification_document") {
+    const documentType = String(body?.documentType || "");
+    if (!VERIFICATION_DOCUMENT_TYPE_SET.has(documentType)) {
+      fail(
+        400,
+        "invalid_verification_document_type",
+        "Choose business_permit, valid_id, or sample_work for this verification document.",
+        { allowed: VERIFICATION_DOCUMENT_TYPES },
+      );
+    }
+    const record = (store.users || []).find((item) => item.id === user?.id);
+    if (!record || record.role !== "supplier") forbidden();
+    const attachedIds = Array.isArray(record.verificationDocumentFileIds)
+      ? record.verificationDocumentFileIds
+      : [];
+    const currentFiles = attachedIds
+      .map((fileId) => (store.files || []).find((item) => item.fileId === fileId))
+      .filter(Boolean);
+    const currentType = (candidate) =>
+      candidate.verificationDocumentType ||
+      (candidate.references || []).find(
+        (reference) => reference.type === "user" && reference.id === record.id,
+      )?.documentType;
+    const replaceFileId = body?.replaceFileId == null ? null : String(body.replaceFileId);
+    let replacedFiles = [];
+    if (replaceFileId) {
+      const replaced = currentFiles.find((candidate) => candidate.fileId === replaceFileId);
+      if (!replaced || currentType(replaced) !== documentType) {
+        fail(
+          409,
+          "verification_document_replacement_mismatch",
+          "The selected document is not attached in this verification slot. Refresh the documents and choose the matching file.",
+          { replaceFileId, documentType },
+        );
+      }
+      replacedFiles = [replaced];
+    } else if (documentType !== "sample_work") {
+      replacedFiles = currentFiles.filter((candidate) => currentType(candidate) === documentType);
+    }
+    return { type: "user", record, documentType, replacedFiles };
   }
   if (purpose === "service_image") {
     if (!body?.supplierServiceId) {
@@ -582,6 +637,13 @@ export function authorizeFileAttach(user, file, target) {
     if (target?.type !== "supplier_service" || user.role !== "supplier" || record.supplierId !== user.id) forbidden();
     return;
   }
+  if (file.purpose === "verification_document") {
+    if (target?.type !== "user" || user.role !== "supplier" || target.record.id !== user.id) forbidden();
+    if (!VERIFICATION_DOCUMENT_TYPE_SET.has(target.documentType)) {
+      fail(409, "file_metadata_invalid", "This verification document has no valid document type. Upload the file again.");
+    }
+    return;
+  }
   fail(409, "file_metadata_invalid", "This file purpose cannot be attached. Upload the file again.");
 }
 
@@ -591,10 +653,20 @@ export function attachFileReference(file, target) {
     fulfilment_proof: "fulfilmentProofFileIds",
     delivery_photo: "deliveryPhotoFileIds",
     service_image: "imageFileIds",
+    verification_document: "verificationDocumentFileIds",
   };
   const field = map[file.purpose];
   if (!field) fail(409, "file_metadata_invalid", "This file purpose cannot be attached. Upload the file again.");
   if (!Array.isArray(target.record[field])) target.record[field] = [];
+  if (file.purpose === "verification_document") {
+    for (const replaced of target.replacedFiles || []) {
+      target.record[field] = target.record[field].filter((fileId) => fileId !== replaced.fileId);
+      replaced.references = (replaced.references || []).filter(
+        (reference) => !(reference.type === "user" && reference.id === target.record.id && reference.field === field),
+      );
+    }
+    file.verificationDocumentType = target.documentType;
+  }
   const existingReference = (file.references || []).find(
     (reference) => reference.type === target.type && reference.id === target.record.id && reference.field === field,
   );
@@ -606,6 +678,7 @@ export function attachFileReference(file, target) {
       id: target.record.id,
       field,
       ...(target.milestoneCode ? { milestoneCode: target.milestoneCode } : {}),
+      ...(target.documentType ? { documentType: target.documentType } : {}),
     });
   }
   if (file.purpose === "fulfilment_proof") {
@@ -647,7 +720,12 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
-  if (["ops_admin", "super_admin"].includes(user.role) || file.ownerId === user.id) return;
+  if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (file.purpose === "verification_document") {
+    if (user.role === "supplier" && file.ownerId === user.id) return;
+    forbidden();
+  }
+  if (file.ownerId === user.id) return;
   if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
   forbidden();
 }
@@ -669,6 +747,12 @@ export function backfillFiles(store) {
   for (const service of store.supplierServices || []) {
     if (!Array.isArray(service.imageFileIds)) {
       service.imageFileIds = [];
+      changed = true;
+    }
+  }
+  for (const user of store.users || []) {
+    if (user.role === "supplier" && !Array.isArray(user.verificationDocumentFileIds)) {
+      user.verificationDocumentFileIds = [];
       changed = true;
     }
   }
