@@ -6,7 +6,7 @@ Local **custom** demo backend for all GRIDGO apps.
 
 - Custom auth (no Clerk)
 - JSON store (no Supabase)
-- Pilot Credits + COD only (no PayMongo)
+- Pilot Credits grants plus manually confirmed QR installments (no PayMongo, no COD)
 - Replaceable: keep route contracts stable
 - Platform-governed **service taxonomy** + supplier services (blueprint §4.2)
 - Ops/super: users, roles, verification, zones, grants, claims, issues, audit
@@ -30,12 +30,18 @@ Rider tracking:
   - Allowed: assigned rider, order client, assigned supplier, ops/super admin
   - Else `403` `{ error: "forbidden" }`
 
+## Operational model v2
+
+The exact rebuild contract is `docs/OPERATIONAL_MODEL_V2_API.md`; file bytes/attachments remain in `docs/STORAGE_API.md`. V2 uses self-signup, approved-only supplier/rider matching, 10%-on-top commission, configurable distance bands, manually confirmed 75%/25% digital payments, POF-gated supplier milestones, a global expiring issue window, and the six-check rider pickup gate. COD and the supplier-proof approval states are retired.
+
+Money/order visibility must go through the role-aware projection in `src/operational-model.js`: clients never receive supplier price, commission, or supplier milestone amounts. `backfillOperationalModel()` is the load-time migration and must remain idempotent.
+
 ## Client account type (branding)
 
-Client users have explicit `accountType`: `"individual"` | `"business"`. Returned via `publicUser` on login, `/auth/me`, and user directory. **Never infer from `orgName`.**
+Client users have explicit `accountType`: `"individual"` | `"business"` | `"organization"`. Signup accepts the human label `"personal"` as an alias for stored `"individual"`. Returned via `publicUser` on signup/login, `/auth/me`, and user directory. **Never infer from `orgName`.**
 
 - Missing/legacy clients backfill to `"individual"` (safe default; business is opt-in)
-- Pilot: seed/store only — no write API for `accountType`
+- Self-signup is the write path; business/organization require `orgName`
 - Non-client roles: field absent (not null)
 - Demo: `client@gridgo.local` = business; `individual@gridgo.local` = individual
 
@@ -56,7 +62,7 @@ The captain's category chart (4 categories, 17 subcategories) is the product tax
 - `GET /users?role=` — publicUser only (never passwords)
 - `PATCH /users/:id/role` — super_admin; audited
 - `POST /users/:id/verification` — ops/super for supplier/rider
-- `GET|POST|PATCH /zones` — delivery fees by zone code
+- `GET|POST|PATCH /zones` — legacy address-zone records; v2 fees come from global distance bands in `/settings`
 - `POST /credits/grant` — super_admin Pilot Credits grant
 - `GET|POST /claims…` + hold/release — payout holds; blocks `payout_released` while held
 - `POST /orders/:id/issues` — client report in `issue_window_open` → auto claim hold
@@ -73,8 +79,8 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 | | Backfill | Fixture convergence |
 |---|---|---|
 | Purpose | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
-| Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
-| Overwrite? | No — never overwrites existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`) |
+| Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Overwrite? | Fill-missing except the documented v2 retirement normalization for COD and supplier-proof states; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`) |
 | Creates? | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.local`) |
 | Never touches | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
 
@@ -91,13 +97,13 @@ The captain's demo API owns port **8787** and its store at `data/store.json`. To
 ## Constraints
 
 - Plain `node:http` only except the `minio` S3 SDK, approved for streamed object storage and presigned SigV4 URLs so signing is never hand-rolled; add no other direct npm dependencies
-- Do not change unrelated order state edges/role rules; the proof path in `docs/STORAGE_API.md` replaces direct `supplier_accepted -> awaiting_payment` (payout hold remains a soft `409` guard only)
+- Do not change unrelated QA edges/role rules; payment, POF milestones, checklist, delivery, and issue expiry follow `docs/OPERATIONAL_MODEL_V2_API.md`
 - Authorisation on every route; `{ error: "snake_case" }`
 
-## Object storage and supplier proofs
+## Object storage and fulfilment evidence
 
 - The authoritative mobile contract is `docs/STORAGE_API.md`; the API streams uploads and authorizes short-lived presigned MinIO GETs. `MINIO_ENDPOINT` and fixed `MINIO_PUBLIC_URL` are separate.
-- Supplier proof states are `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved`; attaching a ready proof file enters/re-enters review.
+- New milestone POF uses purpose `fulfilment_proof`; supplier-proof approval states and new `proof` uploads are retired. Legacy `proofFileIds` remain readable evidence.
 - Files use `pending_upload|ready|delete_pending|deleted`; top-level metadata owns the private `objectKey`, while orders/services reference opaque `fileId` values only. Legacy `order.artworkName` stays valid and is never file identity.
 
 ## Maintaining this file

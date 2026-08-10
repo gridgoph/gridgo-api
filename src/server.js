@@ -8,12 +8,10 @@ import { DEMO_USERS } from "./demo-fixtures.js";
 import {
   AttachmentError,
   attachFileReference,
-  applyProofDecision,
   authorizeFileAttach,
   authorizeFileAttachOwner,
   authorizeFileRead,
   authorizeFileUpload,
-  authorizeProofPaymentTransition,
   backfillFiles,
   createPendingFile,
   findFile,
@@ -22,7 +20,6 @@ import {
   markFileReady,
   parseMultipartStream,
   publicFile,
-  recordProofUpload,
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
@@ -34,6 +31,19 @@ import {
   defaultTaxonomy,
   resolveCategoryCode,
 } from "./taxonomy.js";
+import {
+  backfillOperationalModel,
+  calculateFinalPrice,
+  createPayoutMilestones,
+  defaultOperationalSettings,
+  estimatePriceRange,
+  issueWindowExpiresAt,
+  PICKUP_CHECK_CODES,
+  PICKUP_SIGN_OFF_PROMPT,
+  publicOrderFor,
+  releaseMilestone,
+  validateOperationalSettings,
+} from "./operational-model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -155,7 +165,7 @@ function authUser(req, store) {
 }
 
 /** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
-const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business"]);
+const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business", "organization"]);
 
 /**
  * Safe default when a client has no recorded type: individual.
@@ -185,6 +195,39 @@ function isOps(user) {
 
 function isSuper(user) {
   return user && user.role === "super_admin";
+}
+
+function signupError(res, error, message, details = {}) {
+  return send(res, 400, { error, message, ...details });
+}
+
+function normalizedSignupAccountType(value) {
+  return value === "personal" ? "individual" : value;
+}
+
+function validatedCategoryRanks(store, value) {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const canonical = [];
+  const seen = new Set();
+  for (const item of value) {
+    const category = activeCategoryFor(store.taxonomy, item?.categoryCode);
+    const rank = Number(item?.rank);
+    if (!category || !Number.isInteger(rank) || rank < 1 || seen.has(category.code)) return null;
+    seen.add(category.code);
+    canonical.push({ categoryCode: category.code, rank });
+  }
+  canonical.sort((a, b) => a.rank - b.rank);
+  if (canonical.some((item, index) => item.rank !== index + 1)) return null;
+  return canonical;
+}
+
+function hasSignupShop(value) {
+  return (
+    value &&
+    Number.isFinite(Number(value.lat)) &&
+    Number.isFinite(Number(value.lng)) &&
+    String(value.label || "").trim().length > 0
+  );
 }
 
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
@@ -580,6 +623,7 @@ function load() {
   // Fixtures last so seed-defined demo identity wins over fill-missing defaults
   // (e.g. client@ accountType business after a prior individual backfill).
   if (convergeDemoFixtures(store)) changed = true;
+  if (backfillOperationalModel(store, now())) changed = true;
   if (changed) save(store);
   return store;
 }
@@ -597,6 +641,9 @@ function ordersFor(user, store) {
   if (user.role === "client") return store.orders.filter((o) => o.clientId === user.id);
   if (user.role === "supplier") return store.orders.filter((o) => o.supplierId === user.id);
   if (user.role === "rider") {
+    if (user.verificationStatus !== "approved") {
+      return store.orders.filter((o) => o.riderId === user.id);
+    }
     return store.orders.filter(
       (o) => o.riderId === user.id || ["ready_for_dispatch", "rider_assigned", "picked_up", "out_for_delivery"].includes(o.state),
     );
@@ -609,10 +656,17 @@ function orderVisible(user, order, store) {
   return ordersFor(user, store).some((o) => o.id === order.id);
 }
 
-function publicOrder(order) {
-  if (!order) return null;
-  const { attachments: _legacyAttachments, ...publicRecord } = order;
-  return publicRecord;
+function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
+  const file = (store.files || []).find((candidate) => candidate.fileId === fileId);
+  if (!file || file.state !== "ready" || file.purpose !== purpose || file.ownerId !== ownerId) return null;
+  const referenced = (file.references || []).some(
+    (reference) => reference.type === "order" && reference.id === order.id,
+  );
+  return referenced ? file : null;
+}
+
+function publicOrder(order, user) {
+  return publicOrderFor(order, user);
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -836,25 +890,17 @@ const TRANSITIONS = {
     supplier_accepted: ["supplier"],
     approved_for_matching: ["supplier"], // decline -> rematch
   },
-  supplier_accepted: {}, // proof attachment advances to supplier_proof_review
-  supplier_proof_review: {
-    supplier_proof_changes_requested: ["client"],
-    supplier_proof_approved: ["client"],
-  },
-  supplier_proof_approved: { awaiting_payment: ["supplier", "ops_admin", "super_admin"] },
-  awaiting_payment: { payment_authorized: ["client", "ops_admin", "super_admin"] },
+  awaiting_downpayment: {},
+  downpayment_review: {},
   payment_authorized: { production: ["supplier"] },
   production: { supplier_self_qc: ["supplier"] },
   supplier_self_qc: { ready_for_dispatch: ["supplier"] },
   ready_for_dispatch: { rider_assigned: ["rider", "ops_admin", "super_admin"] },
-  rider_assigned: { picked_up: ["rider"] },
+  rider_assigned: {},
   picked_up: { out_for_delivery: ["rider"] },
-  out_for_delivery: { delivered: ["rider"] },
+  out_for_delivery: {},
   delivered: { issue_window_open: ["system", "ops_admin", "super_admin", "client", "rider"] },
-  issue_window_open: {
-    completed: ["ops_admin", "super_admin", "system"],
-    // issue path simplified
-  },
+  issue_window_open: {}, // load-time expiry completes; no actor may close it early
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
@@ -877,6 +923,118 @@ async function handleRequest(req, res) {
     }
 
     // ---- auth ----
+    if (req.method === "POST" && pathname === "/auth/signup") {
+      const body = await readBody(req);
+      const role = String(body.role || "");
+      const allowedRoles = ["client", "supplier", "rider"];
+      if (!allowedRoles.includes(role)) {
+        return signupError(
+          res,
+          "invalid_signup_role",
+          "Choose client, supplier, or rider for this account.",
+          { allowedRoles },
+        );
+      }
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      const name = String(body.name || "").trim();
+      const phone = String(body.phone || "").trim();
+      if (!email || !email.includes("@")) {
+        return signupError(res, "invalid_email", "Enter a complete email address, then try again.");
+      }
+      if (store.users.some((candidate) => String(candidate.email).toLowerCase() === email)) {
+        return send(res, 409, {
+          error: "email_already_registered",
+          message: "This email already has a GRIDGO account. Sign in or use a different email address.",
+        });
+      }
+      if (password.length < 8) {
+        return signupError(res, "invalid_password", "Use a password with at least 8 characters.");
+      }
+      if (!name) return signupError(res, "name_required", "Enter the account holder's full name.");
+      if (!phone) return signupError(res, "phone_required", "Enter a phone number Operations can use for this account.");
+
+      const createdAt = now();
+      const created = { id: id("user"), email, password, name, phone, role, createdAt };
+      if (role === "client") {
+        const accountType = normalizedSignupAccountType(body.accountType);
+        if (!CLIENT_ACCOUNT_TYPES.has(accountType)) {
+          return signupError(
+            res,
+            "invalid_account_type",
+            "Choose personal, business, or organization for this client account.",
+            { allowed: ["individual", "business", "organization"], inputAlias: { personal: "individual" } },
+          );
+        }
+        const orgName = String(body.orgName || "").trim();
+        if (["business", "organization"].includes(accountType) && !orgName) {
+          return signupError(
+            res,
+            "organization_name_required",
+            "Enter the business or organization name used on this account.",
+          );
+        }
+        created.accountType = accountType;
+        if (orgName) created.orgName = orgName;
+      }
+      if (role === "supplier") {
+        const supplierName = String(body.supplierName || "").trim();
+        if (!supplierName) {
+          return signupError(res, "supplier_name_required", "Enter the supplier shop or trading name.");
+        }
+        if (!hasSignupShop(body.shop)) {
+          return signupError(
+            res,
+            "shop_location_required",
+            "Pin the supplier shop and add its address label before creating the account.",
+          );
+        }
+        const categoryRanks = validatedCategoryRanks(store, body.categoryRanks);
+        if (!categoryRanks) {
+          return signupError(
+            res,
+            "invalid_category_ranks",
+            "Rank at least one active service category from 1 with no gaps or duplicates.",
+          );
+        }
+        created.supplierName = supplierName;
+        created.shop = {
+          lat: Number(body.shop.lat),
+          lng: Number(body.shop.lng),
+          label: String(body.shop.label).trim(),
+        };
+        created.categoryRanks = categoryRanks;
+        created.verificationStatus = "pending";
+        created.verificationNote = "Operations review required before matching";
+        created.verifiedAt = null;
+        created.verifiedBy = null;
+      }
+      if (role === "rider") {
+        const profile = body.riderProfile;
+        const vehicleType = String(profile?.vehicleType || "").trim();
+        const vehiclePlate = String(profile?.vehiclePlate || "").trim();
+        const licenseNumber = String(profile?.licenseNumber || "").trim();
+        if (!vehicleType || !vehiclePlate || !licenseNumber) {
+          return signupError(
+            res,
+            "invalid_rider_profile",
+            "Enter the rider's vehicle type, plate number, and driving licence number.",
+          );
+        }
+        created.riderProfile = { vehicleType, vehiclePlate, licenseNumber };
+        created.verificationStatus = "pending";
+        created.verificationNote = "Operations review required before dispatch";
+        created.verifiedAt = null;
+        created.verifiedBy = null;
+      }
+
+      const token = id("tok");
+      store.users.push(created);
+      store.sessions[token] = { userId: created.id, createdAt };
+      save(store);
+      return send(res, 201, { token, user: publicUser(created) });
+    }
+
     if (req.method === "POST" && pathname === "/auth/login") {
       const body = await readBody(req);
       const user = store.users.find(
@@ -1067,9 +1225,18 @@ async function handleRequest(req, res) {
         latestTarget.record.updatedAt = attachedAt;
         if (latestTarget.type === "order") {
           if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
-          if (latestFile.purpose === "proof") recordProofUpload(latestTarget.record, latestUser, latestFile, attachedAt);
+          if (latestFile.purpose === "fulfilment_proof") {
+            latestTarget.record.timeline.push({
+              at: attachedAt,
+              state: latestTarget.record.state,
+              by: latestUser.id,
+              note: `Proof of Fulfilment attached for ${latestTarget.milestoneCode}`,
+              fileId: latestFile.fileId,
+              milestoneCode: latestTarget.milestoneCode,
+            });
+          }
           save(latestStore);
-          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record) });
+          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
         }
         save(latestStore);
         return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
@@ -1108,6 +1275,33 @@ async function handleRequest(req, res) {
       return send(res, 200, { notifications: items });
     }
 
+    // ---- global operational settings ----
+    if (req.method === "GET" && pathname === "/settings") {
+      return send(res, 200, { settings: store.settings || defaultOperationalSettings() });
+    }
+
+    if (req.method === "PATCH" && pathname === "/settings") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      const next = {
+        issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
+        deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
+      };
+      validateOperationalSettings(next);
+      const previous = structuredClone(store.settings);
+      store.settings = structuredClone(next);
+      audit(store, {
+        actor: user,
+        action: "settings.operational_update",
+        entityType: "settings",
+        entityId: "operational",
+        detail: { previous, current: store.settings },
+        reason: body.reason || null,
+      });
+      save(store);
+      return send(res, 200, { settings: store.settings });
+    }
+
     // ---- credits ----
     if (req.method === "GET" && pathname === "/credits/balance") {
       if (user.role !== "client" && user.role !== "ops_admin" && user.role !== "super_admin") {
@@ -1123,35 +1317,10 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/credits/authorize") {
-      if (user.role !== "client") return send(res, 403, { error: "forbidden" });
-      const body = await readBody(req);
-      const order = store.orders.find((o) => o.id === body.orderId);
-      if (!order || order.clientId !== user.id) return send(res, 404, { error: "order_not_found" });
-      if (order.state !== "awaiting_payment" && order.state !== "supplier_accepted") {
-        return send(res, 409, { error: "invalid_state", state: order.state });
-      }
-      const acct = store.credits[user.id] || { balanceMinor: 0, ledger: [] };
-      const amount = order.totalMinor + order.deliveryFeeMinor;
-      if (acct.balanceMinor < amount) return send(res, 402, { error: "insufficient_credits", needMinor: amount, balanceMinor: acct.balanceMinor });
-      acct.balanceMinor -= amount;
-      acct.ledger.push({
-        id: id("led"),
-        type: "spend",
-        amountMinor: -amount,
-        balanceAfterMinor: acct.balanceMinor,
-        reason: `Authorize order ${order.id}`,
-        orderId: order.id,
-        at: now(),
-        actorId: user.id,
+      return send(res, 410, {
+        error: "payment_route_retired",
+        message: "Order payments now use the 75% downpayment and 25% balance QR routes. Refresh the order and submit the required installment.",
       });
-      store.credits[user.id] = acct;
-      order.paymentMethod = "pilot_credit";
-      order.paymentStatus = "authorized";
-      order.state = "payment_authorized";
-      order.updatedAt = now();
-      order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Pilot Credits authorized" });
-      save(store);
-      return send(res, 200, { order: publicOrder(order), balanceMinor: acct.balanceMinor });
     }
 
     // Super Admin grants Pilot Credits (not a purchase; non-cash, non-transferable)
@@ -1924,7 +2093,7 @@ async function handleRequest(req, res) {
       return send(res, 200, { claim });
     }
 
-    // ---- issues (24h material issue window) ----
+    // ---- issues (global configurable window) ----
     if (req.method === "GET" && pathname === "/issues") {
       let list = store.issues || [];
       if (user.role === "client") {
@@ -1950,8 +2119,17 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       if (order.clientId !== user.id) return send(res, 403, { error: "forbidden" });
-      if (order.state !== "issue_window_open") {
-        return send(res, 409, { error: "issue_window_closed", state: order.state });
+      if (
+        order.state !== "issue_window_open" ||
+        !order.issueWindowExpiresAt ||
+        new Date(order.issueWindowExpiresAt).getTime() <= Date.now()
+      ) {
+        return send(res, 409, {
+          error: "issue_window_closed",
+          message: "The issue-reporting window has ended. Contact Operations if this order still needs review.",
+          state: order.state,
+          issueWindowExpiresAt: order.issueWindowExpiresAt || null,
+        });
       }
       const body = await readBody(req);
       if (!body.description && !body.reason) {
@@ -2091,6 +2269,76 @@ async function handleRequest(req, res) {
       return send(res, 200, { issue });
     }
 
+    // ---- pickup escalations ----
+    if (req.method === "GET" && pathname === "/escalations") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      let list = store.escalations || [];
+      const status = url.searchParams.get("status");
+      const orderId = url.searchParams.get("orderId");
+      if (status) list = list.filter((item) => item.status === status);
+      if (orderId) list = list.filter((item) => item.orderId === orderId);
+      return send(res, 200, {
+        escalations: [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
+      });
+    }
+
+    if (req.method === "POST" && /^\/escalations\/[^/]+\/resolve$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const escalationId = pathname.split("/")[2];
+      const escalation = (store.escalations || []).find((item) => item.id === escalationId);
+      if (!escalation) return send(res, 404, { error: "escalation_not_found" });
+      if (escalation.status !== "open") {
+        return send(res, 409, {
+          error: "escalation_closed",
+          message: "This pickup escalation is already resolved. Refresh the escalation list before taking action.",
+        });
+      }
+      const body = await readBody(req);
+      const resolution = String(body.resolution || "").trim();
+      if (!resolution) {
+        return send(res, 400, {
+          error: "resolution_required",
+          message: "Record the instruction given to the rider before resolving this pickup escalation.",
+        });
+      }
+      const resolvedAt = now();
+      escalation.status = "resolved";
+      escalation.resolution = resolution;
+      escalation.resolvedAt = resolvedAt;
+      escalation.resolvedBy = user.id;
+      const order = store.orders.find((candidate) => candidate.id === escalation.orderId);
+      if (order) {
+        order.pickupChecklist.status = "escalation_resolved";
+        order.updatedAt = resolvedAt;
+        order.timeline.push({
+          at: resolvedAt,
+          state: order.state,
+          by: user.id,
+          note: `Pickup escalation resolved; repeat all six checks: ${resolution}`,
+        });
+        store.notifications.push({
+          id: id("ntf"),
+          userId: escalation.riderId,
+          type: "pickup_escalation_resolved",
+          orderId: order.id,
+          title: "Repeat the pickup quality check",
+          body: resolution,
+          read: false,
+          at: resolvedAt,
+        });
+      }
+      audit(store, {
+        actor: user,
+        action: "pickup_escalation.resolve",
+        entityType: "escalation",
+        entityId: escalation.id,
+        orderId: escalation.orderId,
+        reason: resolution,
+      });
+      save(store);
+      return send(res, 200, { escalation, order: publicOrder(order, user) });
+    }
+
     // ---- audit trail ----
     if (req.method === "GET" && pathname === "/audit") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
@@ -2110,9 +2358,182 @@ async function handleRequest(req, res) {
       return send(res, 200, { audit: list });
     }
 
+    // ---- supplier payout milestones ----
+    if (req.method === "POST" && /^\/orders\/[^/]+\/milestones\/[^/]+\/release$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const milestoneCode = parts[4];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const body = await readBody(req);
+      const releasedAt = now();
+      const milestone = releaseMilestone(order, milestoneCode, user, releasedAt, store);
+      order.updatedAt = releasedAt;
+      order.timeline.push({
+        at: releasedAt,
+        state: order.state,
+        by: user.id,
+        note: `${milestoneCode} supplier payout milestone released`,
+        milestoneCode,
+      });
+      audit(store, {
+        actor: user,
+        action: "payout_milestone.release",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { milestoneCode, amountMinor: milestone.amountMinor },
+        reason: body.note || null,
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user), milestone });
+    }
+
+    // ---- manual QR installment payments ----
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/submit$/.test(pathname)) {
+      if (user.role !== "client") return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const installmentCode = parts[4];
+      const body = await readBody(req);
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order || order.clientId !== user.id) return send(res, 404, { error: "order_not_found" });
+      if (body.method !== "qr_manual") {
+        return send(res, 400, {
+          error: "payment_method_not_allowed",
+          message: "Cash on Delivery is unavailable. Choose the digital QR payment method and submit its reference.",
+          allowed: ["qr_manual"],
+        });
+      }
+      const notification = (store.notifications || []).find(
+        (item) => item.id === order.assignmentNotificationId && item.orderId === order.id && item.userId === order.clientId,
+      );
+      if (!notification || !order.assignmentNotifiedAt) {
+        return send(res, 409, {
+          error: "assignment_notification_required",
+          message: "Wait for GRIDGO to notify you of the assigned supplier and final price before submitting payment.",
+        });
+      }
+      const installment = order.payments?.[installmentCode];
+      if (!installment || !Number.isSafeInteger(installment.amountMinor)) {
+        return send(res, 409, {
+          error: "final_price_required",
+          message: "The final price is not ready. Wait for the supplier assignment notification and refresh the order.",
+        });
+      }
+      if (installmentCode === "downpayment" && !["awaiting_downpayment", "downpayment_review"].includes(order.state)) {
+        return send(res, 409, {
+          error: "downpayment_not_available",
+          message: "The downpayment is not available at this order step. Refresh the order to see the current payment action.",
+          state: order.state,
+        });
+      }
+      if (
+        installmentCode === "balance" &&
+        !["confirmed", "legacy_confirmed"].includes(order.payments?.downpayment?.status)
+      ) {
+        return send(res, 409, {
+          error: "downpayment_not_confirmed",
+          message: "Operations must confirm the downpayment before you submit the remaining balance.",
+        });
+      }
+      if (["pending_confirmation", "confirmed", "legacy_confirmed"].includes(installment.status)) {
+        return send(res, 409, {
+          error: "payment_already_submitted",
+          message: "This installment already has a submitted payment. Refresh the order to see its confirmation status.",
+          installment: installmentCode,
+          status: installment.status,
+        });
+      }
+      const reference = String(body.reference || "").trim();
+      if (!reference) {
+        return send(res, 400, {
+          error: "payment_reference_required",
+          message: "Enter the GCash, Maya, or e-wallet payment reference so Operations can confirm it.",
+        });
+      }
+      const submittedAt = now();
+      installment.method = "qr_manual";
+      installment.status = "pending_confirmation";
+      installment.reference = reference;
+      installment.submittedAt = submittedAt;
+      installment.confirmedAt = null;
+      installment.confirmedBy = null;
+      installment.confirmationSource = null;
+      order.paymentMethod = "qr_manual";
+      order.paymentStatus = installmentCode === "downpayment" ? "downpayment_pending" : "balance_pending";
+      if (installmentCode === "downpayment") order.state = "downpayment_review";
+      order.updatedAt = submittedAt;
+      order.timeline.push({
+        at: submittedAt,
+        state: order.state,
+        by: user.id,
+        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} submitted for Operations confirmation`,
+      });
+      audit(store, {
+        actor: user,
+        action: `payment.${installmentCode}_submit`,
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/confirm$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const installmentCode = parts[4];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const installment = order.payments?.[installmentCode];
+      if (!installment || installment.status !== "pending_confirmation") {
+        return send(res, 409, {
+          error: "payment_not_pending",
+          message: "This installment has no payment waiting for confirmation. Refresh the order before taking action.",
+          installment: installmentCode,
+          status: installment?.status || null,
+        });
+      }
+      const body = await readBody(req);
+      const confirmedAt = now();
+      installment.status = "confirmed";
+      installment.confirmedAt = confirmedAt;
+      installment.confirmedBy = user.id;
+      installment.confirmationSource = "manual_ops";
+      if (installmentCode === "downpayment") {
+        order.state = "payment_authorized";
+        order.paymentStatus = "downpayment_confirmed";
+      } else {
+        order.paymentStatus = "paid";
+      }
+      order.updatedAt = confirmedAt;
+      order.timeline.push({
+        at: confirmedAt,
+        state: order.state,
+        by: user.id,
+        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} confirmed manually by Operations`,
+      });
+      audit(store, {
+        actor: user,
+        action: `payment.${installmentCode}_confirm`,
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
+        reason: body.note || null,
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
     // ---- orders list / create ----
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: ordersFor(user, store).map(publicOrder) });
+      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user)) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -2124,7 +2545,7 @@ async function handleRequest(req, res) {
         if (!order) return send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
-        return send(res, 200, { order: publicOrder(order) });
+        return send(res, 200, { order: publicOrder(order, user) });
       }
     }
 
@@ -2133,10 +2554,15 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const product = store.catalog.find((p) => p.id === body.productId) || store.catalog[0];
       const qty = Number(body.quantity || 1);
-      const totalMinor = (product?.basePriceMinor || 10000) * qty;
+      const referenceCandidates = [(product?.basePriceMinor || 10000) * qty];
+      for (const service of store.supplierServices || []) {
+        if (service.state !== "live" || !Number.isSafeInteger(Number(service.referenceRateMinor))) continue;
+        if (Array.isArray(service.productFamilyIds) && service.productFamilyIds.includes(product?.family)) {
+          referenceCandidates.push(Number(service.referenceRateMinor) * qty);
+        }
+      }
+      const priceRange = estimatePriceRange({ supplierPriceCandidatesMinor: referenceCandidates });
       const zoneCode = body.zone || "davao_central";
-      const zoneRec = (store.zones || []).find((z) => z.code === zoneCode);
-      const deliveryFeeMinor = Number(body.deliveryFeeMinor ?? zoneRec?.deliveryFeeMinor ?? 15000);
       const ts = now();
       const address = body.address || "";
       const order = {
@@ -2156,17 +2582,33 @@ async function handleRequest(req, res) {
         zone: zoneCode,
         pickup: null,
         dropoff: dropoffFor(address, zoneCode),
-        totalMinor,
-        deliveryFeeMinor,
+        operationalModelVersion: 2,
+        priceRange,
+        supplierPriceMinor: null,
+        commissionRatePercent: null,
+        commissionMinor: null,
+        subtotalMinor: null,
+        deliveryDistanceMeters: null,
+        deliveryFeeMinor: null,
+        totalMinor: null,
+        downpaymentMinor: null,
+        balanceMinor: null,
         paymentMethod: null,
         paymentStatus: "unpaid",
-        codEligible: totalMinor + deliveryFeeMinor <= 150000,
+        payments: {
+          downpayment: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null },
+          balance: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null },
+        },
         payoutHold: false,
+        payoutMilestones: [],
         promisedDate: null,
         matchingServiceIds: null,
+        assignmentNotificationId: null,
+        assignmentNotifiedAt: null,
         artworkName: body.artworkName || null,
         artworkFileIds: [],
         proofFileIds: [],
+        fulfilmentProofFileIds: [],
         deliveryPhotoFileIds: [],
         createdAt: ts,
         updatedAt: ts,
@@ -2174,7 +2616,7 @@ async function handleRequest(req, res) {
       };
       store.orders.unshift(order);
       save(store);
-      return send(res, 201, { order: publicOrder(order) });
+      return send(res, 201, { order: publicOrder(order, user) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -2183,13 +2625,57 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
-      if (next === "supplier_proof_changes_requested" || next === "supplier_proof_approved") {
-        applyProofDecision(order, user, { state: next, reason: body.reason }, now());
-        save(store);
-        return send(res, 200, { order: publicOrder(order) });
+      if (body.paymentMethod != null && String(body.paymentMethod).trim().toLowerCase() !== "qr_manual") {
+        return send(res, 400, {
+          error: "payment_method_not_allowed",
+          message: "Order transitions do not accept cash or legacy payment methods. Submit the digital QR installment for Operations confirmation.",
+          allowed: ["qr_manual"],
+        });
       }
-      if (order.state === "supplier_proof_approved" && next === "awaiting_payment" && user.role === "supplier") {
-        authorizeProofPaymentTransition(order, user);
+      if (next === "supplier_assigned") {
+        const supplier = store.users.find(
+          (candidate) => candidate.id === body.supplierId && candidate.role === "supplier",
+        );
+        if (!supplier) {
+          return send(res, 404, {
+            error: "supplier_not_found",
+            message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
+          });
+        }
+        if (supplier.verificationStatus !== "approved") {
+          return send(res, 409, {
+            error: "supplier_not_approved",
+            message: "Operations must approve this supplier before assigning new work.",
+            verificationStatus: supplier.verificationStatus || "unverified",
+          });
+        }
+        const candidate = eligibleSuppliersForOrder(store, order).candidates.find(
+          (item) => item.supplier.id === supplier.id,
+        );
+        if (!candidate?.eligible) {
+          return send(res, 409, {
+            error: "supplier_not_eligible",
+            message: "This supplier has no approved live service that covers the order. Refresh eligible suppliers and choose a listed match.",
+            reasons: candidate?.reasons || ["no_covering_service"],
+          });
+        }
+      }
+      if (next === "rider_assigned") {
+        const riderId = user.role === "rider" ? user.id : body.riderId;
+        const rider = store.users.find((candidate) => candidate.id === riderId && candidate.role === "rider");
+        if (!rider) {
+          return send(res, 404, {
+            error: "rider_not_found",
+            message: "That rider account no longer exists. Refresh approved riders and choose another.",
+          });
+        }
+        if (rider.verificationStatus !== "approved") {
+          return send(res, user.role === "rider" ? 403 : 409, {
+            error: "rider_not_approved",
+            message: "Operations must approve this rider profile before dispatch assignment.",
+            verificationStatus: rider.verificationStatus || "unverified",
+          });
+        }
       }
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
@@ -2199,6 +2685,16 @@ async function handleRequest(req, res) {
           from: order.state,
           to: next,
           role: user.role,
+        });
+      }
+      const wrongRelatedParty =
+        (user.role === "client" && order.clientId !== user.id) ||
+        (user.role === "supplier" && order.supplierId !== user.id) ||
+        (user.role === "rider" && next !== "rider_assigned" && order.riderId !== user.id);
+      if (wrongRelatedParty) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "This order is assigned to another account. Open one of your own orders before taking this action.",
         });
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
@@ -2211,24 +2707,91 @@ async function handleRequest(req, res) {
             reason: hold?.holdReason || "payout hold active",
           });
         }
-      }
-      // COD authorize path
-      if (next === "payment_authorized" && body.paymentMethod === "cod") {
-        const total = order.totalMinor + order.deliveryFeeMinor;
-        if (total > 150000) return send(res, 400, { error: "cod_limit", maxMinor: 150000 });
-        if (!order.codEligible) return send(res, 400, { error: "cod_not_eligible" });
-        const openCod = store.orders.some(
-          (o) => o.clientId === order.clientId && o.id !== order.id && o.paymentMethod === "cod" && o.paymentStatus !== "collected" && o.paymentStatus !== "reconciled" && !["completed", "payout_released"].includes(o.state),
-        );
-        if (openCod) return send(res, 409, { error: "cod_one_active" });
-        order.paymentMethod = "cod";
-        order.paymentStatus = "authorized";
+        const unreleased = (order.payoutMilestones || []).filter((milestone) => milestone.status !== "released");
+        if (unreleased.length) {
+          return send(res, 409, {
+            error: "milestones_not_released",
+            message: "Release every Proof-of-Fulfilment-gated milestone before closing the supplier payout.",
+            milestoneCodes: unreleased.map((milestone) => milestone.code),
+          });
+        }
       }
       if (next === "supplier_accepted") {
-        order.supplierId = order.supplierId || user.id;
+        if (user.role !== "supplier" || order.supplierId !== user.id) {
+          return send(res, 403, {
+            error: "forbidden",
+            message: "Only the supplier assigned to this order can accept it and set the final price.",
+          });
+        }
+        if (user.verificationStatus !== "approved") {
+          return send(res, 403, {
+            error: "supplier_not_approved",
+            message: "Operations must approve this supplier before the supplier can accept matched work.",
+          });
+        }
         order.promisedDate = body.promisedDate || order.deadline;
-        if (body.finalTotalMinor) order.totalMinor = Number(body.finalTotalMinor);
         setOrderPickup(order, store);
+        const money = calculateFinalPrice({
+          supplierPriceMinor: body.supplierPriceMinor,
+          pickup: order.pickup,
+          dropoff: order.dropoff,
+          settings: store.settings,
+        });
+        Object.assign(order, money, { operationalModelVersion: 2 });
+        order.priceRange.deliveryFeeStatus = "final";
+        order.payoutMilestones = createPayoutMilestones(order.supplierPriceMinor);
+        order.payments = {
+          downpayment: {
+            amountMinor: order.downpaymentMinor,
+            method: "qr_manual",
+            status: "not_submitted",
+            reference: null,
+            submittedAt: null,
+            confirmedAt: null,
+            confirmedBy: null,
+            confirmationSource: null,
+          },
+          balance: {
+            amountMinor: order.balanceMinor,
+            method: "qr_manual",
+            status: "not_submitted",
+            reference: null,
+            submittedAt: null,
+            confirmedAt: null,
+            confirmedBy: null,
+            confirmationSource: null,
+          },
+        };
+        const acceptedAt = now();
+        order.timeline.push({
+          at: acceptedAt,
+          state: "supplier_accepted",
+          by: user.id,
+          note: "Supplier accepted and set the final price",
+        });
+        const notification = {
+          id: id("ntf"),
+          userId: order.clientId,
+          type: "supplier_assignment_final_price",
+          orderId: order.id,
+          title: "Supplier assigned and final price ready",
+          body: "A supplier accepted your order. Review the final price and submit the digital downpayment.",
+          read: false,
+          at: acceptedAt,
+        };
+        store.notifications.push(notification);
+        order.assignmentNotificationId = notification.id;
+        order.assignmentNotifiedAt = notification.at;
+        order.state = "awaiting_downpayment";
+        order.updatedAt = acceptedAt;
+        order.timeline.push({
+          at: acceptedAt,
+          state: "awaiting_downpayment",
+          by: "system",
+          note: "Client notified of assignment and final price",
+        });
+        save(store);
+        return send(res, 200, { order: publicOrder(order, user) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
         order.supplierId = body.supplierId;
@@ -2260,21 +2823,11 @@ async function handleRequest(req, res) {
       if (next === "rider_assigned") {
         order.riderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
       }
-      if (next === "delivered") {
-        order.state = "delivered";
-        order.updatedAt = now();
-        order.timeline.push({ at: order.updatedAt, state: "delivered", by: user.id, note: body.note || "Delivered" });
-        // auto open issue window
-        order.state = "issue_window_open";
-        order.timeline.push({ at: now(), state: "issue_window_open", by: "system", note: "24h issue window opened" });
-        save(store);
-        return send(res, 200, { order: publicOrder(order) });
-      }
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       save(store);
-      return send(res, 200, { order: publicOrder(order) });
+      return send(res, 200, { order: publicOrder(order, user) });
     }
 
     // ---- dispatch (rider) ----
@@ -2282,12 +2835,24 @@ async function handleRequest(req, res) {
       if (user.role !== "rider" && user.role !== "ops_admin" && user.role !== "super_admin") {
         return send(res, 403, { error: "forbidden" });
       }
+      if (user.role === "rider" && user.verificationStatus !== "approved") {
+        return send(res, 403, {
+          error: "rider_not_approved",
+          message: "Operations must approve this rider profile before dispatch offers become available.",
+        });
+      }
       const offers = store.orders.filter((o) => o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id));
-      return send(res, 200, { offers: offers.map(publicOrder) });
+      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user)) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
       if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.verificationStatus !== "approved") {
+        return send(res, 403, {
+          error: "rider_not_approved",
+          message: "Operations must approve this rider profile before the rider can accept a dispatch.",
+        });
+      }
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
       if (!order || order.state !== "ready_for_dispatch") return send(res, 409, { error: "not_offerable" });
@@ -2296,7 +2861,156 @@ async function handleRequest(req, res) {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
       save(store);
-      return send(res, 200, { order: publicOrder(order) });
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
+    if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
+      if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.verificationStatus !== "approved") {
+        return send(res, 403, {
+          error: "rider_not_approved",
+          message: "Operations must approve this rider profile before pickup checks can begin.",
+        });
+      }
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.state !== "rider_assigned") {
+        return send(res, 409, {
+          error: "pickup_checklist_not_available",
+          message: "The pickup checklist is available only before transport begins. Refresh the delivery to see its current step.",
+          state: order.state,
+        });
+      }
+      const openEscalation = (store.escalations || []).find(
+        (item) => item.orderId === order.id && item.status === "open",
+      );
+      if (openEscalation) {
+        return send(res, 409, {
+          error: "pickup_escalation_open",
+          message: "Do not transport this order. Wait for Operations to resolve the failed pickup check, then repeat all six checks.",
+          escalationId: openEscalation.id,
+        });
+      }
+      const body = await readBody(req);
+      const checks = Array.isArray(body.checks) ? body.checks : [];
+      const expected = new Set(PICKUP_CHECK_CODES);
+      const received = new Set(checks.map((item) => item?.code));
+      const valid =
+        checks.length === PICKUP_CHECK_CODES.length &&
+        received.size === PICKUP_CHECK_CODES.length &&
+        checks.every((item) => expected.has(item?.code) && typeof item.passed === "boolean");
+      if (!valid) {
+        return send(res, 400, {
+          error: "invalid_pickup_checklist",
+          message: "Complete each of the six pickup checks once and mark every check passed or failed.",
+          requiredCheckCodes: PICKUP_CHECK_CODES,
+        });
+      }
+      const failedCheckCodes = checks.filter((item) => !item.passed).map((item) => item.code);
+      const checkedAt = now();
+      if (failedCheckCodes.length) {
+        const failureNote = String(body.failureNote || "").trim();
+        const evidenceFileIds = Array.isArray(body.evidenceFileIds) ? [...new Set(body.evidenceFileIds)] : [];
+        if (!failureNote || evidenceFileIds.length === 0) {
+          return send(res, 400, {
+            error: "checklist_evidence_required",
+            message: "Describe the failed pickup check and attach at least one photo before escalating it.",
+            failedCheckCodes,
+          });
+        }
+        const invalidEvidence = evidenceFileIds.find(
+          (fileId) => !attachedReadyOrderFile(store, order, fileId, "delivery_photo", user.id),
+        );
+        if (invalidEvidence) {
+          return send(res, 400, {
+            error: "invalid_checklist_evidence",
+            message: "Attach each failure photo to this order before submitting the pickup escalation.",
+            fileId: invalidEvidence,
+          });
+        }
+        const escalation = {
+          id: id("esc"),
+          type: "pickup_check_failed",
+          status: "open",
+          orderId: order.id,
+          riderId: user.id,
+          supplierId: order.supplierId,
+          failedCheckCodes,
+          evidenceFileIds,
+          failureNote,
+          createdAt: checkedAt,
+          resolvedAt: null,
+          resolvedBy: null,
+          resolution: null,
+        };
+        store.escalations.push(escalation);
+        order.pickupChecklist = {
+          status: "failed_escalated",
+          checks: structuredClone(checks),
+          evidenceFileIds,
+          failureNote,
+          completedAt: checkedAt,
+          completedBy: user.id,
+          escalationId: escalation.id,
+          signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+        };
+        order.updatedAt = checkedAt;
+        order.timeline.push({
+          at: checkedAt,
+          state: order.state,
+          by: user.id,
+          note: `Pickup blocked and escalated: ${failedCheckCodes.join(", ")}`,
+          escalationId: escalation.id,
+        });
+        for (const recipient of store.users.filter((candidate) => isOps(candidate))) {
+          store.notifications.push({
+            id: id("ntf"),
+            userId: recipient.id,
+            type: "pickup_check_escalation",
+            orderId: order.id,
+            title: "Pickup blocked by a failed quality check",
+            body: `${failureNote} The rider is waiting for Operations instruction.`,
+            read: false,
+            at: checkedAt,
+          });
+        }
+        audit(store, {
+          actor: user,
+          action: "pickup_checklist.escalate",
+          entityType: "escalation",
+          entityId: escalation.id,
+          orderId: order.id,
+          detail: { failedCheckCodes, evidenceFileIds },
+          reason: failureNote,
+        });
+        save(store);
+        return send(res, 200, { order: publicOrder(order, user), escalation });
+      }
+
+      order.pickupChecklist = {
+        status: "passed",
+        checks: structuredClone(checks),
+        evidenceFileIds: [],
+        failureNote: null,
+        completedAt: checkedAt,
+        completedBy: user.id,
+        escalationId: order.pickupChecklist?.escalationId || null,
+        signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+      };
+      order.state = "picked_up";
+      order.updatedAt = checkedAt;
+      order.timeline.push({
+        at: checkedAt,
+        state: "picked_up",
+        by: user.id,
+        note: "All six pickup checks passed; rider prompted to give the trained verbal sign-off",
+      });
+      save(store);
+      return send(res, 200, {
+        order: publicOrder(order, user),
+        signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+      });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
@@ -2334,37 +3048,81 @@ async function handleRequest(req, res) {
       return send(res, 200, { ping });
     }
 
-    if (req.method === "POST" && /^\/dispatch\/[^/]+\/proof$/.test(pathname)) {
+    if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {
       if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
-      const order = store.orders.find((o) => o.id === orderId && o.riderId === user.id);
+      const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
-      const body = await readBody(req);
-      const proof = {
-        id: id("prf"),
-        orderId,
-        riderId: user.id,
-        kind: body.kind || "delivery", // pickup | delivery | cod | failure
-        otp: body.otp || null,
-        photoName: body.photoName || null,
-        note: body.note || "",
-        at: now(),
-      };
-      store.proofs.push(proof);
-      if (proof.kind === "pickup" && order.state === "rider_assigned") {
-        order.state = "picked_up";
-        order.timeline.push({ at: now(), state: "picked_up", by: user.id, note: "Pickup proof" });
-      } else if (proof.kind === "delivery" && ["picked_up", "out_for_delivery"].includes(order.state)) {
-        order.state = "issue_window_open";
-        order.timeline.push({ at: now(), state: "delivered", by: user.id, note: "Delivery proof" });
-        order.timeline.push({ at: now(), state: "issue_window_open", by: "system", note: "24h issue window" });
-        if (order.paymentMethod === "cod") order.paymentStatus = "collected";
-      } else if (proof.kind === "cod") {
-        order.paymentStatus = "collected";
+      if (!["picked_up", "out_for_delivery"].includes(order.state)) {
+        return send(res, 409, {
+          error: "delivery_not_available",
+          message: "Complete the pickup checklist and begin transport before recording delivery.",
+          state: order.state,
+        });
       }
-      order.updatedAt = now();
+      if (!["confirmed", "legacy_confirmed"].includes(order.payments?.balance?.status)) {
+        return send(res, 409, {
+          error: "balance_not_confirmed",
+          message: "Operations must confirm the client's digital balance before the rider completes delivery.",
+        });
+      }
+      const deliveredMilestone = (order.payoutMilestones || []).find((milestone) => milestone.code === "delivered");
+      if (!deliveredMilestone?.pofFileIds?.length) {
+        return send(res, 409, {
+          error: "pof_required",
+          message: "Attach the delivered Proof of Fulfilment before completing this delivery.",
+          milestoneCode: "delivered",
+        });
+      }
+      const body = await readBody(req);
+      if (!["photo", "signature"].includes(body.evidenceType)) {
+        return send(res, 400, {
+          error: "invalid_delivery_evidence_type",
+          message: "Choose photo evidence, or signature only when the camera cannot be used.",
+          allowed: ["photo", "signature"],
+        });
+      }
+      const evidenceFileId = String(body.evidenceFileId || "");
+      if (!attachedReadyOrderFile(store, order, evidenceFileId, "delivery_photo", user.id)) {
+        return send(res, 400, {
+          error: "delivery_evidence_required",
+          message: "Attach the delivery photo or signature image to this order before completing delivery.",
+        });
+      }
+      const deliveredAt = now();
+      order.deliveryEvidence = {
+        fileId: evidenceFileId,
+        evidenceType: body.evidenceType,
+        riderId: user.id,
+        recordedAt: deliveredAt,
+      };
+      order.state = "delivered";
+      order.timeline.push({
+        at: deliveredAt,
+        state: "delivered",
+        by: user.id,
+        note: body.evidenceType === "photo" ? "Delivery completed with photo evidence" : "Delivery completed with signature evidence",
+        fileId: evidenceFileId,
+      });
+      order.issueWindowOpenedAt = deliveredAt;
+      order.issueWindowExpiresAt = issueWindowExpiresAt(deliveredAt, store.settings.issueWindowHours);
+      order.state = "issue_window_open";
+      order.updatedAt = deliveredAt;
+      order.timeline.push({
+        at: deliveredAt,
+        state: "issue_window_open",
+        by: "system",
+        note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
+      });
       save(store);
-      return send(res, 201, { proof, order: publicOrder(order) });
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
+    if (req.method === "POST" && /^\/dispatch\/[^/]+\/proof$/.test(pathname)) {
+      return send(res, 410, {
+        error: "dispatch_proof_route_retired",
+        message: "Use the pickup checklist or delivery evidence route. Direct proof names and cash collection are no longer accepted.",
+      });
     }
 
     // ---- supplier jobs helper alias ----
@@ -2372,8 +3130,8 @@ async function handleRequest(req, res) {
       if (user.role !== "supplier") return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
         jobs: store.orders
-          .filter((o) => o.supplierId === user.id || o.state === "supplier_assigned")
-          .map(publicOrder),
+          .filter((o) => o.supplierId === user.id)
+          .map((order) => publicOrder(order, user)),
       });
     }
 

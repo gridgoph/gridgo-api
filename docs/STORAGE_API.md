@@ -1,6 +1,6 @@
 # GRIDGO Storage API contract
 
-This is the authoritative contract for all three mobile apps. It covers client artwork, supplier proofs, rider delivery photos, and supplier-service images. Field names, states, status codes, and error codes are stable and case-sensitive.
+This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, and supplier-service images. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
 
@@ -95,9 +95,11 @@ Parents contain IDs only:
 | Purpose | Parent reference field |
 |---|---|
 | `artwork` | `order.artworkFileIds: string[]` |
-| `proof` | `order.proofFileIds: string[]` |
+| `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
+
+Legacy orders may still return `proofFileIds` containing retired supplier-proof files. They remain readable evidence but the `proof` upload purpose and supplier-proof workflow no longer accept writes.
 
 `order.artworkName` remains as a backward-compatibility display string and is populated from `originalFilename` when artwork is attached. It is never file identity, never accepted as a key, and never proves an object exists. No artwork and empty file-ID arrays are valid.
 
@@ -108,7 +110,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | Purpose | Upload role | Allowed detected types | Maximum |
 |---|---|---|---|
 | `artwork` | client | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
-| `proof` | supplier | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
+| `fulfilment_proof` | assigned supplier or rider | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 
@@ -118,7 +120,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `proof` or `service_image`; `rider` for `delivery_photo`.
+Auth: `client` for `artwork`; `supplier` for `service_image`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo`.
 
 Request: `multipart/form-data` with exactly:
 
@@ -155,8 +157,8 @@ Curl for each purpose:
 ARTWORK_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $CLIENT_TOKEN" \
   -F 'purpose=artwork' -F 'file=@./artwork.pdf;type=application/octet-stream' | tee /tmp/artwork-upload.json | jq -r .file.fileId)
 
-PROOF_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -F 'purpose=proof' -F 'file=@./proof.png;type=image/png' | tee /tmp/proof-upload.json | jq -r .file.fileId)
+POF_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
+  -F 'purpose=fulfilment_proof' -F 'file=@./printing-pof.png;type=image/png' | tee /tmp/pof-upload.json | jq -r .file.fileId)
 
 DELIVERY_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $RIDER_TOKEN" \
   -F 'purpose=delivery_photo' -F 'file=@./handoff.jpg;type=image/jpeg' | tee /tmp/delivery-upload.json | jq -r .file.fileId)
@@ -167,18 +169,18 @@ SERVICE_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPP
 
 ## POST /files/:fileId/attach — bind to a domain record
 
-Auth: the caller must be the file owner **and** the relevant parent owner/assignee. The body is JSON and has exactly one target field selected by the stored purpose:
+Auth: the caller must be the file owner **and** the relevant parent owner/assignee. The body is JSON and contains exactly the fields selected by the stored purpose:
 
 | Purpose | Body | Required state/ownership |
 |---|---|---|
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
-| `proof` | `{ "orderId": "..." }` | caller is assigned `order.supplierId`; state `supplier_accepted` or `supplier_proof_changes_requested` |
+| `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
 
-Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once; corrected proofs and other new evidence require a new upload. A file cannot be rebound even if another user knows its ID.
+Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
 
-Success: `200 { "file": File, "order": Order }` for order purposes, or `200 { "file": File, "supplierService": SupplierService }`. The returned parent already contains the ID. Proof attach also changes order state and appends its timeline entry.
+Success: `200 { "file": File, "order": Order }` for order purposes, or `200 { "file": File, "supplierService": SupplierService }`. The returned parent already contains the ID. A POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention` because both gates use the same delivery evidence.
 
 Curl for all four targets:
 
@@ -186,8 +188,8 @@ Curl for all four targets:
 curl -fsS -X POST "$API/files/$ARTWORK_FILE_ID/attach" -H "Authorization: Bearer $CLIENT_TOKEN" \
   -H 'Content-Type: application/json' --data '{"orderId":"ord_demo_1"}' | jq
 
-curl -fsS -X POST "$API/files/$PROOF_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -H 'Content-Type: application/json' --data '{"orderId":"ord_supplier_accepted"}' | jq
+curl -fsS -X POST "$API/files/$POF_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
+  -H 'Content-Type: application/json' --data '{"orderId":"ord_production","milestoneCode":"printing"}' | jq
 
 curl -fsS -X POST "$API/files/$DELIVERY_FILE_ID/attach" -H "Authorization: Bearer $RIDER_TOKEN" \
   -H 'Content-Type: application/json' --data '{"orderId":"ord_active_delivery"}' | jq
@@ -258,50 +260,17 @@ delete_pending --MinIO delete + metadata commit--> deleted
 - On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted`.
 - No automatic age-based retention is enabled in this demo. `purpose` and references are durable so a future retention job can apply different policies without guessing from keys.
 
-## Supplier proof lifecycle
+## Proof of Fulfilment lifecycle
 
-Proof lifecycle uses the existing order `state` and `timeline`; there is no second proof-state mechanism.
-The former direct `supplier_accepted -> awaiting_payment` transition is not allowed; a supplier proof must be attached and approved first.
+POF is a milestone gate, not an order-state approval loop. Upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint.
 
-| From | Trigger | Actor | To | Required request |
-|---|---|---|---|---|
-| `supplier_accepted` | attach a ready `proof` file | assigned supplier | `supplier_proof_review` | `POST /files/:fileId/attach` |
-| `supplier_proof_review` | request changes | order client | `supplier_proof_changes_requested` | transition body with nonblank `reason` |
-| `supplier_proof_changes_requested` | attach corrected ready `proof` file | assigned supplier | `supplier_proof_review` | `POST /files/:fileId/attach` |
-| `supplier_proof_review` | approve | order client | `supplier_proof_approved` | transition body |
-| `supplier_proof_approved` | continue to payment | assigned supplier, ops, or super | `awaiting_payment` | transition body |
+| Milestone | Uploader | Attach result |
+|---|---|---|
+| `printing` | assigned supplier | printing milestone becomes `pof_attached` |
+| `packaging_qc` | assigned supplier | packaging/QC milestone becomes `pof_attached` |
+| `delivered` | assigned rider | delivered and retention milestones become `pof_attached` |
 
-Every successful step appends `{ at, state, by, note }` to `order.timeline`; proof submission entries additionally carry `fileId`. Requested changes record the reason in `note`. The existing transition endpoint is:
-
-`POST /orders/:orderId/transition`, JSON `{ "state": "...", "reason"?: "..." }`.
-
-Full curl loop (each response should be asserted for `.order.state` and the newest `.order.timeline[-1]`):
-
-```bash
-# Supplier upload + initial attach -> supplier_proof_review
-PROOF_V1=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -F 'purpose=proof' -F 'file=@./proof-v1.pdf;type=application/pdf' | jq -r .file.fileId)
-curl -fsS -X POST "$API/files/$PROOF_V1/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -H 'Content-Type: application/json' --data '{"orderId":"ord_supplier_accepted"}' | jq '.order | {state, last: .timeline[-1]}'
-
-# Client asks for changes -> supplier_proof_changes_requested
-curl -fsS -X POST "$API/orders/ord_supplier_accepted/transition" -H "Authorization: Bearer $CLIENT_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data '{"state":"supplier_proof_changes_requested","reason":"Move the crop marks outside the trim."}' \
-  | jq '.order | {state, last: .timeline[-1]}'
-
-# Supplier uploads a distinct corrected file and attaches -> supplier_proof_review
-PROOF_V2=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -F 'purpose=proof' -F 'file=@./proof-v2.pdf;type=application/pdf' | jq -r .file.fileId)
-curl -fsS -X POST "$API/files/$PROOF_V2/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -H 'Content-Type: application/json' --data '{"orderId":"ord_supplier_accepted"}' \
-  | jq '.order | {state, last: .timeline[-1]}'
-
-# Client approves -> supplier_proof_approved
-curl -fsS -X POST "$API/orders/ord_supplier_accepted/transition" -H "Authorization: Bearer $CLIENT_TOKEN" \
-  -H 'Content-Type: application/json' --data '{"state":"supplier_proof_approved"}' \
-  | jq '.order | {state, last: .timeline[-1]}'
-```
+The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions. Load-time migration moves existing orders in those states to `awaiting_downpayment` and preserves their legacy `proofFileIds`.
 
 ## Error contract
 
@@ -313,9 +282,9 @@ curl -fsS -X POST "$API/orders/ord_supplier_accepted/transition" -H "Authorizati
 | 400 | `file_required` | Missing or multiple/wrong-named file part; send exactly one `file`. |
 | 400 | `file_empty` | Zero bytes; choose a nonempty file. |
 | 400 | `filename_required` | Picker supplied no name; provide a name with a supported extension. |
-| 400 | `attachment_target_required` | Attach body lacks `orderId` or `supplierServiceId`; send the purpose-specific field. |
+| 400 | `attachment_target_required` | Attach body lacks `orderId`, `milestoneCode`, or `supplierServiceId`; send the purpose-specific fields. |
 | 400 | `unexpected_target_field` | Attach JSON includes a field other than the purpose-specific target; remove it. |
-| 400 | `reason_required` | Proof changes request lacks a nonblank reason. |
+| 400 | `invalid_milestone_code` | POF target is not printing, packaging/QC, or delivered; choose the stage represented by the file. |
 | 400 | `invalid_json` | Attach/transition JSON is malformed; fix JSON. |
 | 401 | `unauthorized` | Token absent, invalid, or expired; sign in and retry. |
 | 403 | `forbidden` | Wrong role, file owner, parent owner/assignee, or read relationship; open the caller's own record. |
@@ -327,9 +296,7 @@ curl -fsS -X POST "$API/orders/ord_supplier_accepted/transition" -H "Authorizati
 | 409 | `file_state_conflict` | Requested lifecycle operation is invalid for current state; refresh metadata. |
 | 409 | `file_metadata_invalid` | Purpose/media/key/size metadata is internally inconsistent; upload again. |
 | 409 | `file_in_use` | File has domain references; do not delete lifecycle evidence. |
-| 409 | `proof_upload_not_allowed` | Order is not awaiting an initial/corrected proof; refresh order state. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
-| 409 | `proof_decision_not_allowed` | No proof is awaiting that decision; refresh order state. |
 | 409 | `transition_not_allowed` | Requested order step is not reachable from the current state/role; refresh and use an available action. |
 | 409 | `storage_object_missing` | Ready metadata has no MinIO object; upload and attach a replacement. |
 | 409 | `storage_object_mismatch` | MinIO byte size differs from metadata; upload and attach a replacement. |
@@ -363,4 +330,4 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 
 ## Existing-store migration
 
-`load()` additively creates top-level `files: []`, order `artworkFileIds`, `proofFileIds`, and `deliveryPhotoFileIds`, and supplier-service `imageFileIds` only when missing. It never fabricates an object from `artworkName`, overwrites valid fields, removes orders, or changes unrelated collections. Running it twice produces no second change. Never reset a live/demo store to obtain these fields.
+`load()` additively creates top-level `files: []`, order `artworkFileIds`, legacy `proofFileIds`, `fulfilmentProofFileIds`, and `deliveryPhotoFileIds`, and supplier-service `imageFileIds` only when missing. It never fabricates an object from `artworkName`, overwrites valid file metadata, removes orders, or changes unrelated collections. Running it twice produces no second change. Never reset a live/demo store to obtain these fields.

@@ -1,6 +1,8 @@
 # GRIDGO Demo API — PRD (MVP)
 
 > Source: GRIDGO Product Requirements Document (tinker), Supplier presentation (2026-08-04), captain MVP direction, blueprint PR (service catalogue / taxonomy).
+>
+> Captain's operational model v2 supersedes the original payment/fulfilment flow. The exact implemented contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
 ## Purpose
 
@@ -18,15 +20,15 @@ Temporary, **replaceable** local backend used by every GRIDGO surface (client, s
 ## Goals
 
 1. One process all mobile apps and the web portal can call (`http://127.0.0.1:8787` or LAN IP).
-2. Custom auth with fixed demo users and role claims.
-3. Order lifecycle transitions aligned with the pilot state machine (simplified).
-4. Pilot Credits ledger + COD eligibility (≤ ₱1,500, one active COD).
-5. Dispatch offers, location pings (write + latest read), pickup/delivery/COD proofs for riders.
+2. Custom auth with self-signup for clients, suppliers, and riders plus role claims.
+3. Order lifecycle transitions aligned with operational model v2.
+4. Manually confirmed digital QR payment: 75% downpayment and 25% balance; no COD.
+5. Dispatch offers, location pings, six-check pickup gate, evidence-backed escalation, and file-backed delivery evidence.
 6. Stable route shapes so mobile `lib/api.ts` and the web portal survive a future cloud swap.
 7. Order geography for maps: `pickup` / `dropoff` coords (Davao pilot) so apps do not geocode at runtime.
 8. **Platform-governed supplier service catalogue** and matching eligibility for Operations.
 9. **Ops / Super Admin surface**: users, roles, verification, zones/fees, credit grants, claims/holds, issues, audit.
-10. Private MinIO files for artwork, supplier proofs, delivery photos, and supplier-service images: streamed API uploads, explicit file-ID attach, and authorized short-lived presigned GETs.
+10. Private MinIO files for artwork, milestone POFs, delivery/checklist photos, and supplier-service images: streamed API uploads, explicit file-ID attach, and authorized short-lived presigned GETs.
 
 ## Roles served
 
@@ -45,12 +47,12 @@ Authoritative field on **client** users for logo lockup (plain **GRIDGO** vs **G
 
 | Field | Values | Notes |
 |---|---|---|
-| `accountType` | `"individual"` \| `"business"` | **Not** inferred from `orgName` |
+| `accountType` | `"individual"` \| `"business"` \| `"organization"` | **Not** inferred from `orgName`; signup accepts `personal` as alias for `individual` |
 
 | Decision | Choice | Rationale |
 |---|---|---|
 | Default when missing | `"individual"` | Business branding is opt-in; consumers never see `undefined` |
-| API write this pilot | none (seed / store only) | Fixed demo identities; avoid incomplete admin UX. Revisit when client onboarding needs self-serve |
+| API write this pilot | `POST /auth/signup` | Business/organization accounts require `orgName` |
 | Non-client roles | field omitted | Same role-specific pattern as `orgName` / `shop` |
 
 Backfill on `load()`: any client without a valid `accountType` gets `"individual"`; existing valid values are never overwritten.
@@ -66,7 +68,7 @@ Surfaces: **mobile apps + website portal**. User types: Admin, Supplier, Busines
 ## Supplier value props to support in API/data
 
 1. **Client acquisition** — orders routed to accredited suppliers via live service catalogue eligibility.
-2. **Guaranteed payout model** — pilot uses credits/COD; claims/holds gate `payout_released`.
+2. **Guaranteed payout model** — four POF-gated supplier milestones; claims/holds gate release.
 3. **QA & centralized communication** — single order inbox / timeline + platform audit log.
 4. **Service listing** — taxonomy-backed supplier services (not free-form marketing blurbs).
 
@@ -120,9 +122,9 @@ Additive fields on every order (do not remove `address` / `zone`):
 
 Supplier user may include `shop: { lat, lng, label }` and `verificationStatus`.
 
-## Zones & fees
+## Zones and v2 distance fees
 
-`GET /zones` returns platform delivery zones. Orders reference `zone` by code and snapshot `deliveryFeeMinor`. Super Admin creates/updates zones.
+`GET /zones` retains compatibility/address zones. V2 snapshots a configurable distance-band fee from supplier `pickup` to client `dropoff`; Operations/Super Admin manage the global bands through `GET|PATCH /settings`.
 
 ## Pilot Credits granting
 
@@ -177,8 +179,8 @@ Never requires `npm run reset` (which would wipe captain demo orders).
 - [x] Login issues token; role on user
 - [x] Role-scoped order/job/offer lists
 - [x] Transitions refuse illegal role/state pairs
-- [x] Credits authorize spend; COD gate ≤ 150000 minor
-- [x] Rider accept + proof advances job
+- [x] 75%/25% QR installments with manual Operations confirmation; COD paths retired
+- [x] Rider accept + six-check pickup + attached delivery evidence advances job
 - [x] Order pickup/dropoff Davao coords; new orders get dropoff
 - [x] GET latest rider location (role-gated; empty = `{ ping: null }`)
 - [x] Service taxonomy CRUD (super) + read (auth)
@@ -188,10 +190,10 @@ Never requires `npm run reset` (which would wipe captain demo orders).
 - [x] Zones/fees read + super write
 - [x] Pilot Credits grant (super)
 - [x] Claims hold/release
-- [x] Client issue report in window + ops resolve
+- [x] Client issue report in global configured window + real load-time expiry
 - [x] Platform audit log
 - [x] Idempotent backfill without data loss
-- [x] Client `accountType` (`individual` \| `business`) via publicUser; backfill default individual
+- [x] Client `accountType` (`individual` \| `business` \| `organization`) via publicUser; backfill default individual
 - [ ] Idempotency keys on writes
 - [x] Persistent private MinIO storage + streamed file/attach/presigned-GET contract (`docs/STORAGE_API.md`)
 - [ ] Webhook-shaped payment events for future PayMongo
@@ -203,4 +205,4 @@ Never requires `npm run reset` (which would wipe captain demo orders).
 | Bearer token JSON sessions | Clerk session + role claim |
 | `data/store.json` | Supabase Postgres + RLS |
 | In-process transitions | Edge Functions + idempotency |
-| Simulated COD/credits | Real ledger + PayMongo adapter |
+| Manually confirmed QR installments | Provider adapter/webhook on the same installment records |

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
 import { defaultTaxonomy } from "./taxonomy.js";
+import { backfillOperationalModel } from "./operational-model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, "..", "data");
@@ -200,7 +201,6 @@ const orders = [
     deliveryFeeMinor: 15000,
     paymentMethod: null,
     paymentStatus: "unpaid",
-    codEligible: true,
     payoutHold: false,
     promisedDate: "2026-08-12T17:00:00+08:00",
     matchingServiceIds: ["svc_demo_tarpaulin"],
@@ -233,7 +233,6 @@ const orders = [
     deliveryFeeMinor: 10000,
     paymentMethod: "pilot_credit",
     paymentStatus: "authorized",
-    codEligible: true,
     payoutHold: false,
     promisedDate: "2026-08-10T15:00:00+08:00",
     matchingServiceIds: ["svc_demo_print"],
@@ -266,7 +265,6 @@ const orders = [
     deliveryFeeMinor: 15000,
     paymentMethod: "pilot_credit",
     paymentStatus: "authorized",
-    codEligible: true,
     payoutHold: true,
     promisedDate: "2026-08-08T18:00:00+08:00",
     matchingServiceIds: ["svc_demo_print"],
@@ -278,7 +276,7 @@ const orders = [
     updatedAt: t,
     timeline: [
       { at: t, state: "delivered", by: "user_rider", note: "Delivery proof" },
-      { at: t, state: "issue_window_open", by: "system", note: "24h issue window opened" },
+      { at: t, state: "issue_window_open", by: "system", note: "Issue window opened" },
       { at: t, state: "issue_window_open", by: "user_client", note: "Material issue reported: edges peeling" },
     ],
   },
@@ -301,9 +299,8 @@ const orders = [
     dropoff: dropoffFor("Buhangin, Davao City", "davao_east"),
     totalMinor: 70000,
     deliveryFeeMinor: 18000,
-    paymentMethod: "cod",
+    paymentMethod: "pilot_credit",
     paymentStatus: "collected",
-    codEligible: true,
     payoutHold: true,
     promisedDate: "2026-08-05T16:00:00+08:00",
     matchingServiceIds: ["svc_demo_print"],
@@ -315,7 +312,7 @@ const orders = [
     updatedAt: t,
     timeline: [
       { at: t, state: "completed", by: "user_ops", note: "Issue window closed clean" },
-      { at: t, state: "completed", by: "user_ops", note: "Claim raised; payout held: COD cash short on count" },
+      { at: t, state: "completed", by: "user_ops", note: "Claim raised; payout held: payment reconciliation discrepancy" },
     ],
   },
 ];
@@ -360,9 +357,9 @@ const claims = [
     id: "clm_demo_ops",
     orderId: "ord_demo_claim",
     raisedBy: "user_ops",
-    reason: "COD cash short on count at reconciliation",
+    reason: "Payment reconciliation discrepancy",
     status: "payout_held",
-    holdReason: "COD cash short on count at reconciliation",
+    holdReason: "Payment reconciliation discrepancy",
     releaseReason: null,
     heldAt: t,
     heldBy: "user_ops",
@@ -371,7 +368,7 @@ const claims = [
     createdAt: t,
     updatedAt: t,
     issueId: null,
-    timeline: [{ at: t, action: "raised_and_held", by: "user_ops", note: "COD cash short on count at reconciliation" }],
+    timeline: [{ at: t, action: "raised_and_held", by: "user_ops", note: "Payment reconciliation discrepancy" }],
   },
 ];
 
@@ -411,7 +408,7 @@ const auditLog = [
     entityId: "clm_demo_ops",
     orderId: "ord_demo_claim",
     detail: { status: "payout_held" },
-    reason: "COD cash short on count at reconciliation",
+    reason: "Payment reconciliation discrepancy",
   },
   {
     id: id("aud"),
@@ -462,11 +459,14 @@ const store = {
     { id: id("ntf"), userId: "user_rider", title: "Dispatch available", body: "School event flyers ready for pickup", read: false, at: t },
     { id: id("ntf"), userId: "user_client", title: "QA update", body: "Your tarpaulin request is with a supplier", read: false, at: t },
     { id: id("ntf"), userId: "user_ops", title: "Issue reported", body: "Client reported material issue on event stickers", read: false, at: t },
-    { id: id("ntf"), userId: "user_ops", title: "Payout hold", body: "COD claim held on business cards order", read: false, at: t },
+    { id: id("ntf"), userId: "user_ops", title: "Payout hold", body: "Payment claim held on business cards order", read: false, at: t },
   ],
   locationPings: [],
   proofs: [],
 };
+
+// Fresh fixtures use the same v2 defaults and order migration logic as existing stores.
+backfillOperationalModel(store, t);
 
 fs.mkdirSync(dataDir, { recursive: true });
 if (!reset && fs.existsSync(storePath)) {
