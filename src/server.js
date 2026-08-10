@@ -28,6 +28,12 @@ import {
 } from "./attachments.js";
 import { createMutationQueue } from "./mutation-queue.js";
 import { createObjectStorage } from "./object-storage.js";
+import {
+  backfillTaxonomy,
+  buildCategoryTree,
+  defaultTaxonomy,
+  resolveCategoryCode,
+} from "./taxonomy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -252,55 +258,6 @@ function setOrderPickup(order, store) {
 // ---------------------------------------------------------------------------
 // Default platform data (used by seed + idempotent backfill)
 // ---------------------------------------------------------------------------
-
-function defaultTaxonomy() {
-  return {
-    categories: [
-      {
-        id: "taxc_large_format",
-        code: "large_format",
-        name: "Large format",
-        productFamilyIds: ["banner"],
-        active: true,
-      },
-      {
-        id: "taxc_offset",
-        code: "offset",
-        name: "Offset / digital sheet",
-        productFamilyIds: ["flyer", "card", "sticker"],
-        active: true,
-      },
-      {
-        id: "taxc_apparel",
-        code: "apparel_sublimation",
-        name: "Apparel / sublimation",
-        productFamilyIds: ["apparel"],
-        active: true,
-      },
-      {
-        id: "taxc_signage",
-        code: "signage",
-        name: "Signage",
-        productFamilyIds: ["banner", "sticker"],
-        active: true,
-      },
-    ],
-    materials: [
-      { id: "taxm_13oz", code: "tarpaulin_13oz", name: "13oz tarpaulin", categoryCodes: ["large_format", "signage"], active: true },
-      { id: "taxm_mesh", code: "mesh_banner", name: "Mesh banner", categoryCodes: ["large_format"], active: true },
-      { id: "taxm_vinyl", code: "vinyl_sticker", name: "Vinyl sticker", categoryCodes: ["offset", "signage"], active: true },
-      { id: "taxm_matte150", code: "matte_150gsm", name: "Matte 150gsm", categoryCodes: ["offset"], active: true },
-      { id: "taxm_gloss_card", code: "gloss_cardstock", name: "Gloss cardstock", categoryCodes: ["offset"], active: true },
-      { id: "taxm_cotton", code: "cotton_tee", name: "Cotton tee", categoryCodes: ["apparel_sublimation"], active: true },
-    ],
-    finishes: [
-      { id: "taxf_hem_grommet", code: "hem_grommet", name: "Hem + grommets", categoryCodes: ["large_format", "signage"], active: true },
-      { id: "taxf_laminate", code: "lamination", name: "Lamination", categoryCodes: ["offset", "signage"], active: true },
-      { id: "taxf_none", code: "none", name: "None", categoryCodes: ["large_format", "offset", "apparel_sublimation", "signage"], active: true },
-      { id: "taxf_cut", code: "kiss_cut", name: "Kiss cut", categoryCodes: ["offset", "signage"], active: true },
-    ],
-  };
-}
 
 function defaultZones() {
   return [
@@ -550,7 +507,7 @@ function backfillPlatform(store) {
         {
           id: "svc_demo_tarpaulin",
           supplierId: demoSupplier.id,
-          categoryCode: "large_format",
+          categoryCode: "marketing_collateral",
           materialCodes: ["tarpaulin_13oz", "mesh_banner"],
           finishCodes: ["hem_grommet", "none"],
           productFamilyIds: ["banner"],
@@ -578,7 +535,7 @@ function backfillPlatform(store) {
         {
           id: "svc_demo_print",
           supplierId: demoSupplier.id,
-          categoryCode: "offset",
+          categoryCode: "marketing_collateral",
           materialCodes: ["matte_150gsm", "gloss_cardstock", "vinyl_sticker"],
           finishCodes: ["lamination", "kiss_cut", "none"],
           productFamilyIds: ["flyer", "card", "sticker"],
@@ -616,6 +573,8 @@ function load() {
   let changed = false;
   if (backfillGeography(store)) changed = true;
   if (backfillPlatform(store)) changed = true;
+  // After backfillPlatform, which guarantees store.taxonomy and its arrays exist.
+  if (backfillTaxonomy(store)) changed = true;
   if (backfillFiles(store)) changed = true;
   if (backfillAccountType(store)) changed = true;
   // Fixtures last so seed-defined demo identity wins over fill-missing defaults
@@ -661,11 +620,16 @@ function taxonomyCodeSet(taxonomy, kind) {
   return new Set(list.filter((x) => x.active !== false).map((x) => x.code));
 }
 
+/** A category code is valid when it names, or aliases, an active category. */
+function activeCategoryFor(taxonomy, code) {
+  const category = resolveCategoryCode(taxonomy, code);
+  return category && category.active !== false ? category : null;
+}
+
 function validateTaxonomyRefs(store, body) {
-  const cats = taxonomyCodeSet(store.taxonomy, "categories");
   const mats = taxonomyCodeSet(store.taxonomy, "materials");
   const fins = taxonomyCodeSet(store.taxonomy, "finishes");
-  if (body.categoryCode != null && !cats.has(body.categoryCode)) {
+  if (body.categoryCode != null && !activeCategoryFor(store.taxonomy, body.categoryCode)) {
     return { error: "invalid_category_code", code: body.categoryCode };
   }
   if (Array.isArray(body.materialCodes)) {
@@ -1370,7 +1334,9 @@ async function handleRequest(req, res) {
 
     // ---- taxonomy ----
     if (req.method === "GET" && pathname === "/taxonomy") {
-      return send(res, 200, { taxonomy: store.taxonomy });
+      // categoryTree is derived per request from the flat collections; it is a
+      // convenience projection for pickers and is never persisted.
+      return send(res, 200, { taxonomy: store.taxonomy, categoryTree: buildCategoryTree(store.taxonomy) });
     }
 
     if (req.method === "POST" && pathname === "/taxonomy/categories") {
@@ -1380,10 +1346,15 @@ async function handleRequest(req, res) {
       if (store.taxonomy.categories.some((c) => c.code === body.code)) {
         return send(res, 409, { error: "code_exists", code: body.code });
       }
+      if ((store.taxonomy.categoryAliases || []).some((a) => a.code === body.code)) {
+        return send(res, 409, { error: "code_is_alias", code: body.code });
+      }
       const item = {
         id: id("taxc"),
         code: String(body.code),
         name: String(body.name),
+        bestFor: body.bestFor != null ? String(body.bestFor) : null,
+        sortOrder: body.sortOrder != null ? Number(body.sortOrder) : store.taxonomy.categories.length + 1,
         productFamilyIds: Array.isArray(body.productFamilyIds) ? body.productFamilyIds : [],
         active: body.active !== false,
       };
@@ -1400,11 +1371,61 @@ async function handleRequest(req, res) {
       if (!item) return send(res, 404, { error: "category_not_found" });
       const body = await readBody(req);
       if (body.name != null) item.name = String(body.name);
+      if (body.bestFor != null) item.bestFor = String(body.bestFor);
+      if (body.sortOrder != null) item.sortOrder = Number(body.sortOrder);
       if (body.productFamilyIds != null) item.productFamilyIds = body.productFamilyIds;
       if (body.active != null) item.active = Boolean(body.active);
       audit(store, { actor: user, action: "taxonomy.category_update", entityType: "taxonomy_category", entityId: item.id, detail: item });
       save(store);
       return send(res, 200, { category: item });
+    }
+
+    if (req.method === "POST" && pathname === "/taxonomy/subcategories") {
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      if (!body.code || !body.name || !body.categoryCode) {
+        return send(res, 400, { error: "invalid_subcategory", need: "code, name, categoryCode" });
+      }
+      if (store.taxonomy.subcategories.some((s) => s.code === body.code)) {
+        return send(res, 409, { error: "code_exists", code: body.code });
+      }
+      // Accept a retired legacy code but always store the canonical category code.
+      const parent = activeCategoryFor(store.taxonomy, body.categoryCode);
+      if (!parent) return send(res, 400, { error: "invalid_category_code", code: body.categoryCode });
+      const siblings = store.taxonomy.subcategories.filter((s) => s.categoryCode === parent.code);
+      const item = {
+        id: id("taxs"),
+        code: String(body.code),
+        name: String(body.name),
+        categoryCode: parent.code,
+        examples: Array.isArray(body.examples) ? body.examples.map((e) => String(e)) : [],
+        sortOrder: body.sortOrder != null ? Number(body.sortOrder) : siblings.length + 1,
+        active: body.active !== false,
+      };
+      store.taxonomy.subcategories.push(item);
+      audit(store, { actor: user, action: "taxonomy.subcategory_create", entityType: "taxonomy_subcategory", entityId: item.id, detail: item });
+      save(store);
+      return send(res, 201, { subcategory: item });
+    }
+
+    if (req.method === "PATCH" && /^\/taxonomy\/subcategories\/[^/]+$/.test(pathname)) {
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      const sid = pathname.split("/")[3];
+      const item = store.taxonomy.subcategories.find((s) => s.id === sid || s.code === sid);
+      if (!item) return send(res, 404, { error: "subcategory_not_found" });
+      const body = await readBody(req);
+      if (body.categoryCode != null) {
+        const parent = activeCategoryFor(store.taxonomy, body.categoryCode);
+        if (!parent) return send(res, 400, { error: "invalid_category_code", code: body.categoryCode });
+        item.categoryCode = parent.code;
+      }
+      if (body.name != null) item.name = String(body.name);
+      if (body.examples != null) item.examples = Array.isArray(body.examples) ? body.examples.map((e) => String(e)) : [];
+      if (body.sortOrder != null) item.sortOrder = Number(body.sortOrder);
+      if (body.active != null) item.active = Boolean(body.active);
+      audit(store, { actor: user, action: "taxonomy.subcategory_update", entityType: "taxonomy_subcategory", entityId: item.id, detail: item });
+      save(store);
+      return send(res, 200, { subcategory: item });
     }
 
     if (req.method === "POST" && pathname === "/taxonomy/materials") {

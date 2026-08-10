@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
+import { defaultTaxonomy } from "./taxonomy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, "..", "data");
@@ -69,28 +70,9 @@ const catalog = [
   { id: "prod_apparel", name: "Simple Apparel Print", family: "apparel", basePriceMinor: 28000, unit: "piece" },
 ];
 
-const taxonomy = {
-  categories: [
-    { id: "taxc_large_format", code: "large_format", name: "Large format", productFamilyIds: ["banner"], active: true },
-    { id: "taxc_offset", code: "offset", name: "Offset / digital sheet", productFamilyIds: ["flyer", "card", "sticker"], active: true },
-    { id: "taxc_apparel", code: "apparel_sublimation", name: "Apparel / sublimation", productFamilyIds: ["apparel"], active: true },
-    { id: "taxc_signage", code: "signage", name: "Signage", productFamilyIds: ["banner", "sticker"], active: true },
-  ],
-  materials: [
-    { id: "taxm_13oz", code: "tarpaulin_13oz", name: "13oz tarpaulin", categoryCodes: ["large_format", "signage"], active: true },
-    { id: "taxm_mesh", code: "mesh_banner", name: "Mesh banner", categoryCodes: ["large_format"], active: true },
-    { id: "taxm_vinyl", code: "vinyl_sticker", name: "Vinyl sticker", categoryCodes: ["offset", "signage"], active: true },
-    { id: "taxm_matte150", code: "matte_150gsm", name: "Matte 150gsm", categoryCodes: ["offset"], active: true },
-    { id: "taxm_gloss_card", code: "gloss_cardstock", name: "Gloss cardstock", categoryCodes: ["offset"], active: true },
-    { id: "taxm_cotton", code: "cotton_tee", name: "Cotton tee", categoryCodes: ["apparel_sublimation"], active: true },
-  ],
-  finishes: [
-    { id: "taxf_hem_grommet", code: "hem_grommet", name: "Hem + grommets", categoryCodes: ["large_format", "signage"], active: true },
-    { id: "taxf_laminate", code: "lamination", name: "Lamination", categoryCodes: ["offset", "signage"], active: true },
-    { id: "taxf_none", code: "none", name: "None", categoryCodes: ["large_format", "offset", "apparel_sublimation", "signage"], active: true },
-    { id: "taxf_cut", code: "kiss_cut", name: "Kiss cut", categoryCodes: ["offset", "signage"], active: true },
-  ],
-};
+// Fresh-store taxonomy comes from the shared definition so a seeded store and a
+// backfilled store end up with byte-identical taxonomy content.
+const taxonomy = defaultTaxonomy();
 
 const zones = [
   { id: "zone_central", code: "davao_central", name: "Davao Central (Bajada / JP Laurel)", deliveryFeeMinor: 15000, active: true },
@@ -104,7 +86,7 @@ const supplierServices = [
   {
     id: "svc_demo_tarpaulin",
     supplierId: "user_supplier",
-    categoryCode: "large_format",
+    categoryCode: "marketing_collateral",
     materialCodes: ["tarpaulin_13oz", "mesh_banner"],
     finishCodes: ["hem_grommet", "none"],
     productFamilyIds: ["banner"],
@@ -133,7 +115,7 @@ const supplierServices = [
   {
     id: "svc_demo_print",
     supplierId: "user_supplier",
-    categoryCode: "offset",
+    categoryCode: "marketing_collateral",
     materialCodes: ["matte_150gsm", "gloss_cardstock", "vinyl_sticker"],
     finishCodes: ["lamination", "kiss_cut", "none"],
     productFamilyIds: ["flyer", "card", "sticker"],
@@ -162,7 +144,7 @@ const supplierServices = [
   {
     id: "svc_demo_apparel_draft",
     supplierId: "user_supplier",
-    categoryCode: "apparel_sublimation",
+    categoryCode: "corporate_event_merch",
     materialCodes: ["cotton_tee"],
     finishCodes: ["none"],
     productFamilyIds: ["apparel"],

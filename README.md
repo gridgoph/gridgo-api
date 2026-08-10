@@ -122,13 +122,17 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
-| GET | `/taxonomy` | any auth | categories, materials, finishes |
-| POST | `/taxonomy/categories` | super_admin | add capability category |
+| GET | `/taxonomy` | any auth | categories, subcategories, aliases, materials, finishes + derived `categoryTree` |
+| POST | `/taxonomy/categories` | super_admin | add category |
 | PATCH | `/taxonomy/categories/:id` | super_admin | update category (id or code) |
+| POST | `/taxonomy/subcategories` | super_admin | add subcategory |
+| PATCH | `/taxonomy/subcategories/:id` | super_admin | update subcategory (id or code) |
 | POST | `/taxonomy/materials` | super_admin | add material code |
 | PATCH | `/taxonomy/materials/:id` | super_admin | update material |
 | POST | `/taxonomy/finishes` | super_admin | add finish code |
 | PATCH | `/taxonomy/finishes/:id` | super_admin | update finish |
+
+The product category tree is the captain's chart: four categories, seventeen subcategories, each category with a `bestFor` audience line and each subcategory with an `examples` list. One `GET /taxonomy` renders a whole picker. Subcategories are a flat collection referencing their parent by `categoryCode`; `categoryTree` is derived per request and never stored. The pre-chart codes (`large_format`, `offset`, `apparel_sublimation`, `signage`) are retired into `categoryAliases` and still resolve on input. **Exact field shapes: `docs/TAXONOMY_API.md`.**
 
 ### Supplier services (catalogue)
 
@@ -218,7 +222,7 @@ Client report auto-creates a `payout_held` claim. Order stays in `issue_window_o
 
 `data/store.json` is gitignored. On every `load()`:
 
-1. **Backfill** adds missing `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, the top-level `files` registry, parent file-ID arrays, and client `accountType` (default `"individual"` only when missing/invalid) **without** wiping captain demo orders.
+1. **Backfill** migrates `taxonomy` onto the captain's category chart (adds `subcategories` + `categoryAliases`, retires pre-chart category codes, remaps material/finish `categoryCodes`) and adds missing `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, the top-level `files` registry, parent file-ID arrays, and client `accountType` (default `"individual"` only when missing/invalid) **without** wiping captain demo orders.
 2. **Fixture convergence** ensures seed demo accounts from `src/demo-fixtures.js` exist and match their defined identity fields (so a live store that predated `individual@gridgo.local` or still has `client@` as `individual` is fixed without `npm run reset`).
 
 Fixture convergence only mutates allowlisted demo users; orders, credits, proofs, claims, issues, sessions, and location pings stay byte-stable.
