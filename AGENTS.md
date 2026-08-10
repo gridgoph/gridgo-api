@@ -39,9 +39,18 @@ Client users have explicit `accountType`: `"individual"` | `"business"`. Returne
 - Non-client roles: field absent (not null)
 - Demo: `client@gridgo.local` = business; `individual@gridgo.local` = individual
 
+## Product category taxonomy
+
+The captain's category chart (4 categories, 17 subcategories) is the product taxonomy. **Exact contract: `docs/TAXONOMY_API.md`** — mobile workers build against that file.
+
+- One rule: every category reference is the category `code`, held on the *referring* record (`subcategory.categoryCode`, `material.categoryCodes[]`, `finish.categoryCodes[]`). Categories never list their children; nothing is nested in the store.
+- `GET /taxonomy` also returns `categoryTree`, derived per request from the flat collections and never persisted. Never write it back.
+- Pre-chart codes (`large_format`, `offset`, `apparel_sublimation`, `signage`) are retired into `taxonomy.categoryAliases`, not deleted; they still resolve on input. `supplierServices[].categoryCode` keeps whatever it was stored with — resolve through aliases, never rewrite captain-owned service records.
+- Definitions, mapping table and `backfillTaxonomy()` all live in `src/taxonomy.js`; `seed.js` and the server share it so a seeded store and a backfilled store match.
+
 ## Platform data (ops / super / matching)
 
-- `GET /taxonomy` — capability categories, materials, finishes (super manages via POST/PATCH)
+- `GET /taxonomy` — categories, subcategories, aliases, materials, finishes (super manages via POST/PATCH)
 - `GET|POST|PATCH /supplier-services…` — supplier catalogue; states `draft|pending_verification|live|suspended|withdrawn`
 - `GET /orders/:id/eligible-suppliers` — ops matching support (no auto-assign)
 - `GET /users?role=` — publicUser only (never passwords)
@@ -64,7 +73,7 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 | | Backfill | Fixture convergence |
 |---|---|---|
 | Purpose | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
-| Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
 | Overwrite? | No — never overwrites existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`) |
 | Creates? | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.local`) |
 | Never touches | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
@@ -72,6 +81,12 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 **Fixture boundary:** match by exact fixture email, else stable seed id — never by role or bare `@gridgo.local` domain. Getting this wrong is how a migration eats captain work.
 
 **Existing live stores:** both run idempotently on every `load()`. Never reset a live/demo store to acquire new fields; reset wipes captain demo orders.
+
+## Running your own instance
+
+The captain's demo API owns port **8787** and its store at `data/store.json`. To try anything against real data, copy the store and run your own instance with `STORE_PATH=<copy> PORT=<free high port> node src/server.js` — several lanes run this repo at once, so pick a port only after checking it is free.
+
+**Stop it by the exact PID you captured at start.** Never `pkill -f`/`killall` on `src/server.js`: the pattern matches the captain's demo and every other lane's instance too.
 
 ## Constraints
 
