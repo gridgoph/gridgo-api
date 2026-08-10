@@ -4,11 +4,18 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
 import { defaultTaxonomy } from "./taxonomy.js";
-import { backfillOperationalModel } from "./operational-model.js";
+import {
+  PICKUP_CHECK_CODES,
+  PICKUP_SIGN_OFF_PROMPT,
+  backfillOperationalModel,
+  calculateFinalPrice,
+  createPayoutMilestones,
+  defaultOperationalSettings,
+} from "./operational-model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, "..", "data");
-const storePath = path.join(dataDir, "store.json");
+const storePath = process.env.STORE_PATH ? path.resolve(process.env.STORE_PATH) : path.join(dataDir, "store.json");
 
 const reset = process.argv.includes("--reset");
 
@@ -76,11 +83,11 @@ const catalog = [
 const taxonomy = defaultTaxonomy();
 
 const zones = [
-  { id: "zone_central", code: "davao_central", name: "Davao Central (Bajada / JP Laurel)", deliveryFeeMinor: 15000, active: true },
-  { id: "zone_south", code: "davao_south", name: "Davao South (Matina)", deliveryFeeMinor: 10000, active: true },
-  { id: "zone_north", code: "davao_north", name: "Davao North (Lanang)", deliveryFeeMinor: 15000, active: true },
-  { id: "zone_west", code: "davao_west", name: "Davao West (Toril side)", deliveryFeeMinor: 20000, active: true },
-  { id: "zone_east", code: "davao_east", name: "Davao East (Buhangin / Sasa)", deliveryFeeMinor: 18000, active: true },
+  { id: "zone_central", code: "davao_central", name: "Davao Central (Bajada / JP Laurel)", active: true },
+  { id: "zone_south", code: "davao_south", name: "Davao South (Matina)", active: true },
+  { id: "zone_north", code: "davao_north", name: "Davao North (Lanang)", active: true },
+  { id: "zone_west", code: "davao_west", name: "Davao West (Toril side)", active: true },
+  { id: "zone_east", code: "davao_east", name: "Davao East (Buhangin / Sasa)", active: true },
 ];
 
 const supplierServices = [
@@ -179,13 +186,63 @@ const pickupSupplier = {
   label: supplierShop.label,
 };
 
+const settings = defaultOperationalSettings();
+const dropoffs = {
+  ord_demo_1: dropoffFor("JP Laurel Ave, Bajada, Davao City", "davao_central"),
+  ord_demo_2: dropoffFor("Matina Crossing, Davao City", "davao_south"),
+  ord_demo_issue: dropoffFor("Lanang, Davao City", "davao_north"),
+  ord_demo_claim: dropoffFor("Buhangin, Davao City", "davao_east"),
+};
+const prices = {
+  ord_demo_1: calculateFinalPrice({ supplierPriceMinor: 100_000, pickup: pickupSupplier, dropoff: dropoffs.ord_demo_1, settings }),
+  ord_demo_2: calculateFinalPrice({ supplierPriceMinor: 70_000, pickup: pickupSupplier, dropoff: dropoffs.ord_demo_2, settings }),
+  ord_demo_issue: calculateFinalPrice({ supplierPriceMinor: 50_000, pickup: pickupSupplier, dropoff: dropoffs.ord_demo_issue, settings }),
+  ord_demo_claim: calculateFinalPrice({ supplierPriceMinor: 60_000, pickup: pickupSupplier, dropoff: dropoffs.ord_demo_claim, settings }),
+};
+
+function installment(amountMinor, status, reference) {
+  const confirmed = status === "confirmed";
+  return {
+    amountMinor,
+    method: "qr_manual",
+    status,
+    reference: reference || null,
+    submittedAt: confirmed ? t : null,
+    confirmedAt: confirmed ? t : null,
+    confirmedBy: confirmed ? "user_ops" : null,
+    confirmationSource: confirmed ? "manual_ops" : null,
+  };
+}
+
+function paymentsFor(price, { downpayment = "not_submitted", balance = "not_submitted", key }) {
+  return {
+    downpayment: installment(price.downpaymentMinor, downpayment, downpayment === "confirmed" ? `GCASH-DEMO-${key}-75` : null),
+    balance: installment(price.balanceMinor, balance, balance === "confirmed" ? `GCASH-DEMO-${key}-25` : null),
+  };
+}
+
+function milestonesFor(supplierPriceMinor, evidenceByCode = {}, releasedCodes = []) {
+  const released = new Set(releasedCodes);
+  return createPayoutMilestones(supplierPriceMinor).map((milestone) => {
+    const pofFileIds = evidenceByCode[milestone.code] || [];
+    if (released.has(milestone.code)) {
+      return { ...milestone, status: "released", pofFileIds, releasedAt: t, releasedBy: "user_ops" };
+    }
+    if (pofFileIds.length) return { ...milestone, status: "pof_attached", pofFileIds };
+    return milestone;
+  });
+}
+
+const passedPickupChecks = PICKUP_CHECK_CODES.map((code) => ({ code, passed: true }));
+const failedPickupChecks = PICKUP_CHECK_CODES.map((code) => ({ code, passed: code !== "visible_defects" }));
+
 const orders = [
   {
     id: "ord_demo_1",
     clientId: "user_client",
     supplierId: "user_supplier",
     riderId: null,
-    state: "supplier_assigned",
+    state: "awaiting_downpayment",
     productId: "prod_tarpaulin",
     title: "Grand opening tarpaulin 3x6",
     quantity: 1,
@@ -196,28 +253,41 @@ const orders = [
     address: "JP Laurel Ave, Bajada, Davao City",
     zone: "davao_central",
     pickup: pickupSupplier,
-    dropoff: dropoffFor("JP Laurel Ave, Bajada, Davao City", "davao_central"),
-    totalMinor: 120000,
-    deliveryFeeMinor: 15000,
-    paymentMethod: null,
+    dropoff: dropoffs.ord_demo_1,
+    ...prices.ord_demo_1,
+    operationalModelVersion: 2,
+    priceRange: { subtotalMinMinor: prices.ord_demo_1.subtotalMinor, subtotalMaxMinor: prices.ord_demo_1.subtotalMinor, deliveryFeeStatus: "final" },
+    paymentMethod: "qr_manual",
     paymentStatus: "unpaid",
+    payments: paymentsFor(prices.ord_demo_1, { key: "ORDER1" }),
     payoutHold: false,
+    payoutMilestones: milestonesFor(prices.ord_demo_1.supplierPriceMinor),
+    assignmentNotificationId: "ntf_demo_assignment_ord_demo_1",
+    assignmentNotifiedAt: t,
     promisedDate: "2026-08-12T17:00:00+08:00",
     matchingServiceIds: ["svc_demo_tarpaulin"],
     artworkName: "opening-banner-final.pdf",
     artworkFileIds: [],
     proofFileIds: [],
+    fulfilmentProofFileIds: [],
     deliveryPhotoFileIds: [],
+    pickupChecklist: {
+      status: "not_started", checks: [], evidenceFileIds: [], failureNote: null,
+      completedAt: null, completedBy: null, escalationId: null, signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+    },
     createdAt: t,
     updatedAt: t,
-    timeline: [{ at: t, state: "submitted", by: "user_client", note: "Submitted for QA" }],
+    timeline: [
+      { at: t, state: "submitted", by: "user_client", note: "Submitted for QA" },
+      { at: t, state: "awaiting_downpayment", by: "user_supplier", note: "Supplier accepted at ₱1,000; final price sent to client" },
+    ],
   },
   {
     id: "ord_demo_2",
     clientId: "user_client",
     supplierId: "user_supplier",
     riderId: "user_rider",
-    state: "ready_for_dispatch",
+    state: "rider_assigned",
     productId: "prod_flyer",
     title: "School event flyers x500",
     quantity: 5,
@@ -228,21 +298,41 @@ const orders = [
     address: "Matina Crossing, Davao City",
     zone: "davao_south",
     pickup: pickupSupplier,
-    dropoff: dropoffFor("Matina Crossing, Davao City", "davao_south"),
-    totalMinor: 85000,
-    deliveryFeeMinor: 10000,
-    paymentMethod: "pilot_credit",
+    dropoff: dropoffs.ord_demo_2,
+    ...prices.ord_demo_2,
+    operationalModelVersion: 2,
+    priceRange: { subtotalMinMinor: prices.ord_demo_2.subtotalMinor, subtotalMaxMinor: prices.ord_demo_2.subtotalMinor, deliveryFeeStatus: "final" },
+    paymentMethod: "qr_manual",
     paymentStatus: "authorized",
+    payments: paymentsFor(prices.ord_demo_2, { downpayment: "confirmed", key: "ORDER2" }),
     payoutHold: false,
+    payoutMilestones: milestonesFor(prices.ord_demo_2.supplierPriceMinor),
+    assignmentNotificationId: "ntf_demo_assignment_ord_demo_2",
+    assignmentNotifiedAt: t,
     promisedDate: "2026-08-10T15:00:00+08:00",
     matchingServiceIds: ["svc_demo_print"],
     artworkName: "school-flyers.pdf",
     artworkFileIds: [],
     proofFileIds: [],
-    deliveryPhotoFileIds: [],
+    fulfilmentProofFileIds: [],
+    deliveryPhotoFileIds: ["file_demo_pickup_failure"],
+    pickupChecklist: {
+      status: "failed_escalated",
+      checks: failedPickupChecks,
+      evidenceFileIds: ["file_demo_pickup_failure"],
+      failureNote: "Colour shift found on the first flyer batch; transport is blocked pending Operations instruction.",
+      completedAt: t,
+      completedBy: "user_rider",
+      escalationId: "esc_demo_pickup_failure",
+      signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+    },
     createdAt: t,
     updatedAt: t,
-    timeline: [{ at: t, state: "ready_for_dispatch", by: "user_supplier", note: "Self-QC passed" }],
+    timeline: [
+      { at: t, state: "ready_for_dispatch", by: "user_supplier", note: "Self-QC passed" },
+      { at: t, state: "rider_assigned", by: "user_rider", note: "Rider accepted" },
+      { at: t, state: "rider_assigned", by: "user_rider", note: "Pickup blocked and escalated: visible_defects", escalationId: "esc_demo_pickup_failure" },
+    ],
   },
   {
     id: "ord_demo_issue",
@@ -260,18 +350,40 @@ const orders = [
     address: "Lanang, Davao City",
     zone: "davao_north",
     pickup: pickupSupplier,
-    dropoff: dropoffFor("Lanang, Davao City", "davao_north"),
-    totalMinor: 60000,
-    deliveryFeeMinor: 15000,
-    paymentMethod: "pilot_credit",
-    paymentStatus: "authorized",
+    dropoff: dropoffs.ord_demo_issue,
+    ...prices.ord_demo_issue,
+    operationalModelVersion: 2,
+    priceRange: { subtotalMinMinor: prices.ord_demo_issue.subtotalMinor, subtotalMaxMinor: prices.ord_demo_issue.subtotalMinor, deliveryFeeStatus: "final" },
+    paymentMethod: "qr_manual",
+    paymentStatus: "paid",
+    payments: paymentsFor(prices.ord_demo_issue, { downpayment: "confirmed", balance: "confirmed", key: "ISSUE" }),
     payoutHold: true,
+    payoutMilestones: milestonesFor(
+      prices.ord_demo_issue.supplierPriceMinor,
+      {
+        printing: ["file_demo_issue_printing_pof"],
+        packaging_qc: ["file_demo_issue_packaging_pof"],
+        delivered: ["file_demo_issue_delivered_pof"],
+        retention: ["file_demo_issue_delivered_pof"],
+      },
+      ["printing", "packaging_qc", "delivered"],
+    ),
+    assignmentNotificationId: "ntf_demo_assignment_ord_demo_issue",
+    assignmentNotifiedAt: t,
     promisedDate: "2026-08-08T18:00:00+08:00",
     matchingServiceIds: ["svc_demo_print"],
     artworkName: "event-stickers.pdf",
     artworkFileIds: [],
     proofFileIds: [],
-    deliveryPhotoFileIds: [],
+    fulfilmentProofFileIds: ["file_demo_issue_printing_pof", "file_demo_issue_packaging_pof", "file_demo_issue_delivered_pof"],
+    deliveryPhotoFileIds: ["file_demo_issue_delivery"],
+    pickupChecklist: {
+      status: "passed", checks: passedPickupChecks, evidenceFileIds: [], failureNote: null,
+      completedAt: t, completedBy: "user_rider", escalationId: null, signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+    },
+    deliveryEvidence: { fileId: "file_demo_issue_delivery", evidenceType: "photo", riderId: "user_rider", recordedAt: t },
+    issueWindowOpenedAt: t,
+    issueWindowExpiresAt: new Date(new Date(t).getTime() + settings.issueWindowHours * 60 * 60 * 1000).toISOString(),
     createdAt: t,
     updatedAt: t,
     timeline: [
@@ -296,18 +408,40 @@ const orders = [
     address: "Buhangin, Davao City",
     zone: "davao_east",
     pickup: pickupSupplier,
-    dropoff: dropoffFor("Buhangin, Davao City", "davao_east"),
-    totalMinor: 70000,
-    deliveryFeeMinor: 18000,
-    paymentMethod: "pilot_credit",
-    paymentStatus: "collected",
+    dropoff: dropoffs.ord_demo_claim,
+    ...prices.ord_demo_claim,
+    operationalModelVersion: 2,
+    priceRange: { subtotalMinMinor: prices.ord_demo_claim.subtotalMinor, subtotalMaxMinor: prices.ord_demo_claim.subtotalMinor, deliveryFeeStatus: "final" },
+    paymentMethod: "qr_manual",
+    paymentStatus: "paid",
+    payments: paymentsFor(prices.ord_demo_claim, { downpayment: "confirmed", balance: "confirmed", key: "CLAIM" }),
     payoutHold: true,
+    payoutMilestones: milestonesFor(
+      prices.ord_demo_claim.supplierPriceMinor,
+      {
+        printing: ["file_demo_claim_printing_pof"],
+        packaging_qc: ["file_demo_claim_packaging_pof"],
+        delivered: ["file_demo_claim_delivered_pof"],
+        retention: ["file_demo_claim_delivered_pof"],
+      },
+      ["printing", "packaging_qc", "delivered", "retention"],
+    ),
+    assignmentNotificationId: "ntf_demo_assignment_ord_demo_claim",
+    assignmentNotifiedAt: t,
     promisedDate: "2026-08-05T16:00:00+08:00",
     matchingServiceIds: ["svc_demo_print"],
     artworkName: "biz-cards.pdf",
     artworkFileIds: [],
     proofFileIds: [],
-    deliveryPhotoFileIds: [],
+    fulfilmentProofFileIds: ["file_demo_claim_printing_pof", "file_demo_claim_packaging_pof", "file_demo_claim_delivered_pof"],
+    deliveryPhotoFileIds: ["file_demo_claim_delivery"],
+    pickupChecklist: {
+      status: "passed", checks: passedPickupChecks, evidenceFileIds: [], failureNote: null,
+      completedAt: t, completedBy: "user_rider", escalationId: null, signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+    },
+    deliveryEvidence: { fileId: "file_demo_claim_delivery", evidenceType: "photo", riderId: "user_rider", recordedAt: t },
+    issueWindowOpenedAt: "2026-08-04T08:00:00.000Z",
+    issueWindowExpiresAt: "2026-08-05T08:00:00.000Z",
     createdAt: t,
     updatedAt: t,
     timeline: [
@@ -422,6 +556,95 @@ const auditLog = [
     detail: { kind: "material_quality", claimId: "clm_demo_issue" },
     reason: "Edges peeling on vinyl stickers — adhesive failed on outdoor sample",
   },
+  {
+    id: id("aud"),
+    at: t,
+    actorId: "user_rider",
+    actorRole: "rider",
+    action: "pickup_checklist.escalate",
+    entityType: "escalation",
+    entityId: "esc_demo_pickup_failure",
+    orderId: "ord_demo_2",
+    detail: { failedCheckCodes: ["visible_defects"], evidenceFileIds: ["file_demo_pickup_failure"] },
+    reason: "Colour shift found on the first flyer batch; transport is blocked pending Operations instruction.",
+  },
+];
+
+function seededOrderFile({ fileId, orderId, ownerId, purpose, originalFilename, milestoneCode = null }) {
+  const field = purpose === "fulfilment_proof" ? "fulfilmentProofFileIds" : "deliveryPhotoFileIds";
+  return {
+    fileId,
+    ownerId,
+    purpose,
+    originalFilename,
+    declaredContentType: "image/jpeg",
+    detectedContentType: "image/jpeg",
+    size: 128_000,
+    state: "ready",
+    objectKey: `${purpose}/seed/${orderId}/${originalFilename}`,
+    references: [{ type: "order", id: orderId, field, ...(milestoneCode ? { milestoneCode } : {}) }],
+    createdAt: t,
+    readyAt: t,
+    deleteRequestedAt: null,
+    deletedAt: null,
+  };
+}
+
+const files = [
+  seededOrderFile({
+    fileId: "file_demo_pickup_failure", orderId: "ord_demo_2", ownerId: "user_rider",
+    purpose: "delivery_photo", originalFilename: "flyer-colour-shift.jpg",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_issue_printing_pof", orderId: "ord_demo_issue", ownerId: "user_supplier",
+    purpose: "fulfilment_proof", originalFilename: "stickers-printing-pof.jpg", milestoneCode: "printing",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_issue_packaging_pof", orderId: "ord_demo_issue", ownerId: "user_supplier",
+    purpose: "fulfilment_proof", originalFilename: "stickers-packaging-pof.jpg", milestoneCode: "packaging_qc",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_issue_delivered_pof", orderId: "ord_demo_issue", ownerId: "user_rider",
+    purpose: "fulfilment_proof", originalFilename: "stickers-delivered-pof.jpg", milestoneCode: "delivered",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_issue_delivery", orderId: "ord_demo_issue", ownerId: "user_rider",
+    purpose: "delivery_photo", originalFilename: "stickers-delivery.jpg",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_claim_printing_pof", orderId: "ord_demo_claim", ownerId: "user_supplier",
+    purpose: "fulfilment_proof", originalFilename: "cards-printing-pof.jpg", milestoneCode: "printing",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_claim_packaging_pof", orderId: "ord_demo_claim", ownerId: "user_supplier",
+    purpose: "fulfilment_proof", originalFilename: "cards-packaging-pof.jpg", milestoneCode: "packaging_qc",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_claim_delivered_pof", orderId: "ord_demo_claim", ownerId: "user_rider",
+    purpose: "fulfilment_proof", originalFilename: "cards-delivered-pof.jpg", milestoneCode: "delivered",
+  }),
+  seededOrderFile({
+    fileId: "file_demo_claim_delivery", orderId: "ord_demo_claim", ownerId: "user_rider",
+    purpose: "delivery_photo", originalFilename: "cards-delivery.jpg",
+  }),
+];
+
+const escalations = [
+  {
+    id: "esc_demo_pickup_failure",
+    type: "pickup_check_failed",
+    status: "open",
+    orderId: "ord_demo_2",
+    riderId: "user_rider",
+    supplierId: "user_supplier",
+    failedCheckCodes: ["visible_defects"],
+    evidenceFileIds: ["file_demo_pickup_failure"],
+    failureNote: "Colour shift found on the first flyer batch; transport is blocked pending Operations instruction.",
+    createdAt: t,
+    resolvedAt: null,
+    resolvedBy: null,
+    resolution: null,
+  },
 ];
 
 const store = {
@@ -430,10 +653,11 @@ const store = {
   sessions: {},
   catalog,
   taxonomy,
+  settings,
   zones,
   supplierServices,
   orders,
-  files: [],
+  files,
   credits: {
     user_client: {
       balanceMinor: 500000,
@@ -455,20 +679,29 @@ const store = {
   issues,
   auditLog,
   notifications: [
-    { id: id("ntf"), userId: "user_supplier", title: "New assignment", body: "Grand opening tarpaulin 3x6 awaits accept/decline", read: false, at: t },
+    { id: "ntf_demo_assignment_ord_demo_1", userId: "user_client", type: "supplier_assignment_final_price", orderId: "ord_demo_1", title: "Supplier assigned and final price ready", body: "A supplier accepted your order. Review the final price and submit the digital downpayment.", read: false, at: t },
+    { id: "ntf_demo_assignment_ord_demo_2", userId: "user_client", type: "supplier_assignment_final_price", orderId: "ord_demo_2", title: "Supplier assigned and final price ready", body: "A supplier accepted your order. Review the final price and submit the digital downpayment.", read: true, at: t },
+    { id: "ntf_demo_assignment_ord_demo_issue", userId: "user_client", type: "supplier_assignment_final_price", orderId: "ord_demo_issue", title: "Supplier assigned and final price ready", body: "A supplier accepted your order. Review the final price and submit the digital downpayment.", read: true, at: t },
+    { id: "ntf_demo_assignment_ord_demo_claim", userId: "user_client", type: "supplier_assignment_final_price", orderId: "ord_demo_claim", title: "Supplier assigned and final price ready", body: "A supplier accepted your order. Review the final price and submit the digital downpayment.", read: true, at: t },
     { id: id("ntf"), userId: "user_rider", title: "Dispatch available", body: "School event flyers ready for pickup", read: false, at: t },
     { id: id("ntf"), userId: "user_client", title: "QA update", body: "Your tarpaulin request is with a supplier", read: false, at: t },
     { id: id("ntf"), userId: "user_ops", title: "Issue reported", body: "Client reported material issue on event stickers", read: false, at: t },
     { id: id("ntf"), userId: "user_ops", title: "Payout hold", body: "Payment claim held on business cards order", read: false, at: t },
+    { id: id("ntf"), userId: "user_ops", type: "pickup_check_escalation", orderId: "ord_demo_2", title: "Pickup blocked by a failed quality check", body: "Colour shift found on the first flyer batch. The rider is waiting for Operations instruction.", read: false, at: t },
+    { id: id("ntf"), userId: "user_admin", type: "pickup_check_escalation", orderId: "ord_demo_2", title: "Pickup blocked by a failed quality check", body: "Colour shift found on the first flyer batch. The rider is waiting for Operations instruction.", read: false, at: t },
   ],
   locationPings: [],
+  escalations,
   proofs: [],
 };
 
-// Fresh fixtures use the same v2 defaults and order migration logic as existing stores.
-backfillOperationalModel(store, t);
+// A fresh seed is native v2 data. Any mutation here means a fixture drifted back
+// into a legacy shape and should fail reset loudly instead of hiding the mismatch.
+if (backfillOperationalModel(store, t)) {
+  throw new Error("fresh seed required operational-model backfill");
+}
 
-fs.mkdirSync(dataDir, { recursive: true });
+fs.mkdirSync(path.dirname(storePath), { recursive: true });
 if (!reset && fs.existsSync(storePath)) {
   console.log("store already exists; pass --reset to overwrite");
   process.exit(0);
@@ -476,3 +709,13 @@ if (!reset && fs.existsSync(storePath)) {
 fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
 console.log(`wrote ${storePath}`);
 console.log("demo logins: *@gridgo.local / demo");
+const ordersByState = Object.fromEntries(
+  [...new Set(store.orders.map((order) => order.state))]
+    .sort()
+    .map((state) => [state, store.orders.filter((order) => order.state === state).length]),
+);
+const pofBackedOrders = store.orders
+  .filter((order) => order.payoutMilestones.some((milestone) => milestone.status === "released" && milestone.pofFileIds.length))
+  .map((order) => order.id);
+console.log(`orders by state: ${Object.entries(ordersByState).map(([state, count]) => `${state}=${count}`).join(", ")}`);
+console.log(`seed evidence: POF-backed releases=${pofBackedOrders.join(", ")}; failed pickup escalations=${store.escalations.map((item) => item.id).join(", ")}`);

@@ -178,7 +178,7 @@ Verification statuses: `unverified` | `pending` | `approved` | `suspended` | `re
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
-| GET | `/zones` | any auth | delivery zones + `deliveryFeeMinor` |
+| GET | `/zones` | any auth | legacy address-zone records (no pricing) |
 | POST | `/zones` | super_admin | create zone |
 | PATCH | `/zones/:id` | super_admin | update zone (id or code) |
 

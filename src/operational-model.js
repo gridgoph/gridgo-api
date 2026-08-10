@@ -464,6 +464,12 @@ export function backfillOperationalModel(store, at = new Date().toISOString()) {
     store.escalations = [];
     changed = true;
   }
+  for (const zone of store.zones || []) {
+    if (Object.hasOwn(zone, "deliveryFeeMinor")) {
+      delete zone.deliveryFeeMinor;
+      changed = true;
+    }
+  }
 
   for (const order of store.orders || []) {
     const originalState = order.state;

@@ -50,6 +50,10 @@ export const DEMO_USERS = [
     role: "supplier",
     supplierName: "PrintRight Davao",
     shop: DEMO_SUPPLIER_SHOP,
+    categoryRanks: [
+      { categoryCode: "marketing_collateral", rank: 1 },
+      { categoryCode: "corporate_event_merch", rank: 2 },
+    ],
     verificationStatus: "approved",
     verificationNote: "Pilot accredited",
     verifiedBy: "user_admin",

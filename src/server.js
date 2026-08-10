@@ -304,11 +304,11 @@ function setOrderPickup(order, store) {
 
 function defaultZones() {
   return [
-    { id: "zone_central", code: "davao_central", name: "Davao Central (Bajada / JP Laurel)", deliveryFeeMinor: 15000, active: true },
-    { id: "zone_south", code: "davao_south", name: "Davao South (Matina)", deliveryFeeMinor: 10000, active: true },
-    { id: "zone_north", code: "davao_north", name: "Davao North (Lanang)", deliveryFeeMinor: 15000, active: true },
-    { id: "zone_west", code: "davao_west", name: "Davao West (Toril side)", deliveryFeeMinor: 20000, active: true },
-    { id: "zone_east", code: "davao_east", name: "Davao East (Buhangin / Sasa)", deliveryFeeMinor: 18000, active: true },
+    { id: "zone_central", code: "davao_central", name: "Davao Central (Bajada / JP Laurel)", active: true },
+    { id: "zone_south", code: "davao_south", name: "Davao South (Matina)", active: true },
+    { id: "zone_north", code: "davao_north", name: "Davao North (Lanang)", active: true },
+    { id: "zone_west", code: "davao_west", name: "Davao West (Toril side)", active: true },
+    { id: "zone_east", code: "davao_east", name: "Davao East (Buhangin / Sasa)", active: true },
   ];
 }
 
@@ -493,7 +493,6 @@ function backfillPlatform(store) {
     store.zones = defaultZones();
     changed = true;
   }
-
   if (!Array.isArray(store.supplierServices)) {
     store.supplierServices = [];
     changed = true;
@@ -1471,7 +1470,6 @@ async function handleRequest(req, res) {
         id: id("zone"),
         code: String(body.code),
         name: String(body.name),
-        deliveryFeeMinor: Number(body.deliveryFeeMinor ?? 15000),
         active: body.active !== false,
       };
       store.zones.push(zone);
@@ -1487,7 +1485,6 @@ async function handleRequest(req, res) {
       if (!zone) return send(res, 404, { error: "zone_not_found" });
       const body = await readBody(req);
       if (body.name != null) zone.name = String(body.name);
-      if (body.deliveryFeeMinor != null) zone.deliveryFeeMinor = Number(body.deliveryFeeMinor);
       if (body.active != null) zone.active = Boolean(body.active);
       // code is stable identity for orders; allow rename only if unused, else ignore code change
       if (body.code != null && body.code !== zone.code) {
