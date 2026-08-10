@@ -38,6 +38,7 @@ import {
   defaultOperationalSettings,
   estimatePriceRange,
   publicOrderFor,
+  releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
 
@@ -2109,8 +2110,17 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       if (order.clientId !== user.id) return send(res, 403, { error: "forbidden" });
-      if (order.state !== "issue_window_open") {
-        return send(res, 409, { error: "issue_window_closed", state: order.state });
+      if (
+        order.state !== "issue_window_open" ||
+        !order.issueWindowExpiresAt ||
+        new Date(order.issueWindowExpiresAt).getTime() <= Date.now()
+      ) {
+        return send(res, 409, {
+          error: "issue_window_closed",
+          message: "The issue-reporting window has ended. Contact Operations if this order still needs review.",
+          state: order.state,
+          issueWindowExpiresAt: order.issueWindowExpiresAt || null,
+        });
       }
       const body = await readBody(req);
       if (!body.description && !body.reason) {
@@ -2267,6 +2277,38 @@ async function handleRequest(req, res) {
       if (action) list = list.filter((e) => e.action === action);
       list = [...list].sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, limit);
       return send(res, 200, { audit: list });
+    }
+
+    // ---- supplier payout milestones ----
+    if (req.method === "POST" && /^\/orders\/[^/]+\/milestones\/[^/]+\/release$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const milestoneCode = parts[4];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const body = await readBody(req);
+      const releasedAt = now();
+      const milestone = releaseMilestone(order, milestoneCode, user, releasedAt, store);
+      order.updatedAt = releasedAt;
+      order.timeline.push({
+        at: releasedAt,
+        state: order.state,
+        by: user.id,
+        note: `${milestoneCode} supplier payout milestone released`,
+        milestoneCode,
+      });
+      audit(store, {
+        actor: user,
+        action: "payout_milestone.release",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { milestoneCode, amountMinor: milestone.amountMinor },
+        reason: body.note || null,
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user), milestone });
     }
 
     // ---- manual QR installment payments ----
@@ -2529,6 +2571,14 @@ async function handleRequest(req, res) {
             error: "payout_held",
             claimId: hold?.id || null,
             reason: hold?.holdReason || "payout hold active",
+          });
+        }
+        const unreleased = (order.payoutMilestones || []).filter((milestone) => milestone.status !== "released");
+        if (unreleased.length) {
+          return send(res, 409, {
+            error: "milestones_not_released",
+            message: "Release every Proof-of-Fulfilment-gated milestone before closing the supplier payout.",
+            milestoneCodes: unreleased.map((milestone) => milestone.code),
           });
         }
       }

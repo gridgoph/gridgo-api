@@ -480,3 +480,74 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
   assert.equal(riderCashPath.status, 400);
   assert.equal(riderCashPath.body.error, "payment_method_not_allowed");
 });
+
+test("milestone release requires POF and the global issue window actually expires", async () => {
+  const clientToken = await login("existing@example.test", "secret123");
+  const opsToken = await login("ops@gridgo.local");
+
+  const withoutPof = await request("/orders/ord-match/milestones/printing/release", {
+    method: "POST",
+    token: opsToken,
+    body: { note: "Printing verified" },
+  });
+  assert.equal(withoutPof.status, 409);
+  assert.equal(withoutPof.body.error, "pof_required");
+
+  const store = JSON.parse(await fs.readFile(storePath, "utf8"));
+  const paidOrder = store.orders.find((order) => order.id === "ord-match");
+  const printing = paidOrder.payoutMilestones.find((milestone) => milestone.code === "printing");
+  printing.pofFileIds.push("file-printing-test");
+  printing.status = "pof_attached";
+  await fs.writeFile(storePath, JSON.stringify(store, null, 2));
+
+  const released = await request("/orders/ord-match/milestones/printing/release", {
+    method: "POST",
+    token: opsToken,
+    body: { note: "Printing POF reviewed" },
+  });
+  assert.equal(released.status, 200, JSON.stringify(released.body));
+  assert.equal(
+    released.body.order.payoutMilestones.find((milestone) => milestone.code === "printing").status,
+    "released",
+  );
+
+  const afterRelease = JSON.parse(await fs.readFile(storePath, "utf8"));
+  const source = afterRelease.orders.find((order) => order.id === "ord-match");
+  const expired = structuredClone(source);
+  expired.id = "ord-expired-window";
+  expired.state = "issue_window_open";
+  expired.issueWindowOpenedAt = "2026-08-01T00:00:00.000Z";
+  expired.issueWindowExpiresAt = "2026-08-02T00:00:00.000Z";
+  expired.payoutHold = false;
+  expired.timeline = [];
+  for (const milestone of expired.payoutMilestones) {
+    milestone.pofFileIds = milestone.pofFileIds.length ? milestone.pofFileIds : ["file-delivered-test"];
+    if (milestone.code !== "retention") {
+      milestone.status = "released";
+      milestone.releasedAt = "2026-08-01T00:00:00.000Z";
+      milestone.releasedBy = "user_ops";
+    } else {
+      milestone.status = "pof_attached";
+      milestone.releasedAt = null;
+      milestone.releasedBy = null;
+    }
+  }
+  afterRelease.orders.push(expired);
+  await fs.writeFile(storePath, JSON.stringify(afterRelease, null, 2));
+
+  const expiredRead = await request("/orders/ord-expired-window", { token: clientToken });
+  assert.equal(expiredRead.status, 200, JSON.stringify(expiredRead.body));
+  assert.equal(expiredRead.body.order.state, "completed");
+  assert.equal(
+    expiredRead.body.order.payoutMilestones.find((milestone) => milestone.code === "retention").status,
+    "released",
+  );
+
+  const lateIssue = await request("/orders/ord-expired-window/issues", {
+    method: "POST",
+    token: clientToken,
+    body: { description: "Submitted after the deadline" },
+  });
+  assert.equal(lateIssue.status, 409);
+  assert.equal(lateIssue.body.error, "issue_window_closed");
+});
