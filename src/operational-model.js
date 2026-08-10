@@ -1,5 +1,6 @@
 const COMMISSION_RATE_PERCENT = 10;
 const DOWNPAYMENT_PERCENT = 75;
+const LEGACY_COD_METHODS = new Set(["cod", "cash", "cash_on_delivery"]);
 
 export const PICKUP_CHECK_CODES = Object.freeze([
   "quantity_match",
@@ -226,6 +227,37 @@ export function releaseMilestone(order, code, actor, at, store = null) {
       { milestoneCode: code },
     );
   }
+  const printingStates = new Set([
+    "production",
+    "supplier_self_qc",
+    "ready_for_dispatch",
+    "rider_assigned",
+    "picked_up",
+    "out_for_delivery",
+    "delivered",
+    "issue_window_open",
+    "completed",
+    "payout_released",
+  ]);
+  const packagingStates = new Set([
+    "supplier_self_qc",
+    "ready_for_dispatch",
+    "rider_assigned",
+    "picked_up",
+    "out_for_delivery",
+    "delivered",
+    "issue_window_open",
+    "completed",
+    "payout_released",
+  ]);
+  if ((code === "printing" && !printingStates.has(order.state)) || (code === "packaging_qc" && !packagingStates.has(order.state))) {
+    fail(
+      409,
+      "milestone_not_reached",
+      "Move the order to this production milestone before releasing its supplier payout.",
+      { milestoneCode: code, state: order.state },
+    );
+  }
   if (code === "delivered") {
     if (!["issue_window_open", "completed", "payout_released"].includes(order.state)) {
       fail(409, "delivery_required", "Record delivery before releasing the delivered milestone.");
@@ -253,6 +285,7 @@ export function publicOrderFor(order, user) {
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
+  const owningClient = user?.role === "client" && order.clientId === user.id;
   if (!ops) {
     delete publicRecord.commissionMinor;
     delete publicRecord.commissionRatePercent;
@@ -264,6 +297,14 @@ export function publicOrderFor(order, user) {
         const { amountMinor: _amountMinor, ...visible } = milestone;
         return visible;
       });
+    }
+  }
+  if (!ops && !owningClient && publicRecord.payments) {
+    for (const installment of Object.values(publicRecord.payments)) {
+      if (!installment || typeof installment !== "object") continue;
+      delete installment.reference;
+      delete installment.submittedBy;
+      delete installment.confirmedBy;
     }
   }
   return publicRecord;
@@ -373,8 +414,9 @@ function legacyMilestoneProgress(order) {
   const state = order.state;
   if (["production"].includes(state)) return 0;
   if (["supplier_self_qc", "ready_for_dispatch", "rider_assigned"].includes(state)) return 1;
-  if (["picked_up", "out_for_delivery"].includes(state)) return 2;
-  if (DELIVERED_STATES.has(state)) return 3;
+  if (["picked_up", "out_for_delivery"].includes(state)) return 1;
+  if (["delivered", "issue_window_open"].includes(state)) return 2;
+  if (["completed", "payout_released"].includes(state)) return 3;
   return -1;
 }
 
@@ -488,7 +530,7 @@ export function backfillOperationalModel(store, at = new Date().toISOString()) {
       delete order.codEligible;
       changed = true;
     }
-    if (order.paymentMethod === "cod") {
+    if (LEGACY_COD_METHODS.has(String(order.paymentMethod || "").trim().toLowerCase())) {
       order.paymentMethod = "digital_manual_legacy";
       changed = true;
     }

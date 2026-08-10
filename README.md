@@ -2,6 +2,8 @@
 
 **Local demo backend for every GRIDGO app** (client, supplier, rider, ops, super admin).
 
+Operational model v2 is implemented. The rebuild contract for every app is [`docs/OPERATIONAL_MODEL_V2_API.md`](docs/OPERATIONAL_MODEL_V2_API.md); it supersedes older order/payment prose below wherever they differ.
+
 Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. Domain records use the JSON store; private files use local MinIO. Swap later by keeping the same route contracts and pointing the apps at a real backend.
 
 ## Quick start
@@ -53,13 +55,14 @@ Client users expose an explicit, authoritative `accountType` on every public use
 |---|---|
 | `"individual"` | plain **GRIDGO** mark |
 | `"business"` | **GRIDGO Business** lockup |
+| `"organization"` | organization account (Business lockup unless an app specification overrides it) |
 
-**Do not infer business-ness from `orgName`.** An individual may set an organisation label; a business may leave it blank. Apps must read `accountType` only.
+**Do not infer account type from `orgName`.** Apps must read `accountType` only. V2 signup requires `orgName` for business/organization accounts and accepts `personal` as an input alias for stored `individual`.
 
 | Decision | Choice | Why |
 |---|---|---|
 | Missing type on legacy clients | resolves to `"individual"` | Business branding is opt-in; never leave the field undefined for consumers |
-| Mutability this pilot | **seed / store only** (no write API) | Demo accounts are fixed; avoids a half-finished admin surface. Change fixture definitions for future fresh stores; never reset a live/demo store |
+| Mutability this pilot | self-signup only | No profile-edit endpoint yet; never reset a live/demo store |
 | Non-client roles | field **absent** | Same pattern as `orgName` / `shop` — suppliers and riders have no client account type |
 
 Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
@@ -78,7 +81,7 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 
 - **One API for all roles** — role from the session, not from which app calls it
 - **Money in PHP minor units** (centavos as integers)
-- **Pilot payments only** — Pilot Credits + COD ≤ ₱1,500; no live PayMongo
+- **Pilot payments only** — 75% QR downpayment + 25% QR balance, both manually confirmed by Operations; no COD/provider webhook
 - **Order state machine** matches the PRD (simplified transitions for demo)
 - **Platform-governed service taxonomy** — suppliers select codes; Super Admin owns codes
 - **Replaceable** — apps should only talk through `lib/api.ts`; swapping providers means a new server that honors the same routes
@@ -90,6 +93,7 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | Method | Path | Who | Purpose |
 |---|---|---|---|
 | POST | `/auth/login` | public | issue token |
+| POST | `/auth/signup` | public | client/supplier/rider self-signup |
 | GET | `/auth/me` | any | current user + role |
 | POST | `/auth/logout` | any | revoke token |
 
@@ -108,13 +112,15 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | GET | `/files/:id/download-url` | owner/parent-scoped | short-lived MinIO presigned GET |
 | DELETE | `/files/:id` | owner / ops, unreferenced only | durable two-phase deletion |
 | GET | `/credits/balance` | client (own) / ops / super | pilot credit balance + ledger |
-| POST | `/credits/authorize` | client | reserve/spend for order |
+| POST | `/credits/authorize` | any auth | retired (`410 payment_route_retired`) |
 | POST | `/credits/grant` | super_admin | grant Pilot Credits (not a purchase) |
 | GET | `/dispatch/offers` | rider / ops / super | open delivery offers |
 | POST | `/dispatch/:id/accept` | rider | accept job |
 | POST | `/dispatch/:id/location` | assigned rider | location ping (while in transit) |
 | GET | `/dispatch/:id/location` | rider / client / supplier / ops | latest ping or `{ ping: null }` |
-| POST | `/dispatch/:id/proof` | rider | pickup/delivery/COD proof |
+| POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | six checks; pass or evidence-backed escalation |
+| POST | `/dispatch/:id/delivery` | assigned rider | attached photo/signature evidence; confirmed digital balance required |
+| POST | `/dispatch/:id/proof` | any auth | retired (`410 dispatch_proof_route_retired`) |
 | GET | `/jobs` | supplier | assigned jobs alias |
 | GET | `/notifications` | any | in-app alerts |
 
@@ -168,7 +174,7 @@ Returns candidates with `eligible`, `reasons`, `matchingServiceIds`, and ranking
 
 Verification statuses: `unverified` | `pending` | `approved` | `suspended` | `rejected`. Suspending a supplier suspends their live services for new matching.
 
-### Zones & fees
+### Zones and v2 delivery fees
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
@@ -176,7 +182,7 @@ Verification statuses: `unverified` | `pending` | `approved` | `suspended` | `re
 | POST | `/zones` | super_admin | create zone |
 | PATCH | `/zones/:id` | super_admin | update zone (id or code) |
 
-Orders still store `zone` (code string) and `deliveryFeeMinor` snapshot. New orders default fee from the zone record when body omits it.
+Orders keep `zone` as a compatibility/address string. V2 ignores client/zone flat fees: supplier acceptance derives distance from `pickup` to `dropoff` and snapshots the configured band from `GET|PATCH /settings`.
 
 ### Claims & payout holds
 
@@ -190,7 +196,7 @@ Orders still store `zone` (code string) and `deliveryFeeMinor` snapshot. New ord
 
 `completed` → `payout_released` returns `409 { error: "payout_held" }` while an active hold exists.
 
-### Issue reports (24h window)
+### Issue reports (global configurable window)
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
@@ -199,7 +205,7 @@ Orders still store `zone` (code string) and `deliveryFeeMinor` snapshot. New ord
 | POST | `/orders/:id/issues` | client | report material issue while `issue_window_open` |
 | POST | `/issues/:id/resolve` | ops / super | resolve/dismiss; optional `releasePayout` |
 
-Client report auto-creates a `payout_held` claim. Order stays in `issue_window_open` (state machine unchanged).
+Client report auto-creates a `payout_held` claim. Without a hold, the order automatically completes when `issueWindowExpiresAt` elapses.
 
 ### Audit trail
 
@@ -222,7 +228,7 @@ Client report auto-creates a `payout_held` claim. Order stays in `issue_window_o
 
 `data/store.json` is gitignored. On every `load()`:
 
-1. **Backfill** migrates `taxonomy` onto the captain's category chart (adds `subcategories` + `categoryAliases`, retires pre-chart category codes, remaps material/finish `categoryCodes`) and adds missing `zones`, `supplierServices`, `claims`, `issues`, `auditLog`, supplier `verificationStatus`, geography fields, the top-level `files` registry, parent file-ID arrays, and client `accountType` (default `"individual"` only when missing/invalid) **without** wiping captain demo orders.
+1. **Backfill** migrates taxonomy/geography/files/platform structures and runs `backfillOperationalModel()` for v2 settings, order money, digital installments, milestones, checklist, retired-state/COD normalization, and issue-window expiry **without** wiping captain demo orders.
 2. **Fixture convergence** ensures seed demo accounts from `src/demo-fixtures.js` exist and match their defined identity fields (so a live store that predated `individual@gridgo.local` or still has `client@` as `individual` is fixed without `npm run reset`).
 
 Fixture convergence only mutates allowlisted demo users; orders, credits, proofs, claims, issues, sessions, and location pings stay byte-stable.
@@ -235,7 +241,7 @@ Fixture convergence only mutates allowlisted demo users; orders, credits, proofs
 | `data/store.json` | Supabase Postgres + RLS |
 | MinIO + API-controlled streamed uploads + short-lived signed GETs | Managed object storage honoring `docs/STORAGE_API.md` |
 | In-process transitions | Edge Functions + idempotency keys |
-| Simulated COD/credits | Pilot credits ledger + PayMongo adapter |
+| Manually confirmed QR installments | Provider adapter/webhook using the same installment records |
 
 Keep route shapes stable so mobile apps do not need a rewrite when you swap.
 

@@ -276,7 +276,7 @@ const orders = [
     updatedAt: t,
     timeline: [
       { at: t, state: "delivered", by: "user_rider", note: "Delivery proof" },
-      { at: t, state: "issue_window_open", by: "system", note: "24h issue window opened" },
+      { at: t, state: "issue_window_open", by: "system", note: "Issue window opened" },
       { at: t, state: "issue_window_open", by: "user_client", note: "Material issue reported: edges peeling" },
     ],
   },

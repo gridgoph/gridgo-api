@@ -64,6 +64,10 @@ test("client order projection cannot expose supplier price, commission, or miles
     subtotalMinor: 110_000,
     deliveryFeeMinor: 2_500,
     totalMinor: 112_500,
+    payments: {
+      downpayment: { amountMinor: 84_375, status: "confirmed", reference: "PRIVATE-GCASH-REFERENCE" },
+      balance: { amountMinor: 28_125, status: "not_submitted", reference: null },
+    },
     payoutMilestones: createPayoutMilestones(100_000),
   };
 
@@ -72,7 +76,8 @@ test("client order projection cannot expose supplier price, commission, or miles
   assert.equal(serialized.includes("supplierPriceMinor"), false);
   assert.equal(serialized.includes("commissionMinor"), false);
   assert.equal(serialized.includes("commissionRatePercent"), false);
-  assert.equal(serialized.includes("amountMinor"), false);
+  assert.equal(clientOrder.payoutMilestones.some((milestone) => "amountMinor" in milestone), false);
+  assert.equal(clientOrder.payments.downpayment.amountMinor, 84_375);
   assert.equal(clientOrder.subtotalMinor, 110_000);
   assert.equal(clientOrder.deliveryFeeMinor, 2_500);
   assert.equal(clientOrder.totalMinor, 112_500);
@@ -81,10 +86,14 @@ test("client order projection cannot expose supplier price, commission, or miles
   assert.equal(supplierOrder.supplierPriceMinor, 100_000);
   assert.equal("commissionMinor" in supplierOrder, false);
   assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 50_000);
+  assert.equal("reference" in supplierOrder.payments.downpayment, false);
+
+  assert.equal(clientOrder.payments.downpayment.reference, "PRIVATE-GCASH-REFERENCE");
 
   const opsOrder = publicOrderFor(order, { id: "ops-a", role: "ops_admin" });
   assert.equal(opsOrder.supplierPriceMinor, 100_000);
   assert.equal(opsOrder.commissionMinor, 10_000);
+  assert.equal(opsOrder.payments.downpayment.reference, "PRIVATE-GCASH-REFERENCE");
 });
 
 test("milestone shares sum exactly to supplier earnings and release is gated on POF", () => {
@@ -100,13 +109,19 @@ test("milestone shares sum exactly to supplier earnings and release is gated on 
   );
   assert.equal(milestones.reduce((sum, item) => sum + item.amountMinor, 0), 100_001);
 
-  const order = { id: "ord-a", payoutHold: false, payoutMilestones: milestones };
+  const order = { id: "ord-a", state: "production", payoutHold: false, payoutMilestones: milestones };
   expectDomainError(() => releaseMilestone(order, "printing", { id: "ops-a", role: "ops_admin" }, AT), 409, "pof_required");
   milestones[0].pofFileIds.push("file-printing");
   const released = releaseMilestone(order, "printing", { id: "ops-a", role: "ops_admin" }, AT);
   assert.equal(released.status, "released");
   assert.equal(released.releasedAt, AT);
   assert.equal(released.releasedBy, "ops-a");
+  milestones[1].pofFileIds.push("file-packaging");
+  expectDomainError(
+    () => releaseMilestone(order, "packaging_qc", { id: "ops-a", role: "ops_admin" }, AT),
+    409,
+    "milestone_not_reached",
+  );
 });
 
 test("elapsed global issue window completes the order and releases retained earnings", () => {
@@ -160,7 +175,7 @@ test("v2 backfill migrates supplier proof and COD coherently and is byte-idempot
         state: "supplier_proof_review",
         totalMinor: 110_000,
         deliveryFeeMinor: 2_500,
-        paymentMethod: "cod",
+        paymentMethod: "COD",
         paymentStatus: "authorized",
         proofFileIds: ["legacy-proof"],
         timeline: [],
@@ -186,4 +201,32 @@ test("v2 backfill migrates supplier proof and COD coherently and is byte-idempot
   const afterFirst = JSON.stringify(store);
   assert.equal(backfillOperationalModel(store, AT), false);
   assert.equal(JSON.stringify(store), afterFirst);
+});
+
+test("legacy issue-window migration never releases retention before the window expires", () => {
+  const store = {
+    users: [],
+    notifications: [],
+    claims: [{ id: "claim-a", orderId: "ord-window", status: "payout_held" }],
+    orders: [
+      {
+        id: "ord-window",
+        clientId: "client-a",
+        supplierId: "supplier-a",
+        state: "issue_window_open",
+        totalMinor: 110_000,
+        deliveryFeeMinor: 2_500,
+        payoutHold: true,
+        timeline: [{ at: "2026-08-10T11:00:00.000Z", state: "issue_window_open", by: "system", note: "legacy" }],
+        createdAt: "2026-08-09T00:00:00.000Z",
+        updatedAt: "2026-08-10T11:00:00.000Z",
+      },
+    ],
+  };
+
+  backfillOperationalModel(store, AT);
+  const delivered = store.orders[0].payoutMilestones.find((item) => item.code === "delivered");
+  const retention = store.orders[0].payoutMilestones.find((item) => item.code === "retention");
+  assert.equal(delivered.status, "released");
+  assert.equal(retention.status, "pending_pof");
 });

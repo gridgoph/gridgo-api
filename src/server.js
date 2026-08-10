@@ -900,10 +900,7 @@ const TRANSITIONS = {
   picked_up: { out_for_delivery: ["rider"] },
   out_for_delivery: {},
   delivered: { issue_window_open: ["system", "ops_admin", "super_admin", "client", "rider"] },
-  issue_window_open: {
-    completed: ["ops_admin", "super_admin", "system"],
-    // issue path simplified
-  },
+  issue_window_open: {}, // load-time expiry completes; no actor may close it early
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
@@ -2628,12 +2625,57 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
-      if (body.paymentMethod === "cod") {
+      if (body.paymentMethod != null && String(body.paymentMethod).trim().toLowerCase() !== "qr_manual") {
         return send(res, 400, {
           error: "payment_method_not_allowed",
-          message: "Cash on Delivery is unavailable. Submit the digital QR payment for Operations confirmation.",
+          message: "Order transitions do not accept cash or legacy payment methods. Submit the digital QR installment for Operations confirmation.",
           allowed: ["qr_manual"],
         });
+      }
+      if (next === "supplier_assigned") {
+        const supplier = store.users.find(
+          (candidate) => candidate.id === body.supplierId && candidate.role === "supplier",
+        );
+        if (!supplier) {
+          return send(res, 404, {
+            error: "supplier_not_found",
+            message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
+          });
+        }
+        if (supplier.verificationStatus !== "approved") {
+          return send(res, 409, {
+            error: "supplier_not_approved",
+            message: "Operations must approve this supplier before assigning new work.",
+            verificationStatus: supplier.verificationStatus || "unverified",
+          });
+        }
+        const candidate = eligibleSuppliersForOrder(store, order).candidates.find(
+          (item) => item.supplier.id === supplier.id,
+        );
+        if (!candidate?.eligible) {
+          return send(res, 409, {
+            error: "supplier_not_eligible",
+            message: "This supplier has no approved live service that covers the order. Refresh eligible suppliers and choose a listed match.",
+            reasons: candidate?.reasons || ["no_covering_service"],
+          });
+        }
+      }
+      if (next === "rider_assigned") {
+        const riderId = user.role === "rider" ? user.id : body.riderId;
+        const rider = store.users.find((candidate) => candidate.id === riderId && candidate.role === "rider");
+        if (!rider) {
+          return send(res, 404, {
+            error: "rider_not_found",
+            message: "That rider account no longer exists. Refresh approved riders and choose another.",
+          });
+        }
+        if (rider.verificationStatus !== "approved") {
+          return send(res, user.role === "rider" ? 403 : 409, {
+            error: "rider_not_approved",
+            message: "Operations must approve this rider profile before dispatch assignment.",
+            verificationStatus: rider.verificationStatus || "unverified",
+          });
+        }
       }
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
@@ -2643,6 +2685,16 @@ async function handleRequest(req, res) {
           from: order.state,
           to: next,
           role: user.role,
+        });
+      }
+      const wrongRelatedParty =
+        (user.role === "client" && order.clientId !== user.id) ||
+        (user.role === "supplier" && order.supplierId !== user.id) ||
+        (user.role === "rider" && next !== "rider_assigned" && order.riderId !== user.id);
+      if (wrongRelatedParty) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "This order is assigned to another account. Open one of your own orders before taking this action.",
         });
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
@@ -3078,7 +3130,7 @@ async function handleRequest(req, res) {
       if (user.role !== "supplier") return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
         jobs: store.orders
-          .filter((o) => o.supplierId === user.id || o.state === "supplier_assigned")
+          .filter((o) => o.supplierId === user.id)
           .map((order) => publicOrder(order, user)),
       });
     }

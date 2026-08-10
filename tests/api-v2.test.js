@@ -12,6 +12,8 @@ let api;
 let child;
 let tempDir;
 let storePath;
+let secondClientToken;
+let secondSupplierToken;
 
 async function freeHighPort() {
   while (true) {
@@ -182,6 +184,7 @@ test("all three roles self-sign up with exact profiles and pending approval gate
     },
   });
   assert.equal(client.status, 201, JSON.stringify(client.body));
+  secondClientToken = client.body.token;
   assert.equal(client.body.user.accountType, "individual");
   assert.equal("password" in client.body.user, false);
   assert.match(client.body.token, /^tok_/);
@@ -203,6 +206,7 @@ test("all three roles self-sign up with exact profiles and pending approval gate
     },
   });
   assert.equal(supplier.status, 201, JSON.stringify(supplier.body));
+  secondSupplierToken = supplier.body.token;
   assert.equal(supplier.body.user.verificationStatus, "pending");
   assert.deepEqual(supplier.body.user.categoryRanks.map((item) => item.rank), [1, 2]);
 
@@ -256,9 +260,25 @@ test("all three roles self-sign up with exact profiles and pending approval gate
   assert.equal(pendingCandidate.eligible, false);
   assert.deepEqual(pendingCandidate.reasons, ["verification_status:pending"]);
 
+  const pendingSupplierAssignment = await request("/orders/ord-match/transition", {
+    method: "POST",
+    token: opsToken,
+    body: { state: "supplier_assigned", supplierId: supplier.body.user.id },
+  });
+  assert.equal(pendingSupplierAssignment.status, 409);
+  assert.equal(pendingSupplierAssignment.body.error, "supplier_not_approved");
+
   const offersBefore = await request("/dispatch/offers", { token: rider.body.token });
   assert.equal(offersBefore.status, 403);
   assert.equal(offersBefore.body.error, "rider_not_approved");
+
+  const pendingRiderTransition = await request("/orders/ord-offer/transition", {
+    method: "POST",
+    token: rider.body.token,
+    body: { state: "rider_assigned" },
+  });
+  assert.equal(pendingRiderTransition.status, 403);
+  assert.equal(pendingRiderTransition.body.error, "rider_not_approved");
 
   const approveSupplier = await request(`/users/${supplier.body.user.id}/verification`, {
     method: "POST",
@@ -304,6 +324,19 @@ test("assignment calculates final price, notifies the client, and never leaks co
   assert.equal(JSON.stringify(created.body).includes("commissionMinor"), false);
   assert.equal(JSON.stringify(created.body).includes("supplierPriceMinor"), false);
 
+  const ownerDraft = await request("/orders", {
+    method: "POST",
+    token: clientToken,
+    body: { productId: "prod_flyer", quantity: 1, title: "Ownership boundary", submit: false },
+  });
+  const otherClientTransition = await request(`/orders/${ownerDraft.body.order.id}/transition`, {
+    method: "POST",
+    token: secondClientToken,
+    body: { state: "submitted" },
+  });
+  assert.equal(otherClientTransition.status, 403);
+  assert.equal(otherClientTransition.body.error, "forbidden");
+
   const assigned = await request("/orders/ord-match/transition", {
     method: "POST",
     token: opsToken,
@@ -326,6 +359,10 @@ test("assignment calculates final price, notifies the client, and never leaks co
   assert.equal(accepted.body.order.downpaymentMinor, 84_375);
   assert.equal(accepted.body.order.balanceMinor, 28_125);
   assert.match(accepted.body.order.assignmentNotificationId, /^ntf_/);
+
+  const otherSupplierJobs = await request("/jobs", { token: secondSupplierToken });
+  assert.equal(otherSupplierJobs.status, 200);
+  assert.equal(otherSupplierJobs.body.jobs.some((order) => order.id === "ord-match"), false);
 
   const clientOrder = await request("/orders/ord-match", { token: clientToken });
   assert.equal(clientOrder.status, 200);
@@ -453,10 +490,18 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
   assert.equal(confirmedBalance.status, 200, JSON.stringify(confirmedBalance.body));
   assert.equal(confirmedBalance.body.order.payments.balance.status, "confirmed");
 
+  const otherSupplierProduction = await request("/orders/ord-match/transition", {
+    method: "POST",
+    token: secondSupplierToken,
+    body: { state: "production" },
+  });
+  assert.equal(otherSupplierProduction.status, 403);
+  assert.equal(otherSupplierProduction.body.error, "forbidden");
+
   const legacyCod = await request("/orders/ord-legacy-pay/transition", {
     method: "POST",
     token: clientToken,
-    body: { state: "payment_authorized", paymentMethod: "cod" },
+    body: { state: "payment_authorized", paymentMethod: "COD" },
   });
   assert.equal(legacyCod.status, 400);
   assert.equal(legacyCod.body.error, "payment_method_not_allowed");
@@ -483,6 +528,7 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
 
 test("milestone release requires POF and the global issue window actually expires", async () => {
   const clientToken = await login("existing@example.test", "secret123");
+  const supplierToken = await login("supplier@gridgo.local");
   const opsToken = await login("ops@gridgo.local");
 
   const withoutPof = await request("/orders/ord-match/milestones/printing/release", {
@@ -492,6 +538,13 @@ test("milestone release requires POF and the global issue window actually expire
   });
   assert.equal(withoutPof.status, 409);
   assert.equal(withoutPof.body.error, "pof_required");
+
+  const production = await request("/orders/ord-match/transition", {
+    method: "POST",
+    token: supplierToken,
+    body: { state: "production" },
+  });
+  assert.equal(production.status, 200, JSON.stringify(production.body));
 
   const store = JSON.parse(await fs.readFile(storePath, "utf8"));
   const paidOrder = store.orders.find((order) => order.id === "ord-match");
@@ -660,6 +713,15 @@ test("rider pickup checklist blocks transport, records evidence escalation, and 
   assert.equal(passed.body.order.pickupChecklist.status, "passed");
   assert.equal(passed.body.signOffPrompt, "GRIDGO partner! Quality check, done! Salamat po!");
 
+  const otherRiderToken = await login("rider@gridgo.local");
+  const otherRiderTransport = await request("/orders/ord-offer/transition", {
+    method: "POST",
+    token: otherRiderToken,
+    body: { state: "out_for_delivery" },
+  });
+  assert.equal(otherRiderTransport.status, 403);
+  assert.equal(otherRiderTransport.body.error, "forbidden");
+
   const beforeDelivery = JSON.parse(await fs.readFile(storePath, "utf8"));
   const deliveryOrder = beforeDelivery.orders.find((order) => order.id === "ord-offer");
   const deliveredMilestone = deliveryOrder.payoutMilestones.find((milestone) => milestone.code === "delivered");
@@ -694,6 +756,14 @@ test("rider pickup checklist blocks transport, records evidence escalation, and 
   assert.equal(delivered.body.order.state, "issue_window_open");
   assert.match(delivered.body.order.issueWindowExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(delivered.body.order.deliveryEvidence.fileId, "file-delivery-evidence");
+
+  const earlyClose = await request("/orders/ord-offer/transition", {
+    method: "POST",
+    token: opsToken,
+    body: { state: "completed" },
+  });
+  assert.equal(earlyClose.status, 409);
+  assert.equal(earlyClose.body.error, "transition_not_allowed");
 
   const retiredProofRoute = await request("/dispatch/ord-offer/proof", {
     method: "POST",
