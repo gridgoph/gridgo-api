@@ -7,12 +7,10 @@ import { Readable } from "node:stream";
 import {
   AttachmentError,
   MAX_FILE_SIZE,
-  applyProofDecision,
   attachFileReference,
   authorizeFileAttach,
   authorizeFileRead,
   authorizeFileUpload,
-  authorizeProofPaymentTransition,
   backfillFiles,
   createPendingFile,
   markFileDeleted,
@@ -20,7 +18,6 @@ import {
   markFileReady,
   parseMultipartStream,
   publicFile,
-  recordProofUpload,
   resolveFileTarget,
   validateUpload,
 } from "../src/attachments.js";
@@ -77,7 +74,14 @@ function order(overrides = {}) {
     timeline: [],
     artworkFileIds: [],
     proofFileIds: [],
+    fulfilmentProofFileIds: [],
     deliveryPhotoFileIds: [],
+    payoutMilestones: [
+      { code: "printing", status: "pending_pof", pofFileIds: [] },
+      { code: "packaging_qc", status: "pending_pof", pofFileIds: [] },
+      { code: "delivered", status: "pending_pof", pofFileIds: [] },
+      { code: "retention", status: "pending_pof", pofFileIds: [] },
+    ],
     ...overrides,
   };
 }
@@ -91,9 +95,9 @@ function readyFile(purpose, overrides = {}) {
     fileId: `file-${purpose}`,
     ownerId: purpose === "artwork" ? client.id : purpose === "delivery_photo" ? rider.id : supplier.id,
     purpose,
-    originalFilename: purpose === "proof" ? "proof.pdf" : "photo.jpg",
+    originalFilename: purpose === "fulfilment_proof" ? "pof.pdf" : "photo.jpg",
     declaredContentType: "application/octet-stream",
-    detectedContentType: purpose === "proof" || purpose === "artwork" ? "application/pdf" : "image/jpeg",
+    detectedContentType: purpose === "fulfilment_proof" || purpose === "artwork" ? "application/pdf" : "image/jpeg",
     size: 123,
     state: "ready",
     objectKey: `${purpose}/2026/08/09/private-key`,
@@ -174,10 +178,12 @@ test("rejects declared type, signature mismatch, HEIC, empty, and oversize speci
 
 test("purpose policies gate role, media family, and the 20 MiB image limit", () => {
   assert.doesNotThrow(() => authorizeFileUpload(client, "artwork"));
-  assert.doesNotThrow(() => authorizeFileUpload(supplier, "proof"));
+  assert.doesNotThrow(() => authorizeFileUpload(supplier, "fulfilment_proof"));
+  assert.doesNotThrow(() => authorizeFileUpload(rider, "fulfilment_proof"));
   assert.doesNotThrow(() => authorizeFileUpload(rider, "delivery_photo"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "service_image"));
-  expectError(() => authorizeFileUpload(client, "proof"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(supplier, "proof"), 400, "invalid_file_purpose");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "purpose_media_type_not_allowed");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
 });
@@ -188,6 +194,7 @@ test("file registry backfill is additive and byte-idempotent", () => {
   assert.deepEqual(store.files, []);
   assert.deepEqual(store.orders[0].artworkFileIds, []);
   assert.deepEqual(store.orders[0].proofFileIds, []);
+  assert.deepEqual(store.orders[0].fulfilmentProofFileIds, []);
   assert.deepEqual(store.orders[0].deliveryPhotoFileIds, []);
   assert.equal(store.orders[0].artworkName, "legacy.pdf");
   assert.deepEqual(store.supplierServices[0].imageFileIds, []);
@@ -210,10 +217,10 @@ test("pending -> ready -> delete_pending -> deleted never exposes objectKey", ()
 
 test("resolve and attach revalidate owner, ready state, media, target ownership, and state", () => {
   const store = { orders: [order()], supplierServices: [service()] };
-  const file = readyFile("proof");
-  const target = resolveFileTarget(store, file.purpose, { orderId: "order-a" });
+  const file = readyFile("fulfilment_proof");
+  const target = resolveFileTarget(store, file.purpose, { orderId: "order-a", milestoneCode: "printing" });
   expectError(
-    () => resolveFileTarget(store, file.purpose, { orderId: "order-a", supplierServiceId: "service-a" }),
+    () => resolveFileTarget(store, file.purpose, { orderId: "order-a", milestoneCode: "printing", supplierServiceId: "service-a" }),
     400,
     "unexpected_target_field",
   );
@@ -221,17 +228,23 @@ test("resolve and attach revalidate owner, ready state, media, target ownership,
   expectError(() => authorizeFileAttach(otherSupplier, file, target), 403, "forbidden");
   expectError(() => authorizeFileAttach(supplier, { ...file, state: "pending_upload" }, target), 409, "file_not_ready");
   expectError(() => authorizeFileAttach(supplier, { ...file, detectedContentType: "text/plain" }, target), 409, "file_metadata_invalid");
-  expectError(() => authorizeFileAttach(supplier, file, { type: "order", record: order({ state: "production" }) }), 409, "proof_upload_not_allowed");
-  assert.equal(attachFileReference(file, target), "proofFileIds");
-  assert.deepEqual(target.record.proofFileIds, [file.fileId]);
-  assert.deepEqual(file.references, [{ type: "order", id: "order-a", field: "proofFileIds" }]);
+  expectError(
+    () => authorizeFileAttach(rider, { ...file, ownerId: rider.id }, target),
+    403,
+    "forbidden",
+  );
+  assert.equal(attachFileReference(file, target), "fulfilmentProofFileIds");
+  assert.deepEqual(target.record.fulfilmentProofFileIds, [file.fileId]);
+  assert.deepEqual(target.record.payoutMilestones[0].pofFileIds, [file.fileId]);
+  assert.equal(target.record.payoutMilestones[0].status, "pof_attached");
+  assert.deepEqual(file.references, [{ type: "order", id: "order-a", field: "fulfilmentProofFileIds", milestoneCode: "printing" }]);
   expectError(() => authorizeFileAttach(supplier, file, target), 409, "file_already_attached");
 });
 
 test("all four purposes map to ID-only parent fields", () => {
   const cases = [
     [readyFile("artwork"), client, { type: "order", record: order() }, "artworkFileIds"],
-    [readyFile("proof"), supplier, { type: "order", record: order() }, "proofFileIds"],
+    [readyFile("fulfilment_proof"), supplier, { type: "order", record: order(), milestoneCode: "packaging_qc" }, "fulfilmentProofFileIds"],
     [readyFile("delivery_photo"), rider, { type: "order", record: order({ state: "rider_assigned" }) }, "deliveryPhotoFileIds"],
     [readyFile("service_image"), supplier, { type: "supplier_service", record: service() }, "imageFileIds"],
   ];
@@ -257,25 +270,13 @@ test("referenced evidence cannot be deleted", () => {
   expectError(() => markFileDeletePending(readyFile("artwork", { references: [{ type: "order", id: "order-a" }] }), client, "2026-08-09T00:00:00Z"), 409, "file_in_use");
 });
 
-test("supplier proof submit, changes, correction, and approval append timeline", () => {
-  const target = order();
-  recordProofUpload(target, supplier, readyFile("proof", { fileId: "file-v1", originalFilename: "proof-v1.pdf" }), "2026-08-09T01:00:00Z");
-  assert.equal(target.state, "supplier_proof_review");
-  assert.equal(target.timeline.at(-1).fileId, "file-v1");
-  applyProofDecision(target, client, { state: "supplier_proof_changes_requested", reason: "Fix crop marks" }, "2026-08-09T01:01:00Z");
-  assert.equal(target.state, "supplier_proof_changes_requested");
-  recordProofUpload(target, supplier, readyFile("proof", { fileId: "file-v2", originalFilename: "proof-v2.pdf" }), "2026-08-09T01:02:00Z");
-  assert.match(target.timeline.at(-1).note, /corrected proof/);
-  applyProofDecision(target, client, { state: "supplier_proof_approved" }, "2026-08-09T01:03:00Z");
-  assert.equal(target.state, "supplier_proof_approved");
-  assert.equal(target.timeline.length, 4);
-});
-
-test("proof decisions require owning client, reason, and assigned supplier continuation", () => {
-  const review = order({ state: "supplier_proof_review" });
-  expectError(() => applyProofDecision(review, otherClient, { state: "supplier_proof_approved" }, "now"), 403, "forbidden");
-  expectError(() => applyProofDecision(review, client, { state: "supplier_proof_changes_requested" }, "now"), 400, "reason_required");
-  assert.doesNotThrow(() => authorizeProofPaymentTransition(order({ state: "supplier_proof_approved" }), supplier));
-  assert.doesNotThrow(() => authorizeProofPaymentTransition(order({ state: "supplier_proof_approved" }), ops));
-  expectError(() => authorizeProofPaymentTransition(order({ state: "supplier_proof_approved" }), otherSupplier), 403, "forbidden");
+test("delivered POF belongs to the rider and also gates retention", () => {
+  const store = { orders: [order({ state: "out_for_delivery" })], supplierServices: [] };
+  const file = readyFile("fulfilment_proof", { ownerId: rider.id, fileId: "file-delivered" });
+  const target = resolveFileTarget(store, file.purpose, { orderId: "order-a", milestoneCode: "delivered" });
+  assert.doesNotThrow(() => authorizeFileAttach(rider, file, target));
+  expectError(() => authorizeFileAttach(supplier, { ...file, ownerId: supplier.id }, target), 403, "forbidden");
+  attachFileReference(file, target);
+  assert.deepEqual(target.record.payoutMilestones.find((item) => item.code === "delivered").pofFileIds, [file.fileId]);
+  assert.deepEqual(target.record.payoutMilestones.find((item) => item.code === "retention").pofFileIds, [file.fileId]);
 });

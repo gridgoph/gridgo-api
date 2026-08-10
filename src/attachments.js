@@ -5,11 +5,11 @@ import path from "node:path";
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
 export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
 
-const KINDS = new Set(["artwork", "proof", "delivery_photo", "service_image"]);
+const KINDS = new Set(["artwork", "fulfilment_proof", "delivery_photo", "service_image"]);
 const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 export const PURPOSE_POLICIES = Object.freeze({
   artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
-  proof: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
+  fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
     roles: ["rider"],
     maxBytes: 20 * 1024 * 1024,
@@ -37,6 +37,12 @@ const DELIVERY_PHOTO_STATES = new Set([
   "delivered",
   "issue_window_open",
 ]);
+const FULFILMENT_MILESTONE_ACTOR = Object.freeze({
+  printing: "supplier",
+  packaging_qc: "supplier",
+  delivered: "rider",
+});
+// Kept only until the HTTP transition imports are removed in the v2 server pass.
 const PROOF_UPLOAD_STATES = new Set(["supplier_accepted", "supplier_proof_changes_requested"]);
 
 export class AttachmentError extends Error {
@@ -279,7 +285,7 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
 export function validateUpload(file, purpose = "artwork") {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
-    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, proof, delivery_photo, or service_image.", {
+    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, or service_image.", {
       allowedPurposes: Object.keys(PURPOSE_POLICIES),
     });
   }
@@ -442,7 +448,7 @@ export function authorizeProofPaymentTransition(order, user) {
 export function authorizeFileUpload(user, purpose) {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
-    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, proof, delivery_photo, or service_image.", {
+    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, or service_image.", {
       allowedPurposes: Object.keys(PURPOSE_POLICIES),
     });
   }
@@ -530,14 +536,19 @@ export function resolveFileTarget(store, purpose, body) {
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
-  const requiredField = purpose === "service_image" ? "supplierServiceId" : "orderId";
-  const unexpectedField = Object.keys(body || {}).find((field) => field !== requiredField);
+  const allowedFields = purpose === "service_image"
+    ? ["supplierServiceId"]
+    : purpose === "fulfilment_proof"
+      ? ["orderId", "milestoneCode"]
+      : ["orderId"];
+  const requiredField = allowedFields[0];
+  const unexpectedField = Object.keys(body || {}).find((field) => !allowedFields.includes(field));
   if (unexpectedField) {
     fail(
       400,
       "unexpected_target_field",
-      `Remove \`${unexpectedField}\`. This file purpose accepts only \`${requiredField}\`.`,
-      { field: unexpectedField, allowedField: requiredField },
+      `Remove \`${unexpectedField}\`. This file purpose accepts only: ${allowedFields.join(", ")}.`,
+      { field: unexpectedField, allowedFields },
     );
   }
   if (purpose === "service_image") {
@@ -557,6 +568,27 @@ export function resolveFileTarget(store, purpose, body) {
   }
   const record = (store.orders || []).find((item) => item.id === body.orderId);
   if (!record) fail(404, "order_not_found", "That order no longer exists. Refresh orders and try again.");
+  if (purpose === "fulfilment_proof") {
+    const milestoneCode = String(body?.milestoneCode || "");
+    if (!milestoneCode) {
+      fail(
+        400,
+        "attachment_target_required",
+        "Add milestoneCode so GRIDGO knows which payout milestone receives this Proof of Fulfilment.",
+        { requiredField: "milestoneCode" },
+      );
+    }
+    const milestone = (record.payoutMilestones || []).find((item) => item.code === milestoneCode);
+    if (!milestone || milestoneCode === "retention") {
+      fail(
+        400,
+        "invalid_milestone_code",
+        "Choose printing, packaging_qc, or delivered for this Proof of Fulfilment.",
+        { milestoneCode, allowed: Object.keys(FULFILMENT_MILESTONE_ACTOR) },
+      );
+    }
+    return { type: "order", record, milestoneCode };
+  }
   return { type: "order", record };
 }
 
@@ -588,16 +620,12 @@ export function authorizeFileAttach(user, file, target) {
     if (target?.type !== "order" || user.role !== "client" || record.clientId !== user.id) forbidden();
     return;
   }
-  if (file.purpose === "proof") {
-    if (target?.type !== "order" || user.role !== "supplier" || record.supplierId !== user.id) forbidden();
-    if (!PROOF_UPLOAD_STATES.has(record.state)) {
-      fail(
-        409,
-        "proof_upload_not_allowed",
-        "This order is not waiting for a supplier proof. Open an accepted order or requested correction and try again.",
-        { state: record.state, allowedStates: [...PROOF_UPLOAD_STATES] },
-      );
-    }
+  if (file.purpose === "fulfilment_proof") {
+    if (target?.type !== "order") forbidden();
+    const requiredRole = FULFILMENT_MILESTONE_ACTOR[target.milestoneCode];
+    if (!requiredRole || user.role !== requiredRole) forbidden();
+    if (requiredRole === "supplier" && record.supplierId !== user.id) forbidden();
+    if (requiredRole === "rider" && record.riderId !== user.id) forbidden();
     return;
   }
   if (file.purpose === "delivery_photo") {
@@ -622,7 +650,7 @@ export function authorizeFileAttach(user, file, target) {
 export function attachFileReference(file, target) {
   const map = {
     artwork: "artworkFileIds",
-    proof: "proofFileIds",
+    fulfilment_proof: "fulfilmentProofFileIds",
     delivery_photo: "deliveryPhotoFileIds",
     service_image: "imageFileIds",
   };
@@ -634,7 +662,29 @@ export function attachFileReference(file, target) {
   );
   if (!target.record[field].includes(file.fileId)) target.record[field].push(file.fileId);
   if (!Array.isArray(file.references)) file.references = [];
-  if (!existingReference) file.references.push({ type: target.type, id: target.record.id, field });
+  if (!existingReference) {
+    file.references.push({
+      type: target.type,
+      id: target.record.id,
+      field,
+      ...(target.milestoneCode ? { milestoneCode: target.milestoneCode } : {}),
+    });
+  }
+  if (file.purpose === "fulfilment_proof") {
+    const milestone = (target.record.payoutMilestones || []).find((item) => item.code === target.milestoneCode);
+    if (!milestone) fail(409, "milestone_not_found", "That payout milestone no longer exists. Refresh the order and try again.");
+    if (!Array.isArray(milestone.pofFileIds)) milestone.pofFileIds = [];
+    if (!milestone.pofFileIds.includes(file.fileId)) milestone.pofFileIds.push(file.fileId);
+    if (milestone.status === "pending_pof") milestone.status = "pof_attached";
+    if (target.milestoneCode === "delivered") {
+      const retention = (target.record.payoutMilestones || []).find((item) => item.code === "retention");
+      if (retention) {
+        if (!Array.isArray(retention.pofFileIds)) retention.pofFileIds = [];
+        if (!retention.pofFileIds.includes(file.fileId)) retention.pofFileIds.push(file.fileId);
+        if (retention.status === "pending_pof") retention.status = "pof_attached";
+      }
+    }
+  }
   return field;
 }
 
@@ -671,7 +721,7 @@ export function backfillFiles(store) {
     changed = true;
   }
   for (const order of store.orders || []) {
-    for (const field of ["artworkFileIds", "proofFileIds", "deliveryPhotoFileIds"]) {
+    for (const field of ["artworkFileIds", "proofFileIds", "fulfilmentProofFileIds", "deliveryPhotoFileIds"]) {
       if (!Array.isArray(order[field])) {
         order[field] = [];
         changed = true;
