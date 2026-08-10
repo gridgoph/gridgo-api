@@ -36,7 +36,12 @@ import {
 } from "./taxonomy.js";
 import {
   backfillOperationalModel,
+  calculateFinalPrice,
+  createPayoutMilestones,
+  defaultOperationalSettings,
+  estimatePriceRange,
   publicOrderFor,
+  validateOperationalSettings,
 } from "./operational-model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1220,7 +1225,7 @@ async function handleRequest(req, res) {
           if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
           if (latestFile.purpose === "proof") recordProofUpload(latestTarget.record, latestUser, latestFile, attachedAt);
           save(latestStore);
-          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record) });
+          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
         }
         save(latestStore);
         return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
@@ -1257,6 +1262,33 @@ async function handleRequest(req, res) {
         .filter((n) => n.userId === user.id)
         .sort((a, b) => (a.at < b.at ? 1 : -1));
       return send(res, 200, { notifications: items });
+    }
+
+    // ---- global operational settings ----
+    if (req.method === "GET" && pathname === "/settings") {
+      return send(res, 200, { settings: store.settings || defaultOperationalSettings() });
+    }
+
+    if (req.method === "PATCH" && pathname === "/settings") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      const next = {
+        issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
+        deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
+      };
+      validateOperationalSettings(next);
+      const previous = structuredClone(store.settings);
+      store.settings = structuredClone(next);
+      audit(store, {
+        actor: user,
+        action: "settings.operational_update",
+        entityType: "settings",
+        entityId: "operational",
+        detail: { previous, current: store.settings },
+        reason: body.reason || null,
+      });
+      save(store);
+      return send(res, 200, { settings: store.settings });
     }
 
     // ---- credits ----
@@ -1302,7 +1334,7 @@ async function handleRequest(req, res) {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Pilot Credits authorized" });
       save(store);
-      return send(res, 200, { order: publicOrder(order), balanceMinor: acct.balanceMinor });
+      return send(res, 200, { order: publicOrder(order, user), balanceMinor: acct.balanceMinor });
     }
 
     // Super Admin grants Pilot Credits (not a purchase; non-cash, non-transferable)
@@ -2263,7 +2295,7 @@ async function handleRequest(req, res) {
 
     // ---- orders list / create ----
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: ordersFor(user, store).map(publicOrder) });
+      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user)) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -2275,7 +2307,7 @@ async function handleRequest(req, res) {
         if (!order) return send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
-        return send(res, 200, { order: publicOrder(order) });
+        return send(res, 200, { order: publicOrder(order, user) });
       }
     }
 
@@ -2284,10 +2316,15 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const product = store.catalog.find((p) => p.id === body.productId) || store.catalog[0];
       const qty = Number(body.quantity || 1);
-      const totalMinor = (product?.basePriceMinor || 10000) * qty;
+      const referenceCandidates = [(product?.basePriceMinor || 10000) * qty];
+      for (const service of store.supplierServices || []) {
+        if (service.state !== "live" || !Number.isSafeInteger(Number(service.referenceRateMinor))) continue;
+        if (Array.isArray(service.productFamilyIds) && service.productFamilyIds.includes(product?.family)) {
+          referenceCandidates.push(Number(service.referenceRateMinor) * qty);
+        }
+      }
+      const priceRange = estimatePriceRange({ supplierPriceCandidatesMinor: referenceCandidates });
       const zoneCode = body.zone || "davao_central";
-      const zoneRec = (store.zones || []).find((z) => z.code === zoneCode);
-      const deliveryFeeMinor = Number(body.deliveryFeeMinor ?? zoneRec?.deliveryFeeMinor ?? 15000);
       const ts = now();
       const address = body.address || "";
       const order = {
@@ -2307,17 +2344,33 @@ async function handleRequest(req, res) {
         zone: zoneCode,
         pickup: null,
         dropoff: dropoffFor(address, zoneCode),
-        totalMinor,
-        deliveryFeeMinor,
+        operationalModelVersion: 2,
+        priceRange,
+        supplierPriceMinor: null,
+        commissionRatePercent: null,
+        commissionMinor: null,
+        subtotalMinor: null,
+        deliveryDistanceMeters: null,
+        deliveryFeeMinor: null,
+        totalMinor: null,
+        downpaymentMinor: null,
+        balanceMinor: null,
         paymentMethod: null,
         paymentStatus: "unpaid",
-        codEligible: totalMinor + deliveryFeeMinor <= 150000,
+        payments: {
+          downpayment: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null },
+          balance: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null },
+        },
         payoutHold: false,
+        payoutMilestones: [],
         promisedDate: null,
         matchingServiceIds: null,
+        assignmentNotificationId: null,
+        assignmentNotifiedAt: null,
         artworkName: body.artworkName || null,
         artworkFileIds: [],
         proofFileIds: [],
+        fulfilmentProofFileIds: [],
         deliveryPhotoFileIds: [],
         createdAt: ts,
         updatedAt: ts,
@@ -2325,7 +2378,7 @@ async function handleRequest(req, res) {
       };
       store.orders.unshift(order);
       save(store);
-      return send(res, 201, { order: publicOrder(order) });
+      return send(res, 201, { order: publicOrder(order, user) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -2337,7 +2390,7 @@ async function handleRequest(req, res) {
       if (next === "supplier_proof_changes_requested" || next === "supplier_proof_approved") {
         applyProofDecision(order, user, { state: next, reason: body.reason }, now());
         save(store);
-        return send(res, 200, { order: publicOrder(order) });
+        return send(res, 200, { order: publicOrder(order, user) });
       }
       if (order.state === "supplier_proof_approved" && next === "awaiting_payment" && user.role === "supplier") {
         authorizeProofPaymentTransition(order, user);
@@ -2376,10 +2429,81 @@ async function handleRequest(req, res) {
         order.paymentStatus = "authorized";
       }
       if (next === "supplier_accepted") {
-        order.supplierId = order.supplierId || user.id;
+        if (user.role !== "supplier" || order.supplierId !== user.id) {
+          return send(res, 403, {
+            error: "forbidden",
+            message: "Only the supplier assigned to this order can accept it and set the final price.",
+          });
+        }
+        if (user.verificationStatus !== "approved") {
+          return send(res, 403, {
+            error: "supplier_not_approved",
+            message: "Operations must approve this supplier before the supplier can accept matched work.",
+          });
+        }
         order.promisedDate = body.promisedDate || order.deadline;
-        if (body.finalTotalMinor) order.totalMinor = Number(body.finalTotalMinor);
         setOrderPickup(order, store);
+        const money = calculateFinalPrice({
+          supplierPriceMinor: body.supplierPriceMinor,
+          pickup: order.pickup,
+          dropoff: order.dropoff,
+          settings: store.settings,
+        });
+        Object.assign(order, money, { operationalModelVersion: 2 });
+        order.priceRange.deliveryFeeStatus = "final";
+        order.payoutMilestones = createPayoutMilestones(order.supplierPriceMinor);
+        order.payments = {
+          downpayment: {
+            amountMinor: order.downpaymentMinor,
+            method: "qr_manual",
+            status: "not_submitted",
+            reference: null,
+            submittedAt: null,
+            confirmedAt: null,
+            confirmedBy: null,
+            confirmationSource: null,
+          },
+          balance: {
+            amountMinor: order.balanceMinor,
+            method: "qr_manual",
+            status: "not_submitted",
+            reference: null,
+            submittedAt: null,
+            confirmedAt: null,
+            confirmedBy: null,
+            confirmationSource: null,
+          },
+        };
+        const acceptedAt = now();
+        order.timeline.push({
+          at: acceptedAt,
+          state: "supplier_accepted",
+          by: user.id,
+          note: "Supplier accepted and set the final price",
+        });
+        const notification = {
+          id: id("ntf"),
+          userId: order.clientId,
+          type: "supplier_assignment_final_price",
+          orderId: order.id,
+          title: "Supplier assigned and final price ready",
+          body: "A supplier accepted your order. Review the final price and submit the digital downpayment.",
+          read: false,
+          at: acceptedAt,
+        };
+        store.notifications.push(notification);
+        order.assignmentNotificationId = notification.id;
+        order.assignmentNotifiedAt = notification.at;
+        order.state = "awaiting_downpayment";
+        order.updatedAt = acceptedAt;
+        order.timeline.push({
+          at: acceptedAt,
+          state: "awaiting_downpayment",
+          by: "system",
+          note: "Client notified of assignment and final price",
+        });
+        save(store);
+        return send(res, 200, { order: publicOrder(order, user) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
         order.supplierId = body.supplierId;
@@ -2419,13 +2543,13 @@ async function handleRequest(req, res) {
         order.state = "issue_window_open";
         order.timeline.push({ at: now(), state: "issue_window_open", by: "system", note: "24h issue window opened" });
         save(store);
-        return send(res, 200, { order: publicOrder(order) });
+        return send(res, 200, { order: publicOrder(order, user) });
       }
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       save(store);
-      return send(res, 200, { order: publicOrder(order) });
+      return send(res, 200, { order: publicOrder(order, user) });
     }
 
     // ---- dispatch (rider) ----
@@ -2440,7 +2564,7 @@ async function handleRequest(req, res) {
         });
       }
       const offers = store.orders.filter((o) => o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id));
-      return send(res, 200, { offers: offers.map(publicOrder) });
+      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user)) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
@@ -2459,7 +2583,7 @@ async function handleRequest(req, res) {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
       save(store);
-      return send(res, 200, { order: publicOrder(order) });
+      return send(res, 200, { order: publicOrder(order, user) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
@@ -2527,7 +2651,7 @@ async function handleRequest(req, res) {
       }
       order.updatedAt = now();
       save(store);
-      return send(res, 201, { proof, order: publicOrder(order) });
+      return send(res, 201, { proof, order: publicOrder(order, user) });
     }
 
     // ---- supplier jobs helper alias ----
@@ -2536,7 +2660,7 @@ async function handleRequest(req, res) {
       return send(res, 200, {
         jobs: store.orders
           .filter((o) => o.supplierId === user.id || o.state === "supplier_assigned")
-          .map(publicOrder),
+          .map((order) => publicOrder(order, user)),
       });
     }
 

@@ -423,7 +423,9 @@ export function backfillOperationalModel(store, at = new Date().toISOString()) {
 
   for (const order of store.orders || []) {
     const originalState = order.state;
-    const alreadyV2 = Number.isSafeInteger(order.subtotalMinor) && Number.isSafeInteger(order.supplierPriceMinor);
+    const alreadyV2 =
+      order.operationalModelVersion === 2 ||
+      (Number.isSafeInteger(order.subtotalMinor) && Number.isSafeInteger(order.supplierPriceMinor));
     if (!alreadyV2) {
       const legacySubtotal = Number.isSafeInteger(order.totalMinor) ? order.totalMinor : 0;
       order.subtotalMinor = legacySubtotal;
@@ -434,6 +436,7 @@ export function backfillOperationalModel(store, at = new Date().toISOString()) {
       order.totalMinor = order.subtotalMinor + order.deliveryFeeMinor;
       order.downpaymentMinor = Math.round((order.totalMinor * DOWNPAYMENT_PERCENT) / 100);
       order.balanceMinor = order.totalMinor - order.downpaymentMinor;
+      order.operationalModelVersion = 2;
       changed = true;
     }
     if (!order.priceRange || typeof order.priceRange !== "object") {

@@ -255,3 +255,111 @@ test("all three roles self-sign up with exact profiles and pending approval gate
   assert.equal(offersAfter.status, 200);
   assert.equal(offersAfter.body.offers.some((order) => order.id === "ord-offer"), true);
 });
+
+test("assignment calculates final price, notifies the client, and never leaks commission to clients", async () => {
+  const clientToken = await login("existing@example.test", "secret123");
+  const supplierToken = await login("supplier@gridgo.local");
+  const opsToken = await login("ops@gridgo.local");
+
+  const created = await request("/orders", {
+    method: "POST",
+    token: clientToken,
+    body: {
+      productId: "prod_flyer",
+      quantity: 2,
+      title: "Range before assignment",
+      address: "Bajada, Davao City",
+      zone: "davao_central",
+      deliveryFeeMinor: 1,
+      submit: true,
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(Number.isInteger(created.body.order.priceRange.subtotalMinMinor), true);
+  assert.equal(Number.isInteger(created.body.order.priceRange.subtotalMaxMinor), true);
+  assert.equal(created.body.order.priceRange.deliveryFeeStatus, "pending_supplier_assignment");
+  assert.equal(JSON.stringify(created.body).includes("commissionMinor"), false);
+  assert.equal(JSON.stringify(created.body).includes("supplierPriceMinor"), false);
+
+  const assigned = await request("/orders/ord-match/transition", {
+    method: "POST",
+    token: opsToken,
+    body: { state: "supplier_assigned", supplierId: "user_supplier" },
+  });
+  assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+
+  const accepted = await request("/orders/ord-match/transition", {
+    method: "POST",
+    token: supplierToken,
+    body: { state: "supplier_accepted", supplierPriceMinor: 100_000, promisedDate: "2026-08-12T09:00:00.000Z" },
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.order.state, "awaiting_downpayment");
+  assert.equal(accepted.body.order.supplierPriceMinor, 100_000);
+  assert.equal("commissionMinor" in accepted.body.order, false);
+  assert.equal(accepted.body.order.subtotalMinor, 110_000);
+  assert.equal(accepted.body.order.deliveryFeeMinor, 2_500);
+  assert.equal(accepted.body.order.totalMinor, 112_500);
+  assert.equal(accepted.body.order.downpaymentMinor, 84_375);
+  assert.equal(accepted.body.order.balanceMinor, 28_125);
+  assert.match(accepted.body.order.assignmentNotificationId, /^ntf_/);
+
+  const clientOrder = await request("/orders/ord-match", { token: clientToken });
+  assert.equal(clientOrder.status, 200);
+  const clientJson = JSON.stringify(clientOrder.body);
+  assert.equal(clientJson.includes("supplierPriceMinor"), false);
+  assert.equal(clientJson.includes("commissionMinor"), false);
+  assert.equal(clientJson.includes("commissionRatePercent"), false);
+  assert.equal(clientOrder.body.order.payoutMilestones.every((milestone) => !("amountMinor" in milestone)), true);
+  assert.equal(clientOrder.body.order.payments.downpayment.amountMinor, 84_375);
+  assert.equal(clientOrder.body.order.subtotalMinor, 110_000);
+
+  const opsOrder = await request("/orders/ord-match", { token: opsToken });
+  assert.equal(opsOrder.body.order.supplierPriceMinor, 100_000);
+  assert.equal(opsOrder.body.order.commissionMinor, 10_000);
+  assert.equal(opsOrder.body.order.commissionRatePercent, 10);
+
+  const notifications = await request("/notifications", { token: clientToken });
+  assert.equal(
+    notifications.body.notifications.some(
+      (notification) => notification.id === accepted.body.order.assignmentNotificationId && notification.orderId === "ord-match",
+    ),
+    true,
+  );
+});
+
+test("Operations and Super Admin can change the one global issue window and provisional distance bands", async () => {
+  const clientToken = await login("existing@example.test", "secret123");
+  const opsToken = await login("ops@gridgo.local");
+  const settings = await request("/settings", { token: clientToken });
+  assert.equal(settings.status, 200);
+  assert.equal(settings.body.settings.issueWindowHours, 24);
+  assert.deepEqual(settings.body.settings.deliveryFeeBands, [
+    { maxDistanceMeters: 4_999, feeMinor: 2_500 },
+    { maxDistanceMeters: 10_000, feeMinor: 5_000 },
+    { maxDistanceMeters: null, feeMinor: 7_500 },
+  ]);
+
+  const updated = await request("/settings", {
+    method: "PATCH",
+    token: opsToken,
+    body: {
+      issueWindowHours: 48,
+      deliveryFeeBands: [
+        { maxDistanceMeters: 4_999, feeMinor: 3_000 },
+        { maxDistanceMeters: 10_000, feeMinor: 6_000 },
+        { maxDistanceMeters: null, feeMinor: 9_000 },
+      ],
+    },
+  });
+  assert.equal(updated.status, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.settings.issueWindowHours, 48);
+  assert.equal(updated.body.settings.deliveryFeeBands[0].feeMinor, 3_000);
+
+  const forbidden = await request("/settings", {
+    method: "PATCH",
+    token: clientToken,
+    body: { issueWindowHours: 12 },
+  });
+  assert.equal(forbidden.status, 403);
+});
