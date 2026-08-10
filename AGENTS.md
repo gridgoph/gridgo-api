@@ -58,6 +58,7 @@ The captain's category chart (4 categories, 17 subcategories) is the product tax
 
 ## Platform data (ops / super / matching)
 
+- Notification state and caller-scoped SSE delivery are server-owned; exact contracts are in `docs/OPERATIONAL_MODEL_V2_API.md`. Notification creation stays append-only because list snapshots/SSE resume use append order; atomic `save()` emits new records. Deletes retain lifecycle evidence with `deletedAt`.
 - `GET /taxonomy` — categories, subcategories, aliases, materials, finishes (super manages via POST/PATCH)
 - `GET|POST|PATCH /supplier-services…` — supplier catalogue; states `draft|pending_verification|live|suspended|withdrawn`
 - `GET /orders/:id/eligible-suppliers` — ops matching support (no auto-assign)

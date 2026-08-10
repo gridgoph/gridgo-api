@@ -27,6 +27,10 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
 | DELETE | `/files/:fileId` | owner/ops/super; unreferenced only | safe delete lifecycle |
 | GET | `/notifications` | authenticated | caller's notifications, newest first |
+| GET | `/notifications/stream` | authenticated | caller-scoped SSE notification delivery and resume |
+| PATCH | `/notifications/:id` | notification owner | set `{read:true|false}` |
+| PATCH | `/notifications/read-all` | notification owner | mark caller's list snapshot read |
+| DELETE | `/notifications/:id` | notification owner | persistent soft delete from caller's inbox |
 | GET | `/settings` | authenticated | global issue window and delivery bands |
 | PATCH | `/settings` | ops/super | replace either/both operational settings |
 | GET | `/credits/balance` | client own; ops/super any `?clientId=` | pilot grant ledger only |
@@ -201,6 +205,64 @@ File bytes use `purpose=verification_document` and the upload/attach contract in
 Each array item is the complete public `File` metadata object; the abbreviated example highlights identifying fields. A supplier cannot request another supplier's list. Clients and riders cannot request any list. All denied calls return `403 {"error":"forbidden","message":"..."}`; a non-supplier target returns `400 verification_documents_require_supplier`; an unknown target returns `404 user_not_found`.
 
 The existing Operations/Super Admin `GET /users/:id` approval response is now `{ "user": PublicUser, "verificationDocuments": File[] }` for a supplier. The same array is returned by `POST /users/:id/verification`, so the decision response remains a complete approval surface. General `PublicUser` values—including `/users`, login, `/auth/me`, matching, and catalogue projections—never contain `verificationDocumentFileIds`.
+
+## Notifications
+
+Notification IDs are opaque. Every notification route is owner-only: an authenticated caller receives only records whose `userId` is their own user ID. A known notification owned by another user returns `403 {"error":"forbidden"}`; an unknown notification returns `404 {"error":"notification_not_found"}`. Deleted notifications are omitted from all later lists.
+
+### `GET /notifications`
+
+Returns the caller's non-deleted notifications, newest first, plus an append-order snapshot watermark:
+
+```json
+{
+  "notifications": [
+    { "id": "ntf_123", "userId": "user_client", "title": "Final price ready", "body": "Review your order.", "read": false, "at": "2026-08-11T02:00:00.000Z" }
+  ],
+  "snapshot": "ntf_123"
+}
+```
+
+`snapshot` is `null` when the caller has never had a notification. Clients must retain the non-null snapshot returned with the list and echo it to mark-all; it is not a notification timestamp.
+
+### `GET /notifications/stream`
+
+Opens a caller-scoped Server-Sent Events stream using the same bearer token as other authenticated routes. The response uses `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and a five-second reconnect hint. Each new notification created by any server path is sent only to its owner:
+
+```text
+id: ntf_124
+event: notification
+data: {"id":"ntf_124","userId":"user_client","title":"Final price ready","body":"Review your order.","read":false,"at":"2026-08-11T02:01:00.000Z"}
+
+```
+
+The server sends a comment heartbeat every 25 seconds (`: heartbeat <ISO timestamp>`) and removes the subscription and timer immediately when either side closes.
+
+For initial synchronization, call `GET /notifications`, render that response, then open the stream with its non-null `snapshot` as the `Last-Event-ID` header. The server replays caller-owned, non-deleted notifications appended after that ID before continuing live delivery. Native SSE reconnection sends the most recently received event ID automatically, preventing gaps while a phone is backgrounded. With no `Last-Event-ID` (including when the list snapshot is `null`), the stream replays the caller's current non-deleted inbox before continuing live; clients should de-duplicate those IDs against the rendered list. An unknown cursor returns `409 {"error":"notification_resume_unavailable"}` (refresh the list); a cursor owned by another user returns `403 {"error":"forbidden"}` and no stream opens.
+
+### `PATCH /notifications/:id`
+
+Set one notification read or unread. Unread is deliberately supported so an accidental mark can be reversed.
+
+```json
+{ "read": true }
+```
+
+Returns `200 {"notification": {...}}`. `read` must be a JSON boolean; missing or non-boolean values return `400 {"error":"notification_read_required"}`. A notification already deleted by its owner returns `404 notification_not_found`.
+
+### `PATCH /notifications/read-all`
+
+Mark every non-deleted notification belonging to the caller that existed in a prior list snapshot:
+
+```json
+{ "snapshot": "ntf_123" }
+```
+
+Returns `200 {"updatedCount":2}`. A missing/empty snapshot returns `400 {"error":"notification_snapshot_required"}`. Unknown and foreign snapshot IDs use the same `404`/`403` errors above. The server uses append order through that ID, not wall-clock timestamps, so notifications appended after the list response remain unread even if the mark-all request races with delivery.
+
+### `DELETE /notifications/:id`
+
+Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying the same owner delete returns the same response. Deletion is a durable soft delete: the record remains as internal lifecycle evidence (assignment notifications gate payment), but it never appears in `GET /notifications` again. This makes swipe-to-delete persistent without breaking order invariants.
 
 ## Settings and distance fee
 

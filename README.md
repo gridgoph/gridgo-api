@@ -122,7 +122,7 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | POST | `/dispatch/:id/delivery` | assigned rider | attached photo/signature evidence; confirmed digital balance required |
 | POST | `/dispatch/:id/proof` | any auth | retired (`410 dispatch_proof_route_retired`) |
 | GET | `/jobs` | supplier | assigned jobs alias |
-| GET | `/notifications` | any | in-app alerts |
+| GET/PATCH/DELETE | `/notifications…` | owner | list, SSE stream/resume, read/unread, snapshot mark-all, persistent delete |
 
 ### Service taxonomy (platform-governed)
 
