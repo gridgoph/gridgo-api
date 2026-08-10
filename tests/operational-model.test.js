@@ -195,6 +195,12 @@ test("v2 backfill migrates supplier proof and COD coherently and is byte-idempot
   assert.equal("codEligible" in order, false);
   assert.equal(order.payments.downpayment.status, "legacy_confirmed");
   assert.equal(order.payments.balance.status, "not_submitted");
+  assert.equal(order.payments.downpayment.rejectedAt, null);
+  assert.equal(order.payments.downpayment.rejectedBy, null);
+  assert.equal(order.payments.downpayment.rejectionReason, null);
+  assert.equal(order.payments.balance.rejectedAt, null);
+  assert.equal(order.payments.balance.rejectedBy, null);
+  assert.equal(order.payments.balance.rejectionReason, null);
   assert.equal(order.assignmentNotificationId, store.notifications[0].id);
   assert.deepEqual(order.proofFileIds, ["legacy-proof"]);
   assert.equal(Object.hasOwn(store.zones[0], "deliveryFeeMinor"), false);

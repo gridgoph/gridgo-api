@@ -211,6 +211,9 @@ function installment(amountMinor, status, reference) {
     confirmedAt: confirmed ? t : null,
     confirmedBy: confirmed ? "user_ops" : null,
     confirmationSource: confirmed ? "manual_ops" : null,
+    rejectedAt: null,
+    rejectedBy: null,
+    rejectionReason: null,
   };
 }
 

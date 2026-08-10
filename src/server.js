@@ -2458,6 +2458,9 @@ async function handleRequest(req, res) {
       installment.confirmedAt = null;
       installment.confirmedBy = null;
       installment.confirmationSource = null;
+      installment.rejectedAt = null;
+      installment.rejectedBy = null;
+      installment.rejectionReason = null;
       order.paymentMethod = "qr_manual";
       order.paymentStatus = installmentCode === "downpayment" ? "downpayment_pending" : "balance_pending";
       if (installmentCode === "downpayment") order.state = "downpayment_review";
@@ -2475,6 +2478,74 @@ async function handleRequest(req, res) {
         entityId: order.id,
         orderId: order.id,
         detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/reject$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const installmentCode = parts[4];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const installment = order.payments?.[installmentCode];
+      if (["confirmed", "legacy_confirmed"].includes(installment?.status)) {
+        return send(res, 409, {
+          error: "payment_already_confirmed",
+          message: "Operations already accepted this installment, so it cannot be rejected here. Escalate any payment correction for manual reconciliation.",
+          installment: installmentCode,
+          status: installment.status,
+        });
+      }
+      if (!installment || installment.status !== "pending_confirmation") {
+        return send(res, 409, {
+          error: "payment_not_pending",
+          message: "This installment has no submitted payment waiting for review. Refresh the order before taking action.",
+          installment: installmentCode,
+          status: installment?.status || null,
+        });
+      }
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      if (!reason) {
+        return send(res, 400, {
+          error: "payment_rejection_reason_required",
+          message: "Explain what is wrong with the submitted payment and tell the client what to correct before resubmitting.",
+        });
+      }
+      const rejectedAt = now();
+      installment.status = "not_submitted";
+      installment.reference = null;
+      installment.submittedAt = null;
+      installment.confirmedAt = null;
+      installment.confirmedBy = null;
+      installment.confirmationSource = null;
+      installment.rejectedAt = rejectedAt;
+      installment.rejectedBy = user.id;
+      installment.rejectionReason = reason;
+      if (installmentCode === "downpayment") {
+        order.state = "awaiting_downpayment";
+        order.paymentStatus = "unpaid";
+      } else {
+        order.paymentStatus = "downpayment_confirmed";
+      }
+      order.updatedAt = rejectedAt;
+      order.timeline.push({
+        at: rejectedAt,
+        state: order.state,
+        by: user.id,
+        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} rejected by Operations: ${reason}`,
+      });
+      audit(store, {
+        actor: user,
+        action: `payment.${installmentCode}_reject`,
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
+        reason,
       });
       save(store);
       return send(res, 200, { order: publicOrder(order, user) });
@@ -2593,8 +2664,8 @@ async function handleRequest(req, res) {
         paymentMethod: null,
         paymentStatus: "unpaid",
         payments: {
-          downpayment: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null },
-          balance: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null },
+          downpayment: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null, rejectedAt: null, rejectedBy: null, rejectionReason: null },
+          balance: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null, rejectedAt: null, rejectedBy: null, rejectionReason: null },
         },
         payoutHold: false,
         payoutMilestones: [],
@@ -2747,6 +2818,9 @@ async function handleRequest(req, res) {
             confirmedAt: null,
             confirmedBy: null,
             confirmationSource: null,
+            rejectedAt: null,
+            rejectedBy: null,
+            rejectionReason: null,
           },
           balance: {
             amountMinor: order.balanceMinor,
@@ -2757,6 +2831,9 @@ async function handleRequest(req, res) {
             confirmedAt: null,
             confirmedBy: null,
             confirmationSource: null,
+            rejectedAt: null,
+            rejectedBy: null,
+            rejectionReason: null,
           },
         };
         const acceptedAt = now();

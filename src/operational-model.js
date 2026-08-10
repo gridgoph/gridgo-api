@@ -305,6 +305,8 @@ export function publicOrderFor(order, user) {
       delete installment.reference;
       delete installment.submittedBy;
       delete installment.confirmedBy;
+      delete installment.rejectedBy;
+      delete installment.rejectionReason;
     }
   }
   return publicRecord;
@@ -403,6 +405,9 @@ function legacyPayments(order) {
     confirmedAt: status === "legacy_confirmed" ? order.updatedAt || order.createdAt || null : null,
     confirmedBy: status === "legacy_confirmed" ? "system_migration" : null,
     confirmationSource: status === "legacy_confirmed" ? "legacy" : null,
+    rejectedAt: null,
+    rejectedBy: null,
+    rejectionReason: null,
   });
   return {
     downpayment: make(downpayment, paid || PROGRESSED_STATES.has(order.state) ? "legacy_confirmed" : "not_submitted"),
@@ -516,6 +521,15 @@ export function backfillOperationalModel(store, at = new Date().toISOString()) {
     if (!order.payments || typeof order.payments !== "object") {
       order.payments = legacyPayments(order);
       changed = true;
+    }
+    for (const installment of Object.values(order.payments)) {
+      if (!installment || typeof installment !== "object") continue;
+      for (const field of ["rejectedAt", "rejectedBy", "rejectionReason"]) {
+        if (!Object.hasOwn(installment, field)) {
+          installment[field] = null;
+          changed = true;
+        }
+      }
     }
     if (!order.pickupChecklist || typeof order.pickupChecklist !== "object") {
       order.pickupChecklist = {
