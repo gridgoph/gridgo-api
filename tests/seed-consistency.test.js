@@ -112,6 +112,10 @@ test("fresh seed is coherent with operational model v2", () => {
     "admin@gridgo.local",
   ];
   for (const email of demoEmails) assert.equal(store.users.find((user) => user.email === email)?.password, "demo", email);
+  assert.deepEqual(
+    store.users.find((user) => user.email === "supplier@gridgo.local")?.verificationDocumentFileIds,
+    [],
+  );
 
   const at = store.orders[0].createdAt;
   assert.equal(backfillOperationalModel(store, at), false, "native v2 seed should need no migration");

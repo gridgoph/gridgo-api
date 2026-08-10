@@ -179,6 +179,9 @@ function resolveClientAccountType(u) {
 function publicUser(u) {
   if (!u) return null;
   const { password, ...rest } = u;
+  // Identity-document references are exposed only through the dedicated, caller-aware
+  // verification projection. publicUser is reused in catalogue and matching responses.
+  delete rest.verificationDocumentFileIds;
   // Clients always expose an authoritative accountType (never undefined for consumers).
   // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
   if (u.role === "client") {
@@ -199,6 +202,32 @@ function isSuper(user) {
 
 function signupError(res, error, message, details = {}) {
   return send(res, 400, { error, message, ...details });
+}
+
+function validatedShop(value) {
+  if (
+    !value ||
+    typeof value.lat !== "number" ||
+    typeof value.lng !== "number" ||
+    !Number.isFinite(value.lat) ||
+    !Number.isFinite(value.lng) ||
+    value.lat < -90 ||
+    value.lat > 90 ||
+    value.lng < -180 ||
+    value.lng > 180
+  ) {
+    return {
+      error: "invalid_shop_coordinates",
+      message: "Pin the shop with finite latitude from -90 to 90 and longitude from -180 to 180.",
+    };
+  }
+  if (typeof value.label !== "string" || !value.label.trim()) {
+    return {
+      error: "shop_label_required",
+      message: "Add the shop address or landmark label before saving the pin.",
+    };
+  }
+  return { shop: { lat: value.lat, lng: value.lng, label: value.label.trim() } };
 }
 
 function normalizedSignupAccountType(value) {
@@ -222,12 +251,27 @@ function validatedCategoryRanks(store, value) {
 }
 
 function hasSignupShop(value) {
-  return (
-    value &&
-    Number.isFinite(Number(value.lat)) &&
-    Number.isFinite(Number(value.lng)) &&
-    String(value.label || "").trim().length > 0
-  );
+  return Boolean(validatedShop(value).shop);
+}
+
+function verificationDocumentsFor(store, supplier) {
+  if (!supplier || supplier.role !== "supplier") return [];
+  return (supplier.verificationDocumentFileIds || [])
+    .map((fileId) => findFile(store, fileId))
+    .filter(
+      (file) =>
+        file?.state === "ready" &&
+        file.purpose === "verification_document" &&
+        file.ownerId === supplier.id,
+    )
+    .map(publicFile);
+}
+
+function verificationUserResponse(store, target) {
+  return {
+    user: publicUser(target),
+    ...(target.role === "supplier" ? { verificationDocuments: verificationDocumentsFor(store, target) } : {}),
+  };
 }
 
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
@@ -997,12 +1041,9 @@ async function handleRequest(req, res) {
           );
         }
         created.supplierName = supplierName;
-        created.shop = {
-          lat: Number(body.shop.lat),
-          lng: Number(body.shop.lng),
-          label: String(body.shop.label).trim(),
-        };
+        created.shop = validatedShop(body.shop).shop;
         created.categoryRanks = categoryRanks;
+        created.verificationDocumentFileIds = [];
         created.verificationStatus = "pending";
         created.verificationNote = "Operations review required before matching";
         created.verifiedAt = null;
@@ -1199,7 +1240,7 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const file = findFile(store, fileId);
       authorizeFileAttachOwner(user, file);
-      const target = resolveFileTarget(store, file.purpose, body);
+      const target = resolveFileTarget(store, file.purpose, body, user);
       authorizeFileAttach(user, file, target);
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
@@ -1217,7 +1258,7 @@ async function handleRequest(req, res) {
         }
         const latestFile = findFile(latestStore, fileId);
         authorizeFileAttachOwner(latestUser, latestFile);
-        const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body);
+        const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
         attachFileReference(latestFile, latestTarget);
         const attachedAt = now();
@@ -1236,6 +1277,13 @@ async function handleRequest(req, res) {
           }
           save(latestStore);
           return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
+        }
+        if (latestTarget.type === "user") {
+          save(latestStore);
+          return send(res, 200, {
+            file: publicFile(latestFile),
+            ...verificationUserResponse(latestStore, latestTarget.record),
+          });
         }
         save(latestStore);
         return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
@@ -1373,6 +1421,76 @@ async function handleRequest(req, res) {
       const uid = pathname.split("/")[2];
       const target = store.users.find((u) => u.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
+      return send(res, 200, verificationUserResponse(store, target));
+    }
+
+    if (req.method === "GET" && /^\/users\/[^/]+\/verification-documents$/.test(pathname)) {
+      const uid = pathname.split("/")[2];
+      const target = store.users.find((candidate) => candidate.id === uid);
+      if (!target) {
+        return send(res, 404, {
+          error: "user_not_found",
+          message: "That supplier account no longer exists. Refresh the account list and try again.",
+        });
+      }
+      const ownsSupplierProfile = user.role === "supplier" && user.id === target.id;
+      if (!isOps(user) && !ownsSupplierProfile) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "Verification documents are private. Open your own supplier documents or ask Operations for access.",
+        });
+      }
+      if (target.role !== "supplier") {
+        return send(res, 400, {
+          error: "verification_documents_require_supplier",
+          message: "Verification documents apply only to supplier accounts. Choose a supplier profile.",
+        });
+      }
+      return send(res, 200, {
+        userId: target.id,
+        verificationDocuments: verificationDocumentsFor(store, target),
+      });
+    }
+
+    // Supplier shop correction. Orders retain their pickup and money snapshots.
+    if (req.method === "PATCH" && /^\/users\/[^/]+\/shop$/.test(pathname)) {
+      const uid = pathname.split("/")[2];
+      const target = store.users.find((candidate) => candidate.id === uid);
+      if (!target) {
+        return send(res, 404, {
+          error: "user_not_found",
+          message: "That supplier account no longer exists. Refresh the account list and try again.",
+        });
+      }
+      const ownsSupplierProfile = user.role === "supplier" && user.id === target.id;
+      if (!isOps(user) && !ownsSupplierProfile) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "You can move only your own supplier shop pin. Open your supplier profile and try again.",
+        });
+      }
+      if (target.role !== "supplier") {
+        return send(res, 400, {
+          error: "shop_requires_supplier",
+          message: "Shop pins apply only to supplier accounts. Choose a supplier profile.",
+        });
+      }
+      const body = await readBody(req);
+      const validation = validatedShop(body.shop);
+      if (!validation.shop) return send(res, 400, validation);
+      const previousShop = target.shop ? { ...target.shop } : null;
+      const updatedAt = now();
+      target.shop = validation.shop;
+      target.shopUpdatedAt = updatedAt;
+      target.updatedAt = updatedAt;
+      audit(store, {
+        actor: user,
+        action: "user.shop_update",
+        entityType: "user",
+        entityId: target.id,
+        detail: { from: previousShop, to: target.shop, existingOrdersRepriced: false },
+      });
+      save(store);
       return send(res, 200, { user: publicUser(target) });
     }
 
@@ -1395,6 +1513,9 @@ async function handleRequest(req, res) {
       if (body.role === "supplier" && target.verificationStatus == null) {
         target.verificationStatus = "unverified";
       }
+      if (body.role === "supplier" && !Array.isArray(target.verificationDocumentFileIds)) {
+        target.verificationDocumentFileIds = [];
+      }
       audit(store, {
         actor: user,
         action: "user.role_change",
@@ -1404,7 +1525,7 @@ async function handleRequest(req, res) {
         reason: body.reason || null,
       });
       save(store);
-      return send(res, 200, { user: publicUser(target) });
+      return send(res, 200, verificationUserResponse(store, target));
     }
 
     // Supplier / rider verification (ops + super)
@@ -1451,7 +1572,7 @@ async function handleRequest(req, res) {
         reason: body.reason || body.note || null,
       });
       save(store);
-      return send(res, 200, { user: publicUser(target) });
+      return send(res, 200, verificationUserResponse(store, target));
     }
 
     // ---- zones ----

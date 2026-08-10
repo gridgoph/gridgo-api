@@ -20,6 +20,7 @@ import {
   publicFile,
   resolveFileTarget,
   validateUpload,
+  VERIFICATION_DOCUMENT_TYPES,
 } from "../src/attachments.js";
 
 function expectError(fn, status, code) {
@@ -63,6 +64,7 @@ const supplier = { id: "supplier-a", role: "supplier" };
 const otherSupplier = { id: "supplier-b", role: "supplier" };
 const rider = { id: "rider-a", role: "rider" };
 const ops = { id: "ops-a", role: "ops_admin" };
+const superAdmin = { id: "super-a", role: "super_admin" };
 
 function order(overrides = {}) {
   return {
@@ -97,7 +99,7 @@ function readyFile(purpose, overrides = {}) {
     purpose,
     originalFilename: purpose === "fulfilment_proof" ? "pof.pdf" : "photo.jpg",
     declaredContentType: "application/octet-stream",
-    detectedContentType: purpose === "fulfilment_proof" || purpose === "artwork" ? "application/pdf" : "image/jpeg",
+    detectedContentType: ["fulfilment_proof", "artwork"].includes(purpose) ? "application/pdf" : "image/jpeg",
     size: 123,
     state: "ready",
     objectKey: `${purpose}/2026/08/09/private-key`,
@@ -182,14 +184,22 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   assert.doesNotThrow(() => authorizeFileUpload(rider, "fulfilment_proof"));
   assert.doesNotThrow(() => authorizeFileUpload(rider, "delivery_photo"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "service_image"));
+  assert.doesNotThrow(() => authorizeFileUpload(supplier, "verification_document"));
   expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(client, "verification_document"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(rider, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(supplier, "proof"), 400, "invalid_file_purpose");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "purpose_media_type_not_allowed");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
 });
 
 test("file registry backfill is additive and byte-idempotent", () => {
-  const store = { orders: [{ id: "order-a", artworkName: "legacy.pdf" }], supplierServices: [{ id: "service-a" }], claims: [{ id: "untouched" }] };
+  const store = {
+    users: [{ id: "supplier-a", role: "supplier" }, { id: "client-a", role: "client" }],
+    orders: [{ id: "order-a", artworkName: "legacy.pdf" }],
+    supplierServices: [{ id: "service-a" }],
+    claims: [{ id: "untouched" }],
+  };
   assert.equal(backfillFiles(store), true);
   assert.deepEqual(store.files, []);
   assert.deepEqual(store.orders[0].artworkFileIds, []);
@@ -198,6 +208,8 @@ test("file registry backfill is additive and byte-idempotent", () => {
   assert.deepEqual(store.orders[0].deliveryPhotoFileIds, []);
   assert.equal(store.orders[0].artworkName, "legacy.pdf");
   assert.deepEqual(store.supplierServices[0].imageFileIds, []);
+  assert.deepEqual(store.users[0].verificationDocumentFileIds, []);
+  assert.equal("verificationDocumentFileIds" in store.users[1], false);
   assert.deepEqual(store.claims, [{ id: "untouched" }]);
   const once = JSON.stringify(store);
   assert.equal(backfillFiles(store), false);
@@ -241,18 +253,101 @@ test("resolve and attach revalidate owner, ready state, media, target ownership,
   expectError(() => authorizeFileAttach(supplier, file, target), 409, "file_already_attached");
 });
 
-test("all four purposes map to ID-only parent fields", () => {
+test("all five purposes map to ID-only parent fields", () => {
   const cases = [
     [readyFile("artwork"), client, { type: "order", record: order() }, "artworkFileIds"],
     [readyFile("fulfilment_proof"), supplier, { type: "order", record: order(), milestoneCode: "packaging_qc" }, "fulfilmentProofFileIds"],
     [readyFile("delivery_photo"), rider, { type: "order", record: order({ state: "rider_assigned" }) }, "deliveryPhotoFileIds"],
     [readyFile("service_image"), supplier, { type: "supplier_service", record: service() }, "imageFileIds"],
+    [
+      readyFile("verification_document"),
+      supplier,
+      { type: "user", record: { ...supplier, verificationDocumentFileIds: [] }, documentType: "business_permit", replacedFiles: [] },
+      "verificationDocumentFileIds",
+    ],
   ];
   for (const [file, user, target, field] of cases) {
     authorizeFileAttach(user, file, target);
     assert.equal(attachFileReference(file, target), field);
     assert.deepEqual(target.record[field], [file.fileId]);
   }
+});
+
+test("verification documents attach only to the uploader and support typed replacement", () => {
+  const first = readyFile("verification_document", { fileId: "permit-old" });
+  const store = {
+    users: [
+      { ...supplier, verificationDocumentFileIds: [] },
+      { ...otherSupplier, verificationDocumentFileIds: [] },
+    ],
+    files: [first],
+    orders: [],
+    supplierServices: [],
+  };
+  const target = resolveFileTarget(store, first.purpose, { documentType: "business_permit" }, supplier);
+  assert.doesNotThrow(() => authorizeFileAttach(supplier, first, target));
+  assert.equal(attachFileReference(first, target), "verificationDocumentFileIds");
+  assert.deepEqual(target.record.verificationDocumentFileIds, [first.fileId]);
+  assert.equal(first.verificationDocumentType, "business_permit");
+
+  expectError(
+    () => resolveFileTarget(
+      store,
+      first.purpose,
+      { documentType: "business_permit", userId: otherSupplier.id },
+      supplier,
+    ),
+    400,
+    "unexpected_target_field",
+  );
+  const otherTarget = resolveFileTarget(store, first.purpose, { documentType: "business_permit" }, otherSupplier);
+  expectError(() => authorizeFileAttach(otherSupplier, first, otherTarget), 403, "forbidden");
+  expectError(
+    () => resolveFileTarget(store, first.purpose, { documentType: "tax_clearance" }, supplier),
+    400,
+    "invalid_verification_document_type",
+  );
+  assert.deepEqual(VERIFICATION_DOCUMENT_TYPES, ["business_permit", "valid_id", "sample_work"]);
+
+  const replacement = readyFile("verification_document", { fileId: "permit-new" });
+  store.files.push(replacement);
+  const replacementTarget = resolveFileTarget(
+    store,
+    replacement.purpose,
+    { documentType: "business_permit" },
+    supplier,
+  );
+  assert.deepEqual(replacementTarget.replacedFiles.map(({ fileId }) => fileId), [first.fileId]);
+  authorizeFileAttach(supplier, replacement, replacementTarget);
+  attachFileReference(replacement, replacementTarget);
+  assert.deepEqual(replacementTarget.record.verificationDocumentFileIds, [replacement.fileId]);
+  assert.deepEqual(first.references, []);
+  assert.deepEqual(replacement.references, [
+    {
+      type: "user",
+      id: supplier.id,
+      field: "verificationDocumentFileIds",
+      documentType: "business_permit",
+    },
+  ]);
+  expectError(() => markFileDeletePending(first, ops, "2026-08-09T00:00:00Z"), 403, "forbidden");
+  assert.doesNotThrow(() => markFileDeletePending(first, supplier, "2026-08-09T00:00:00Z"));
+});
+
+test("verification document reads never inherit order, service, or another supplier visibility", () => {
+  const file = readyFile("verification_document", {
+    references: [
+      { type: "user", id: supplier.id, field: "verificationDocumentFileIds", documentType: "valid_id" },
+      { type: "supplier_service", id: "service-a", field: "imageFileIds" },
+    ],
+  });
+  const store = { users: [supplier], orders: [order()], supplierServices: [service()] };
+  assert.doesNotThrow(() => authorizeFileRead(supplier, store, file));
+  assert.doesNotThrow(() => authorizeFileRead(ops, store, file));
+  assert.doesNotThrow(() => authorizeFileRead(superAdmin, store, file));
+  expectError(() => authorizeFileRead(otherSupplier, store, file), 403, "forbidden");
+  expectError(() => authorizeFileRead(client, store, file), 403, "forbidden");
+  expectError(() => authorizeFileRead(rider, store, file), 403, "forbidden");
 });
 
 test("reads require owner, operations, domain relationship, or live service visibility", () => {

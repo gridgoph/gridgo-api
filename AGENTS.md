@@ -23,6 +23,8 @@ Orders carry additive map points so apps never geocode at runtime:
 
 Supplier users may have `shop: { lat, lng, label }`. Order `pickup` is derived from that shop. Coords are real **Davao City** anchors (centre ~`7.0731, 125.6128`); zone-based dropoffs use a small deterministic offset so pins do not stack.
 
+`PATCH /users/:id/shop` lets a supplier correct only their own pin; ops/super may correct any supplier. Existing order pickup/money fields are snapshots and are never repriced by a profile move.
+
 Rider tracking:
 
 - `POST /dispatch/:id/location` — assigned rider pings while `picked_up` / `out_for_delivery`
@@ -107,6 +109,7 @@ The captain's demo API owns port **8787** and its store at `data/store.json`. To
 - The authoritative mobile contract is `docs/STORAGE_API.md`; the API streams uploads and authorizes short-lived presigned MinIO GETs. `MINIO_ENDPOINT` and fixed `MINIO_PUBLIC_URL` are separate.
 - New milestone POF uses purpose `fulfilment_proof`; supplier-proof approval states and new `proof` uploads are retired. Legacy `proofFileIds` remain readable evidence.
 - Files use `pending_upload|ready|delete_pending|deleted`; top-level metadata owns the private `objectKey`, while orders/services reference opaque `fileId` values only. Legacy `order.artworkName` stays valid and is never file identity.
+- Supplier identity evidence uses private `verification_document` files attached to the uploader's own `verificationDocumentFileIds`; exact types, replacement behavior, and strict owner/ops/super reads are in `docs/STORAGE_API.md`. Never expose those IDs through general `publicUser` projections.
 
 ## Maintaining this file
 
