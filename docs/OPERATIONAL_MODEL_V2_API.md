@@ -434,6 +434,7 @@ The hours snapshot comes from the one global setting. Every store load expires e
 Load-time `backfillOperationalModel()` is idempotent:
 
 - adds `settings` and `escalations` collections;
+- removes retired `zones[].deliveryFeeMinor`; delivery pricing comes only from `settings.deliveryFeeBands`;
 - fills complete v2 order money, split payment, milestone, checklist, and issue-window fields;
 - preserves legacy client-visible subtotal: old `totalMinor` becomes `subtotalMinor`; supplier price is reverse-derived and commission is the exact remainder; delivery is then added to new `totalMinor`;
 - maps old COD payment records to `digital_manual_legacy`, removes `codEligible`, and creates coherent installment status from lifecycle progress;

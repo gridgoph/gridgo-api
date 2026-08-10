@@ -166,6 +166,7 @@ test("v2 backfill migrates supplier proof and COD coherently and is byte-idempot
   };
   const store = {
     ...structuredClone(untouched),
+    zones: [{ id: "zone-a", code: "davao_central", deliveryFeeMinor: 15_000, active: true }],
     notifications: [],
     orders: [
       {
@@ -196,6 +197,7 @@ test("v2 backfill migrates supplier proof and COD coherently and is byte-idempot
   assert.equal(order.payments.balance.status, "not_submitted");
   assert.equal(order.assignmentNotificationId, store.notifications[0].id);
   assert.deepEqual(order.proofFileIds, ["legacy-proof"]);
+  assert.equal(Object.hasOwn(store.zones[0], "deliveryFeeMinor"), false);
   for (const key of Object.keys(untouched)) assert.deepEqual(store[key], untouched[key], `${key} changed`);
 
   const afterFirst = JSON.stringify(store);
