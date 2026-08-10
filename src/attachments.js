@@ -42,8 +42,6 @@ const FULFILMENT_MILESTONE_ACTOR = Object.freeze({
   packaging_qc: "supplier",
   delivered: "rider",
 });
-// Kept only until the HTTP transition imports are removed in the v2 server pass.
-const PROOF_UPLOAD_STATES = new Set(["supplier_accepted", "supplier_proof_changes_requested"]);
 
 export class AttachmentError extends Error {
   constructor(status, code, message, details = {}) {
@@ -382,66 +380,6 @@ function sniffContentType(bytes) {
 
 function forbidden() {
   fail(403, "forbidden", "This file belongs to another order or service. Open a file attached to one of your own records.");
-}
-
-export function recordProofUpload(order, user, attachment, at) {
-  if (user?.role !== "supplier" || order?.supplierId !== user.id) forbidden();
-  if (!PROOF_UPLOAD_STATES.has(order.state)) {
-    fail(
-      409,
-      "proof_upload_not_allowed",
-      "This order is not waiting for a supplier proof. Open an accepted order or a proof with requested changes and try again.",
-      { state: order.state, allowedStates: [...PROOF_UPLOAD_STATES] },
-    );
-  }
-  const corrected = order.state === "supplier_proof_changes_requested";
-  order.state = "supplier_proof_review";
-  order.updatedAt = at;
-  if (!Array.isArray(order.timeline)) order.timeline = [];
-  order.timeline.push({
-    at,
-    state: order.state,
-    by: user.id,
-    note: `Supplier submitted${corrected ? " corrected" : ""} proof`,
-    fileId: attachment.fileId,
-  });
-}
-
-export function applyProofDecision(order, user, decision, at) {
-  if (user?.role !== "client" || order.clientId !== user.id) forbidden();
-  if (order.state !== "supplier_proof_review") {
-    fail(
-      409,
-      "proof_decision_not_allowed",
-      "This order has no supplier proof waiting for your decision. Refresh the order and try again.",
-      { state: order.state, requiredState: "supplier_proof_review" },
-    );
-  }
-  if (decision.state === "supplier_proof_changes_requested") {
-    const reason = String(decision.reason || "").trim();
-    if (!reason) {
-      fail(400, "reason_required", "Describe what the supplier must change before requesting a corrected proof.");
-    }
-    order.state = decision.state;
-    order.updatedAt = at;
-    if (!Array.isArray(order.timeline)) order.timeline = [];
-    order.timeline.push({ at, state: order.state, by: user.id, note: `Changes requested: ${reason}` });
-    return;
-  }
-  if (decision.state === "supplier_proof_approved") {
-    order.state = decision.state;
-    order.updatedAt = at;
-    if (!Array.isArray(order.timeline)) order.timeline = [];
-    order.timeline.push({ at, state: order.state, by: user.id, note: "Proof approved" });
-    return;
-  }
-  fail(409, "proof_decision_not_allowed", "Choose `supplier_proof_approved` or `supplier_proof_changes_requested`.");
-}
-
-export function authorizeProofPaymentTransition(order, user) {
-  if (user?.role === "ops_admin" || user?.role === "super_admin") return;
-  if (user?.role === "supplier" && order?.supplierId === user.id) return;
-  forbidden();
 }
 
 // File registry contract. Parent records contain only opaque file IDs; object keys never cross the API boundary.

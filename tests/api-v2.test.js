@@ -82,6 +82,29 @@ function fixtureStore() {
         createdAt: at,
         updatedAt: at,
       },
+      {
+        id: "ord-legacy-pay",
+        clientId: "client-existing",
+        supplierId: "user_supplier",
+        riderId: null,
+        state: "awaiting_payment",
+        productId: "prod_flyer",
+        title: "Legacy COD risk path",
+        quantity: 100,
+        material: "matte 150gsm",
+        zone: "davao_central",
+        address: "Bajada, Davao City",
+        pickup: { lat: 7.064, lng: 125.6085, label: "PrintRight" },
+        dropoff: { lat: 7.0865, lng: 125.6135, label: "Bajada, Davao City" },
+        totalMinor: 25_000,
+        deliveryFeeMinor: 15_000,
+        paymentMethod: null,
+        paymentStatus: "unpaid",
+        codEligible: true,
+        timeline: [],
+        createdAt: at,
+        updatedAt: at,
+      },
     ],
     files: [],
     credits: {},
@@ -362,4 +385,98 @@ test("Operations and Super Admin can change the one global issue window and prov
     body: { issueWindowHours: 12 },
   });
   assert.equal(forbidden.status, 403);
+});
+
+test("manual Operations confirmation enforces the 75/25 digital split and every COD path is retired", async () => {
+  const clientToken = await login("existing@example.test", "secret123");
+  const opsToken = await login("ops@gridgo.local");
+
+  const clientOrders = await request("/orders", { token: clientToken });
+  const unassigned = clientOrders.body.orders.find((order) => order.title === "Range before assignment");
+  const tooEarly = await request(`/orders/${unassigned.id}/payments/downpayment/submit`, {
+    method: "POST",
+    token: clientToken,
+    body: { method: "qr_manual", reference: "GCASH-EARLY" },
+  });
+  assert.equal(tooEarly.status, 409);
+  assert.equal(tooEarly.body.error, "assignment_notification_required");
+
+  const codBalance = await request("/orders/ord-match/payments/balance/submit", {
+    method: "POST",
+    token: clientToken,
+    body: { method: "cod", reference: "CASH" },
+  });
+  assert.equal(codBalance.status, 400);
+  assert.equal(codBalance.body.error, "payment_method_not_allowed");
+
+  const downpayment = await request("/orders/ord-match/payments/downpayment/submit", {
+    method: "POST",
+    token: clientToken,
+    body: { method: "qr_manual", reference: "GCASH-DOWN-1125" },
+  });
+  assert.equal(downpayment.status, 200, JSON.stringify(downpayment.body));
+  assert.equal(downpayment.body.order.state, "downpayment_review");
+  assert.equal(downpayment.body.order.payments.downpayment.status, "pending_confirmation");
+  assert.equal(downpayment.body.order.payments.downpayment.amountMinor, 84_375);
+
+  const clientConfirm = await request("/orders/ord-match/payments/downpayment/confirm", {
+    method: "POST",
+    token: clientToken,
+    body: { note: "self confirm" },
+  });
+  assert.equal(clientConfirm.status, 403);
+
+  const confirmedDownpayment = await request("/orders/ord-match/payments/downpayment/confirm", {
+    method: "POST",
+    token: opsToken,
+    body: { note: "QR reference matched Operations wallet" },
+  });
+  assert.equal(confirmedDownpayment.status, 200, JSON.stringify(confirmedDownpayment.body));
+  assert.equal(confirmedDownpayment.body.order.state, "payment_authorized");
+  assert.equal(confirmedDownpayment.body.order.payments.downpayment.status, "confirmed");
+  assert.equal(confirmedDownpayment.body.order.payments.downpayment.confirmationSource, "manual_ops");
+
+  const balance = await request("/orders/ord-match/payments/balance/submit", {
+    method: "POST",
+    token: clientToken,
+    body: { method: "qr_manual", reference: "MAYA-BALANCE-1125" },
+  });
+  assert.equal(balance.status, 200, JSON.stringify(balance.body));
+  assert.equal(balance.body.order.payments.balance.status, "pending_confirmation");
+  assert.equal(balance.body.order.payments.balance.amountMinor, 28_125);
+
+  const confirmedBalance = await request("/orders/ord-match/payments/balance/confirm", {
+    method: "POST",
+    token: opsToken,
+    body: { note: "Balance reference matched Operations wallet" },
+  });
+  assert.equal(confirmedBalance.status, 200, JSON.stringify(confirmedBalance.body));
+  assert.equal(confirmedBalance.body.order.payments.balance.status, "confirmed");
+
+  const legacyCod = await request("/orders/ord-legacy-pay/transition", {
+    method: "POST",
+    token: clientToken,
+    body: { state: "payment_authorized", paymentMethod: "cod" },
+  });
+  assert.equal(legacyCod.status, 400);
+  assert.equal(legacyCod.body.error, "payment_method_not_allowed");
+
+  const retiredCredits = await request("/credits/authorize", {
+    method: "POST",
+    token: clientToken,
+    body: { orderId: "ord-legacy-pay" },
+  });
+  assert.equal(retiredCredits.status, 410);
+  assert.equal(retiredCredits.body.error, "payment_route_retired");
+
+  const riderToken = await login("new-rider@example.test", "strong-pass");
+  const acceptedDispatch = await request("/dispatch/ord-offer/accept", { method: "POST", token: riderToken, body: {} });
+  assert.equal(acceptedDispatch.status, 200, JSON.stringify(acceptedDispatch.body));
+  const riderCashPath = await request("/dispatch/ord-offer/proof", {
+    method: "POST",
+    token: riderToken,
+    body: { kind: "cod", note: "must never collect cash" },
+  });
+  assert.equal(riderCashPath.status, 400);
+  assert.equal(riderCashPath.body.error, "payment_method_not_allowed");
 });

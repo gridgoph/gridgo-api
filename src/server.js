@@ -8,12 +8,10 @@ import { DEMO_USERS } from "./demo-fixtures.js";
 import {
   AttachmentError,
   attachFileReference,
-  applyProofDecision,
   authorizeFileAttach,
   authorizeFileAttachOwner,
   authorizeFileRead,
   authorizeFileUpload,
-  authorizeProofPaymentTransition,
   backfillFiles,
   createPendingFile,
   findFile,
@@ -22,7 +20,6 @@ import {
   markFileReady,
   parseMultipartStream,
   publicFile,
-  recordProofUpload,
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
@@ -880,13 +877,8 @@ const TRANSITIONS = {
     supplier_accepted: ["supplier"],
     approved_for_matching: ["supplier"], // decline -> rematch
   },
-  supplier_accepted: {}, // proof attachment advances to supplier_proof_review
-  supplier_proof_review: {
-    supplier_proof_changes_requested: ["client"],
-    supplier_proof_approved: ["client"],
-  },
-  supplier_proof_approved: { awaiting_payment: ["supplier", "ops_admin", "super_admin"] },
-  awaiting_payment: { payment_authorized: ["client", "ops_admin", "super_admin"] },
+  awaiting_downpayment: {},
+  downpayment_review: {},
   payment_authorized: { production: ["supplier"] },
   production: { supplier_self_qc: ["supplier"] },
   supplier_self_qc: { ready_for_dispatch: ["supplier"] },
@@ -1223,7 +1215,16 @@ async function handleRequest(req, res) {
         latestTarget.record.updatedAt = attachedAt;
         if (latestTarget.type === "order") {
           if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
-          if (latestFile.purpose === "proof") recordProofUpload(latestTarget.record, latestUser, latestFile, attachedAt);
+          if (latestFile.purpose === "fulfilment_proof") {
+            latestTarget.record.timeline.push({
+              at: attachedAt,
+              state: latestTarget.record.state,
+              by: latestUser.id,
+              note: `Proof of Fulfilment attached for ${latestTarget.milestoneCode}`,
+              fileId: latestFile.fileId,
+              milestoneCode: latestTarget.milestoneCode,
+            });
+          }
           save(latestStore);
           return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
         }
@@ -1306,35 +1307,10 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/credits/authorize") {
-      if (user.role !== "client") return send(res, 403, { error: "forbidden" });
-      const body = await readBody(req);
-      const order = store.orders.find((o) => o.id === body.orderId);
-      if (!order || order.clientId !== user.id) return send(res, 404, { error: "order_not_found" });
-      if (order.state !== "awaiting_payment" && order.state !== "supplier_accepted") {
-        return send(res, 409, { error: "invalid_state", state: order.state });
-      }
-      const acct = store.credits[user.id] || { balanceMinor: 0, ledger: [] };
-      const amount = order.totalMinor + order.deliveryFeeMinor;
-      if (acct.balanceMinor < amount) return send(res, 402, { error: "insufficient_credits", needMinor: amount, balanceMinor: acct.balanceMinor });
-      acct.balanceMinor -= amount;
-      acct.ledger.push({
-        id: id("led"),
-        type: "spend",
-        amountMinor: -amount,
-        balanceAfterMinor: acct.balanceMinor,
-        reason: `Authorize order ${order.id}`,
-        orderId: order.id,
-        at: now(),
-        actorId: user.id,
+      return send(res, 410, {
+        error: "payment_route_retired",
+        message: "Order payments now use the 75% downpayment and 25% balance QR routes. Refresh the order and submit the required installment.",
       });
-      store.credits[user.id] = acct;
-      order.paymentMethod = "pilot_credit";
-      order.paymentStatus = "authorized";
-      order.state = "payment_authorized";
-      order.updatedAt = now();
-      order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Pilot Credits authorized" });
-      save(store);
-      return send(res, 200, { order: publicOrder(order, user), balanceMinor: acct.balanceMinor });
     }
 
     // Super Admin grants Pilot Credits (not a purchase; non-cash, non-transferable)
@@ -2293,6 +2269,147 @@ async function handleRequest(req, res) {
       return send(res, 200, { audit: list });
     }
 
+    // ---- manual QR installment payments ----
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/submit$/.test(pathname)) {
+      if (user.role !== "client") return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const installmentCode = parts[4];
+      const body = await readBody(req);
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order || order.clientId !== user.id) return send(res, 404, { error: "order_not_found" });
+      if (body.method !== "qr_manual") {
+        return send(res, 400, {
+          error: "payment_method_not_allowed",
+          message: "Cash on Delivery is unavailable. Choose the digital QR payment method and submit its reference.",
+          allowed: ["qr_manual"],
+        });
+      }
+      const notification = (store.notifications || []).find(
+        (item) => item.id === order.assignmentNotificationId && item.orderId === order.id && item.userId === order.clientId,
+      );
+      if (!notification || !order.assignmentNotifiedAt) {
+        return send(res, 409, {
+          error: "assignment_notification_required",
+          message: "Wait for GRIDGO to notify you of the assigned supplier and final price before submitting payment.",
+        });
+      }
+      const installment = order.payments?.[installmentCode];
+      if (!installment || !Number.isSafeInteger(installment.amountMinor)) {
+        return send(res, 409, {
+          error: "final_price_required",
+          message: "The final price is not ready. Wait for the supplier assignment notification and refresh the order.",
+        });
+      }
+      if (installmentCode === "downpayment" && !["awaiting_downpayment", "downpayment_review"].includes(order.state)) {
+        return send(res, 409, {
+          error: "downpayment_not_available",
+          message: "The downpayment is not available at this order step. Refresh the order to see the current payment action.",
+          state: order.state,
+        });
+      }
+      if (
+        installmentCode === "balance" &&
+        !["confirmed", "legacy_confirmed"].includes(order.payments?.downpayment?.status)
+      ) {
+        return send(res, 409, {
+          error: "downpayment_not_confirmed",
+          message: "Operations must confirm the downpayment before you submit the remaining balance.",
+        });
+      }
+      if (["pending_confirmation", "confirmed", "legacy_confirmed"].includes(installment.status)) {
+        return send(res, 409, {
+          error: "payment_already_submitted",
+          message: "This installment already has a submitted payment. Refresh the order to see its confirmation status.",
+          installment: installmentCode,
+          status: installment.status,
+        });
+      }
+      const reference = String(body.reference || "").trim();
+      if (!reference) {
+        return send(res, 400, {
+          error: "payment_reference_required",
+          message: "Enter the GCash, Maya, or e-wallet payment reference so Operations can confirm it.",
+        });
+      }
+      const submittedAt = now();
+      installment.method = "qr_manual";
+      installment.status = "pending_confirmation";
+      installment.reference = reference;
+      installment.submittedAt = submittedAt;
+      installment.confirmedAt = null;
+      installment.confirmedBy = null;
+      installment.confirmationSource = null;
+      order.paymentMethod = "qr_manual";
+      order.paymentStatus = installmentCode === "downpayment" ? "downpayment_pending" : "balance_pending";
+      if (installmentCode === "downpayment") order.state = "downpayment_review";
+      order.updatedAt = submittedAt;
+      order.timeline.push({
+        at: submittedAt,
+        state: order.state,
+        by: user.id,
+        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} submitted for Operations confirmation`,
+      });
+      audit(store, {
+        actor: user,
+        action: `payment.${installmentCode}_submit`,
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/confirm$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const parts = pathname.split("/");
+      const orderId = parts[2];
+      const installmentCode = parts[4];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const installment = order.payments?.[installmentCode];
+      if (!installment || installment.status !== "pending_confirmation") {
+        return send(res, 409, {
+          error: "payment_not_pending",
+          message: "This installment has no payment waiting for confirmation. Refresh the order before taking action.",
+          installment: installmentCode,
+          status: installment?.status || null,
+        });
+      }
+      const body = await readBody(req);
+      const confirmedAt = now();
+      installment.status = "confirmed";
+      installment.confirmedAt = confirmedAt;
+      installment.confirmedBy = user.id;
+      installment.confirmationSource = "manual_ops";
+      if (installmentCode === "downpayment") {
+        order.state = "payment_authorized";
+        order.paymentStatus = "downpayment_confirmed";
+      } else {
+        order.paymentStatus = "paid";
+      }
+      order.updatedAt = confirmedAt;
+      order.timeline.push({
+        at: confirmedAt,
+        state: order.state,
+        by: user.id,
+        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} confirmed manually by Operations`,
+      });
+      audit(store, {
+        actor: user,
+        action: `payment.${installmentCode}_confirm`,
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
+        reason: body.note || null,
+      });
+      save(store);
+      return send(res, 200, { order: publicOrder(order, user) });
+    }
+
     // ---- orders list / create ----
     if (req.method === "GET" && pathname === "/orders") {
       return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user)) });
@@ -2387,13 +2504,12 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
-      if (next === "supplier_proof_changes_requested" || next === "supplier_proof_approved") {
-        applyProofDecision(order, user, { state: next, reason: body.reason }, now());
-        save(store);
-        return send(res, 200, { order: publicOrder(order, user) });
-      }
-      if (order.state === "supplier_proof_approved" && next === "awaiting_payment" && user.role === "supplier") {
-        authorizeProofPaymentTransition(order, user);
+      if (body.paymentMethod === "cod") {
+        return send(res, 400, {
+          error: "payment_method_not_allowed",
+          message: "Cash on Delivery is unavailable. Submit the digital QR payment for Operations confirmation.",
+          allowed: ["qr_manual"],
+        });
       }
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
@@ -2415,18 +2531,6 @@ async function handleRequest(req, res) {
             reason: hold?.holdReason || "payout hold active",
           });
         }
-      }
-      // COD authorize path
-      if (next === "payment_authorized" && body.paymentMethod === "cod") {
-        const total = order.totalMinor + order.deliveryFeeMinor;
-        if (total > 150000) return send(res, 400, { error: "cod_limit", maxMinor: 150000 });
-        if (!order.codEligible) return send(res, 400, { error: "cod_not_eligible" });
-        const openCod = store.orders.some(
-          (o) => o.clientId === order.clientId && o.id !== order.id && o.paymentMethod === "cod" && o.paymentStatus !== "collected" && o.paymentStatus !== "reconciled" && !["completed", "payout_released"].includes(o.state),
-        );
-        if (openCod) return send(res, 409, { error: "cod_one_active" });
-        order.paymentMethod = "cod";
-        order.paymentStatus = "authorized";
       }
       if (next === "supplier_accepted") {
         if (user.role !== "supplier" || order.supplierId !== user.id) {
@@ -2627,11 +2731,18 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId && o.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const body = await readBody(req);
+      if (body.kind === "cod") {
+        return send(res, 400, {
+          error: "payment_method_not_allowed",
+          message: "Do not collect cash for this order. GRIDGO now requires the client to pay the balance digitally.",
+          allowed: ["pickup", "delivery", "failure"],
+        });
+      }
       const proof = {
         id: id("prf"),
         orderId,
         riderId: user.id,
-        kind: body.kind || "delivery", // pickup | delivery | cod | failure
+        kind: body.kind || "delivery", // legacy route: pickup | delivery | failure
         otp: body.otp || null,
         photoName: body.photoName || null,
         note: body.note || "",
@@ -2645,9 +2756,6 @@ async function handleRequest(req, res) {
         order.state = "issue_window_open";
         order.timeline.push({ at: now(), state: "delivered", by: user.id, note: "Delivery proof" });
         order.timeline.push({ at: now(), state: "issue_window_open", by: "system", note: "24h issue window" });
-        if (order.paymentMethod === "cod") order.paymentStatus = "collected";
-      } else if (proof.kind === "cod") {
-        order.paymentStatus = "collected";
       }
       order.updatedAt = now();
       save(store);

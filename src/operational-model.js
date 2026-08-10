@@ -306,9 +306,11 @@ export function expireIssueWindows(store, at) {
 }
 
 const LEGACY_SUPPLIER_PROOF_STATES = new Set([
+  "supplier_accepted",
   "supplier_proof_review",
   "supplier_proof_changes_requested",
   "supplier_proof_approved",
+  "awaiting_payment",
 ]);
 
 const ASSIGNMENT_ACCEPTED_STATES = new Set([
@@ -491,15 +493,18 @@ export function backfillOperationalModel(store, at = new Date().toISOString()) {
       changed = true;
     }
     if (LEGACY_SUPPLIER_PROOF_STATES.has(order.state)) {
+      const migrationNote = ["supplier_accepted", "awaiting_payment"].includes(order.state)
+        ? "Legacy payment entry state migrated to operational model v2"
+        : "Supplier proof step retired in operational model v2";
       order.state = "awaiting_downpayment";
       if (!Array.isArray(order.timeline)) order.timeline = [];
-      const migrationEntryExists = order.timeline.some((entry) => entry.note === "Supplier proof step retired in operational model v2");
+      const migrationEntryExists = order.timeline.some((entry) => entry.note === migrationNote);
       if (!migrationEntryExists) {
         order.timeline.push({
           at,
           state: "awaiting_downpayment",
           by: "system",
-          note: "Supplier proof step retired in operational model v2",
+          note: migrationNote,
         });
       }
       changed = true;
