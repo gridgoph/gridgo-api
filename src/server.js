@@ -34,6 +34,10 @@ import {
   defaultTaxonomy,
   resolveCategoryCode,
 } from "./taxonomy.js";
+import {
+  backfillOperationalModel,
+  publicOrderFor,
+} from "./operational-model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -155,7 +159,7 @@ function authUser(req, store) {
 }
 
 /** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
-const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business"]);
+const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business", "organization"]);
 
 /**
  * Safe default when a client has no recorded type: individual.
@@ -185,6 +189,39 @@ function isOps(user) {
 
 function isSuper(user) {
   return user && user.role === "super_admin";
+}
+
+function signupError(res, error, message, details = {}) {
+  return send(res, 400, { error, message, ...details });
+}
+
+function normalizedSignupAccountType(value) {
+  return value === "personal" ? "individual" : value;
+}
+
+function validatedCategoryRanks(store, value) {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const canonical = [];
+  const seen = new Set();
+  for (const item of value) {
+    const category = activeCategoryFor(store.taxonomy, item?.categoryCode);
+    const rank = Number(item?.rank);
+    if (!category || !Number.isInteger(rank) || rank < 1 || seen.has(category.code)) return null;
+    seen.add(category.code);
+    canonical.push({ categoryCode: category.code, rank });
+  }
+  canonical.sort((a, b) => a.rank - b.rank);
+  if (canonical.some((item, index) => item.rank !== index + 1)) return null;
+  return canonical;
+}
+
+function hasSignupShop(value) {
+  return (
+    value &&
+    Number.isFinite(Number(value.lat)) &&
+    Number.isFinite(Number(value.lng)) &&
+    String(value.label || "").trim().length > 0
+  );
 }
 
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
@@ -580,6 +617,7 @@ function load() {
   // Fixtures last so seed-defined demo identity wins over fill-missing defaults
   // (e.g. client@ accountType business after a prior individual backfill).
   if (convergeDemoFixtures(store)) changed = true;
+  if (backfillOperationalModel(store, now())) changed = true;
   if (changed) save(store);
   return store;
 }
@@ -597,6 +635,9 @@ function ordersFor(user, store) {
   if (user.role === "client") return store.orders.filter((o) => o.clientId === user.id);
   if (user.role === "supplier") return store.orders.filter((o) => o.supplierId === user.id);
   if (user.role === "rider") {
+    if (user.verificationStatus !== "approved") {
+      return store.orders.filter((o) => o.riderId === user.id);
+    }
     return store.orders.filter(
       (o) => o.riderId === user.id || ["ready_for_dispatch", "rider_assigned", "picked_up", "out_for_delivery"].includes(o.state),
     );
@@ -609,10 +650,8 @@ function orderVisible(user, order, store) {
   return ordersFor(user, store).some((o) => o.id === order.id);
 }
 
-function publicOrder(order) {
-  if (!order) return null;
-  const { attachments: _legacyAttachments, ...publicRecord } = order;
-  return publicRecord;
+function publicOrder(order, user) {
+  return publicOrderFor(order, user);
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -877,6 +916,118 @@ async function handleRequest(req, res) {
     }
 
     // ---- auth ----
+    if (req.method === "POST" && pathname === "/auth/signup") {
+      const body = await readBody(req);
+      const role = String(body.role || "");
+      const allowedRoles = ["client", "supplier", "rider"];
+      if (!allowedRoles.includes(role)) {
+        return signupError(
+          res,
+          "invalid_signup_role",
+          "Choose client, supplier, or rider for this account.",
+          { allowedRoles },
+        );
+      }
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      const name = String(body.name || "").trim();
+      const phone = String(body.phone || "").trim();
+      if (!email || !email.includes("@")) {
+        return signupError(res, "invalid_email", "Enter a complete email address, then try again.");
+      }
+      if (store.users.some((candidate) => String(candidate.email).toLowerCase() === email)) {
+        return send(res, 409, {
+          error: "email_already_registered",
+          message: "This email already has a GRIDGO account. Sign in or use a different email address.",
+        });
+      }
+      if (password.length < 8) {
+        return signupError(res, "invalid_password", "Use a password with at least 8 characters.");
+      }
+      if (!name) return signupError(res, "name_required", "Enter the account holder's full name.");
+      if (!phone) return signupError(res, "phone_required", "Enter a phone number Operations can use for this account.");
+
+      const createdAt = now();
+      const created = { id: id("user"), email, password, name, phone, role, createdAt };
+      if (role === "client") {
+        const accountType = normalizedSignupAccountType(body.accountType);
+        if (!CLIENT_ACCOUNT_TYPES.has(accountType)) {
+          return signupError(
+            res,
+            "invalid_account_type",
+            "Choose personal, business, or organization for this client account.",
+            { allowed: ["individual", "business", "organization"], inputAlias: { personal: "individual" } },
+          );
+        }
+        const orgName = String(body.orgName || "").trim();
+        if (["business", "organization"].includes(accountType) && !orgName) {
+          return signupError(
+            res,
+            "organization_name_required",
+            "Enter the business or organization name used on this account.",
+          );
+        }
+        created.accountType = accountType;
+        if (orgName) created.orgName = orgName;
+      }
+      if (role === "supplier") {
+        const supplierName = String(body.supplierName || "").trim();
+        if (!supplierName) {
+          return signupError(res, "supplier_name_required", "Enter the supplier shop or trading name.");
+        }
+        if (!hasSignupShop(body.shop)) {
+          return signupError(
+            res,
+            "shop_location_required",
+            "Pin the supplier shop and add its address label before creating the account.",
+          );
+        }
+        const categoryRanks = validatedCategoryRanks(store, body.categoryRanks);
+        if (!categoryRanks) {
+          return signupError(
+            res,
+            "invalid_category_ranks",
+            "Rank at least one active service category from 1 with no gaps or duplicates.",
+          );
+        }
+        created.supplierName = supplierName;
+        created.shop = {
+          lat: Number(body.shop.lat),
+          lng: Number(body.shop.lng),
+          label: String(body.shop.label).trim(),
+        };
+        created.categoryRanks = categoryRanks;
+        created.verificationStatus = "pending";
+        created.verificationNote = "Operations review required before matching";
+        created.verifiedAt = null;
+        created.verifiedBy = null;
+      }
+      if (role === "rider") {
+        const profile = body.riderProfile;
+        const vehicleType = String(profile?.vehicleType || "").trim();
+        const vehiclePlate = String(profile?.vehiclePlate || "").trim();
+        const licenseNumber = String(profile?.licenseNumber || "").trim();
+        if (!vehicleType || !vehiclePlate || !licenseNumber) {
+          return signupError(
+            res,
+            "invalid_rider_profile",
+            "Enter the rider's vehicle type, plate number, and driving licence number.",
+          );
+        }
+        created.riderProfile = { vehicleType, vehiclePlate, licenseNumber };
+        created.verificationStatus = "pending";
+        created.verificationNote = "Operations review required before dispatch";
+        created.verifiedAt = null;
+        created.verifiedBy = null;
+      }
+
+      const token = id("tok");
+      store.users.push(created);
+      store.sessions[token] = { userId: created.id, createdAt };
+      save(store);
+      return send(res, 201, { token, user: publicUser(created) });
+    }
+
     if (req.method === "POST" && pathname === "/auth/login") {
       const body = await readBody(req);
       const user = store.users.find(
@@ -2282,12 +2433,24 @@ async function handleRequest(req, res) {
       if (user.role !== "rider" && user.role !== "ops_admin" && user.role !== "super_admin") {
         return send(res, 403, { error: "forbidden" });
       }
+      if (user.role === "rider" && user.verificationStatus !== "approved") {
+        return send(res, 403, {
+          error: "rider_not_approved",
+          message: "Operations must approve this rider profile before dispatch offers become available.",
+        });
+      }
       const offers = store.orders.filter((o) => o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id));
       return send(res, 200, { offers: offers.map(publicOrder) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
       if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.verificationStatus !== "approved") {
+        return send(res, 403, {
+          error: "rider_not_approved",
+          message: "Operations must approve this rider profile before the rider can accept a dispatch.",
+        });
+      }
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
       if (!order || order.state !== "ready_for_dispatch") return send(res, 409, { error: "not_offerable" });
