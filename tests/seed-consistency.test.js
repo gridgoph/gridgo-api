@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { PICKUP_CHECK_CODES, backfillOperationalModel } from "../src/operational-model.js";
+import { DEMO_PASSWORD } from "../src/demo-fixtures.js";
 
 function freshSeed() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gridgo-seed-consistency-"));
@@ -111,7 +112,7 @@ test("fresh seed is coherent with operational model v2", () => {
     "ops@gridgo.local",
     "admin@gridgo.local",
   ];
-  for (const email of demoEmails) assert.equal(store.users.find((user) => user.email === email)?.password, "demo", email);
+  for (const email of demoEmails) assert.equal(store.users.find((user) => user.email === email)?.password, DEMO_PASSWORD, email);
   assert.deepEqual(
     store.users.find((user) => user.email === "supplier@gridgo.local")?.verificationDocumentFileIds,
     [],

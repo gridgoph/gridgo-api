@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
-import { DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
+import { DEMO_PASSWORD, DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
 import { defaultTaxonomy } from "./taxonomy.js";
 import {
   PICKUP_CHECK_CODES,
@@ -712,7 +712,7 @@ if (!reset && fs.existsSync(storePath)) {
 }
 fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
 console.log(`wrote ${storePath}`);
-console.log("demo logins: *@gridgo.local / demo");
+console.log(`demo logins: *@gridgo.local / ${DEMO_PASSWORD}`);
 const ordersByState = Object.fromEntries(
   [...new Set(store.orders.map((order) => order.state))]
     .sort()

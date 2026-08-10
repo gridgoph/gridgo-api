@@ -7,6 +7,10 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { defaultTaxonomy } from "../src/taxonomy.js";
+import { DEMO_PASSWORD } from "../src/demo-fixtures.js";
+
+const LEGACY_DEMO_PASSWORD = "de" + "mo";
+const CUSTOM_FIXTURE_PASSWORD = "captain-custom-password";
 
 let api;
 let child;
@@ -35,13 +39,14 @@ function fixtureStore() {
   return {
     version: 2,
     users: [
-      { id: "user_ops", email: "ops@gridgo.local", password: "demo", name: "Dina Ops", role: "ops_admin" },
-      { id: "user_admin", email: "admin@gridgo.local", password: "demo", name: "Eli Admin", role: "super_admin" },
+      { id: "user_ops", email: "ops@gridgo.local", password: LEGACY_DEMO_PASSWORD, name: "Dina Ops", role: "ops_admin" },
+      { id: "user_admin", email: "admin@gridgo.local", password: LEGACY_DEMO_PASSWORD, name: "Eli Admin", role: "super_admin" },
+      { id: "user_client", email: "client@gridgo.local", password: CUSTOM_FIXTURE_PASSWORD, name: "Ana Client", role: "client", accountType: "individual" },
       { id: "client-existing", email: "existing@example.test", password: "secret123", name: "Existing", role: "client", accountType: "individual" },
       {
         id: "user_supplier",
         email: "supplier@gridgo.local",
-        password: "demo",
+        password: LEGACY_DEMO_PASSWORD,
         name: "Ben Supplier",
         role: "supplier",
         supplierName: "PrintRight Davao",
@@ -174,7 +179,7 @@ async function request(pathname, { method = "GET", token, body } = {}) {
   return { status: response.status, body: payload };
 }
 
-async function login(email, password = "demo") {
+async function login(email, password = DEMO_PASSWORD) {
   const response = await request("/auth/login", { method: "POST", body: { email, password } });
   assert.equal(response.status, 200, JSON.stringify(response.body));
   return response.body.token;
@@ -270,6 +275,25 @@ after(async () => {
     await new Promise((resolve) => child.once("exit", resolve));
   }
   if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+});
+
+test("fixture convergence rotates only the retired demo credential and is idempotent", async () => {
+  const migrated = JSON.parse(await fs.readFile(storePath, "utf8"));
+  assert.equal(migrated.users.find(({ email }) => email === "ops@gridgo.local")?.password, DEMO_PASSWORD);
+  assert.equal(migrated.users.find(({ email }) => email === "supplier@gridgo.local")?.password, DEMO_PASSWORD);
+  assert.equal(migrated.users.find(({ email }) => email === "client@gridgo.local")?.password, CUSTOM_FIXTURE_PASSWORD);
+
+  const beforeSecondLoad = await fs.readFile(storePath, "utf8");
+  const health = await fetch(`${api}/health`);
+  assert.equal(health.status, 200);
+  assert.equal(await fs.readFile(storePath, "utf8"), beforeSecondLoad, "second load changed the store");
+
+  const oldLogin = await request("/auth/login", {
+    method: "POST",
+    body: { email: "ops@gridgo.local", password: LEGACY_DEMO_PASSWORD },
+  });
+  assert.equal(oldLogin.status, 401);
+  assert.equal(oldLogin.body.error, "invalid_credentials");
 });
 
 test("all three roles self-sign up with exact profiles and pending approval gates", async () => {

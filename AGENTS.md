@@ -83,7 +83,7 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 |---|---|---|
 | Purpose | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
 | Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
-| Overwrite? | Fill-missing except documented v2 retirement normalization for COD, supplier-proof states, and removal of obsolete zone fees; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`) |
+| Overwrite? | Fill-missing except documented v2 retirement normalization for COD, supplier-proof states, and removal of obsolete zone fees; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`); password rotates only from the exact retired shipped credential and preserves diverged values |
 | Creates? | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.local`) |
 | Never touches | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
 

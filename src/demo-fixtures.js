@@ -16,10 +16,14 @@ export const DEMO_SUPPLIER_SHOP = {
   label: "PrintRight Davao, C.M. Recto St",
 };
 
+/** Repository-visible pilot credential shared by every shipped demo account. */
+export const DEMO_PASSWORD = "Ilovegridgo-0990";
+
 /**
  * Fixture user records. Keys present here are the only attributes convergence
  * will create or overwrite on a matching store user (plus verifiedAt/verifiedBy
- * when creating an already-approved supplier/rider).
+ * when creating an already-approved supplier/rider). Password is the exception:
+ * existing fixture users rotate only from the exact retired shipped credential.
  *
  * Identity match: exact email first, else stable seed id. Never match by role
  * alone or by a broad domain rule — that would risk touching real accounts.
@@ -28,7 +32,7 @@ export const DEMO_USERS = [
   {
     id: "user_client",
     email: "client@gridgo.local",
-    password: "demo",
+    password: DEMO_PASSWORD,
     name: "Ana Client",
     role: "client",
     accountType: "business",
@@ -37,7 +41,7 @@ export const DEMO_USERS = [
   {
     id: "user_client_individual",
     email: "individual@gridgo.local",
-    password: "demo",
+    password: DEMO_PASSWORD,
     name: "Ivy Individual",
     role: "client",
     accountType: "individual",
@@ -45,7 +49,7 @@ export const DEMO_USERS = [
   {
     id: "user_supplier",
     email: "supplier@gridgo.local",
-    password: "demo",
+    password: DEMO_PASSWORD,
     name: "Ben Supplier",
     role: "supplier",
     supplierName: "PrintRight Davao",
@@ -61,7 +65,7 @@ export const DEMO_USERS = [
   {
     id: "user_rider",
     email: "rider@gridgo.local",
-    password: "demo",
+    password: DEMO_PASSWORD,
     name: "Carlo Rider",
     role: "rider",
     verificationStatus: "approved",
@@ -71,14 +75,14 @@ export const DEMO_USERS = [
   {
     id: "user_ops",
     email: "ops@gridgo.local",
-    password: "demo",
+    password: DEMO_PASSWORD,
     name: "Dina Ops",
     role: "ops_admin",
   },
   {
     id: "user_admin",
     email: "admin@gridgo.local",
-    password: "demo",
+    password: DEMO_PASSWORD,
     name: "Eli Admin",
     role: "super_admin",
   },
