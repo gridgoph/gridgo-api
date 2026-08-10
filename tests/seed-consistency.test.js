@@ -56,6 +56,11 @@ test("fresh seed is coherent with operational model v2", () => {
     assert.equal(order.payments.balance.amountMinor, order.balanceMinor, order.id);
     assert.equal(order.payments.downpayment.method, "qr_manual", order.id);
     assert.equal(order.payments.balance.method, "qr_manual", order.id);
+    for (const installment of Object.values(order.payments)) {
+      assert.equal(Object.hasOwn(installment, "rejectedAt"), true, order.id);
+      assert.equal(Object.hasOwn(installment, "rejectedBy"), true, order.id);
+      assert.equal(Object.hasOwn(installment, "rejectionReason"), true, order.id);
+    }
 
     assert.deepEqual(order.payoutMilestones.map(({ sharePercent }) => sharePercent), [50, 15, 25, 10], order.id);
     assert.equal(

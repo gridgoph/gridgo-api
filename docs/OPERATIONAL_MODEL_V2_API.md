@@ -62,6 +62,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/orders/:id/transition` | edge-specific role | unchanged QA/production edges below |
 | POST | `/orders/:id/payments/:installment/submit` | owning client | submit QR reference |
 | POST | `/orders/:id/payments/:installment/confirm` | ops/super | manual confirmation |
+| POST | `/orders/:id/payments/:installment/reject` | ops/super | reject submitted reference with client-visible reason |
 | POST | `/orders/:id/milestones/:code/release` | ops/super | POF-gated supplier payout release |
 | GET | `/claims` | ops/super | list claims; filters `orderId`, `status` |
 | POST | `/claims` | ops/super | raise claim; holds unless `hold:false` |
@@ -249,7 +250,10 @@ Order payment shape:
       "submittedAt": null,
       "confirmedAt": null,
       "confirmedBy": null,
-      "confirmationSource": null
+      "confirmationSource": null,
+      "rejectedAt": null,
+      "rejectedBy": null,
+      "rejectionReason": null
     },
     "balance": {
       "amountMinor": 28125,
@@ -259,7 +263,10 @@ Order payment shape:
       "submittedAt": null,
       "confirmedAt": null,
       "confirmedBy": null,
-      "confirmationSource": null
+      "confirmationSource": null,
+      "rejectedAt": null,
+      "rejectedBy": null,
+      "rejectionReason": null
     }
   }
 }
@@ -292,6 +299,31 @@ POST /orders/:id/payments/balance/confirm
 ```
 
 Only Operations/Super Admin. Confirmation sets `status: "confirmed"`, actor/timestamp, and `confirmationSource: "manual_ops"`. Downpayment confirmation changes order state to `payment_authorized`; balance confirmation sets legacy summary `paymentStatus: "paid"`. Delivery is blocked until balance is confirmed.
+
+Manual rejection:
+
+```http
+POST /orders/:id/payments/downpayment/reject
+POST /orders/:id/payments/balance/reject
+```
+
+```json
+{
+  "reason": "The submitted GCash reference does not match the Operations wallet. Check the reference and submit it again."
+}
+```
+
+Only Operations/Super Admin. A successful rejection returns `200 { "order": ... }`, restores the installment to `status: "not_submitted"`, clears its submitted reference/submission timestamp, and sets `rejectedAt`, `rejectedBy`, and client-visible `rejectionReason`. Downpayment rejection also restores order state `awaiting_downpayment` and summary `paymentStatus: "unpaid"`; balance rejection restores summary `paymentStatus: "downpayment_confirmed"` without changing the production/delivery state. The client can submit the installment again immediately. Resubmission clears the three current rejection fields; the rejection remains in `order.timeline` and the platform audit log.
+
+Exact rejection errors:
+
+| Status | `error` | Meaning and recovery |
+|---:|---|---|
+| 400 | `payment_rejection_reason_required` | `reason` is blank or missing; state the concrete payment problem and what the client must correct. |
+| 403 | `forbidden` | caller is not Operations or Super Admin. |
+| 404 | `order_not_found` | no order has that ID. |
+| 409 | `payment_not_pending` | installment has no submitted payment awaiting review; refresh before acting. |
+| 409 | `payment_already_confirmed` | installment is `confirmed` or `legacy_confirmed`; accepted money cannot be reversed through this route and needs manual reconciliation. |
 
 ## Payout milestones and POF
 

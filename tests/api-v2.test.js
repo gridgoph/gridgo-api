@@ -424,9 +424,10 @@ test("Operations and Super Admin can change the one global issue window and prov
   assert.equal(forbidden.status, 403);
 });
 
-test("manual Operations confirmation enforces the 75/25 digital split and every COD path is retired", async () => {
+test("manual Operations payment review supports rejection, resubmission, confirmation, and no COD", async () => {
   const clientToken = await login("existing@example.test", "secret123");
   const opsToken = await login("ops@gridgo.local");
+  const superToken = await login("admin@gridgo.local");
 
   const clientOrders = await request("/orders", { token: clientToken });
   const unassigned = clientOrders.body.orders.find((order) => order.title === "Range before assignment");
@@ -456,6 +457,63 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
   assert.equal(downpayment.body.order.payments.downpayment.status, "pending_confirmation");
   assert.equal(downpayment.body.order.payments.downpayment.amountMinor, 84_375);
 
+  const clientReject = await request("/orders/ord-match/payments/downpayment/reject", {
+    method: "POST",
+    token: clientToken,
+    body: { reason: "The reference does not match the Operations wallet. Check it and submit the correct e-wallet reference." },
+  });
+  assert.equal(clientReject.status, 403);
+
+  const missingReason = await request("/orders/ord-match/payments/downpayment/reject", {
+    method: "POST",
+    token: opsToken,
+    body: { reason: "   " },
+  });
+  assert.equal(missingReason.status, 400);
+  assert.equal(missingReason.body.error, "payment_rejection_reason_required");
+  assert.match(missingReason.body.message, /what is wrong.*correct/i);
+
+  const rejectionReason = "The submitted GCash reference does not match the Operations wallet. Check the reference and submit it again.";
+  const rejectedDownpayment = await request("/orders/ord-match/payments/downpayment/reject", {
+    method: "POST",
+    token: opsToken,
+    body: { reason: `  ${rejectionReason}  ` },
+  });
+  assert.equal(rejectedDownpayment.status, 200, JSON.stringify(rejectedDownpayment.body));
+  assert.equal(rejectedDownpayment.body.order.state, "awaiting_downpayment");
+  assert.equal(rejectedDownpayment.body.order.paymentStatus, "unpaid");
+  assert.equal(rejectedDownpayment.body.order.payments.downpayment.status, "not_submitted");
+  assert.equal(rejectedDownpayment.body.order.payments.downpayment.reference, null);
+  assert.equal(rejectedDownpayment.body.order.payments.downpayment.submittedAt, null);
+  assert.equal(rejectedDownpayment.body.order.payments.downpayment.rejectedBy, "user_ops");
+  assert.match(rejectedDownpayment.body.order.payments.downpayment.rejectedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(rejectedDownpayment.body.order.payments.downpayment.rejectionReason, rejectionReason);
+  assert.equal(rejectedDownpayment.body.order.timeline.at(-1).by, "user_ops");
+  assert.match(rejectedDownpayment.body.order.timeline.at(-1).note, new RegExp(rejectionReason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const rejectedClientOrder = await request("/orders/ord-match", { token: clientToken });
+  assert.equal(rejectedClientOrder.status, 200);
+  assert.equal(rejectedClientOrder.body.order.payments.downpayment.rejectionReason, rejectionReason);
+  assert.equal(rejectedClientOrder.body.order.payments.downpayment.rejectedBy, "user_ops");
+
+  const rejectionAudit = await request("/audit?action=payment.downpayment_reject&orderId=ord-match", { token: opsToken });
+  assert.equal(rejectionAudit.status, 200);
+  assert.equal(rejectionAudit.body.audit.at(-1).action, "payment.downpayment_reject");
+  assert.equal(rejectionAudit.body.audit.at(-1).actorId, "user_ops");
+  assert.equal(rejectionAudit.body.audit.at(-1).reason, rejectionReason);
+
+  const resubmittedDownpayment = await request("/orders/ord-match/payments/downpayment/submit", {
+    method: "POST",
+    token: clientToken,
+    body: { method: "qr_manual", reference: "GCASH-DOWN-CORRECTED-1125" },
+  });
+  assert.equal(resubmittedDownpayment.status, 200, JSON.stringify(resubmittedDownpayment.body));
+  assert.equal(resubmittedDownpayment.body.order.payments.downpayment.status, "pending_confirmation");
+  assert.equal(resubmittedDownpayment.body.order.payments.downpayment.reference, "GCASH-DOWN-CORRECTED-1125");
+  assert.equal(resubmittedDownpayment.body.order.payments.downpayment.rejectedAt, null);
+  assert.equal(resubmittedDownpayment.body.order.payments.downpayment.rejectedBy, null);
+  assert.equal(resubmittedDownpayment.body.order.payments.downpayment.rejectionReason, null);
+
   const clientConfirm = await request("/orders/ord-match/payments/downpayment/confirm", {
     method: "POST",
     token: clientToken,
@@ -473,6 +531,15 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
   assert.equal(confirmedDownpayment.body.order.payments.downpayment.status, "confirmed");
   assert.equal(confirmedDownpayment.body.order.payments.downpayment.confirmationSource, "manual_ops");
 
+  const confirmedReject = await request("/orders/ord-match/payments/downpayment/reject", {
+    method: "POST",
+    token: superToken,
+    body: { reason: "This accepted payment must remain accepted." },
+  });
+  assert.equal(confirmedReject.status, 409);
+  assert.equal(confirmedReject.body.error, "payment_already_confirmed");
+  assert.match(confirmedReject.body.message, /accepted.*cannot be rejected/i);
+
   const balance = await request("/orders/ord-match/payments/balance/submit", {
     method: "POST",
     token: clientToken,
@@ -481,6 +548,23 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
   assert.equal(balance.status, 200, JSON.stringify(balance.body));
   assert.equal(balance.body.order.payments.balance.status, "pending_confirmation");
   assert.equal(balance.body.order.payments.balance.amountMinor, 28_125);
+
+  const rejectedBalance = await request("/orders/ord-match/payments/balance/reject", {
+    method: "POST",
+    token: superToken,
+    body: { reason: "The Maya reference is missing one digit. Check the receipt and submit the complete reference." },
+  });
+  assert.equal(rejectedBalance.status, 200, JSON.stringify(rejectedBalance.body));
+  assert.equal(rejectedBalance.body.order.payments.balance.status, "not_submitted");
+  assert.equal(rejectedBalance.body.order.paymentStatus, "downpayment_confirmed");
+
+  const resubmittedBalance = await request("/orders/ord-match/payments/balance/submit", {
+    method: "POST",
+    token: clientToken,
+    body: { method: "qr_manual", reference: "MAYA-BALANCE-CORRECTED-1125" },
+  });
+  assert.equal(resubmittedBalance.status, 200, JSON.stringify(resubmittedBalance.body));
+  assert.equal(resubmittedBalance.body.order.payments.balance.status, "pending_confirmation");
 
   const confirmedBalance = await request("/orders/ord-match/payments/balance/confirm", {
     method: "POST",
