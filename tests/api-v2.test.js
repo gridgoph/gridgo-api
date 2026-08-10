@@ -477,8 +477,8 @@ test("manual Operations confirmation enforces the 75/25 digital split and every 
     token: riderToken,
     body: { kind: "cod", note: "must never collect cash" },
   });
-  assert.equal(riderCashPath.status, 400);
-  assert.equal(riderCashPath.body.error, "payment_method_not_allowed");
+  assert.equal(riderCashPath.status, 410);
+  assert.equal(riderCashPath.body.error, "dispatch_proof_route_retired");
 });
 
 test("milestone release requires POF and the global issue window actually expires", async () => {
@@ -550,4 +550,156 @@ test("milestone release requires POF and the global issue window actually expire
   });
   assert.equal(lateIssue.status, 409);
   assert.equal(lateIssue.body.error, "issue_window_closed");
+});
+
+test("rider pickup checklist blocks transport, records evidence escalation, and gates delivery", async () => {
+  const riderToken = await login("new-rider@example.test", "strong-pass");
+  const opsToken = await login("ops@gridgo.local");
+  const checks = [
+    "quantity_match",
+    "specification_match",
+    "visible_defects",
+    "packaging_integrity",
+    "documentation",
+    "supplier_sign_off",
+  ];
+
+  const incomplete = await request("/dispatch/ord-offer/pickup-checklist", {
+    method: "POST",
+    token: riderToken,
+    body: { checks: checks.slice(0, 5).map((code) => ({ code, passed: true })) },
+  });
+  assert.equal(incomplete.status, 400);
+  assert.equal(incomplete.body.error, "invalid_pickup_checklist");
+
+  const failedChecks = checks.map((code) => ({ code, passed: code !== "visible_defects" }));
+  const noEvidence = await request("/dispatch/ord-offer/pickup-checklist", {
+    method: "POST",
+    token: riderToken,
+    body: { checks: failedChecks, failureNote: "Colour shift on the first batch", evidenceFileIds: [] },
+  });
+  assert.equal(noEvidence.status, 400);
+  assert.equal(noEvidence.body.error, "checklist_evidence_required");
+
+  const beforeFailure = JSON.parse(await fs.readFile(storePath, "utf8"));
+  const offer = beforeFailure.orders.find((order) => order.id === "ord-offer");
+  offer.deliveryPhotoFileIds.push("file-checklist-failure", "file-delivery-evidence");
+  beforeFailure.files.push(
+    {
+      fileId: "file-checklist-failure",
+      ownerId: offer.riderId,
+      purpose: "delivery_photo",
+      originalFilename: "colour-shift.jpg",
+      declaredContentType: "image/jpeg",
+      detectedContentType: "image/jpeg",
+      size: 100,
+      state: "ready",
+      objectKey: "delivery_photo/test/colour-shift.jpg",
+      references: [{ type: "order", id: offer.id, field: "deliveryPhotoFileIds" }],
+      createdAt: "2026-08-10T00:00:00.000Z",
+      readyAt: "2026-08-10T00:00:00.000Z",
+    },
+    {
+      fileId: "file-delivery-evidence",
+      ownerId: offer.riderId,
+      purpose: "delivery_photo",
+      originalFilename: "delivery.jpg",
+      declaredContentType: "image/jpeg",
+      detectedContentType: "image/jpeg",
+      size: 100,
+      state: "ready",
+      objectKey: "delivery_photo/test/delivery.jpg",
+      references: [{ type: "order", id: offer.id, field: "deliveryPhotoFileIds" }],
+      createdAt: "2026-08-10T00:00:00.000Z",
+      readyAt: "2026-08-10T00:00:00.000Z",
+    },
+  );
+  await fs.writeFile(storePath, JSON.stringify(beforeFailure, null, 2));
+
+  const failed = await request("/dispatch/ord-offer/pickup-checklist", {
+    method: "POST",
+    token: riderToken,
+    body: {
+      checks: failedChecks,
+      failureNote: "Colour shift on the first batch",
+      evidenceFileIds: ["file-checklist-failure"],
+    },
+  });
+  assert.equal(failed.status, 200, JSON.stringify(failed.body));
+  assert.equal(failed.body.order.state, "rider_assigned");
+  assert.equal(failed.body.order.pickupChecklist.status, "failed_escalated");
+  assert.match(failed.body.escalation.id, /^esc_/);
+
+  const blockedPass = await request("/dispatch/ord-offer/pickup-checklist", {
+    method: "POST",
+    token: riderToken,
+    body: { checks: checks.map((code) => ({ code, passed: true })) },
+  });
+  assert.equal(blockedPass.status, 409);
+  assert.equal(blockedPass.body.error, "pickup_escalation_open");
+
+  const escalationList = await request("/escalations?status=open", { token: opsToken });
+  assert.equal(escalationList.status, 200);
+  assert.equal(escalationList.body.escalations.some((item) => item.id === failed.body.escalation.id), true);
+
+  const resolved = await request(`/escalations/${failed.body.escalation.id}/resolve`, {
+    method: "POST",
+    token: opsToken,
+    body: { resolution: "Supplier replaced the affected batch; rider must repeat all checks" },
+  });
+  assert.equal(resolved.status, 200, JSON.stringify(resolved.body));
+  assert.equal(resolved.body.escalation.status, "resolved");
+
+  const passed = await request("/dispatch/ord-offer/pickup-checklist", {
+    method: "POST",
+    token: riderToken,
+    body: { checks: checks.map((code) => ({ code, passed: true })) },
+  });
+  assert.equal(passed.status, 200, JSON.stringify(passed.body));
+  assert.equal(passed.body.order.state, "picked_up");
+  assert.equal(passed.body.order.pickupChecklist.status, "passed");
+  assert.equal(passed.body.signOffPrompt, "GRIDGO partner! Quality check, done! Salamat po!");
+
+  const beforeDelivery = JSON.parse(await fs.readFile(storePath, "utf8"));
+  const deliveryOrder = beforeDelivery.orders.find((order) => order.id === "ord-offer");
+  const deliveredMilestone = deliveryOrder.payoutMilestones.find((milestone) => milestone.code === "delivered");
+  const retentionMilestone = deliveryOrder.payoutMilestones.find((milestone) => milestone.code === "retention");
+  deliveredMilestone.pofFileIds = ["file-delivery-pof"];
+  deliveredMilestone.status = "pof_attached";
+  retentionMilestone.pofFileIds = ["file-delivery-pof"];
+  retentionMilestone.status = "pof_attached";
+  deliveryOrder.fulfilmentProofFileIds.push("file-delivery-pof");
+  beforeDelivery.files.push({
+    fileId: "file-delivery-pof",
+    ownerId: deliveryOrder.riderId,
+    purpose: "fulfilment_proof",
+    originalFilename: "delivered-pof.jpg",
+    declaredContentType: "image/jpeg",
+    detectedContentType: "image/jpeg",
+    size: 100,
+    state: "ready",
+    objectKey: "fulfilment_proof/test/delivered-pof.jpg",
+    references: [{ type: "order", id: deliveryOrder.id, field: "fulfilmentProofFileIds", milestoneCode: "delivered" }],
+    createdAt: "2026-08-10T00:00:00.000Z",
+    readyAt: "2026-08-10T00:00:00.000Z",
+  });
+  await fs.writeFile(storePath, JSON.stringify(beforeDelivery, null, 2));
+
+  const delivered = await request("/dispatch/ord-offer/delivery", {
+    method: "POST",
+    token: riderToken,
+    body: { evidenceFileId: "file-delivery-evidence", evidenceType: "photo" },
+  });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.order.state, "issue_window_open");
+  assert.match(delivered.body.order.issueWindowExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(delivered.body.order.deliveryEvidence.fileId, "file-delivery-evidence");
+
+  const retiredProofRoute = await request("/dispatch/ord-offer/proof", {
+    method: "POST",
+    token: riderToken,
+    body: { kind: "delivery", photoName: "bypass.jpg" },
+  });
+  assert.equal(retiredProofRoute.status, 410);
+  assert.equal(retiredProofRoute.body.error, "dispatch_proof_route_retired");
 });
