@@ -151,7 +151,11 @@ function fixtureStore() {
     claims: [],
     issues: [],
     auditLog: [],
-    notifications: [],
+    notifications: [
+      { id: "ntf_client_old", userId: "client-existing", title: "Old", body: "Old client notification", read: false, at: "2026-08-10T01:00:00.000Z" },
+      { id: "ntf_ops_private", userId: "user_ops", title: "Ops", body: "Ops-only notification", read: false, at: "2026-08-10T02:00:00.000Z" },
+      { id: "ntf_client_new", userId: "client-existing", title: "New", body: "New client notification", read: false, at: "2026-08-10T03:00:00.000Z" },
+    ],
     locationPings: [],
     proofs: [],
   };
@@ -176,6 +180,59 @@ async function login(email, password = "demo") {
   return response.body.token;
 }
 
+async function openNotificationStream(token, lastEventId) {
+  const controller = new AbortController();
+  const response = await fetch(`${api}/notifications/stream`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}),
+    },
+    signal: controller.signal,
+  });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+
+  async function nextFrame(timeoutMs = 1_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const boundary = buffered.indexOf("\n\n");
+      if (boundary !== -1) {
+        const frame = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 2);
+        return frame;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("SSE frame timeout");
+      const result = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("SSE frame timeout")), remaining)),
+      ]);
+      if (result.done) throw new Error("SSE stream closed");
+      buffered += decoder.decode(result.value, { stream: true });
+    }
+  }
+
+  async function nextNotification(timeoutMs = 1_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const frame = await nextFrame(deadline - Date.now());
+      if (!frame.includes("event: notification")) continue;
+      const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
+      return { frame, notification: JSON.parse(data) };
+    }
+  }
+
+  return {
+    close() {
+      controller.abort();
+    },
+    nextFrame,
+    nextNotification,
+  };
+}
+
 before(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gridgo-v2-api-test-"));
   storePath = path.join(tempDir, "store.json");
@@ -184,7 +241,13 @@ before(async () => {
   api = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ["src/server.js"], {
     cwd: path.resolve("."),
-    env: { ...process.env, STORE_PATH: storePath, PORT: String(port), HOST: "127.0.0.1" },
+    env: {
+      ...process.env,
+      STORE_PATH: storePath,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      NOTIFICATION_HEARTBEAT_MS: "50",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -373,6 +436,144 @@ test("supplier verification documents stay private and appear on the Operations 
   assert.equal(anotherSupplierDownload.body.error, "forbidden");
 });
 
+test("notification read, unread, mark-all snapshot, deletion, and ownership are server-persisted", async () => {
+  const clientToken = await login("existing@example.test", "secret123");
+  const initial = await request("/notifications", { token: clientToken });
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.notifications.some((notification) => notification.userId !== "client-existing"), false);
+  assert.equal(initial.body.notifications.some((notification) => notification.id === "ntf_client_new"), true);
+  assert.equal(initial.body.notifications.some((notification) => notification.id === "ntf_client_old"), true);
+  assert.equal(typeof initial.body.snapshot, "string");
+  const initiallyUnreadIds = initial.body.notifications
+    .filter((notification) => !notification.read)
+    .map((notification) => notification.id);
+
+  const marked = await request("/notifications/ntf_client_old", {
+    method: "PATCH",
+    token: clientToken,
+    body: { read: true },
+  });
+  assert.equal(marked.status, 200);
+  assert.equal(marked.body.notification.read, true);
+
+  const unread = await request("/notifications/ntf_client_old", {
+    method: "PATCH",
+    token: clientToken,
+    body: { read: false },
+  });
+  assert.equal(unread.status, 200);
+  assert.equal(unread.body.notification.read, false);
+
+  const invalidRead = await request("/notifications/ntf_client_old", {
+    method: "PATCH",
+    token: clientToken,
+    body: { read: "yes" },
+  });
+  assert.equal(invalidRead.status, 400);
+  assert.equal(invalidRead.body.error, "notification_read_required");
+
+  const beforeArrival = JSON.parse(await fs.readFile(storePath, "utf8"));
+  beforeArrival.notifications.push({
+    id: "ntf_client_after_snapshot",
+    userId: "client-existing",
+    title: "Later",
+    body: "Arrived after the list snapshot",
+    read: false,
+    at: "2026-08-10T04:00:00.000Z",
+  });
+  await fs.writeFile(storePath, JSON.stringify(beforeArrival, null, 2));
+
+  const markedAll = await request("/notifications/read-all", {
+    method: "PATCH",
+    token: clientToken,
+    body: { snapshot: initial.body.snapshot },
+  });
+  assert.equal(markedAll.status, 200);
+  assert.equal(markedAll.body.updatedCount, initiallyUnreadIds.length);
+  const afterMarkAll = await request("/notifications", { token: clientToken });
+  for (const notificationId of initiallyUnreadIds) {
+    assert.equal(afterMarkAll.body.notifications.find((item) => item.id === notificationId).read, true);
+  }
+  assert.equal(afterMarkAll.body.notifications.find((item) => item.id === "ntf_client_after_snapshot").read, false);
+
+  for (const method of ["PATCH", "DELETE"]) {
+    const refusal = await request("/notifications/ntf_ops_private", {
+      method,
+      token: clientToken,
+      ...(method === "PATCH" ? { body: { read: true } } : {}),
+    });
+    assert.equal(refusal.status, 403);
+    assert.equal(refusal.body.error, "forbidden");
+  }
+  const bulkRefusal = await request("/notifications/read-all", {
+    method: "PATCH",
+    token: clientToken,
+    body: { snapshot: "ntf_ops_private" },
+  });
+  assert.equal(bulkRefusal.status, 403);
+  assert.equal(bulkRefusal.body.error, "forbidden");
+
+  const deleted = await request("/notifications/ntf_client_old", { method: "DELETE", token: clientToken });
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.body.id, "ntf_client_old");
+  assert.match(deleted.body.deletedAt, /^\d{4}-\d{2}-\d{2}T/);
+  const deletedAgain = await request("/notifications/ntf_client_old", { method: "DELETE", token: clientToken });
+  assert.deepEqual(deletedAgain.body, deleted.body, "delete retries must be idempotent");
+
+  const afterDelete = await request("/notifications", { token: clientToken });
+  assert.equal(afterDelete.body.notifications.some((item) => item.id === "ntf_client_old"), false);
+  const persisted = JSON.parse(await fs.readFile(storePath, "utf8"));
+  assert.equal(
+    persisted.notifications.find((item) => item.id === "ntf_client_old").deletedAt,
+    deleted.body.deletedAt,
+    "soft deletion must retain internal notification evidence",
+  );
+});
+
+test("notification stream rejects unauthenticated and foreign resume attempts", async () => {
+  const unauthenticated = await request("/notifications/stream");
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(unauthenticated.body.error, "unauthorized");
+
+  const clientToken = await login("existing@example.test", "secret123");
+  const foreignResume = await fetch(`${api}/notifications/stream`, {
+    headers: {
+      Authorization: `Bearer ${clientToken}`,
+      "Last-Event-ID": "ntf_ops_private",
+    },
+  });
+  assert.equal(foreignResume.status, 403);
+  assert.deepEqual(await foreignResume.json(), { error: "forbidden" });
+
+  const unknownResume = await fetch(`${api}/notifications/stream`, {
+    headers: {
+      Authorization: `Bearer ${clientToken}`,
+      "Last-Event-ID": "ntf_missing",
+    },
+  });
+  assert.equal(unknownResume.status, 409);
+  assert.deepEqual(await unknownResume.json(), { error: "notification_resume_unavailable" });
+
+  const emptyList = await request("/notifications", { token: secondClientToken });
+  assert.equal(emptyList.body.snapshot, null);
+  const secondClient = await request("/auth/me", { token: secondClientToken });
+  const afterEmptySnapshot = JSON.parse(await fs.readFile(storePath, "utf8"));
+  afterEmptySnapshot.notifications.push({
+    id: "ntf_after_empty_snapshot",
+    userId: secondClient.body.user.id,
+    title: "First notification",
+    body: "Arrived between the empty list and stream connection",
+    read: false,
+    at: "2026-08-10T05:00:00.000Z",
+  });
+  await fs.writeFile(storePath, JSON.stringify(afterEmptySnapshot, null, 2));
+  const firstStream = await openNotificationStream(secondClientToken);
+  assert.match(await firstStream.nextFrame(), /^retry: 5000$/);
+  const firstEvent = await firstStream.nextNotification();
+  assert.equal(firstEvent.notification.id, "ntf_after_empty_snapshot");
+  firstStream.close();
+});
+
 test("assignment calculates final price, notifies the client, and never leaks commission to clients", async () => {
   const clientToken = await login("existing@example.test", "secret123");
   const supplierToken = await login("supplier@gridgo.local");
@@ -418,6 +619,14 @@ test("assignment calculates final price, notifies the client, and never leaks co
   });
   assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
 
+  const beforeAcceptance = await request("/notifications", { token: clientToken });
+  const opsBeforeAcceptance = await request("/notifications", { token: opsToken });
+  const clientStream = await openNotificationStream(clientToken, beforeAcceptance.body.snapshot);
+  const opsStream = await openNotificationStream(opsToken, opsBeforeAcceptance.body.snapshot);
+  assert.match(await clientStream.nextFrame(), /^retry: 5000$/);
+  assert.match(await clientStream.nextFrame(), /^: heartbeat /);
+  assert.match(await opsStream.nextFrame(), /^retry: 5000$/);
+
   const accepted = await request("/orders/ord-match/transition", {
     method: "POST",
     token: supplierToken,
@@ -433,6 +642,20 @@ test("assignment calculates final price, notifies the client, and never leaks co
   assert.equal(accepted.body.order.downpaymentMinor, 84_375);
   assert.equal(accepted.body.order.balanceMinor, 28_125);
   assert.match(accepted.body.order.assignmentNotificationId, /^ntf_/);
+
+  const liveEvent = await clientStream.nextNotification();
+  assert.match(liveEvent.frame, new RegExp(`^id: ${accepted.body.order.assignmentNotificationId}\\n`));
+  assert.equal(liveEvent.notification.id, accepted.body.order.assignmentNotificationId);
+  assert.equal(liveEvent.notification.userId, "client-existing");
+  await assert.rejects(opsStream.nextNotification(150), /SSE frame timeout/);
+  clientStream.close();
+  opsStream.close();
+
+  const resumedStream = await openNotificationStream(clientToken, beforeAcceptance.body.snapshot);
+  assert.match(await resumedStream.nextFrame(), /^retry: 5000$/);
+  const replayedEvent = await resumedStream.nextNotification();
+  assert.equal(replayedEvent.notification.id, accepted.body.order.assignmentNotificationId);
+  resumedStream.close();
 
   const otherSupplierJobs = await request("/jobs", { token: secondSupplierToken });
   assert.equal(otherSupplierJobs.status, 200);

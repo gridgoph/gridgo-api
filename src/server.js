@@ -24,6 +24,12 @@ import {
   validateUpload,
 } from "./attachments.js";
 import { createMutationQueue } from "./mutation-queue.js";
+import {
+  backfillNotifications,
+  createNotificationEvents,
+  formatNotificationEvent,
+  notificationSnapshot,
+} from "./notifications.js";
 import { createObjectStorage } from "./object-storage.js";
 import {
   backfillTaxonomy,
@@ -53,6 +59,9 @@ const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const objectStorage = createObjectStorage(process.env);
 const enqueueMutation = createMutationQueue();
+const notificationEvents = createNotificationEvents();
+const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
+const STORE_NOTIFICATION_IDS = Symbol("storeNotificationIds");
 let storageInitializing = true;
 
 // Auto-seed if missing
@@ -64,9 +73,15 @@ if (!fs.existsSync(STORE)) {
 }
 
 function save(store) {
+  const previousNotificationIds = store[STORE_NOTIFICATION_IDS] || new Set();
+  const createdNotifications = (store.notifications || []).filter(
+    (notification) => !previousNotificationIds.has(notification.id),
+  );
   const temporary = `${STORE}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, JSON.stringify(store, null, 2));
   fs.renameSync(temporary, STORE);
+  store[STORE_NOTIFICATION_IDS] = new Set((store.notifications || []).map((notification) => notification.id));
+  for (const notification of createdNotifications) notificationEvents.publish(notification);
 }
 function id(prefix) {
   return `${prefix}_${crypto.randomBytes(6).toString("hex")}`;
@@ -95,7 +110,7 @@ function send(res, status, body) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
     "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
   });
   res.end(payload);
@@ -656,12 +671,17 @@ function backfillPlatform(store) {
 
 function load() {
   const store = JSON.parse(fs.readFileSync(STORE, "utf8"));
+  Object.defineProperty(store, STORE_NOTIFICATION_IDS, {
+    value: new Set((store.notifications || []).map((notification) => notification.id)),
+    writable: true,
+  });
   let changed = false;
   if (backfillGeography(store)) changed = true;
   if (backfillPlatform(store)) changed = true;
   // After backfillPlatform, which guarantees store.taxonomy and its arrays exist.
   if (backfillTaxonomy(store)) changed = true;
   if (backfillFiles(store)) changed = true;
+  if (backfillNotifications(store)) changed = true;
   if (backfillAccountType(store)) changed = true;
   // Fixtures last so seed-defined demo identity wins over fill-missing defaults
   // (e.g. client@ accountType business after a prior individual backfill).
@@ -1315,11 +1335,111 @@ async function handleRequest(req, res) {
     }
 
     // ---- notifications ----
+    if (req.method === "GET" && pathname === "/notifications/stream") {
+      const lastEventId = String(req.headers["last-event-id"] || "").trim();
+      let resumeIndex = -1;
+      if (lastEventId) {
+        resumeIndex = store.notifications.findIndex((notification) => notification.id === lastEventId);
+        if (resumeIndex === -1) {
+          return send(res, 409, { error: "notification_resume_unavailable" });
+        }
+        if (store.notifications[resumeIndex].userId !== user.id) {
+          return send(res, 403, { error: "forbidden" });
+        }
+      }
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.flushHeaders();
+      res.write("retry: 5000\n\n");
+
+      const unsubscribe = notificationEvents.subscribe(user.id, (notification) => {
+        if (notification.deletedAt == null) res.write(formatNotificationEvent(notification));
+      });
+      for (let index = resumeIndex + 1; index < store.notifications.length; index += 1) {
+        const notification = store.notifications[index];
+        if (notification.userId === user.id && notification.deletedAt == null) {
+          res.write(formatNotificationEvent(notification));
+        }
+      }
+
+      const heartbeat = setInterval(() => {
+        res.write(`: heartbeat ${now()}\n\n`);
+      }, NOTIFICATION_HEARTBEAT_MS);
+      heartbeat.unref();
+      let closed = false;
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        unsubscribe();
+      };
+      req.once("aborted", cleanup);
+      res.once("close", cleanup);
+      return;
+    }
+
     if (req.method === "GET" && pathname === "/notifications") {
       const items = store.notifications
-        .filter((n) => n.userId === user.id)
+        .filter((n) => n.userId === user.id && n.deletedAt == null)
         .sort((a, b) => (a.at < b.at ? 1 : -1));
-      return send(res, 200, { notifications: items });
+      return send(res, 200, {
+        notifications: items,
+        snapshot: notificationSnapshot(store.notifications, user.id),
+      });
+    }
+
+    if (req.method === "PATCH" && pathname === "/notifications/read-all") {
+      const body = await readBody(req);
+      if (typeof body.snapshot !== "string" || !body.snapshot) {
+        return send(res, 400, { error: "notification_snapshot_required" });
+      }
+      const snapshotIndex = store.notifications.findIndex((notification) => notification.id === body.snapshot);
+      if (snapshotIndex === -1) return send(res, 404, { error: "notification_not_found" });
+      if (store.notifications[snapshotIndex].userId !== user.id) {
+        return send(res, 403, { error: "forbidden" });
+      }
+      let updatedCount = 0;
+      for (let index = 0; index <= snapshotIndex; index += 1) {
+        const notification = store.notifications[index];
+        if (notification.userId !== user.id || notification.deletedAt != null || notification.read) continue;
+        notification.read = true;
+        updatedCount += 1;
+      }
+      if (updatedCount) save(store);
+      return send(res, 200, { updatedCount });
+    }
+
+    if (req.method === "PATCH" && /^\/notifications\/[^/]+$/.test(pathname)) {
+      const notificationId = pathname.split("/")[2];
+      const notification = store.notifications.find((candidate) => candidate.id === notificationId);
+      if (!notification) return send(res, 404, { error: "notification_not_found" });
+      if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
+      if (notification.deletedAt != null) return send(res, 404, { error: "notification_not_found" });
+      const body = await readBody(req);
+      if (typeof body.read !== "boolean") {
+        return send(res, 400, { error: "notification_read_required" });
+      }
+      notification.read = body.read;
+      save(store);
+      return send(res, 200, { notification });
+    }
+
+    if (req.method === "DELETE" && /^\/notifications\/[^/]+$/.test(pathname)) {
+      const notificationId = pathname.split("/")[2];
+      const notification = store.notifications.find((candidate) => candidate.id === notificationId);
+      if (!notification) return send(res, 404, { error: "notification_not_found" });
+      if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
+      if (notification.deletedAt == null) {
+        notification.deletedAt = now();
+        save(store);
+      }
+      return send(res, 200, { id: notification.id, deletedAt: notification.deletedAt });
     }
 
     // ---- global operational settings ----
