@@ -56,9 +56,23 @@ The captain's category chart (4 categories, 17 subcategories) is the product tax
 - Pre-chart codes (`large_format`, `offset`, `apparel_sublimation`, `signage`) are retired into `taxonomy.categoryAliases`, not deleted; they still resolve on input. `supplierServices[].categoryCode` keeps whatever it was stored with — resolve through aliases, never rewrite captain-owned service records.
 - Definitions, mapping table and `backfillTaxonomy()` all live in `src/taxonomy.js`; `seed.js` and the server share it so a seeded store and a backfilled store match.
 
+## Phone push (Firebase Cloud Messaging)
+
+Notifications reach phones three ways: `GET /notifications`, the SSE stream, and FCM push. Contract for the apps is `docs/OPERATIONAL_MODEL_V2_API.md` → *Push notifications*; operator install/rotation is `docs/DEPLOYMENT.md` §2a. Firebase project `gridgo-c2ce9`; `src/push.js` holds both the device-token store rules and the FCM v1 client.
+
+- **`save()` is the only place push fires.** It already computes which notifications are new (for SSE), so hooking there is what makes every push correspond to exactly one readable notification, emitted once, with no call site able to forget it. Never add a send at a `store.notifications.push(...)` site.
+- **A failed push may never fail its trigger.** `deliverPush` is fire-and-forget and cannot reject; the payout/payment/transition is already on disk when it runs.
+- **FCM v1 with no new dependency**: `node:crypto` signs the RS256 service-account assertion, the OAuth2 access token is cached for its lifetime and shares one in-flight mint. `firebase-admin` stays out (see Constraints).
+- **One token belongs to one user.** Re-registration under a second account moves it; two rows for one token puts one person's orders on another's lock screen. A foreign token on unregister returns `404`, not `403` — the value is caller-suppliable, so `403` would be an ownership oracle.
+- **A registration keys on `user.id`, never on the login.** That is why the fixture email domain migration renames an account without orphaning its phone, and `migrateFixtureEmailDomain()` refuses at startup if a `deviceTokens` record is ever found holding an address instead. See *Email is a login key, never a foreign key* below.
+- **`INVALID_ARGUMENT` is not "dead token".** FCM returns it for a malformed *message* too; prune only when the field violation names `message.token`, or the whole fleet disappears the first time a payload bug ships.
+- **Push payload `data` is an allowlist** (`notificationId`, `type`, `orderId`, `at`), so money added to a notification record can never reach a lock screen.
+- **Push never blocks startup.** A missing or broken credential disables it and reports the reason on `/health` (`disabled` / `misconfigured`), because every merge auto-deploys and Docker turns an uninstalled bind-mounted secret into a directory.
+
 ## Platform data (ops / super / matching)
 
 - Notification state and caller-scoped SSE delivery are server-owned; exact contracts are in `docs/OPERATIONAL_MODEL_V2_API.md`. Notification creation stays append-only because list snapshots/SSE resume use append order; atomic `save()` emits new records. Deletes retain lifecycle evidence with `deletedAt`.
+- `GET|POST /devices`, `POST /devices/unregister` — caller-owned FCM registrations; `POST /auth/logout` accepts `{deviceToken}` so sign-out cannot strand a phone.
 - `GET /taxonomy` — categories, subcategories, aliases, materials, finishes (super manages via POST/PATCH)
 - `GET|POST|PATCH /supplier-services…` — supplier catalogue; states `draft|pending_verification|live|suspended|withdrawn`
 - `GET /orders/:id/eligible-suppliers` — ops matching support (no auto-assign)
@@ -82,7 +96,7 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 | | Fixture email domain migration | Backfill | Fixture convergence |
 |---|---|---|---|
 | Purpose | Rename the six shipped identities off the retired `@gridgo.local` addresses | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
-| Scope | only `user.email`, only for an exact address in `RETIRED_FIXTURE_EMAILS` (`src/demo-fixtures.js`) | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Scope | only `user.email`, only for an exact address in `RETIRED_FIXTURE_EMAILS` (`src/demo-fixtures.js`) | geography, platform arrays, top-level `files` and `deviceTokens`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
 | Overwrite? | Yes — the retired address only; validates every identity before mutating any | Fill-missing except documented v2 retirement normalization for COD, supplier-proof states, and removal of obsolete zone fees; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`); password rotates only from the exact retired shipped credential and preserves diverged values. **Never `email`** — that is this migration's job alone |
 | Creates? | nothing | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.ph`) |
 | Never touches | `user.id`, any account whose address diverged from the shipped fixture, any other collection | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
@@ -91,7 +105,7 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 
 **The identity domain is `@gridgo.ph`.** `@gridgo.local` is retired: `.local` is reserved for multicast DNS and cannot address the hosted API. The client/rider/supplier apps and `gridgo-web` hardcode these logins in their own login screens and tests — this repo's rename does not reach them, so treat a `.local` login there as a separate, still-open change.
 
-**Email is a login key, never a foreign key.** `user.email` is read in exactly two places — login lookup and signup duplicate detection. Orders, sessions, credits, claims, issues, notifications and pings all reference `user.id`. That is what makes an in-place rename safe and a reseed unnecessary; keep it true, and never denormalise an email into another record.
+**Email is a login key, never a foreign key.** `user.email` is read in exactly two places — login lookup and signup duplicate detection. Orders, sessions, credits, claims, issues, notifications, device push registrations and pings all reference `user.id`. That is what makes an in-place rename safe and a reseed unnecessary; keep it true, and never denormalise an email into another record.
 
 **A migration that cannot proceed safely must refuse, not improvise.** `migrateFixtureEmailDomain()` throws (naming both account ids, mutating nothing) when the retired and replacement addresses both exist, because two accounts on one login breaks auth and orphans whatever the loser owned. Same precedent as `assertProductionStoreHasNoDemoOperationalData()`: a loud startup refusal is recoverable by hand; silent data merging is not.
 
@@ -122,7 +136,7 @@ Four things about this deployment are load-bearing and easy to break:
 
 ## Constraints
 
-- Plain `node:http` only except the `minio` S3 SDK, approved for streamed object storage and presigned SigV4 URLs so signing is never hand-rolled; add no other direct npm dependencies
+- Plain `node:http` only except the `minio` S3 SDK, approved for streamed object storage and presigned SigV4 URLs so signing is never hand-rolled; add no other direct npm dependencies. FCM push is deliberately hand-rolled on `node:crypto` + `fetch` rather than `firebase-admin`
 - Do not change unrelated QA edges/role rules; payment, POF milestones, checklist, delivery, and issue expiry follow `docs/OPERATIONAL_MODEL_V2_API.md`
 - Authorisation on every route; `{ error: "snake_case" }`
 

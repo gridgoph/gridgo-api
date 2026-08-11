@@ -4,3 +4,9 @@ data/*.log
 .env
 .tmp/
 .DS_Store
+
+# The Firebase push credential is deployment configuration and belongs nowhere
+# near this repository (docs/DEPLOYMENT.md §2a). Anyone holding it can notify
+# every GRIDGO user, so a stray local copy must not be committable by accident.
+*service-account*.json
+fcm-*.json
