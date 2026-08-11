@@ -3,7 +3,7 @@
 This runbook deploys the current GRIDGO API for the Davao hosted pilot:
 
 - API: `https://gridgo-api.talasora.com`
-- Web portal: `https://gridgo.talasora.com`
+- Dashboard: `https://gridgo-dash.talasora.com`
 
 This is a single-host, single-process pilot backend. Domain data lives in one JSON file and uploads live in a private MinIO bucket. It is suitable for small, manually operated pilot volumes when the host, store, object bucket, credentials, TLS, and backups are managed as described here. It is not highly available and must not be horizontally replicated.
 
@@ -23,7 +23,7 @@ Production startup checks known scenario record markers before running any load-
 
 ## 1. Host and filesystem
 
-Install Node.js 20 or newer, nginx, Docker Engine with the Compose plugin, and a current MinIO Client (`mc`) for backup/restore. Use a dedicated unprivileged service account and protected paths:
+Install Node.js 20 or newer, Caddy, Docker Engine with the Compose plugin, and a current MinIO Client (`mc`) for backup/restore. Use a dedicated unprivileged service account and protected paths:
 
 ```bash
 sudo useradd --system --home /var/lib/gridgo-api --shell /usr/sbin/nologin gridgo
@@ -52,7 +52,7 @@ PORT=18787
 STORE_PATH=/var/lib/gridgo-api/store.json
 
 # Exact browser origins only: no wildcard, path, or trailing slash.
-CORS_ALLOWED_ORIGINS=https://gridgo.talasora.com
+CORS_ALLOWED_ORIGINS=https://gridgo-dash.talasora.com
 
 # One distinct secret for each fixed pilot identity; minimum 12 characters.
 GRIDGO_CLIENT_PASSWORD=<unique-secret>
@@ -73,7 +73,7 @@ MINIO_DOWNLOAD_URL_TTL_SECONDS=300
 UPLOAD_REQUEST_TIMEOUT_MS=900000
 ```
 
-The portal deployment must use:
+The dashboard deployment must use:
 
 ```dotenv
 EXPO_PUBLIC_API_URL=https://gridgo-api.talasora.com
@@ -179,46 +179,50 @@ curl -fsS http://127.0.0.1:18787/health
 
 Never run multiple API workers or replicas against the JSON store. In-process serialization protects one process only; two processes can overwrite each other's mutations.
 
-## 6. TLS termination and signed downloads
+## 6. Cloudflare Flexible TLS and Caddy routing
 
-Point DNS for both domains at the reverse proxy and obtain valid certificates. The API domain needs two upstreams on the same HTTPS origin:
+Cloudflare owns the public TLS connection for `https://gridgo-api.talasora.com`. The DNS record must be proxied through Cloudflare and its SSL/TLS encryption mode must be **Flexible**. In [Cloudflare Flexible mode](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/flexible/), the visitor-to-Cloudflare leg is HTTPS but Cloudflare connects to the server over plain HTTP. There is no origin certificate on the box and Caddy must not redirect HTTP to HTTPS.
 
-- normal routes go to Node on loopback `18787`;
-- only `/gridgo-uploads/` goes to the MinIO API on loopback `19000`.
+This also means the Cloudflare-to-origin leg is not encrypted. Restricting origin port 80 to Cloudflare's proxy ranges prevents direct public bypass but does not add transport encryption. Treat this as a named hosted-pilot limitation; move to Cloudflare Full (strict) before end-to-end encryption becomes a requirement.
 
-Example nginx server after certificate provisioning:
+The API hostname has two loopback upstreams behind the one HTTP Caddy listener:
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name gridgo-api.talasora.com;
+- normal routes go to Node on `127.0.0.1:18787`;
+- only `/gridgo-uploads/` goes to MinIO on `127.0.0.1:19000`.
 
-    ssl_certificate     /etc/letsencrypt/live/gridgo-api.talasora.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/gridgo-api.talasora.com/privkey.pem;
-    client_max_body_size 210m;
+Use this site block in `/etc/caddy/Caddyfile`. Per [Caddy's site-address rules](https://caddyserver.com/docs/caddyfile/concepts#addresses), the explicit `http://` address keeps Caddy on plain HTTP and disables automatic HTTPS for this host:
 
-    # Preserve the public Host and complete URI; changing either breaks SigV4.
-    location ^~ /gridgo-uploads/ {
-        proxy_pass http://127.0.0.1:19000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_request_buffering off;
+```caddyfile
+http://gridgo-api.talasora.com {
+    # Signed GET data plane. Preserve the public Host and complete URI;
+    # changing the host, path, or query invalidates the MinIO SigV4 signature.
+    @signed_downloads path /gridgo-uploads/*
+    handle @signed_downloads {
+        reverse_proxy 127.0.0.1:19000 {
+            header_up Host {http.request.host}
+        }
     }
 
-    location / {
-        proxy_pass http://127.0.0.1:18787;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_read_timeout 16m;
-        proxy_send_timeout 16m;
+    # API control plane, streamed uploads, JSON routes, and notification SSE.
+    handle {
+        reverse_proxy 127.0.0.1:18787 {
+            header_up Host {http.request.host}
+        }
     }
 }
 ```
 
-Redirect HTTP to HTTPS in a separate port-80 server. Serve `gridgo.talasora.com` with its own portal configuration/certificate. Do not proxy `/minio/`, the console port, Docker sockets, the JSON store, backup directories, or host administration interfaces.
+Validate and reload Caddy, then test the origin route locally with the real Host header:
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+curl -fsS -H 'Host: gridgo-api.talasora.com' http://127.0.0.1/health
+```
+
+Do not add a certificate, HTTPS listener, or HTTP-to-HTTPS redirect on this server while Cloudflare remains in Flexible mode. The browser-facing API and signed URLs are still HTTPS because clients connect to Cloudflare first, so `MINIO_PUBLIC_URL` remains `https://gridgo-api.talasora.com`.
+
+At the network edge, allow inbound origin HTTP only from Cloudflare's published proxy ranges; do not expose Node `18787`, MinIO `19000`, or the MinIO console `19001`. Configure a Cloudflare Cache Rule to bypass caching for the API hostname so authenticated JSON, SSE, and signed object responses are never served from cache. Never proxy `/minio/`, the console, Docker sockets, the JSON store, backup directories, or host administration interfaces.
 
 ## 7. Back up both halves
 
@@ -288,11 +292,11 @@ The response must contain `"ok":true` and storage status `"available"`. An unava
 Prove the browser boundary:
 
 ```bash
-curl -si -H 'Origin: https://gridgo.talasora.com' https://gridgo-api.talasora.com/health
+curl -si -H 'Origin: https://gridgo-dash.talasora.com' https://gridgo-api.talasora.com/health
 curl -si -H 'Origin: https://not-gridgo.example' https://gridgo-api.talasora.com/health
 ```
 
-The first response must echo `Access-Control-Allow-Origin: https://gridgo.talasora.com`, never `*`. The second must be `403` with `origin_not_allowed` and no allow-origin header.
+The first response must echo `Access-Control-Allow-Origin: https://gridgo-dash.talasora.com`, never `*`. The second must be `403` with `origin_not_allowed` and no allow-origin header.
 
 Log in without placing the password in shell history:
 
@@ -317,5 +321,6 @@ Treat these as operating guardrails, not benchmarked capacity promises:
 - Keep concurrent notification streams and active users to small pilot cohorts; the process owns all live SSE connections in memory.
 - Deploys and coordinated backups may require a brief maintenance window. There is no automatic failover or point-in-time recovery.
 - Passwords use the current custom-auth store format rather than a production identity provider; protect the store and backups as secrets and limit pilot access.
+- Cloudflare Flexible mode leaves the Cloudflare-to-Caddy origin leg unencrypted; keep the origin restricted to Cloudflare proxy ranges and treat Full (strict) migration as a security milestone.
 
 Move to a transactional database and production identity system before any of these becomes true: a second API instance is needed; zero-downtime deploys or point-in-time recovery are required; the store reaches 25 MiB or routinely takes more than 500 ms to mutate; write contention/errors appear; backup or restore misses the captain's recovery objective; access/audit requirements exceed file permissions; or real platform-processed money/provider webhooks are introduced. Preserve the documented route contracts during that migration.

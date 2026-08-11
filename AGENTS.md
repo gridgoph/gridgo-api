@@ -101,7 +101,7 @@ The captain's demo API owns port **8787** and its store at `data/store.json`. To
 
 ## Hosted pilot deployment
 
-The production environment, clean-seed boundary, exact-origin CORS policy, loopback-only MinIO/TLS topology, coordinated backup/restore, and JSON-store migration signals are authoritative in `docs/DEPLOYMENT.md`. `NODE_ENV=production` requires distinct environment-owned passwords for all six fixed pilot identities, never falls back to the committed local-development credential, and refuses known rich-demo operational records before mutating the store.
+The production environment, clean-seed boundary, dashboard-only CORS policy, Cloudflare Flexible TLS/Caddy origin topology, loopback-only MinIO, coordinated backup/restore, and JSON-store migration signals are authoritative in `docs/DEPLOYMENT.md`. `NODE_ENV=production` requires distinct environment-owned passwords for all six fixed pilot identities, never falls back to the committed local-development credential, and refuses known rich-demo operational records before mutating the store.
 
 ## Constraints
 

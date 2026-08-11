@@ -52,9 +52,9 @@ When a browser sends an allowed origin, normal responses, preflight responses, e
 
 ## Object storage and TLS
 
-The API remains the upload/control plane. Signed downloads use an HTTPS public origin. The recommended reverse-proxy layout serves Node routes on `gridgo-api.talasora.com` and forwards only the private bucket path to loopback-bound MinIO while preserving the public host and request URI required by SigV4. The MinIO console stays loopback-only and is never reverse proxied.
+The API remains the upload/control plane. Signed downloads use the Cloudflare-provided HTTPS public origin. Caddy accepts Cloudflare Flexible TLS traffic over plain origin HTTP, serves Node routes for `gridgo-api.talasora.com`, and forwards only the private bucket path to loopback-bound MinIO while preserving the public host and request URI required by SigV4. The server has no certificate or HTTPS redirect, and the MinIO console stays loopback-only and is never reverse proxied.
 
-The portal uses `https://gridgo-api.talasora.com` as its API base, while the API allowlists exactly `https://gridgo.talasora.com`. TLS terminates at the reverse proxy; Node and MinIO listen only on loopback high ports.
+The dashboard uses `https://gridgo-api.talasora.com` as its API base, while the API allowlists exactly `https://gridgo-dash.talasora.com`. Cloudflare terminates visitor TLS and connects to Caddy over HTTP; Node and MinIO listen only on loopback high ports.
 
 ## Recovery and operational limits
 

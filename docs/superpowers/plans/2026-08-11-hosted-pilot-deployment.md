@@ -6,7 +6,7 @@
 
 **Architecture:** Add a small environment/configuration boundary shared by the seeder and server. Keep the rich local fixture as-is, produce a minimal production store from shared reference definitions, apply an exact-origin CORS policy at the HTTP response boundary, and document a loopback-only reverse-proxy deployment and coordinated recovery procedure.
 
-**Tech Stack:** Node.js 20+ ESM, `node:http`, built-in `node:test`, JSON file store, MinIO SDK, Docker Compose, nginx/systemd deployment examples.
+**Tech Stack:** Node.js 20+ ESM, `node:http`, built-in `node:test`, JSON file store, MinIO SDK, Docker Compose, Caddy/systemd, and Cloudflare Flexible TLS deployment examples.
 
 ## Global Constraints
 
@@ -211,15 +211,15 @@ Expected: PASS and repository search finds no wildcard allow-origin header.
 
 **Interfaces:**
 - Consumes: environment names and runtime behavior from Tasks 2–4.
-- Produces: complete operator runbook for `gridgo-api.talasora.com` and `gridgo.talasora.com`.
+- Produces: complete operator runbook for `gridgo-api.talasora.com` and `gridgo-dash.talasora.com`.
 
 - [ ] **Step 1: Document environment and initialization**
 
-Include all six password variables, `CORS_ALLOWED_ORIGINS=https://gridgo.talasora.com`, `STORE_PATH`, loopback Node port, MinIO internal and HTTPS public origins, API-scoped credentials, and portal API base.
+Include all six password variables, `CORS_ALLOWED_ORIGINS=https://gridgo-dash.talasora.com`, `STORE_PATH`, loopback Node port, MinIO internal and HTTPS public origins, API-scoped credentials, and dashboard API base.
 
 - [ ] **Step 2: Document TLS and private MinIO routing**
 
-Provide an nginx example that terminates TLS, proxies Node routes, forwards only `/gridgo-uploads/` to loopback MinIO with the original host/URI, and never proxies the console. Warn that Docker-published ports bypass host firewall rules.
+Provide a Caddy example that accepts Cloudflare Flexible TLS traffic over plain HTTP, proxies Node routes, forwards only `/gridgo-uploads/` to loopback MinIO with the original host/URI, and never proxies the console. Do not configure an origin certificate or HTTPS redirect. Warn that Docker-published ports bypass host firewall rules.
 
 - [ ] **Step 3: Document backup, restore, health verification, and limits**
 

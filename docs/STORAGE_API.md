@@ -41,7 +41,7 @@ MINIO_PUBLIC_URL=http://192.168.1.10:9000
 
 Then restart Compose so the exact binding takes effect. This is an explicit LAN-only opt-in and is off by default. Never use `0.0.0.0` or a bare Docker port mapping; the Compose preflight accepts only one explicit IPv4 address and rejects wildcard/IPv6 forms. Docker-published ports bypass host `ufw`; do not expose MinIO on an untrusted LAN or the internet. The console stays on `127.0.0.1` in every mode. The bucket is private, and possession of a signed URL grants read access only until its five-minute expiry.
 
-For the hosted pilot, `MINIO_ENDPOINT` remains a loopback origin while `MINIO_PUBLIC_URL` must be the public HTTPS origin. The reverse proxy exposes only the signed private-bucket path and never the MinIO port or console. Production startup rejects an absent or non-HTTPS public URL. See [`docs/DEPLOYMENT.md`](DEPLOYMENT.md#3-private-minio) for the exact topology, TLS proxy, backup, and restore procedure.
+For the hosted pilot, `MINIO_ENDPOINT` remains a loopback origin while `MINIO_PUBLIC_URL` must be the Cloudflare-facing public HTTPS origin. Caddy receives plain HTTP from Cloudflare Flexible TLS and exposes only the signed private-bucket path, never the MinIO port or console. Production startup rejects an absent or non-HTTPS public URL. See [`docs/DEPLOYMENT.md`](DEPLOYMENT.md#3-private-minio) for the exact Cloudflare/Caddy topology, backup, and restore procedure.
 
 ## Base conventions
 

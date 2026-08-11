@@ -9,7 +9,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { DEMO_PASSWORD } from "../src/demo-fixtures.js";
 
 const FORBIDDEN_PORTS = new Set([3000, 8081, 8082, 8083, 8787, 9000]);
-const ALLOWED_ORIGIN = "https://gridgo.talasora.com";
+const ALLOWED_ORIGIN = "https://gridgo-dash.talasora.com";
 const PASSWORD_ENV = {
   GRIDGO_CLIENT_PASSWORD: "client-hosted-secret",
   GRIDGO_INDIVIDUAL_PASSWORD: "individual-hosted-secret",
@@ -234,7 +234,7 @@ test("local development keeps the rich scenario seed and development credential"
   });
 });
 
-test("origin allowlist accepts the configured portal and rejects another origin", async () => {
+test("origin allowlist accepts the configured dashboard and rejects another origin", async () => {
   await withTempStore(async (storePath) => {
     const seeded = seed(storePath, cleanEnvironment());
     assert.equal(seeded.status, 0, seeded.stderr || seeded.stdout);

@@ -63,7 +63,7 @@ function exactOrigin(value, variable) {
   if (value === "*") {
     throw configurationError(
       `${variable} cannot contain the wildcard origin '*'.`,
-      `Set ${variable} to comma-separated exact portal origins such as https://gridgo.talasora.com and restart.`,
+      `Set ${variable} to comma-separated exact dashboard origins such as https://gridgo-dash.talasora.com and restart.`,
     );
   }
 
@@ -73,7 +73,7 @@ function exactOrigin(value, variable) {
   } catch {
     throw configurationError(
       `${variable} contains an invalid origin: ${value}.`,
-      `Use complete HTTP(S) origins without paths, for example https://gridgo.talasora.com, and restart.`,
+      `Use complete HTTP(S) origins without paths, for example https://gridgo-dash.talasora.com, and restart.`,
     );
   }
   if (
@@ -138,7 +138,7 @@ export function validateProductionServerEnvironment(env = process.env, allowedOr
   if (allowedOrigins.size === 0) {
     throw configurationError(
       "CORS_ALLOWED_ORIGINS is required when NODE_ENV=production.",
-      "Set CORS_ALLOWED_ORIGINS to the exact portal origin, for example https://gridgo.talasora.com, and restart.",
+      "Set CORS_ALLOWED_ORIGINS to the exact dashboard origin, for example https://gridgo-dash.talasora.com, and restart.",
     );
   }
   requireStorageOrigin(env, "MINIO_ENDPOINT", { httpsOnly: false, loopbackOnly: true });
