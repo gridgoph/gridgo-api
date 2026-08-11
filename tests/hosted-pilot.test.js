@@ -146,7 +146,7 @@ test("production refuses a password reused across fixed pilot identities", async
   });
 });
 
-test("production refuses a non-loopback internal MinIO endpoint", async () => {
+test("production refuses a routable internal MinIO endpoint", async () => {
   await withTempStore(async (storePath) => {
     const seeded = seed(storePath, productionEnvironment());
     assert.equal(seeded.status, 0, seeded.stderr || seeded.stdout);
@@ -157,8 +157,53 @@ test("production refuses a non-loopback internal MinIO endpoint", async () => {
     );
     try {
       assert.equal(instance.started, false, "production server accepted a public internal MinIO endpoint");
-      assert.match(instance.output(), /MINIO_ENDPOINT must use host loopback/);
+      assert.match(instance.output(), /MINIO_ENDPOINT must stay on a private API-to-MinIO leg/);
       assert.match(instance.output(), /Set MINIO_ENDPOINT to a loopback origin/);
+    } finally {
+      await stopServer(instance);
+    }
+  });
+});
+
+// The containerised deployment reaches MinIO by container name on a private
+// Docker network that publishes no host port at all — a stricter boundary than
+// the loopback binding this rule was originally written for. A single-label
+// hostname cannot resolve in public DNS, which is what makes it safe to accept.
+test("production accepts a container-name MinIO endpoint on a private network", async () => {
+  await withTempStore(async (storePath) => {
+    const seeded = seed(storePath, productionEnvironment());
+    assert.equal(seeded.status, 0, seeded.stderr || seeded.stdout);
+
+    const instance = await startServer(
+      storePath,
+      productionEnvironment({ MINIO_ENDPOINT: "http://gridgo-minio:9000" }),
+    );
+    try {
+      assert.equal(instance.started, true, `production server refused a private container endpoint:\n${instance.output()}`);
+    } finally {
+      await stopServer(instance);
+    }
+  });
+});
+
+test("/health reports the build identity so a deploy can be proven to have taken", async () => {
+  await withTempStore(async (storePath) => {
+    const seeded = seed(storePath, productionEnvironment());
+    assert.equal(seeded.status, 0, seeded.stderr || seeded.stdout);
+
+    const instance = await startServer(
+      storePath,
+      productionEnvironment({
+        GRIDGO_BUILD_SHA: "0123456789abcdef",
+        GRIDGO_BUILD_TIME: "2026-08-11T00:00:00Z",
+      }),
+    );
+    try {
+      assert.equal(instance.started, true, instance.output());
+      const health = await (await fetch(`${instance.api}/health`)).json();
+      assert.equal(health.ok, true);
+      assert.equal(health.commit, "0123456789abcdef");
+      assert.equal(health.builtAt, "2026-08-11T00:00:00Z");
     } finally {
       await stopServer(instance);
     }

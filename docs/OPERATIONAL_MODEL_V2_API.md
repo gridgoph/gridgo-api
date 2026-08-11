@@ -15,7 +15,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 | Method | Path | Authorization | Contract |
 |---|---|---|---|
-| GET | `/health` | public | service/storage health |
+| GET | `/health` | public | service/storage health, plus `commit`/`builtAt` build identity |
 | GET | `/catalog` | public | demo product catalogue |
 | POST | `/auth/signup` | public | self-signup for client/supplier/rider |
 | POST | `/auth/login` | public | `{email,password}` → `{token,user}` |

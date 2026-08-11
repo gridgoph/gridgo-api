@@ -63,6 +63,11 @@ const STORE = process.env.STORE_PATH ? path.resolve(process.env.STORE_PATH) : DE
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const PRODUCTION = isProduction(process.env);
+// Baked into the image at build time (see Dockerfile). `/health` reports them so
+// a deploy can be *proven* to have taken: a stale container answering `ok` is
+// otherwise indistinguishable from a deploy that never happened.
+const BUILD_COMMIT = process.env.GRIDGO_BUILD_SHA || "unknown";
+const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
 const PILOT_USERS = configuredDemoUsers(process.env);
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
@@ -1046,6 +1051,8 @@ async function handleRequest(req, res) {
         ok: true,
         service: "gridgo-api",
         version: store.version,
+        commit: BUILD_COMMIT,
+        builtAt: BUILD_TIME,
         storage: objectStorage.health(),
         at: now(),
       });

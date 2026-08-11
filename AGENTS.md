@@ -101,7 +101,18 @@ The captain's demo API owns port **8787** and its store at `data/store.json`. To
 
 ## Hosted pilot deployment
 
-The production environment, clean-seed boundary, dashboard-only CORS policy, Cloudflare Flexible TLS/Caddy origin topology, loopback-only MinIO, coordinated backup/restore, and JSON-store migration signals are authoritative in `docs/DEPLOYMENT.md`. `NODE_ENV=production` requires distinct environment-owned passwords for all six fixed pilot identities, never falls back to the committed local-development credential, and refuses known rich-demo operational records before mutating the store.
+The production environment, clean-seed boundary, dashboard-only CORS policy, Cloudflare Flexible TLS/proxy topology, unpublished MinIO, secret files and rotation, coordinated backup/restore, rollback, and JSON-store migration signals are authoritative in `docs/DEPLOYMENT.md`. `NODE_ENV=production` requires distinct environment-owned passwords for all six fixed pilot identities, never falls back to the committed local-development credential, and refuses known rich-demo operational records before mutating the store.
+
+Every merge to the default branch ships: `.github/workflows/deploy.yml` builds `Dockerfile`, smoke tests the image, publishes to GHCR, then runs the one restricted command the deploy key allows (`ssh … api`, registry token on stdin). Pull requests build but never publish and never deploy. `deploy/docker-compose.yml` is the server's copy at `~/gridgo/api/docker-compose.yml`; **CI never writes to the server**, so changing it here requires an operator to copy it across.
+
+Four things about this deployment are load-bearing and easy to break:
+
+- **The store is on the `gridgo_api_store` volume, not in the container.** A deploy replaces the container. Anything that moves `STORE_PATH` into the image layer destroys every account, order and payment record on the next merge.
+- **Container names are addresses.** The proxy resolves `gridgo-api:8787`, and `/gridgo-uploads/*` resolves `gridgo-minio:9000` for signed GETs. Renaming either takes the API — or every file download — off the internet.
+- **MinIO publishes no host port at all**, and `MINIO_ENDPOINT` is a container name. Production startup accepts loopback *or* a single-label host (undotted names cannot resolve in public DNS) and refuses anything routable; see `requireStorageOrigin` in `src/runtime-config.js`.
+- **Uploads spool to `$PWD/.tmp/uploads` before streaming to MinIO**, so the image must create that directory writable by its own uid. Miss it and `/health` stays green while every upload 500s.
+
+`/health` carries `commit`/`builtAt` from image build args purely so a deploy can be proven to have taken; a stale container answering `ok` is otherwise indistinguishable from no deploy at all.
 
 ## Constraints
 
