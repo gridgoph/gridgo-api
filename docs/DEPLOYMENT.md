@@ -56,6 +56,27 @@ Local development remains different by design: without `NODE_ENV=production`, `n
 
 Production startup checks known scenario record markers before running any load-time migration. If a configured `STORE_PATH` contains the local rich seed, startup refuses without mutating it and directs the operator to a fresh production store. It never deletes demo data to make a file appear safe.
 
+### The pilot logins moved to `@gridgo.ph` — no operator step, no reseed
+
+The six fixed identities were originally seeded on `@gridgo.local`. `.local` is reserved for multicast DNS, so it could never be the address of an API on the public internet. They are now `client@`, `individual@`, `supplier@`, `rider@`, `ops@` and `admin@` **`gridgo.ph`**.
+
+A store seeded before that move is renamed in place by a load-time migration (`migrateFixtureEmailDomain()` in `src/server.js`), which runs on the first `load()` after the deploy. **Nothing to run, and nothing is reseeded** — reseeding to fix an address would destroy every real order, payment and claim the pilot has taken.
+
+The rename is safe because email is a login key only: orders, sessions, credits, claims, issues, notifications and location pings all reference `user.id`, which the migration never touches. An account keeps everything it owned.
+
+It matches the exact retired address and nothing else:
+
+| Store state | What happens |
+|---|---|
+| `ops@gridgo.local` | renamed to `ops@gridgo.ph`, same `user.id`, same password, same everything else |
+| Already `ops@gridgo.ph` | no-op; the store is not rewritten (second run is byte-identical) |
+| `user_ops` under some other address | **untouched** — that address has diverged and belongs to a real person. No duplicate `ops@gridgo.ph` is created in its place either: one ops identity stays one account |
+| Both `ops@gridgo.local` and `ops@gridgo.ph` exist | **startup refuses**, naming both account ids, and mutates nothing |
+
+That last row is deliberate. Two accounts on one login is an auth-integrity failure that would orphan whatever the loser owned; a refusal at startup is recoverable by hand, a silent merge is not. If it fires, restore from §7, decide which record keeps the address (the one that owns the orders), and remove the other before restarting.
+
+The passwords do not change: `GRIDGO_*_PASSWORD` still supplies one per identity, now keyed to the `@gridgo.ph` address in `src/demo-fixtures.js`. No rotation is needed for this move.
+
 ## 1. What the server needs
 
 **Provided by the captain's server** (`~` is the deploy user's home):
@@ -336,6 +357,7 @@ Check, in order:
 
 1. `ok` is `true` and `commit` matches the commit you expect. A stale `commit` means the restart did not take the new image.
 2. Storage status is `available`. `unavailable` means JSON routes are alive but uploads and downloads are not; check `docker compose ps` and the bucket credential match between the two env files.
+3. On the first deploy after the domain move, the login below succeeds at `admin@gridgo.ph` with the unchanged `GRIDGO_ADMIN_PASSWORD`. If the container exited instead of serving, read `docker compose logs api` — a refusal naming two account ids is the collision case described in [the data boundary](#the-pilot-logins-moved-to-gridgoph--no-operator-step-no-reseed).
 
 Prove the browser boundary:
 
@@ -352,7 +374,7 @@ Log in without placing the password in shell history:
 read -rsp 'GRIDGO admin password: ' GRIDGO_LOGIN_PASSWORD; echo
 curl -fsS https://gridgo-api.talasora.com/auth/login \
   -H 'Content-Type: application/json' \
-  --data "$(jq -n --arg email admin@gridgo.local --arg password "$GRIDGO_LOGIN_PASSWORD" '{email:$email,password:$password}')"
+  --data "$(jq -n --arg email admin@gridgo.ph --arg password "$GRIDGO_LOGIN_PASSWORD" '{email:$email,password:$password}')"
 unset GRIDGO_LOGIN_PASSWORD
 ```
 

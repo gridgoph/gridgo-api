@@ -1,7 +1,7 @@
 /**
  * Canonical demo-account fixtures shared by seed.js and server load().
  *
- * These are not user-entered data. They are the fixed *@gridgo.local identities
+ * These are not user-entered data. They are the fixed *@gridgo.ph identities
  * the apps use for demos. Only emails listed here are fixtures; anything else
  * in the store (captain-created users, orders, credits, …) is real data and
  * must never be rewritten by fixture convergence.
@@ -21,12 +21,34 @@ export const DEMO_PASSWORD = "Ilovegridgo-0990";
 
 /** Production password variables for the fixed pilot identities. */
 export const DEMO_PASSWORD_ENV_BY_EMAIL = new Map([
-  ["client@gridgo.local", "GRIDGO_CLIENT_PASSWORD"],
-  ["individual@gridgo.local", "GRIDGO_INDIVIDUAL_PASSWORD"],
-  ["supplier@gridgo.local", "GRIDGO_SUPPLIER_PASSWORD"],
-  ["rider@gridgo.local", "GRIDGO_RIDER_PASSWORD"],
-  ["ops@gridgo.local", "GRIDGO_OPS_PASSWORD"],
-  ["admin@gridgo.local", "GRIDGO_ADMIN_PASSWORD"],
+  ["client@gridgo.ph", "GRIDGO_CLIENT_PASSWORD"],
+  ["individual@gridgo.ph", "GRIDGO_INDIVIDUAL_PASSWORD"],
+  ["supplier@gridgo.ph", "GRIDGO_SUPPLIER_PASSWORD"],
+  ["rider@gridgo.ph", "GRIDGO_RIDER_PASSWORD"],
+  ["ops@gridgo.ph", "GRIDGO_OPS_PASSWORD"],
+  ["admin@gridgo.ph", "GRIDGO_ADMIN_PASSWORD"],
+]);
+
+/**
+ * Retired fixture addresses, mapped to the identity that replaces each one.
+ *
+ * `.local` is reserved for multicast DNS, so it was only ever tenable while
+ * GRIDGO was a laptop demo. The hosted pilot moved these six identities to the
+ * captain's real domain. Stores seeded before that move still hold the retired
+ * address, so `migrateFixtureEmailDomain()` in server.js renames them in place
+ * on load — an exact-address match only, never a domain-wide rule.
+ *
+ * This map is a historical record, not a derived value: it must keep listing
+ * exactly the addresses that were once shipped, so a fixture added later never
+ * implies a rename of a `.local` address that GRIDGO never issued.
+ */
+export const RETIRED_FIXTURE_EMAILS = new Map([
+  ["client@gridgo.local", "client@gridgo.ph"],
+  ["individual@gridgo.local", "individual@gridgo.ph"],
+  ["supplier@gridgo.local", "supplier@gridgo.ph"],
+  ["rider@gridgo.local", "rider@gridgo.ph"],
+  ["ops@gridgo.local", "ops@gridgo.ph"],
+  ["admin@gridgo.local", "admin@gridgo.ph"],
 ]);
 
 /**
@@ -41,7 +63,7 @@ export const DEMO_PASSWORD_ENV_BY_EMAIL = new Map([
 export const DEMO_USERS = [
   {
     id: "user_client",
-    email: "client@gridgo.local",
+    email: "client@gridgo.ph",
     password: DEMO_PASSWORD,
     name: "Ana Client",
     role: "client",
@@ -50,7 +72,7 @@ export const DEMO_USERS = [
   },
   {
     id: "user_client_individual",
-    email: "individual@gridgo.local",
+    email: "individual@gridgo.ph",
     password: DEMO_PASSWORD,
     name: "Ivy Individual",
     role: "client",
@@ -58,7 +80,7 @@ export const DEMO_USERS = [
   },
   {
     id: "user_supplier",
-    email: "supplier@gridgo.local",
+    email: "supplier@gridgo.ph",
     password: DEMO_PASSWORD,
     name: "Ben Supplier",
     role: "supplier",
@@ -74,7 +96,7 @@ export const DEMO_USERS = [
   },
   {
     id: "user_rider",
-    email: "rider@gridgo.local",
+    email: "rider@gridgo.ph",
     password: DEMO_PASSWORD,
     name: "Carlo Rider",
     role: "rider",
@@ -84,14 +106,14 @@ export const DEMO_USERS = [
   },
   {
     id: "user_ops",
-    email: "ops@gridgo.local",
+    email: "ops@gridgo.ph",
     password: DEMO_PASSWORD,
     name: "Dina Ops",
     role: "ops_admin",
   },
   {
     id: "user_admin",
-    email: "admin@gridgo.local",
+    email: "admin@gridgo.ph",
     password: DEMO_PASSWORD,
     name: "Eli Admin",
     role: "super_admin",

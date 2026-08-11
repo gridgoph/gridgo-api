@@ -223,11 +223,11 @@ test("production seed contains reference data and configured accounts but no ope
     assert.equal(store.users.length, 6);
     for (const user of store.users) {
       assert.equal(user.password, PASSWORD_ENV[
-        user.email === "client@gridgo.local" ? "GRIDGO_CLIENT_PASSWORD"
-          : user.email === "individual@gridgo.local" ? "GRIDGO_INDIVIDUAL_PASSWORD"
-            : user.email === "supplier@gridgo.local" ? "GRIDGO_SUPPLIER_PASSWORD"
-              : user.email === "rider@gridgo.local" ? "GRIDGO_RIDER_PASSWORD"
-                : user.email === "ops@gridgo.local" ? "GRIDGO_OPS_PASSWORD"
+        user.email === "client@gridgo.ph" ? "GRIDGO_CLIENT_PASSWORD"
+          : user.email === "individual@gridgo.ph" ? "GRIDGO_INDIVIDUAL_PASSWORD"
+            : user.email === "supplier@gridgo.ph" ? "GRIDGO_SUPPLIER_PASSWORD"
+              : user.email === "rider@gridgo.ph" ? "GRIDGO_RIDER_PASSWORD"
+                : user.email === "ops@gridgo.ph" ? "GRIDGO_OPS_PASSWORD"
                   : "GRIDGO_ADMIN_PASSWORD"
       ]);
       assert.notEqual(user.password, DEMO_PASSWORD);
@@ -326,7 +326,7 @@ test("configured production server starts empty and a second load is byte-idempo
       const login = await fetch(`${first.api}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Origin: ALLOWED_ORIGIN },
-        body: JSON.stringify({ email: "admin@gridgo.local", password: PASSWORD_ENV.GRIDGO_ADMIN_PASSWORD }),
+        body: JSON.stringify({ email: "admin@gridgo.ph", password: PASSWORD_ENV.GRIDGO_ADMIN_PASSWORD }),
       });
       assert.equal(login.status, 200);
       const { token } = await login.json();

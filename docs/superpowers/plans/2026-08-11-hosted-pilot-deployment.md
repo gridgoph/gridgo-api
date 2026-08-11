@@ -92,6 +92,10 @@ Expected: FAIL on clean production seeding and wildcard CORS behavior.
 
 - [ ] **Step 1: Implement exact password mapping and validation**
 
+> Historical record — the addresses below were superseded when the six pilot
+> identities moved off the reserved `.local` domain to `@gridgo.ph`. Do not copy
+> them; `src/demo-fixtures.js` is current.
+
 ```js
 export const DEMO_PASSWORD_ENV_BY_EMAIL = new Map([
   ["client@gridgo.local", "GRIDGO_CLIENT_PASSWORD"],

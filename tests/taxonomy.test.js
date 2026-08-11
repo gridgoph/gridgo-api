@@ -64,7 +64,7 @@ function legacyTaxonomy() {
 function legacyStore() {
   return {
     version: 2,
-    users: [{ id: "user_supplier", email: "supplier@gridgo.local", role: "supplier" }],
+    users: [{ id: "user_supplier", email: "supplier@gridgo.ph", role: "supplier" }],
     sessions: { tok_live: { userId: "user_supplier" } },
     catalog: [{ id: "prod_flyer", name: "Brochures / Flyers", family: "flyer" }],
     taxonomy: legacyTaxonomy(),

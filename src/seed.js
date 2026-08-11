@@ -743,7 +743,7 @@ console.log(`wrote ${storePath}`);
 if (production) {
   console.log("hosted pilot accounts: passwords loaded from GRIDGO_*_PASSWORD environment variables");
 } else {
-  console.log(`demo logins: *@gridgo.local / ${DEMO_PASSWORD}`);
+  console.log(`demo logins: *@gridgo.ph / ${DEMO_PASSWORD}`);
 }
 const ordersByState = Object.fromEntries(
   [...new Set(store.orders.map((order) => order.state))]
