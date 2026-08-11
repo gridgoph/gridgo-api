@@ -38,6 +38,9 @@ function fixtureStore() {
   const at = "2026-08-10T00:00:00.000Z";
   return {
     version: 2,
+    // Deliberately a pre-migration store: these five carry the retired
+    // @gridgo.local addresses the hosted pilot was seeded with, so the whole
+    // suite below runs against a store the load-time rename has migrated.
     users: [
       { id: "user_ops", email: "ops@gridgo.local", password: LEGACY_DEMO_PASSWORD, name: "Dina Ops", role: "ops_admin" },
       { id: "user_admin", email: "admin@gridgo.local", password: LEGACY_DEMO_PASSWORD, name: "Eli Admin", role: "super_admin" },
@@ -277,11 +280,30 @@ after(async () => {
   if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 });
 
+test("load renames the retired gridgo.local pilot logins without renumbering ids", async () => {
+  const migrated = JSON.parse(await fs.readFile(storePath, "utf8"));
+  assert.deepEqual(
+    migrated.users.filter(({ email }) => String(email).endsWith("@gridgo.local")),
+    [],
+    "a retired .local address survived load()",
+  );
+  for (const [id, email] of [
+    ["user_ops", "ops@gridgo.ph"],
+    ["user_admin", "admin@gridgo.ph"],
+    ["user_client", "client@gridgo.ph"],
+    ["user_supplier", "supplier@gridgo.ph"],
+  ]) {
+    assert.equal(migrated.users.find((user) => user.id === id)?.email, email);
+  }
+  // The one non-fixture account in this store keeps its own address.
+  assert.equal(migrated.users.find(({ id }) => id === "client-existing")?.email, "existing@example.test");
+});
+
 test("fixture convergence rotates only the retired demo credential and is idempotent", async () => {
   const migrated = JSON.parse(await fs.readFile(storePath, "utf8"));
-  assert.equal(migrated.users.find(({ email }) => email === "ops@gridgo.local")?.password, DEMO_PASSWORD);
-  assert.equal(migrated.users.find(({ email }) => email === "supplier@gridgo.local")?.password, DEMO_PASSWORD);
-  assert.equal(migrated.users.find(({ email }) => email === "client@gridgo.local")?.password, CUSTOM_FIXTURE_PASSWORD);
+  assert.equal(migrated.users.find(({ email }) => email === "ops@gridgo.ph")?.password, DEMO_PASSWORD);
+  assert.equal(migrated.users.find(({ email }) => email === "supplier@gridgo.ph")?.password, DEMO_PASSWORD);
+  assert.equal(migrated.users.find(({ email }) => email === "client@gridgo.ph")?.password, CUSTOM_FIXTURE_PASSWORD);
 
   const beforeSecondLoad = await fs.readFile(storePath, "utf8");
   const health = await fetch(`${api}/health`);
@@ -290,7 +312,7 @@ test("fixture convergence rotates only the retired demo credential and is idempo
 
   const oldLogin = await request("/auth/login", {
     method: "POST",
-    body: { email: "ops@gridgo.local", password: LEGACY_DEMO_PASSWORD },
+    body: { email: "ops@gridgo.ph", password: LEGACY_DEMO_PASSWORD },
   });
   assert.equal(oldLogin.status, 401);
   assert.equal(oldLogin.body.error, "invalid_credentials");
@@ -380,7 +402,7 @@ test("all three roles self-sign up with exact profiles and pending approval gate
   assert.equal(badRanks.status, 400);
   assert.equal(badRanks.body.error, "invalid_category_ranks");
 
-  const opsToken = await login("ops@gridgo.local");
+  const opsToken = await login("ops@gridgo.ph");
   const candidatesBefore = await request("/orders/ord-match/eligible-suppliers", { token: opsToken });
   const pendingCandidate = candidatesBefore.body.candidates.find((item) => item.supplier.id === supplier.body.user.id);
   assert.equal(pendingCandidate.eligible, false);
@@ -426,10 +448,10 @@ test("all three roles self-sign up with exact profiles and pending approval gate
 });
 
 test("supplier verification documents stay private and appear on the Operations approval surface", async () => {
-  const ownerToken = await login("supplier@gridgo.local");
-  const opsToken = await login("ops@gridgo.local");
-  const superToken = await login("admin@gridgo.local");
-  const riderToken = await login("rider@gridgo.local");
+  const ownerToken = await login("supplier@gridgo.ph");
+  const opsToken = await login("ops@gridgo.ph");
+  const superToken = await login("admin@gridgo.ph");
+  const riderToken = await login("rider@gridgo.ph");
 
   const ownDocuments = await request("/users/user_supplier/verification-documents", { token: ownerToken });
   assert.equal(ownDocuments.status, 200, JSON.stringify(ownDocuments.body));
@@ -600,8 +622,8 @@ test("notification stream rejects unauthenticated and foreign resume attempts", 
 
 test("assignment calculates final price, notifies the client, and never leaks commission to clients", async () => {
   const clientToken = await login("existing@example.test", "secret123");
-  const supplierToken = await login("supplier@gridgo.local");
-  const opsToken = await login("ops@gridgo.local");
+  const supplierToken = await login("supplier@gridgo.ph");
+  const opsToken = await login("ops@gridgo.ph");
 
   const created = await request("/orders", {
     method: "POST",
@@ -710,9 +732,9 @@ test("assignment calculates final price, notifies the client, and never leaks co
 });
 
 test("suppliers move only their own shop, Operations can move any, and in-flight orders keep agreed pricing", async () => {
-  const opsToken = await login("ops@gridgo.local");
-  const superToken = await login("admin@gridgo.local");
-  const demoSupplierToken = await login("supplier@gridgo.local");
+  const opsToken = await login("ops@gridgo.ph");
+  const superToken = await login("admin@gridgo.ph");
+  const demoSupplierToken = await login("supplier@gridgo.ph");
 
   const ownMove = await request(`/users/${secondSupplierId}/shop`, {
     method: "PATCH",
@@ -803,7 +825,7 @@ test("suppliers move only their own shop, Operations can move any, and in-flight
 
 test("Operations and Super Admin can change the one global issue window and provisional distance bands", async () => {
   const clientToken = await login("existing@example.test", "secret123");
-  const opsToken = await login("ops@gridgo.local");
+  const opsToken = await login("ops@gridgo.ph");
   const settings = await request("/settings", { token: clientToken });
   assert.equal(settings.status, 200);
   assert.equal(settings.body.settings.issueWindowHours, 24);
@@ -839,8 +861,8 @@ test("Operations and Super Admin can change the one global issue window and prov
 
 test("manual Operations payment review supports rejection, resubmission, confirmation, and no COD", async () => {
   const clientToken = await login("existing@example.test", "secret123");
-  const opsToken = await login("ops@gridgo.local");
-  const superToken = await login("admin@gridgo.local");
+  const opsToken = await login("ops@gridgo.ph");
+  const superToken = await login("admin@gridgo.ph");
 
   const clientOrders = await request("/orders", { token: clientToken });
   const unassigned = clientOrders.body.orders.find((order) => order.title === "Range before assignment");
@@ -1025,8 +1047,8 @@ test("manual Operations payment review supports rejection, resubmission, confirm
 
 test("milestone release requires POF and the global issue window actually expires", async () => {
   const clientToken = await login("existing@example.test", "secret123");
-  const supplierToken = await login("supplier@gridgo.local");
-  const opsToken = await login("ops@gridgo.local");
+  const supplierToken = await login("supplier@gridgo.ph");
+  const opsToken = await login("ops@gridgo.ph");
 
   const withoutPof = await request("/orders/ord-match/milestones/printing/release", {
     method: "POST",
@@ -1104,7 +1126,7 @@ test("milestone release requires POF and the global issue window actually expire
 
 test("rider pickup checklist blocks transport, records evidence escalation, and gates delivery", async () => {
   const riderToken = await login("new-rider@example.test", "strong-pass");
-  const opsToken = await login("ops@gridgo.local");
+  const opsToken = await login("ops@gridgo.ph");
   const checks = [
     "quantity_match",
     "specification_match",
@@ -1210,7 +1232,7 @@ test("rider pickup checklist blocks transport, records evidence escalation, and 
   assert.equal(passed.body.order.pickupChecklist.status, "passed");
   assert.equal(passed.body.signOffPrompt, "GRIDGO partner! Quality check, done! Salamat po!");
 
-  const otherRiderToken = await login("rider@gridgo.local");
+  const otherRiderToken = await login("rider@gridgo.ph");
   const otherRiderTransport = await request("/orders/ord-offer/transition", {
     method: "POST",
     token: otherRiderToken,

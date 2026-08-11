@@ -34,12 +34,12 @@ Temporary, **replaceable** local backend used by every GRIDGO surface (client, s
 
 | Role | Demo login | App |
 |---|---|---|
-| client (business) | client@gridgo.local / Ilovegridgo-0990 | gridgo-client — `accountType: "business"` |
-| client (individual) | individual@gridgo.local / Ilovegridgo-0990 | gridgo-client — `accountType: "individual"` |
-| supplier | supplier@gridgo.local / Ilovegridgo-0990 | gridgo-supplier + portal catalogue |
-| rider | rider@gridgo.local / Ilovegridgo-0990 | gridgo-rider |
-| ops_admin | ops@gridgo.local / Ilovegridgo-0990 | web Operations |
-| super_admin | admin@gridgo.local / Ilovegridgo-0990 | web Super Admin |
+| client (business) | client@gridgo.ph / Ilovegridgo-0990 | gridgo-client — `accountType: "business"` |
+| client (individual) | individual@gridgo.ph / Ilovegridgo-0990 | gridgo-client — `accountType: "individual"` |
+| supplier | supplier@gridgo.ph / Ilovegridgo-0990 | gridgo-supplier + portal catalogue |
+| rider | rider@gridgo.ph / Ilovegridgo-0990 | gridgo-rider |
+| ops_admin | ops@gridgo.ph / Ilovegridgo-0990 | web Operations |
+| super_admin | admin@gridgo.ph / Ilovegridgo-0990 | web Super Admin |
 
 ## Client account type
 

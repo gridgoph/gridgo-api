@@ -49,6 +49,7 @@ import {
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
+import { RETIRED_FIXTURE_EMAILS } from "./demo-fixtures.js";
 import {
   configuredDemoUsers,
   isProduction,
@@ -478,6 +479,77 @@ function cloneFixtureValue(value) {
 // ordinary word demo remain useful for finding stale login documentation.
 const LEGACY_DEMO_PASSWORD = "de" + "mo";
 
+/** Signup/login canonicalise to lowercase; compare defensively for older rows. */
+function normalizedEmail(user) {
+  return String(user?.email ?? "").trim().toLowerCase();
+}
+
+/**
+ * Rename the six shipped pilot identities off the retired `.local` mDNS domain
+ * onto `@gridgo.ph`, in place, on an existing store.
+ *
+ * Renaming beats reseeding because the hosted pilot store holds real orders,
+ * payments and claims: a reseed would destroy them to fix an address. It is
+ * safe to rename because email is a *login* key only — every other record
+ * (orders, sessions, credits, claims, issues, notifications, locationPings)
+ * references `user.id`, which this never touches. See docs/DEPLOYMENT.md.
+ *
+ * Boundary — as tight as fixture convergence, for the same reason:
+ * - Match the exact retired address and nothing else. An account holding a
+ *   fixture *id* under a different address has diverged: it belongs to a real
+ *   person now and is left alone (convergence must not rewrite it either).
+ * - Refuse, rather than proceed, when renaming would collide with an account
+ *   that already holds the replacement address, or when the retired address
+ *   itself is held twice. Two accounts sharing a login is an auth-integrity
+ *   failure; a loud startup refusal is recoverable, a silent merge is not.
+ * - Validate every identity before mutating any, so a refusal never leaves a
+ *   half-renamed store behind.
+ *
+ * Idempotent: once renamed, no user matches a retired address and this is a
+ * no-op, so `load()` writes nothing on the second run.
+ *
+ * Returns true if the store was mutated.
+ */
+function migrateFixtureEmailDomain(store) {
+  const users = Array.isArray(store.users) ? store.users : [];
+  const planned = [];
+  const conflicts = [];
+
+  for (const [retired, replacement] of RETIRED_FIXTURE_EMAILS) {
+    const matches = users.filter((user) => normalizedEmail(user) === retired);
+    if (matches.length === 0) continue; // already migrated, or never seeded here
+    if (matches.length > 1) {
+      conflicts.push(
+        `${retired} is held by ${matches.length} accounts (${matches.map((user) => user.id).join(", ")})`,
+      );
+      continue;
+    }
+    const occupant = users.find(
+      (user) => user !== matches[0] && normalizedEmail(user) === replacement,
+    );
+    if (occupant) {
+      conflicts.push(
+        `${retired} (${matches[0].id}) cannot become ${replacement}: account ${occupant.id} already holds it`,
+      );
+      continue;
+    }
+    planned.push({ user: matches[0], replacement });
+  }
+
+  if (conflicts.length > 0) {
+    throw new Error(
+      `Refusing to migrate pilot logins off the retired gridgo.local domain: ${conflicts.join("; ")}. ` +
+      "Merging two accounts onto one login would break authentication and orphan whatever the loser owned. " +
+      `Resolve the duplicate accounts in ${STORE} by hand (keep the record that owns the orders), then restart.`,
+    );
+  }
+
+  for (const { user, replacement } of planned) {
+    user.email = replacement;
+  }
+  return planned.length > 0;
+}
+
 /**
  * Bring seed demo accounts (fixtures) up to their defined state on an existing store.
  *
@@ -526,6 +598,12 @@ function convergeDemoFixtures(store) {
     // Converge fixture-owned attributes only. Leave id and any extra keys alone.
     for (const [key, value] of Object.entries(fixture)) {
       if (key === "id") continue;
+      // Email is a login key, not a convergeable attribute. This user may have
+      // been matched by stable seed id, which means its address has diverged —
+      // rewriting it would take a real person's login. The only sanctioned
+      // rename is migrateFixtureEmailDomain(), which matches the exact retired
+      // address and refuses on collision.
+      if (key === "email") continue;
       // Rotate only the exact retired fixture credential. A password that has
       // diverged is user-owned and must never be silently overwritten.
       if (key === "password" && !PRODUCTION && user.password !== LEGACY_DEMO_PASSWORD) continue;
@@ -622,7 +700,7 @@ function backfillPlatform(store) {
 
   // If no services at all, seed a live catalogue for the demo supplier (idempotent key)
   if (!PRODUCTION && store.supplierServices.length === 0) {
-    const demoSupplier = (store.users || []).find((u) => u.id === "user_supplier" || (u.role === "supplier" && u.email === "supplier@gridgo.local"));
+    const demoSupplier = (store.users || []).find((u) => u.id === "user_supplier" || (u.role === "supplier" && u.email === "supplier@gridgo.ph"));
     if (demoSupplier) {
       const ts = now();
       store.supplierServices.push(
@@ -730,6 +808,9 @@ function load() {
     writable: true,
   });
   let changed = false;
+  // First: every later pass (and the demo-supplier lookup in backfillPlatform)
+  // reads fixture emails, so normalise the retired domain before they run.
+  if (migrateFixtureEmailDomain(store)) changed = true;
   if (backfillGeography(store)) changed = true;
   if (backfillPlatform(store)) changed = true;
   // After backfillPlatform, which guarantees store.taxonomy and its arrays exist.

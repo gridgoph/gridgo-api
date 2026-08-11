@@ -79,7 +79,7 @@ test("fresh seed is coherent with operational model v2", () => {
     }
   }
 
-  const supplier = store.users.find(({ email }) => email === "supplier@gridgo.local");
+  const supplier = store.users.find(({ email }) => email === "supplier@gridgo.ph");
   const taxonomyCodes = new Set(store.taxonomy.categories.map(({ code }) => code));
   assert.ok(supplier.categoryRanks.length > 0);
   assert.deepEqual(supplier.categoryRanks.map(({ rank }) => rank), [1, 2]);
@@ -105,16 +105,16 @@ test("fresh seed is coherent with operational model v2", () => {
   }
 
   const demoEmails = [
-    "client@gridgo.local",
-    "individual@gridgo.local",
-    "supplier@gridgo.local",
-    "rider@gridgo.local",
-    "ops@gridgo.local",
-    "admin@gridgo.local",
+    "client@gridgo.ph",
+    "individual@gridgo.ph",
+    "supplier@gridgo.ph",
+    "rider@gridgo.ph",
+    "ops@gridgo.ph",
+    "admin@gridgo.ph",
   ];
   for (const email of demoEmails) assert.equal(store.users.find((user) => user.email === email)?.password, DEMO_PASSWORD, email);
   assert.deepEqual(
-    store.users.find((user) => user.email === "supplier@gridgo.local")?.verificationDocumentFileIds,
+    store.users.find((user) => user.email === "supplier@gridgo.ph")?.verificationDocumentFileIds,
     [],
   );
 

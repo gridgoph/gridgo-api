@@ -45,7 +45,7 @@ Client users have explicit `accountType`: `"individual"` | `"business"` | `"orga
 - Missing/legacy clients backfill to `"individual"` (safe default; business is opt-in)
 - Self-signup is the write path; business/organization require `orgName`
 - Non-client roles: field absent (not null)
-- Demo: `client@gridgo.local` = business; `individual@gridgo.local` = individual
+- Demo: `client@gridgo.ph` = business; `individual@gridgo.ph` = individual
 
 ## Product category taxonomy
 
@@ -77,19 +77,25 @@ The captain's category chart (4 categories, 17 subcategories) is the product tax
 
 Fresh-store fixture definitions live in `src/seed.js`; demo user identities live in `src/demo-fixtures.js` (shared by seed + server). Treat reset as destructive and use load-time migration for existing stores.
 
-**Two different load-time migrations — do not conflate them:**
+**Three different load-time migrations — do not conflate them.** They run in this order in `load()`:
 
-| | Backfill | Fixture convergence |
-|---|---|---|
-| Purpose | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
-| Scope | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
-| Overwrite? | Fill-missing except documented v2 retirement normalization for COD, supplier-proof states, and removal of obsolete zone fees; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`); password rotates only from the exact retired shipped credential and preserves diverged values |
-| Creates? | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.local`) |
-| Never touches | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
+| | Fixture email domain migration | Backfill | Fixture convergence |
+|---|---|---|---|
+| Purpose | Rename the six shipped identities off the retired `@gridgo.local` addresses | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
+| Scope | only `user.email`, only for an exact address in `RETIRED_FIXTURE_EMAILS` (`src/demo-fixtures.js`) | geography, platform arrays, top-level `files`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Overwrite? | Yes — the retired address only; validates every identity before mutating any | Fill-missing except documented v2 retirement normalization for COD, supplier-proof states, and removal of obsolete zone fees; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`); password rotates only from the exact retired shipped credential and preserves diverged values. **Never `email`** — that is this migration's job alone |
+| Creates? | nothing | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.ph`) |
+| Never touches | `user.id`, any account whose address diverged from the shipped fixture, any other collection | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
 
-**Fixture boundary:** match by exact fixture email, else stable seed id — never by role or bare `@gridgo.local` domain. Getting this wrong is how a migration eats captain work.
+**Fixture boundary:** match by exact fixture email, else stable seed id — never by role or bare `@gridgo.ph` domain. Getting this wrong is how a migration eats captain work.
 
-**Existing live stores:** both run idempotently on every `load()`. Never reset a live/demo store to acquire new fields; reset wipes captain demo orders.
+**The identity domain is `@gridgo.ph`.** `@gridgo.local` is retired: `.local` is reserved for multicast DNS and cannot address the hosted API. The client/rider/supplier apps and `gridgo-web` hardcode these logins in their own login screens and tests — this repo's rename does not reach them, so treat a `.local` login there as a separate, still-open change.
+
+**Email is a login key, never a foreign key.** `user.email` is read in exactly two places — login lookup and signup duplicate detection. Orders, sessions, credits, claims, issues, notifications and pings all reference `user.id`. That is what makes an in-place rename safe and a reseed unnecessary; keep it true, and never denormalise an email into another record.
+
+**A migration that cannot proceed safely must refuse, not improvise.** `migrateFixtureEmailDomain()` throws (naming both account ids, mutating nothing) when the retired and replacement addresses both exist, because two accounts on one login breaks auth and orphans whatever the loser owned. Same precedent as `assertProductionStoreHasNoDemoOperationalData()`: a loud startup refusal is recoverable by hand; silent data merging is not.
+
+**Existing live stores:** all three run idempotently on every `load()` — a second run must leave the store byte-identical. Never reset a live/demo store to acquire new fields; reset wipes captain demo orders.
 
 Fresh seed consistency is regression-tested in `tests/seed-consistency.test.js`; keep supplier-authored prices round and derive all order money and delivery bands through `src/operational-model.js`.
 
