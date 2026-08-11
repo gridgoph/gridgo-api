@@ -146,6 +146,25 @@ test("production refuses a password reused across fixed pilot identities", async
   });
 });
 
+test("production refuses a non-loopback internal MinIO endpoint", async () => {
+  await withTempStore(async (storePath) => {
+    const seeded = seed(storePath, productionEnvironment());
+    assert.equal(seeded.status, 0, seeded.stderr || seeded.stdout);
+
+    const instance = await startServer(
+      storePath,
+      productionEnvironment({ MINIO_ENDPOINT: "https://storage.example" }),
+    );
+    try {
+      assert.equal(instance.started, false, "production server accepted a public internal MinIO endpoint");
+      assert.match(instance.output(), /MINIO_ENDPOINT must use host loopback/);
+      assert.match(instance.output(), /Set MINIO_ENDPOINT to a loopback origin/);
+    } finally {
+      await stopServer(instance);
+    }
+  });
+});
+
 test("production seed contains reference data and configured accounts but no operational fixtures", async () => {
   await withTempStore(async (storePath) => {
     const result = seed(storePath, productionEnvironment());

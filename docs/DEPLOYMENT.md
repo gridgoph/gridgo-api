@@ -79,7 +79,7 @@ The portal deployment must use:
 EXPO_PUBLIC_API_URL=https://gridgo-api.talasora.com
 ```
 
-Production startup validates all six account passwords, the exact CORS allowlist, explicit MinIO credentials/origins, and HTTPS for `MINIO_PUBLIC_URL`. It refuses to start with a concrete error and repair instruction instead of falling back to repository defaults. Changing one of the six password variables and restarting rotates that fixed account on the next load.
+Production startup validates all six account passwords, the exact CORS allowlist, a loopback `MINIO_ENDPOINT`, explicit MinIO credentials, and HTTPS for `MINIO_PUBLIC_URL`. It refuses to start with a concrete error and repair instruction instead of falling back to repository defaults. Changing one of the six password variables and restarting rotates that fixed account on the next load.
 
 ## 3. Private MinIO
 
@@ -258,9 +258,8 @@ Choose an exact dated backup and verify its checksums before touching the live f
 
 ```bash
 restore_dir=/var/backups/gridgo/20260811T120000Z
-cd "$restore_dir"
-sha256sum -c SHA256SUMS
-node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); console.log("store JSON valid")' store.json
+sudo /bin/bash -c "cd '$restore_dir' && sha256sum -c SHA256SUMS"
+sudo node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); console.log("store JSON valid")' "$restore_dir/store.json"
 ```
 
 Then enter a maintenance window, stop the API, retain a safety copy, and restore both halves:

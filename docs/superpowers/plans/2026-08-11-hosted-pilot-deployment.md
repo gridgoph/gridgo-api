@@ -107,7 +107,7 @@ For production, clone every fixture and replace its password from the mapped var
 
 - [ ] **Step 2: Implement exact-origin parsing and production server validation**
 
-Normalize comma-separated HTTP(S) origins through `new URL(value).origin`, require the input to equal that origin, and reject `*`. In production require at least one origin, `MINIO_ENDPOINT`, HTTPS `MINIO_PUBLIC_URL`, `MINIO_ACCESS_KEY`, and `MINIO_SECRET_KEY`; every error names the variable and fix.
+Normalize comma-separated HTTP(S) origins through `new URL(value).origin`, require the input to equal that origin, and reject `*`. In production require at least one origin, a loopback `MINIO_ENDPOINT`, HTTPS `MINIO_PUBLIC_URL`, `MINIO_ACCESS_KEY`, and `MINIO_SECRET_KEY`; every error names the variable and fix.
 
 - [ ] **Step 3: Run the credential-focused tests and verify GREEN**
 
@@ -259,4 +259,3 @@ Start the configured server twice against the same temporary store and compare t
 - [ ] **Step 5: Review, commit, push, and open PR**
 
 Run the verification-before-completion, requesting-code-review, and finishing-a-development-branch skill checklists; inspect `git diff --check` and the final diff; commit on `fm/gridgo-api-production`; push only that branch; open a PR with `gh-axi`; append the final `done: PR <url>` status.
-

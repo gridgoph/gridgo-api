@@ -111,13 +111,20 @@ function requireValue(env, variable, description) {
   return value;
 }
 
-function requireStorageOrigin(env, variable, { httpsOnly }) {
+function requireStorageOrigin(env, variable, { httpsOnly, loopbackOnly = false }) {
   const value = requireValue(
     env,
     variable,
     httpsOnly ? "the public HTTPS object-storage origin" : "the private API-to-MinIO HTTP(S) origin",
   );
   const origin = exactOrigin(value, variable);
+  const hostname = new URL(origin).hostname;
+  if (loopbackOnly && !["127.0.0.1", "localhost", "[::1]"].includes(hostname)) {
+    throw configurationError(
+      `${variable} must use host loopback in production; received ${origin}.`,
+      `Set ${variable} to a loopback origin such as http://127.0.0.1:19000 and restart.`,
+    );
+  }
   if (httpsOnly && !origin.startsWith("https://")) {
     throw configurationError(
       `${variable} must use HTTPS in production; received ${origin}.`,
@@ -134,7 +141,7 @@ export function validateProductionServerEnvironment(env = process.env, allowedOr
       "Set CORS_ALLOWED_ORIGINS to the exact portal origin, for example https://gridgo.talasora.com, and restart.",
     );
   }
-  requireStorageOrigin(env, "MINIO_ENDPOINT", { httpsOnly: false });
+  requireStorageOrigin(env, "MINIO_ENDPOINT", { httpsOnly: false, loopbackOnly: true });
   requireStorageOrigin(env, "MINIO_PUBLIC_URL", { httpsOnly: true });
   requireValue(env, "MINIO_ACCESS_KEY", "the bucket-scoped MinIO API access key");
   requireValue(env, "MINIO_SECRET_KEY", "the bucket-scoped MinIO API secret key");

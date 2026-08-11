@@ -32,7 +32,7 @@ A second independent seed script would initially be simple, but taxonomy, settin
 
 Production requires all six password variables: `GRIDGO_CLIENT_PASSWORD`, `GRIDGO_INDIVIDUAL_PASSWORD`, `GRIDGO_SUPPLIER_PASSWORD`, `GRIDGO_RIDER_PASSWORD`, `GRIDGO_OPS_PASSWORD`, and `GRIDGO_ADMIN_PASSWORD`. Every value must be at least 12 characters and must not equal the committed local-development password. Missing or unsafe credentials stop the process with a message naming the variable and the exact repair.
 
-Production server startup also requires a non-wildcard `CORS_ALLOWED_ORIGINS`, explicit MinIO API credentials and origins, and an HTTPS `MINIO_PUBLIC_URL`. Seeding needs only the configured account credentials, so operators can create the store before bringing storage or TLS online.
+Production server startup also requires a non-wildcard `CORS_ALLOWED_ORIGINS`, a loopback `MINIO_ENDPOINT`, explicit MinIO API credentials, and an HTTPS `MINIO_PUBLIC_URL`. Seeding needs only the configured account credentials, so operators can create the store before bringing storage or TLS online.
 
 An explicit custom `STORE_PATH` is never silently created by server startup. Operators run the production seed command once; a missing path produces a startup error that gives that command. This prevents a typo from looking like a successful but empty recovery.
 
@@ -65,4 +65,3 @@ The guide names the pilot limits: one API writer/process, no horizontal replicas
 ## Verification
 
 Automated tests cover production startup refusal without configured credentials, a clean production seed, unchanged rich development seed, allowed and rejected origins, successful production startup, and two-load byte stability. Manual verification uses a temporary store and free high port, captures and stops only its exact child PID, confirms health and empty collections with configured credentials, and confirms startup refusal without them.
-
