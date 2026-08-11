@@ -1,0 +1,280 @@
+# GRIDGO API — the compose file that runs on the captain's server.
+#
+# Install to ~/gridgo/api/docker-compose.yml. That path is what
+# ~/gridgo/bin/deploy.sh (the single command the CI deploy key may run) enters
+# before `docker compose pull && docker compose up -d --remove-orphans`.
+#
+# Two secret files must sit beside it, mode 0600, and are never in this
+# repository or in this file. See docs/DEPLOYMENT.md for their contents,
+# installation, rotation, rollback, backup and restore.
+#
+#   ./gridgo-api.env   the six pilot account passwords + the bucket-scoped
+#                      MinIO API key. Read by `api` and `store-init`.
+#   ./minio.env        the MinIO root credentials + the same bucket-scoped API
+#                      key. Read by `minio` and `minio-init`.
+#
+# MINIO_ACCESS_KEY / MINIO_SECRET_KEY appear in both and must match: one file
+# creates that user, the other authenticates as it. Nothing else is shared, so
+# the API process never holds MinIO root credentials and the `mc` container
+# never holds account passwords.
+
+name: gridgo-api
+
+services:
+  # ---------------------------------------------------------------------------
+  # One-shot: create the production store the first time, then do nothing.
+  # ---------------------------------------------------------------------------
+  # `src/seed.js` without --reset refuses to overwrite an existing store and
+  # exits 0, so this is safe to re-run on every single deploy — and it is, which
+  # is what makes a rebuilt volume recover by itself instead of leaving the API
+  # in a crash loop against a missing STORE_PATH.
+  #
+  # It must not be replaced by the API's own auto-seed: that only ever fires for
+  # the default in-repo store path, precisely so a mistyped STORE_PATH surfaces
+  # as a refusal rather than as a silently empty database.
+  store-init:
+    image: ghcr.io/rqms40/gridgo-api:${GRIDGO_API_TAG:-latest}
+    container_name: gridgo-api-store-init
+    command: ["node", "src/seed.js"]
+    env_file:
+      - ./gridgo-api.env
+    environment:
+      # NODE_ENV=production is already baked into the image; repeated here
+      # because it is what selects the clean pilot seed over the rich demo one.
+      NODE_ENV: production
+      STORE_PATH: /var/lib/gridgo-api/store.json
+    volumes:
+      - gridgo_api_store:/var/lib/gridgo-api
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - gridgo-storage
+
+  # ---------------------------------------------------------------------------
+  # The API itself.
+  # ---------------------------------------------------------------------------
+  api:
+    image: ghcr.io/rqms40/gridgo-api:${GRIDGO_API_TAG:-latest}
+
+    # The edge proxy resolves this exact name on the gridgo-edge network:
+    #   gridgo-api.talasora.com  ->  reverse_proxy gridgo-api:8787
+    # Renaming it takes the API off the internet and the dashboard with it.
+    container_name: gridgo-api
+
+    restart: unless-stopped
+
+    # No `ports:`. The API is reachable only through the proxy on the shared
+    # network. Nothing is published on the host, so this can never collide with
+    # the captain's demo on host :8787 — and never bypass the host firewall.
+    expose:
+      - "8787"
+
+    env_file:
+      - ./gridgo-api.env
+
+    environment:
+      # Everything here is configuration, not secret, so it is version
+      # controlled and reviewable. Values in `environment:` win over the
+      # env_file, which is why no secret file can quietly widen CORS.
+      NODE_ENV: production
+      HOST: "0.0.0.0"
+      PORT: "8787"
+
+      # The whole domain database. On the volume, never in the container layer.
+      STORE_PATH: /var/lib/gridgo-api/store.json
+
+      # The dashboard, and only the dashboard. Not the landing site. An exact
+      # origin: no wildcard, no path, no trailing slash.
+      CORS_ALLOWED_ORIGINS: https://gridgo-dash.talasora.com
+
+      # Private container-network leg for the API's own S3 calls. `gridgo-minio`
+      # has no dot, so it cannot resolve anywhere but on a Docker network this
+      # container is attached to. The signing origin is separate and public:
+      # rewriting a signed URL's host afterwards invalidates the signature.
+      MINIO_ENDPOINT: http://gridgo-minio:9000
+      MINIO_PUBLIC_URL: https://gridgo-api.talasora.com
+      MINIO_BUCKET: gridgo-uploads
+      MINIO_REGION: us-east-1
+      MINIO_DOWNLOAD_URL_TTL_SECONDS: "300"
+      UPLOAD_REQUEST_TIMEOUT_MS: "900000"
+
+    volumes:
+      - gridgo_api_store:/var/lib/gridgo-api
+
+    # No store, no API — that dependency is absolute.
+    #
+    # `minio-init` is here for an unobvious reason. The API checks the bucket
+    # once at startup and keeps reporting that verdict on /health until the next
+    # file operation moves it. Start it before the bucket exists and it comes up
+    # working but permanently self-reporting `storage: unavailable` — which is
+    # precisely the post-deploy check in docs/DEPLOYMENT.md §9. Measured, not
+    # assumed: without this dependency the API loses that race on a cold start.
+    # Waiting for the idempotent init makes the verdict deterministic instead of
+    # something the operator has to interpret.
+    #
+    # To start the API while MinIO is being repaired, and accept that file
+    # routes 503 meanwhile: `docker compose up -d --no-deps api`.
+    depends_on:
+      store-init:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+    # Inherited from the image's HEALTHCHECK (see Dockerfile) — declared here so
+    # an operator reading only this file knows the container has one and where
+    # it points.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # Container logs are the only record of a crash loop; unbounded they fill
+    # the disk that also holds the store volume.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      - gridgo-edge
+      - gridgo-storage
+
+  # ---------------------------------------------------------------------------
+  # Private object storage for artwork, fulfilment proof and identity evidence.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    container_name: gridgo-minio
+    restart: unless-stopped
+
+    # No `ports:` at any address. A Docker port publication inserts its own
+    # DOCKER-USER chain rules and bypasses the host firewall, so "published to
+    # 127.0.0.1 and firewalled" is not a control that can be relied on. An
+    # exposed datastore is how the previous GRIDGO was ransomwared; the only
+    # safe amount of host publication for this service is none.
+    #
+    # The console is bound to the container's own loopback and the browser UI is
+    # switched off outright, so it is unreachable even from a sibling container,
+    # and it is never given a proxy route.
+    command: ["server", "/data", "--address", ":9000", "--console-address", "127.0.0.1:9001"]
+    environment:
+      MINIO_BROWSER: "off"
+    env_file:
+      - ./minio.env
+
+    volumes:
+      - gridgo_minio_data:/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      # gridgo-storage carries the API's S3 traffic. gridgo-edge exists solely
+      # so the proxy can pass /gridgo-uploads/* through to a signed GET; without
+      # that route every download URL the API mints 404s.
+      - gridgo-storage
+      - gridgo-edge
+
+  # ---------------------------------------------------------------------------
+  # One-shot: private bucket + a user scoped to it. Idempotent, re-runs freely.
+  # ---------------------------------------------------------------------------
+  # The policy is inlined rather than bind-mounted because ~/gridgo/api holds
+  # only the compose file and its two secret files — there is no checkout on the
+  # server to mount from. It matches docker/minio/gridgo-api-policy.json.
+  minio-init:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    container_name: gridgo-api-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file:
+      - ./minio.env
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        cat > /tmp/gridgo-api-policy.json <<'POLICY'
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["s3:GetBucketLocation", "s3:ListBucket", "s3:ListBucketMultipartUploads"],
+              "Resource": ["arn:aws:s3:::gridgo-uploads"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"
+              ],
+              "Resource": ["arn:aws:s3:::gridgo-uploads/*"]
+            }
+          ]
+        }
+        POLICY
+        mc alias set local http://gridgo-minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing local/gridgo-uploads
+        mc anonymous set none local/gridgo-uploads
+        mc admin user info local "$${MINIO_ACCESS_KEY}" >/dev/null 2>&1 \
+          || mc admin user add local "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
+        mc admin policy create local gridgo-api /tmp/gridgo-api-policy.json 2>/dev/null || true
+        mc admin policy attach local gridgo-api --user "$${MINIO_ACCESS_KEY}" 2>/dev/null || true
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - gridgo-storage
+
+volumes:
+  # Named explicitly so the volume keeps these names regardless of the compose
+  # project name — the backup and restore procedures in docs/DEPLOYMENT.md
+  # address them by name, and a renamed volume is a silently empty database.
+  gridgo_api_store:
+    name: gridgo_api_store
+  gridgo_minio_data:
+    name: gridgo_minio_data
+
+networks:
+  # Created and owned by ~/gridgo-proxy (Caddy). Declared external so a
+  # `docker compose down` here can never delete the network the portal and the
+  # landing site also sit on.
+  gridgo-edge:
+    name: gridgo-edge
+    external: true
+
+  # The API-to-MinIO leg. `internal: true` gives it no gateway at all, so
+  # bucket credentials on this network cannot reach anything off the host.
+  gridgo-storage:
+    name: gridgo-api-storage
+    internal: true

@@ -18,7 +18,9 @@ set -a; source .env; set +a
 npm run dev   # http://127.0.0.1:8787
 ```
 
-Health: `GET /health`
+Health: `GET /health` — `ok`, `version`, storage status, plus `commit`/`builtAt` (both `"unknown"` outside a built image; the hosted pipeline uses them to prove a deploy took).
+
+Hosted pilot deployment — image, compose file, pipeline, secrets, backup/restore: `docs/DEPLOYMENT.md`.
 
 MinIO API: `http://127.0.0.1:9000`; console: `http://127.0.0.1:9001`. Both bind only to host loopback by default. The one-shot `minio-init` service idempotently creates the private `gridgo-uploads` bucket and a bucket-scoped API user; the API never uses MinIO root credentials.
 
