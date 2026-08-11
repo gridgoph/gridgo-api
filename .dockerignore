@@ -20,6 +20,12 @@ data
 
 *.pem
 
+# The Firebase push credential is mounted into the container at run time from a
+# file on the server (docs/DEPLOYMENT.md §2a). It must never be baked into a
+# layer: image layers are published to GHCR.
+*service-account*.json
+fcm-*.json
+
 npm-debug.log*
 yarn-debug.log*
 

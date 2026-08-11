@@ -20,12 +20,15 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/auth/signup` | public | self-signup for client/supplier/rider |
 | POST | `/auth/login` | public | `{email,password}` → `{token,user}` |
 | GET | `/auth/me` | authenticated | `{user}` without password |
-| POST | `/auth/logout` | authenticated/token optional | invalidates current token |
+| POST | `/auth/logout` | authenticated/token optional | invalidates current token; optionally unregisters this phone from push |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
 | GET | `/files/:fileId/download-url` | same as file read | five-minute signed GET |
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
 | DELETE | `/files/:fileId` | owner/ops/super; unreferenced only | safe delete lifecycle |
+| GET | `/devices` | authenticated | caller's own push registrations |
+| POST | `/devices` | authenticated | register this phone's FCM token against the caller |
+| POST | `/devices/unregister` | authenticated | stop push to one of the caller's own phones |
 | GET | `/notifications` | authenticated | caller's notifications, newest first |
 | GET | `/notifications/stream` | authenticated | caller-scoped SSE notification delivery and resume |
 | PATCH | `/notifications/:id` | notification owner | set `{read:true|false}` |
@@ -205,6 +208,133 @@ File bytes use `purpose=verification_document` and the upload/attach contract in
 Each array item is the complete public `File` metadata object; the abbreviated example highlights identifying fields. A supplier cannot request another supplier's list. Clients and riders cannot request any list. All denied calls return `403 {"error":"forbidden","message":"..."}`; a non-supplier target returns `400 verification_documents_require_supplier`; an unknown target returns `404 user_not_found`.
 
 The existing Operations/Super Admin `GET /users/:id` approval response is now `{ "user": PublicUser, "verificationDocuments": File[] }` for a supplier. The same array is returned by `POST /users/:id/verification`, so the decision response remains a complete approval surface. General `PublicUser` values—including `/users`, login, `/auth/me`, matching, and catalogue projections—never contain `verificationDocumentFileIds`.
+
+## Push notifications (Firebase Cloud Messaging)
+
+`GET /notifications` and `/notifications/stream` only reach a phone while the app is open and connected. Push is the third delivery leg: the server sends the same notification through **FCM HTTP v1** to every device the owner has registered, so it arrives with the app closed and the screen locked.
+
+Firebase project: **`gridgo-c2ce9`**. The apps need its `google-services.json` / `GoogleService-Info.plist`; the sending credential is server-side only and is never distributed to a device.
+
+Push **supplements** the existing legs and never replaces them. Every push corresponds to exactly one notification record the same user can read in `GET /notifications`, carries that record's ID, and is emitted once — the server pushes from the single place that already persists notifications, so no server path can create a notification without a push or push the same record twice. Apps must still render the in-app list as the source of truth: a phone with notifications denied, a stale token, or an offline period receives nothing, and the list is what closes that gap.
+
+When the deployment has no FCM credential installed, every route below still works and stores registrations; nothing is sent. `GET /health` reports `push.status: "disabled"` in that case — see `docs/DEPLOYMENT.md` §2.
+
+### Device registration model
+
+- A registration is `{ token, platform }`. `token` is the FCM registration token Firebase issued to that installation; `platform` is `android`, `ios`, or `web`.
+- **A token belongs to exactly one user.** Registering a token that is already registered to somebody else moves it to the caller and removes the previous owner's claim, which is what a shared handset or a sign-out/sign-in on the same phone produces. Without that move, one person's orders would appear on another person's lock screen.
+- **One user may hold many devices.** A phone and a tablet both receive every notification; one dead device never suppresses the others.
+- Re-registering the same token under the same account updates the existing record instead of adding a second one. Apps should re-register on every launch and on every Firebase token refresh; it is idempotent and cheap.
+- The server deletes a registration as soon as FCM reports it unregistered or its token invalid. An app that finds itself receiving nothing should simply register again.
+- **Registrations are strictly caller-owned.** Ownership is established exactly as it is for `/notifications` — from the bearer token. There is no operations override and no route through which one account can read, move, or delete another account's registrations.
+- **A registration is bound to the account, not to its login address.** The stored record holds `userId`; it never holds an email. Changing an account's sign-in address — including the pilot move from `@gridgo.local` to `@gridgo.ph` described under *Migration contract* — leaves the phone registered to the same person, and apps do not need to re-register after one.
+
+### `POST /devices`
+
+```json
+{ "token": "fcm-registration-token-from-firebase", "platform": "android" }
+```
+
+`201` when this token was not registered anywhere, `200` when an existing registration was updated or moved:
+
+```json
+{
+  "device": {
+    "id": "dev_9f2c41a7c8d3",
+    "userId": "user_client",
+    "platform": "android",
+    "tokenTail": "a7c8d3f1",
+    "createdAt": "2026-08-11T02:00:00.000Z",
+    "updatedAt": "2026-08-11T02:00:00.000Z"
+  },
+  "created": true,
+  "reassigned": false
+}
+```
+
+`reassigned` is `true` when the token was taken from another account. **The raw token is never returned** by any route; `tokenTail` is its last eight characters, enough to identify a registration in a list or a support conversation.
+
+| Status | Error | Cause |
+|---|---|---|
+| `400` | `device_token_required` | `token` missing, empty, or not a string |
+| `400` | `device_token_too_long` | `token` longer than 4096 characters |
+| `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
+| `401` | `unauthorized` | no or expired bearer token |
+
+### `GET /devices`
+
+```json
+{ "devices": [ { "id": "dev_9f2c41a7c8d3", "userId": "user_client", "platform": "android", "tokenTail": "a7c8d3f1", "createdAt": "…", "updatedAt": "…" } ] }
+```
+
+Only the caller's own registrations, always. An account with none receives `{"devices": []}`.
+
+### `POST /devices/unregister`
+
+```json
+{ "token": "fcm-registration-token-from-firebase" }
+```
+
+Returns `200 {"id": "dev_9f2c41a7c8d3", "unregistered": true}`.
+
+| Status | Error | Cause |
+|---|---|---|
+| `400` | `device_token_required` | `token` missing or empty |
+| `404` | `device_token_not_found` | the token is not registered **to the caller** |
+| `401` | `unauthorized` | no or expired bearer token |
+
+A token registered to a *different* account also returns `404`, not `403`. Unlike an opaque server-minted notification ID, a device token is a value a caller can supply, so a distinguishable refusal would answer "is this token registered to somebody else?" for anyone who asked. Nothing is changed either way.
+
+### Signing out
+
+`POST /auth/logout` accepts an optional device token and unregisters it in the same call:
+
+```json
+{ "deviceToken": "fcm-registration-token-from-firebase" }
+```
+
+```json
+{ "ok": true, "deviceUnregistered": true }
+```
+
+**Prefer this over a separate unregister call.** After logout the bearer token is invalid, so a phone that logs out first can no longer authenticate `POST /devices/unregister` and would keep receiving the previous user's notifications. `deviceUnregistered` is `false` when no token was sent, when the session had already expired, or when the token belongs to another account — the body is still `200` and the sign-out still happens. Sending no body remains valid and behaves exactly as before.
+
+### What a push looks like
+
+One FCM v1 message per registered device:
+
+```json
+{
+  "message": {
+    "token": "<one device token>",
+    "notification": {
+      "title": "Supplier assigned and final price ready",
+      "body": "A supplier accepted your order. Review the final price and submit the digital downpayment."
+    },
+    "data": {
+      "notificationId": "ntf_9c1f3a",
+      "type": "supplier_assignment_final_price",
+      "orderId": "ord_demo_1",
+      "at": "2026-08-11T02:00:00.000Z"
+    },
+    "android": { "priority": "high", "notification": { "channel_id": "gridgo_default" } },
+    "apns": { "headers": { "apns-priority": "10" }, "payload": { "aps": { "sound": "default" } } }
+  }
+}
+```
+
+- `title` and `body` are the notification record's own, readable with the phone locked.
+- `data` values are always strings, and the keys are exactly `notificationId`, `type`, `orderId`, `at`. Keys with no value are omitted — a notification with no order carries no `orderId`. Route on `type` and `orderId`; fetch the order and re-read `GET /notifications` after opening, because the push carries no order state.
+- **Android apps must create the notification channel `gridgo_default`** before requesting a token. A message naming a channel the app has not created is downgraded or dropped on Android 8+.
+- `type` is the same discriminator as on the notification record: `supplier_assignment_final_price`, `pickup_check_escalation`, `pickup_escalation_resolved`, and any later value. Treat unknown types as "open the notification list".
+
+**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier price, commission, payout milestone amounts and every other field the [visibility rules](#visibility-authorization) hide stay off the lock screen even if a future notification record carries them. Titles and bodies are the owner-scoped strings the same user already sees in-app.
+
+### Failure behaviour apps can rely on
+
+- A failed push never fails the action that caused it. If a payout releases and FCM is unreachable, the payout still happened, the notification record still exists, and `GET /notifications` still returns it.
+- A dead token is pruned, a transient FCM failure is not. A phone that is merely offline or unreachable keeps its registration.
+- There is no delivery receipt and no read receipt. `read` is set only through `PATCH /notifications/:id` or `PATCH /notifications/read-all`; a push does not mark anything read.
 
 ## Notifications
 
@@ -598,5 +728,9 @@ Load-time `backfillOperationalModel()` is idempotent:
 - preserves `proofFileIds`, file objects, uploaded object metadata, artwork names, and every unrelated collection.
 
 The structural file backfill also adds missing `verificationDocumentFileIds: []` only to supplier users. It never replaces an existing array or document metadata and is byte-idempotent on the second run.
+
+A store written before push gains an empty `deviceTokens: []` on its first load and is byte-identical on every load after that. Registrations are only ever created by a real device calling `POST /devices`; none are seeded, because a fabricated FCM token can only fail and then be pruned.
+
+A separate load-time pass renames the six shipped pilot identities off the retired `@gridgo.local` addresses onto `@gridgo.ph`, in place. It runs before every backfill and rewrites `user.email` and nothing else, so a phone registered under the old address stays registered, keeps its `dev_…` id, and continues to receive that account's pushes; the account also keeps its notifications, orders and live sessions, all of which reference `user.id`. Apps require no migration step — only the new login addresses. Because that guarantee depends on registrations never storing a login, startup refuses (mutating nothing) if a `deviceTokens` record is found carrying an email instead of a `userId`. Operator detail: `docs/DEPLOYMENT.md`.
 
 See `docs/V2_MIGRATION_CHECKSUMS.md` for the copied-live-store proof and exact hashes.

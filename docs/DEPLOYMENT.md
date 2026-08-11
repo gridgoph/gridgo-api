@@ -62,7 +62,7 @@ The six fixed identities were originally seeded on `@gridgo.local`. `.local` is 
 
 A store seeded before that move is renamed in place by a load-time migration (`migrateFixtureEmailDomain()` in `src/server.js`), which runs on the first `load()` after the deploy. **Nothing to run, and nothing is reseeded** — reseeding to fix an address would destroy every real order, payment and claim the pilot has taken.
 
-The rename is safe because email is a login key only: orders, sessions, credits, claims, issues, notifications and location pings all reference `user.id`, which the migration never touches. An account keeps everything it owned.
+The rename is safe because email is a login key only: orders, sessions, credits, claims, issues, notifications, device push registrations and location pings all reference `user.id`, which the migration never touches. An account keeps everything it owned. A phone registered for push before the move keeps receiving that account's notifications with no re-registration.
 
 It matches the exact retired address and nothing else:
 
@@ -93,6 +93,7 @@ The passwords do not change: `GRIDGO_*_PASSWORD` still supplies one per identity
 | `docker-compose.yml` | `deploy/docker-compose.yml` in this repository | 0644 |
 | `gridgo-api.env` | written by hand — §3 | **0600** |
 | `minio.env` | written by hand — §3 | **0600** |
+| `fcm-service-account.json` | downloaded from the Firebase console — §2a | **0600**, owned by uid 1001 |
 
 Nothing else belongs in that directory. There is no checkout on the server, no `node_modules`, no store file on the host filesystem and no `mc` binary to install: everything the deployment needs is in the image or in a container it starts.
 
@@ -162,6 +163,73 @@ docker compose run --rm --entrypoint /bin/sh minio-init -ec \
 
 **To rotate the MinIO root credential**, change it in `minio.env` and run `docker compose up -d --force-recreate minio minio-init`. MinIO reads root credentials from its environment at start; the bucket user and its policy are stored in the volume and are unaffected.
 
+## 2a. The Firebase push credential
+
+Phone push (`docs/OPERATIONAL_MODEL_V2_API.md` → *Push notifications*) sends through Firebase Cloud Messaging on project **`gridgo-c2ce9`**. The sending credential is a Google service-account JSON. It is the most dangerous secret in this deployment: **anyone holding it can send a notification to every GRIDGO user on every phone.** It never enters this repository, a log line, an error message, a test fixture, a chat message, or a GitHub secret.
+
+It is a file rather than an environment variable because the key inside it is a multi-line PEM, and because a file can be mounted into one service only.
+
+**Install it:**
+
+```bash
+# On a trusted machine, download the service-account JSON from
+#   Firebase console → Project settings → Service accounts → Generate new private key
+# Copy it to the server over SSH, never through a chat client or a paste bin.
+scp fcm-service-account.json <deploy-user>@<server>:~/gridgo/api/fcm-service-account.json
+
+# On the server: readable by the API container's own uid, and by nobody else.
+sudo chown 1001:1001 ~/gridgo/api/fcm-service-account.json
+sudo chmod 600       ~/gridgo/api/fcm-service-account.json
+shred -u fcm-service-account.json   # on the machine you copied it from
+```
+
+The compose file bind-mounts it read-only into the `api` service alone, at `/run/secrets/fcm-service-account.json`, and names that path in `GRIDGO_FCM_SERVICE_ACCOUNT_FILE`. `store-init` does not receive it: seeding a store has no business holding a credential that can notify every user.
+
+**Install the file before the first deploy that includes push.** A bind mount whose host file does not exist is materialised by Docker as an empty *directory*, which is not readable as JSON. The API does not crash on that — it starts with push switched off and says so — but no phone receives anything until the file is real.
+
+**The API never refuses to start over this credential.** Unlike the account passwords, the CORS allowlist and the MinIO endpoint, a broken push credential costs lock-screen delivery and nothing else: in-app and SSE notifications continue, and every route keeps working. Deploys are automatic on merge, so a missing secret must not be able to take the API down. The trade is that the failure is quiet unless you look, which is what `/health` is for:
+
+```bash
+curl -fsS https://gridgo-api.talasora.com/health | jq .push
+```
+
+| `push.status` | Meaning |
+| --- | --- |
+| `available` | a send has succeeded since the last restart |
+| `configured` | the credential loaded; nothing has been sent yet |
+| `disabled` | `GRIDGO_FCM_SERVICE_ACCOUNT_FILE` is unset — push is off by configuration |
+| `misconfigured` | the file is unreadable, not JSON, or incomplete; `push.detail` names the file and the problem, never a value from inside it |
+| `unavailable` | the credential is fine but the last send failed (Google unreachable, or the assertion was rejected) |
+
+The startup log carries the same reason once: `push notifications are DISABLED: …`.
+
+**To rotate the key** — do this whenever it may have been exposed, and on the same cadence as the account passwords:
+
+```bash
+# 1. Firebase console → Service accounts → Generate new private key.
+#    This ADDS a key; the old one keeps working until you delete it, so there
+#    is no outage window.
+scp fcm-service-account.json <deploy-user>@<server>:~/gridgo/api/fcm-service-account.json.new
+ssh <deploy-user>@<server>
+cd ~/gridgo/api
+sudo chown 1001:1001 fcm-service-account.json.new && sudo chmod 600 fcm-service-account.json.new
+sudo mv fcm-service-account.json.new fcm-service-account.json
+
+# 2. The credential is read once at start, and access tokens are cached for
+#    their lifetime, so the container must be recreated.
+docker compose up -d --force-recreate api
+curl -fsS -H 'Host: gridgo-api.talasora.com' http://127.0.0.1/health | jq .push
+#    status must be "configured" (or "available" once a notification fires)
+
+# 3. Only after confirming the new key works: Firebase console → Service
+#    accounts → Manage keys → delete the OLD key id. Until you do, a leaked
+#    old key still sends.
+```
+
+Rotating this key touches no account, no order and no stored device token: registered phones keep receiving, because the token identifies the *phone*, not the sender.
+
+**Egress matters.** Sending reaches `oauth2.googleapis.com` and `fcm.googleapis.com` over HTTPS. The `api` container has that route through `gridgo-edge`; `gridgo-api-storage` is `internal: true` and deliberately has no gateway. A host firewall that blocks outbound 443 leaves `/health` green and every push failing — the symptom is `push.status: unavailable` with `push delivery error …` in `docker compose logs api`.
+
 ## 3. Install the deployment
 
 As the deploy user, once:
@@ -170,6 +238,7 @@ As the deploy user, once:
 mkdir -p ~/gridgo/api
 # copy deploy/docker-compose.yml from this repository to ~/gridgo/api/docker-compose.yml
 # write gridgo-api.env and minio.env as in §2, then chmod 600 both
+# install fcm-service-account.json as in §2a (0600, owned by uid 1001)
 cd ~/gridgo/api
 docker compose config --quiet          # must print nothing
 docker compose config --images         # must include ghcr.io/rqms40/gridgo-api:latest
@@ -300,6 +369,8 @@ curl -fsS -H 'Host: gridgo-api.talasora.com' http://127.0.0.1/health
 
 Encrypt backups, copy them off the API host, restrict access, and retain multiple dated recovery points. The JSON contains passwords and sessions; the bucket contains private artwork and identity evidence. Schedule backups according to the maximum data loss the captain accepts, and perform a restore drill after setup and after material storage changes.
 
+The three secret files in `~/gridgo/api` are **not** part of this backup and must be held separately, in the captain's password manager, at the same protection as the backups themselves. Two of them can be regenerated (§2, §2a); `fcm-service-account.json` cannot — Firebase reveals a private key exactly once, so a lost copy means generating a new key and deleting the old one. A restored store contains registered device tokens, and those keep working only if a valid credential for project `gridgo-c2ce9` is still installed.
+
 ## 8. Restore and prove recovery
 
 Choose an exact dated backup and verify it before touching the live data:
@@ -350,14 +421,16 @@ The pipeline already performs the first two and fails the run if it cannot: `/he
 curl -fsS https://gridgo-api.talasora.com/health
 # {"ok":true,"service":"gridgo-api","version":2,"commit":"<merged sha>",
 #  "builtAt":"2026-08-11T00:38:09Z",
-#  "storage":{"provider":"minio","bucket":"gridgo-uploads","status":"available",...}}
+#  "storage":{"provider":"minio","bucket":"gridgo-uploads","status":"available",...},
+#  "push":{"provider":"fcm","projectId":"gridgo-c2ce9","status":"configured",...}}
 ```
 
 Check, in order:
 
 1. `ok` is `true` and `commit` matches the commit you expect. A stale `commit` means the restart did not take the new image.
 2. Storage status is `available`. `unavailable` means JSON routes are alive but uploads and downloads are not; check `docker compose ps` and the bucket credential match between the two env files.
-3. On the first deploy after the domain move, the login below succeeds at `admin@gridgo.ph` with the unchanged `GRIDGO_ADMIN_PASSWORD`. If the container exited instead of serving, read `docker compose logs api` — a refusal naming two account ids is the collision case described in [the data boundary](#the-pilot-logins-moved-to-gridgoph--no-operator-step-no-reseed).
+3. `push.projectId` is `gridgo-c2ce9` and `push.status` is `configured` or `available`. `disabled` or `misconfigured` means phones receive nothing while the API otherwise looks healthy — see §2a for the status table and `push.detail`.
+4. On the first deploy after the domain move, the login below succeeds at `admin@gridgo.ph` with the unchanged `GRIDGO_ADMIN_PASSWORD`. If the container exited instead of serving, read `docker compose logs api` — a refusal naming two account ids is the collision case described in [the data boundary](#the-pilot-logins-moved-to-gridgoph--no-operator-step-no-reseed).
 
 Prove the browser boundary:
 
@@ -430,3 +503,4 @@ Move to a transactional database and production identity system before any of th
 
 - Portal deployment and its own pipeline: `docs/DEPLOYMENT.md` in `gridgo-web`. The portal and this API share the `gridgo-edge` network and the same restricted deploy key.
 - File, upload and signed-download contracts: `docs/STORAGE_API.md`.
+- Device registration, push payload and failure behaviour the apps build against: `docs/OPERATIONAL_MODEL_V2_API.md` → *Push notifications*.

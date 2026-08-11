@@ -31,6 +31,18 @@ import {
 } from "./notifications.js";
 import { createObjectStorage } from "./object-storage.js";
 import {
+  DEVICE_PLATFORMS,
+  backfillDeviceTokens,
+  createPushDeliveryOrDisable,
+  deviceTokensFor,
+  normalizeDeviceToken,
+  publicDevice,
+  pushMessageFor,
+  registerDeviceToken,
+  removeDeviceTokenIds,
+  unregisterDeviceToken,
+} from "./push.js";
+import {
   backfillTaxonomy,
   buildCategoryTree,
   defaultTaxonomy,
@@ -73,6 +85,13 @@ const PILOT_USERS = configuredDemoUsers(process.env);
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
+// Push is optional configuration, not a startup requirement. A hosted pilot
+// without a usable service-account file must still serve every route — the
+// phones simply fall back to in-app and SSE delivery — because the deploy that
+// ships this code runs before an operator can install the secret. `/health`
+// reports `push.status` as `disabled` or `misconfigured` with the reason, so
+// the gap is loud rather than silent.
+const pushDelivery = createPushDeliveryOrDisable(process.env);
 const enqueueMutation = createMutationQueue();
 const notificationEvents = createNotificationEvents();
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
@@ -98,7 +117,67 @@ function save(store) {
   fs.writeFileSync(temporary, JSON.stringify(store, null, 2));
   fs.renameSync(temporary, STORE);
   store[STORE_NOTIFICATION_IDS] = new Set((store.notifications || []).map((notification) => notification.id));
-  for (const notification of createdNotifications) notificationEvents.publish(notification);
+  for (const notification of createdNotifications) {
+    notificationEvents.publish(notification);
+    deliverPush(store, notification);
+  }
+}
+
+/**
+ * Push the notifications this save just created, to every device its owner has
+ * registered.
+ *
+ * Hooked here rather than at each `store.notifications.push(...)` call site for
+ * two reasons: `save()` is already the one place that knows which records are
+ * new, so a push can neither be forgotten by a future call site nor fire twice
+ * for one record; and every push therefore corresponds to a notification the
+ * same user can also read in `GET /notifications`.
+ *
+ * Intentionally not awaited and intentionally unable to reject. The triggering
+ * action — a payout release, a payment confirmation — is already durable on
+ * disk by the time this runs, and a dead phone or an unreachable Google must
+ * never turn that into a failed request.
+ */
+function deliverPush(store, notification) {
+  if (!pushDelivery.configured) return;
+  if (notification.deletedAt != null) return;
+  const devices = deviceTokensFor(store, notification.userId);
+  if (devices.length === 0) return;
+
+  pushDelivery
+    .send(pushMessageFor(notification), devices)
+    .then((results) => {
+      for (const result of results) {
+        if (!result.ok && !result.prune) {
+          console.warn(
+            `push delivery failed notification=${notification.id} device=${result.deviceId} code=${result.code}`,
+          );
+        }
+      }
+      return pruneDeadDeviceTokens(results.filter((result) => result.prune).map(({ deviceId }) => deviceId));
+    })
+    .catch((error) => {
+      console.warn(`push delivery error notification=${notification.id} reason=${error?.message || "unknown"}`);
+    });
+}
+
+/**
+ * Drop registrations FCM reported as gone. Left in place, they fill the store
+ * with reinstalled and wiped phones and cost a request on every later send.
+ *
+ * Re-reads the store under the mutation queue instead of editing the caller's
+ * copy: by the time FCM answers, that copy is stale and writing it back would
+ * lose whatever landed in between.
+ */
+async function pruneDeadDeviceTokens(deviceIds) {
+  if (deviceIds.length === 0) return;
+  await enqueueMutation(async () => {
+    const latestStore = load();
+    const removed = removeDeviceTokenIds(latestStore, deviceIds);
+    if (removed === 0) return;
+    save(latestStore);
+    console.warn(`push pruned ${removed} unregistered device token(s)`);
+  });
 }
 function id(prefix) {
   return `${prefix}_${crypto.randomBytes(6).toString("hex")}`;
@@ -491,8 +570,16 @@ function normalizedEmail(user) {
  * Renaming beats reseeding because the hosted pilot store holds real orders,
  * payments and claims: a reseed would destroy them to fix an address. It is
  * safe to rename because email is a *login* key only — every other record
- * (orders, sessions, credits, claims, issues, notifications, locationPings)
- * references `user.id`, which this never touches. See docs/DEPLOYMENT.md.
+ * (orders, sessions, credits, claims, issues, notifications, locationPings,
+ * deviceTokens) references `user.id`, which this never touches. A phone
+ * registered for push before the rename therefore still belongs to the same
+ * person after it, with no re-pointing pass. See docs/DEPLOYMENT.md.
+ *
+ * `deviceTokens` postdates this migration, so the invariant it relies on is
+ * asserted rather than assumed: `assertNoDenormalisedFixtureEmail` refuses if a
+ * registration ever carries an email instead of a `userId`. Device records have
+ * no free-text field, so a match there is unambiguously a denormalised foreign
+ * key — not prose that merely mentions an address.
  *
  * Boundary — as tight as fixture convergence, for the same reason:
  * - Match the exact retired address and nothing else. An account holding a
@@ -510,10 +597,36 @@ function normalizedEmail(user) {
  *
  * Returns true if the store was mutated.
  */
+/**
+ * Guard the "email is a login key, never a foreign key" invariant for the one
+ * user-owned collection added after this migration was written.
+ *
+ * A device registration is `{ id, userId, token, platform, createdAt, updatedAt }`
+ * — every field a machine value, none of them prose. So if a retired address
+ * turns up inside one, somebody denormalised a login into it, and renaming the
+ * user would strand that phone pointing at an address no account holds. Refuse
+ * on the same grounds as a collision: recoverable by hand, unlike silent drift.
+ */
+function assertNoDenormalisedFixtureEmail(store, conflicts) {
+  const retired = new Set(RETIRED_FIXTURE_EMAILS.keys());
+  for (const record of Array.isArray(store.deviceTokens) ? store.deviceTokens : []) {
+    for (const [field, value] of Object.entries(record || {})) {
+      if (typeof value !== "string") continue;
+      if (!retired.has(value.trim().toLowerCase())) continue;
+      conflicts.push(
+        `device registration ${record.id} carries a login address in \`${field}\`; ` +
+        "registrations must reference `userId` only",
+      );
+    }
+  }
+}
+
 function migrateFixtureEmailDomain(store) {
   const users = Array.isArray(store.users) ? store.users : [];
   const planned = [];
   const conflicts = [];
+
+  assertNoDenormalisedFixtureEmail(store, conflicts);
 
   for (const [retired, replacement] of RETIRED_FIXTURE_EMAILS) {
     const matches = users.filter((user) => normalizedEmail(user) === retired);
@@ -539,8 +652,9 @@ function migrateFixtureEmailDomain(store) {
   if (conflicts.length > 0) {
     throw new Error(
       `Refusing to migrate pilot logins off the retired gridgo.local domain: ${conflicts.join("; ")}. ` +
-      "Merging two accounts onto one login would break authentication and orphan whatever the loser owned. " +
-      `Resolve the duplicate accounts in ${STORE} by hand (keep the record that owns the orders), then restart.`,
+      "Renaming here would either merge two accounts onto one login — breaking authentication and orphaning " +
+      "whatever the loser owned — or strand a record that stored a login where it should store `userId`. " +
+      `Resolve it in ${STORE} by hand (keep the record that owns the orders), then restart.`,
     );
   }
 
@@ -817,6 +931,7 @@ function load() {
   if (backfillTaxonomy(store)) changed = true;
   if (backfillFiles(store)) changed = true;
   if (backfillNotifications(store)) changed = true;
+  if (backfillDeviceTokens(store)) changed = true;
   if (backfillAccountType(store)) changed = true;
   // Fixtures last so seed-defined demo identity wins over fill-missing defaults
   // (e.g. client@ accountType business after a prior individual backfill).
@@ -1135,6 +1250,7 @@ async function handleRequest(req, res) {
         commit: BUILD_COMMIT,
         builtAt: BUILD_TIME,
         storage: objectStorage.health(),
+        push: pushDelivery.health(),
         at: now(),
       });
     }
@@ -1270,11 +1386,22 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && pathname === "/auth/logout") {
       const h = req.headers.authorization || "";
       const m = /^Bearer\s+(.+)$/i.exec(h);
+      // Signing out is the moment a phone must stop receiving. Accepting the
+      // device token here removes the ordering trap of "unregister first, then
+      // log out" — after logout the bearer token is gone and the phone can no
+      // longer authenticate an unregister call at all.
+      const body = await readBody(req);
+      const deviceToken = normalizeDeviceToken(body?.deviceToken);
+      let unregistered = false;
       if (m && store.sessions[m[1]]) {
+        const sessionUser = authUser(req, store);
+        if (deviceToken && sessionUser) {
+          unregistered = unregisterDeviceToken(store, { userId: sessionUser.id, token: deviceToken }).changed;
+        }
         delete store.sessions[m[1]];
         save(store);
       }
-      return send(res, 200, { ok: true });
+      return send(res, 200, { ok: true, deviceUnregistered: unregistered });
     }
 
     const user = authUser(req, store);
@@ -1486,6 +1613,75 @@ async function handleRequest(req, res) {
         return latestFile;
       });
       return send(res, 200, { file: publicFile(deleted) });
+    }
+
+    // ---- push device registrations ----
+    //
+    // Ownership is established exactly as it is for /notifications: the bearer
+    // token names the caller, and a caller only ever sees or edits records
+    // whose userId is their own. There is no second rule and no ops override —
+    // nothing on the platform needs to read another person's device tokens.
+    if (req.method === "GET" && pathname === "/devices") {
+      return send(res, 200, { devices: deviceTokensFor(store, user.id).map(publicDevice) });
+    }
+
+    if (req.method === "POST" && pathname === "/devices") {
+      const body = await readBody(req);
+      const token = normalizeDeviceToken(body.token);
+      if (!token) {
+        return send(res, 400, {
+          error: "device_token_required",
+          message: "Send the FCM registration token this device received from Firebase.",
+        });
+      }
+      if (token.length > 4096) {
+        return send(res, 400, {
+          error: "device_token_too_long",
+          message: "An FCM registration token is far shorter than this. Send the token Firebase issued, unmodified.",
+        });
+      }
+      const platform = String(body.platform || "").trim();
+      if (!DEVICE_PLATFORMS.includes(platform)) {
+        return send(res, 400, {
+          error: "invalid_device_platform",
+          message: "Choose android, ios, or web for this device registration.",
+          allowed: DEVICE_PLATFORMS,
+        });
+      }
+      const { device, created, reassignedFrom } = registerDeviceToken(store, {
+        userId: user.id,
+        token,
+        platform,
+        at: now(),
+      });
+      save(store);
+      return send(res, created ? 201 : 200, {
+        device: publicDevice(device),
+        created,
+        // A shared handset or a re-login moves the token; the response says so
+        // rather than leaving the app to guess whether it now owns the phone.
+        reassigned: reassignedFrom !== null,
+      });
+    }
+
+    if (req.method === "POST" && pathname === "/devices/unregister") {
+      const body = await readBody(req);
+      const token = normalizeDeviceToken(body.token);
+      if (!token) {
+        return send(res, 400, {
+          error: "device_token_required",
+          message: "Send the FCM registration token this device is registered with.",
+        });
+      }
+      const { removed } = unregisterDeviceToken(store, { userId: user.id, token });
+      if (!removed) {
+        return send(res, 404, {
+          error: "device_token_not_found",
+          message: "This device token is not registered to your account. Nothing was changed.",
+        });
+      }
+      save(store);
+      return send(res, 200, { id: removed.id, unregistered: true });
     }
 
     // ---- notifications ----

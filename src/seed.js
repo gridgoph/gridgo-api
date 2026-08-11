@@ -699,6 +699,10 @@ const demoStore = {
   locationPings: [],
   escalations,
   proofs: [],
+  // Push registrations are always earned by a real device calling POST
+  // /devices. Seeding one would mean a fabricated FCM token that can only ever
+  // fail and then be pruned.
+  deviceTokens: [],
 };
 
 // Hosted pilots keep platform reference data and configured identities, but no
@@ -724,6 +728,7 @@ const store = production
       locationPings: [],
       escalations: [],
       proofs: [],
+      deviceTokens: [],
     }
   : demoStore;
 

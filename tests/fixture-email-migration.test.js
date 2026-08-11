@@ -9,7 +9,10 @@
  * - an account whose address diverged from the shipped fixture is untouched
  *   (that address belongs to a real person now);
  * - a store where both the retired and replacement address exist makes startup
- *   refuse, naming both accounts, without mutating the file.
+ *   refuse, naming both accounts, without mutating the file;
+ * - a phone registered for push *before* the rename still belongs to the same
+ *   person after it. Device registrations postdate this migration, so that is
+ *   proven end to end here rather than assumed from the `userId` field.
  */
 
 import test from "node:test";
@@ -92,6 +95,10 @@ function preMigrationStore(overrides = {}) {
       { id: "ntf-pilot", userId: "user_client", type: "order_delivered", orderId: "ord-pilot", readAt: null, createdAt: at },
     ],
     locationPings: [{ id: "png-pilot", orderId: "ord-pilot", riderId: "user_rider", lat: 7.07, lng: 125.61, at }],
+    // A phone that registered for push while the account was still on .local.
+    deviceTokens: [
+      { id: "dev-pilot-client", userId: "user_client", token: "fcm-pilot-client-token", platform: "android", createdAt: at, updatedAt: at },
+    ],
     auditLog: [{ id: "aud-pilot", actorId: "user_admin", action: "user.role_changed", at }],
     ...overrides,
   };
@@ -227,6 +234,7 @@ test("a renamed account keeps every record it owned", async (t) => {
   assert.equal(migrated.claims.find(({ id }) => id === "clm-pilot").supplierId, supplier.id);
   assert.equal(migrated.issues.find(({ id }) => id === "iss-pilot").reportedBy, client.id);
   assert.equal(migrated.notifications.find(({ id }) => id === "ntf-pilot").userId, client.id);
+  assert.equal(migrated.deviceTokens.find(({ id }) => id === "dev-pilot-client").userId, client.id);
   assert.equal(migrated.locationPings.find(({ id }) => id === "png-pilot").riderId, rider.id);
   assert.equal(migrated.auditLog.find(({ id }) => id === "aud-pilot").actorId, byEmail("admin@gridgo.ph").id);
 
@@ -240,6 +248,102 @@ test("a renamed account keeps every record it owned", async (t) => {
     assert.equal(orders.status, 200);
     assert.equal((await orders.json()).orders.some(({ id }) => id === "ord-pilot"), true);
   });
+});
+
+test("a phone registered before the rename still belongs to the same person after it", async (t) => {
+  // The interaction the two features have: push stores a token *against a user*,
+  // and this migration *renames users*. It holds because a registration
+  // references `userId` and the rename only ever rewrites `user.email` — but
+  // device records did not exist when the migration was written, so prove it.
+  const { dir, storePath } = writeStore(preMigrationStore());
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const before = JSON.parse(fs.readFileSync(storePath, "utf8"));
+  const registeredBefore = before.deviceTokens.find(({ id }) => id === "dev-pilot-client");
+
+  assert.equal((await loadOnce(storePath)).started, true);
+  const afterFirst = fs.readFileSync(storePath, "utf8");
+  const migrated = JSON.parse(afterFirst);
+
+  const client = migrated.users.find((user) => user.email === "client@gridgo.ph");
+  assert.ok(client, "the client was not renamed");
+  assert.equal(client.id, "user_client", "the rename renumbered the id devices point at");
+
+  // The registration is not merely still present: it is untouched. A rename
+  // that had to rewrite a device record would be a rename that could lose one.
+  assert.deepEqual(migrated.deviceTokens, [registeredBefore]);
+
+  await withServer(storePath, async (api) => {
+    const auth = { authorization: "Bearer tok-pilot-client" };
+
+    const me = await fetch(`${api}/auth/me`, { headers: auth });
+    assert.equal((await me.json()).user.email, "client@gridgo.ph");
+
+    // The phone is still this account's, reachable through the same session
+    // token the app held before the rename.
+    const devices = await fetch(`${api}/devices`, { headers: auth });
+    assert.equal(devices.status, 200);
+    const listed = (await devices.json()).devices;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].id, "dev-pilot-client");
+    assert.equal(listed[0].userId, client.id);
+    assert.equal(listed[0].tokenTail, "nt-token");
+
+    // ...and everything else the account owned came with it.
+    const notifications = await fetch(`${api}/notifications`, { headers: auth });
+    assert.equal(
+      (await notifications.json()).notifications.some(({ id }) => id === "ntf-pilot"),
+      true,
+      "the renamed account lost its notifications",
+    );
+    const orders = await fetch(`${api}/orders`, { headers: auth });
+    assert.equal((await orders.json()).orders.some(({ id }) => id === "ord-pilot"), true);
+
+    // The same handset re-registering after the rename is recognised as the
+    // one already on file, not stored a second time under the new address.
+    const again = await fetch(`${api}/devices`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ token: "fcm-pilot-client-token", platform: "android" }),
+    });
+    assert.equal(again.status, 200, "a known token was treated as a new registration");
+    const body = await again.json();
+    assert.equal(body.created, false);
+    assert.equal(body.reassigned, false, "the rename made the phone look like another account's");
+    assert.equal(body.device.id, "dev-pilot-client");
+  });
+
+  // Re-registering bumped updatedAt, so compare the migration's own second run
+  // against the store as the API left it.
+  const settled = fs.readFileSync(storePath, "utf8");
+  assert.equal((await loadOnce(storePath)).started, true);
+  assert.equal(fs.readFileSync(storePath, "utf8"), settled, "a second load rewrote the store");
+});
+
+test("a login address denormalised into a device registration refuses the rename", async (t) => {
+  // Renaming is only safe while email stays a login key. A registration that
+  // stored an address instead of a userId would be left pointing at an address
+  // no account holds, so startup refuses rather than stranding the phone.
+  const store = preMigrationStore();
+  store.deviceTokens.push({
+    id: "dev-denormalised",
+    userId: "user_rider",
+    ownerEmail: "rider@gridgo.local",
+    token: "fcm-denormalised-token",
+    platform: "ios",
+    createdAt: "2026-08-06T00:00:00.000Z",
+    updatedAt: "2026-08-06T00:00:00.000Z",
+  });
+  const { dir, storePath } = writeStore(store);
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const before = fs.readFileSync(storePath, "utf8");
+  const attempt = await loadOnce(storePath);
+
+  assert.equal(attempt.started, false, "startup should have refused the denormalised address");
+  assert.match(attempt.output, /dev-denormalised/);
+  assert.match(attempt.output, /ownerEmail/);
+  assert.equal(fs.readFileSync(storePath, "utf8"), before, "a refused migration mutated the store");
 });
 
 test("all six renamed identities sign in at the new domain", async (t) => {

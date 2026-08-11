@@ -4,7 +4,7 @@
 # ~/gridgo/bin/deploy.sh (the single command the CI deploy key may run) enters
 # before `docker compose pull && docker compose up -d --remove-orphans`.
 #
-# Two secret files must sit beside it, mode 0600, and are never in this
+# Three secret files must sit beside it, mode 0600, and are never in this
 # repository or in this file. See docs/DEPLOYMENT.md for their contents,
 # installation, rotation, rollback, backup and restore.
 #
@@ -12,11 +12,15 @@
 #                      MinIO API key. Read by `api` and `store-init`.
 #   ./minio.env        the MinIO root credentials + the same bucket-scoped API
 #                      key. Read by `minio` and `minio-init`.
+#   ./fcm-service-account.json
+#                      the Firebase service account that signs push sends.
+#                      Mounted read-only into `api` alone. Anyone holding it can
+#                      notify every GRIDGO user, so it goes nowhere else.
 #
-# MINIO_ACCESS_KEY / MINIO_SECRET_KEY appear in both and must match: one file
-# creates that user, the other authenticates as it. Nothing else is shared, so
-# the API process never holds MinIO root credentials and the `mc` container
-# never holds account passwords.
+# MINIO_ACCESS_KEY / MINIO_SECRET_KEY appear in both env files and must match:
+# one file creates that user, the other authenticates as it. Nothing else is
+# shared, so the API process never holds MinIO root credentials and the `mc`
+# container never holds account passwords.
 
 name: gridgo-api
 
@@ -102,8 +106,24 @@ services:
       MINIO_DOWNLOAD_URL_TTL_SECONDS: "300"
       UPLOAD_REQUEST_TIMEOUT_MS: "900000"
 
+      # Where the push credential is mounted, not the credential itself — a
+      # path is configuration, so it belongs here and stays reviewable. Remove
+      # the variable and the volume together to switch push off; the API still
+      # starts and /health then reports push.status "disabled".
+      GRIDGO_FCM_SERVICE_ACCOUNT_FILE: /run/secrets/fcm-service-account.json
+
     volumes:
       - gridgo_api_store:/var/lib/gridgo-api
+
+      # Read-only, and on the `api` service only. `store-init` seeds the store
+      # and has no business holding a credential that can notify every user.
+      #
+      # The host file must be readable by uid 1001 (the image's `gridgo` user):
+      #   sudo chown 1001:1001 ~/gridgo/api/fcm-service-account.json
+      #   sudo chmod 600       ~/gridgo/api/fcm-service-account.json
+      # A root-owned 0600 file mounts fine and then fails to open, which the
+      # API reports at startup rather than hiding.
+      - ./fcm-service-account.json:/run/secrets/fcm-service-account.json:ro
 
     # No store, no API — that dependency is absolute.
     #

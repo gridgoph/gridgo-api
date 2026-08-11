@@ -18,7 +18,9 @@ set -a; source .env; set +a
 npm run dev   # http://127.0.0.1:8787
 ```
 
-Health: `GET /health` — `ok`, `version`, storage status, plus `commit`/`builtAt` (both `"unknown"` outside a built image; the hosted pipeline uses them to prove a deploy took).
+Health: `GET /health` — `ok`, `version`, storage status, push status, plus `commit`/`builtAt` (both `"unknown"` outside a built image; the hosted pipeline uses them to prove a deploy took).
+
+Phone push is off unless `GRIDGO_FCM_SERVICE_ACCOUNT_FILE` points at a Firebase service-account JSON; `/health` then reports `push.status: "disabled"` and notifications are delivered in-app and over SSE only. Contract: `docs/OPERATIONAL_MODEL_V2_API.md` → *Push notifications*; operator install and rotation: `docs/DEPLOYMENT.md` §2a.
 
 Hosted pilot deployment — image, compose file, pipeline, secrets, backup/restore: `docs/DEPLOYMENT.md`.
 
@@ -73,7 +75,7 @@ Idempotent backfill on `load()` sets missing client `accountType` to `"individua
 
 **Demo fixture convergence (separate from backfill):** on every local-development `load()`, seed demo accounts (`*@gridgo.ph` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. The retired shipped password is rotated to `Ilovegridgo-0990`; a password that has already diverged is preserved. In production, the deployment-configured password is authoritative for each of those exact fixture identities. Convergence never rewrites an existing user's `email` — see the domain migration below. Captain-created users and all non-user collections (orders, credits, …) are never touched.
 
-**These six identities used to live on `@gridgo.local`.** `.local` is reserved for multicast DNS and could never address a hosted API, so they moved to the captain's real domain. A store seeded before the move is renamed in place on `load()` by `migrateFixtureEmailDomain()`, keyed to the exact retired address in `RETIRED_FIXTURE_EMAILS` — never a `.local`-wide rule. Renaming preserves everything the account owned, because only login reads `email`; orders, sessions, credits, claims, issues and notifications all reference `user.id`. An account holding a fixture *id* under a diverged address is left alone, and a store where both the old and new address exist makes startup refuse rather than merge two accounts onto one login. Full operator detail: [deployment data boundary](docs/DEPLOYMENT.md#the-pilot-logins-moved-to-gridgoph--no-operator-step-no-reseed).
+**These six identities used to live on `@gridgo.local`.** `.local` is reserved for multicast DNS and could never address a hosted API, so they moved to the captain's real domain. A store seeded before the move is renamed in place on `load()` by `migrateFixtureEmailDomain()`, keyed to the exact retired address in `RETIRED_FIXTURE_EMAILS` — never a `.local`-wide rule. Renaming preserves everything the account owned, because only login reads `email`; orders, sessions, credits, claims, issues, notifications and device push registrations all reference `user.id`. An account holding a fixture *id* under a diverged address is left alone, and a store where both the old and new address exist makes startup refuse rather than merge two accounts onto one login. Full operator detail: [deployment data boundary](docs/DEPLOYMENT.md#the-pilot-logins-moved-to-gridgoph--no-operator-step-no-reseed).
 
 `Ilovegridgo-0990` is a repository-visible local-development credential, not a secret. Do not reuse it for any hosted account or environment. Production retains these six fixed identities but requires a distinct deployment-configured password for each one; see [deployment environment](docs/DEPLOYMENT.md#2-required-environment).
 
@@ -131,6 +133,8 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | POST | `/dispatch/:id/proof` | any auth | retired (`410 dispatch_proof_route_retired`) |
 | GET | `/jobs` | supplier | assigned jobs alias |
 | GET/PATCH/DELETE | `/notifications…` | owner | list, SSE stream/resume, read/unread, snapshot mark-all, persistent delete |
+| GET/POST | `/devices` | owner | list caller's push registrations; register this phone's FCM token |
+| POST | `/devices/unregister` | owner | stop push to one of the caller's own phones |
 
 ### Service taxonomy (platform-governed)
 
