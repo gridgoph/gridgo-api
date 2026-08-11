@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { DEMO_USERS } from "./demo-fixtures.js";
 import {
   AttachmentError,
   attachFileReference,
@@ -50,6 +49,12 @@ import {
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
+import {
+  configuredDemoUsers,
+  isProduction,
+  parseAllowedOrigins,
+  validateProductionServerEnvironment,
+} from "./runtime-config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -57,6 +62,10 @@ const DEFAULT_STORE = path.join(ROOT, "data", "store.json");
 const STORE = process.env.STORE_PATH ? path.resolve(process.env.STORE_PATH) : DEFAULT_STORE;
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
+const PRODUCTION = isProduction(process.env);
+const PILOT_USERS = configuredDemoUsers(process.env);
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
+validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
 const enqueueMutation = createMutationQueue();
 const notificationEvents = createNotificationEvents();
@@ -67,7 +76,9 @@ let storageInitializing = true;
 // Auto-seed if missing
 if (!fs.existsSync(STORE)) {
   if (STORE !== DEFAULT_STORE) {
-    throw new Error(`STORE_PATH does not exist: ${STORE}`);
+    throw new Error(
+      `STORE_PATH does not exist: ${STORE}. Create it with NODE_ENV=${PRODUCTION ? "production " : ""}STORE_PATH=${STORE} npm run seed, then restart.`,
+    );
   }
   spawnSync(process.execPath, [path.join(__dirname, "seed.js"), "--reset"], { stdio: "inherit" });
 }
@@ -109,9 +120,7 @@ function send(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+    ...(res.gridgoCorsHeaders || {}),
   });
   res.end(payload);
 }
@@ -489,7 +498,7 @@ function convergeDemoFixtures(store) {
     changed = true;
   }
 
-  for (const fixture of DEMO_USERS) {
+  for (const fixture of PILOT_USERS) {
     let user = store.users.find((u) => u.email === fixture.email);
     if (!user) {
       user = store.users.find((u) => u.id === fixture.id);
@@ -514,7 +523,7 @@ function convergeDemoFixtures(store) {
       if (key === "id") continue;
       // Rotate only the exact retired fixture credential. A password that has
       // diverged is user-owned and must never be silently overwritten.
-      if (key === "password" && user.password !== LEGACY_DEMO_PASSWORD) continue;
+      if (key === "password" && !PRODUCTION && user.password !== LEGACY_DEMO_PASSWORD) continue;
       if (!fixtureValueEqual(user[key], value)) {
         user[key] = cloneFixtureValue(value);
         changed = true;
@@ -588,7 +597,7 @@ function backfillPlatform(store) {
     if (u.role === "supplier") {
       if (u.verificationStatus == null) {
         // Demo supplier is treated as accredited so matching works without reset
-        u.verificationStatus = u.id === "user_supplier" ? "approved" : "unverified";
+        u.verificationStatus = !PRODUCTION && u.id === "user_supplier" ? "approved" : "unverified";
         changed = true;
       }
       if (u.verificationNote == null) {
@@ -607,7 +616,7 @@ function backfillPlatform(store) {
   }
 
   // If no services at all, seed a live catalogue for the demo supplier (idempotent key)
-  if (store.supplierServices.length === 0) {
+  if (!PRODUCTION && store.supplierServices.length === 0) {
     const demoSupplier = (store.users || []).find((u) => u.id === "user_supplier" || (u.role === "supplier" && u.email === "supplier@gridgo.local"));
     if (demoSupplier) {
       const ts = now();
@@ -676,8 +685,41 @@ function backfillPlatform(store) {
   return changed;
 }
 
+function assertProductionStoreHasNoDemoOperationalData(store) {
+  if (!PRODUCTION) return;
+  const demoRecords = [];
+  for (const collection of [
+    "orders",
+    "supplierServices",
+    "files",
+    "claims",
+    "issues",
+    "auditLog",
+    "notifications",
+    "locationPings",
+    "escalations",
+    "proofs",
+  ]) {
+    for (const record of Array.isArray(store[collection]) ? store[collection] : []) {
+      const marker = Object.values(record || {}).find(
+        (value) => typeof value === "string" && value.includes("_demo_"),
+      );
+      if (marker) demoRecords.push(`${collection}:${marker}`);
+    }
+  }
+  if (demoRecords.length === 0) return;
+
+  const freshStore = `${STORE}.production`;
+  throw new Error(
+    `STORE_PATH ${STORE} contains local demo operational data (${demoRecords.slice(0, 3).join(", ")}). ` +
+    `Back up this file, set STORE_PATH to a fresh production store, run NODE_ENV=production STORE_PATH=${freshStore} npm run seed, and restart with that new path.`,
+  );
+}
+
 function load() {
   const store = JSON.parse(fs.readFileSync(STORE, "utf8"));
+  // Refuse before any backfill or fixture convergence can mutate the wrong file.
+  assertProductionStoreHasNoDemoOperationalData(store);
   Object.defineProperty(store, STORE_NOTIFICATION_IDS, {
     value: new Set((store.notifications || []).map((notification) => notification.id)),
     writable: true,
@@ -976,6 +1018,23 @@ const TRANSITIONS = {
 
 async function handleRequest(req, res) {
   try {
+    const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
+    res.gridgoCorsHeaders = { Vary: "Origin" };
+    if (requestOrigin && !ALLOWED_ORIGINS.has(requestOrigin)) {
+      return send(res, 403, {
+        error: "origin_not_allowed",
+        message: `Origin ${requestOrigin} is not allowed. Add its exact origin to CORS_ALLOWED_ORIGINS and restart the API.`,
+      });
+    }
+    if (requestOrigin) {
+      res.gridgoCorsHeaders = {
+        "Access-Control-Allow-Origin": requestOrigin,
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
+        "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+        Vary: "Origin",
+      };
+    }
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -1360,7 +1419,7 @@ async function handleRequest(req, res) {
         "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
         "X-Accel-Buffering": "no",
-        "Access-Control-Allow-Origin": "*",
+        ...(res.gridgoCorsHeaders || {}),
       });
       res.flushHeaders();
       res.write("retry: 5000\n\n");

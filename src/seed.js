@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
-import { DEMO_PASSWORD, DEMO_USERS, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
+import { DEMO_PASSWORD, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
+import { configuredDemoUsers, isProduction } from "./runtime-config.js";
 import { defaultTaxonomy } from "./taxonomy.js";
 import {
   PICKUP_CHECK_CODES,
@@ -60,7 +61,8 @@ const supplierShop = DEMO_SUPPLIER_SHOP;
 const t = now();
 
 /** Seed users = fixtures + verification timestamps for approved supplier/rider. */
-const users = DEMO_USERS.map((u) => {
+const production = isProduction(process.env);
+const users = configuredDemoUsers(process.env).map((u) => {
   const copy = { ...u, shop: u.shop ? { ...u.shop } : undefined };
   if (copy.shop === undefined) delete copy.shop;
   if (copy.role === "supplier") copy.verificationDocumentFileIds = [];
@@ -651,7 +653,7 @@ const escalations = [
   },
 ];
 
-const store = {
+const demoStore = {
   version: 2,
   users,
   sessions: {},
@@ -699,6 +701,32 @@ const store = {
   proofs: [],
 };
 
+// Hosted pilots keep platform reference data and configured identities, but no
+// scenario transactions or supplier-authored catalogue records. Local
+// development continues to use demoStore unchanged.
+const store = production
+  ? {
+      version: 2,
+      users,
+      sessions: {},
+      catalog,
+      taxonomy,
+      settings,
+      zones,
+      supplierServices: [],
+      orders: [],
+      files: [],
+      credits: {},
+      claims: [],
+      issues: [],
+      auditLog: [],
+      notifications: [],
+      locationPings: [],
+      escalations: [],
+      proofs: [],
+    }
+  : demoStore;
+
 // A fresh seed is native v2 data. Any mutation here means a fixture drifted back
 // into a legacy shape and should fail reset loudly instead of hiding the mismatch.
 if (backfillOperationalModel(store, t)) {
@@ -712,7 +740,11 @@ if (!reset && fs.existsSync(storePath)) {
 }
 fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
 console.log(`wrote ${storePath}`);
-console.log(`demo logins: *@gridgo.local / ${DEMO_PASSWORD}`);
+if (production) {
+  console.log("hosted pilot accounts: passwords loaded from GRIDGO_*_PASSWORD environment variables");
+} else {
+  console.log(`demo logins: *@gridgo.local / ${DEMO_PASSWORD}`);
+}
 const ordersByState = Object.fromEntries(
   [...new Set(store.orders.map((order) => order.state))]
     .sort()

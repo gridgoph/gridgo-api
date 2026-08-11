@@ -99,6 +99,10 @@ The captain's demo API owns port **8787** and its store at `data/store.json`. To
 
 **Stop it by the exact PID you captured at start.** Never `pkill -f`/`killall` on `src/server.js`: the pattern matches the captain's demo and every other lane's instance too.
 
+## Hosted pilot deployment
+
+The production environment, clean-seed boundary, exact-origin CORS policy, loopback-only MinIO/TLS topology, coordinated backup/restore, and JSON-store migration signals are authoritative in `docs/DEPLOYMENT.md`. `NODE_ENV=production` requires distinct environment-owned passwords for all six fixed pilot identities, never falls back to the committed local-development credential, and refuses known rich-demo operational records before mutating the store.
+
 ## Constraints
 
 - Plain `node:http` only except the `minio` S3 SDK, approved for streamed object storage and presigned SigV4 URLs so signing is never hand-rolled; add no other direct npm dependencies

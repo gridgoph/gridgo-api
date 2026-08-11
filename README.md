@@ -6,6 +6,8 @@ Operational model v2 is implemented. The rebuild contract for every app is [`doc
 
 Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. Domain records use the JSON store; private files use local MinIO. Swap later by keeping the same route contracts and pointing the apps at a real backend.
 
+For the real-domain, single-host pilot at `gridgo-api.talasora.com`, follow the complete [hosted pilot deployment and recovery runbook](docs/DEPLOYMENT.md). Production mode requires deployment-owned account credentials, creates no scenario transactions, enforces an exact CORS allowlist, and requires HTTPS signed-download URLs.
+
 ## Quick start
 
 ```bash
@@ -32,7 +34,7 @@ The named `gridgo_minio_data` volume survives `docker compose down` and restarts
 
 If MinIO is stopped, the API still starts and serves every non-file route, and `GET /files/:id` can still return authorized JSON metadata. Storage-dependent file operations return `503 minio_unavailable` with the recovery command; during the brief boot recovery gate they return `503 storage_initializing`. See [the exact mobile storage contract](docs/STORAGE_API.md).
 
-## Demo accounts
+## Local development demo accounts
 
 | Email | Password | Role | Notes |
 |---|---|---|---|
@@ -67,9 +69,9 @@ Client users expose an explicit, authoritative `accountType` on every public use
 
 Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
 
-**Demo fixture convergence (separate from backfill):** on every `load()`, seed demo accounts (`*@gridgo.local` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. The retired shipped password is rotated to `Ilovegridgo-0990`; a password that has already diverged is preserved. Captain-created users and all non-user collections (orders, credits, …) are never touched.
+**Demo fixture convergence (separate from backfill):** on every local-development `load()`, seed demo accounts (`*@gridgo.local` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. The retired shipped password is rotated to `Ilovegridgo-0990`; a password that has already diverged is preserved. In production, the deployment-configured password is authoritative for each of those exact fixture identities. Captain-created users and all non-user collections (orders, credits, …) are never touched.
 
-`Ilovegridgo-0990` is a repository-visible pilot credential, not a secret. Do not reuse it for any real account or environment.
+`Ilovegridgo-0990` is a repository-visible local-development credential, not a secret. Do not reuse it for any hosted account or environment. Production retains these six fixed identities but requires a distinct deployment-configured password for each one; see [deployment environment](docs/DEPLOYMENT.md#2-required-environment).
 
 ## Mobile apps
 
@@ -225,6 +227,10 @@ Client report auto-creates a `payout_held` claim. Without a hold, the order auto
 ## Seed data highlights
 
 `src/seed.js` defines the fresh-store fixtures: taxonomy, Davao zones, PrintRight live services, a credit grant ledger, issue/claim samples, and audit entries. The checked-out `data/store.json` may be live demo data; do not replace it just to pick up new fields.
+
+With `NODE_ENV=production`, the same seeder writes only configured pilot identities plus the platform request catalog, taxonomy, settings, and Davao zones. Operational collections start empty. Never initialize a hosted pilot from the local rich store; use [the production initialization procedure](docs/DEPLOYMENT.md#4-initialize-the-real-store).
+
+Production startup also refuses a store containing known local scenario records before running backfill or fixture convergence. It reports how to seed a fresh path and leaves the rejected file untouched.
 
 ## Existing stores (no reset)
 

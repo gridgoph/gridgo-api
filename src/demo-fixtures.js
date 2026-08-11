@@ -19,6 +19,16 @@ export const DEMO_SUPPLIER_SHOP = {
 /** Repository-visible pilot credential shared by every shipped demo account. */
 export const DEMO_PASSWORD = "Ilovegridgo-0990";
 
+/** Production password variables for the fixed pilot identities. */
+export const DEMO_PASSWORD_ENV_BY_EMAIL = new Map([
+  ["client@gridgo.local", "GRIDGO_CLIENT_PASSWORD"],
+  ["individual@gridgo.local", "GRIDGO_INDIVIDUAL_PASSWORD"],
+  ["supplier@gridgo.local", "GRIDGO_SUPPLIER_PASSWORD"],
+  ["rider@gridgo.local", "GRIDGO_RIDER_PASSWORD"],
+  ["ops@gridgo.local", "GRIDGO_OPS_PASSWORD"],
+  ["admin@gridgo.local", "GRIDGO_ADMIN_PASSWORD"],
+]);
+
 /**
  * Fixture user records. Keys present here are the only attributes convergence
  * will create or overwrite on a matching store user (plus verifiedAt/verifiedBy
