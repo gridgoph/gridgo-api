@@ -43,10 +43,33 @@ export const DEVICE_PLATFORMS = ["android", "ios", "web"];
  */
 const PUSH_DATA_FIELDS = ["notificationId", "type", "orderId", "at"];
 
+/**
+ * The `data` an *unclaimed* device may receive: the message type and nothing
+ * else. No notification ID (there is no notification record behind an
+ * announcement), no order ID, no timestamp that could correlate a handset with
+ * an order. See `assertStrangerSafeMessage`.
+ */
+const ANONYMOUS_PUSH_DATA_FIELDS = ["type"];
+
+/** The one message type an anonymous handset may ever be sent. */
+export const ANNOUNCEMENT_PUSH_TYPE = "announcement";
+
 export class PushConfigurationError extends Error {
   constructor(message) {
     super(message);
     this.name = "PushConfigurationError";
+  }
+}
+
+/**
+ * Thrown when a message that is not safe for a stranger would reach a device
+ * nobody has signed in on. This is a programming error, not a runtime
+ * condition: it means a personal notification reached the anonymous fan-out.
+ */
+export class PushAudienceError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PushAudienceError";
   }
 }
 
@@ -56,14 +79,26 @@ export class PushConfigurationError extends Error {
 
 /**
  * Additive migration for legacy stores: a store written before push existed
- * has no device tokens at all. Idempotent — a second run changes nothing.
+ * has no device tokens at all, and one written before anonymous registration
+ * has no `userId` key on a row that predates the field. Idempotent — a second
+ * run changes nothing.
  */
 export function backfillDeviceTokens(store) {
   if (!Array.isArray(store.deviceTokens)) {
     store.deviceTokens = [];
     return true;
   }
-  return false;
+  let changed = false;
+  for (const record of store.deviceTokens) {
+    // `null` is the stored spelling of "unclaimed"; an absent key would read the
+    // same way through `isClaimedDevice`, but only an explicit value keeps the
+    // shape of every row identical.
+    if (!Object.hasOwn(record, "userId")) {
+      record.userId = null;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function deviceId() {
@@ -74,8 +109,32 @@ export function normalizeDeviceToken(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/**
+ * A registration belongs to somebody exactly when it holds a non-empty user id.
+ * `userId: null` is an *unclaimed* device: an install that has never signed in,
+ * or one whose owner signed out. It has no role, no orders and no name, so the
+ * only thing it may ever be sent is a general announcement.
+ */
+export function isClaimedDevice(record) {
+  return typeof record?.userId === "string" && record.userId !== "";
+}
+
+/**
+ * Every registration owned by one user — and never an unclaimed one.
+ *
+ * The empty-caller guard is the load-bearing half. Unclaimed rows store
+ * `userId: null`, so a caller that passed a missing or null id would otherwise
+ * match every anonymous handset on the platform and fan a personal
+ * notification out to strangers. There is no id that means "everyone" here.
+ */
 export function deviceTokensFor(store, userId) {
+  if (typeof userId !== "string" || userId === "") return [];
   return (store.deviceTokens || []).filter((record) => record.userId === userId);
+}
+
+/** Every registration nobody has signed in on. The announcement audience. */
+export function unclaimedDeviceTokens(store) {
+  return (store.deviceTokens || []).filter((record) => !isClaimedDevice(record));
 }
 
 /**
@@ -120,28 +179,154 @@ export function registerDeviceToken(store, { userId, token, platform, at }) {
     return { device, created: true, reassignedFrom: null, changed: true };
   }
 
-  const reassignedFrom = existing.userId === userId ? null : existing.userId;
-  const changed = reassignedFrom !== null || existing.platform !== platform;
+  // An unclaimed row is *claimed*, not reassigned: nobody loses a phone when a
+  // handset that had never signed in acquires its first owner.
+  const reassignedFrom = isClaimedDevice(existing) && existing.userId !== userId ? existing.userId : null;
+  const claimedFromUnclaimed = !isClaimedDevice(existing);
   existing.userId = userId;
   existing.platform = platform;
   // `updatedAt` moves on every re-registration: the app refreshes its token on
   // a schedule, and that recency is the only staleness signal ops has.
   existing.updatedAt = at;
-  return { device: existing, created: false, reassignedFrom, changed: true };
+  return { device: existing, created: false, reassignedFrom, claimedFromUnclaimed, changed: true };
 }
 
 /**
- * Remove one of the caller's own device tokens.
+ * Shape check for the unauthenticated registration path.
+ *
+ * Anyone on the internet can call that route, so a value that cannot be an FCM
+ * registration token is rejected before it can occupy a row. Firebase issues
+ * roughly 140–200 characters of `[A-Za-z0-9_:.-]` (the instance-ID half, a
+ * colon, then the APA91b… half); the bounds here are deliberately wider than
+ * any token observed, because rejecting a *valid* token silently removes that
+ * handset from the app-update channel, which is worse than storing a
+ * well-formed fake that FCM will reject once and let us prune.
+ */
+const FCM_TOKEN_PATTERN = /^[A-Za-z0-9_:.-]{64,4096}$/;
+
+export function isFcmTokenShaped(token) {
+  return FCM_TOKEN_PATTERN.test(token);
+}
+
+/**
+ * How many unclaimed registrations the pilot keeps. See
+ * `registerUnclaimedDeviceToken` for why this is a ceiling with eviction
+ * rather than a refusal.
+ */
+export const UNCLAIMED_DEVICE_LIMIT = 5_000;
+
+export function unclaimedDeviceLimit(env = process.env) {
+  const configured = Number(env.GRIDGO_MAX_UNCLAIMED_DEVICES);
+  return Number.isInteger(configured) && configured > 0 ? configured : UNCLAIMED_DEVICE_LIMIT;
+}
+
+/** Drop least-recently-seen unclaimed rows until at most `keep` remain. */
+function evictOldestUnclaimed(store, keep) {
+  const unclaimed = unclaimedDeviceTokens(store);
+  if (unclaimed.length <= keep) return 0;
+  const ordered = unclaimed.sort((a, b) => {
+    if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? -1 : 1;
+    return a.id < b.id ? -1 : 1;
+  });
+  const doomed = new Set(ordered.slice(0, unclaimed.length - keep).map((record) => record.id));
+  store.deviceTokens = store.deviceTokens.filter((record) => !doomed.has(record.id));
+  return doomed.size;
+}
+
+/**
+ * Register a handset that has no account yet, so an app-update announcement
+ * can reach an install whose owner never signed in.
+ *
+ * Two rules make this safe to expose unauthenticated:
+ *
+ *   - **A claimed row is never touched.** The token is a value an attacker can
+ *     supply, and an anonymous call that could unclaim, re-platform or refresh
+ *     somebody's registration would be a way to steal or silence their phone.
+ *     A re-register of a claimed token is therefore a complete no-op, and the
+ *     route answers identically either way. The owner's own app re-registers
+ *     with its bearer token; a genuine sign-out unclaims the row itself.
+ *   - **The unclaimed pool is bounded.** Past the ceiling the least recently
+ *     seen unclaimed rows are evicted, rather than the registration being
+ *     refused. A refusal would let one script close the app-update channel to
+ *     every genuine new install until an operator intervened; eviction costs an
+ *     attacker's fabricated rows first and a real phone only until its next
+ *     launch, when the app re-registers. Claimed rows are never evicted.
+ */
+export function registerUnclaimedDeviceToken(store, { token, platform, at, limit = UNCLAIMED_DEVICE_LIMIT }) {
+  backfillDeviceTokens(store);
+  const existing = store.deviceTokens.find((record) => record.token === token);
+  if (existing) {
+    if (isClaimedDevice(existing)) {
+      return { device: null, created: false, changed: false, claimedElsewhere: true, evicted: 0 };
+    }
+    existing.platform = platform;
+    existing.updatedAt = at;
+    return { device: existing, created: false, changed: true, claimedElsewhere: false, evicted: 0 };
+  }
+
+  const evicted = evictOldestUnclaimed(store, Math.max(limit - 1, 0));
+  const device = { id: deviceId(), userId: null, token, platform, createdAt: at, updatedAt: at };
+  store.deviceTokens.push(device);
+  return { device, created: true, changed: true, claimedElsewhere: false, evicted };
+}
+
+/**
+ * Signing in claims the handset it was performed on.
+ *
+ * Only an existing registration is claimed: a login knows no platform, so it
+ * cannot create one. An app whose token is not registered yet simply calls
+ * `POST /devices` with its new bearer token, which registers and claims in one
+ * step.
+ */
+export function claimDeviceToken(store, { token, userId, at }) {
+  backfillDeviceTokens(store);
+  const existing = store.deviceTokens.find((record) => record.token === token);
+  if (!existing) return { device: null, claimed: false, changed: false, previousUserId: null };
+  if (existing.userId === userId) {
+    existing.updatedAt = at;
+    return { device: existing, claimed: false, changed: true, previousUserId: null };
+  }
+  const previousUserId = isClaimedDevice(existing) ? existing.userId : null;
+  existing.userId = userId;
+  existing.updatedAt = at;
+  return { device: existing, claimed: true, changed: true, previousUserId };
+}
+
+/**
+ * Signing out returns the handset to the unclaimed pool instead of deleting it.
+ *
+ * Deleting would take the phone off the app-update channel at exactly the
+ * moment it is most likely to be stuck on a broken build. The row survives
+ * carrying no identity: it stops receiving that person's notifications with
+ * the same immediacy an unregister gave.
+ */
+export function releaseDeviceToken(store, { token, userId, at }) {
+  backfillDeviceTokens(store);
+  const record = store.deviceTokens.find(
+    (candidate) => candidate.token === token && isClaimedDevice(candidate) && candidate.userId === userId,
+  );
+  if (!record) return { device: null, released: false, changed: false };
+  record.userId = null;
+  record.updatedAt = at;
+  return { device: record, released: true, changed: true };
+}
+
+/**
+ * Remove a device token: the caller's own, or — for an unauthenticated caller,
+ * `userId: null` — an unclaimed one.
  *
  * A token the caller does not own is reported as absent, not as forbidden. The
  * value is attacker-suppliable, so a distinguishable refusal would turn this
  * route into an oracle for "is this token registered to somebody else?" —
- * unlike an opaque server-minted notification ID, where `403` is safe.
+ * unlike an opaque server-minted notification ID, where `403` is safe. The same
+ * reasoning bars an anonymous caller from removing a *claimed* row: that still
+ * requires its owner's bearer token.
  */
-export function unregisterDeviceToken(store, { userId, token }) {
+export function unregisterDeviceToken(store, { userId = null, token }) {
   backfillDeviceTokens(store);
-  const index = store.deviceTokens.findIndex(
-    (record) => record.token === token && record.userId === userId,
+  const index = store.deviceTokens.findIndex((record) =>
+    record.token === token &&
+    (userId == null ? !isClaimedDevice(record) : record.userId === userId),
   );
   if (index === -1) return { removed: null, changed: false };
   const [removed] = store.deviceTokens.splice(index, 1);
@@ -188,6 +373,46 @@ export function pushMessageFor(notification) {
     body: trimmedString(notification.body) || "Open GRIDGO for the latest update.",
     data,
   };
+}
+
+/**
+ * The only message shape an unclaimed device may be handed: an ops-authored
+ * title and body, plus `type: "announcement"` so the app can route it without
+ * a notification record to open.
+ */
+export function announcementPushMessage({ title, body }) {
+  return {
+    title: trimmedString(title) || "GRIDGO",
+    body: trimmedString(body) || "Open GRIDGO for the latest update.",
+    data: { type: ANNOUNCEMENT_PUSH_TYPE },
+  };
+}
+
+/**
+ * Refuse to send anything but a general announcement to a handset nobody has
+ * signed in on.
+ *
+ * An unclaimed registration is an anonymous phone: nothing proves who is
+ * holding it. So the boundary is enforced where the bytes leave — any fan-out
+ * that includes one unclaimed device must carry a stranger-safe message —
+ * rather than by each caller remembering to pick the right audience. A
+ * personal notification's message carries `notificationId` (and usually
+ * `orderId`), so passing one here throws rather than silently reaching a
+ * stranger's lock screen.
+ */
+export function assertStrangerSafeMessage(message) {
+  const data = message?.data || {};
+  const personal = Object.keys(data).filter((key) => !ANONYMOUS_PUSH_DATA_FIELDS.includes(key));
+  if (personal.length > 0) {
+    throw new PushAudienceError(
+      `refusing to push personal field(s) to an unclaimed device: ${personal.sort().join(", ")}`,
+    );
+  }
+  if (data.type !== ANNOUNCEMENT_PUSH_TYPE) {
+    throw new PushAudienceError(
+      `only ${ANNOUNCEMENT_PUSH_TYPE} messages may reach an unclaimed device (got ${JSON.stringify(data.type ?? null)})`,
+    );
+  }
 }
 
 export function fcmRequestBody(message, token) {
@@ -508,6 +733,10 @@ function buildPushDelivery(credentials, env, options) {
    */
   async function send(message, devices) {
     if (!configured || devices.length === 0) return [];
+    // The one gate every push passes through. A batch containing a device
+    // nobody has signed in on may only carry a general announcement, whatever
+    // the caller believed it was sending.
+    if (devices.some((device) => !isClaimedDevice(device))) assertStrangerSafeMessage(message);
     const settled = await Promise.allSettled(
       devices.map((device) => sendToDevice(device, message)),
     );

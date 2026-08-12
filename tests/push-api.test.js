@@ -31,6 +31,22 @@ let storePath;
 let clientToken;
 let supplierToken;
 let riderToken;
+let opsToken;
+
+/**
+ * A value shaped like an FCM registration token. The unauthenticated
+ * registration route rejects anything else, so every anonymous handset in this
+ * file carries one; `tail` is the eight characters the API reports as
+ * `tokenTail`.
+ */
+function fcmToken(tail) {
+  assert.equal(tail.length, 8, "an fcmToken tail must be the eight characters tokenTail reports");
+  return `${"cQ7hK2ZtR0uWx9Yb".repeat(9).slice(0, 140)}:${tail}`;
+}
+
+const ANON_TOKEN = fcmToken("neversig");
+const CLAIMED_TOKEN = fcmToken("signedin");
+const RIDER_TOKEN = fcmToken("ridersph");
 
 async function freeHighPort() {
   while (true) {
@@ -99,6 +115,8 @@ function fixtureStore() {
       order("ord-fanout", "supplier_assigned"),
       order("ord-prune", "supplier_assigned"),
       order("ord-fcm-down", "supplier_assigned"),
+      order("ord-stranger", "supplier_assigned"),
+      order("ord-claimed", "supplier_assigned"),
     ],
     files: [],
     credits: {},
@@ -245,6 +263,37 @@ async function login(email) {
   return response.body.token;
 }
 
+async function readStore() {
+  return JSON.parse(await fs.readFile(storePath, "utf8"));
+}
+
+async function deviceRowsFor(token) {
+  return (await readStore()).deviceTokens.filter((record) => record.token === token);
+}
+
+function sendsTo(token) {
+  return firebase.state.sends.filter((message) => message.token === token);
+}
+
+/** Wait for a push to one specific handset, then settle so extras are caught. */
+async function waitForSendTo(token, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [message] = sendsTo(token);
+    if (message) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return message;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`no FCM send to that handset; saw ${firebase.state.sends.length} send(s)`);
+}
+
+/** Give the fire-and-forget fan-out time to prove it sent nothing. */
+async function settlePush() {
+  await new Promise((resolve) => setTimeout(resolve, 250));
+}
+
 async function acceptOrder(orderId, supplierPriceMinor = 250_000) {
   return request(`/orders/${orderId}/transition`, {
     method: "POST",
@@ -301,6 +350,8 @@ before(async () => {
   clientToken = await login("client@gridgo.ph");
   supplierToken = await login("supplier@gridgo.ph");
   riderToken = await login("rider@gridgo.ph");
+  // Fixture convergence creates the shipped ops identity on first load.
+  opsToken = await login("ops@gridgo.ph");
 });
 
 after(async () => {
@@ -313,13 +364,17 @@ after(async () => {
 // Registration and ownership
 // ---------------------------------------------------------------------------
 
-test("registering a device is authenticated, validated, and idempotent", async () => {
-  const anonymous = await request("/devices", {
+test("registering a device is validated and idempotent", async () => {
+  // A *stale* bearer token is still rejected: an app with an expired session
+  // must learn to sign in again rather than quietly demote its registration to
+  // unclaimed. The unauthenticated path (no header at all) is exercised below.
+  const expiredSession = await request("/devices", {
     method: "POST",
-    body: { token: "fcm-anonymous", platform: "android" },
+    token: "tok_expired",
+    body: { token: fcmToken("expired1"), platform: "android" },
   });
-  assert.equal(anonymous.status, 401);
-  assert.equal(anonymous.body.error, "unauthorized");
+  assert.equal(expiredSession.status, 401);
+  assert.equal(expiredSession.body.error, "unauthorized");
 
   const missingToken = await request("/devices", { method: "POST", token: clientToken, body: { platform: "android" } });
   assert.equal(missingToken.status, 400);
@@ -547,6 +602,255 @@ test("a sign-out that names another account's phone leaves it registered", async
   assert.equal(riderDevices.body.devices.some(({ tokenTail }) => tokenTail === "der-keep"), true);
 });
 
+// ---------------------------------------------------------------------------
+// Handsets nobody has signed in on
+// ---------------------------------------------------------------------------
+
+test("a handset that never signed in registers unclaimed, once, and discloses nothing", async () => {
+  const first = await request("/devices", {
+    method: "POST",
+    body: { token: ANON_TOKEN, platform: "android" },
+  });
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.body, { ok: true });
+
+  // Byte-identical answer the second time: no id, no `created`, no count, and
+  // nothing that says whether this token was already known.
+  const again = await request("/devices", {
+    method: "POST",
+    body: { token: ANON_TOKEN, platform: "ios" },
+  });
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.body, { ok: true });
+
+  const rows = await deviceRowsFor(ANON_TOKEN);
+  assert.equal(rows.length, 1, "re-registration duplicated an unclaimed handset");
+  assert.equal(rows[0].userId, null);
+  assert.equal(rows[0].platform, "ios", "the re-registration did not update the row");
+
+  // An unclaimed registration belongs to nobody, so it is nobody's to list.
+  const listed = await request("/devices", { token: clientToken });
+  assert.equal(listed.body.devices.some(({ tokenTail }) => tokenTail === "neversig"), false);
+});
+
+test("the unauthenticated route refuses anything that is not shaped like an FCM token", async () => {
+  const missing = await request("/devices", { method: "POST", body: { platform: "android" } });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.error, "device_token_required");
+
+  const tooShort = await request("/devices", {
+    method: "POST",
+    body: { token: "fcm-anonymous", platform: "android" },
+  });
+  assert.equal(tooShort.status, 400);
+  assert.equal(tooShort.body.error, "invalid_device_token");
+
+  const wrongCharacters = await request("/devices", {
+    method: "POST",
+    body: { token: `${"a".repeat(80)} <script>`, platform: "android" },
+  });
+  assert.equal(wrongCharacters.status, 400);
+  assert.equal(wrongCharacters.body.error, "invalid_device_token");
+
+  const badPlatform = await request("/devices", {
+    method: "POST",
+    body: { token: fcmToken("platform"), platform: "symbian" },
+  });
+  assert.equal(badPlatform.status, 400);
+  assert.equal(badPlatform.body.error, "invalid_device_platform");
+  assert.deepEqual(badPlatform.body.allowed, ["android", "ios", "web"]);
+
+  const stored = (await readStore()).deviceTokens;
+  assert.equal(stored.some((record) => record.token.includes("fcm-anonymous")), false);
+  assert.equal(stored.some((record) => record.token === fcmToken("platform")), false);
+});
+
+test("an announcement to everyone reaches unclaimed handsets and every account", async () => {
+  firebase.reset();
+  await request("/devices", { method: "POST", token: clientToken, body: { token: CLAIMED_TOKEN, platform: "android" } });
+
+  const announced = await request("/announcements", {
+    method: "POST",
+    token: opsToken,
+    body: { audience: "everyone", title: "Update your app", body: "GRIDGO 1.4 is available in the store." },
+  });
+  assert.equal(announced.status, 201, JSON.stringify(announced.body));
+  assert.equal(announced.body.announcement.audience, "everyone");
+  assert.equal(announced.body.announcement.notifiedUsers, (await readStore()).users.length);
+  assert.equal(announced.body.announcement.unclaimedDevices >= 1, true);
+
+  // The anonymous handset receives the announcement and nothing else: no
+  // notification id, no order, no timestamp to correlate it with.
+  const anonymous = await waitForSendTo(ANON_TOKEN);
+  assert.deepEqual(anonymous.data, { type: "announcement" });
+  assert.equal(anonymous.notification.title, "Update your app");
+
+  // The signed-in handset receives the same words as a personal notification
+  // it can also open in-app.
+  const claimed = await waitForSendTo(CLAIMED_TOKEN);
+  assert.equal(claimed.data.type, "announcement");
+  assert.equal(typeof claimed.data.notificationId, "string");
+  const inbox = await request("/notifications", { token: clientToken });
+  assert.equal(
+    inbox.body.notifications.some((item) => item.id === claimed.data.notificationId && item.type === "announcement"),
+    true,
+  );
+});
+
+test("a role-targeted announcement cannot reach a handset with no role", async () => {
+  firebase.reset();
+  await request("/devices", { method: "POST", token: riderToken, body: { token: RIDER_TOKEN, platform: "android" } });
+
+  const announced = await request("/announcements", {
+    method: "POST",
+    token: opsToken,
+    body: { audience: "riders", title: "Rider briefing", body: "Collect your new thermal bag at the hub." },
+  });
+  assert.equal(announced.status, 201);
+  assert.equal(announced.body.announcement.unclaimedDevices, 0);
+
+  const rider = await waitForSendTo(RIDER_TOKEN);
+  assert.equal(rider.notification.title, "Rider briefing");
+  assert.equal(sendsTo(ANON_TOKEN).length, 0, "a rider briefing reached a handset with no role");
+  assert.equal(sendsTo(CLAIMED_TOKEN).length, 0, "a rider briefing reached a client");
+});
+
+test("only ops and super may announce, and the words are bounded", async () => {
+  const asClient = await request("/announcements", {
+    method: "POST",
+    token: clientToken,
+    body: { audience: "everyone", title: "Free flyers", body: "Call me." },
+  });
+  assert.equal(asClient.status, 403);
+  assert.equal(asClient.body.error, "forbidden");
+
+  const anonymous = await request("/announcements", {
+    method: "POST",
+    body: { audience: "everyone", title: "Free flyers", body: "Call me." },
+  });
+  assert.equal(anonymous.status, 401);
+
+  const badAudience = await request("/announcements", {
+    method: "POST",
+    token: opsToken,
+    body: { audience: "user_client", title: "Hello", body: "Hello" },
+  });
+  assert.equal(badAudience.status, 400);
+  assert.equal(badAudience.body.error, "invalid_announcement_audience");
+  assert.deepEqual(badAudience.body.allowed, ["everyone", "clients", "suppliers", "riders", "ops"]);
+
+  const emptyTitle = await request("/announcements", {
+    method: "POST",
+    token: opsToken,
+    body: { audience: "everyone", title: "   ", body: "Hello" },
+  });
+  assert.equal(emptyTitle.status, 400);
+  assert.equal(emptyTitle.body.error, "invalid_announcement_title");
+
+  const longBody = await request("/announcements", {
+    method: "POST",
+    token: opsToken,
+    body: { audience: "everyone", title: "Hello", body: "x".repeat(501) },
+  });
+  assert.equal(longBody.status, 400);
+  assert.equal(longBody.body.error, "invalid_announcement_body");
+});
+
+test("a personal notification never reaches a handset nobody has signed in on", async () => {
+  firebase.reset();
+  const accepted = await acceptOrder("ord-stranger");
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+  // The client's own phone gets the order notification…
+  const claimed = await waitForSendTo(CLAIMED_TOKEN);
+  assert.equal(claimed.data.orderId, "ord-stranger");
+  await settlePush();
+  // …and the anonymous handset registered on the same platform gets nothing.
+  assert.equal(sendsTo(ANON_TOKEN).length, 0, "an order notification reached an unclaimed handset");
+});
+
+test("signing in claims the handset and signing out returns it to unclaimed", async () => {
+  const signedIn = await request("/auth/login", {
+    method: "POST",
+    body: { email: "client@gridgo.ph", password: DEMO_PASSWORD, deviceToken: ANON_TOKEN },
+  });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.body.deviceClaimed, true);
+
+  const claimedRows = await deviceRowsFor(ANON_TOKEN);
+  assert.equal(claimedRows.length, 1, "claiming duplicated the registration");
+  assert.equal(claimedRows[0].userId, "user_client");
+  const listed = await request("/devices", { token: signedIn.body.token });
+  assert.equal(listed.body.devices.some(({ tokenTail }) => tokenTail === "neversig"), true);
+
+  // Claimed, it now receives that person's order notifications.
+  firebase.reset();
+  assert.equal((await acceptOrder("ord-claimed")).status, 200);
+  const personal = await waitForSendTo(ANON_TOKEN);
+  assert.equal(personal.data.orderId, "ord-claimed");
+
+  const signedOut = await request("/auth/logout", {
+    method: "POST",
+    token: signedIn.body.token,
+    body: { deviceToken: ANON_TOKEN },
+  });
+  assert.equal(signedOut.status, 200);
+  assert.equal(signedOut.body.deviceUnclaimed, true);
+  assert.equal(signedOut.body.deviceUnregistered, true, "the published sign-out contract changed shape");
+
+  const releasedRows = await deviceRowsFor(ANON_TOKEN);
+  assert.equal(releasedRows.length, 1, "signing out deleted the app-update channel for this handset");
+  assert.equal(releasedRows[0].userId, null);
+  assert.equal((await request("/devices", { token: clientToken })).body.devices.some(
+    ({ tokenTail }) => tokenTail === "neversig",
+  ), false);
+
+  // Still on the app-update channel, and back to stranger-safe content only.
+  firebase.reset();
+  await request("/announcements", {
+    method: "POST",
+    token: opsToken,
+    body: { audience: "everyone", title: "Update your app", body: "GRIDGO 1.5 is available in the store." },
+  });
+  const anonymous = await waitForSendTo(ANON_TOKEN);
+  assert.deepEqual(anonymous.data, { type: "announcement" });
+});
+
+test("an unauthenticated call can neither steal nor delete a claimed handset", async () => {
+  const before = (await deviceRowsFor(CLAIMED_TOKEN))[0];
+  assert.equal(before.userId, "user_client");
+
+  const steal = await request("/devices", {
+    method: "POST",
+    body: { token: CLAIMED_TOKEN, platform: "web" },
+  });
+  assert.equal(steal.status, 200);
+  assert.deepEqual(steal.body, { ok: true }, "the refusal was distinguishable from a registration");
+  assert.deepEqual(await deviceRowsFor(CLAIMED_TOKEN), [before], "an anonymous call moved a claimed registration");
+
+  const deleteClaimed = await request("/devices/unregister", {
+    method: "POST",
+    body: { token: CLAIMED_TOKEN },
+  });
+  assert.equal(deleteClaimed.status, 200);
+  assert.deepEqual(deleteClaimed.body, { ok: true });
+  assert.deepEqual(await deviceRowsFor(CLAIMED_TOKEN), [before], "an anonymous call deleted a claimed registration");
+
+  // The same answer for an unclaimed token — which really is removed. Anyone
+  // holding the token may take that handset off the announcement channel.
+  const deleteUnclaimed = await request("/devices/unregister", {
+    method: "POST",
+    body: { token: ANON_TOKEN },
+  });
+  assert.equal(deleteUnclaimed.status, 200);
+  assert.deepEqual(deleteUnclaimed.body, { ok: true });
+  assert.deepEqual(await deviceRowsFor(ANON_TOKEN), []);
+
+  const missing = await request("/devices/unregister", { method: "POST", body: {} });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.error, "device_token_required");
+});
+
 test("health names the configured Firebase project and its last verdict", async () => {
   const health = await request("/health");
   assert.equal(health.body.push.provider, "fcm");
@@ -567,6 +871,47 @@ test("one access token serves every send in the run", async () => {
 // ---------------------------------------------------------------------------
 // Migration
 // ---------------------------------------------------------------------------
+
+test("existing registrations, claimed and unclaimed, survive a load byte-identically", async () => {
+  const existingPath = path.join(tempDir, "existing-devices-store.json");
+  const existing = fixtureStore();
+  existing.deviceTokens = [
+    {
+      id: "dev_claimed",
+      userId: "user_client",
+      token: fcmToken("claimedp"),
+      platform: "android",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    },
+    {
+      id: "dev_unclaimed",
+      userId: null,
+      token: fcmToken("unclaimd"),
+      platform: "ios",
+      createdAt: "2026-08-02T00:00:00.000Z",
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    },
+  ];
+  await fs.writeFile(existingPath, JSON.stringify(existing, null, 2));
+
+  const first = await startApi({ STORE_PATH: existingPath });
+  try {
+    assert.equal((await fetch(`${first.base}/health`)).status, 200);
+  } finally {
+    await stopApi(first.child);
+  }
+  const afterFirst = await fs.readFile(existingPath, "utf8");
+  assert.deepEqual(JSON.parse(afterFirst).deviceTokens, existing.deviceTokens, "a load rewrote a registration");
+
+  const second = await startApi({ STORE_PATH: existingPath });
+  try {
+    assert.equal((await fetch(`${second.base}/health`)).status, 200);
+  } finally {
+    await stopApi(second.child);
+  }
+  assert.equal(await fs.readFile(existingPath, "utf8"), afterFirst, "the second load changed the store");
+});
 
 test("a store written before push backfills once and then byte-identically", async () => {
   const legacyPath = path.join(tempDir, "legacy-store.json");

@@ -133,8 +133,9 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | POST | `/dispatch/:id/proof` | any auth | retired (`410 dispatch_proof_route_retired`) |
 | GET | `/jobs` | supplier | assigned jobs alias |
 | GET/PATCH/DELETE | `/notifications…` | owner | list, SSE stream/resume, read/unread, snapshot mark-all, persistent delete |
-| GET/POST | `/devices` | owner | list caller's push registrations; register this phone's FCM token |
-| POST | `/devices/unregister` | owner | stop push to one of the caller's own phones |
+| GET/POST | `/devices` | owner; POST also anonymous | list caller's push registrations; register this phone's FCM token, or unclaimed with no bearer token |
+| POST | `/devices/unregister` | owner; anonymous for unclaimed | stop push to one of the caller's own phones |
+| POST | `/announcements` | ops / super | one general message to an audience; `everyone` also reaches phones that never signed in |
 
 ### Service taxonomy (platform-governed)
 
