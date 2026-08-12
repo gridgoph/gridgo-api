@@ -228,6 +228,8 @@ curl -fsS -H 'Host: gridgo-api.talasora.com' http://127.0.0.1/health | jq .push
 
 Rotating this key touches no account, no order and no stored device token: registered phones keep receiving, because the token identifies the *phone*, not the sender.
 
+**Phones that have never signed in.** `POST /devices` accepts a call with no bearer token and stores an *unclaimed* registration, so an "update your app" announcement (`POST /announcements` with `audience: "everyone"`) reaches every install rather than only signed-in accounts. That is the platform's only unauthenticated write, so the pool it fills is bounded: past 5,000 unclaimed registrations the least recently seen are evicted, and claimed ones are never touched. Override with `GRIDGO_MAX_UNCLAIMED_DEVICES` in `gridgo-api.env` only if the pilot outgrows it — a value that is not a positive integer falls back to the default. The bound is deliberately not per-IP: behind Cloudflare and `gridgo-edge` every request arrives from the same source address, so an IP limit would throttle the whole pilot and stop nobody. Full contract, including what an anonymous handset may and may not receive, is in `docs/OPERATIONAL_MODEL_V2_API.md` → *Reaching a phone that has never signed in*.
+
 **Egress matters.** Sending reaches `oauth2.googleapis.com` and `fcm.googleapis.com` over HTTPS. The `api` container has that route through `gridgo-edge`; `gridgo-api-storage` is `internal: true` and deliberately has no gateway. A host firewall that blocks outbound 443 leaves `/health` green and every push failing — the symptom is `push.status: unavailable` with `push delivery error …` in `docker compose logs api`.
 
 ## 3. Install the deployment

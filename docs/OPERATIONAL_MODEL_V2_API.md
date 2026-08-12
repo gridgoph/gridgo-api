@@ -4,7 +4,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 ## Conventions
 
-- Bearer auth: `Authorization: Bearer <token>` except `/health`, `/catalog`, `/auth/signup`, and `/auth/login`.
+- Bearer auth: `Authorization: Bearer <token>` except `/health`, `/catalog`, `/auth/signup`, `/auth/login`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
 - Roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`.
@@ -20,15 +20,16 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/auth/signup` | public | self-signup for client/supplier/rider |
 | POST | `/auth/login` | public | `{email,password}` → `{token,user}` |
 | GET | `/auth/me` | authenticated | `{user}` without password |
-| POST | `/auth/logout` | authenticated/token optional | invalidates current token; optionally unregisters this phone from push |
+| POST | `/auth/logout` | authenticated/token optional | invalidates current token; optionally releases this phone back to unclaimed |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
 | GET | `/files/:fileId/download-url` | same as file read | five-minute signed GET |
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
 | DELETE | `/files/:fileId` | owner/ops/super; unreferenced only | safe delete lifecycle |
 | GET | `/devices` | authenticated | caller's own push registrations |
-| POST | `/devices` | authenticated | register this phone's FCM token against the caller |
-| POST | `/devices/unregister` | authenticated | stop push to one of the caller's own phones |
+| POST | `/devices` | authenticated **or** anonymous | register this phone's FCM token against the caller, or unclaimed when no bearer token is sent |
+| POST | `/devices/unregister` | authenticated **or** anonymous | stop push to one of the caller's own phones; an anonymous call may remove only an unclaimed registration |
+| POST | `/announcements` | ops/super | one general message to an audience; `everyone` also reaches unclaimed handsets |
 | GET | `/notifications` | authenticated | caller's notifications, newest first |
 | GET | `/notifications/stream` | authenticated | caller-scoped SSE notification delivery and resume |
 | PATCH | `/notifications/:id` | notification owner | set `{read:true|false}` |
@@ -222,6 +223,7 @@ When the deployment has no FCM credential installed, every route below still wor
 ### Device registration model
 
 - A registration is `{ token, platform }`. `token` is the FCM registration token Firebase issued to that installation; `platform` is `android`, `ios`, or `web`.
+- **A registration is either claimed or unclaimed.** A claimed registration belongs to one account. An *unclaimed* one belongs to nobody: a phone that installed the app and never signed in, or one whose owner signed out. Unclaimed registrations exist so an app-update announcement reaches every install — see *Reaching a phone that has never signed in*.
 - **A token belongs to exactly one user.** Registering a token that is already registered to somebody else moves it to the caller and removes the previous owner's claim, which is what a shared handset or a sign-out/sign-in on the same phone produces. Without that move, one person's orders would appear on another person's lock screen.
 - **One user may hold many devices.** A phone and a tablet both receive every notification; one dead device never suppresses the others.
 - Re-registering the same token under the same account updates the existing record instead of adding a second one. Apps should re-register on every launch and on every Firebase token refresh; it is idempotent and cheap.
@@ -254,12 +256,14 @@ When the deployment has no FCM credential installed, every route below still wor
 
 `reassigned` is `true` when the token was taken from another account. **The raw token is never returned** by any route; `tokenTail` is its last eight characters, enough to identify a registration in a list or a support conversation.
 
+Registering a token that is currently **unclaimed** claims it for the caller: the same row, now owned, and `reassigned` is `false` because nobody lost a phone.
+
 | Status | Error | Cause |
 |---|---|---|
 | `400` | `device_token_required` | `token` missing, empty, or not a string |
 | `400` | `device_token_too_long` | `token` longer than 4096 characters |
 | `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
-| `401` | `unauthorized` | no or expired bearer token |
+| `401` | `unauthorized` | the request carried a bearer token that is expired or unknown |
 
 ### `GET /devices`
 
@@ -267,7 +271,7 @@ When the deployment has no FCM credential installed, every route below still wor
 { "devices": [ { "id": "dev_9f2c41a7c8d3", "userId": "user_client", "platform": "android", "tokenTail": "a7c8d3f1", "createdAt": "…", "updatedAt": "…" } ] }
 ```
 
-Only the caller's own registrations, always. An account with none receives `{"devices": []}`.
+Only the caller's own registrations, always — and never an unclaimed one, which belongs to nobody and is therefore nobody's to list. An account with none receives `{"devices": []}`. There is no route, for any role, that lists or counts unclaimed registrations.
 
 ### `POST /devices/unregister`
 
@@ -281,23 +285,69 @@ Returns `200 {"id": "dev_9f2c41a7c8d3", "unregistered": true}`.
 |---|---|---|
 | `400` | `device_token_required` | `token` missing or empty |
 | `404` | `device_token_not_found` | the token is not registered **to the caller** |
-| `401` | `unauthorized` | no or expired bearer token |
+| `401` | `unauthorized` | the request carried a bearer token that is expired or unknown |
 
 A token registered to a *different* account also returns `404`, not `403`. Unlike an opaque server-minted notification ID, a device token is a value a caller can supply, so a distinguishable refusal would answer "is this token registered to somebody else?" for anyone who asked. Nothing is changed either way.
 
-### Signing out
+Called with **no** `Authorization` header, this route removes an unclaimed registration and answers `200 {"ok": true}` — see below.
 
-`POST /auth/logout` accepts an optional device token and unregisters it in the same call:
+### Signing in and signing out
+
+`POST /auth/login` accepts an optional device token and **claims** that registration for the account signing in:
+
+```json
+{ "email": "…", "password": "…", "deviceToken": "fcm-registration-token-from-firebase" }
+```
+
+```json
+{ "token": "tok_…", "user": { … }, "deviceClaimed": true }
+```
+
+`deviceClaimed` is `true` when a registration for that token existed and now belongs to this account — the normal case for a phone that registered anonymously before anyone signed in. It is `false` when no `deviceToken` was sent, when the token was already this account's, or when the server has never seen it (a login carries no `platform`, so it cannot create a registration). **After any sign-in the app should still call `POST /devices`**; that path registers *and* claims, and is the only one that works for a token the server has not seen.
+
+`POST /auth/logout` accepts an optional device token and **releases** it in the same call:
 
 ```json
 { "deviceToken": "fcm-registration-token-from-firebase" }
 ```
 
 ```json
-{ "ok": true, "deviceUnregistered": true }
+{ "ok": true, "deviceUnregistered": true, "deviceUnclaimed": true }
 ```
 
-**Prefer this over a separate unregister call.** After logout the bearer token is invalid, so a phone that logs out first can no longer authenticate `POST /devices/unregister` and would keep receiving the previous user's notifications. `deviceUnregistered` is `false` when no token was sent, when the session had already expired, or when the token belongs to another account — the body is still `200` and the sign-out still happens. Sending no body remains valid and behaves exactly as before.
+**Prefer this over a separate unregister call.** After logout the bearer token is invalid, so a phone that logs out first can no longer authenticate `POST /devices/unregister` and would keep receiving the previous user's notifications.
+
+The registration is **released, not deleted**: the row survives holding no identity, so the handset stays on the app-update channel while continuing to receive nothing personal. Signing out is exactly when a phone is most likely to be stuck on a build that needs updating. `deviceUnregistered` keeps its published meaning — this phone no longer receives the caller's notifications — and `deviceUnclaimed` is the same boolean under the name that now describes what happened. Both are `false` when no token was sent, when the session had already expired, or when the token belongs to another account; the body is still `200` and the sign-out still happens. Sending no body remains valid and behaves exactly as before.
+
+### Reaching a phone that has never signed in
+
+An "update your app" notice has to reach every install, including the ones whose owner never got as far as an account — they are the most likely to be stuck on a broken build. So `POST /devices` accepts a call with **no** `Authorization` header and stores an *unclaimed* registration.
+
+```
+POST /devices          (no Authorization header)
+{ "token": "fcm-registration-token-from-firebase", "platform": "android" }
+```
+
+```json
+{ "ok": true }
+```
+
+**That body is fixed.** It is the same whether the token was new, already registered unclaimed, or belongs to a signed-in account, and it carries no id, no `created`, and no count. The caller supplies the token, so any variation would answer "is this token registered, and to whom?" for anyone who asked.
+
+| Status | Error | Cause |
+|---|---|---|
+| `400` | `device_token_required` | `token` missing or empty |
+| `400` | `invalid_device_token` | `token` is not shaped like an FCM registration token (64–4096 characters of `A–Z a–z 0–9 _ : . -`) |
+| `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
+
+What apps can rely on:
+
+- **Register on first launch, before any sign-in**, and re-register on every launch and token refresh. Re-registration updates the one row; it never creates a second.
+- **A claimed registration is never changed by an anonymous call.** If the token already belongs to an account, the call is a no-op — it cannot move, re-platform, or silence somebody's phone. The owner's own app re-registers with its bearer token, and a genuine sign-out releases the row itself.
+- **`POST /devices/unregister` with no `Authorization` header** removes an unclaimed registration and answers `200 {"ok": true}`. A *claimed* registration is left alone and answers identically; removing one still requires its owner's bearer token.
+- **The unclaimed pool is bounded.** Past the pilot ceiling (5,000; `GRIDGO_MAX_UNCLAIMED_DEVICES`) the least recently seen unclaimed registrations are evicted to make room. Claimed registrations are never evicted, and a phone evicted while idle re-registers on its next launch. Registration is not refused at the ceiling: a refusal would let one script close the app-update channel to every genuine new install until an operator intervened.
+
+**What an unclaimed handset may receive — the hard rule.** An unclaimed registration is an anonymous phone; nothing proves who is holding it. It may only ever be sent a general announcement: never an order, a payout, a claim, an issue, a name, an amount, or anything else tied to a person. This is enforced in the delivery path — the client that talks to FCM refuses any batch containing an unclaimed device unless the message carries `data` of exactly `{"type": "announcement"}` — not by convention at the call sites.
 
 ### What a push looks like
 
@@ -335,6 +385,59 @@ One FCM v1 message per registered device:
 - A failed push never fails the action that caused it. If a payout releases and FCM is unreachable, the payout still happened, the notification record still exists, and `GET /notifications` still returns it.
 - A dead token is pruned, a transient FCM failure is not. A phone that is merely offline or unreachable keeps its registration.
 - There is no delivery receipt and no read receipt. `read` is set only through `PATCH /notifications/:id` or `PATCH /notifications/read-all`; a push does not mark anything read.
+
+## Platform announcements
+
+One general message to a whole audience, from Operations. `everyone` is the app-update channel.
+
+### `POST /announcements`
+
+Authorization: `ops_admin` or `super_admin`.
+
+```json
+{ "audience": "everyone", "title": "Update your app", "body": "GRIDGO 1.4 is available in the store." }
+```
+
+`201`:
+
+```json
+{
+  "announcement": {
+    "id": "anc_4f21c9d0a8b7",
+    "audience": "everyone",
+    "title": "Update your app",
+    "body": "GRIDGO 1.4 is available in the store.",
+    "at": "2026-08-11T02:00:00.000Z",
+    "notifiedUsers": 6,
+    "unclaimedDevices": 3
+  }
+}
+```
+
+Every targeted account gets one notification record (`type: "announcement"`, `orderId: null`, plus the `announcementId` that groups them), readable in `GET /notifications`, on the SSE stream, and pushed to that account's registered devices like any other notification.
+
+**Which audiences reach unclaimed devices:**
+
+| `audience` | Accounts notified | Unclaimed handsets |
+|---|---|---|
+| `everyone` | every account | **yes** — this is the only audience that reaches them |
+| `clients` | role `client` | no |
+| `suppliers` | role `supplier` | no |
+| `riders` | role `rider` | no |
+| `ops` | roles `ops_admin`, `super_admin` | no |
+
+A role-targeted announcement **cannot** reach an unclaimed handset, and this is not a setting: an unclaimed registration has no role, and guessing one would put a print-shop message on a rider's lock screen. If a message must reach phones that have never signed in, it has to be true and safe for anyone holding any phone — which is what `everyone` means.
+
+Write `everyone` announcements accordingly: the same words land on handsets nobody has signed in on, so nothing order-, money- or person-specific belongs in one. The audience rule is enforced; the wording is Operations' judgement.
+
+| Status | Error | Cause |
+|---|---|---|
+| `400` | `invalid_announcement_audience` | `audience` is not one of the five above; the response repeats `allowed` |
+| `400` | `invalid_announcement_title` | `title` empty or longer than 120 characters |
+| `400` | `invalid_announcement_body` | `body` empty or longer than 500 characters |
+| `403` | `forbidden` | the caller is not ops or super |
+
+Every announcement is written to the platform audit log (`announcement.broadcast`) with its audience, title, and both counts.
 
 ## Notifications
 
@@ -729,7 +832,7 @@ Load-time `backfillOperationalModel()` is idempotent:
 
 The structural file backfill also adds missing `verificationDocumentFileIds: []` only to supplier users. It never replaces an existing array or document metadata and is byte-idempotent on the second run.
 
-A store written before push gains an empty `deviceTokens: []` on its first load and is byte-identical on every load after that. Registrations are only ever created by a real device calling `POST /devices`; none are seeded, because a fabricated FCM token can only fail and then be pruned.
+A store written before push gains an empty `deviceTokens: []` on its first load and is byte-identical on every load after that. Registrations are only ever created by a real device calling `POST /devices`; none are seeded, because a fabricated FCM token can only fail and then be pruned. Existing registrations are never rewritten: a claimed row keeps its `userId`, and `userId: null` is the stored spelling of unclaimed.
 
 A separate load-time pass renames the six shipped pilot identities off the retired `@gridgo.local` addresses onto `@gridgo.ph`, in place. It runs before every backfill and rewrites `user.email` and nothing else, so a phone registered under the old address stays registered, keeps its `dev_…` id, and continues to receive that account's pushes; the account also keeps its notifications, orders and live sessions, all of which reference `user.id`. Apps require no migration step — only the new login addresses. Because that guarantee depends on registrations never storing a login, startup refuses (mutating nothing) if a `deviceTokens` record is found carrying an email instead of a `userId`. Operator detail: `docs/DEPLOYMENT.md`.
 

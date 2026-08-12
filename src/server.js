@@ -32,14 +32,21 @@ import {
 import { createObjectStorage } from "./object-storage.js";
 import {
   DEVICE_PLATFORMS,
+  announcementPushMessage,
   backfillDeviceTokens,
+  claimDeviceToken,
   createPushDeliveryOrDisable,
   deviceTokensFor,
+  isFcmTokenShaped,
   normalizeDeviceToken,
   publicDevice,
   pushMessageFor,
   registerDeviceToken,
+  registerUnclaimedDeviceToken,
+  releaseDeviceToken,
   removeDeviceTokenIds,
+  unclaimedDeviceLimit,
+  unclaimedDeviceTokens,
   unregisterDeviceToken,
 } from "./push.js";
 import {
@@ -92,6 +99,9 @@ const objectStorage = createObjectStorage(process.env);
 // reports `push.status` as `disabled` or `misconfigured` with the reason, so
 // the gap is loud rather than silent.
 const pushDelivery = createPushDeliveryOrDisable(process.env);
+// Ceiling on registrations nobody has signed in on; `POST /devices` is the one
+// unauthenticated write on the platform. See `registerUnclaimedDeviceToken`.
+const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const enqueueMutation = createMutationQueue();
 const notificationEvents = createNotificationEvents();
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
@@ -144,20 +154,43 @@ function deliverPush(store, notification) {
   const devices = deviceTokensFor(store, notification.userId);
   if (devices.length === 0) return;
 
+  fanOutPush(`notification=${notification.id}`, pushMessageFor(notification), devices);
+}
+
+/**
+ * Push a platform-wide announcement to every handset nobody has signed in on.
+ *
+ * The single exception to "`save()` is the only place push fires", and it is
+ * not one a call site can forget: an unclaimed device has no user, so there is
+ * no notification record for it to be derived from, and no `save()` to hook.
+ * The rule the hook exists to enforce — one push per readable notification —
+ * still holds, because this path carries no notification at all. It has exactly
+ * one call site (`POST /announcements`), and `pushDelivery.send` refuses
+ * anything but a stranger-safe message for these devices regardless.
+ */
+function deliverAnnouncementPush(devices, { title, body }) {
+  if (!pushDelivery.configured || devices.length === 0) return;
+  fanOutPush("announcement", announcementPushMessage({ title, body }), devices);
+}
+
+/**
+ * Fire-and-forget fan-out shared by both push paths. Cannot reject: whatever
+ * created the message is already durable on disk, and neither a dead phone nor
+ * an unreachable Google may turn that into a failed request.
+ */
+function fanOutPush(label, message, devices) {
   pushDelivery
-    .send(pushMessageFor(notification), devices)
+    .send(message, devices)
     .then((results) => {
       for (const result of results) {
         if (!result.ok && !result.prune) {
-          console.warn(
-            `push delivery failed notification=${notification.id} device=${result.deviceId} code=${result.code}`,
-          );
+          console.warn(`push delivery failed ${label} device=${result.deviceId} code=${result.code}`);
         }
       }
       return pruneDeadDeviceTokens(results.filter((result) => result.prune).map(({ deviceId }) => deviceId));
     })
     .catch((error) => {
-      console.warn(`push delivery error notification=${notification.id} reason=${error?.message || "unknown"}`);
+      console.warn(`push delivery error ${label} reason=${error?.message || "unknown"}`);
     });
 }
 
@@ -264,6 +297,11 @@ function sendDomainError(res, error) {
   });
 }
 
+/** Whether the caller presented a bearer token at all — valid or not. */
+function hasBearerToken(req) {
+  return /^Bearer\s+(.+)$/i.test(req.headers.authorization || "");
+}
+
 function authUser(req, store) {
   const h = req.headers.authorization || "";
   const m = /^Bearer\s+(.+)$/i.exec(h);
@@ -308,6 +346,25 @@ function isOps(user) {
 function isSuper(user) {
   return user && user.role === "super_admin";
 }
+
+/**
+ * Who a platform announcement reaches.
+ *
+ * `everyone` is the only audience that extends to unclaimed devices, and it is
+ * the reason they exist: an app-update notice has to reach an install whose
+ * owner never signed in. A role-targeted audience cannot include them — an
+ * unclaimed handset has no role, and guessing one would put a print-shop
+ * message on a rider's lock screen.
+ */
+const ANNOUNCEMENT_AUDIENCES = new Map([
+  ["everyone", null],
+  ["clients", ["client"]],
+  ["suppliers", ["supplier"]],
+  ["riders", ["rider"]],
+  ["ops", ["ops_admin", "super_admin"]],
+]);
+const ANNOUNCEMENT_TITLE_MAX = 120;
+const ANNOUNCEMENT_BODY_MAX = 500;
 
 function signupError(res, error, message, details = {}) {
   return send(res, 400, { error, message, ...details });
@@ -1373,8 +1430,15 @@ async function handleRequest(req, res) {
       if (!user) return send(res, 401, { error: "invalid_credentials" });
       const token = id("tok");
       store.sessions[token] = { userId: user.id, createdAt: now() };
+      // Signing in claims the handset it was performed on: the app registered
+      // its token before anyone had an account, and that registration becomes
+      // this person's rather than a second row appearing beside it.
+      const deviceToken = normalizeDeviceToken(body?.deviceToken);
+      const deviceClaimed = deviceToken
+        ? claimDeviceToken(store, { token: deviceToken, userId: user.id, at: now() }).claimed
+        : false;
       save(store);
-      return send(res, 200, { token, user: publicUser(user) });
+      return send(res, 200, { token, user: publicUser(user), deviceClaimed });
     }
 
     if (req.method === "GET" && pathname === "/auth/me") {
@@ -1386,22 +1450,34 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && pathname === "/auth/logout") {
       const h = req.headers.authorization || "";
       const m = /^Bearer\s+(.+)$/i.exec(h);
-      // Signing out is the moment a phone must stop receiving. Accepting the
-      // device token here removes the ordering trap of "unregister first, then
-      // log out" — after logout the bearer token is gone and the phone can no
-      // longer authenticate an unregister call at all.
+      // Signing out is the moment a phone must stop receiving that person's
+      // notifications. Accepting the device token here removes the ordering
+      // trap of "unregister first, then log out" — after logout the bearer
+      // token is gone and the phone can no longer authenticate an unregister
+      // call at all.
+      //
+      // The registration is *released*, not deleted: it returns to the
+      // unclaimed pool so an app-update announcement still reaches the handset.
+      // Deleting it would close that channel at exactly the moment the person
+      // is most likely to be stuck on a build that made them sign out.
       const body = await readBody(req);
       const deviceToken = normalizeDeviceToken(body?.deviceToken);
-      let unregistered = false;
+      let released = false;
       if (m && store.sessions[m[1]]) {
         const sessionUser = authUser(req, store);
         if (deviceToken && sessionUser) {
-          unregistered = unregisterDeviceToken(store, { userId: sessionUser.id, token: deviceToken }).changed;
+          released = releaseDeviceToken(store, {
+            userId: sessionUser.id,
+            token: deviceToken,
+            at: now(),
+          }).released;
         }
         delete store.sessions[m[1]];
         save(store);
       }
-      return send(res, 200, { ok: true, deviceUnregistered: unregistered });
+      // `deviceUnregistered` keeps its published meaning — this phone no longer
+      // receives the caller's notifications — for app builds already shipped.
+      return send(res, 200, { ok: true, deviceUnregistered: released, deviceUnclaimed: released });
     }
 
     const user = authUser(req, store);
@@ -1409,6 +1485,77 @@ async function handleRequest(req, res) {
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
       return send(res, 200, { catalog: store.catalog });
+    }
+
+    // ---- push registration before there is an account ----
+    //
+    // The only unauthenticated write on the platform, and it exists so an
+    // "update your app" announcement reaches an install whose owner never
+    // signed in — the people most likely to be stuck on a broken build.
+    //
+    // Anonymous only when the request carries no Authorization header at all.
+    // A *stale* bearer token still gets `401`, so an app with an expired
+    // session learns to sign in again instead of silently demoting its
+    // registration to unclaimed.
+    //
+    // Every response on this path is a fixed body. It must not disclose whether
+    // the token was already known, whether it belongs to somebody, or how many
+    // registrations exist: the caller supplies the token, so any variation
+    // would answer those questions for whoever asked. `GET /devices` stays
+    // authenticated and caller-scoped.
+    if (!hasBearerToken(req) && req.method === "POST" && pathname === "/devices") {
+      const body = await readBody(req);
+      const token = normalizeDeviceToken(body.token);
+      if (!token) {
+        return send(res, 400, {
+          error: "device_token_required",
+          message: "Send the FCM registration token this device received from Firebase.",
+        });
+      }
+      if (!isFcmTokenShaped(token)) {
+        return send(res, 400, {
+          error: "invalid_device_token",
+          message:
+            "This is not an FCM registration token. Send the token Firebase issued to this installation, unmodified.",
+        });
+      }
+      const platform = String(body.platform || "").trim();
+      if (!DEVICE_PLATFORMS.includes(platform)) {
+        return send(res, 400, {
+          error: "invalid_device_platform",
+          message: "Choose android, ios, or web for this device registration.",
+          allowed: DEVICE_PLATFORMS,
+        });
+      }
+      const result = registerUnclaimedDeviceToken(store, {
+        token,
+        platform,
+        at: now(),
+        limit: MAX_UNCLAIMED_DEVICES,
+      });
+      if (result.changed) save(store);
+      if (result.evicted > 0) {
+        console.warn(
+          `unclaimed device registry at capacity ${MAX_UNCLAIMED_DEVICES}; evicted ${result.evicted} least-recently-seen registration(s)`,
+        );
+      }
+      return send(res, 200, { ok: true });
+    }
+
+    if (!hasBearerToken(req) && req.method === "POST" && pathname === "/devices/unregister") {
+      const body = await readBody(req);
+      const token = normalizeDeviceToken(body.token);
+      if (!token) {
+        return send(res, 400, {
+          error: "device_token_required",
+          message: "Send the FCM registration token this device is registered with.",
+        });
+      }
+      // Unclaimed rows only. A claimed registration still requires its owner's
+      // bearer token, and the identical response is what stops this from
+      // reporting which of the two it was.
+      if (unregisterDeviceToken(store, { userId: null, token }).changed) save(store);
+      return send(res, 200, { ok: true });
     }
 
     if (!user) {
@@ -1621,6 +1768,10 @@ async function handleRequest(req, res) {
     // token names the caller, and a caller only ever sees or edits records
     // whose userId is their own. There is no second rule and no ops override —
     // nothing on the platform needs to read another person's device tokens.
+    //
+    // Registering an already-unclaimed token here claims it for the caller: one
+    // row, now owned. Unclaimed rows never appear in `GET /devices` — they
+    // belong to nobody, so they are nobody's to list.
     if (req.method === "GET" && pathname === "/devices") {
       return send(res, 200, { devices: deviceTokensFor(store, user.id).map(publicDevice) });
     }
@@ -1790,6 +1941,91 @@ async function handleRequest(req, res) {
         save(store);
       }
       return send(res, 200, { id: notification.id, deletedAt: notification.deletedAt });
+    }
+
+    // ---- platform announcements ----
+    //
+    // One general message to a whole audience. `everyone` is the app-update
+    // channel: it writes a notification for every account (which pushes to
+    // their claimed devices through `save()`) *and* pushes to every unclaimed
+    // handset, which is the only way to reach an install that never signed in.
+    //
+    // An announcement is deliberately not a way to say something personal to a
+    // crowd. Nothing order-, money- or person-specific belongs in one, because
+    // for `everyone` the same words land on handsets nobody has signed in on.
+    if (req.method === "POST" && pathname === "/announcements") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      const audience = String(body.audience || "").trim();
+      if (!ANNOUNCEMENT_AUDIENCES.has(audience)) {
+        return send(res, 400, {
+          error: "invalid_announcement_audience",
+          message: "Choose everyone, clients, suppliers, riders, or ops for this announcement.",
+          allowed: [...ANNOUNCEMENT_AUDIENCES.keys()],
+        });
+      }
+      const title = String(body.title || "").trim();
+      const text = String(body.body || "").trim();
+      if (!title || title.length > ANNOUNCEMENT_TITLE_MAX) {
+        return send(res, 400, {
+          error: "invalid_announcement_title",
+          message: `Enter an announcement title of 1 to ${ANNOUNCEMENT_TITLE_MAX} characters.`,
+        });
+      }
+      if (!text || text.length > ANNOUNCEMENT_BODY_MAX) {
+        return send(res, 400, {
+          error: "invalid_announcement_body",
+          message: `Enter announcement text of 1 to ${ANNOUNCEMENT_BODY_MAX} characters.`,
+        });
+      }
+
+      const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
+      const recipients = store.users.filter((candidate) => roles === null || roles.includes(candidate.role));
+      const announcementId = id("anc");
+      const at = now();
+      for (const recipient of recipients) {
+        store.notifications.push({
+          id: id("ntf"),
+          userId: recipient.id,
+          type: "announcement",
+          orderId: null,
+          announcementId,
+          title,
+          body: text,
+          read: false,
+          at,
+        });
+      }
+      // Read before `save()`, which is where the per-account pushes fire; the
+      // records themselves carry no identity, so the anonymous fan-out below
+      // can use them after the write.
+      const unclaimed = audience === "everyone" ? unclaimedDeviceTokens(store) : [];
+      audit(store, {
+        actor: user,
+        action: "announcement.broadcast",
+        entityType: "announcement",
+        entityId: announcementId,
+        detail: {
+          audience,
+          title,
+          notifiedUsers: recipients.length,
+          unclaimedDevices: unclaimed.length,
+        },
+        reason: body.reason || null,
+      });
+      save(store);
+      deliverAnnouncementPush(unclaimed, { title, body: text });
+      return send(res, 201, {
+        announcement: {
+          id: announcementId,
+          audience,
+          title,
+          body: text,
+          at,
+          notifiedUsers: recipients.length,
+          unclaimedDevices: unclaimed.length,
+        },
+      });
     }
 
     // ---- global operational settings ----

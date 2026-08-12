@@ -4,18 +4,28 @@ import crypto from "node:crypto";
 
 import {
   ANDROID_NOTIFICATION_CHANNEL_ID,
+  PushAudienceError,
+  UNCLAIMED_DEVICE_LIMIT,
+  announcementPushMessage,
+  assertStrangerSafeMessage,
   backfillDeviceTokens,
+  claimDeviceToken,
   classifyFcmFailure,
   createPushDelivery,
   createPushDeliveryOrDisable,
   deviceTokensFor,
   fcmRequestBody,
+  isFcmTokenShaped,
   loadServiceAccount,
   publicDevice,
   pushMessageFor,
   registerDeviceToken,
+  registerUnclaimedDeviceToken,
+  releaseDeviceToken,
   removeDeviceTokenIds,
   signServiceAccountAssertion,
+  unclaimedDeviceLimit,
+  unclaimedDeviceTokens,
   unregisterDeviceToken,
 } from "../src/push.js";
 
@@ -169,6 +179,167 @@ test("pruning removes exactly the named registrations", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Handsets nobody has signed in on
+// ---------------------------------------------------------------------------
+
+test("a registration written before the field gains an explicit unclaimed userId, once", () => {
+  const store = {
+    deviceTokens: [{ id: "dev_legacy", token: "legacy-phone", platform: "android", createdAt: AT, updatedAt: AT }],
+  };
+  assert.equal(backfillDeviceTokens(store), true);
+  assert.equal(store.deviceTokens[0].userId, null);
+  const afterFirst = JSON.stringify(store);
+
+  assert.equal(backfillDeviceTokens(store), false);
+  assert.equal(JSON.stringify(store), afterFirst, "second backfill changed the store");
+});
+
+test("an unclaimed registration answers to nobody, not to an empty caller", () => {
+  const store = {};
+  registerUnclaimedDeviceToken(store, { token: "anonymous-phone", platform: "android", at: AT });
+  registerDeviceToken(store, { userId: "user_client", token: "client-phone", platform: "android", at: AT });
+
+  // The load-bearing guard: an unclaimed row stores `userId: null`, so a
+  // caller-scoped lookup with a missing id must match nothing rather than
+  // matching every anonymous handset on the platform.
+  for (const caller of [null, undefined, "", 0, false]) {
+    assert.deepEqual(deviceTokensFor(store, caller), [], `deviceTokensFor(${JSON.stringify(caller)}) matched a device`);
+  }
+  assert.deepEqual(deviceTokensFor(store, "user_client").map(({ token }) => token), ["client-phone"]);
+  assert.deepEqual(unclaimedDeviceTokens(store).map(({ token }) => token), ["anonymous-phone"]);
+});
+
+test("an unclaimed handset re-registers into one row and is claimed by signing in", () => {
+  const store = {};
+  const first = registerUnclaimedDeviceToken(store, { token: "handset", platform: "android", at: AT });
+  assert.equal(first.created, true);
+  assert.equal(first.device.userId, null);
+
+  const again = registerUnclaimedDeviceToken(store, { token: "handset", platform: "ios", at: LATER });
+  assert.equal(again.created, false);
+  assert.equal(store.deviceTokens.length, 1, "re-registration duplicated an unclaimed handset");
+  assert.equal(store.deviceTokens[0].platform, "ios");
+  assert.equal(store.deviceTokens[0].createdAt, AT);
+  assert.equal(store.deviceTokens[0].updatedAt, LATER);
+
+  const claimed = claimDeviceToken(store, { token: "handset", userId: "user_client", at: LATER });
+  assert.equal(claimed.claimed, true);
+  assert.equal(claimed.previousUserId, null, "claiming an unclaimed handset took it from nobody");
+  assert.equal(store.deviceTokens.length, 1);
+  assert.deepEqual(deviceTokensFor(store, "user_client").map(({ id }) => id), [first.device.id]);
+  assert.deepEqual(unclaimedDeviceTokens(store), []);
+
+  // Signing in again on the same handset is not a second claim.
+  assert.equal(claimDeviceToken(store, { token: "handset", userId: "user_client", at: LATER }).claimed, false);
+  // A handset the server has never seen cannot be claimed by a login alone: a
+  // login knows no platform, so the app registers with its new bearer token.
+  assert.equal(claimDeviceToken(store, { token: "unknown", userId: "user_client", at: LATER }).claimed, false);
+  assert.equal(store.deviceTokens.length, 1);
+});
+
+test("registering under an account claims an unclaimed handset rather than reassigning it", () => {
+  const store = {};
+  registerUnclaimedDeviceToken(store, { token: "handset", platform: "android", at: AT });
+  const registered = registerDeviceToken(store, {
+    userId: "user_client",
+    token: "handset",
+    platform: "android",
+    at: LATER,
+  });
+
+  assert.equal(registered.created, false);
+  assert.equal(registered.reassignedFrom, null, "nobody loses a phone that belonged to nobody");
+  assert.equal(registered.claimedFromUnclaimed, true);
+  assert.equal(store.deviceTokens.length, 1);
+});
+
+test("signing out releases the handset instead of deleting it", () => {
+  const store = {};
+  registerDeviceToken(store, { userId: "user_client", token: "handset", platform: "android", at: AT });
+  registerDeviceToken(store, { userId: "user_rider", token: "rider-phone", platform: "android", at: AT });
+
+  // Another account's sign-out never touches it.
+  assert.equal(releaseDeviceToken(store, { userId: "user_client", token: "rider-phone", at: LATER }).released, false);
+  assert.equal(deviceTokensFor(store, "user_rider").length, 1);
+
+  const released = releaseDeviceToken(store, { userId: "user_client", token: "handset", at: LATER });
+  assert.equal(released.released, true);
+  assert.deepEqual(deviceTokensFor(store, "user_client"), []);
+  assert.deepEqual(
+    unclaimedDeviceTokens(store).map(({ token }) => token),
+    ["handset"],
+    "signing out closed the app-update channel for this handset",
+  );
+  // An unclaimed row is not released a second time.
+  assert.equal(releaseDeviceToken(store, { userId: "user_client", token: "handset", at: LATER }).released, false);
+});
+
+test("an anonymous caller may not move or delete a claimed registration", () => {
+  const store = {};
+  const owned = registerDeviceToken(store, {
+    userId: "user_client",
+    token: "handset",
+    platform: "android",
+    at: AT,
+  }).device;
+  const before = structuredClone(owned);
+
+  const steal = registerUnclaimedDeviceToken(store, { token: "handset", platform: "web", at: LATER });
+  assert.equal(steal.claimedElsewhere, true);
+  assert.equal(steal.changed, false);
+  assert.deepEqual(store.deviceTokens, [before], "an anonymous registration mutated a claimed row");
+
+  assert.equal(unregisterDeviceToken(store, { userId: null, token: "handset" }).changed, false);
+  assert.deepEqual(store.deviceTokens, [before], "an anonymous unregister deleted a claimed row");
+
+  // An unclaimed row is anyone's to remove — the token is the only proof of
+  // possession an anonymous handset can offer.
+  registerUnclaimedDeviceToken(store, { token: "anonymous-phone", platform: "android", at: LATER });
+  assert.equal(unregisterDeviceToken(store, { userId: null, token: "anonymous-phone" }).removed.userId, null);
+  assert.deepEqual(unclaimedDeviceTokens(store), []);
+});
+
+test("the unclaimed pool is bounded, evicting the least recently seen first", () => {
+  const store = {};
+  registerDeviceToken(store, { userId: "user_client", token: "owned", platform: "android", at: AT });
+  for (const [index, token] of ["oldest", "middle", "newest"].entries()) {
+    registerUnclaimedDeviceToken(store, {
+      token,
+      platform: "android",
+      at: `2026-08-11T0${index}:00:00.000Z`,
+      limit: 3,
+    });
+  }
+  assert.equal(unclaimedDeviceTokens(store).length, 3);
+
+  const overflow = registerUnclaimedDeviceToken(store, { token: "arrival", platform: "android", at: LATER, limit: 3 });
+  assert.equal(overflow.evicted, 1);
+  assert.deepEqual(
+    unclaimedDeviceTokens(store).map(({ token }) => token),
+    ["middle", "newest", "arrival"],
+  );
+  assert.deepEqual(
+    deviceTokensFor(store, "user_client").map(({ token }) => token),
+    ["owned"],
+    "a claimed registration was evicted to make room for an anonymous one",
+  );
+});
+
+test("only something shaped like an FCM registration token is accepted anonymously", () => {
+  const real = `${"cQ7hK2ZtR0uWx9Yb".repeat(9).slice(0, 140)}:APA91bHu`;
+  assert.equal(isFcmTokenShaped(real), true);
+  assert.equal(isFcmTokenShaped(`${"a".repeat(80)}-_.:`), true, "a valid token character was rejected");
+  for (const junk of ["", "fcm-token", "a".repeat(63), "a".repeat(4097), `${"a".repeat(80)} b`, `${"a".repeat(80)}<`]) {
+    assert.equal(isFcmTokenShaped(junk), false, `accepted ${JSON.stringify(junk.slice(0, 20))}`);
+  }
+
+  assert.equal(unclaimedDeviceLimit({}), UNCLAIMED_DEVICE_LIMIT);
+  assert.equal(unclaimedDeviceLimit({ GRIDGO_MAX_UNCLAIMED_DEVICES: "25" }), 25);
+  assert.equal(unclaimedDeviceLimit({ GRIDGO_MAX_UNCLAIMED_DEVICES: "-1" }), UNCLAIMED_DEVICE_LIMIT);
+  assert.equal(unclaimedDeviceLimit({ GRIDGO_MAX_UNCLAIMED_DEVICES: "many" }), UNCLAIMED_DEVICE_LIMIT);
+});
+
+// ---------------------------------------------------------------------------
 // Message shaping and money visibility
 // ---------------------------------------------------------------------------
 
@@ -213,6 +384,78 @@ test("the FCM request body pins the Android channel the apps must create", () =>
   assert.equal(body.message.android.notification.channel_id, ANDROID_NOTIFICATION_CHANNEL_ID);
   assert.equal(body.message.android.priority, "high");
   assert.equal(body.message.apns.headers["apns-priority"], "10");
+});
+
+test("an announcement message carries a routing type and nothing else", () => {
+  const message = announcementPushMessage({
+    title: "  Update your app  ",
+    body: "GRIDGO 1.4 is available in the store.",
+  });
+  assert.equal(message.title, "Update your app");
+  assert.deepEqual(message.data, { type: "announcement" });
+  assertStrangerSafeMessage(message);
+
+  const empty = announcementPushMessage({ title: "", body: "" });
+  assert.equal(empty.title, "GRIDGO");
+  assert.equal(empty.body, "Open GRIDGO for the latest update.");
+});
+
+test("a personal notification is refused before it can reach a stranger's handset", () => {
+  const personal = pushMessageFor({
+    id: "ntf_1",
+    userId: "user_client",
+    type: "supplier_assignment_final_price",
+    orderId: "ord_1",
+    title: "Supplier assigned and final price ready",
+    body: "Review the final price and submit the digital downpayment.",
+    at: AT,
+  });
+
+  assert.throws(() => assertStrangerSafeMessage(personal), PushAudienceError);
+  assert.throws(
+    () => assertStrangerSafeMessage({ title: "T", body: "B", data: { type: "announcement", orderId: "ord_1" } }),
+    /orderId/,
+    "an order id was allowed onto an anonymous handset",
+  );
+  assert.throws(
+    () => assertStrangerSafeMessage({ title: "T", body: "B", data: { type: "payout_released" } }),
+    PushAudienceError,
+    "a personal message type was allowed onto an anonymous handset",
+  );
+  assert.throws(() => assertStrangerSafeMessage({ title: "T", body: "B" }), PushAudienceError);
+});
+
+test("the delivery client refuses a fan-out that would push personal content to an unclaimed device", async () => {
+  const { credentials } = testCredentials();
+  const sent = [];
+  const push = createPushDelivery(
+    {},
+    {
+      credentials,
+      logger: silentLogger,
+      fetch: async (url, init) => {
+        if (url === credentials.tokenUri) return tokenResponse();
+        sent.push(JSON.parse(init.body).message.token);
+        return fcmResponse(200, {});
+      },
+    },
+  );
+
+  const store = {};
+  registerUnclaimedDeviceToken(store, { token: "anonymous-phone", platform: "android", at: AT });
+  registerDeviceToken(store, { userId: "user_client", token: "client-phone", platform: "android", at: AT });
+  const personal = pushMessageFor({ id: "ntf_1", userId: "user_client", orderId: "ord_1", title: "T", body: "B", at: AT });
+
+  // The guard sits at the one function that talks to FCM, so it holds even when
+  // a caller hands it the wrong audience outright.
+  await assert.rejects(() => push.send(personal, store.deviceTokens), PushAudienceError);
+  await assert.rejects(() => push.send(personal, unclaimedDeviceTokens(store)), PushAudienceError);
+  assert.deepEqual(sent, [], "a personal notification was pushed to an unclaimed device");
+
+  // The two audiences that are allowed still go through.
+  await push.send(personal, deviceTokensFor(store, "user_client"));
+  await push.send(announcementPushMessage({ title: "Update your app", body: "1.4 is out." }), store.deviceTokens);
+  assert.deepEqual(sent, ["client-phone", "anonymous-phone", "client-phone"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -363,7 +606,7 @@ test("the access token is minted once and reused until it nears expiry", async (
     },
   );
 
-  const devices = [{ id: "dev_1", token: "t1" }];
+  const devices = [{ id: "dev_1", userId: "user_client", token: "t1" }];
   await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), devices);
   await push.send(pushMessageFor({ id: "n2", title: "T", body: "B", at: AT }), devices);
   assert.equal(calls.filter((url) => url === credentials.tokenUri).length, 1, "minted a token per notification");
@@ -395,7 +638,9 @@ test("a burst of concurrent sends shares one in-flight token mint", async () => 
 
   const message = pushMessageFor({ id: "n1", title: "T", body: "B", at: AT });
   await Promise.all(
-    Array.from({ length: 8 }, (_, index) => push.send(message, [{ id: `dev_${index}`, token: `t${index}` }])),
+    Array.from({ length: 8 }, (_, index) =>
+      push.send(message, [{ id: `dev_${index}`, userId: "user_client", token: `t${index}` }]),
+    ),
   );
   assert.equal(mints, 1, "a burst must not mint one access token per send");
 });
@@ -422,7 +667,7 @@ test("a revoked access token is refreshed once and the send retried", async () =
   );
 
   const [result] = await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
-    { id: "dev_1", token: "t1" },
+    { id: "dev_1", userId: "user_client", token: "t1" },
   ]);
   assert.equal(result.ok, true);
   assert.deepEqual(bearers, ["Bearer token-1", "Bearer token-2"]);
@@ -452,10 +697,10 @@ test("one dead phone neither stops the others nor rejects the send", async () =>
   );
 
   const results = await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
-    { id: "dev_live", token: "live" },
-    { id: "dev_dead", token: "dead" },
-    { id: "dev_flaky", token: "flaky" },
-    { id: "dev_boom", token: "exploding" },
+    { id: "dev_live", userId: "user_client", token: "live" },
+    { id: "dev_dead", userId: "user_client", token: "dead" },
+    { id: "dev_flaky", userId: "user_client", token: "flaky" },
+    { id: "dev_boom", userId: "user_client", token: "exploding" },
   ]);
 
   assert.deepEqual(
@@ -483,7 +728,7 @@ test("an unreachable Google surfaces as a failed send, not a thrown error", asyn
   );
 
   const results = await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
-    { id: "dev_1", token: "t1" },
+    { id: "dev_1", userId: "user_client", token: "t1" },
   ]);
   assert.deepEqual(results, [{ deviceId: "dev_1", ok: false, prune: false, code: "transport_error" }]);
   assert.equal(push.health().status, "unavailable");
@@ -500,7 +745,7 @@ test("an unconfigured deployment reports disabled and sends nothing", async () =
     checkedAt: null,
   });
   assert.deepEqual(await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
-    { id: "dev_1", token: "t1" },
+    { id: "dev_1", userId: "user_client", token: "t1" },
   ]), []);
 });
 
@@ -521,7 +766,7 @@ test("a broken credential disables push loudly instead of refusing to boot", asy
   assert.match(warnings[0], /push notifications are DISABLED/);
 
   assert.deepEqual(await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
-    { id: "dev_1", token: "t1" },
+    { id: "dev_1", userId: "user_client", token: "t1" },
   ]), []);
 });
 
@@ -551,7 +796,7 @@ test("health names the Firebase project once a send has succeeded", async () => 
     checkedAt: null,
   });
 
-  await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [{ id: "dev_1", token: "t1" }]);
+  await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [{ id: "dev_1", userId: "user_client", token: "t1" }]);
   const health = push.health();
   assert.equal(health.status, "available");
   assert.equal(typeof health.checkedAt, "string");
