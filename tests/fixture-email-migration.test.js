@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-import { DEMO_FIXTURE_EMAILS, DEMO_PASSWORD, RETIRED_FIXTURE_EMAILS } from "../src/demo-fixtures.js";
+import { DEMO_PASSWORD, HOSTED_LEGACY_FIXTURE_EMAILS, OFFICIAL_DEV_USERS, RETIRED_FIXTURE_EMAILS } from "../src/demo-fixtures.js";
 
 // The captain's live demo owns these; a test must never bind one.
 const FORBIDDEN_PORTS = new Set([3000, 8081, 8082, 8083, 8787, 9000]);
@@ -200,11 +200,20 @@ test("every retired pilot address is renamed and the rename is byte-idempotent",
     );
   }
 
-  // Ids are what every other record points at, so they must be identical.
+  // Hosted seed ids stay put; official Clerk rows are added, never a rename.
   assert.deepEqual(
-    migrated.users.map((user) => user.id).sort(),
+    migrated.users
+      .filter((user) => PRE_MIGRATION_USERS.some((fixture) => fixture.id === user.id))
+      .map((user) => user.id)
+      .sort(),
     PRE_MIGRATION_USERS.map((user) => user.id).sort(),
   );
+  for (const fixture of OFFICIAL_DEV_USERS) {
+    assert.equal(
+      migrated.users.find((user) => user.id === fixture.id)?.email,
+      fixture.email,
+    );
+  }
 
   assert.equal((await loadOnce(storePath)).started, true);
   assert.equal(fs.readFileSync(storePath, "utf8"), afterFirst, "second load rewrote the store");
@@ -450,8 +459,8 @@ test("a fresh seed needs no rename and every retirement target is a live fixture
   // Drift guard: a rename may only ever land on an address the repository still
   // ships, and a retired address may never also be a live one.
   for (const [retired, replacement] of RETIRED_FIXTURE_EMAILS) {
-    assert.equal(DEMO_FIXTURE_EMAILS.has(replacement), true, `${replacement} is not a shipped fixture`);
-    assert.equal(DEMO_FIXTURE_EMAILS.has(retired), false, `${retired} is both retired and shipped`);
+    assert.equal(HOSTED_LEGACY_FIXTURE_EMAILS.has(replacement), true, `${replacement} is not a shipped hosted fixture`);
+    assert.equal(HOSTED_LEGACY_FIXTURE_EMAILS.has(retired), false, `${retired} is both retired and shipped`);
   }
-  assert.equal(RETIRED_FIXTURE_EMAILS.size, DEMO_FIXTURE_EMAILS.size);
+  assert.equal(RETIRED_FIXTURE_EMAILS.size, HOSTED_LEGACY_FIXTURE_EMAILS.size);
 });

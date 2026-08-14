@@ -40,14 +40,15 @@ If MinIO is stopped, the API still starts and serves every non-file route, and `
 
 ## Local development demo accounts
 
+Official Development Client / Supplier / Rider people are the Clerk Development trio. Do not log in as `client@` / `individual@` / `supplier@` / `rider@` `@gridgo.ph` for those roles.
+
 | Email | Password | Role | Notes |
 |---|---|---|---|
-| `client@gridgo.ph` | `Ilovegridgo-0990` | client | **business** — GRIDGO Business lockup (`accountType: "business"`, orgName set) |
-| `individual@gridgo.ph` | `Ilovegridgo-0990` | client | **individual** — plain GRIDGO lockup (`accountType: "individual"`) |
-| `supplier@gridgo.ph` | `Ilovegridgo-0990` | supplier | verification: approved |
-| `rider@gridgo.ph` | `Ilovegridgo-0990` | rider | verification: approved |
-| `ops@gridgo.ph` | `Ilovegridgo-0990` | ops_admin | |
-| `admin@gridgo.ph` | `Ilovegridgo-0990` | super_admin | |
+| `felyciaaa0220@gmail.com` | `Ilovegridgo-0990` | client | Fely Cia — Clerk Development; `accountType: "individual"` |
+| `markdavidprado@gmail.com` | `Ilovegridgo-0990` | supplier | Mark David Prado — approved; PrintRight shop pin |
+| `mddprado00290@usep.edu.ph` | `Ilovegridgo-0990` | rider | Mark David Prado — approved |
+| `ops@gridgo.ph` | `Ilovegridgo-0990` | ops_admin | remaining platform fixture while hosted `AUTH_MODE` is `legacy` |
+| `admin@gridgo.ph` | `Ilovegridgo-0990` | super_admin | remaining platform fixture while hosted `AUTH_MODE` is `legacy` |
 
 Login: `POST /auth/login` `{ "email", "password" }` → `{ token, user }`
 
@@ -99,11 +100,11 @@ Client users expose an explicit, authoritative `accountType` on every public use
 
 Idempotent backfill on `load()` sets missing client `accountType` to `"individual"` without wiping other data.
 
-**Demo fixture convergence (separate from backfill):** on every local-development `load()`, seed demo accounts (`*@gridgo.ph` listed in `src/demo-fixtures.js`) are created if missing and their fixture fields (including `client@` → `accountType: "business"`) are brought up to the seed definition. The retired shipped password is rotated to `Ilovegridgo-0990`; a password that has already diverged is preserved. In production, the deployment-configured password is authoritative for each of those exact fixture identities. Convergence never rewrites an existing user's `email` — see the domain migration below. Captain-created users and all non-user collections (orders, credits, …) are never touched.
+**Demo fixture convergence (separate from backfill):** on every local-development `load()`, advertised accounts in `DEMO_USERS` (the Clerk Development trio plus `ops@` / `admin@`) are created if missing, and the unadvertised hosted six stay on their own ids so scenario orders are not attached to Fely / Mark. Official Clerk rows are new fixture ids (`user_fely_client`, `user_test_supplier`, `user_test_rider`); if another user already holds that email, convergence skips rather than overwriting. The retired shipped password is rotated to `Ilovegridgo-0990`; a password that has already diverged is preserved. In production, only the six `@gridgo.ph` identities are fixtures and each has a deployment-configured password — Gmail/USEP addresses are never `GRIDGO_*_PASSWORD` people. Convergence never rewrites an existing user's `email` — see the domain migration below. Captain-created users and all non-user collections (orders, credits, …) are never touched.
 
 **These six identities used to live on `@gridgo.local`.** `.local` is reserved for multicast DNS and could never address a hosted API, so they moved to the captain's real domain. A store seeded before the move is renamed in place on `load()` by `migrateFixtureEmailDomain()`, keyed to the exact retired address in `RETIRED_FIXTURE_EMAILS` — never a `.local`-wide rule. Renaming preserves everything the account owned, because only login reads `email`; orders, sessions, credits, claims, issues, notifications and device push registrations all reference `user.id`. An account holding a fixture *id* under a diverged address is left alone, and a store where both the old and new address exist makes startup refuse rather than merge two accounts onto one login. Full operator detail: [deployment data boundary](docs/DEPLOYMENT.md#the-pilot-logins-moved-to-gridgoph--no-operator-step-no-reseed).
 
-`Ilovegridgo-0990` is a repository-visible local-development credential, not a secret. Do not reuse it for any hosted account or environment. Production retains these six fixed identities but requires a distinct deployment-configured password for each one; see [deployment environment](docs/DEPLOYMENT.md#2-required-environment).
+`Ilovegridgo-0990` is a repository-visible local-development credential, not a secret. Do not reuse it for any hosted account or environment. The hosted `talasora` pilot stays `AUTH_MODE=legacy` and keeps the six `@gridgo.ph` identities with distinct deployment-configured passwords; see [deployment environment](docs/DEPLOYMENT.md#2-required-environment). Those addresses are not the local Client / Supplier / Rider logins.
 
 ## Mobile apps
 
@@ -274,7 +275,7 @@ Production startup also refuses a store containing known local scenario records 
 
 1. **Fixture email domain migration** renames the six shipped pilot identities off the retired `@gridgo.local` addresses onto `@gridgo.ph`, in place, keeping the `user.id` every other record points at. It runs first so later passes read current addresses. Exact-address match only; refuses on collision.
 2. **Backfill** migrates taxonomy/geography/files/platform structures and runs `backfillOperationalModel()` for v2 settings, order money, digital installments, milestones, checklist, retired-state/COD normalization, and issue-window expiry **without** wiping captain demo orders.
-3. **Fixture convergence** ensures seed demo accounts from `src/demo-fixtures.js` exist and match their defined identity fields (so a live store that predated `individual@gridgo.ph` or still has `client@` as `individual` is fixed without `npm run reset`).
+3. **Fixture convergence** ensures seed demo accounts from `src/demo-fixtures.js` exist and match their defined identity fields (locally: create the official Clerk trio if missing; do not rename `user_client` onto a Gmail address).
 
 Fixture convergence only mutates allowlisted demo users; orders, credits, proofs, claims, issues, sessions, and location pings stay byte-stable.
 

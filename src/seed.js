@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
-import { DEMO_PASSWORD, DEMO_SUPPLIER_SHOP } from "./demo-fixtures.js";
+import { DEMO_PASSWORD, DEMO_SUPPLIER_SHOP, DEMO_USERS } from "./demo-fixtures.js";
 import { configuredDemoUsers, isProduction } from "./runtime-config.js";
 import { defaultTaxonomy } from "./taxonomy.js";
 import {
@@ -748,7 +748,10 @@ console.log(`wrote ${storePath}`);
 if (production) {
   console.log("hosted pilot accounts: passwords loaded from GRIDGO_*_PASSWORD environment variables");
 } else {
-  console.log(`demo logins: *@gridgo.ph / ${DEMO_PASSWORD}`);
+  console.log(`demo logins (${DEMO_PASSWORD}):`);
+  for (const user of DEMO_USERS) {
+    console.log(`  ${user.email}  ${user.role}`);
+  }
 }
 const ordersByState = Object.fromEntries(
   [...new Set(store.orders.map((order) => order.state))]

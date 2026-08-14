@@ -74,7 +74,7 @@ import {
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
-import { RETIRED_FIXTURE_EMAILS } from "./demo-fixtures.js";
+import { OFFICIAL_DEV_USER_IDS, RETIRED_FIXTURE_EMAILS } from "./demo-fixtures.js";
 import {
   configuredDemoUsers,
   isProduction,
@@ -731,8 +731,12 @@ function migrateFixtureEmailDomain(store) {
  * Bring seed demo accounts (fixtures) up to their defined state on an existing store.
  *
  * Fixture boundary (must stay tight — wrong match eats captain data):
- * - Only emails/ids listed in DEMO_USERS from demo-fixtures.js are fixtures.
+ * - Local PILOT_USERS are LOCAL_SEED_USERS (official Clerk trio + hosted six).
+ *   Production PILOT_USERS are HOSTED_LEGACY_USERS only — never Gmail/USEP.
  * - Match by exact email first, else by stable seed id. Never by role or domain alone.
+ * - Official Clerk fixtures are new rows. If another user already holds that
+ *   email, or the fixture id exists under a different email, skip — do not
+ *   overwrite and do not rename user_client / user_supplier / user_rider.
  * - Create a fixture user when missing; converge only attributes defined on the fixture.
  * - Never renumber an existing user's id (orders/credits FK safety).
  * - Never touch orders, credits, proofs, claims, issues, sessions, locationPings,
@@ -745,6 +749,46 @@ function migrateFixtureEmailDomain(store) {
  *
  * Returns true if the store was mutated.
  */
+function applyFixtureAttributes(user, fixture) {
+  let changed = false;
+  for (const [key, value] of Object.entries(fixture)) {
+    if (key === "id") continue;
+    // Email is a login key, not a convergeable attribute. This user may have
+    // been matched by stable seed id, which means its address has diverged —
+    // rewriting it would take a real person's login. The only sanctioned
+    // rename is migrateFixtureEmailDomain(), which matches the exact retired
+    // address and refuses on collision.
+    if (key === "email") continue;
+    // Rotate only the exact retired fixture credential. A password that has
+    // diverged is user-owned and must never be silently overwritten.
+    if (key === "password" && !PRODUCTION && user.password !== LEGACY_DEMO_PASSWORD) continue;
+    if (!fixtureValueEqual(user[key], value)) {
+      user[key] = cloneFixtureValue(value);
+      changed = true;
+    }
+  }
+  if (
+    fixture.verificationStatus === "approved" &&
+    user.verificationStatus === "approved" &&
+    user.verifiedAt == null
+  ) {
+    user.verifiedAt = now();
+    changed = true;
+  }
+  return changed;
+}
+
+function createFixtureUser(fixture) {
+  const created = {};
+  for (const [key, value] of Object.entries(fixture)) {
+    created[key] = cloneFixtureValue(value);
+  }
+  if (created.verificationStatus === "approved" && created.verifiedAt == null) {
+    created.verifiedAt = now();
+  }
+  return created;
+}
+
 function convergeDemoFixtures(store) {
   let changed = false;
   if (!Array.isArray(store.users)) {
@@ -753,51 +797,24 @@ function convergeDemoFixtures(store) {
   }
 
   for (const fixture of PILOT_USERS) {
-    let user = store.users.find((u) => u.email === fixture.email);
-    if (!user) {
-      user = store.users.find((u) => u.id === fixture.id);
+    const byEmail = store.users.find((u) => u.email === fixture.email);
+    const byId = store.users.find((u) => u.id === fixture.id);
+
+    if (OFFICIAL_DEV_USER_IDS.has(fixture.id)) {
+      // Never steal an existing occupant of the official email, and never
+      // attach a Clerk id to a hosted seed row whose address has diverged.
+      if (byEmail && byEmail.id !== fixture.id) continue;
+      if (byId && byId.email !== fixture.email) continue;
     }
 
+    const user = byEmail || byId;
     if (!user) {
-      const created = {};
-      for (const [key, value] of Object.entries(fixture)) {
-        created[key] = cloneFixtureValue(value);
-      }
-      // Approved supplier/rider fixtures need verification timestamps once on create.
-      if (created.verificationStatus === "approved" && created.verifiedAt == null) {
-        created.verifiedAt = now();
-      }
-      store.users.push(created);
+      store.users.push(createFixtureUser(fixture));
       changed = true;
       continue;
     }
 
-    // Converge fixture-owned attributes only. Leave id and any extra keys alone.
-    for (const [key, value] of Object.entries(fixture)) {
-      if (key === "id") continue;
-      // Email is a login key, not a convergeable attribute. This user may have
-      // been matched by stable seed id, which means its address has diverged —
-      // rewriting it would take a real person's login. The only sanctioned
-      // rename is migrateFixtureEmailDomain(), which matches the exact retired
-      // address and refuses on collision.
-      if (key === "email") continue;
-      // Rotate only the exact retired fixture credential. A password that has
-      // diverged is user-owned and must never be silently overwritten.
-      if (key === "password" && !PRODUCTION && user.password !== LEGACY_DEMO_PASSWORD) continue;
-      if (!fixtureValueEqual(user[key], value)) {
-        user[key] = cloneFixtureValue(value);
-        changed = true;
-      }
-    }
-    // If fixture requires approved verification but store never recorded a stamp, set once.
-    if (
-      fixture.verificationStatus === "approved" &&
-      user.verificationStatus === "approved" &&
-      user.verifiedAt == null
-    ) {
-      user.verifiedAt = now();
-      changed = true;
-    }
+    if (applyFixtureAttributes(user, fixture)) changed = true;
   }
 
   return changed;
@@ -857,7 +874,9 @@ function backfillPlatform(store) {
     if (u.role === "supplier") {
       if (u.verificationStatus == null) {
         // Demo supplier is treated as accredited so matching works without reset
-        u.verificationStatus = !PRODUCTION && u.id === "user_supplier" ? "approved" : "unverified";
+        u.verificationStatus = !PRODUCTION && (u.id === "user_supplier" || u.id === "user_test_supplier")
+          ? "approved"
+          : "unverified";
         changed = true;
       }
       if (u.verificationNote == null) {
@@ -877,7 +896,11 @@ function backfillPlatform(store) {
 
   // If no services at all, seed a live catalogue for the demo supplier (idempotent key)
   if (!PRODUCTION && store.supplierServices.length === 0) {
-    const demoSupplier = (store.users || []).find((u) => u.id === "user_supplier" || (u.role === "supplier" && u.email === "supplier@gridgo.ph"));
+    const demoSupplier = (store.users || []).find((u) =>
+      u.id === "user_test_supplier" || (u.role === "supplier" && u.email === "markdavidprado@gmail.com")
+    ) || (store.users || []).find((u) =>
+      u.id === "user_supplier" || (u.role === "supplier" && u.email === "supplier@gridgo.ph")
+    );
     if (demoSupplier) {
       const ts = now();
       store.supplierServices.push(
