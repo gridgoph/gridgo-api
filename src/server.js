@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { authConfiguration, authenticateBearerToken } from "./auth.js";
+import {
+  activateClerkClientProfile,
+  authConfiguration,
+  authenticateBearerToken,
+  createClerkBackend,
+} from "./auth.js";
 import {
   AttachmentError,
   attachFileReference,
@@ -85,6 +90,7 @@ const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const PRODUCTION = isProduction(process.env);
 const AUTH = authConfiguration(process.env);
+const clerkBackend = AUTH.mode === "legacy" ? null : createClerkBackend(AUTH);
 // Baked into the image at build time (see Dockerfile). `/health` reports them so
 // a deploy can be *proven* to have taken: a stale container answering `ok` is
 // otherwise indistinguishable from a deploy that never happened.
@@ -1451,6 +1457,33 @@ async function handleRequest(req, res) {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
       return send(res, 200, { user: publicUser(auth.user) });
+    }
+
+    if (req.method === "POST" && pathname === "/auth/clerk/activate") {
+      if (AUTH.mode === "legacy") {
+        return send(res, 404, {
+          error: "not_found",
+          message: "Clerk client activation is available only when AUTH_MODE is dual or clerk.",
+        });
+      }
+      const header = req.headers.authorization || "";
+      const match = /^Bearer\s+(.+)$/i.exec(header);
+      const result = await activateClerkClientProfile({
+        token: match?.[1] || null,
+        store,
+        config: AUTH,
+        clerkBackend,
+        createId: id,
+        now,
+      });
+      if (result.mutated) save(store);
+      if (result.status !== 200) {
+        return send(res, result.status, {
+          error: result.error,
+          message: result.message,
+        });
+      }
+      return send(res, 200, { user: publicUser(result.user) });
     }
 
     if (req.method === "POST" && pathname === "/auth/logout") {

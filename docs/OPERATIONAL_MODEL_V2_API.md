@@ -19,6 +19,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/catalog` | public | demo product catalogue |
 | POST | `/auth/signup` | public | self-signup for client/supplier/rider |
 | POST | `/auth/login` | public | `{email,password}` → `{token,user}` |
+| POST | `/auth/clerk/activate` | Clerk JWT when `AUTH_MODE` is `dual` or `clerk` | link or create a client after Google / public SSO; `404` in `legacy` |
 | GET | `/auth/me` | authenticated | `{user}` without password |
 | POST | `/auth/logout` | authenticated/token optional | invalidates current token; optionally releases this phone back to unclaimed |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
@@ -151,6 +152,21 @@ The response user has `verificationStatus: "pending"`. Success for every role is
 Supplier signup also creates an authenticated session immediately: the `201` response token is valid while `verificationStatus` remains `pending`. The supplier uses that token to upload and attach the required business permit, valid ID, and sample-work photos after the account exists. Pending status does not block profile/document setup, but it continues to block matching and accepting work.
 
 Approval is the existing `POST /users/:id/verification` body `{ "status": "approved", "reason": "..." }`. Pending suppliers cannot be assigned by the transition endpoint; pending riders cannot list, accept, or transition into dispatch assignment.
+
+### `POST /auth/clerk/activate`
+
+Auth: `Authorization: Bearer <Clerk session JWT>` when `AUTH_MODE` is `dual` or `clerk`. Empty body. `legacy` returns `404 not_found`.
+
+Used once after Google / public SSO. `/auth/me` does not create or email-link accounts.
+
+- Verifies the JWT the same way other Clerk routes do (signature, issuer, `azp`, expiry).
+- Loads the Clerk user with the Backend API.
+- Only `role=client` may self-activate. A Clerk or local supplier/rider/ops identity is `403 invitation_required`.
+- If exactly one existing local user has the same email, `role=client`, and no `clerkUserId`, that profile is linked. No merge across roles.
+- If no such user exists, a client is created (`clerkUserId`, email, name, phone if present). `accountType` is left unset until the client app collects it.
+- Writes Clerk `publicMetadata.gridgoRole=client` so later session tokens carry `gridgo_role`.
+- Success is `200 { user }` (`publicUser`; no `clerkUserId`). Call `/auth/me` again with a **fresh** token that includes `gridgo_role=client`.
+- Unmapped JWT on `/auth/me` remains `401 unauthorized`. A linked identity with a missing or mismatched role claim remains `403 forbidden`.
 
 ## Supplier shop and verification profile
 
