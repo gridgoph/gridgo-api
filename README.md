@@ -73,7 +73,9 @@ clerk env pull --instance dev --file .env.local
 node --env-file=.env.local src/server.js
 ```
 
-Never commit `.env.local` or print `CLERK_SECRET_KEY`. A Clerk JWT resolves only through the additive internal `User.clerkUserId` field; there is no email fallback or automatic account linking. After Clerk verifies signature, time claims, and `azp`, the API also requires the exact configured issuer and requires session claim `gridgo_role` to equal the local `User.role`. An unmapped identity is `401`; a missing, invalid, or mismatched role is `403`. `clerkUserId` is not exposed by `publicUser`.
+Never commit `.env.local` or print `CLERK_SECRET_KEY`. Ordinary authenticated routes resolve a Clerk JWT only through the additive internal `User.clerkUserId` field — there is no email fallback on `/auth/me` or other bearer routes. After Clerk verifies signature, time claims, and `azp`, the API also requires the exact configured issuer and requires session claim `gridgo_role` to equal the local `User.role`. An unmapped identity is `401`; a missing, invalid, or mismatched role is `403`. `clerkUserId` is not exposed by `publicUser`.
+
+A first-time Google / public SSO client has no `clerkUserId` and usually no `gridgo_role` yet. In `dual` or `clerk`, the app calls `POST /auth/clerk/activate` once with the Clerk session JWT. That route loads the Clerk user via the Backend API and may only activate `role=client`: it links `clerkUserId` when exactly one existing client shares that email and has no link, or it creates a client profile. Supplier, rider, and operations emails are refused (`403 invitation_required`). It then writes Clerk `publicMetadata.gridgoRole=client` so later session tokens carry `gridgo_role`. `/auth/me` stays fail-closed until that link exists and the caller presents a fresh token with a matching role claim. The hosted `talasora` pilot stays `AUTH_MODE=legacy`, so this route is `404` there.
 
 Only clients may use public signup while `AUTH_MODE` is `dual` or `clerk`. Supplier and rider signup returns `403 invitation_required`; those roles are invitation-assigned. Legacy mode retains the existing demo signup behavior, and no signup route writes Clerk metadata.
 
@@ -128,6 +130,7 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 |---|---|---|---|
 | POST | `/auth/login` | public | issue token |
 | POST | `/auth/signup` | public | client self-signup in dual/Clerk; legacy demo also accepts supplier/rider |
+| POST | `/auth/clerk/activate` | Clerk JWT (dual/clerk) | link or create a client profile after Google / public SSO |
 | GET | `/auth/me` | any | current user + role |
 | POST | `/auth/logout` | any | revoke token |
 

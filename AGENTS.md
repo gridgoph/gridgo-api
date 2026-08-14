@@ -15,7 +15,9 @@ See `PRD.md` and `README.md` for full route tables and field shapes.
 
 ## Clerk authentication transition
 
-`src/auth.js` owns `AUTH_MODE=legacy|dual|clerk` and all Clerk session verification. Dual mode accepts only the existing `tok_*` family as legacy; every other bearer is sent to `@clerk/backend` and can never fall back to the JSON session store after verification fails. Clerk identity maps only by additive `User.clerkUserId`; issuer and `azp` must match environment allowlists, and `gridgo_role` must exactly match local `User.role`. `publicUser` never exposes the link.
+`src/auth.js` owns `AUTH_MODE=legacy|dual|clerk` and all Clerk session verification. Dual mode accepts only the existing `tok_*` family as legacy; every other bearer is sent to `@clerk/backend` and can never fall back to the JSON session store after verification fails. Ordinary authenticated routes map only by additive `User.clerkUserId`; issuer and `azp` must match environment allowlists, and `gridgo_role` must exactly match local `User.role`. `publicUser` never exposes the link.
+
+A first-time Google / public SSO client activates through `POST /auth/clerk/activate` only. That route may link by email or create a `role=client` user and write Clerk `publicMetadata.gridgoRole=client`. It never grants supplier, rider, or ops. `/auth/me` stays fail-closed (unmapped `401`, wrong-role `403`).
 
 `dual` and `clerk` refuse startup without `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES`. The hosted `talasora` deployment stays `legacy` until a separate cutover. In dual/Clerk modes, public signup is client-only; supplier/rider roles remain Operations-assigned and no signup route writes Clerk metadata.
 
