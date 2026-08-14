@@ -2,6 +2,7 @@ node_modules/
 data/store.json
 data/*.log
 .env
+.env.local
 .tmp/
 .DS_Store
 

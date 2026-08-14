@@ -12,9 +12,10 @@
     "reset": "node src/seed.js --reset"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9.0"
   },
   "dependencies": {
+    "@clerk/backend": "3.16.5",
     "minio": "8.0.7"
   }
 }

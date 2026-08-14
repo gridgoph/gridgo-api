@@ -3,8 +3,8 @@
 # GRIDGO API — production image.
 #
 # Two stages, so the shipped layer carries no build toolchain and no dev tree:
-#   deps    — `npm ci --omit=dev`, which for this project is exactly one runtime
-#             dependency (`minio`); everything else is `node:` builtins.
+#   deps    — `npm ci --omit=dev`, installing the pinned MinIO and Clerk backend
+#             SDK dependency trees.
 #   runner  — that tree plus `src/`, running as a non-root user.
 #
 # There is no compile step. This is plain ESM run by node, so the image is the

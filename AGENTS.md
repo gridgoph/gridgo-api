@@ -4,7 +4,7 @@ Local **custom** demo backend for all GRIDGO apps.
 
 ## MVP
 
-- Custom auth (no Clerk)
+- Legacy JSON sessions plus opt-in Clerk session verification (default `AUTH_MODE=legacy`)
 - JSON store (no Supabase)
 - Pilot Credits grants plus manually confirmed QR installments (no PayMongo, no COD)
 - Replaceable: keep route contracts stable
@@ -12,6 +12,12 @@ Local **custom** demo backend for all GRIDGO apps.
 - Ops/super: users, roles, verification, zones, grants, claims, issues, audit
 
 See `PRD.md` and `README.md` for full route tables and field shapes.
+
+## Clerk authentication transition
+
+`src/auth.js` owns `AUTH_MODE=legacy|dual|clerk` and all Clerk session verification. Dual mode accepts only the existing `tok_*` family as legacy; every other bearer is sent to `@clerk/backend` and can never fall back to the JSON session store after verification fails. Clerk identity maps only by additive `User.clerkUserId`; issuer and `azp` must match environment allowlists, and `gridgo_role` must exactly match local `User.role`. `publicUser` never exposes the link.
+
+`dual` and `clerk` refuse startup without `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES`. The hosted `talasora` deployment stays `legacy` until a separate cutover. In dual/Clerk modes, public signup is client-only; supplier/rider roles remain Operations-assigned and no signup route writes Clerk metadata.
 
 ## Geography (map / OSRM)
 
@@ -140,7 +146,7 @@ Four things about this deployment are load-bearing and easy to break:
 
 ## Constraints
 
-- Plain `node:http` only except the `minio` S3 SDK, approved for streamed object storage and presigned SigV4 URLs so signing is never hand-rolled; add no other direct npm dependencies. FCM push is deliberately hand-rolled on `node:crypto` + `fetch` rather than `firebase-admin`
+- Plain `node:http` only except the `minio` S3 SDK and the approved `@clerk/backend` verifier; do not hand-roll JWT crypto or add other direct npm dependencies. FCM push remains deliberately hand-rolled on `node:crypto` + `fetch` rather than `firebase-admin`
 - Do not change unrelated QA edges/role rules; payment, POF milestones, checklist, delivery, and issue expiry follow `docs/OPERATIONAL_MODEL_V2_API.md`
 - Authorisation on every route; `{ error: "snake_case" }`
 
