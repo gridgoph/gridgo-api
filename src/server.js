@@ -1622,7 +1622,7 @@ async function handleRequest(req, res) {
 
         await enqueueMutation(async () => {
           const latestStore = load();
-          const latestUser = authUser(req, latestStore);
+          const latestUser = (await authenticateRequest(req, latestStore)).user;
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
           }
@@ -1646,7 +1646,7 @@ async function handleRequest(req, res) {
         try {
           const ready = await enqueueMutation(async () => {
             const latestStore = load();
-            const latestUser = authUser(req, latestStore);
+            const latestUser = (await authenticateRequest(req, latestStore)).user;
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
               throw new AttachmentError(
@@ -1708,7 +1708,7 @@ async function handleRequest(req, res) {
       }
       return await enqueueMutation(async () => {
         const latestStore = load();
-        const latestUser = authUser(req, latestStore);
+        const latestUser = (await authenticateRequest(req, latestStore)).user;
         if (!latestUser) {
           throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
         }
@@ -1750,7 +1750,7 @@ async function handleRequest(req, res) {
       const fileId = pathname.split("/")[2];
       const pending = await enqueueMutation(async () => {
         const latestStore = load();
-        const latestUser = authUser(req, latestStore);
+        const latestUser = (await authenticateRequest(req, latestStore)).user;
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";

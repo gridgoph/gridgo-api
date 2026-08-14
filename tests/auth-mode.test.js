@@ -156,6 +156,16 @@ async function request(api, pathname, { method = "GET", token, body } = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+async function waitForStorageStatus(api, expected) {
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    const response = await fetch(`${api}/health`);
+    const health = await response.json();
+    if (health.storage?.status === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`storage did not reach ${expected}`);
+}
+
 test("legacy is the default and dual mode refuses incomplete Clerk configuration", async () => {
   await withTempStore(async (storePath) => {
     seed(storePath);
@@ -326,6 +336,50 @@ test("dual mode blocks public supplier and rider signup while legacy keeps fixtu
       assert.notEqual(response.body.error, "invitation_required");
     } finally {
       await stopServer(legacy);
+    }
+  });
+});
+
+test("default legacy signup token survives the upload store recheck", async () => {
+  await withTempStore(async (storePath) => {
+    seed(storePath);
+    const unavailableStoragePort = await freeHighPort();
+    const instance = await startServer(storePath, {
+      MINIO_ENDPOINT: `http://127.0.0.1:${unavailableStoragePort}`,
+      MINIO_PUBLIC_URL: `http://127.0.0.1:${unavailableStoragePort}`,
+    });
+    try {
+      assert.equal(instance.started, true, instance.output());
+      await waitForStorageStatus(instance.api, "unavailable");
+
+      const signup = await request(instance.api, "/auth/signup", {
+        method: "POST",
+        body: {
+          role: "client",
+          email: "legacy-upload@example.com",
+          password: "legacy-upload-password",
+          name: "Legacy Upload",
+          phone: "+63 917 000 0000",
+          accountType: "individual",
+        },
+      });
+      assert.equal(signup.status, 201, JSON.stringify(signup.body));
+      assert.match(signup.body.token, /^tok_/);
+
+      const form = new FormData();
+      form.append("purpose", "artwork");
+      form.append("file", new Blob([Buffer.from("%PDF-1.4\n%%EOF\n")], { type: "application/pdf" }), "smoke.pdf");
+      const upload = await fetch(`${instance.api}/files`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${signup.body.token}` },
+        body: form,
+      });
+      const uploadBody = await upload.json();
+
+      assert.equal(upload.status, 503, JSON.stringify(uploadBody));
+      assert.equal(uploadBody.error, "minio_unavailable");
+    } finally {
+      await stopServer(instance);
     }
   });
 });
