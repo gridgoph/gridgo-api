@@ -9,6 +9,8 @@ This is a single-host, single-process pilot backend. Domain data lives in one JS
 
 Every merge to the default branch builds a container image, publishes it to this repository's private GitHub Container Registry, and asks the server to pull and restart. Nothing is deployed by hand and nothing is built on the server.
 
+The hosted `talasora` pilot remains on `AUTH_MODE=legacy` during the Clerk transition. `legacy` is the server default, so this deployment does not receive a Clerk secret, issuer, or authorized-party list until a separately approved cutover. Never copy the Development-instance `sk_test_` key into `gridgo-api.env`; the later production cutover uses environment-owned Production-instance values (`sk_live_` and its matching issuer).
+
 | Piece | Lives at |
 | --- | --- |
 | Production image | `Dockerfile` |

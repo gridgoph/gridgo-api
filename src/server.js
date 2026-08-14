@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { authConfiguration, authenticateBearerToken } from "./auth.js";
 import {
   AttachmentError,
   attachFileReference,
@@ -83,6 +84,7 @@ const STORE = process.env.STORE_PATH ? path.resolve(process.env.STORE_PATH) : DE
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const PRODUCTION = isProduction(process.env);
+const AUTH = authConfiguration(process.env);
 // Baked into the image at build time (see Dockerfile). `/health` reports them so
 // a deploy can be *proven* to have taken: a stale container answering `ok` is
 // otherwise indistinguishable from a deploy that never happened.
@@ -302,13 +304,10 @@ function hasBearerToken(req) {
   return /^Bearer\s+(.+)$/i.test(req.headers.authorization || "");
 }
 
-function authUser(req, store) {
+async function authenticateRequest(req, store) {
   const h = req.headers.authorization || "";
   const m = /^Bearer\s+(.+)$/i.exec(h);
-  if (!m) return null;
-  const session = store.sessions[m[1]];
-  if (!session) return null;
-  return store.users.find((u) => u.id === session.userId) || null;
+  return authenticateBearerToken(m?.[1] || null, store, AUTH);
 }
 
 /** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
@@ -326,6 +325,7 @@ function resolveClientAccountType(u) {
 function publicUser(u) {
   if (!u) return null;
   const { password, ...rest } = u;
+  delete rest.clerkUserId;
   // Identity-document references are exposed only through the dedicated, caller-aware
   // verification projection. publicUser is reused in catalogue and matching responses.
   delete rest.verificationDocumentFileIds;
@@ -1325,6 +1325,12 @@ async function handleRequest(req, res) {
           { allowedRoles },
         );
       }
+      if (AUTH.mode !== "legacy" && ["supplier", "rider"].includes(role)) {
+        return send(res, 403, {
+          error: "invitation_required",
+          message: "Supplier and rider access is assigned by GRIDGO Operations through a Clerk invitation.",
+        });
+      }
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
       const name = String(body.name || "").trim();
@@ -1442,9 +1448,9 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/auth/me") {
-      const user = authUser(req, store);
-      if (!user) return send(res, 401, { error: "unauthorized" });
-      return send(res, 200, { user: publicUser(user) });
+      const auth = await authenticateRequest(req, store);
+      if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
+      return send(res, 200, { user: publicUser(auth.user) });
     }
 
     if (req.method === "POST" && pathname === "/auth/logout") {
@@ -1463,16 +1469,16 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const deviceToken = normalizeDeviceToken(body?.deviceToken);
       let released = false;
-      if (m && store.sessions[m[1]]) {
-        const sessionUser = authUser(req, store);
-        if (deviceToken && sessionUser) {
+      const auth = await authenticateRequest(req, store);
+      if (m && auth.user) {
+        if (deviceToken) {
           released = releaseDeviceToken(store, {
-            userId: sessionUser.id,
+            userId: auth.user.id,
             token: deviceToken,
             at: now(),
           }).released;
         }
-        delete store.sessions[m[1]];
+        if (auth.kind === "legacy") delete store.sessions[m[1]];
         save(store);
       }
       // `deviceUnregistered` keeps its published meaning — this phone no longer
@@ -1480,7 +1486,8 @@ async function handleRequest(req, res) {
       return send(res, 200, { ok: true, deviceUnregistered: released, deviceUnclaimed: released });
     }
 
-    const user = authUser(req, store);
+    const auth = await authenticateRequest(req, store);
+    const user = auth.user;
 
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
@@ -1559,6 +1566,7 @@ async function handleRequest(req, res) {
     }
 
     if (!user) {
+      if (auth.status === 403) return send(res, 403, { error: "forbidden" });
       return send(res, 401, {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
@@ -1614,7 +1622,7 @@ async function handleRequest(req, res) {
 
         await enqueueMutation(async () => {
           const latestStore = load();
-          const latestUser = authUser(req, latestStore);
+          const latestUser = (await authenticateRequest(req, latestStore)).user;
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
           }
@@ -1638,7 +1646,7 @@ async function handleRequest(req, res) {
         try {
           const ready = await enqueueMutation(async () => {
             const latestStore = load();
-            const latestUser = authUser(req, latestStore);
+            const latestUser = (await authenticateRequest(req, latestStore)).user;
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
               throw new AttachmentError(
@@ -1700,7 +1708,7 @@ async function handleRequest(req, res) {
       }
       return await enqueueMutation(async () => {
         const latestStore = load();
-        const latestUser = authUser(req, latestStore);
+        const latestUser = (await authenticateRequest(req, latestStore)).user;
         if (!latestUser) {
           throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
         }
@@ -1742,7 +1750,7 @@ async function handleRequest(req, res) {
       const fileId = pathname.split("/")[2];
       const pending = await enqueueMutation(async () => {
         const latestStore = load();
-        const latestUser = authUser(req, latestStore);
+        const latestUser = (await authenticateRequest(req, latestStore)).user;
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";

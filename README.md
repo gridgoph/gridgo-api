@@ -4,7 +4,7 @@
 
 Operational model v2 is implemented. The rebuild contract for every app is [`docs/OPERATIONAL_MODEL_V2_API.md`](docs/OPERATIONAL_MODEL_V2_API.md); it supersedes older order/payment prose below wherever they differ.
 
-Temporary and replaceable. No Clerk, Supabase, PayMongo, or cloud accounts. Domain records use the JSON store; private files use local MinIO. Swap later by keeping the same route contracts and pointing the apps at a real backend.
+Temporary and replaceable. Domain records use the JSON store; private files use local MinIO. Authentication defaults to the existing JSON sessions and has an opt-in Clerk transition mode; there is no Supabase or PayMongo. Swap later by keeping the same route contracts and pointing the apps at a real backend.
 
 For the real-domain, single-host pilot at `gridgo-api.talasora.com`, follow the complete [hosted pilot deployment and recovery runbook](docs/DEPLOYMENT.md). Production mode requires deployment-owned account credentials, creates no scenario transactions, enforces an exact CORS allowlist, and requires HTTPS signed-download URLs.
 
@@ -52,6 +52,30 @@ If MinIO is stopped, the API still starts and serves every non-file route, and `
 Login: `POST /auth/login` `{ "email", "password" }` → `{ token, user }`
 
 Send `Authorization: Bearer <token>` on subsequent requests.
+
+### Authentication modes
+
+`AUTH_MODE` controls which bearer-token families the API accepts:
+
+| Value | Accepted bearer tokens | Intended use |
+|---|---|---|
+| `legacy` (default) | existing JSON-store sessions | current apps and hosted `talasora` pilot |
+| `dual` | JSON sessions whose tokens start with `tok_`, plus verified Clerk session JWTs | local transition and per-surface cutover |
+| `clerk` | verified Clerk session JWTs only | later completed cutover |
+
+`dual` and `clerk` refuse to start unless all of `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES` are set. The issuer is the exact Clerk instance HTTPS origin; authorized parties is a comma-separated allowlist matched against the JWT `azp` claim. `CLERK_JWT_KEY` is optional for networkless verification; without it, the official `@clerk/backend` verifier retrieves the instance JWKS using the secret key.
+
+For local Development-instance work, link and pull keys into the ignored `.env.local`, add the non-secret mode/issuer/authorized-party settings, and explicitly load that file:
+
+```bash
+clerk link --app app_3HtBS4XpDN7ArrSaajuXWBMBDpH
+clerk env pull --instance dev --file .env.local
+node --env-file=.env.local src/server.js
+```
+
+Never commit `.env.local` or print `CLERK_SECRET_KEY`. A Clerk JWT resolves only through the additive internal `User.clerkUserId` field; there is no email fallback or automatic account linking. After Clerk verifies signature, time claims, and `azp`, the API also requires the exact configured issuer and requires session claim `gridgo_role` to equal the local `User.role`. An unmapped identity is `401`; a missing, invalid, or mismatched role is `403`. `clerkUserId` is not exposed by `publicUser`.
+
+Only clients may use public signup while `AUTH_MODE` is `dual` or `clerk`. Supplier and rider signup returns `403 invitation_required`; those roles are invitation-assigned. Legacy mode retains the existing demo signup behavior, and no signup route writes Clerk metadata.
 
 ### Client `accountType` (branding)
 
@@ -103,7 +127,7 @@ On a physical phone, use your machine's LAN IP (e.g. `http://192.168.1.10:8787`)
 | Method | Path | Who | Purpose |
 |---|---|---|---|
 | POST | `/auth/login` | public | issue token |
-| POST | `/auth/signup` | public | client/supplier/rider self-signup |
+| POST | `/auth/signup` | public | client self-signup in dual/Clerk; legacy demo also accepts supplier/rider |
 | GET | `/auth/me` | any | current user + role |
 | POST | `/auth/logout` | any | revoke token |
 
@@ -255,7 +279,7 @@ Fixture convergence only mutates allowlisted demo users; orders, credits, proofs
 
 | Demo today | Production later |
 |---|---|
-| Bearer token in JSON store | Clerk session + role claim |
+| JSON sessions plus opt-in Clerk verification | Clerk-only session + role claim after cutover |
 | `data/store.json` | Supabase Postgres + RLS |
 | MinIO + API-controlled streamed uploads + short-lived signed GETs | Managed object storage honoring `docs/STORAGE_API.md` |
 | In-process transitions | Edge Functions + idempotency keys |
