@@ -221,6 +221,19 @@ test("production seed contains reference data and configured accounts but no ope
     assert.ok(store.settings.deliveryFeeBands.length > 0, "operational settings are required reference data");
     assert.ok(store.zones.length > 0, "Davao zones are required reference data");
     assert.equal(store.users.length, 6);
+    assert.deepEqual(
+      store.users.map(({ email }) => email).sort(),
+      [
+        "admin@gridgo.ph",
+        "client@gridgo.ph",
+        "individual@gridgo.ph",
+        "ops@gridgo.ph",
+        "rider@gridgo.ph",
+        "supplier@gridgo.ph",
+      ],
+    );
+    assert.equal(store.users.some((user) => user.email.endsWith("@gmail.com") || user.email.endsWith("@usep.edu.ph")), false);
+    assert.equal(store.users.some((user) => user.clerkUserId), false);
     for (const user of store.users) {
       assert.equal(user.password, PASSWORD_ENV[
         user.email === "client@gridgo.ph" ? "GRIDGO_CLIENT_PASSWORD"

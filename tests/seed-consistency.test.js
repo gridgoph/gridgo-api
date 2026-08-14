@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { PICKUP_CHECK_CODES, backfillOperationalModel } from "../src/operational-model.js";
-import { DEMO_PASSWORD } from "../src/demo-fixtures.js";
+import { DEMO_PASSWORD, DEMO_USERS, OFFICIAL_DEV_USERS } from "../src/demo-fixtures.js";
 
 function freshSeed() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gridgo-seed-consistency-"));
@@ -79,11 +79,16 @@ test("fresh seed is coherent with operational model v2", () => {
     }
   }
 
-  const supplier = store.users.find(({ email }) => email === "supplier@gridgo.ph");
+  const scenarioSupplier = store.users.find(({ email }) => email === "supplier@gridgo.ph");
+  const officialSupplier = store.users.find(({ email }) => email === "markdavidprado@gmail.com");
   const taxonomyCodes = new Set(store.taxonomy.categories.map(({ code }) => code));
-  assert.ok(supplier.categoryRanks.length > 0);
-  assert.deepEqual(supplier.categoryRanks.map(({ rank }) => rank), [1, 2]);
-  assert.equal(supplier.categoryRanks.every(({ categoryCode }) => taxonomyCodes.has(categoryCode)), true);
+  for (const supplier of [scenarioSupplier, officialSupplier]) {
+    assert.ok(supplier, "seed is missing a supplier fixture");
+    assert.ok(supplier.categoryRanks.length > 0);
+    assert.deepEqual(supplier.categoryRanks.map(({ rank }) => rank), [1, 2]);
+    assert.equal(supplier.categoryRanks.every(({ categoryCode }) => taxonomyCodes.has(categoryCode)), true);
+    assert.equal(supplier.verificationStatus, "approved");
+  }
 
   const pofOrder = store.orders.find((order) =>
     order.payoutMilestones.some(({ status, pofFileIds }) => status === "released" && pofFileIds.length > 0));
@@ -104,15 +109,16 @@ test("fresh seed is coherent with operational model v2", () => {
     assert.equal(file?.state, "ready");
   }
 
-  const demoEmails = [
-    "client@gridgo.ph",
-    "individual@gridgo.ph",
-    "supplier@gridgo.ph",
-    "rider@gridgo.ph",
-    "ops@gridgo.ph",
-    "admin@gridgo.ph",
-  ];
-  for (const email of demoEmails) assert.equal(store.users.find((user) => user.email === email)?.password, DEMO_PASSWORD, email);
+  const advertisedEmails = DEMO_USERS.map((user) => user.email);
+  for (const email of advertisedEmails) {
+    assert.equal(store.users.find((user) => user.email === email)?.password, DEMO_PASSWORD, email);
+  }
+  for (const fixture of OFFICIAL_DEV_USERS) {
+    const user = store.users.find((candidate) => candidate.id === fixture.id);
+    assert.equal(user?.email, fixture.email, fixture.id);
+    assert.equal(user?.clerkUserId, fixture.clerkUserId, fixture.id);
+  }
+  assert.equal(store.users.find((user) => user.id === "user_client")?.email, "client@gridgo.ph");
   assert.deepEqual(
     store.users.find((user) => user.email === "supplier@gridgo.ph")?.verificationDocumentFileIds,
     [],

@@ -1,7 +1,8 @@
 import {
   DEMO_PASSWORD,
   DEMO_PASSWORD_ENV_BY_EMAIL,
-  DEMO_USERS,
+  HOSTED_LEGACY_USERS,
+  LOCAL_SEED_USERS,
 } from "./demo-fixtures.js";
 
 const MIN_PRODUCTION_PASSWORD_LENGTH = 12;
@@ -19,14 +20,18 @@ function configurationError(problem, fix) {
 }
 
 /**
- * The repository-visible fixture credential is valid only for local development.
- * In production, each fixed pilot identity has an environment-owned password.
+ * Local seed advertises the Clerk Development trio plus ops/admin, and still
+ * includes the unadvertised hosted six so scenario FKs stay put.
+ *
+ * Production uses only the six @gridgo.ph identities and their GRIDGO_*_PASSWORD
+ * values. Official Gmail/USEP addresses are Development Clerk people and must
+ * never become hosted password fixtures.
  */
 export function configuredDemoUsers(env = process.env) {
-  if (!isProduction(env)) return DEMO_USERS;
+  if (!isProduction(env)) return LOCAL_SEED_USERS;
 
   const passwordOwners = new Map();
-  return DEMO_USERS.map((fixture) => {
+  return HOSTED_LEGACY_USERS.map((fixture) => {
     const variable = DEMO_PASSWORD_ENV_BY_EMAIL.get(fixture.email);
     const password = String(env[variable] || "");
     if (!password) {

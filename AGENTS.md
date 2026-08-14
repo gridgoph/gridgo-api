@@ -21,6 +21,8 @@ A first-time Google / public SSO client activates through `POST /auth/clerk/acti
 
 `dual` and `clerk` refuse startup without `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES`. The hosted `talasora` deployment stays `legacy` until a separate cutover. In dual/Clerk modes, public signup is client-only; supplier/rider roles remain Operations-assigned and no signup route writes Clerk metadata.
 
+Official Development Client / Supplier / Rider accounts are new fixture rows in `src/demo-fixtures.js` (`OFFICIAL_DEV_USERS`, ids `user_fely_client` / `user_test_supplier` / `user_test_rider`) with Clerk `clerkUserId` set. Never rename `user_client` (or the other hosted seed ids) onto those emails — that would attach Fely to Ana Client's orders. Production `configuredDemoUsers()` stays on the six `@gridgo.ph` identities; Gmail/USEP addresses are not `GRIDGO_*_PASSWORD` fixtures. Ops / Super stay `ops@gridgo.ph` / `admin@gridgo.ph`.
+
 ## Geography (map / OSRM)
 
 Orders carry additive map points so apps never geocode at runtime:
@@ -53,7 +55,7 @@ Client users have explicit `accountType`: `"individual"` | `"business"` | `"orga
 - Missing/legacy clients backfill to `"individual"` (safe default; business is opt-in)
 - Self-signup is the write path; business/organization require `orgName`
 - Non-client roles: field absent (not null)
-- Demo: `client@gridgo.ph` = business; `individual@gridgo.ph` = individual
+- Advertised local client is the Clerk Development person `felyciaaa0220@gmail.com` (`accountType: "individual"`). Do not advertise `client@gridgo.ph` / `individual@gridgo.ph` as the people to log in as.
 
 ## Product category taxonomy
 
@@ -108,9 +110,9 @@ Fresh-store fixture definitions live in `src/seed.js`; demo user identities live
 | | Fixture email domain migration | Backfill | Fixture convergence |
 |---|---|---|---|
 | Purpose | Rename the six shipped identities off the retired `@gridgo.local` addresses | Fill *missing* fields/collections so old stores keep working | Bring *seed demo accounts* up to their defined state |
-| Scope | only `user.email`, only for an exact address in `RETIRED_FIXTURE_EMAILS` (`src/demo-fixtures.js`) | geography, platform arrays, top-level `files` and `deviceTokens`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | only users allowlisted in `DEMO_USERS` (`src/demo-fixtures.js`) |
+| Scope | only `user.email`, only for an exact address in `RETIRED_FIXTURE_EMAILS` (`src/demo-fixtures.js`) | geography, platform arrays, top-level `files` and `deviceTokens`, parent file-ID arrays, missing client `accountType` → `"individual"`, taxonomy → captain's category chart, and v2 order/settings migration via `backfillOperationalModel()` | local: `LOCAL_SEED_USERS` (official Clerk trio + hosted six); production: `HOSTED_LEGACY_USERS` only |
 | Overwrite? | Yes — the retired address only; validates every identity before mutating any | Fill-missing except documented v2 retirement normalization for COD, supplier-proof states, and removal of obsolete zone fees; never overwrite existing valid values/coords | Yes — only on fixture users (e.g. `client@` → `accountType: "business"`); password rotates only from the exact retired shipped credential and preserves diverged values. **Never `email`** — that is this migration's job alone |
-| Creates? | nothing | empty platform collections if absent | missing demo accounts (e.g. `individual@gridgo.ph`) |
+| Creates? | nothing | empty platform collections if absent | missing official Clerk trio (and, locally, missing hosted-legacy fixtures). Skips if another user already holds an official email |
 | Never touches | `user.id`, any account whose address diverged from the shipped fixture, any other collection | existing valid values, coords, file metadata, or legacy `artworkName` | orders, credits, proofs, claims, issues, sessions, pings, non-fixture users |
 
 **Fixture boundary:** match by exact fixture email, else stable seed id — never by role or bare `@gridgo.ph` domain. Getting this wrong is how a migration eats captain work.

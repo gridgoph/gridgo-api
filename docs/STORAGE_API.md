@@ -57,11 +57,11 @@ Local-development login helpers used below (never use the committed password on 
 ```bash
 API=http://127.0.0.1:18787
 CLIENT_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"client@gridgo.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
+  --data '{"email":"felyciaaa0220@gmail.com","password":"Ilovegridgo-0990"}' | jq -r .token)
 SUPPLIER_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"supplier@gridgo.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
+  --data '{"email":"markdavidprado@gmail.com","password":"Ilovegridgo-0990"}' | jq -r .token)
 RIDER_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"rider@gridgo.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
+  --data '{"email":"mddprado00290@usep.edu.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
 OPS_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
   --data '{"email":"ops@gridgo.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
 ```
