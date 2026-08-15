@@ -2,31 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  backfillNotifications,
   createNotificationEvents,
   formatNotificationEvent,
   notificationSnapshot,
 } from "../src/notifications.js";
-
-test("notification backfill is additive and byte-idempotent", () => {
-  const deletedAt = "2026-08-11T02:00:00.000Z";
-  const store = {
-    notifications: [
-      { id: "ntf_legacy", userId: "user_client", at: "2026-08-11T00:00:00.000Z" },
-      { id: "ntf_read", userId: "user_client", read: true, at: "2026-08-11T01:00:00.000Z" },
-      { id: "ntf_deleted", userId: "user_client", read: false, deletedAt, at: deletedAt },
-    ],
-  };
-
-  assert.equal(backfillNotifications(store), true);
-  assert.equal(store.notifications[0].read, false);
-  assert.equal(store.notifications[1].read, true);
-  assert.equal(store.notifications[2].deletedAt, deletedAt);
-  const afterFirst = JSON.stringify(store);
-
-  assert.equal(backfillNotifications(store), false);
-  assert.equal(JSON.stringify(store), afterFirst, "second backfill changed the store");
-});
 
 test("notification snapshot is the caller's last append, including a soft-deleted watermark", () => {
   const notifications = [

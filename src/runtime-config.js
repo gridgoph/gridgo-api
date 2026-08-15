@@ -1,68 +1,11 @@
-import {
-  DEMO_PASSWORD,
-  DEMO_PASSWORD_ENV_BY_EMAIL,
-  HOSTED_LEGACY_USERS,
-  LOCAL_SEED_USERS,
-} from "./demo-fixtures.js";
-
-const MIN_PRODUCTION_PASSWORD_LENGTH = 12;
-
 export function isProduction(env = process.env) {
   return env.NODE_ENV === "production";
-}
-
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
 }
 
 function configurationError(problem, fix) {
   return new Error(`${problem} ${fix}`);
 }
 
-/**
- * Local seed advertises the Clerk Development trio plus ops/admin, and still
- * includes the unadvertised hosted six so scenario FKs stay put.
- *
- * Production uses only the six @gridgo.ph identities and their GRIDGO_*_PASSWORD
- * values. Official Gmail/USEP addresses are Development Clerk people and must
- * never become hosted password fixtures.
- */
-export function configuredDemoUsers(env = process.env) {
-  if (!isProduction(env)) return LOCAL_SEED_USERS;
-
-  const passwordOwners = new Map();
-  return HOSTED_LEGACY_USERS.map((fixture) => {
-    const variable = DEMO_PASSWORD_ENV_BY_EMAIL.get(fixture.email);
-    const password = String(env[variable] || "");
-    if (!password) {
-      throw configurationError(
-        `${variable} is required when NODE_ENV=production.`,
-        `Set ${variable} to a unique password of at least ${MIN_PRODUCTION_PASSWORD_LENGTH} characters and restart.`,
-      );
-    }
-    if (password.length < MIN_PRODUCTION_PASSWORD_LENGTH) {
-      throw configurationError(
-        `${variable} is too short for the hosted pilot.`,
-        `Set ${variable} to a unique password of at least ${MIN_PRODUCTION_PASSWORD_LENGTH} characters and restart.`,
-      );
-    }
-    if (password === DEMO_PASSWORD) {
-      throw configurationError(
-        `${variable} still uses the repository-visible local development password.`,
-        `Set ${variable} to a different password and restart.`,
-      );
-    }
-    const existingVariable = passwordOwners.get(password);
-    if (existingVariable) {
-      throw configurationError(
-        `${variable} reuses the password configured by ${existingVariable}.`,
-        `Set ${variable} to a unique password for this pilot identity and restart.`,
-      );
-    }
-    passwordOwners.set(password, variable);
-    return { ...clone(fixture), password };
-  });
-}
 
 function exactOrigin(value, variable) {
   if (value === "*") {

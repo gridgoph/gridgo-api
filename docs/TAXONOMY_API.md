@@ -136,7 +136,7 @@ Each node is a category object **plus** a `subcategories` array:
   "categoryCodes": ["marketing_collateral", "recognition_awards_signage"], "active": true }
 ```
 
-Only the **values** in `categoryCodes` changed with this migration — see §4.
+The values in `categoryCodes` use the canonical chart codes described in §4.
 
 ### categoryAlias
 
@@ -244,15 +244,8 @@ Audit actions: `taxonomy.subcategory_create`, `taxonomy.subcategory_update`.
 
 ---
 
-## 6. Migration
+## 6. PostgreSQL seed
 
-Load-time, idempotent, in `backfillTaxonomy()` (`src/taxonomy.js`), run from `load()`
-on every boot. It fills what is missing, never overwrites an existing value, and never
-touches a non-taxonomy collection. The one removal is the four pre-chart *seed*
-category records, each retired into `categoryAliases`.
+The ordered schema migration creates the flat taxonomy tables. `npm run seed` idempotently writes the platform reference definitions from `src/taxonomy.js`; it creates no users or operational records. Runtime boot performs no schema or taxonomy backfill.
 
-Ops-created categories and subcategories that are neither canonical nor a known
-legacy code are left completely alone. A freshly seeded store and a backfilled store
-end up with identical taxonomy content.
-
-Never run `npm run reset` on a live store to acquire these fields.
+Ops-created categories and subcategories remain ordinary PostgreSQL rows. Retired aliases are seeded reference records so older category input remains resolvable without an import path.

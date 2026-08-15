@@ -729,32 +729,3 @@ export function authorizeFileRead(user, store, file) {
   if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
   forbidden();
 }
-
-export function backfillFiles(store) {
-  let changed = false;
-  if (!Array.isArray(store.files)) {
-    store.files = [];
-    changed = true;
-  }
-  for (const order of store.orders || []) {
-    for (const field of ["artworkFileIds", "proofFileIds", "fulfilmentProofFileIds", "deliveryPhotoFileIds"]) {
-      if (!Array.isArray(order[field])) {
-        order[field] = [];
-        changed = true;
-      }
-    }
-  }
-  for (const service of store.supplierServices || []) {
-    if (!Array.isArray(service.imageFileIds)) {
-      service.imageFileIds = [];
-      changed = true;
-    }
-  }
-  for (const user of store.users || []) {
-    if (user.role === "supplier" && !Array.isArray(user.verificationDocumentFileIds)) {
-      user.verificationDocumentFileIds = [];
-      changed = true;
-    }
-  }
-  return changed;
-}

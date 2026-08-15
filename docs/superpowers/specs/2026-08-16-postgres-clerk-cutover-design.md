@@ -28,6 +28,8 @@ JSONB is reserved for bounded composite fields whose internal shape is returned 
 
 Every HTTP mutation executes inside one PostgreSQL transaction. The transaction obtains a transaction-scoped advisory lock before loading its object graph; this preserves the current mutation semantics across multiple API processes rather than only within one Node process. The repository captures a baseline and upserts/deletes only changed records. Order transitions, installment confirmations/rejections, payout milestone releases, credit grants, claims, issue-created holds, device ownership moves, and their audit/notification rows commit atomically.
 
+COD is retired by Operational Model v2, so the clean schema deliberately has no cash-custody balance or movement to transact. Any attempt to submit a cash/COD payment remains rejected before persistence.
+
 File bytes continue to stream to MinIO. The database stores metadata and opaque references only. File upload and deletion keep their existing compensation pattern: short database transactions create or change durable metadata around the external object operation. Push and SSE publication run only after the database commit that created the notification, and push failure never rolls back the triggering transaction.
 
 Database startup configuration requires `DATABASE_URL`. The API does not create tables or seed at boot. It checks connectivity and migration presence before listening. `/health` retains `commit` and `builtAt` and adds `database: { status }` alongside storage and push.
@@ -46,7 +48,7 @@ GRIDGO roles are authoritative in PostgreSQL and are not accepted from JWT claim
 
 ## First-administrator bootstrap
 
-There is no HTTP bootstrap route. An operator first creates/signs into one Clerk identity, then runs `npm run bootstrap-admin -- --clerk-user-id user_...` in the deployment environment. The command requires the normal Clerk and database secrets, loads the identity from Clerk, and transactionally inserts it as `super_admin` only when no privileged GRIDGO user exists. It records an audit entry. Once an operations or super-admin row exists, every later invocation refuses. Because the code is a direct database administration command, not a remotely reachable route, and its one-time database precondition closes permanently, it is not a surviving authentication backdoor.
+There is no HTTP bootstrap route. An operator first creates/signs into one Clerk identity, then runs `npm run bootstrap-admin -- --clerk-user-id user_...` in the deployment environment. The command requires the normal Clerk and database secrets, loads the identity from Clerk, and transactionally inserts it as `super_admin` only when no privileged GRIDGO user exists. It records an audit entry and an immutable singleton completion row. Every later invocation refuses even if all privileged roles are subsequently changed. Because the code is a direct database administration command, not a remotely reachable route, and its one-time database marker closes permanently, it is not a surviving authentication backdoor.
 
 ## Deployment, local development, and testing
 

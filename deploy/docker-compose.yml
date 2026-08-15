@@ -4,12 +4,14 @@
 # ~/gridgo/bin/deploy.sh (the single command the CI deploy key may run) enters
 # before `docker compose pull && docker compose up -d --remove-orphans`.
 #
-# Three secret files must sit beside it, mode 0600, and are never in this
+# Four secret files must sit beside it, mode 0600, and are never in this
 # repository or in this file. See docs/DEPLOYMENT.md for their contents,
 # installation, rotation, rollback, backup and restore.
 #
-#   ./gridgo-api.env   the six pilot account passwords + the bucket-scoped
-#                      MinIO API key. Read by `api` and `store-init`.
+#   ./gridgo-api.env   PostgreSQL URL, Clerk server configuration and the
+#                      bucket-scoped MinIO API key. Read by API/migrate/seed.
+#   ./postgres.env     the PostgreSQL database, user and password. Read only by
+#                      PostgreSQL.
 #   ./minio.env        the MinIO root credentials + the same bucket-scoped API
 #                      key. Read by `minio` and `minio-init`.
 #   ./fcm-service-account.json
@@ -26,29 +28,47 @@ name: gridgo-api
 
 services:
   # ---------------------------------------------------------------------------
-  # One-shot: create the production store the first time, then do nothing.
+  # Private PostgreSQL 17. No host port; only GRIDGO containers can reach it.
   # ---------------------------------------------------------------------------
-  # `src/seed.js` without --reset refuses to overwrite an existing store and
-  # exits 0, so this is safe to re-run on every single deploy — and it is, which
-  # is what makes a rebuilt volume recover by itself instead of leaving the API
-  # in a crash loop against a missing STORE_PATH.
-  #
-  # It must not be replaced by the API's own auto-seed: that only ever fires for
-  # the default in-repo store path, precisely so a mistyped STORE_PATH surfaces
-  # as a refusal rather than as a silently empty database.
-  store-init:
+  postgres:
+    image: postgres:17-alpine
+    container_name: gridgo-postgres
+    env_file:
+      - ./postgres.env
+    volumes:
+      - gridgo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - gridgo-storage
+
+  migrate:
     image: ghcr.io/gridgoph/gridgo-api:${GRIDGO_API_TAG:-latest}
-    container_name: gridgo-api-store-init
-    command: ["node", "src/seed.js"]
+    container_name: gridgo-api-migrate
+    command: ["npm", "run", "migrate"]
     env_file:
       - ./gridgo-api.env
-    environment:
-      # NODE_ENV=production is already baked into the image; repeated here
-      # because it is what selects the clean pilot seed over the rich demo one.
-      NODE_ENV: production
-      STORE_PATH: /var/lib/gridgo-api/store.json
-    volumes:
-      - gridgo_api_store:/var/lib/gridgo-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - gridgo-storage
+
+  seed:
+    image: ghcr.io/gridgoph/gridgo-api:${GRIDGO_API_TAG:-latest}
+    container_name: gridgo-api-seed
+    command: ["npm", "run", "seed"]
+    env_file:
+      - ./gridgo-api.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: "no"
     logging:
       driver: json-file
@@ -88,9 +108,6 @@ services:
       HOST: "0.0.0.0"
       PORT: "8787"
 
-      # The whole domain database. On the volume, never in the container layer.
-      STORE_PATH: /var/lib/gridgo-api/store.json
-
       # The dashboard, and only the dashboard. Not the landing site. An exact
       # origin: no wildcard, no path, no trailing slash.
       CORS_ALLOWED_ORIGINS: https://gridgo-dash.talasora.com
@@ -113,10 +130,8 @@ services:
       GRIDGO_FCM_SERVICE_ACCOUNT_FILE: /run/secrets/fcm-service-account.json
 
     volumes:
-      - gridgo_api_store:/var/lib/gridgo-api
-
-      # Read-only, and on the `api` service only. `store-init` seeds the store
-      # and has no business holding a credential that can notify every user.
+      # Read-only, and on the `api` service only. Migration and seed jobs have
+      # no business holding a credential that can notify every user.
       #
       # The host file must be readable by uid 1001 (the image's `gridgo` user):
       #   sudo chown 1001:1001 ~/gridgo/api/fcm-service-account.json
@@ -125,7 +140,7 @@ services:
       # API reports at startup rather than hiding.
       - ./fcm-service-account.json:/run/secrets/fcm-service-account.json:ro
 
-    # No store, no API — that dependency is absolute.
+    # No migrated/seeded database, no API — that dependency is absolute.
     #
     # `minio-init` is here for an unobvious reason. The API checks the bucket
     # once at startup and keeps reporting that verdict on /health until the next
@@ -139,7 +154,7 @@ services:
     # To start the API while MinIO is being repaired, and accept that file
     # routes 503 meanwhile: `docker compose up -d --no-deps api`.
     depends_on:
-      store-init:
+      seed:
         condition: service_completed_successfully
       minio:
         condition: service_healthy
@@ -163,7 +178,7 @@ services:
       retries: 3
 
     # Container logs are the only record of a crash loop; unbounded they fill
-    # the disk that also holds the store volume.
+    # the disk that also holds the database and object-storage volumes.
     logging:
       driver: json-file
       options:
@@ -280,8 +295,8 @@ volumes:
   # Named explicitly so the volume keeps these names regardless of the compose
   # project name — the backup and restore procedures in docs/DEPLOYMENT.md
   # address them by name, and a renamed volume is a silently empty database.
-  gridgo_api_store:
-    name: gridgo_api_store
+  gridgo_postgres_data:
+    name: gridgo_postgres_data
   gridgo_minio_data:
     name: gridgo_minio_data
 

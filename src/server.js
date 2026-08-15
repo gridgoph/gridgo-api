@@ -1,9 +1,5 @@
 import http from "node:http";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
 import {
   activateClerkClientProfile,
   authConfiguration,
@@ -17,7 +13,6 @@ import {
   authorizeFileAttachOwner,
   authorizeFileRead,
   authorizeFileUpload,
-  backfillFiles,
   createPendingFile,
   findFile,
   markFileDeleted,
@@ -28,9 +23,7 @@ import {
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
-import { createMutationQueue } from "./mutation-queue.js";
 import {
-  backfillNotifications,
   createNotificationEvents,
   formatNotificationEvent,
   notificationSnapshot,
@@ -39,8 +32,6 @@ import { createObjectStorage } from "./object-storage.js";
 import {
   DEVICE_PLATFORMS,
   announcementPushMessage,
-  backfillDeviceTokens,
-  claimDeviceToken,
   createPushDeliveryOrDisable,
   deviceTokensFor,
   isFcmTokenShaped,
@@ -56,17 +47,15 @@ import {
   unregisterDeviceToken,
 } from "./push.js";
 import {
-  backfillTaxonomy,
   buildCategoryTree,
-  defaultTaxonomy,
   resolveCategoryCode,
 } from "./taxonomy.js";
 import {
-  backfillOperationalModel,
   calculateFinalPrice,
   createPayoutMilestones,
   defaultOperationalSettings,
   estimatePriceRange,
+  expireIssueWindows,
   issueWindowExpiresAt,
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
@@ -74,29 +63,23 @@ import {
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
-import { OFFICIAL_DEV_USER_IDS, RETIRED_FIXTURE_EMAILS } from "./demo-fixtures.js";
 import {
-  configuredDemoUsers,
-  isProduction,
   parseAllowedOrigins,
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
+import { createDatabase } from "./database.js";
+import { loadStore, originalNotificationIds, saveStore } from "./postgres-store.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.join(__dirname, "..");
-const DEFAULT_STORE = path.join(ROOT, "data", "store.json");
-const STORE = process.env.STORE_PATH ? path.resolve(process.env.STORE_PATH) : DEFAULT_STORE;
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
-const PRODUCTION = isProduction(process.env);
 const AUTH = authConfiguration(process.env);
-const clerkBackend = AUTH.mode === "legacy" ? null : createClerkBackend(AUTH);
+const clerkBackend = createClerkBackend(AUTH);
+const database = createDatabase(process.env);
 // Baked into the image at build time (see Dockerfile). `/health` reports them so
 // a deploy can be *proven* to have taken: a stale container answering `ok` is
 // otherwise indistinguishable from a deploy that never happened.
 const BUILD_COMMIT = process.env.GRIDGO_BUILD_SHA || "unknown";
 const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
-const PILOT_USERS = configuredDemoUsers(process.env);
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
@@ -110,35 +93,23 @@ const pushDelivery = createPushDeliveryOrDisable(process.env);
 // Ceiling on registrations nobody has signed in on; `POST /devices` is the one
 // unauthenticated write on the platform. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
-const enqueueMutation = createMutationQueue();
+const enqueueMutation = (mutation) => database.transaction(mutation);
 const notificationEvents = createNotificationEvents();
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
-const STORE_NOTIFICATION_IDS = Symbol("storeNotificationIds");
 let storageInitializing = true;
 
-// Auto-seed if missing
-if (!fs.existsSync(STORE)) {
-  if (STORE !== DEFAULT_STORE) {
-    throw new Error(
-      `STORE_PATH does not exist: ${STORE}. Create it with NODE_ENV=${PRODUCTION ? "production " : ""}STORE_PATH=${STORE} npm run seed, then restart.`,
-    );
-  }
-  spawnSync(process.execPath, [path.join(__dirname, "seed.js"), "--reset"], { stdio: "inherit" });
-}
-
-function save(store) {
-  const previousNotificationIds = store[STORE_NOTIFICATION_IDS] || new Set();
+async function save(store) {
+  const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
     (notification) => !previousNotificationIds.has(notification.id),
   );
-  const temporary = `${STORE}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(store, null, 2));
-  fs.renameSync(temporary, STORE);
-  store[STORE_NOTIFICATION_IDS] = new Set((store.notifications || []).map((notification) => notification.id));
-  for (const notification of createdNotifications) {
-    notificationEvents.publish(notification);
-    deliverPush(store, notification);
-  }
+  await saveStore(database, store);
+  database.afterCommit(() => {
+    for (const notification of createdNotifications) {
+      notificationEvents.publish(notification);
+      deliverPush(store, notification);
+    }
+  });
 }
 
 /**
@@ -152,8 +123,8 @@ function save(store) {
  * same user can also read in `GET /notifications`.
  *
  * Intentionally not awaited and intentionally unable to reject. The triggering
- * action — a payout release, a payment confirmation — is already durable on
- * disk by the time this runs, and a dead phone or an unreachable Google must
+ * action — a payout release, a payment confirmation — is already committed
+ * by the time this runs, and a dead phone or an unreachable Google must
  * never turn that into a failed request.
  */
 function deliverPush(store, notification) {
@@ -183,7 +154,7 @@ function deliverAnnouncementPush(devices, { title, body }) {
 
 /**
  * Fire-and-forget fan-out shared by both push paths. Cannot reject: whatever
- * created the message is already durable on disk, and neither a dead phone nor
+ * created the message is already committed, and neither a dead phone nor
  * an unreachable Google may turn that into a failed request.
  */
 function fanOutPush(label, message, devices) {
@@ -203,20 +174,20 @@ function fanOutPush(label, message, devices) {
 }
 
 /**
- * Drop registrations FCM reported as gone. Left in place, they fill the store
+ * Drop registrations FCM reported as gone. Left in place, they fill the database
  * with reinstalled and wiped phones and cost a request on every later send.
  *
- * Re-reads the store under the mutation queue instead of editing the caller's
+ * Re-reads the database snapshot in a transaction instead of editing the caller's
  * copy: by the time FCM answers, that copy is stale and writing it back would
  * lose whatever landed in between.
  */
 async function pruneDeadDeviceTokens(deviceIds) {
   if (deviceIds.length === 0) return;
   await enqueueMutation(async () => {
-    const latestStore = load();
+    const latestStore = await load();
     const removed = removeDeviceTokenIds(latestStore, deviceIds);
     if (removed === 0) return;
-    save(latestStore);
+    await save(latestStore);
     console.warn(`push pruned ${removed} unregistered device token(s)`);
   });
 }
@@ -231,11 +202,11 @@ async function compensatePendingFile(fileId, objectKey) {
   try {
     await objectStorage.deleteObject(objectKey);
     await enqueueMutation(async () => {
-      const latestStore = load();
+      const latestStore = await load();
       const latestFile = findFile(latestStore, fileId);
       if (latestFile?.state !== "pending_upload") return;
       markFileDeleted(latestFile, now());
-      save(latestStore);
+      await save(latestStore);
     });
   } catch {
     // The pending record is the durable reconciliation marker for the next successful boot.
@@ -321,7 +292,7 @@ const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business", "organization"])
 
 /**
  * Safe default when a client has no recorded type: individual.
- * Business branding must be explicit opt-in, never accidental from orgName or legacy data.
+ * Business branding must be explicit opt-in, never accidental from orgName.
  */
 function resolveClientAccountType(u) {
   if (u && CLIENT_ACCOUNT_TYPES.has(u.accountType)) return u.accountType;
@@ -330,7 +301,7 @@ function resolveClientAccountType(u) {
 
 function publicUser(u) {
   if (!u) return null;
-  const { password, ...rest } = u;
+  const rest = { ...u };
   delete rest.clerkUserId;
   // Identity-document references are exposed only through the dedicated, caller-aware
   // verification projection. publicUser is reused in catalogue and matching responses.
@@ -372,10 +343,6 @@ const ANNOUNCEMENT_AUDIENCES = new Map([
 const ANNOUNCEMENT_TITLE_MAX = 120;
 const ANNOUNCEMENT_BODY_MAX = 500;
 
-function signupError(res, error, message, details = {}) {
-  return send(res, 400, { error, message, ...details });
-}
-
 function validatedShop(value) {
   if (
     !value ||
@@ -400,30 +367,6 @@ function validatedShop(value) {
     };
   }
   return { shop: { lat: value.lat, lng: value.lng, label: value.label.trim() } };
-}
-
-function normalizedSignupAccountType(value) {
-  return value === "personal" ? "individual" : value;
-}
-
-function validatedCategoryRanks(store, value) {
-  if (!Array.isArray(value) || value.length === 0) return null;
-  const canonical = [];
-  const seen = new Set();
-  for (const item of value) {
-    const category = activeCategoryFor(store.taxonomy, item?.categoryCode);
-    const rank = Number(item?.rank);
-    if (!category || !Number.isInteger(rank) || rank < 1 || seen.has(category.code)) return null;
-    seen.add(category.code);
-    canonical.push({ categoryCode: category.code, rank });
-  }
-  canonical.sort((a, b) => a.rank - b.rank);
-  if (canonical.some((item, index) => item.rank !== index + 1)) return null;
-  return canonical;
-}
-
-function hasSignupShop(value) {
-  return Boolean(validatedShop(value).shop);
 }
 
 function verificationDocumentsFor(store, supplier) {
@@ -485,16 +428,6 @@ function hasCoords(point) {
   );
 }
 
-/** Default shop for suppliers that predate geography (stable Davao downtown pin). */
-function defaultShopFor(supplier) {
-  const name = supplier.supplierName || supplier.name || "Supplier";
-  return {
-    lat: 7.064,
-    lng: 125.6085,
-    label: `${name}, C.M. Recto St`,
-  };
-}
-
 /** Pickup from supplier shop; null when no supplier assigned yet. */
 function pickupFromSupplier(supplier) {
   if (!supplier?.shop || !hasCoords(supplier.shop)) return null;
@@ -515,25 +448,9 @@ function setOrderPickup(order, store) {
 }
 
 // ---------------------------------------------------------------------------
-// Default platform data (used by seed + idempotent backfill)
+// Default platform data used by route validation and the explicit reference seed.
 // ---------------------------------------------------------------------------
 
-function defaultZones() {
-  return [
-    { id: "zone_central", code: "davao_central", name: "Davao Central (Bajada / JP Laurel)", active: true },
-    { id: "zone_south", code: "davao_south", name: "Davao South (Matina)", active: true },
-    { id: "zone_north", code: "davao_north", name: "Davao North (Lanang)", active: true },
-    { id: "zone_west", code: "davao_west", name: "Davao West (Toril side)", active: true },
-    { id: "zone_east", code: "davao_east", name: "Davao East (Buhangin / Sasa)", active: true },
-  ];
-}
-
-/**
- * Append an audit log entry. Separate from order.timeline:
- * - order.timeline = per-order state machine history (clients/suppliers/riders see it on the order)
- * - auditLog = platform-wide immutable record for ops/super (role changes, grants, verification,
- *   taxonomy, claims, issues, matching decisions, etc.) that is not order-scoped only
- */
 function audit(store, { actor, action, entityType, entityId, detail, reason, orderId }) {
   if (!Array.isArray(store.auditLog)) store.auditLog = [];
   const entry = {
@@ -552,479 +469,29 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
   return entry;
 }
 
-/**
- * Idempotent geography backfill for stores that predate pickup/dropoff/shop.
- * Only fills missing coords; never overwrites existing ones. Returns true if mutated.
- */
-function backfillGeography(store) {
-  let changed = false;
-
-  for (const u of store.users || []) {
-    if (u.role === "supplier" && !hasCoords(u.shop)) {
-      u.shop = defaultShopFor(u);
-      changed = true;
-    }
-  }
-
-  for (const order of store.orders || []) {
-    if (!hasCoords(order.dropoff)) {
-      order.dropoff = dropoffFor(order.address, order.zone || "davao_central");
-      changed = true;
-    }
-    if (order.supplierId && !hasCoords(order.pickup)) {
-      const supplier = (store.users || []).find((u) => u.id === order.supplierId);
-      const pickup = pickupFromSupplier(supplier);
-      if (pickup) {
-        order.pickup = pickup;
-        changed = true;
-      }
-    }
-  }
-
-  return changed;
+async function load() {
+  return loadStore(database);
 }
 
-/**
- * Idempotent backfill: every client user gets accountType.
- * Missing → "individual" (safe default; never overwrite an existing valid value).
- * Non-clients are left unchanged (field absent). Returns true if mutated.
- *
- * Distinct from convergeDemoFixtures: this only fills missing/invalid types and
- * never upgrades a recorded "individual" to "business".
- */
-function backfillAccountType(store) {
-  let changed = false;
-  for (const u of store.users || []) {
-    if (u.role !== "client") continue;
-    if (!CLIENT_ACCOUNT_TYPES.has(u.accountType)) {
-      u.accountType = "individual";
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/** Structural equality for fixture scalars and small plain objects (e.g. shop). */
-function fixtureValueEqual(a, b) {
-  if (a === b) return true;
-  if (a == null || b == null) return a === b;
-  if (typeof a !== "object" || typeof b !== "object") return false;
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-function cloneFixtureValue(value) {
-  if (value == null || typeof value !== "object") return value;
-  return JSON.parse(JSON.stringify(value));
-}
-
-// This retired fixture credential is split so repository-wide searches for the
-// ordinary word demo remain useful for finding stale login documentation.
-const LEGACY_DEMO_PASSWORD = "de" + "mo";
-
-/** Signup/login canonicalise to lowercase; compare defensively for older rows. */
-function normalizedEmail(user) {
-  return String(user?.email ?? "").trim().toLowerCase();
-}
-
-/**
- * Rename the six shipped pilot identities off the retired `.local` mDNS domain
- * onto `@gridgo.ph`, in place, on an existing store.
- *
- * Renaming beats reseeding because the hosted pilot store holds real orders,
- * payments and claims: a reseed would destroy them to fix an address. It is
- * safe to rename because email is a *login* key only — every other record
- * (orders, sessions, credits, claims, issues, notifications, locationPings,
- * deviceTokens) references `user.id`, which this never touches. A phone
- * registered for push before the rename therefore still belongs to the same
- * person after it, with no re-pointing pass. See docs/DEPLOYMENT.md.
- *
- * `deviceTokens` postdates this migration, so the invariant it relies on is
- * asserted rather than assumed: `assertNoDenormalisedFixtureEmail` refuses if a
- * registration ever carries an email instead of a `userId`. Device records have
- * no free-text field, so a match there is unambiguously a denormalised foreign
- * key — not prose that merely mentions an address.
- *
- * Boundary — as tight as fixture convergence, for the same reason:
- * - Match the exact retired address and nothing else. An account holding a
- *   fixture *id* under a different address has diverged: it belongs to a real
- *   person now and is left alone (convergence must not rewrite it either).
- * - Refuse, rather than proceed, when renaming would collide with an account
- *   that already holds the replacement address, or when the retired address
- *   itself is held twice. Two accounts sharing a login is an auth-integrity
- *   failure; a loud startup refusal is recoverable, a silent merge is not.
- * - Validate every identity before mutating any, so a refusal never leaves a
- *   half-renamed store behind.
- *
- * Idempotent: once renamed, no user matches a retired address and this is a
- * no-op, so `load()` writes nothing on the second run.
- *
- * Returns true if the store was mutated.
- */
-/**
- * Guard the "email is a login key, never a foreign key" invariant for the one
- * user-owned collection added after this migration was written.
- *
- * A device registration is `{ id, userId, token, platform, createdAt, updatedAt }`
- * — every field a machine value, none of them prose. So if a retired address
- * turns up inside one, somebody denormalised a login into it, and renaming the
- * user would strand that phone pointing at an address no account holds. Refuse
- * on the same grounds as a collision: recoverable by hand, unlike silent drift.
- */
-function assertNoDenormalisedFixtureEmail(store, conflicts) {
-  const retired = new Set(RETIRED_FIXTURE_EMAILS.keys());
-  for (const record of Array.isArray(store.deviceTokens) ? store.deviceTokens : []) {
-    for (const [field, value] of Object.entries(record || {})) {
-      if (typeof value !== "string") continue;
-      if (!retired.has(value.trim().toLowerCase())) continue;
-      conflicts.push(
-        `device registration ${record.id} carries a login address in \`${field}\`; ` +
-        "registrations must reference `userId` only",
-      );
-    }
-  }
-}
-
-function migrateFixtureEmailDomain(store) {
-  const users = Array.isArray(store.users) ? store.users : [];
-  const planned = [];
-  const conflicts = [];
-
-  assertNoDenormalisedFixtureEmail(store, conflicts);
-
-  for (const [retired, replacement] of RETIRED_FIXTURE_EMAILS) {
-    const matches = users.filter((user) => normalizedEmail(user) === retired);
-    if (matches.length === 0) continue; // already migrated, or never seeded here
-    if (matches.length > 1) {
-      conflicts.push(
-        `${retired} is held by ${matches.length} accounts (${matches.map((user) => user.id).join(", ")})`,
-      );
-      continue;
-    }
-    const occupant = users.find(
-      (user) => user !== matches[0] && normalizedEmail(user) === replacement,
-    );
-    if (occupant) {
-      conflicts.push(
-        `${retired} (${matches[0].id}) cannot become ${replacement}: account ${occupant.id} already holds it`,
-      );
-      continue;
-    }
-    planned.push({ user: matches[0], replacement });
-  }
-
-  if (conflicts.length > 0) {
-    throw new Error(
-      `Refusing to migrate pilot logins off the retired gridgo.local domain: ${conflicts.join("; ")}. ` +
-      "Renaming here would either merge two accounts onto one login — breaking authentication and orphaning " +
-      "whatever the loser owned — or strand a record that stored a login where it should store `userId`. " +
-      `Resolve it in ${STORE} by hand (keep the record that owns the orders), then restart.`,
-    );
-  }
-
-  for (const { user, replacement } of planned) {
-    user.email = replacement;
-  }
-  return planned.length > 0;
-}
-
-/**
- * Bring seed demo accounts (fixtures) up to their defined state on an existing store.
- *
- * Fixture boundary (must stay tight — wrong match eats captain data):
- * - Local PILOT_USERS are LOCAL_SEED_USERS (official Clerk trio + hosted six).
- *   Production PILOT_USERS are HOSTED_LEGACY_USERS only — never Gmail/USEP.
- * - Match by exact email first, else by stable seed id. Never by role or domain alone.
- * - Official Clerk fixtures are new rows. If another user already holds that
- *   email, or the fixture id exists under a different email, skip — do not
- *   overwrite and do not rename user_client / user_supplier / user_rider.
- * - Create a fixture user when missing; converge only attributes defined on the fixture.
- * - Never renumber an existing user's id (orders/credits FK safety).
- * - Never touch orders, credits, proofs, claims, issues, sessions, locationPings,
- *   notifications, catalog, taxonomy, zones, supplierServices, or auditLog.
- * - Never create/modify non-fixture users (captain-created accounts).
- *
- * Distinct from backfillAccountType: backfill only fills *missing* accountType with
- * "individual"; fixture convergence *overwrites* fixture fields so client@ becomes
- * business as the seed defines, even when a prior backfill left "individual".
- *
- * Returns true if the store was mutated.
- */
-function applyFixtureAttributes(user, fixture) {
-  let changed = false;
-  for (const [key, value] of Object.entries(fixture)) {
-    if (key === "id") continue;
-    // Email is a login key, not a convergeable attribute. This user may have
-    // been matched by stable seed id, which means its address has diverged —
-    // rewriting it would take a real person's login. The only sanctioned
-    // rename is migrateFixtureEmailDomain(), which matches the exact retired
-    // address and refuses on collision.
-    if (key === "email") continue;
-    // Rotate only the exact retired fixture credential. A password that has
-    // diverged is user-owned and must never be silently overwritten.
-    if (key === "password" && !PRODUCTION && user.password !== LEGACY_DEMO_PASSWORD) continue;
-    if (!fixtureValueEqual(user[key], value)) {
-      user[key] = cloneFixtureValue(value);
-      changed = true;
-    }
-  }
-  if (
-    fixture.verificationStatus === "approved" &&
-    user.verificationStatus === "approved" &&
-    user.verifiedAt == null
-  ) {
-    user.verifiedAt = now();
-    changed = true;
-  }
-  return changed;
-}
-
-function createFixtureUser(fixture) {
-  const created = {};
-  for (const [key, value] of Object.entries(fixture)) {
-    created[key] = cloneFixtureValue(value);
-  }
-  if (created.verificationStatus === "approved" && created.verifiedAt == null) {
-    created.verifiedAt = now();
-  }
-  return created;
-}
-
-function convergeDemoFixtures(store) {
-  let changed = false;
-  if (!Array.isArray(store.users)) {
-    store.users = [];
-    changed = true;
-  }
-
-  for (const fixture of PILOT_USERS) {
-    const byEmail = store.users.find((u) => u.email === fixture.email);
-    const byId = store.users.find((u) => u.id === fixture.id);
-
-    if (OFFICIAL_DEV_USER_IDS.has(fixture.id)) {
-      // Never steal an existing occupant of the official email, and never
-      // attach a Clerk id to a hosted seed row whose address has diverged.
-      if (byEmail && byEmail.id !== fixture.id) continue;
-      if (byId && byId.email !== fixture.email) continue;
-    }
-
-    const user = byEmail || byId;
-    if (!user) {
-      store.users.push(createFixtureUser(fixture));
-      changed = true;
-      continue;
-    }
-
-    if (applyFixtureAttributes(user, fixture)) changed = true;
-  }
-
-  return changed;
-}
-
-/**
- * Idempotent backfill for ops/super-admin platform records (taxonomy, services, zones,
- * claims, issues, audit). Never overwrites existing arrays/objects; never deletes orders.
- */
-function backfillPlatform(store) {
-  let changed = false;
-
-  if (!store.taxonomy || !Array.isArray(store.taxonomy.categories)) {
-    store.taxonomy = defaultTaxonomy();
-    changed = true;
-  } else {
-    if (!Array.isArray(store.taxonomy.materials)) {
-      store.taxonomy.materials = defaultTaxonomy().materials;
-      changed = true;
-    }
-    if (!Array.isArray(store.taxonomy.finishes)) {
-      store.taxonomy.finishes = defaultTaxonomy().finishes;
-      changed = true;
-    }
-  }
-
-  if (!Array.isArray(store.zones) || store.zones.length === 0) {
-    store.zones = defaultZones();
-    changed = true;
-  }
-  if (!Array.isArray(store.supplierServices)) {
-    store.supplierServices = [];
-    changed = true;
-  }
-
-  if (!Array.isArray(store.claims)) {
-    store.claims = [];
-    changed = true;
-  }
-
-  if (!Array.isArray(store.issues)) {
-    store.issues = [];
-    changed = true;
-  }
-
-  if (!Array.isArray(store.auditLog)) {
-    store.auditLog = [];
-    changed = true;
-  }
-
-  if (!store.credits || typeof store.credits !== "object") {
-    store.credits = {};
-    changed = true;
-  }
-
-  for (const u of store.users || []) {
-    if (u.role === "supplier") {
-      if (u.verificationStatus == null) {
-        // Demo supplier is treated as accredited so matching works without reset
-        u.verificationStatus = !PRODUCTION && (u.id === "user_supplier" || u.id === "user_test_supplier")
-          ? "approved"
-          : "unverified";
-        changed = true;
-      }
-      if (u.verificationNote == null) {
-        u.verificationNote = u.verificationStatus === "approved" ? "Pilot accredited" : null;
-        changed = true;
-      }
-      if (u.verifiedAt == null && u.verificationStatus === "approved") {
-        u.verifiedAt = now();
-        changed = true;
-      }
-      if (u.verifiedBy == null && u.verificationStatus === "approved") {
-        u.verifiedBy = "user_admin";
-        changed = true;
-      }
-    }
-  }
-
-  // If no services at all, seed a live catalogue for the demo supplier (idempotent key)
-  if (!PRODUCTION && store.supplierServices.length === 0) {
-    const demoSupplier = (store.users || []).find((u) =>
-      u.id === "user_test_supplier" || (u.role === "supplier" && u.email === "markdavidprado@gmail.com")
-    ) || (store.users || []).find((u) =>
-      u.id === "user_supplier" || (u.role === "supplier" && u.email === "supplier@gridgo.ph")
-    );
-    if (demoSupplier) {
-      const ts = now();
-      store.supplierServices.push(
-        {
-          id: "svc_demo_tarpaulin",
-          supplierId: demoSupplier.id,
-          categoryCode: "marketing_collateral",
-          materialCodes: ["tarpaulin_13oz", "mesh_banner"],
-          finishCodes: ["hem_grommet", "none"],
-          productFamilyIds: ["banner"],
-          sizeMin: "1x1 ft",
-          sizeMax: "10x30 ft",
-          qtyMin: 1,
-          qtyMax: 50,
-          pricingBasis: "per_sqm",
-          referenceRateMinor: 45000,
-          turnaroundHours: 24,
-          capacityDaily: 20,
-          capacityWeekly: 100,
-          zones: ["davao_central", "davao_south", "davao_north", "davao_east"],
-          equipmentNotes: "Solvent large-format printer + welding table",
-          state: "live",
-          verifiedAt: ts,
-          verifiedBy: "user_admin",
-          suspendedAt: null,
-          suspendedBy: null,
-          suspendReason: null,
-          withdrawnAt: null,
-          createdAt: ts,
-          updatedAt: ts,
-        },
-        {
-          id: "svc_demo_print",
-          supplierId: demoSupplier.id,
-          categoryCode: "marketing_collateral",
-          materialCodes: ["matte_150gsm", "gloss_cardstock", "vinyl_sticker"],
-          finishCodes: ["lamination", "kiss_cut", "none"],
-          productFamilyIds: ["flyer", "card", "sticker"],
-          sizeMin: "A6",
-          sizeMax: "A3",
-          qtyMin: 50,
-          qtyMax: 10000,
-          pricingBasis: "per_pack",
-          referenceRateMinor: 2500,
-          turnaroundHours: 48,
-          capacityDaily: 40,
-          capacityWeekly: 200,
-          zones: ["davao_central", "davao_south", "davao_north", "davao_west", "davao_east"],
-          equipmentNotes: "Digital press + guillotine",
-          state: "live",
-          verifiedAt: ts,
-          verifiedBy: "user_admin",
-          suspendedAt: null,
-          suspendedBy: null,
-          suspendReason: null,
-          withdrawnAt: null,
-          createdAt: ts,
-          updatedAt: ts,
-        },
-      );
-      changed = true;
-    }
-  }
-
-  return changed;
-}
-
-function assertProductionStoreHasNoDemoOperationalData(store) {
-  if (!PRODUCTION) return;
-  const demoRecords = [];
-  for (const collection of [
-    "orders",
-    "supplierServices",
-    "files",
-    "claims",
-    "issues",
-    "auditLog",
-    "notifications",
-    "locationPings",
-    "escalations",
-    "proofs",
-  ]) {
-    for (const record of Array.isArray(store[collection]) ? store[collection] : []) {
-      const marker = Object.values(record || {}).find(
-        (value) => typeof value === "string" && value.includes("_demo_"),
-      );
-      if (marker) demoRecords.push(`${collection}:${marker}`);
-    }
-  }
-  if (demoRecords.length === 0) return;
-
-  const freshStore = `${STORE}.production`;
-  throw new Error(
-    `STORE_PATH ${STORE} contains local demo operational data (${demoRecords.slice(0, 3).join(", ")}). ` +
-    `Back up this file, set STORE_PATH to a fresh production store, run NODE_ENV=production STORE_PATH=${freshStore} npm run seed, and restart with that new path.`,
-  );
-}
-
-function load() {
-  const store = JSON.parse(fs.readFileSync(STORE, "utf8"));
-  // Refuse before any backfill or fixture convergence can mutate the wrong file.
-  assertProductionStoreHasNoDemoOperationalData(store);
-  Object.defineProperty(store, STORE_NOTIFICATION_IDS, {
-    value: new Set((store.notifications || []).map((notification) => notification.id)),
-    writable: true,
+async function expireElapsedIssueWindows() {
+  const candidate = await database.query(`
+    SELECT 1
+      FROM orders AS candidate
+     WHERE candidate.state = 'issue_window_open'
+       AND candidate.issue_window_expires_at <= now()
+       AND candidate.payout_hold = false
+       AND NOT EXISTS (
+         SELECT 1 FROM claims
+          WHERE claims.order_id = candidate.id
+            AND claims.status IN ('open', 'payout_held')
+       )
+     LIMIT 1
+  `);
+  if (candidate.rowCount === 0) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (expireIssueWindows(store, now())) await save(store);
   });
-  let changed = false;
-  // First: every later pass (and the demo-supplier lookup in backfillPlatform)
-  // reads fixture emails, so normalise the retired domain before they run.
-  if (migrateFixtureEmailDomain(store)) changed = true;
-  if (backfillGeography(store)) changed = true;
-  if (backfillPlatform(store)) changed = true;
-  // After backfillPlatform, which guarantees store.taxonomy and its arrays exist.
-  if (backfillTaxonomy(store)) changed = true;
-  if (backfillFiles(store)) changed = true;
-  if (backfillNotifications(store)) changed = true;
-  if (backfillDeviceTokens(store)) changed = true;
-  if (backfillAccountType(store)) changed = true;
-  // Fixtures last so seed-defined demo identity wins over fill-missing defaults
-  // (e.g. client@ accountType business after a prior individual backfill).
-  if (convergeDemoFixtures(store)) changed = true;
-  if (backfillOperationalModel(store, now())) changed = true;
-  if (changed) save(store);
-  return store;
 }
 
 function canViewOrderLocation(user, order) {
@@ -1299,7 +766,7 @@ const TRANSITIONS = {
   picked_up: { out_for_delivery: ["rider"] },
   out_for_delivery: {},
   delivered: { issue_window_open: ["system", "ops_admin", "super_admin", "client", "rider"] },
-  issue_window_open: {}, // load-time expiry completes; no actor may close it early
+  issue_window_open: {}, // request-driven expiry completes; no actor may close it early
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
@@ -1326,156 +793,28 @@ async function handleRequest(req, res) {
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     const { pathname } = url;
-    const store = load();
 
     if (req.method === "GET" && pathname === "/health") {
-      return send(res, 200, {
-        ok: true,
+      const databaseHealth = await database.health();
+      return send(res, databaseHealth.status === "available" ? 200 : 503, {
+        ok: databaseHealth.status === "available",
         service: "gridgo-api",
-        version: store.version,
+        version: 3,
         commit: BUILD_COMMIT,
         builtAt: BUILD_TIME,
+        database: databaseHealth,
         storage: objectStorage.health(),
         push: pushDelivery.health(),
         at: now(),
       });
     }
+    await expireElapsedIssueWindows();
+    const store = await load();
 
     // ---- auth ----
-    if (req.method === "POST" && pathname === "/auth/signup") {
-      const body = await readBody(req);
-      const role = String(body.role || "");
-      const allowedRoles = ["client", "supplier", "rider"];
-      if (!allowedRoles.includes(role)) {
-        return signupError(
-          res,
-          "invalid_signup_role",
-          "Choose client, supplier, or rider for this account.",
-          { allowedRoles },
-        );
-      }
-      if (AUTH.mode !== "legacy" && ["supplier", "rider"].includes(role)) {
-        return send(res, 403, {
-          error: "invitation_required",
-          message: "Supplier and rider access is assigned by GRIDGO Operations through a Clerk invitation.",
-        });
-      }
-      const email = String(body.email || "").trim().toLowerCase();
-      const password = String(body.password || "");
-      const name = String(body.name || "").trim();
-      const phone = String(body.phone || "").trim();
-      if (!email || !email.includes("@")) {
-        return signupError(res, "invalid_email", "Enter a complete email address, then try again.");
-      }
-      if (store.users.some((candidate) => String(candidate.email).toLowerCase() === email)) {
-        return send(res, 409, {
-          error: "email_already_registered",
-          message: "This email already has a GRIDGO account. Sign in or use a different email address.",
-        });
-      }
-      if (password.length < 8) {
-        return signupError(res, "invalid_password", "Use a password with at least 8 characters.");
-      }
-      if (!name) return signupError(res, "name_required", "Enter the account holder's full name.");
-      if (!phone) return signupError(res, "phone_required", "Enter a phone number Operations can use for this account.");
-
-      const createdAt = now();
-      const created = { id: id("user"), email, password, name, phone, role, createdAt };
-      if (role === "client") {
-        const accountType = normalizedSignupAccountType(body.accountType);
-        if (!CLIENT_ACCOUNT_TYPES.has(accountType)) {
-          return signupError(
-            res,
-            "invalid_account_type",
-            "Choose personal, business, or organization for this client account.",
-            { allowed: ["individual", "business", "organization"], inputAlias: { personal: "individual" } },
-          );
-        }
-        const orgName = String(body.orgName || "").trim();
-        if (["business", "organization"].includes(accountType) && !orgName) {
-          return signupError(
-            res,
-            "organization_name_required",
-            "Enter the business or organization name used on this account.",
-          );
-        }
-        created.accountType = accountType;
-        if (orgName) created.orgName = orgName;
-      }
-      if (role === "supplier") {
-        const supplierName = String(body.supplierName || "").trim();
-        if (!supplierName) {
-          return signupError(res, "supplier_name_required", "Enter the supplier shop or trading name.");
-        }
-        if (!hasSignupShop(body.shop)) {
-          return signupError(
-            res,
-            "shop_location_required",
-            "Pin the supplier shop and add its address label before creating the account.",
-          );
-        }
-        const categoryRanks = validatedCategoryRanks(store, body.categoryRanks);
-        if (!categoryRanks) {
-          return signupError(
-            res,
-            "invalid_category_ranks",
-            "Rank at least one active service category from 1 with no gaps or duplicates.",
-          );
-        }
-        created.supplierName = supplierName;
-        created.shop = validatedShop(body.shop).shop;
-        created.categoryRanks = categoryRanks;
-        created.verificationDocumentFileIds = [];
-        created.verificationStatus = "pending";
-        created.verificationNote = "Operations review required before matching";
-        created.verifiedAt = null;
-        created.verifiedBy = null;
-      }
-      if (role === "rider") {
-        const profile = body.riderProfile;
-        const vehicleType = String(profile?.vehicleType || "").trim();
-        const vehiclePlate = String(profile?.vehiclePlate || "").trim();
-        const licenseNumber = String(profile?.licenseNumber || "").trim();
-        if (!vehicleType || !vehiclePlate || !licenseNumber) {
-          return signupError(
-            res,
-            "invalid_rider_profile",
-            "Enter the rider's vehicle type, plate number, and driving licence number.",
-          );
-        }
-        created.riderProfile = { vehicleType, vehiclePlate, licenseNumber };
-        created.verificationStatus = "pending";
-        created.verificationNote = "Operations review required before dispatch";
-        created.verifiedAt = null;
-        created.verifiedBy = null;
-      }
-
-      const token = id("tok");
-      store.users.push(created);
-      store.sessions[token] = { userId: created.id, createdAt };
-      save(store);
-      return send(res, 201, { token, user: publicUser(created) });
+    if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
+      return send(res, 404, { error: "not_found", path: pathname });
     }
-
-    if (req.method === "POST" && pathname === "/auth/login") {
-      const body = await readBody(req);
-      const user = store.users.find(
-        (u) => u.email === String(body.email || "").toLowerCase() && u.password === body.password,
-      );
-      if (!user) return send(res, 401, { error: "invalid_credentials" });
-      const token = id("tok");
-      store.sessions[token] = { userId: user.id, createdAt: now() };
-      // Signing in claims the handset it was performed on: the app registered
-      // its token before anyone had an account, and that registration becomes
-      // this person's rather than a second row appearing beside it.
-      const deviceToken = normalizeDeviceToken(body?.deviceToken);
-      const deviceClaimed = deviceToken
-        ? claimDeviceToken(store, { token: deviceToken, userId: user.id, at: now() }).claimed
-        : false;
-      save(store);
-      return send(res, 200, { token, user: publicUser(user), deviceClaimed });
-    }
-
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
@@ -1483,12 +822,6 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/activate") {
-      if (AUTH.mode === "legacy") {
-        return send(res, 404, {
-          error: "not_found",
-          message: "Clerk client activation is available only when AUTH_MODE is dual or clerk.",
-        });
-      }
       const header = req.headers.authorization || "";
       const match = /^Bearer\s+(.+)$/i.exec(header);
       const result = await activateClerkClientProfile({
@@ -1499,7 +832,7 @@ async function handleRequest(req, res) {
         createId: id,
         now,
       });
-      if (result.mutated) save(store);
+      if (result.mutated) await save(store);
       if (result.status !== 200) {
         return send(res, result.status, {
           error: result.error,
@@ -1510,8 +843,6 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/auth/logout") {
-      const h = req.headers.authorization || "";
-      const m = /^Bearer\s+(.+)$/i.exec(h);
       // Signing out is the moment a phone must stop receiving that person's
       // notifications. Accepting the device token here removes the ordering
       // trap of "unregister first, then log out" — after logout the bearer
@@ -1526,17 +857,17 @@ async function handleRequest(req, res) {
       const deviceToken = normalizeDeviceToken(body?.deviceToken);
       let released = false;
       const auth = await authenticateRequest(req, store);
-      if (m && auth.user) {
-        if (deviceToken) {
-          released = releaseDeviceToken(store, {
-            userId: auth.user.id,
-            token: deviceToken,
-            at: now(),
-          }).released;
-        }
-        if (auth.kind === "legacy") delete store.sessions[m[1]];
-        save(store);
+      if (!auth.user) {
+        return send(res, auth.status || 401, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
       }
+      if (deviceToken) {
+        released = releaseDeviceToken(store, {
+          userId: auth.user.id,
+          token: deviceToken,
+          at: now(),
+        }).released;
+      }
+      if (released) await save(store);
       // `deviceUnregistered` keeps its published meaning — this phone no longer
       // receives the caller's notifications — for app builds already shipped.
       return send(res, 200, { ok: true, deviceUnregistered: released, deviceUnclaimed: released });
@@ -1596,7 +927,7 @@ async function handleRequest(req, res) {
         at: now(),
         limit: MAX_UNCLAIMED_DEVICES,
       });
-      if (result.changed) save(store);
+      if (result.changed) await save(store);
       if (result.evicted > 0) {
         console.warn(
           `unclaimed device registry at capacity ${MAX_UNCLAIMED_DEVICES}; evicted ${result.evicted} least-recently-seen registration(s)`,
@@ -1617,7 +948,7 @@ async function handleRequest(req, res) {
       // Unclaimed rows only. A claimed registration still requires its owner's
       // bearer token, and the identical response is what stops this from
       // reporting which of the two it was.
-      if (unregisterDeviceToken(store, { userId: null, token }).changed) save(store);
+      if (unregisterDeviceToken(store, { userId: null, token }).changed) await save(store);
       return send(res, 200, { ok: true });
     }
 
@@ -1677,14 +1008,14 @@ async function handleRequest(req, res) {
         });
 
         await enqueueMutation(async () => {
-          const latestStore = load();
+          const latestStore = await load();
           const latestUser = (await authenticateRequest(req, latestStore)).user;
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
           }
           authorizeFileUpload(latestUser, purpose);
           latestStore.files.push(pending);
-          save(latestStore);
+          await save(latestStore);
         });
 
         try {
@@ -1701,7 +1032,7 @@ async function handleRequest(req, res) {
         }
         try {
           const ready = await enqueueMutation(async () => {
-            const latestStore = load();
+            const latestStore = await load();
             const latestUser = (await authenticateRequest(req, latestStore)).user;
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
@@ -1712,7 +1043,7 @@ async function handleRequest(req, res) {
               );
             }
             markFileReady(latestFile, now());
-            save(latestStore);
+            await save(latestStore);
             return latestFile;
           });
           // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
@@ -1763,7 +1094,7 @@ async function handleRequest(req, res) {
         );
       }
       return await enqueueMutation(async () => {
-        const latestStore = load();
+        const latestStore = await load();
         const latestUser = (await authenticateRequest(req, latestStore)).user;
         if (!latestUser) {
           throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
@@ -1787,17 +1118,17 @@ async function handleRequest(req, res) {
               milestoneCode: latestTarget.milestoneCode,
             });
           }
-          save(latestStore);
+          await save(latestStore);
           return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
         }
         if (latestTarget.type === "user") {
-          save(latestStore);
+          await save(latestStore);
           return send(res, 200, {
             file: publicFile(latestFile),
             ...verificationUserResponse(latestStore, latestTarget.record),
           });
         }
-        save(latestStore);
+        await save(latestStore);
         return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
       });
     }
@@ -1805,22 +1136,22 @@ async function handleRequest(req, res) {
     if (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname)) {
       const fileId = pathname.split("/")[2];
       const pending = await enqueueMutation(async () => {
-        const latestStore = load();
+        const latestStore = await load();
         const latestUser = (await authenticateRequest(req, latestStore)).user;
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";
         markFileDeletePending(latestFile, latestUser, now());
-        save(latestStore);
+        await save(latestStore);
         return { alreadyDeleted, file: latestFile, objectKey: latestFile.objectKey };
       });
       if (pending.alreadyDeleted) return send(res, 200, { file: publicFile(pending.file) });
       await objectStorage.deleteObject(pending.objectKey);
       const deleted = await enqueueMutation(async () => {
-        const latestStore = load();
+        const latestStore = await load();
         const latestFile = findFile(latestStore, fileId);
         markFileDeleted(latestFile, now());
-        save(latestStore);
+        await save(latestStore);
         return latestFile;
       });
       return send(res, 200, { file: publicFile(deleted) });
@@ -1869,7 +1200,7 @@ async function handleRequest(req, res) {
         platform,
         at: now(),
       });
-      save(store);
+      await save(store);
       return send(res, created ? 201 : 200, {
         device: publicDevice(device),
         created,
@@ -1895,7 +1226,7 @@ async function handleRequest(req, res) {
           message: "This device token is not registered to your account. Nothing was changed.",
         });
       }
-      save(store);
+      await save(store);
       return send(res, 200, { id: removed.id, unregistered: true });
     }
 
@@ -1976,7 +1307,7 @@ async function handleRequest(req, res) {
         notification.read = true;
         updatedCount += 1;
       }
-      if (updatedCount) save(store);
+      if (updatedCount) await save(store);
       return send(res, 200, { updatedCount });
     }
 
@@ -1991,7 +1322,7 @@ async function handleRequest(req, res) {
         return send(res, 400, { error: "notification_read_required" });
       }
       notification.read = body.read;
-      save(store);
+      await save(store);
       return send(res, 200, { notification });
     }
 
@@ -2002,7 +1333,7 @@ async function handleRequest(req, res) {
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
       if (notification.deletedAt == null) {
         notification.deletedAt = now();
-        save(store);
+        await save(store);
       }
       return send(res, 200, { id: notification.id, deletedAt: notification.deletedAt });
     }
@@ -2077,7 +1408,7 @@ async function handleRequest(req, res) {
         },
         reason: body.reason || null,
       });
-      save(store);
+      await save(store);
       deliverAnnouncementPush(unclaimed, { title, body: text });
       return send(res, 201, {
         announcement: {
@@ -2115,7 +1446,7 @@ async function handleRequest(req, res) {
         detail: { previous, current: store.settings },
         reason: body.reason || null,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { settings: store.settings });
     }
 
@@ -2173,7 +1504,7 @@ async function handleRequest(req, res) {
         detail: { amountMinor, balanceAfterMinor: acct.balanceMinor },
         reason: entry.reason,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { clientId, balanceMinor: acct.balanceMinor, entry, ledger: acct.ledger });
     }
 
@@ -2260,7 +1591,7 @@ async function handleRequest(req, res) {
         entityId: target.id,
         detail: { from: previousShop, to: target.shop, existingOrdersRepriced: false },
       });
-      save(store);
+      await save(store);
       return send(res, 200, { user: publicUser(target) });
     }
 
@@ -2280,11 +1611,31 @@ async function handleRequest(req, res) {
         return send(res, 200, { user: publicUser(target) });
       }
       target.role = body.role;
-      if (body.role === "supplier" && target.verificationStatus == null) {
+      if (body.role === "client") {
+        target.accountType = resolveClientAccountType(target);
+      } else {
+        delete target.accountType;
+        delete target.orgName;
+      }
+      if (["supplier", "rider"].includes(body.role) && target.verificationStatus == null) {
         target.verificationStatus = "unverified";
       }
       if (body.role === "supplier" && !Array.isArray(target.verificationDocumentFileIds)) {
         target.verificationDocumentFileIds = [];
+      }
+      if (body.role !== "supplier") {
+        delete target.shop;
+        delete target.shopUpdatedAt;
+        delete target.supplierName;
+        delete target.categoryRanks;
+        delete target.verificationDocumentFileIds;
+      }
+      if (body.role !== "rider") delete target.riderProfile;
+      if (!["supplier", "rider"].includes(body.role)) {
+        delete target.verificationStatus;
+        delete target.verificationNote;
+        delete target.verifiedAt;
+        delete target.verifiedBy;
       }
       audit(store, {
         actor: user,
@@ -2294,7 +1645,7 @@ async function handleRequest(req, res) {
         detail: { from: prev, to: body.role },
         reason: body.reason || null,
       });
-      save(store);
+      await save(store);
       return send(res, 200, verificationUserResponse(store, target));
     }
 
@@ -2341,7 +1692,7 @@ async function handleRequest(req, res) {
         detail: { from: prev, to: body.status },
         reason: body.reason || body.note || null,
       });
-      save(store);
+      await save(store);
       return send(res, 200, verificationUserResponse(store, target));
     }
 
@@ -2365,7 +1716,7 @@ async function handleRequest(req, res) {
       };
       store.zones.push(zone);
       audit(store, { actor: user, action: "zone.create", entityType: "zone", entityId: zone.id, detail: zone });
-      save(store);
+      await save(store);
       return send(res, 201, { zone });
     }
 
@@ -2385,7 +1736,7 @@ async function handleRequest(req, res) {
         zone.code = String(body.code);
       }
       audit(store, { actor: user, action: "zone.update", entityType: "zone", entityId: zone.id, detail: zone });
-      save(store);
+      await save(store);
       return send(res, 200, { zone });
     }
 
@@ -2417,7 +1768,7 @@ async function handleRequest(req, res) {
       };
       store.taxonomy.categories.push(item);
       audit(store, { actor: user, action: "taxonomy.category_create", entityType: "taxonomy_category", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 201, { category: item });
     }
 
@@ -2433,7 +1784,7 @@ async function handleRequest(req, res) {
       if (body.productFamilyIds != null) item.productFamilyIds = body.productFamilyIds;
       if (body.active != null) item.active = Boolean(body.active);
       audit(store, { actor: user, action: "taxonomy.category_update", entityType: "taxonomy_category", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 200, { category: item });
     }
 
@@ -2461,7 +1812,7 @@ async function handleRequest(req, res) {
       };
       store.taxonomy.subcategories.push(item);
       audit(store, { actor: user, action: "taxonomy.subcategory_create", entityType: "taxonomy_subcategory", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 201, { subcategory: item });
     }
 
@@ -2481,7 +1832,7 @@ async function handleRequest(req, res) {
       if (body.sortOrder != null) item.sortOrder = Number(body.sortOrder);
       if (body.active != null) item.active = Boolean(body.active);
       audit(store, { actor: user, action: "taxonomy.subcategory_update", entityType: "taxonomy_subcategory", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 200, { subcategory: item });
     }
 
@@ -2501,7 +1852,7 @@ async function handleRequest(req, res) {
       };
       store.taxonomy.materials.push(item);
       audit(store, { actor: user, action: "taxonomy.material_create", entityType: "taxonomy_material", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 201, { material: item });
     }
 
@@ -2515,7 +1866,7 @@ async function handleRequest(req, res) {
       if (body.categoryCodes != null) item.categoryCodes = body.categoryCodes;
       if (body.active != null) item.active = Boolean(body.active);
       audit(store, { actor: user, action: "taxonomy.material_update", entityType: "taxonomy_material", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 200, { material: item });
     }
 
@@ -2535,7 +1886,7 @@ async function handleRequest(req, res) {
       };
       store.taxonomy.finishes.push(item);
       audit(store, { actor: user, action: "taxonomy.finish_create", entityType: "taxonomy_finish", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 201, { finish: item });
     }
 
@@ -2549,7 +1900,7 @@ async function handleRequest(req, res) {
       if (body.categoryCodes != null) item.categoryCodes = body.categoryCodes;
       if (body.active != null) item.active = Boolean(body.active);
       audit(store, { actor: user, action: "taxonomy.finish_update", entityType: "taxonomy_finish", entityId: item.id, detail: item });
-      save(store);
+      await save(store);
       return send(res, 200, { finish: item });
     }
 
@@ -2614,7 +1965,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
         detail: { categoryCode: service.categoryCode, state: service.state },
       });
-      save(store);
+      await save(store);
       return send(res, 201, { service: summarizeService(service) });
     }
 
@@ -2715,7 +2066,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
         detail: { state: service.state },
       });
-      save(store);
+      await save(store);
       return send(res, 200, { service: summarizeService(service) });
     }
 
@@ -2747,7 +2098,7 @@ async function handleRequest(req, res) {
         entityType: "supplier_service",
         entityId: service.id,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { service: summarizeService(service) });
     }
 
@@ -2776,7 +2127,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
         reason: body.reason || null,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { service: summarizeService(service) });
     }
 
@@ -2799,7 +2150,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
         reason: body.reason,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { service: summarizeService(service) });
     }
 
@@ -2819,7 +2170,7 @@ async function handleRequest(req, res) {
         entityType: "supplier_service",
         entityId: service.id,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { service: summarizeService(service) });
     }
 
@@ -2898,7 +2249,7 @@ async function handleRequest(req, res) {
         reason: body.reason,
         detail: { status: claim.status },
       });
-      save(store);
+      await save(store);
       return send(res, 201, { claim });
     }
 
@@ -2941,7 +2292,7 @@ async function handleRequest(req, res) {
         orderId: claim.orderId,
         reason: body.reason,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { claim });
     }
 
@@ -2977,7 +2328,7 @@ async function handleRequest(req, res) {
         orderId: claim.orderId,
         reason: body.reason,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { claim });
     }
 
@@ -3081,7 +2432,7 @@ async function handleRequest(req, res) {
         detail: { kind: issue.kind, claimId: claim.id },
         reason: issue.description,
       });
-      save(store);
+      await save(store);
       return send(res, 201, { issue, claim });
     }
 
@@ -3153,7 +2504,7 @@ async function handleRequest(req, res) {
         reason: issue.resolution,
         detail: { status: issue.status, releasePayout: Boolean(body.releasePayout) },
       });
-      save(store);
+      await save(store);
       return send(res, 200, { issue });
     }
 
@@ -3223,7 +2574,7 @@ async function handleRequest(req, res) {
         orderId: escalation.orderId,
         reason: resolution,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { escalation, order: publicOrder(order, user) });
     }
 
@@ -3274,7 +2625,7 @@ async function handleRequest(req, res) {
         detail: { milestoneCode, amountMinor: milestone.amountMinor },
         reason: body.note || null,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user), milestone });
     }
 
@@ -3319,14 +2670,14 @@ async function handleRequest(req, res) {
       }
       if (
         installmentCode === "balance" &&
-        !["confirmed", "legacy_confirmed"].includes(order.payments?.downpayment?.status)
+        order.payments?.downpayment?.status !== "confirmed"
       ) {
         return send(res, 409, {
           error: "downpayment_not_confirmed",
           message: "Operations must confirm the downpayment before you submit the remaining balance.",
         });
       }
-      if (["pending_confirmation", "confirmed", "legacy_confirmed"].includes(installment.status)) {
+      if (["pending_confirmation", "confirmed"].includes(installment.status)) {
         return send(res, 409, {
           error: "payment_already_submitted",
           message: "This installment already has a submitted payment. Refresh the order to see its confirmation status.",
@@ -3370,7 +2721,7 @@ async function handleRequest(req, res) {
         orderId: order.id,
         detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
       });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
@@ -3382,7 +2733,7 @@ async function handleRequest(req, res) {
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const installment = order.payments?.[installmentCode];
-      if (["confirmed", "legacy_confirmed"].includes(installment?.status)) {
+      if (installment?.status === "confirmed") {
         return send(res, 409, {
           error: "payment_already_confirmed",
           message: "Operations already accepted this installment, so it cannot be rejected here. Escalate any payment correction for manual reconciliation.",
@@ -3438,7 +2789,7 @@ async function handleRequest(req, res) {
         detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
         reason,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
@@ -3486,7 +2837,7 @@ async function handleRequest(req, res) {
         detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
         reason: body.note || null,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
@@ -3574,7 +2925,7 @@ async function handleRequest(req, res) {
         timeline: [{ at: ts, state: body.submit ? "submitted" : "draft", by: user.id, note: body.submit ? "Submitted" : "Draft saved" }],
       };
       store.orders.unshift(order);
-      save(store);
+      await save(store);
       return send(res, 201, { order: publicOrder(order, user) });
     }
 
@@ -3755,7 +3106,7 @@ async function handleRequest(req, res) {
           by: "system",
           note: "Client notified of assignment and final price",
         });
-        save(store);
+        await save(store);
         return send(res, 200, { order: publicOrder(order, user) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
@@ -3791,7 +3142,7 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
@@ -3825,7 +3176,7 @@ async function handleRequest(req, res) {
       order.state = "rider_assigned";
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
@@ -3949,7 +3300,7 @@ async function handleRequest(req, res) {
           detail: { failedCheckCodes, evidenceFileIds },
           reason: failureNote,
         });
-        save(store);
+        await save(store);
         return send(res, 200, { order: publicOrder(order, user), escalation });
       }
 
@@ -3971,7 +3322,7 @@ async function handleRequest(req, res) {
         by: user.id,
         note: "All six pickup checks passed; rider prompted to give the trained verbal sign-off",
       });
-      save(store);
+      await save(store);
       return send(res, 200, {
         order: publicOrder(order, user),
         signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
@@ -3997,7 +3348,7 @@ async function handleRequest(req, res) {
         at: now(),
       };
       store.locationPings.push(ping);
-      save(store);
+      await save(store);
       return send(res, 201, { ping });
     }
 
@@ -4025,7 +3376,7 @@ async function handleRequest(req, res) {
           state: order.state,
         });
       }
-      if (!["confirmed", "legacy_confirmed"].includes(order.payments?.balance?.status)) {
+      if (order.payments?.balance?.status !== "confirmed") {
         return send(res, 409, {
           error: "balance_not_confirmed",
           message: "Operations must confirm the client's digital balance before the rider completes delivery.",
@@ -4079,7 +3430,7 @@ async function handleRequest(req, res) {
         by: "system",
         note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
       });
-      save(store);
+      await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
@@ -4102,6 +3453,7 @@ async function handleRequest(req, res) {
 
     return send(res, 404, { error: "not_found", path: pathname });
   } catch (err) {
+    database.markRollback();
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
       return sendDomainError(res, err);
     }
@@ -4116,8 +3468,8 @@ async function handleRequest(req, res) {
 const server = http.createServer((req, res) => {
   const pathname = String(req.url || "").split("?", 1)[0];
   const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
-  // File transfers and MinIO calls stay outside the mutation queue. File routes
-  // acquire the queue only for short load -> validate -> mutate -> atomic-save commits.
+  // File transfers and MinIO calls stay outside database transactions. File routes
+  // acquire one only for short load -> validate -> mutate -> commit sections.
   const isSelfQueuedFileMutation =
     (req.method === "POST" && pathname === "/files") ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
@@ -4147,18 +3499,18 @@ const server = http.createServer((req, res) => {
 server.requestTimeout = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
 
 async function reconcileInterruptedFiles() {
-  const candidates = load().files.filter(
+  const candidates = (await load()).files.filter(
     (file) => ["pending_upload", "delete_pending"].includes(file.state) && file.objectKey,
   );
   for (const candidate of candidates) {
     try {
       await objectStorage.deleteObject(candidate.objectKey);
       await enqueueMutation(async () => {
-        const latestStore = load();
+        const latestStore = await load();
         const latestFile = findFile(latestStore, candidate.fileId);
         if (!latestFile || !["pending_upload", "delete_pending"].includes(latestFile.state)) return;
         markFileDeleted(latestFile, now());
-        save(latestStore);
+        await save(latestStore);
       });
     } catch {
       // Leave the durable pending state for the next boot; non-file routes remain usable.
@@ -4166,8 +3518,9 @@ async function reconcileInterruptedFiles() {
   }
 }
 
-// Complete additive/idempotent backfill before accepting concurrent requests.
-load();
+// Migrations and the reference seed are explicit operator steps. Boot never
+// creates schema or data; it refuses before listening when PostgreSQL is not ready.
+await database.assertReady();
 
 server.listen(PORT, HOST, () => {
   console.log(`gridgo-api listening on http://${HOST}:${PORT}`);
