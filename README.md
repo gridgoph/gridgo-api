@@ -70,7 +70,8 @@ The seed creates only catalog, taxonomy, zones, and global operational settings.
   "builtAt": "<image build time>",
   "database": { "status": "available" },
   "storage": { "status": "available" },
-  "push": { "status": "disabled" }
+  "push": { "status": "disabled" },
+  "at": "<current server time>"
 }
 ```
 

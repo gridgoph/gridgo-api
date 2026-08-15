@@ -101,6 +101,8 @@ Clerk owns sign-up, sign-in, password recovery, Google SSO, sessions, and JWT re
 
 The first authenticated activation creates an `individual` client. Supplier, rider, Operations, and Super Admin access is granted only by a database role change performed by an existing Super Admin. The database role is authoritative for every authorization decision; Clerk client-settable metadata is ignored. Supplier/rider verification remains a separate Operations-controlled approval.
 
+`PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
+
 ### `POST /auth/clerk/activate`
 
 Auth: `Authorization: Bearer <Clerk session JWT>`. Empty body.
