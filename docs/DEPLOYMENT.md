@@ -245,7 +245,7 @@ mkdir -p ~/gridgo/api
 # install fcm-service-account.json as in §2a (0600, owned by uid 1001)
 cd ~/gridgo/api
 docker compose config --quiet          # must print nothing
-docker compose config --images         # must include ghcr.io/rqms40/gridgo-api:latest
+docker compose config --images         # must include ghcr.io/gridgoph/gridgo-api:latest
 ```
 
 `deploy.sh` refuses while `~/gridgo/api/docker-compose.yml` is missing. Then merge to the default branch and let the pipeline do the first deploy. **Do not `docker compose up` by hand first**: the image is private, and CI is what supplies the pull credential — by design, nothing durable authenticates this host to the registry. A manual pull failing with `unauthorized` before the first CI publish is the expected, correct state, not a fault.

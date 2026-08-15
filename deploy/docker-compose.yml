@@ -37,7 +37,7 @@ services:
   # the default in-repo store path, precisely so a mistyped STORE_PATH surfaces
   # as a refusal rather than as a silently empty database.
   store-init:
-    image: ghcr.io/rqms40/gridgo-api:${GRIDGO_API_TAG:-latest}
+    image: ghcr.io/gridgoph/gridgo-api:${GRIDGO_API_TAG:-latest}
     container_name: gridgo-api-store-init
     command: ["node", "src/seed.js"]
     env_file:
@@ -62,7 +62,7 @@ services:
   # The API itself.
   # ---------------------------------------------------------------------------
   api:
-    image: ghcr.io/rqms40/gridgo-api:${GRIDGO_API_TAG:-latest}
+    image: ghcr.io/gridgoph/gridgo-api:${GRIDGO_API_TAG:-latest}
 
     # The edge proxy resolves this exact name on the gridgo-edge network:
     #   gridgo-api.talasora.com  ->  reverse_proxy gridgo-api:8787
