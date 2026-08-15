@@ -173,8 +173,18 @@ function rowsFromStore(store) {
   for (const [position, ping] of (store.locationPings || []).entries()) rows.location_pings.push({ id: ping.id, order_id: ping.orderId, rider_id: ping.riderId, lat: ping.lat, lng: ping.lng, accuracy_meters: ping.accuracy ?? null, at: ping.at, position, data: without(ping, ["id", "orderId", "riderId", "lat", "lng", "accuracy", "at"]) });
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
   for (const [position, item] of (store.proofs || []).entries()) rows.proofs.push({ id: item.id, order_id: item.orderId, uploader_id: item.uploaderId ?? null, created_at: item.createdAt || item.at, position, data: without(item, ["id", "orderId", "uploaderId", "createdAt", "at"]) });
-  for (const [position, item] of (store.deviceTokens || []).entries()) rows.device_tokens.push({ id: item.id, user_id: item.userId ?? null, token: item.token, platform: item.platform, created_at: item.createdAt, updated_at: item.updatedAt, position, data: without(item, ["id", "userId", "token", "platform", "createdAt", "updatedAt"]) });
+  for (const [position, item] of (store.deviceTokens || []).entries()) rows.device_tokens.push(deviceTokenRow(item, position));
   return rows;
+}
+
+const DEVICE_TOKENS_TABLE = TABLES.find((table) => table.name === "device_tokens");
+
+function deviceTokenRow(item, position) {
+  return { id: item.id, user_id: item.userId ?? null, token: item.token, platform: item.platform, created_at: item.createdAt, updated_at: item.updatedAt, position, data: without(item, ["id", "userId", "token", "platform", "createdAt", "updatedAt"]) };
+}
+
+function deviceTokenItem(row) {
+  return { ...row.data, id: row.id, userId: row.user_id, token: row.token, platform: row.platform, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 function attachBaseline(store, rows) {
@@ -248,8 +258,30 @@ export async function loadStore(database) {
   store.locationPings = ordered(loaded.location_pings).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, lat: row.lat, lng: row.lng, accuracy: row.accuracy_meters, at: row.at }));
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.proofs = ordered(loaded.proofs).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, uploaderId: row.uploader_id, createdAt: row.created_at }));
-  store.deviceTokens = ordered(loaded.device_tokens).map((row) => ({ ...row.data, id: row.id, userId: row.user_id, token: row.token, platform: row.platform, createdAt: row.created_at, updatedAt: row.updated_at }));
+  store.deviceTokens = ordered(loaded.device_tokens).map(deviceTokenItem);
   return attachBaseline(store, rowsFromStore(store));
+}
+
+/**
+ * Device-token-only store for routes that must not join the whole-store
+ * domain transaction. The returned object works with the push.js device
+ * functions and persists exclusively through saveDeviceTokenStore.
+ */
+export async function loadDeviceTokenStore(database) {
+  if (!database.inTransaction()) throw new Error("loadDeviceTokenStore requires an active transaction");
+  const rows = (await database.query(`SELECT ${DEVICE_TOKENS_TABLE.columns.join(", ")} FROM device_tokens`)).rows;
+  const store = { deviceTokens: ordered(rows).map(deviceTokenItem) };
+  return attachBaseline(store, { device_tokens: store.deviceTokens.map(deviceTokenRow) });
+}
+
+export async function saveDeviceTokenStore(database, store) {
+  if (!database.inWriteTransaction()) throw new Error("saveDeviceTokenStore requires an active write transaction");
+  const currentRows = (store.deviceTokens || []).map(deviceTokenRow);
+  const before = rowMap(store[BASELINE]?.device_tokens || [], DEVICE_TOKENS_TABLE);
+  const current = rowMap(currentRows, DEVICE_TOKENS_TABLE);
+  await deleteMissing(database, DEVICE_TOKENS_TABLE, before, current);
+  await upsertChanged(database, DEVICE_TOKENS_TABLE, before, current);
+  store[BASELINE] = { device_tokens: structuredClone(currentRows) };
 }
 
 function rowMap(rows, table) {

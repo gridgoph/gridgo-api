@@ -84,6 +84,39 @@ async function request(api, pathname, { method = "GET", subject, body } = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+/** Sends rawPath exactly as given — fetch would normalize dot segments client-side. */
+function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
+  const { hostname, port } = new URL(api);
+  return new Promise((resolve, reject) => {
+    const clientRequest = http.request(
+      {
+        hostname,
+        port,
+        path: rawPath,
+        method,
+        headers: {
+          ...(subject ? { Authorization: `Bearer ${token(subject)}` } : {}),
+          ...(body == null ? {} : { "Content-Type": "application/json" }),
+        },
+      },
+      (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => { text += chunk; });
+        response.on("end", () => {
+          try {
+            resolve({ status: response.statusCode, body: JSON.parse(text) });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+    clientRequest.on("error", reject);
+    clientRequest.end(body == null ? undefined : JSON.stringify(body));
+  });
+}
+
 async function clearAndFixture(database) {
   await database.query(`TRUNCATE
     administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
@@ -305,6 +338,10 @@ test("Clerk activation provisions only a client through the live API and Postgre
     assert.equal(again.status, 200, JSON.stringify(again.body));
     assert.equal(again.body.user.id, activated.body.user.id);
 
+    const dotted = await rawRequest(instance.api, "/auth/clerk/x/../activate", { subject: "clerk_activate", body: {} });
+    assert.equal(dotted.status, 200, JSON.stringify(dotted.body));
+    assert.equal(dotted.body.user.id, activated.body.user.id);
+
     const me = await request(instance.api, "/auth/me", { subject: "clerk_activate" });
     assert.equal(me.status, 200);
     assert.equal(me.body.user.id, activated.body.user.id);
@@ -319,6 +356,43 @@ test("Clerk activation provisions only a client through the live API and Postgre
       await new Promise((resolve) => instance.child.once("exit", resolve));
     }
     await new Promise((resolve) => clerk.server.close(resolve));
+    await database.close();
+  }
+});
+
+test("anonymous device routes stay off the global mutation lock", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  const deviceToken = `anon-lock-proof-${"x".repeat(64)}`;
+  const post = (pathname, body, headers = {}) =>
+    fetch(`${instance.api}${pathname}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5_000),
+    });
+  try {
+    await request(instance.api, "/catalog");
+    await database.transaction(async () => {
+      const registered = await post("/devices", { token: deviceToken, platform: "android" });
+      assert.equal(registered.status, 200);
+      assert.deepEqual(await registered.json(), { ok: true });
+      const row = await database.query("SELECT user_id FROM device_tokens WHERE token = $1", [deviceToken]);
+      assert.equal(row.rowCount, 1);
+      assert.equal(row.rows[0].user_id, null);
+
+      const staleBearer = await post("/devices", { token: deviceToken, platform: "android" }, { Authorization: "Bearer not-a-clerk-token" });
+      assert.equal(staleBearer.status, 401);
+
+      const unregistered = await post("/devices/unregister", { token: deviceToken });
+      assert.equal(unregistered.status, 200);
+      assert.deepEqual(await unregistered.json(), { ok: true });
+      assert.equal((await database.query("SELECT 1 FROM device_tokens WHERE token = $1", [deviceToken])).rowCount, 0);
+    });
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
     await database.close();
   }
 });

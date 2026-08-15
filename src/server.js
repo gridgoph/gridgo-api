@@ -69,7 +69,13 @@ import {
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
 import { createDatabase } from "./database.js";
-import { loadStore, originalNotificationIds, saveStore } from "./postgres-store.js";
+import {
+  loadDeviceTokenStore,
+  loadStore,
+  originalNotificationIds,
+  saveDeviceTokenStore,
+  saveStore,
+} from "./postgres-store.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -95,6 +101,10 @@ const pushDelivery = createPushDeliveryOrDisable(process.env);
 // unauthenticated write on the platform. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
+// The anonymous device routes touch nothing but device_tokens, so they commit
+// under their own advisory lock and can never hold up the domain lock that
+// serializes every credentialed platform mutation.
+const enqueueDeviceMutation = (mutation) => database.transaction(mutation, { lockKey: "gridgo-device-tokens" });
 const notificationEvents = createNotificationEvents();
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
 let storageInitializing = true;
@@ -320,6 +330,7 @@ async function verifyClerkBeforeMutation(req, pathname) {
       req.gridgoClerkUser = { clerkUser: null };
     }
   }
+  return verified;
 }
 
 /** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
@@ -843,6 +854,91 @@ async function handleRequest(req, res) {
         at: now(),
       });
     }
+    // ---- push registration before there is an account ----
+    //
+    // The only unauthenticated write on the platform, and it exists so an
+    // "update your app" announcement reaches an install whose owner never
+    // signed in — the people most likely to be stuck on a broken build.
+    //
+    // Anonymous only when the request carries no Authorization header at all.
+    // A *stale* bearer token still gets `401`, so an app with an expired
+    // session learns to sign in again instead of silently demoting its
+    // registration to unclaimed.
+    //
+    // Every response on this path is a fixed body. It must not disclose whether
+    // the token was already known, whether it belongs to somebody, or how many
+    // registrations exist: the caller supplies the token, so any variation
+    // would answer those questions for whoever asked. `GET /devices` stays
+    // authenticated and caller-scoped.
+    //
+    // Handled before the store load on purpose: these routes read and write
+    // only device_tokens through their own targeted transaction, so anonymous
+    // callers can neither hold the domain mutation lock nor force full-store
+    // work.
+    if (!hasBearerToken(req) && req.method === "POST" && pathname === "/devices") {
+      const body = await readBody(req);
+      const token = normalizeDeviceToken(body.token);
+      if (!token) {
+        return send(res, 400, {
+          error: "device_token_required",
+          message: "Send the FCM registration token this device received from Firebase.",
+        });
+      }
+      if (!isFcmTokenShaped(token)) {
+        return send(res, 400, {
+          error: "invalid_device_token",
+          message:
+            "This is not an FCM registration token. Send the token Firebase issued to this installation, unmodified.",
+        });
+      }
+      const platform = String(body.platform || "").trim();
+      if (!DEVICE_PLATFORMS.includes(platform)) {
+        return send(res, 400, {
+          error: "invalid_device_platform",
+          message: "Choose android, ios, or web for this device registration.",
+          allowed: DEVICE_PLATFORMS,
+        });
+      }
+      const result = await enqueueDeviceMutation(async () => {
+        const deviceStore = await loadDeviceTokenStore(database);
+        const outcome = registerUnclaimedDeviceToken(deviceStore, {
+          token,
+          platform,
+          at: now(),
+          limit: MAX_UNCLAIMED_DEVICES,
+        });
+        if (outcome.changed) await saveDeviceTokenStore(database, deviceStore);
+        return outcome;
+      });
+      if (result.evicted > 0) {
+        console.warn(
+          `unclaimed device registry at capacity ${MAX_UNCLAIMED_DEVICES}; evicted ${result.evicted} least-recently-seen registration(s)`,
+        );
+      }
+      return send(res, 200, { ok: true });
+    }
+
+    if (!hasBearerToken(req) && req.method === "POST" && pathname === "/devices/unregister") {
+      const body = await readBody(req);
+      const token = normalizeDeviceToken(body.token);
+      if (!token) {
+        return send(res, 400, {
+          error: "device_token_required",
+          message: "Send the FCM registration token this device is registered with.",
+        });
+      }
+      // Unclaimed rows only. A claimed registration still requires its owner's
+      // bearer token, and the identical response is what stops this from
+      // reporting which of the two it was.
+      await enqueueDeviceMutation(async () => {
+        const deviceStore = await loadDeviceTokenStore(database);
+        if (unregisterDeviceToken(deviceStore, { userId: null, token }).changed) {
+          await saveDeviceTokenStore(database, deviceStore);
+        }
+      });
+      return send(res, 200, { ok: true });
+    }
+
     await expireElapsedIssueWindows();
     const store = await load();
 
@@ -916,77 +1012,6 @@ async function handleRequest(req, res) {
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
       return send(res, 200, { catalog: store.catalog });
-    }
-
-    // ---- push registration before there is an account ----
-    //
-    // The only unauthenticated write on the platform, and it exists so an
-    // "update your app" announcement reaches an install whose owner never
-    // signed in — the people most likely to be stuck on a broken build.
-    //
-    // Anonymous only when the request carries no Authorization header at all.
-    // A *stale* bearer token still gets `401`, so an app with an expired
-    // session learns to sign in again instead of silently demoting its
-    // registration to unclaimed.
-    //
-    // Every response on this path is a fixed body. It must not disclose whether
-    // the token was already known, whether it belongs to somebody, or how many
-    // registrations exist: the caller supplies the token, so any variation
-    // would answer those questions for whoever asked. `GET /devices` stays
-    // authenticated and caller-scoped.
-    if (!hasBearerToken(req) && req.method === "POST" && pathname === "/devices") {
-      const body = await readBody(req);
-      const token = normalizeDeviceToken(body.token);
-      if (!token) {
-        return send(res, 400, {
-          error: "device_token_required",
-          message: "Send the FCM registration token this device received from Firebase.",
-        });
-      }
-      if (!isFcmTokenShaped(token)) {
-        return send(res, 400, {
-          error: "invalid_device_token",
-          message:
-            "This is not an FCM registration token. Send the token Firebase issued to this installation, unmodified.",
-        });
-      }
-      const platform = String(body.platform || "").trim();
-      if (!DEVICE_PLATFORMS.includes(platform)) {
-        return send(res, 400, {
-          error: "invalid_device_platform",
-          message: "Choose android, ios, or web for this device registration.",
-          allowed: DEVICE_PLATFORMS,
-        });
-      }
-      const result = registerUnclaimedDeviceToken(store, {
-        token,
-        platform,
-        at: now(),
-        limit: MAX_UNCLAIMED_DEVICES,
-      });
-      if (result.changed) await save(store);
-      if (result.evicted > 0) {
-        console.warn(
-          `unclaimed device registry at capacity ${MAX_UNCLAIMED_DEVICES}; evicted ${result.evicted} least-recently-seen registration(s)`,
-        );
-      }
-      return send(res, 200, { ok: true });
-    }
-
-    if (!hasBearerToken(req) && req.method === "POST" && pathname === "/devices/unregister") {
-      const body = await readBody(req);
-      const token = normalizeDeviceToken(body.token);
-      if (!token) {
-        return send(res, 400, {
-          error: "device_token_required",
-          message: "Send the FCM registration token this device is registered with.",
-        });
-      }
-      // Unclaimed rows only. A claimed registration still requires its owner's
-      // bearer token, and the identical response is what stops this from
-      // reporting which of the two it was.
-      if (unregisterDeviceToken(store, { userId: null, token }).changed) await save(store);
-      return send(res, 200, { ok: true });
     }
 
     if (!user) {
@@ -3511,7 +3536,15 @@ async function handleRequest(req, res) {
 }
 
 const server = http.createServer((req, res) => {
-  const pathname = String(req.url || "").split("?", 1)[0];
+  // The same WHATWG normalization handleRequest routes on — a raw string split
+  // would let dot-segment paths reach a route the dispatch classified
+  // differently.
+  let pathname = "/";
+  try {
+    pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname;
+  } catch {
+    // handleRequest fails the same parse and answers 500 itself.
+  }
   const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
   // File transfers and MinIO calls stay outside database transactions. File routes
   // acquire one only for short load -> validate -> mutate -> commit sections.
@@ -3524,9 +3557,18 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (mutatesStore) {
+    // Only a mutation bearing a verified Clerk subject enters the global
+    // domain transaction. Without one, no store-mutating route is reachable:
+    // anonymous or garbage-token requests end at 401/404, and the two
+    // documented anonymous device routes commit through their own targeted
+    // device-token transaction inside handleRequest.
     void readBody(req)
       .then(() => verifyClerkBeforeMutation(req, pathname))
-      .then(() => enqueueMutation(() => handleRequest(req, res)))
+      .then((verified) =>
+        verified?.claims?.sub
+          ? enqueueMutation(() => handleRequest(req, res))
+          : handleRequest(req, res),
+      )
       .catch((error) => {
         if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
           sendDomainError(res, error);

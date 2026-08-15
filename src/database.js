@@ -52,7 +52,7 @@ export function createDatabase(env = process.env) {
     return (active?.client || pool).query(text, values);
   }
 
-  async function transaction(fn) {
+  async function transaction(fn, { lockKey = "gridgo-domain-mutation" } = {}) {
     const active = current();
     if (active?.readOnly) throw new Error("Cannot start a write transaction inside a read-only database snapshot");
     if (active) return fn();
@@ -61,7 +61,7 @@ export function createDatabase(env = process.env) {
     const state = { client, afterCommit: [], rollbackOnly: false, readOnly: false };
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('gridgo-domain-mutation'))");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
       const result = await context.run(state, fn);
       if (state.rollbackOnly) {
         await client.query("ROLLBACK");
