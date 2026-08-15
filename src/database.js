@@ -42,9 +42,13 @@ export function createDatabase(env = process.env) {
     connectionTimeoutMillis: Number(env.DATABASE_CONNECT_TIMEOUT_MS || 5_000),
     idleTimeoutMillis: Number(env.DATABASE_IDLE_TIMEOUT_MS || 30_000),
   });
+  pool.on("error", (error) => {
+    console.error(`PostgreSQL idle client error: ${error?.code || "unknown"}`);
+  });
 
   function current() {
-    return context.getStore() || null;
+    const active = context.getStore();
+    return active && !active.finished ? active : null;
   }
 
   async function query(text, values) {
@@ -58,16 +62,18 @@ export function createDatabase(env = process.env) {
     if (active) return fn();
 
     const client = await pool.connect();
-    const state = { client, afterCommit: [], rollbackOnly: false, readOnly: false };
+    const state = { client, afterCommit: [], rollbackOnly: false, readOnly: false, finished: false };
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
       const result = await context.run(state, fn);
       if (state.rollbackOnly) {
         await client.query("ROLLBACK");
+        state.finished = true;
         return result;
       }
       await client.query("COMMIT");
+      state.finished = true;
       for (const callback of state.afterCommit) {
         try {
           await callback();
@@ -82,8 +88,10 @@ export function createDatabase(env = process.env) {
       } catch {
         // Preserve the triggering failure. The pool discards a broken client.
       }
+      state.finished = true;
       throw error;
     } finally {
+      state.finished = true;
       client.release();
     }
   }
@@ -91,11 +99,12 @@ export function createDatabase(env = process.env) {
   async function snapshot(fn) {
     if (current()) return fn();
     const client = await pool.connect();
-    const state = { client, afterCommit: [], rollbackOnly: false, readOnly: true };
+    const state = { client, afterCommit: [], rollbackOnly: false, readOnly: true, finished: false };
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const result = await context.run(state, fn);
       await client.query("COMMIT");
+      state.finished = true;
       return result;
     } catch (error) {
       try {
@@ -103,8 +112,10 @@ export function createDatabase(env = process.env) {
       } catch {
         // Preserve the triggering failure.
       }
+      state.finished = true;
       throw error;
     } finally {
+      state.finished = true;
       client.release();
     }
   }

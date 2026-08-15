@@ -52,7 +52,16 @@ For host-run commands against local compose:
 export DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo
 npm run migrate
 npm run seed
-npm test
+```
+
+Create a separate test database once, then migrate and test only that database.
+The tests intentionally truncate their target between cases and must never use
+the development database served by the local API:
+
+```bash
+docker compose exec postgres createdb -U gridgo gridgo_test
+DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm run migrate
+DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm test
 ```
 
 The seed creates only catalog, taxonomy, zones, and global operational settings. It never creates users or operational records and has no destructive reset mode.

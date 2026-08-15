@@ -1,5 +1,8 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   activateClerkClientProfile,
   authConfiguration,
@@ -77,6 +80,7 @@ import {
   saveStore,
 } from "./postgres-store.js";
 
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const AUTH = authConfiguration(process.env);
@@ -1471,7 +1475,7 @@ async function handleRequest(req, res) {
         reason: body.reason || null,
       });
       await save(store);
-      deliverAnnouncementPush(unclaimed, { title, body: text });
+      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text }));
       return send(res, 201, {
         announcement: {
           id: announcementId,
@@ -1539,7 +1543,7 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const clientId = body.clientId;
       const amountMinor = Number(body.amountMinor);
-      if (!clientId || !Number.isFinite(amountMinor) || amountMinor <= 0) {
+      if (!clientId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
         return send(res, 400, { error: "invalid_grant", need: "clientId, amountMinor > 0" });
       }
       const client = store.users.find((u) => u.id === clientId);
@@ -1997,6 +2001,14 @@ async function handleRequest(req, res) {
       if (!body.categoryCode) return send(res, 400, { error: "invalid_service", need: "categoryCode" });
       const bad = validateTaxonomyRefs(store, body);
       if (bad) return send(res, 400, bad);
+      const referenceRateMinor = body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0;
+      const turnaroundHours = body.turnaroundHours != null ? Number(body.turnaroundHours) : 48;
+      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
+        return send(res, 400, {
+          error: "invalid_service",
+          message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
+        });
+      }
       const ts = now();
       const service = {
         id: id("svc"),
@@ -2010,8 +2022,8 @@ async function handleRequest(req, res) {
         qtyMin: body.qtyMin != null ? Number(body.qtyMin) : null,
         qtyMax: body.qtyMax != null ? Number(body.qtyMax) : null,
         pricingBasis: body.pricingBasis || "per_unit",
-        referenceRateMinor: body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0,
-        turnaroundHours: body.turnaroundHours != null ? Number(body.turnaroundHours) : 48,
+        referenceRateMinor,
+        turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
         zones: Array.isArray(body.zones) ? body.zones : [],
@@ -2081,6 +2093,17 @@ async function handleRequest(req, res) {
       if (body.zones != null) toValidate.zones = body.zones;
       const bad = validateTaxonomyRefs(store, toValidate);
       if (bad) return send(res, 400, bad);
+      const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
+      const turnaroundHours = body.turnaroundHours == null ? null : Number(body.turnaroundHours);
+      if (
+        (referenceRateMinor != null && (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0)) ||
+        (turnaroundHours != null && (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0))
+      ) {
+        return send(res, 400, {
+          error: "invalid_service",
+          message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
+        });
+      }
 
       const paramKeys = [
         "sizeMin",
@@ -2932,6 +2955,12 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && pathname === "/orders") {
       if (user.role !== "client") return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
+      if (store.catalog.length === 0) {
+        return send(res, 409, {
+          error: "catalog_not_seeded",
+          message: "The product catalog is unavailable. Run the platform reference seed and try again.",
+        });
+      }
       const product = store.catalog.find((p) => p.id === body.productId) || store.catalog[0];
       const qty = Number(body.quantity || 1);
       const referenceCandidates = [(product?.basePriceMinor || 10000) * qty];
@@ -2943,6 +2972,12 @@ async function handleRequest(req, res) {
       }
       const priceRange = estimatePriceRange({ supplierPriceCandidatesMinor: referenceCandidates });
       const zoneCode = body.zone || "davao_central";
+      if (!store.zones.some((zone) => zone.code === zoneCode && zone.active !== false)) {
+        return send(res, 400, {
+          error: "invalid_zone",
+          message: "Choose an active delivery zone from GET /zones.",
+        });
+      }
       const ts = now();
       const address = body.address || "";
       const order = {
@@ -3524,6 +3559,10 @@ async function handleRequest(req, res) {
     return send(res, 404, { error: "not_found", path: pathname });
   } catch (err) {
     database.markRollback();
+    if (res.headersSent) {
+      res.destroy(err);
+      return;
+    }
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
       return sendDomainError(res, err);
     }
@@ -3570,6 +3609,10 @@ const server = http.createServer((req, res) => {
           : handleRequest(req, res),
       )
       .catch((error) => {
+        if (res.headersSent) {
+          res.destroy(error);
+          return;
+        }
         if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
           sendDomainError(res, error);
           return;

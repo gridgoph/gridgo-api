@@ -16,6 +16,7 @@ services:
       retries: 30
     restart: unless-stopped
     networks:
+      - default
       - gridgo-storage
 
   migrate:
@@ -81,6 +82,7 @@ services:
       minio-bind-check:
         condition: service_completed_successfully
     networks:
+      - default
       - gridgo-storage
 
   minio-init:

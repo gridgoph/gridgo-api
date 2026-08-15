@@ -396,3 +396,127 @@ test("anonymous device routes stay off the global mutation lock", { skip: !DATAB
     await database.close();
   }
 });
+
+test("file upload reaches the storage boundary instead of crashing in request setup", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi({ MINIO_ENDPOINT: "http://127.0.0.1:1" });
+  try {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const health = await request(instance.api, "/health");
+      if (health.body.storage.status === "unavailable") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const form = new FormData();
+    form.set("purpose", "artwork");
+    form.set("file", new Blob([Buffer.from("%PDF-1.7\n")], { type: "application/pdf" }), "artwork.pdf");
+    const response = await fetch(`${instance.api}/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token("clerk_client")}` },
+      body: form,
+    });
+    const body = await response.json();
+    assert.equal(response.status, 503, JSON.stringify(body));
+    assert.equal(body.error, "minio_unavailable");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("money and reference inputs rejected by PostgreSQL are client errors at HTTP boundaries", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const fractionalGrant = await request(instance.api, "/credits/grant", {
+      method: "POST",
+      subject: "clerk_super",
+      body: { clientId: "user_client", amountMinor: 100.5 },
+    });
+    assert.equal(fractionalGrant.status, 400, JSON.stringify(fractionalGrant.body));
+    assert.equal(fractionalGrant.body.error, "invalid_grant");
+
+    const fractionalService = await request(instance.api, "/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: { categoryCode: "marketing_collateral", referenceRateMinor: 12.5 },
+    });
+    assert.equal(fractionalService.status, 400, JSON.stringify(fractionalService.body));
+    assert.equal(fractionalService.body.error, "invalid_service");
+
+    const invalidTurnaround = await request(instance.api, "/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { turnaroundHours: 0 },
+    });
+    assert.equal(invalidTurnaround.status, 400, JSON.stringify(invalidTurnaround.body));
+    assert.equal(invalidTurnaround.body.error, "invalid_service");
+
+    const invalidZone = await request(instance.api, "/orders", {
+      method: "POST",
+      subject: "clerk_client",
+      body: { productId: "prod_tarpaulin", quantity: 1, address: "Davao", zone: "not_a_zone" },
+    });
+    assert.equal(invalidZone.status, 400, JSON.stringify(invalidZone.body));
+    assert.equal(invalidZone.body.error, "invalid_zone");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("order creation reports an unseeded catalog explicitly", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.query("DELETE FROM orders");
+  await database.query("DELETE FROM catalog_products");
+  const instance = await startApi();
+  try {
+    const response = await request(instance.api, "/orders", {
+      method: "POST",
+      subject: "clerk_client",
+      body: { quantity: 1, address: "Davao", zone: "davao_central" },
+    });
+    assert.equal(response.status, 409, JSON.stringify(response.body));
+    assert.equal(response.body.error, "catalog_not_seeded");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("a deferred commit failure cannot crash the API by sending a second response", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.query(`
+    CREATE OR REPLACE FUNCTION gridgo_test_fail_audit_commit() RETURNS trigger
+    LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced deferred commit failure'; END $$
+  `);
+  await database.query(`
+    CREATE CONSTRAINT TRIGGER gridgo_test_fail_audit_commit
+    AFTER INSERT ON audit_log DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION gridgo_test_fail_audit_commit()
+  `);
+  const instance = await startApi();
+  try {
+    await request(instance.api, "/credits/grant", {
+      method: "POST",
+      subject: "clerk_super",
+      body: { clientId: "user_client", amountMinor: 100 },
+    }).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const health = await request(instance.api, "/health");
+    assert.equal(health.status, 200, instance.output());
+    assert.equal(health.body.database.status, "available");
+  } finally {
+    instance.child.kill("SIGTERM");
+    if (instance.child.exitCode == null) await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.query("DROP TRIGGER IF EXISTS gridgo_test_fail_audit_commit ON audit_log");
+    await database.query("DROP FUNCTION IF EXISTS gridgo_test_fail_audit_commit()");
+    await database.close();
+  }
+});

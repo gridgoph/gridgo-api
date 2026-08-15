@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 
@@ -88,4 +89,42 @@ test("mutation transactions serialize credit updates across database clients", {
   await first.query("DELETE FROM credit_accounts WHERE user_id = 'user_concurrency_test'");
   await first.query("DELETE FROM users WHERE id = 'user_concurrency_test'");
   await Promise.all([first.close(), second.close()]);
+});
+
+test("async work inherited from a completed transaction cannot reuse its released client", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  const deferred = Promise.withResolvers();
+  let inheritedContext;
+
+  await database.transaction(async () => {
+    inheritedContext = deferred.promise.then(() => database.inTransaction());
+  });
+
+  deferred.resolve();
+  assert.equal(await inheritedContext, false);
+  await database.close();
+});
+
+test("an idle PostgreSQL connection loss is contained by the pool", { skip: !DATABASE_URL }, async () => {
+  const script = `
+    import pg from "pg";
+    import { createDatabase } from "./src/database.js";
+    const database = createDatabase(process.env);
+    const killer = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+    const pid = (await database.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    await killer.query("SELECT pg_terminate_backend($1)", [pid]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await database.query("SELECT 1");
+    await Promise.all([database.close(), killer.end()]);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, DATABASE_URL },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const exitCode = await new Promise((resolve) => child.once("exit", resolve));
+  assert.equal(exitCode, 0, output);
 });
