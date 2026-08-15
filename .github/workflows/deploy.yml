@@ -64,19 +64,19 @@ jobs:
 
       - name: Resolve image name and tags
         id: meta
+        # Only default-branch builds publish to the registry, tagged with the
+        # immutable sha-<12> plus `latest`. Every other ref builds and
+        # smoke-tests the image locally and never pushes any tag.
         run: |
           set -euo pipefail
           image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
           sha_tag="sha-${GITHUB_SHA::12}"
-          branch_slug="$(printf '%s' "${GITHUB_REF_NAME}" | tr -c 'a-zA-Z0-9._-' '-')"
           tags="${image}:${sha_tag}"
+          published=false
           if [ "${GITHUB_REF}" = "refs/heads/${DEFAULT_BRANCH}" ]; then
             tags="${tags},${image}:latest"
-          else
-            tags="${tags},${image}:branch-${branch_slug}"
+            published=true
           fi
-          published=false
-          [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ] || published=true
           {
             echo "tags=${tags}"
             echo "primary=${image}:${sha_tag}"

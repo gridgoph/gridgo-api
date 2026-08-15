@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -36,7 +37,7 @@ async function freePort() {
   });
 }
 
-async function startApi() {
+async function startApi(extraEnv = {}) {
   const port = await freePort();
   const api = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["src/server.js"], {
@@ -52,6 +53,7 @@ async function startApi() {
       PORT: String(port),
       GRIDGO_BUILD_SHA: "api-postgres-test",
       GRIDGO_BUILD_TIME: AT,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -164,6 +166,11 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     const promotedIdentity = await request(instance.api, "/auth/me", { subject: "clerk_promote" });
     assert.equal(promotedIdentity.body.user.role, "supplier");
 
+    const demoted = await request(instance.api, "/users/user_super/role", { method: "PATCH", subject: "clerk_super", body: { role: "client" } });
+    assert.equal(demoted.status, 409, JSON.stringify(demoted.body));
+    assert.equal(demoted.body.error, "last_super_admin");
+    assert.equal((await request(instance.api, "/auth/me", { subject: "clerk_super" })).body.user.role, "super_admin");
+
     const created = await request(instance.api, "/orders", { method: "POST", subject: "clerk_client", body: { productId: "prod_tarpaulin", title: "API banner", quantity: 1, address: "Bajada", zone: "davao_central", submit: true } });
     assert.equal(created.status, 201, JSON.stringify(created.body));
     const orderId = created.body.order.id;
@@ -216,6 +223,102 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+/** Serves the Clerk Backend API surface `users.getUser` calls: GET /v1/users/:id. */
+function clerkUserJson(subject, email) {
+  return {
+    object: "user",
+    id: subject,
+    first_name: "Acti",
+    last_name: "Vator",
+    username: null,
+    image_url: "",
+    has_image: false,
+    password_enabled: false,
+    totp_enabled: false,
+    backup_code_enabled: false,
+    two_factor_enabled: false,
+    banned: false,
+    locked: false,
+    primary_email_address_id: `idn_${subject}`,
+    primary_phone_number_id: null,
+    primary_web3_wallet_id: null,
+    email_addresses: [{
+      object: "email_address",
+      id: `idn_${subject}`,
+      email_address: email,
+      verification: { object: "verification", status: "verified", strategy: "from_oauth_google" },
+      linked_to: [],
+    }],
+    phone_numbers: [],
+    web3_wallets: [],
+    external_accounts: [],
+    public_metadata: { gridgoRole: "super_admin" },
+    private_metadata: {},
+    unsafe_metadata: {},
+    created_at: 0,
+    updated_at: 0,
+    last_sign_in_at: null,
+  };
+}
+
+async function startMockClerkApi(usersBySubject) {
+  const server = http.createServer((req, res) => {
+    const match = /^\/v1\/users\/([^/?]+)/.exec(req.url || "");
+    const user = match ? usersBySubject[decodeURIComponent(match[1])] : null;
+    if (!user) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ errors: [{ message: "not found", code: "resource_not_found" }] }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(user));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, url: `http://127.0.0.1:${server.address().port}` };
+}
+
+test("Clerk activation provisions only a client through the live API and PostgreSQL", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const clerk = await startMockClerkApi({
+    clerk_activate: clerkUserJson("clerk_activate", "Activate@Gridgo.test"),
+    clerk_ops: clerkUserJson("clerk_ops", "ops@gridgo.test"),
+  });
+  let instance = null;
+  try {
+    instance = await startApi({ CLERK_API_URL: clerk.url });
+
+    assert.equal((await request(instance.api, "/auth/clerk/activate", { method: "POST", body: {} })).status, 401);
+
+    const activated = await request(instance.api, "/auth/clerk/activate", { method: "POST", subject: "clerk_activate", body: {} });
+    assert.equal(activated.status, 200, JSON.stringify(activated.body));
+    assert.equal(activated.body.user.role, "client");
+    assert.equal(activated.body.user.accountType, "individual");
+    assert.equal(activated.body.user.email, "activate@gridgo.test");
+    assert.equal(Object.hasOwn(activated.body.user, "clerkUserId"), false);
+
+    const again = await request(instance.api, "/auth/clerk/activate", { method: "POST", subject: "clerk_activate", body: {} });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.user.id, activated.body.user.id);
+
+    const me = await request(instance.api, "/auth/me", { subject: "clerk_activate" });
+    assert.equal(me.status, 200);
+    assert.equal(me.body.user.id, activated.body.user.id);
+    assert.equal(me.body.user.role, "client");
+
+    const privileged = await request(instance.api, "/auth/clerk/activate", { method: "POST", subject: "clerk_ops", body: {} });
+    assert.equal(privileged.status, 403, JSON.stringify(privileged.body));
+    assert.equal(privileged.body.error, "invitation_required");
+  } finally {
+    if (instance) {
+      instance.child.kill("SIGTERM");
+      await new Promise((resolve) => instance.child.once("exit", resolve));
+    }
+    await new Promise((resolve) => clerk.server.close(resolve));
     await database.close();
   }
 });

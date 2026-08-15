@@ -1,6 +1,6 @@
 # GRIDGO API production deployment
 
-This runbook is authoritative for the PostgreSQL 17 and Clerk-only production service at `gridgo-api.talasora.com`. CI builds and smoke-tests the image, publishes it to `ghcr.io/gridgoph/gridgo-api`, and invokes the server's restricted `api` deploy command after a default-branch merge. CI never writes compose or secret files to the server.
+This runbook is authoritative for the PostgreSQL 17 and Clerk-only production service at `gridgo-api.talasora.com`. CI builds and smoke-tests the image on every ref, but publishes to `ghcr.io/gridgoph/gridgo-api` (immutable `sha-...` plus `latest`) and invokes the server's restricted `api` deploy command only after a default-branch merge; feature-branch builds never push an image. CI never writes compose or secret files to the server.
 
 The PostgreSQL/Clerk cutover starts from the captain-authorized empty state. Do not restore `store.json`, write a JSON importer, recreate demo users, or copy development Clerk credentials into production.
 

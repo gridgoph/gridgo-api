@@ -5,6 +5,7 @@ import {
   authConfiguration,
   authenticateBearerToken,
   createClerkBackend,
+  verifyClerkClaims,
 } from "./auth.js";
 import {
   AttachmentError,
@@ -281,10 +282,44 @@ function hasBearerToken(req) {
   return /^Bearer\s+(.+)$/i.test(req.headers.authorization || "");
 }
 
+/**
+ * Verify the request's Clerk token once per request and reuse the verdict.
+ *
+ * Verification can reach the Clerk JWKS endpoint over the network, and every
+ * mutation handler runs inside the transaction that holds the global mutation
+ * advisory lock — so the network round trip must happen before the transaction
+ * starts, never inside it, or a slow Clerk API stalls every platform mutation.
+ */
+async function verifiedClerkClaimsFor(req) {
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  const token = m?.[1] || null;
+  if (!token) return null;
+  if (!req.gridgoVerifiedClaims) {
+    req.gridgoVerifiedClaims = await verifyClerkClaims(token, AUTH);
+  }
+  return req.gridgoVerifiedClaims;
+}
+
 async function authenticateRequest(req, store) {
-  const h = req.headers.authorization || "";
-  const m = /^Bearer\s+(.+)$/i.exec(h);
-  return authenticateBearerToken(m?.[1] || null, store, AUTH);
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  return authenticateBearerToken(m?.[1] || null, store, AUTH, await verifiedClerkClaimsFor(req));
+}
+
+/**
+ * All Clerk network traffic a mutation needs, performed before its transaction.
+ * Activation additionally loads the Clerk user profile; a failure is carried as
+ * `clerkUser: null` so the handler can still answer its ordering-sensitive
+ * 401/403 checks against the store before reporting Clerk as unavailable.
+ */
+async function verifyClerkBeforeMutation(req, pathname) {
+  const verified = await verifiedClerkClaimsFor(req);
+  if (req.method === "POST" && pathname === "/auth/clerk/activate" && verified?.claims?.sub) {
+    try {
+      req.gridgoClerkUser = { clerkUser: await clerkBackend.users.getUser(verified.claims.sub) };
+    } catch {
+      req.gridgoClerkUser = { clerkUser: null };
+    }
+  }
 }
 
 /** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
@@ -831,6 +866,8 @@ async function handleRequest(req, res) {
         clerkBackend,
         createId: id,
         now,
+        preVerified: req.gridgoVerifiedClaims || null,
+        preloadedClerkUser: req.gridgoClerkUser || null,
       });
       if (result.mutated) await save(store);
       if (result.status !== 200) {
@@ -1609,6 +1646,14 @@ async function handleRequest(req, res) {
       const prev = target.role;
       if (prev === body.role) {
         return send(res, 200, { user: publicUser(target) });
+      }
+      // Administrator bootstrap closes permanently after first use, so losing
+      // the final super_admin would lock role management until manual SQL.
+      if (prev === "super_admin" && !store.users.some((u) => u.role === "super_admin" && u.id !== target.id)) {
+        return send(res, 409, {
+          error: "last_super_admin",
+          message: "GRIDGO must keep at least one Super Admin. Promote another user to super_admin before changing this account's role.",
+        });
       }
       target.role = body.role;
       if (body.role === "client") {
@@ -3480,6 +3525,7 @@ const server = http.createServer((req, res) => {
   }
   if (mutatesStore) {
     void readBody(req)
+      .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(() => enqueueMutation(() => handleRequest(req, res)))
       .catch((error) => {
         if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {

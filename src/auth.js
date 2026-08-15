@@ -111,9 +111,9 @@ function invitationRequired(message) {
   return { status: 403, error: "invitation_required", message, user: null, mutated: false };
 }
 
-export async function authenticateBearerToken(token, store, config) {
+export async function authenticateBearerToken(token, store, config, preVerified = null) {
   if (!token) return { user: null, status: 401, kind: null };
-  const verified = await verifyClerkClaims(token, config);
+  const verified = preVerified || (await verifyClerkClaims(token, config));
   if (!verified.claims?.sub) return { user: null, status: 401, kind: "clerk" };
   const matches = (store.users || []).filter((candidate) => candidate.clerkUserId === verified.claims.sub);
   if (matches.length !== 1) return { user: null, status: 401, kind: "clerk" };
@@ -121,9 +121,18 @@ export async function authenticateBearerToken(token, store, config) {
 }
 
 /** Explicit first-use entry for public SSO. It can only create a client. */
-export async function activateClerkClientProfile({ token, store, config, clerkBackend, createId, now }) {
+export async function activateClerkClientProfile({
+  token,
+  store,
+  config,
+  clerkBackend,
+  createId,
+  now,
+  preVerified = null,
+  preloadedClerkUser = null,
+}) {
   if (!token) return unauthorized();
-  const verified = await verifyClerkClaims(token, config);
+  const verified = preVerified || (await verifyClerkClaims(token, config));
   if (!verified.claims?.sub) return unauthorized();
   const clerkUserId = verified.claims.sub;
   const linked = (store.users || []).filter((candidate) => candidate.clerkUserId === clerkUserId);
@@ -132,10 +141,15 @@ export async function activateClerkClientProfile({ token, store, config, clerkBa
     return invitationRequired("This Clerk identity is already assigned to a non-client GRIDGO role.");
   }
 
-  let clerkUser;
-  try {
-    clerkUser = await clerkBackend.users.getUser(clerkUserId);
-  } catch {
+  let clerkUser = preloadedClerkUser ? preloadedClerkUser.clerkUser : undefined;
+  if (clerkUser === undefined) {
+    try {
+      clerkUser = await clerkBackend.users.getUser(clerkUserId);
+    } catch {
+      clerkUser = null;
+    }
+  }
+  if (!clerkUser) {
     return { status: 502, error: "clerk_unavailable", message: "Could not load this Clerk user. Retry Google sign-in in a moment.", user: null, mutated: false };
   }
   const profile = clerkClientProfile(clerkUser);
