@@ -354,8 +354,8 @@ test("push payload carries only allowlisted routing data, never money detail", (
     at: AT,
     read: false,
     // Nothing below may reach a lock screen, whatever a future record carries.
-    supplierPriceMinor: 250_000,
-    commissionMinor: 25_000,
+    supplierSubtotalMinor: 250_000,
+    serviceFeeMinor: 25_000,
     payoutMilestones: [{ code: "acceptance", amountMinor: 125_000 }],
   });
 
@@ -366,7 +366,7 @@ test("push payload carries only allowlisted routing data, never money detail", (
     at: AT,
   });
   const serialized = JSON.stringify(fcmRequestBody(message, "token"));
-  for (const forbidden of ["Minor", "commission", "supplierPrice", "payoutMilestones", "250000", "25000"]) {
+  for (const forbidden of ["Minor", "supplierSubtotal", "serviceFee", "payoutMilestones", "250000", "25000"]) {
     assert.equal(serialized.includes(forbidden), false, `push payload leaked ${forbidden}`);
   }
 });

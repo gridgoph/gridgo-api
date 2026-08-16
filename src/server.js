@@ -63,7 +63,8 @@ import {
   resolveCategoryCode,
 } from "./taxonomy.js";
 import {
-  calculateFinalPrice,
+  calculateOrderMoney,
+  createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
   estimatePriceRange,
@@ -721,8 +722,17 @@ function setOrderPickup(order, store) {
     order.pickup = null;
     return;
   }
-  const supplier = store.users.find((u) => u.id === order.supplierId);
-  order.pickup = pickupFromSupplier(supplier);
+  const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === order.supplierId);
+  const supplier = store.users.find((candidate) => candidate.id === order.supplierId);
+  order.pickup = profile?.shop ? structuredClone(profile.shop) : pickupFromSupplier(supplier);
+}
+
+function supplierTermsFor(store, supplierId) {
+  return (store.supplierPaymentTerms || []).find((terms) => terms.supplierId === supplierId) || null;
+}
+
+function paymentCodeForRoute(code) {
+  return ({ downpayment: "initial", balance: "final_online" })[code] || code;
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,6 +1044,9 @@ const TRANSITIONS = {
     supplier_accepted: ["supplier"],
     approved_for_matching: ["supplier"], // decline -> rematch
   },
+  awaiting_checkout: { awaiting_initial_payment: ["client"], supplier_accepted: ["supplier"] },
+  awaiting_initial_payment: { supplier_accepted: ["supplier"] },
+  initial_payment_review: {},
   awaiting_downpayment: {},
   downpayment_review: {},
   payment_authorized: { production: ["supplier"] },
@@ -1743,29 +1756,87 @@ async function handleRequest(req, res) {
 
     // ---- global operational settings ----
     if (req.method === "GET" && pathname === "/settings") {
-      return send(res, 200, { settings: store.settings || defaultOperationalSettings() });
+      return send(res, 200, { version: store.version, settings: store.settings || defaultOperationalSettings() });
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
+      if (!Number.isInteger(body.expectedVersion) || body.expectedVersion !== store.version) {
+        return send(res, 409, { error: "settings_version_conflict", version: store.version });
+      }
+      const reason = String(body.reason || "").trim();
+      if (!reason) return send(res, 400, { error: "settings_reason_required" });
       const next = {
+        ...store.settings,
+        serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
+        pickupNoShowHours: body.pickupNoShowHours ?? store.settings.pickupNoShowHours,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
       };
       validateOperationalSettings(next);
       const previous = structuredClone(store.settings);
       store.settings = structuredClone(next);
+      store.version += 1;
       audit(store, {
         actor: user,
         action: "settings.operational_update",
         entityType: "settings",
         entityId: "operational",
         detail: { previous, current: store.settings },
-        reason: body.reason || null,
+        reason,
       });
       await save(store);
-      return send(res, 200, { settings: store.settings });
+      return send(res, 200, { version: store.version, settings: store.settings });
+    }
+
+    // ---- supplier payment timing terms ----
+    if (req.method === "GET" && pathname === "/supplier-payment-terms") {
+      const supplierId = isOps(user) ? (url.searchParams.get("supplierId") || user.id) : user.id;
+      if (user.role !== "supplier" && !isOps(user)) return send(res, 403, { error: "forbidden" });
+      const terms = supplierTermsFor(store, supplierId);
+      if (!terms) return send(res, 404, { error: "supplier_payment_terms_not_found" });
+      return send(res, 200, { terms });
+    }
+
+    if (req.method === "PATCH" && pathname === "/supplier-payment-terms") {
+      if (user.role !== "supplier") return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      const terms = supplierTermsFor(store, user.id);
+      if (!terms) return send(res, 409, { error: "supplier_profile_required" });
+      const next = {
+        ...terms,
+        deliveryDownpaymentRateBps: body.deliveryDownpaymentRateBps ?? terms.deliveryDownpaymentRateBps,
+        pickupFullOnlineEnabled: body.pickupFullOnlineEnabled ?? terms.pickupFullOnlineEnabled,
+        pickupDownpaymentStoreEnabled: body.pickupDownpaymentStoreEnabled ?? terms.pickupDownpaymentStoreEnabled,
+        pickupDownpaymentRateBps: body.pickupDownpaymentStoreEnabled === false
+          ? null
+          : (body.pickupDownpaymentRateBps ?? terms.pickupDownpaymentRateBps),
+      };
+      if (![0, 2_500, 5_000].includes(next.deliveryDownpaymentRateBps)) {
+        return send(res, 400, { error: "invalid_delivery_downpayment_rate" });
+      }
+      if (typeof next.pickupFullOnlineEnabled !== "boolean" || typeof next.pickupDownpaymentStoreEnabled !== "boolean") {
+        return send(res, 400, { error: "invalid_pickup_payment_mode" });
+      }
+      if (next.pickupDownpaymentStoreEnabled !== [2_500, 5_000].includes(next.pickupDownpaymentRateBps)) {
+        return send(res, 400, { error: "invalid_pickup_downpayment_rate" });
+      }
+      const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === user.id);
+      if (profile?.pickupAvailable && !next.pickupFullOnlineEnabled && !next.pickupDownpaymentStoreEnabled) {
+        return send(res, 400, { error: "pickup_payment_mode_required" });
+      }
+      next.updatedAt = now();
+      Object.assign(terms, next);
+      audit(store, {
+        actor: user,
+        action: "supplier_payment_terms.update",
+        entityType: "supplier_payment_terms",
+        entityId: user.id,
+        detail: { current: terms },
+      });
+      await save(store);
+      return send(res, 200, { terms });
     }
 
     // ---- credits ----
@@ -1785,7 +1856,7 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && pathname === "/credits/authorize") {
       return send(res, 410, {
         error: "payment_route_retired",
-        message: "Order payments now use the 75% downpayment and 25% balance QR routes. Refresh the order and submit the required installment.",
+        message: "Order payments use the installment plan snapshotted at final checkout. Refresh the order and submit its required online payment.",
       });
     }
 
@@ -3002,11 +3073,11 @@ async function handleRequest(req, res) {
     }
 
     // ---- manual QR installment payments ----
-    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/submit$/.test(pathname)) {
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/submit$/.test(pathname)) {
       if (user.role !== "client") return send(res, 403, { error: "forbidden" });
       const parts = pathname.split("/");
       const orderId = parts[2];
-      const installmentCode = parts[4];
+      const installmentCode = paymentCodeForRoute(parts[4]);
       const body = await readBody(req);
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order || order.clientId !== user.id) return send(res, 404, { error: "order_not_found" });
@@ -3017,13 +3088,10 @@ async function handleRequest(req, res) {
           allowed: ["qr_manual"],
         });
       }
-      const notification = (store.notifications || []).find(
-        (item) => item.id === order.assignmentNotificationId && item.orderId === order.id && item.userId === order.clientId,
-      );
-      if (!notification || !order.assignmentNotifiedAt) {
+      if (!order.commercialCommittedAt) {
         return send(res, 409, {
-          error: "assignment_notification_required",
-          message: "Wait for GRIDGO to notify you of the assigned supplier and final price before submitting payment.",
+          error: "commercial_commitment_required",
+          message: "Accept the current final quote before submitting its initial online payment.",
         });
       }
       const installment = order.payments?.[installmentCode];
@@ -3033,20 +3101,20 @@ async function handleRequest(req, res) {
           message: "The final price is not ready. Wait for the supplier assignment notification and refresh the order.",
         });
       }
-      if (installmentCode === "downpayment" && !["awaiting_downpayment", "downpayment_review"].includes(order.state)) {
+      if (installmentCode === "initial" && !["awaiting_initial_payment", "initial_payment_review", "awaiting_downpayment", "downpayment_review"].includes(order.state)) {
         return send(res, 409, {
-          error: "downpayment_not_available",
-          message: "The downpayment is not available at this order step. Refresh the order to see the current payment action.",
+          error: "initial_payment_not_available",
+          message: "The initial online payment is not available at this order step. Refresh the order to see the current payment action.",
           state: order.state,
         });
       }
       if (
-        installmentCode === "balance" &&
-        order.payments?.downpayment?.status !== "confirmed"
+        installmentCode === "final_online" &&
+        order.payments?.initial?.status !== "confirmed"
       ) {
         return send(res, 409, {
-          error: "downpayment_not_confirmed",
-          message: "Operations must confirm the downpayment before you submit the remaining balance.",
+          error: "initial_payment_not_confirmed",
+          message: "Operations must confirm the initial payment before you submit the final online payment.",
         });
       }
       if (["pending_confirmation", "confirmed"].includes(installment.status)) {
@@ -3076,14 +3144,14 @@ async function handleRequest(req, res) {
       installment.rejectedBy = null;
       installment.rejectionReason = null;
       order.paymentMethod = "qr_manual";
-      order.paymentStatus = installmentCode === "downpayment" ? "downpayment_pending" : "balance_pending";
-      if (installmentCode === "downpayment") order.state = "downpayment_review";
+      order.paymentStatus = installmentCode === "initial" ? "initial_payment_pending" : "final_online_pending";
+      if (installmentCode === "initial") order.state = "initial_payment_review";
       order.updatedAt = submittedAt;
       order.timeline.push({
         at: submittedAt,
         state: order.state,
         by: user.id,
-        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} submitted for Operations confirmation`,
+        note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} submitted for Operations confirmation`,
       });
       audit(store, {
         actor: user,
@@ -3097,11 +3165,11 @@ async function handleRequest(req, res) {
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
-    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/reject$/.test(pathname)) {
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/reject$/.test(pathname)) {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const parts = pathname.split("/");
       const orderId = parts[2];
-      const installmentCode = parts[4];
+      const installmentCode = paymentCodeForRoute(parts[4]);
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const installment = order.payments?.[installmentCode];
@@ -3139,18 +3207,18 @@ async function handleRequest(req, res) {
       installment.rejectedAt = rejectedAt;
       installment.rejectedBy = user.id;
       installment.rejectionReason = reason;
-      if (installmentCode === "downpayment") {
-        order.state = "awaiting_downpayment";
+      if (installmentCode === "initial") {
+        order.state = order.moneyModelVersion === 1 ? "awaiting_downpayment" : "awaiting_initial_payment";
         order.paymentStatus = "unpaid";
       } else {
-        order.paymentStatus = "downpayment_confirmed";
+        order.paymentStatus = "initial_payment_confirmed";
       }
       order.updatedAt = rejectedAt;
       order.timeline.push({
         at: rejectedAt,
         state: order.state,
         by: user.id,
-        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} rejected by Operations: ${reason}`,
+        note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} rejected by Operations: ${reason}`,
       });
       audit(store, {
         actor: user,
@@ -3165,11 +3233,11 @@ async function handleRequest(req, res) {
       return send(res, 200, { order: publicOrder(order, user) });
     }
 
-    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(downpayment|balance)\/confirm$/.test(pathname)) {
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/confirm$/.test(pathname)) {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const parts = pathname.split("/");
       const orderId = parts[2];
-      const installmentCode = parts[4];
+      const installmentCode = paymentCodeForRoute(parts[4]);
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const installment = order.payments?.[installmentCode];
@@ -3187,9 +3255,9 @@ async function handleRequest(req, res) {
       installment.confirmedAt = confirmedAt;
       installment.confirmedBy = user.id;
       installment.confirmationSource = "manual_ops";
-      if (installmentCode === "downpayment") {
+      if (installmentCode === "initial") {
         order.state = "payment_authorized";
-        order.paymentStatus = "downpayment_confirmed";
+        order.paymentStatus = "initial_payment_confirmed";
       } else {
         order.paymentStatus = "paid";
       }
@@ -3198,7 +3266,7 @@ async function handleRequest(req, res) {
         at: confirmedAt,
         state: order.state,
         by: user.id,
-        note: `${installmentCode === "downpayment" ? "Downpayment" : "Balance"} confirmed manually by Operations`,
+        note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} confirmed manually by Operations`,
       });
       audit(store, {
         actor: user,
@@ -3255,7 +3323,7 @@ async function handleRequest(req, res) {
           referenceCandidates.push(Number(service.referenceRateMinor) * qty);
         }
       }
-      const priceRange = estimatePriceRange({ supplierPriceCandidatesMinor: referenceCandidates });
+      const priceRange = estimatePriceRange({ supplierSubtotalCandidatesMinor: referenceCandidates });
       const zoneCode = body.zone || "davao_central";
       if (!store.zones.some((zone) => zone.code === zoneCode && zone.active !== false)) {
         return send(res, 400, {
@@ -3265,6 +3333,7 @@ async function handleRequest(req, res) {
       }
       const ts = now();
       const address = body.address || "";
+      const requestedDropoff = dropoffFor(address, zoneCode);
       const order = {
         id: id("ord"),
         clientId: user.id,
@@ -3281,24 +3350,30 @@ async function handleRequest(req, res) {
         address,
         zone: zoneCode,
         pickup: null,
-        dropoff: dropoffFor(address, zoneCode),
+        dropoff: structuredClone(requestedDropoff),
+        requestedDropoff,
         operationalModelVersion: 2,
+        moneyModelVersion: 2,
         priceRange,
-        supplierPriceMinor: null,
-        commissionRatePercent: null,
-        commissionMinor: null,
+        supplierSubtotalMinor: null,
         subtotalMinor: null,
+        serviceFeeRateBps: null,
+        serviceFeeMinor: null,
         deliveryDistanceMeters: null,
         deliveryFeeMinor: null,
         totalMinor: null,
-        downpaymentMinor: null,
-        balanceMinor: null,
+        fulfillmentMode: null,
+        paymentPlan: null,
+        quoteVersion: null,
+        supplierDownpaymentRateBps: null,
+        onlineDueMinor: null,
+        directStoreDueMinor: null,
+        supplierPlatformPayoutMinor: null,
+        commercialCommittedAt: null,
         paymentMethod: null,
         paymentStatus: "unpaid",
-        payments: {
-          downpayment: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null, rejectedAt: null, rejectedBy: null, rejectionReason: null },
-          balance: { amountMinor: null, method: "qr_manual", status: "not_submitted", reference: null, submittedAt: null, confirmedAt: null, confirmedBy: null, confirmationSource: null, rejectedAt: null, rejectedBy: null, rejectionReason: null },
-        },
+        payments: {},
+        paymentAllocations: [],
         payoutHold: false,
         payoutMilestones: [],
         promisedDate: null,
@@ -3429,72 +3504,197 @@ async function handleRequest(req, res) {
             message: "Operations must approve this supplier before the supplier can accept matched work.",
           });
         }
+        const superseding = Boolean(order.commercialCommittedAt);
+        if (superseding) {
+          if (Object.values(order.payments || {}).some((payment) => payment.status !== "not_submitted")) {
+            return send(res, 409, { error: "payment_authorization_started" });
+          }
+          const reason = String(body.reason || "").trim();
+          if (!reason) return send(res, 400, { error: "quote_supersession_reason_required" });
+          order.quoteHistory ||= [];
+          order.quoteHistory.push(structuredClone(order.acceptedQuote));
+          order.dropoff = order.requestedDropoff ? structuredClone(order.requestedDropoff) : order.dropoff;
+          for (const field of [
+            "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor",
+            "deliveryDistanceMeters", "deliveryFeeMinor", "totalMinor", "fulfillmentMode",
+            "paymentPlan", "supplierDownpaymentRateBps", "initialSupplierPrincipalMinor",
+            "supplierRemainderMinor", "initialOnlineMinor", "finalOnlineMinor", "onlineDueMinor",
+            "directStoreDueMinor", "supplierPlatformPayoutMinor", "supplierEarningsMinor",
+          ]) order[field] = null;
+          order.quoteVersion = null;
+          order.commercialCommittedAt = null;
+          order.payments = {};
+          order.paymentAllocations = [];
+          order.payoutMilestones = [];
+          order.paymentStatus = "unpaid";
+          delete order.acceptedQuote;
+          audit(store, {
+            actor: user,
+            action: "order.quote_superseded",
+            entityType: "order",
+            entityId: order.id,
+            orderId: order.id,
+            detail: { priorQuoteVersion: order.quoteHistory.at(-1)?.version || null },
+            reason,
+          });
+        }
+        const supplierSubtotalMinor = Number(body.supplierSubtotalMinor);
+        if (!Number.isSafeInteger(supplierSubtotalMinor) || supplierSubtotalMinor < 0) {
+          return send(res, 400, {
+            error: "invalid_supplier_subtotal",
+            message: "Enter the final supplier subtotal as a non-negative integer in PHP minor units.",
+          });
+        }
+        const terms = supplierTermsFor(store, user.id);
+        if (!terms) return send(res, 409, { error: "supplier_payment_terms_required" });
         order.promisedDate = body.promisedDate || order.deadline;
         setOrderPickup(order, store);
-        const money = calculateFinalPrice({
-          supplierPriceMinor: body.supplierPriceMinor,
-          pickup: order.pickup,
-          dropoff: order.dropoff,
-          settings: store.settings,
-        });
-        Object.assign(order, money, { operationalModelVersion: 2 });
-        order.priceRange.deliveryFeeStatus = "final";
-        order.payoutMilestones = createPayoutMilestones(order.supplierPriceMinor);
-        order.payments = {
-          downpayment: {
-            amountMinor: order.downpaymentMinor,
-            method: "qr_manual",
-            status: "not_submitted",
-            reference: null,
-            submittedAt: null,
-            confirmedAt: null,
-            confirmedBy: null,
-            confirmationSource: null,
-            rejectedAt: null,
-            rejectedBy: null,
-            rejectionReason: null,
-          },
-          balance: {
-            amountMinor: order.balanceMinor,
-            method: "qr_manual",
-            status: "not_submitted",
-            reference: null,
-            submittedAt: null,
-            confirmedAt: null,
-            confirmedBy: null,
-            confirmationSource: null,
-            rejectedAt: null,
-            rejectedBy: null,
-            rejectionReason: null,
-          },
+        const quoteVersion = Math.max(
+          order.pendingQuote?.version || 0,
+          order.quoteHistory?.at(-1)?.version || 0,
+          order.quoteVersion || 0,
+        ) + 1;
+        order.pendingQuote = {
+          version: quoteVersion,
+          supplierSubtotalMinor,
+          promisedDate: order.promisedDate,
+          supplierShop: structuredClone(order.pickup),
+          paymentTerms: structuredClone(terms),
+          orderLines: structuredClone(order.orderLines || [{
+            productId: order.productId,
+            label: order.title,
+            quantity: order.quantity,
+            amountMinor: supplierSubtotalMinor,
+            optionSnapshots: order.optionSnapshots || [],
+            structuredSpecification: order.structuredSpecification || null,
+            acceptedFormatCodes: order.acceptedFormatCodes || [],
+          }]),
+          createdAt: now(),
         };
         const acceptedAt = now();
         order.timeline.push({
           at: acceptedAt,
           state: "supplier_accepted",
           by: user.id,
-          note: "Supplier accepted and set the final price",
+          note: `Supplier issued final quote version ${quoteVersion}`,
         });
         const notification = {
           id: id("ntf"),
           userId: order.clientId,
           type: "supplier_assignment_final_price",
           orderId: order.id,
-          title: "Supplier assigned and final price ready",
-          body: "A supplier accepted your order. Review the final price and submit the digital downpayment.",
+          title: "Final quote ready",
+          body: "Review the final quote, fulfillment choice, and payment plan.",
           read: false,
           at: acceptedAt,
         };
         store.notifications.push(notification);
         order.assignmentNotificationId = notification.id;
         order.assignmentNotifiedAt = notification.at;
-        order.state = "awaiting_downpayment";
+        order.state = "awaiting_checkout";
         order.updatedAt = acceptedAt;
         order.timeline.push({
           at: acceptedAt,
-          state: "awaiting_downpayment",
+          state: "awaiting_checkout",
           by: "system",
-          note: "Client notified of assignment and final price",
+          note: "Client notified that the final quote is ready for checkout",
+        });
+        await save(store);
+        return send(res, 200, { order: publicOrder(order, user) });
+      }
+      if (next === "awaiting_initial_payment") {
+        if (user.role !== "client" || order.clientId !== user.id) {
+          return send(res, 403, { error: "forbidden" });
+        }
+        const quote = order.pendingQuote;
+        if (!quote || !Number.isInteger(body.quoteVersion) || body.quoteVersion !== quote.version) {
+          return send(res, 409, {
+            error: "quote_stale",
+            quoteVersion: quote?.version || null,
+          });
+        }
+        const fulfillmentMode = body.fulfillmentMode;
+        const paymentPlan = body.paymentPlan;
+        const terms = quote.paymentTerms;
+        let supplierDownpaymentRateBps;
+        if (paymentPlan === "delivery_online" && fulfillmentMode === "delivery") {
+          supplierDownpaymentRateBps = terms.deliveryDownpaymentRateBps;
+        } else if (paymentPlan === "pickup_full_online" && fulfillmentMode === "pickup") {
+          if (!terms.pickupFullOnlineEnabled) return send(res, 409, { error: "payment_plan_not_offered" });
+          supplierDownpaymentRateBps = 10_000;
+        } else if (paymentPlan === "pickup_downpayment_store" && fulfillmentMode === "pickup") {
+          if (!terms.pickupDownpaymentStoreEnabled) return send(res, 409, { error: "payment_plan_not_offered" });
+          supplierDownpaymentRateBps = terms.pickupDownpaymentRateBps;
+        } else {
+          return send(res, 400, { error: "invalid_payment_plan" });
+        }
+        const supplierProfile = (store.supplierProfiles || []).find((candidate) => candidate.userId === order.supplierId);
+        if (fulfillmentMode === "pickup" && (!supplierProfile?.pickupAvailable || !quote.supplierShop)) {
+          return send(res, 409, { error: "pickup_not_available" });
+        }
+
+        const money = calculateOrderMoney({
+          supplierSubtotalMinor: quote.supplierSubtotalMinor,
+          fulfillmentMode,
+          paymentPlan,
+          supplierDownpaymentRateBps,
+          pickup: quote.supplierShop,
+          dropoff: order.dropoff,
+          settings: store.settings,
+        });
+        const schedule = createPaymentSchedule(money);
+        const committedAt = now();
+        Object.assign(order, money, schedule, {
+          operationalModelVersion: 2,
+          moneyModelVersion: 2,
+          quoteVersion: quote.version,
+          commercialCommittedAt: committedAt,
+          promisedDate: quote.promisedDate,
+          pickup: structuredClone(quote.supplierShop),
+          acceptedQuote: {
+            ...structuredClone(quote),
+            acceptedAt: committedAt,
+            fulfillmentMode,
+            paymentPlan,
+            serviceFeeRateBps: money.serviceFeeRateBps,
+            serviceFeeMinor: money.serviceFeeMinor,
+            deliveryDistanceMeters: money.deliveryDistanceMeters,
+            deliveryFeeMinor: money.deliveryFeeMinor,
+            totalMinor: money.totalMinor,
+            supplierDownpaymentRateBps: money.supplierDownpaymentRateBps,
+            onlineDueMinor: money.onlineDueMinor,
+            directStoreDueMinor: money.directStoreDueMinor,
+            payments: structuredClone(schedule.payments),
+          },
+        });
+        delete order.pendingQuote;
+        if (fulfillmentMode === "pickup") {
+          order.dropoff = null;
+          order.riderId = null;
+        }
+        order.priceRange.deliveryFeeStatus = "final";
+        order.payoutMilestones = createPayoutMilestones(order.supplierPlatformPayoutMinor, fulfillmentMode);
+        order.state = "awaiting_initial_payment";
+        order.updatedAt = committedAt;
+        order.timeline.push({
+          at: committedAt,
+          state: order.state,
+          by: user.id,
+          note: `Client accepted quote version ${quote.version}`,
+        });
+        audit(store, {
+          actor: user,
+          action: "order.commercial_commitment",
+          entityType: "order",
+          entityId: order.id,
+          orderId: order.id,
+          detail: {
+            quoteVersion: quote.version,
+            fulfillmentMode,
+            paymentPlan,
+            serviceFeeRateBps: order.serviceFeeRateBps,
+            serviceFeeMinor: order.serviceFeeMinor,
+          },
         });
         await save(store);
         return send(res, 200, { order: publicOrder(order, user) });
@@ -3766,10 +3966,10 @@ async function handleRequest(req, res) {
           state: order.state,
         });
       }
-      if (order.payments?.balance?.status !== "confirmed") {
+      if (order.payments?.final_online?.status !== "confirmed") {
         return send(res, 409, {
-          error: "balance_not_confirmed",
-          message: "Operations must confirm the client's digital balance before the rider completes delivery.",
+          error: "final_payment_not_confirmed",
+          message: "Operations must confirm the client's final online payment before the rider completes delivery.",
         });
       }
       const deliveredMilestone = (order.payoutMilestones || []).find((milestone) => milestone.code === "delivered");

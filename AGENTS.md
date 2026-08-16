@@ -26,8 +26,8 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
-- Commission is 10% on top; payments are manually confirmed 75%/25% digital QR installments; COD and supplier-proof approval states are retired.
-- Clients never receive supplier price, commission, or supplier milestone amounts. All order responses go through the role-aware projection in `src/operational-model.js`.
+- The client service fee is seeded at 1,000 bps on the supplier subtotal; accepted quotes snapshot the rate, amount, fulfillment, and generalized online/direct allocation plan. COD and supplier-proof approval states are retired.
+- Clients receive the item subtotal, service fee, delivery pass-through, total, and their payment plan, but never supplier payout or milestone amounts. All order responses go through the role-aware projection in `src/operational-model.js`.
 - Claims/issue holds block payout. POF gates supplier milestone release. Rider pickup uses the six-check gate.
 - Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it.
 

@@ -191,13 +191,20 @@ async function clearAndFixture(database) {
     store.orders.push({
       id: "ord_payout", clientId: "user_client", supplierId: "user_supplier", riderId: null,
       productId: "prod_tarpaulin", state: "completed", zone: "davao_central",
-      supplierPriceMinor: 100000, commissionMinor: 10000, subtotalMinor: 110000,
-      deliveryFeeMinor: 2500, totalMinor: 112500, downpaymentMinor: 84375, balanceMinor: 28125,
+      supplierSubtotalMinor: 100000, subtotalMinor: 100000, serviceFeeRateBps: 1000, serviceFeeMinor: 10000,
+      deliveryFeeMinor: 2500, totalMinor: 112500, fulfillmentMode: "delivery", paymentPlan: "delivery_online",
+      quoteVersion: 1, supplierDownpaymentRateBps: null, onlineDueMinor: 112500, directStoreDueMinor: 0,
+      supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion: 1,
       payoutHold: false, pickup: { lat: 7.064, lng: 125.6085, label: "Davao Shop" },
       dropoff: { lat: 7.08, lng: 125.62, label: "Client" }, payments: {
-        downpayment: { amountMinor: 84375, method: "qr_manual", status: "confirmed" },
-        balance: { amountMinor: 28125, method: "qr_manual", status: "confirmed" },
-      }, payoutMilestones: milestones, timeline: [], createdAt: AT, updatedAt: AT,
+        initial: { amountMinor: 84375, method: "qr_manual", status: "confirmed" },
+        final_online: { amountMinor: 28125, method: "qr_manual", status: "confirmed" },
+      }, paymentAllocations: [
+        { paymentCode: "initial", component: "service_fee", amountMinor: 10000 },
+        { paymentCode: "initial", component: "supplier_principal", amountMinor: 74375 },
+        { paymentCode: "final_online", component: "supplier_principal", amountMinor: 25625 },
+        { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: 2500 },
+      ], payoutMilestones: milestones, timeline: [], createdAt: AT, updatedAt: AT,
     });
     store.orders.push({
       id: "ord_expired", clientId: "user_client", supplierId: null, riderId: null,
@@ -632,10 +639,42 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
     }
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned", supplierId: "user_supplier" } })).status, 200);
-    const accepted = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierPriceMinor: 100000 } });
+    const accepted = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierSubtotalMinor: 100000 } });
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
-    assert.equal(accepted.body.order.state, "awaiting_downpayment");
+    assert.equal(accepted.body.order.state, "awaiting_checkout");
+    const committed = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_client",
+      body: { state: "awaiting_initial_payment", quoteVersion: 1, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
+    });
+    assert.equal(committed.status, 200, JSON.stringify(committed.body));
+    assert.equal(committed.body.order.state, "awaiting_initial_payment");
+    assert.equal(committed.body.order.serviceFeeMinor, 10000);
 
+    const superseded = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: { state: "supplier_accepted", supplierSubtotalMinor: 120000, reason: "Client requested a revised specification" },
+    });
+    assert.equal(superseded.status, 200, JSON.stringify(superseded.body));
+    assert.equal(superseded.body.order.state, "awaiting_checkout");
+    assert.equal(superseded.body.order.pendingQuote.version, 2);
+    const staleQuote = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_client",
+      body: { state: "awaiting_initial_payment", quoteVersion: 1, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
+    });
+    assert.equal(staleQuote.status, 409);
+    assert.equal(staleQuote.body.error, "quote_stale");
+    const recommitted = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_client",
+      body: { state: "awaiting_initial_payment", quoteVersion: 2, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
+    });
+    assert.equal(recommitted.status, 200, JSON.stringify(recommitted.body));
+    assert.equal(recommitted.body.order.serviceFeeMinor, 12000);
+
+    // Legacy route names remain compatibility aliases for the canonical codes.
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/downpayment/submit`, { method: "POST", subject: "clerk_client", body: { method: "qr_manual", reference: "DP-API" } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/downpayment/confirm`, { method: "POST", subject: "clerk_supplier", body: {} })).status, 403);
     const confirmed = await request(instance.api, `/orders/${orderId}/payments/downpayment/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
@@ -668,11 +707,76 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
   try {
     const persistedPayment = await request(instance.api, "/orders", { subject: "clerk_ops" });
     const lifecycleOrder = persistedPayment.body.orders.find((order) => order.title === "API banner");
-    assert.equal(lifecycleOrder.payments.downpayment.status, "confirmed");
-    assert.equal(lifecycleOrder.payments.balance.status, "confirmed");
+    assert.equal(lifecycleOrder.payments.initial.status, "confirmed");
+    assert.equal(lifecycleOrder.payments.final_online.status, "confirmed");
     assert.equal(lifecycleOrder.state, "out_for_delivery");
     assert.equal(persistedPayment.body.orders.find((order) => order.id === "ord_payout").state, "payout_released");
     assert.equal(persistedPayment.body.orders.find((order) => order.id === "ord_expired").state, "completed");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("settings use audited compare-and-swap and suppliers govern supported payment terms", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const current = await request(instance.api, "/settings", { subject: "clerk_ops" });
+    assert.equal(current.status, 200);
+    assert.equal(current.body.settings.serviceFeeRateBps, 1000);
+
+    const noReason = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: { expectedVersion: current.body.version, serviceFeeRateBps: 1250 },
+    });
+    assert.equal(noReason.status, 400);
+    assert.equal(noReason.body.error, "settings_reason_required");
+
+    const stale = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: { expectedVersion: current.body.version - 1, serviceFeeRateBps: 1250, reason: "Pilot fee update" },
+    });
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.error, "settings_version_conflict");
+
+    const updated = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: { expectedVersion: current.body.version, serviceFeeRateBps: 1250, reason: "Pilot fee update" },
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.version, current.body.version + 1);
+    assert.equal(updated.body.settings.serviceFeeRateBps, 1250);
+
+    const defaults = await request(instance.api, "/supplier-payment-terms", { subject: "clerk_supplier" });
+    assert.equal(defaults.status, 200, JSON.stringify(defaults.body));
+    assert.equal(defaults.body.terms.deliveryDownpaymentRateBps, 0);
+
+    const terms = await request(instance.api, "/supplier-payment-terms", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: {
+        deliveryDownpaymentRateBps: 2500,
+        pickupFullOnlineEnabled: false,
+        pickupDownpaymentStoreEnabled: true,
+        pickupDownpaymentRateBps: 2500,
+      },
+    });
+    assert.equal(terms.status, 200, JSON.stringify(terms.body));
+    assert.equal(terms.body.terms.pickupDownpaymentRateBps, 2500);
+
+    const invalid = await request(instance.api, "/supplier-payment-terms", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { pickupDownpaymentStoreEnabled: true, pickupDownpaymentRateBps: 0 },
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, "invalid_pickup_downpayment_rate");
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));

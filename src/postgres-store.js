@@ -34,6 +34,7 @@ const TABLES = [
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "updated_at"] },
+  { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "updated_at"] },
   { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
   { name: "approval_case_events", keys: ["id"], columns: ["id", "approval_case_id", "application_revision", "from_status", "to_status", "actor_user_id", "actor_kind", "reason", "request_id", "snapshot", "created_at"], appendOnly: true },
@@ -45,8 +46,10 @@ const TABLES = [
   { name: "taxonomy_finishes", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "zones", keys: ["id"], columns: ["id", "code", "name", "active", "position", "data"] },
   { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "created_at", "updated_at", "position", "data"] },
-  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_price_minor", "commission_minor", "subtotal_minor", "delivery_fee_minor", "total_minor", "downpayment_minor", "balance_minor", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "created_at", "updated_at", "position", "data"] },
+  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "created_at", "updated_at", "position", "data"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
+  { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
+  { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "file_references", keys: ["file_id", "reference_type", "reference_id", "field"], columns: ["file_id", "reference_type", "reference_id", "field", "position", "data"] },
@@ -70,6 +73,7 @@ export function emptyStore() {
     userRoleMemberships: [],
     clientProfiles: [],
     supplierProfiles: [],
+    supplierPaymentTerms: [],
     riderProfiles: [],
     approvalCases: [],
     approvalCaseEvents: [],
@@ -125,6 +129,28 @@ function rowsFromStore(store) {
   for (const profile of (store.supplierProfiles || [])) {
     rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), updated_at: profile.updatedAt });
   }
+  for (const terms of (store.supplierPaymentTerms || [])) {
+    rows.supplier_payment_terms.push({
+      supplier_id: terms.supplierId,
+      delivery_downpayment_rate_bps: terms.deliveryDownpaymentRateBps,
+      pickup_full_online_enabled: terms.pickupFullOnlineEnabled,
+      pickup_downpayment_store_enabled: terms.pickupDownpaymentStoreEnabled,
+      pickup_downpayment_rate_bps: terms.pickupDownpaymentRateBps ?? null,
+      updated_at: terms.updatedAt,
+    });
+  }
+  const suppliersWithTerms = new Set(rows.supplier_payment_terms.map((terms) => terms.supplier_id));
+  for (const profile of (store.supplierProfiles || [])) {
+    if (suppliersWithTerms.has(profile.userId)) continue;
+    rows.supplier_payment_terms.push({
+      supplier_id: profile.userId,
+      delivery_downpayment_rate_bps: 0,
+      pickup_full_online_enabled: true,
+      pickup_downpayment_store_enabled: false,
+      pickup_downpayment_rate_bps: null,
+      updated_at: profile.updatedAt,
+    });
+  }
   for (const profile of (store.riderProfiles || [])) {
     rows.rider_profiles.push({ user_id: profile.userId, vehicle_type: profile.vehicleType, plate_number: profile.plateNumber, license_number: profile.licenseNumber ?? null, updated_at: profile.updatedAt });
   }
@@ -179,20 +205,45 @@ function rowsFromStore(store) {
     rows.orders.push({
       id: order.id, client_id: order.clientId, supplier_id: order.supplierId ?? null, rider_id: order.riderId ?? null,
       product_id: order.productId ?? null, state: order.state, zone_code: order.zone ?? null,
-      supplier_price_minor: money(order.supplierPriceMinor, "order.supplierPriceMinor"),
-      commission_minor: money(order.commissionMinor, "order.commissionMinor"), subtotal_minor: money(order.subtotalMinor, "order.subtotalMinor"),
+      supplier_subtotal_minor: money(order.supplierSubtotalMinor, "order.supplierSubtotalMinor"),
+      subtotal_minor: money(order.subtotalMinor, "order.subtotalMinor"),
+      service_fee_rate_bps: order.serviceFeeRateBps ?? null,
+      service_fee_minor: money(order.serviceFeeMinor, "order.serviceFeeMinor"),
       delivery_fee_minor: money(order.deliveryFeeMinor, "order.deliveryFeeMinor"), total_minor: money(order.totalMinor, "order.totalMinor"),
-      downpayment_minor: money(order.downpaymentMinor, "order.downpaymentMinor"), balance_minor: money(order.balanceMinor, "order.balanceMinor"),
+      fulfillment_mode: order.fulfillmentMode ?? null, payment_plan: order.paymentPlan ?? null,
+      quote_version: order.quoteVersion ?? null, supplier_downpayment_rate_bps: order.supplierDownpaymentRateBps ?? null,
+      online_due_minor: money(order.onlineDueMinor, "order.onlineDueMinor"), direct_store_due_minor: money(order.directStoreDueMinor, "order.directStoreDueMinor"),
+      supplier_platform_payout_minor: money(order.supplierPlatformPayoutMinor, "order.supplierPlatformPayoutMinor"),
+      commercial_committed_at: order.commercialCommittedAt ?? null, money_model_version: order.moneyModelVersion ?? 1,
       payout_hold: Boolean(order.payoutHold), pickup_lat: order.pickup?.lat ?? null, pickup_lng: order.pickup?.lng ?? null,
-      pickup_label: order.pickup?.label ?? null, dropoff_lat: order.dropoff?.lat, dropoff_lng: order.dropoff?.lng,
-      dropoff_label: order.dropoff?.label, issue_window_opened_at: order.issueWindowOpenedAt ?? null,
+      pickup_label: order.pickup?.label ?? null, dropoff_lat: order.dropoff?.lat ?? null, dropoff_lng: order.dropoff?.lng ?? null,
+      dropoff_label: order.dropoff?.label ?? null, issue_window_opened_at: order.issueWindowOpenedAt ?? null,
       issue_window_expires_at: order.issueWindowExpiresAt ?? null, created_at: order.createdAt, updated_at: order.updatedAt, position,
-      data: without(order, ["id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierPriceMinor", "commissionMinor", "subtotalMinor", "deliveryFeeMinor", "totalMinor", "downpaymentMinor", "balanceMinor", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "payoutMilestones"]),
+      data: without(order, ["id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
     });
-    for (const [paymentPosition, code] of ["downpayment", "balance"].entries()) {
+    for (const [paymentPosition, code] of ["initial", "final_online"].entries()) {
       const payment = order.payments?.[code];
       if (!payment) continue;
       rows.order_payments.push({ order_id: order.id, code, amount_minor: money(payment.amountMinor, `payment.${code}.amountMinor`), method: payment.method, status: payment.status, position: paymentPosition, data: without(payment, ["amountMinor", "method", "status"]) });
+    }
+    for (const allocation of (order.paymentAllocations || [])) {
+      rows.order_payment_allocations.push({
+        order_id: order.id,
+        payment_code: allocation.paymentCode,
+        component: allocation.component,
+        amount_minor: money(allocation.amountMinor, "paymentAllocation.amountMinor"),
+      });
+    }
+    for (const adjustment of (order.revenueAdjustments || [])) {
+      rows.platform_revenue_adjustments.push({
+        id: adjustment.id,
+        order_id: order.id,
+        kind: adjustment.kind,
+        amount_minor: money(adjustment.amountMinor, "revenueAdjustment.amountMinor"),
+        reason: adjustment.reason,
+        created_by: adjustment.createdBy ?? null,
+        created_at: adjustment.createdAt,
+      });
     }
     for (const [milestonePosition, milestone] of (order.payoutMilestones || []).entries()) {
       rows.payout_milestones.push({ order_id: order.id, code: milestone.code, share_percent: milestone.sharePercent, amount_minor: money(milestone.amountMinor, "payoutMilestone.amountMinor"), status: milestone.status, position: milestonePosition, data: without(milestone, ["code", "sharePercent", "amountMinor", "status"]) });
@@ -281,6 +332,14 @@ export async function loadStore(database) {
     return item;
   });
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => ({ userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, updatedAt: row.updated_at }));
+  store.supplierPaymentTerms = orderedBy(loaded.supplier_payment_terms, "supplier_id").map((row) => ({
+    supplierId: row.supplier_id,
+    deliveryDownpaymentRateBps: row.delivery_downpayment_rate_bps,
+    pickupFullOnlineEnabled: row.pickup_full_online_enabled,
+    pickupDownpaymentStoreEnabled: row.pickup_downpayment_store_enabled,
+    pickupDownpaymentRateBps: row.pickup_downpayment_rate_bps,
+    updatedAt: row.updated_at,
+  }));
   store.riderProfiles = orderedBy(loaded.rider_profiles, "user_id").map((row) => {
     const item = { userId: row.user_id, vehicleType: row.vehicle_type, plateNumber: row.plate_number, updatedAt: row.updated_at };
     present(item, "licenseNumber", row.license_number);
@@ -316,13 +375,67 @@ export async function loadStore(database) {
     if (!payments.has(row.order_id)) payments.set(row.order_id, {});
     payments.get(row.order_id)[row.code] = { ...row.data, amountMinor: row.amount_minor, method: row.method, status: row.status };
   }
+  const paymentAllocations = new Map();
+  for (const row of orderedBy(loaded.order_payment_allocations, "payment_code", "component")) {
+    if (!paymentAllocations.has(row.order_id)) paymentAllocations.set(row.order_id, []);
+    paymentAllocations.get(row.order_id).push({
+      paymentCode: row.payment_code,
+      component: row.component,
+      amountMinor: row.amount_minor,
+    });
+  }
+  const revenueAdjustments = new Map();
+  for (const row of orderedBy(loaded.platform_revenue_adjustments, "created_at", "id")) {
+    if (!revenueAdjustments.has(row.order_id)) revenueAdjustments.set(row.order_id, []);
+    revenueAdjustments.get(row.order_id).push({
+      id: row.id,
+      kind: row.kind,
+      amountMinor: row.amount_minor,
+      reason: row.reason,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+    });
+  }
   const milestones = new Map();
   for (const row of ordered(loaded.payout_milestones)) {
     if (!milestones.has(row.order_id)) milestones.set(row.order_id, []);
     milestones.get(row.order_id).push({ ...row.data, code: row.code, sharePercent: row.share_percent, amountMinor: row.amount_minor, status: row.status });
   }
   store.orders = ordered(loaded.orders).map((row) => {
-    const item = { ...row.data, id: row.id, clientId: row.client_id, supplierId: row.supplier_id, riderId: row.rider_id, productId: row.product_id, state: row.state, zone: row.zone_code, supplierPriceMinor: row.supplier_price_minor, commissionMinor: row.commission_minor, subtotalMinor: row.subtotal_minor, deliveryFeeMinor: row.delivery_fee_minor, totalMinor: row.total_minor, downpaymentMinor: row.downpayment_minor, balanceMinor: row.balance_minor, payoutHold: row.payout_hold, pickup: row.pickup_lat == null ? null : { lat: row.pickup_lat, lng: row.pickup_lng, label: row.pickup_label }, dropoff: { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label }, payments: payments.get(row.id) || {}, payoutMilestones: milestones.get(row.id) || [], createdAt: row.created_at, updatedAt: row.updated_at };
+    const item = {
+      ...row.data,
+      id: row.id,
+      clientId: row.client_id,
+      supplierId: row.supplier_id,
+      riderId: row.rider_id,
+      productId: row.product_id,
+      state: row.state,
+      zone: row.zone_code,
+      supplierSubtotalMinor: row.supplier_subtotal_minor,
+      subtotalMinor: row.subtotal_minor,
+      serviceFeeRateBps: row.service_fee_rate_bps,
+      serviceFeeMinor: row.service_fee_minor,
+      deliveryFeeMinor: row.delivery_fee_minor,
+      totalMinor: row.total_minor,
+      fulfillmentMode: row.fulfillment_mode,
+      paymentPlan: row.payment_plan,
+      quoteVersion: row.quote_version,
+      supplierDownpaymentRateBps: row.supplier_downpayment_rate_bps,
+      onlineDueMinor: row.online_due_minor,
+      directStoreDueMinor: row.direct_store_due_minor,
+      supplierPlatformPayoutMinor: row.supplier_platform_payout_minor,
+      commercialCommittedAt: row.commercial_committed_at,
+      moneyModelVersion: row.money_model_version,
+      payoutHold: row.payout_hold,
+      pickup: row.pickup_lat == null ? null : { lat: row.pickup_lat, lng: row.pickup_lng, label: row.pickup_label },
+      dropoff: row.dropoff_lat == null ? null : { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label },
+      payments: payments.get(row.id) || {},
+      paymentAllocations: paymentAllocations.get(row.id) || [],
+      revenueAdjustments: revenueAdjustments.get(row.id) || [],
+      payoutMilestones: milestones.get(row.id) || [],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
     present(item, "issueWindowOpenedAt", row.issue_window_opened_at);
     present(item, "issueWindowExpiresAt", row.issue_window_expires_at);
     return item;

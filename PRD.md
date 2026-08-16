@@ -10,7 +10,7 @@ GRIDGO is a centralized Davao printing platform connecting clients, accredited p
 
 - PostgreSQL 17 is the only domain persistence system. MinIO stores private file bytes; PostgreSQL stores metadata only.
 - Clerk is the only identity/session provider, including Google sign-in. GRIDGO roles remain authoritative in PostgreSQL.
-- Money uses integer PHP minor units. Payments are manually confirmed digital QR installments: 75% downpayment and 25% balance. COD is unavailable.
+- Money uses integer PHP minor units. A client service fee is added to the supplier subtotal and collected in the initial online installment; later online/direct-at-store amounts follow the accepted payment plan. COD is unavailable.
 - Fresh seed creates catalog, taxonomy, zones, and settings only. It creates no accounts or operational data.
 
 ## Roles and onboarding
@@ -36,15 +36,15 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 ## Orders, money, and fulfilment
 
 - Orders snapshot client dropoff, assigned supplier pickup, distance band, delivery fee, and accepted price.
-- Commission is 10% on top of supplier price.
-- Payments and the four supplier payout milestones have independent relational records.
+- The service fee is seeded at 1,000 bps on the supplier subtotal and snapshotted with the accepted quote; delivery is a separate pass-through.
+- Generalized online installments, component allocations, and supplier payout milestones have independent relational records.
 - Supplier milestone release is gated by Proof of Fulfilment.
 - Claims hold payout. Client issues during the global issue window create an automatic claim hold.
 - Rider pickup requires all six checks; failures create an Operations escalation.
 - Delivery requires file-backed photo or signature evidence and opens the issue window.
 - Order/payment/payout/credit/claim/issue changes commit atomically with audit and notification records.
 
-Clients never receive supplier price, commission, or supplier milestone amounts. Use the role-aware projection in `src/operational-model.js` for every order response.
+Clients receive item subtotal, service fee, delivery, total, and their accepted installment plan, but never supplier payout or milestone amounts. Use the role-aware projection in `src/operational-model.js` for every order response.
 
 ## Geography
 

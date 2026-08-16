@@ -339,7 +339,7 @@ One FCM v1 message per registered device:
 - **Android apps must create the notification channel `gridgo_default`** before requesting a token. A message naming a channel the app has not created is downgraded or dropped on Android 8+.
 - `type` is the same discriminator as on the notification record: `supplier_assignment_final_price`, `pickup_check_escalation`, `pickup_escalation_resolved`, and any later value. Treat unknown types as "open the notification list".
 
-**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier price, commission, payout milestone amounts and every other field the [visibility rules](#visibility-authorization) hide stay off the lock screen even if a future notification record carries them. Titles and bodies are the owner-scoped strings the same user already sees in-app.
+**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Titles and bodies are the owner-scoped strings the same user already sees in-app.
 
 ### Failure behaviour apps can rely on
 
@@ -464,7 +464,10 @@ Default `GET /settings` response:
 
 ```json
 {
+  "version": 4,
   "settings": {
+    "serviceFeeRateBps": 1000,
+    "pickupNoShowHours": 72,
     "issueWindowHours": 24,
     "deliveryFeeBands": [
       { "maxDistanceMeters": 4999, "feeMinor": 2500 },
@@ -483,6 +486,9 @@ PATCH /settings
 
 ```json
 {
+  "expectedVersion": 4,
+  "serviceFeeRateBps": 1000,
+  "pickupNoShowHours": 72,
   "issueWindowHours": 48,
   "deliveryFeeBands": [
     { "maxDistanceMeters": 4999, "feeMinor": 3000 },
@@ -493,17 +499,20 @@ PATCH /settings
 }
 ```
 
-`issueWindowHours` is a whole number from 1 to 720. Band maxima increase strictly; the final maximum is `null`. The API derives `deliveryDistanceMeters` with a Haversine distance between the assigned supplier's `shop`/order `pickup` and order `dropoff`. Client-supplied `deliveryFeeMinor` is ignored.
+The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an integer from 0 through 10,000; `pickupNoShowHours` is 24 through 168; `issueWindowHours` is 1 through 720. Band maxima increase strictly and the final maximum is `null`. Settings changes affect only future commercial commitments.
+
+Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
 ## Price estimate and exact money
 
-At `POST /orders`, `priceRange` is client-safe and commission-inclusive:
+At `POST /orders`, `priceRange` is a client-safe supplier-subtotal estimate:
 
 ```json
 {
   "priceRange": {
-    "subtotalMinMinor": 49500,
-    "subtotalMaxMinor": 55000,
+    "supplierSubtotalMinMinor": 45000,
+    "supplierSubtotalMaxMinor": 50000,
+    "serviceFeeStatus": "calculated_at_quote_acceptance",
     "deliveryFeeStatus": "pending_supplier_assignment"
   }
 }
@@ -513,7 +522,7 @@ It is derived from current product and live-service reference prices. No supplie
 
 Order creation validates its inputs before drafting anything: `quantity` must be a positive integer (omitted means `1`) or the request is `400 invalid_quantity`, and `zone` must be an active zone code from `GET /zones` (omitted means `davao_central`) or the request is `400 invalid_zone`. When the reference catalog has not been seeded, creation fails with `409 catalog_not_seeded` instead of estimating from missing data.
 
-Supplier acceptance uses the existing transition endpoint with a new exact field:
+The assigned approved supplier issues a versioned final quote:
 
 ```http
 POST /orders/:id/transition
@@ -522,48 +531,66 @@ POST /orders/:id/transition
 ```json
 {
   "state": "supplier_accepted",
-  "supplierPriceMinor": 100000,
+  "supplierSubtotalMinor": 100000,
   "promisedDate": "2026-08-12T09:00:00.000Z"
 }
 ```
 
-The assigned, approved supplier is the only allowed caller. This atomically computes money, creates a `supplier_assignment_final_price` client notification, stores `assignmentNotificationId`/`assignmentNotifiedAt`, and returns order state `awaiting_downpayment`.
+The response state is `awaiting_checkout`. The quote carries immutable line/specification/format snapshots, the supplier shop and payment terms, and its `version`; it is not yet commercial history.
+
+The owning client accepts the exact version and selects one offered fulfillment/payment plan:
+
+```json
+{
+  "state": "awaiting_initial_payment",
+  "quoteVersion": 1,
+  "fulfillmentMode": "delivery",
+  "paymentPlan": "delivery_online"
+}
+```
+
+Acceptance snapshots the service-fee setting and every money/fulfillment field, creates generalized payments and component allocations, and returns `awaiting_initial_payment`. A mismatched version is `409 quote_stale`.
 
 ### Worked example
 
 | Field | Minor units | Peso meaning | Client receives field? |
 |---|---:|---:|---|
-| `supplierPriceMinor` | 100000 | ₱1,000 | no |
-| `commissionRatePercent` | 10 | 10% | no |
-| `commissionMinor` | 10000 | ₱100 | no |
-| `subtotalMinor` | 110000 | ₱1,100 | yes |
+| `subtotalMinor` | 100000 | ₱1,000 items subtotal | yes |
+| `serviceFeeRateBps` | 1000 | 10% | yes |
+| `serviceFeeMinor` | 10000 | ₱100 | yes |
 | `deliveryFeeMinor` | 2500 | ₱25 | yes |
 | `totalMinor` | 112500 | ₱1,125 | yes |
-| `downpaymentMinor` | 84375 | ₱843.75 | yes |
-| `balanceMinor` | 28125 | ₱281.25 | yes |
+| initial online (25% supplier principal + fee) | 35000 | ₱350 | yes |
+| final online (supplier remainder + delivery) | 77500 | ₱775 | yes |
 
-`commissionMinor = round(supplierPriceMinor * 10 / 100)`. `subtotalMinor = supplierPriceMinor + commissionMinor`. `totalMinor = subtotalMinor + deliveryFeeMinor`. `downpaymentMinor = round(totalMinor * 75 / 100)` and `balanceMinor` receives the exact remainder.
+`round_bps(x,bps) = floor((x*bps+5000)/10000)`. The service fee and initial supplier principal are rounded independently; the supplier remainder is subtraction, so it receives every principal-rounding cent. Delivery never enters the fee base, and the full service fee is allocated to the initial payment.
 
 ### Visibility authorization
 
-- Client: subtotal, delivery, total, downpayment/balance, payment status, its submitted payment references, and milestone codes/status/POF IDs. Never supplier price, commission rate/amount, or milestone amounts.
-- Assigned supplier: client-visible totals plus its `supplierPriceMinor` and milestone `amountMinor`. Never commission or client payment references.
-- Rider: client-safe order money; no supplier price, commission, payout amounts, or client payment references.
-- Operations/Super Admin: full supplier price, commission, client totals, installment amounts, and milestone amounts.
+- Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and milestone codes/status/POF IDs; never platform supplier-payout amounts.
+- Assigned supplier: its full supplier subtotal, zero-deduction settlement card, and milestone amounts; never client payment references.
+- Rider: client-safe order totals; no supplier payout, allocation, milestone, or client-reference details.
+- Operations/Super Admin: full client totals, allocations, supplier settlement, service-fee revenue fields, and milestone amounts.
 
-All order-returning endpoints use this projection. Commission secrecy is an API authorization rule.
+All order-returning endpoints use this projection.
 
-## Digital payment split
+## Digital payment plans and allocations
 
-`installment` is `downpayment` or `balance`. COD is not an enum and is rejected with `400 payment_method_not_allowed` on legacy transition attempts. The old credit authorization route is `410` and the old rider proof/cash route is `410`.
+Canonical installment codes are `initial` and optional `final_online`. The legacy route aliases `downpayment` and `balance` map to those codes. COD is not an enum and is rejected with `400 payment_method_not_allowed`.
 
 Order payment shape:
 
 ```json
 {
   "payments": {
-    "downpayment": {
-      "amountMinor": 84375,
+    "initial": {
+      "amountMinor": 35000,
+      "label": "Initial online payment",
+      "percent": 25,
+      "componentLines": [
+        { "component": "supplier_principal", "amountMinor": 25000 },
+        { "component": "service_fee", "amountMinor": 10000 }
+      ],
       "method": "qr_manual",
       "status": "not_submitted",
       "reference": null,
@@ -575,8 +602,14 @@ Order payment shape:
       "rejectedBy": null,
       "rejectionReason": null
     },
-    "balance": {
-      "amountMinor": 28125,
+    "final_online": {
+      "amountMinor": 77500,
+      "label": "Final online payment",
+      "percent": 75,
+      "componentLines": [
+        { "component": "supplier_principal", "amountMinor": 75000 },
+        { "component": "delivery_pass_through", "amountMinor": 2500 }
+      ],
       "method": "qr_manual",
       "status": "not_submitted",
       "reference": null,
@@ -597,34 +630,34 @@ Statuses: `not_submitted | pending_confirmation | confirmed`.
 Client submission:
 
 ```http
-POST /orders/:id/payments/downpayment/submit
-POST /orders/:id/payments/balance/submit
+POST /orders/:id/payments/initial/submit
+POST /orders/:id/payments/final_online/submit
 ```
 
 ```json
 { "method": "qr_manual", "reference": "GCASH-ABC123" }
 ```
 
-Payment is `409 assignment_notification_required` until the persisted assignment notification exists. Downpayment submission changes order state to `downpayment_review`. Balance submission requires confirmed downpayment.
+Payment is `409 commercial_commitment_required` until the final quote is accepted. Initial submission changes the order to `initial_payment_review`; final-online submission requires confirmed initial payment.
 
 Manual confirmation:
 
 ```http
-POST /orders/:id/payments/downpayment/confirm
-POST /orders/:id/payments/balance/confirm
+POST /orders/:id/payments/initial/confirm
+POST /orders/:id/payments/final_online/confirm
 ```
 
 ```json
 { "note": "Reference matched Operations wallet" }
 ```
 
-Only Operations/Super Admin. Confirmation sets `status: "confirmed"`, actor/timestamp, and `confirmationSource: "manual_ops"`. Downpayment confirmation changes order state to `payment_authorized`; balance confirmation sets legacy summary `paymentStatus: "paid"`. Delivery is blocked until balance is confirmed.
+Only Operations/Super Admin. Confirmation sets `status: "confirmed"`, actor/timestamp, and `confirmationSource: "manual_ops"`. Initial confirmation changes the order to `payment_authorized`; final-online confirmation marks online collection paid. Delivery is blocked until final online payment is confirmed.
 
 Manual rejection:
 
 ```http
-POST /orders/:id/payments/downpayment/reject
-POST /orders/:id/payments/balance/reject
+POST /orders/:id/payments/initial/reject
+POST /orders/:id/payments/final_online/reject
 ```
 
 ```json
@@ -633,7 +666,7 @@ POST /orders/:id/payments/balance/reject
 }
 ```
 
-Only Operations/Super Admin. A successful rejection returns `200 { "order": ... }`, restores the installment to `status: "not_submitted"`, clears its submitted reference/submission timestamp, and sets `rejectedAt`, `rejectedBy`, and client-visible `rejectionReason`. Downpayment rejection also restores order state `awaiting_downpayment` and summary `paymentStatus: "unpaid"`; balance rejection restores summary `paymentStatus: "downpayment_confirmed"` without changing the production/delivery state. The client can submit the installment again immediately. Resubmission clears the three current rejection fields; the rejection remains in `order.timeline` and the platform audit log.
+Only Operations/Super Admin. Rejection restores `status: "not_submitted"`, clears the submitted reference/timestamp, and records `rejectedAt`, `rejectedBy`, and `rejectionReason`. Initial rejection restores `awaiting_initial_payment`; final-online rejection leaves the production state intact. The timeline and audit log retain the rejection.
 
 Exact rejection errors:
 
@@ -658,7 +691,7 @@ Exact rejection errors:
 }
 ```
 
-Statuses: `pending_pof | pof_attached | released`. Amounts split `supplierPriceMinor`, not client total. Retention receives any integer-rounding remainder so amounts sum exactly to supplier earnings.
+Statuses: `pending_pof | pof_attached | released`. Delivery milestones split the full supplier subtotal. Pickup milestones split only `supplierPlatformPayoutMinor`; any direct-at-store remainder is already supplier-received. Retention receives the exact integer remainder.
 
 POF uses the existing file flow with `purpose=fulfilment_proof`, then:
 
@@ -682,7 +715,7 @@ POST /orders/:id/milestones/:code/release
 { "note": "POF reviewed" }
 ```
 
-Only Operations/Super Admin. Missing POF is `409 pof_required`; an early production-stage release is `409 milestone_not_reached`; active claim is `409 payout_held`; delivered share additionally needs recorded delivery and confirmed balance; retention needs completed issue-window expiry. `completed -> payout_released` is permitted only after every milestone is released.
+Only Operations/Super Admin. Missing POF is `409 pof_required`; an early production-stage release is `409 milestone_not_reached`; active claim is `409 payout_held`; delivered share additionally needs recorded delivery and confirmed final-online payment; retention needs completed issue-window expiry. `completed -> payout_released` is permitted only after every milestone is released.
 
 ## Order states and transitions
 
@@ -700,8 +733,9 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `proof_approval` | `client_correction` | owning client | request artwork correction |
 | `approved_for_matching` | `supplier_assigned` | ops/super | supplier must be approved and eligible |
 | `supplier_assigned` | `approved_for_matching` | assigned supplier | decline/rematch |
-| `supplier_assigned` | `awaiting_downpayment` | assigned approved supplier | request says `supplier_accepted`; acceptance + price + notification are atomic |
-| `payment_authorized` | `production` | assigned supplier | after confirmed downpayment |
+| `supplier_assigned` | `awaiting_checkout` | assigned approved supplier | request says `supplier_accepted`; creates the next final quote version |
+| `awaiting_checkout` | `awaiting_initial_payment` | owning client | accepts exact quote version and snapshots money/fulfillment |
+| `payment_authorized` | `production` | assigned supplier | after confirmed initial payment |
 | `production` | `supplier_self_qc` | assigned supplier | production complete |
 | `supplier_self_qc` | `ready_for_dispatch` | assigned supplier | ready for pickup |
 | `ready_for_dispatch` | `rider_assigned` | approved rider/ops/super | normally dispatch accept; rider must be approved |
@@ -710,13 +744,13 @@ The transition endpoint accepts only these role edges. A role label means the re
 
 Endpoint-owned steps:
 
-- `awaiting_downpayment -> downpayment_review`: client submits downpayment.
-- `downpayment_review -> payment_authorized`: Operations/Super Admin confirms downpayment.
+- `awaiting_initial_payment -> initial_payment_review`: client submits initial payment.
+- `initial_payment_review -> payment_authorized`: Operations/Super Admin confirms initial payment.
 - `rider_assigned -> picked_up`: all six pickup checks pass; no direct transition bypass.
 - `picked_up|out_for_delivery -> delivered -> issue_window_open`: delivery evidence route atomically records delivery and opens window; no direct transition bypass.
 - `issue_window_open -> completed`: system only, when `issueWindowExpiresAt` has elapsed and no active hold. No actor can close it early.
 
-Retired states are never accepted or stored: `supplier_proof_review`, `supplier_proof_changes_requested`, `supplier_proof_approved`, `awaiting_payment`.
+Backfilled revision-1 rows may retain `awaiting_downpayment`/`downpayment_review`; new commercial commitments never create them. Supplier-proof states and `awaiting_payment` remain retired.
 
 ## Rider pickup checklist and escalation
 
