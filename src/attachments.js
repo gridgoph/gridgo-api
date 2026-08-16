@@ -2,10 +2,19 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { identityHasMembership } from "./authorization-context.js";
+
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
 export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
 
-const KINDS = new Set(["artwork", "fulfilment_proof", "delivery_photo", "service_image", "verification_document"]);
+const KINDS = new Set([
+  "artwork",
+  "fulfilment_proof",
+  "delivery_photo",
+  "service_image",
+  "verification_document",
+  "rider_verification_document",
+]);
 const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
@@ -27,7 +36,14 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 20 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
   },
+  rider_verification_document: {
+    roles: ["rider"],
+    maxBytes: 20 * 1024 * 1024,
+    contentTypes: [...CONTENT_TYPES],
+  },
 });
+export const RIDER_DOCUMENT_TYPES = Object.freeze(["drivers_license", "or_cr", "selfie"]);
+const RIDER_DOCUMENT_TYPE_SET = new Set(RIDER_DOCUMENT_TYPES);
 const GENERIC_CONTENT_TYPES = new Set(["", "application/octet-stream"]);
 const EXTENSION_CONTENT_TYPES = new Map([
   [".jpg", "image/jpeg"],
@@ -290,7 +306,7 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
 export function validateUpload(file, purpose = "artwork") {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
-    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, service_image, or verification_document.", {
+    fail(400, "invalid_file_purpose", "Choose a supported file purpose, including rider_verification_document for rider evidence.", {
       allowedPurposes: Object.keys(PURPOSE_POLICIES),
     });
   }
@@ -389,15 +405,31 @@ function forbidden() {
   fail(403, "forbidden", "This file belongs to another account or record. Open a file attached to one of your own records.");
 }
 
+function hasRole(user, role) {
+  return identityHasMembership(user, role);
+}
+
+function manilaDate(value = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(value).map((part) => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 // File registry contract. Parent records contain only opaque file IDs; object keys never cross the API boundary.
 export function authorizeFileUpload(user, purpose) {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
-    fail(400, "invalid_file_purpose", "Choose one file purpose: artwork, fulfilment_proof, delivery_photo, service_image, or verification_document.", {
+    fail(400, "invalid_file_purpose", "Choose a supported file purpose, including rider_verification_document for rider evidence.", {
       allowedPurposes: Object.keys(PURPOSE_POLICIES),
     });
   }
-  if (!user || !policy.roles.includes(user.role)) forbidden();
+  if (!user || !policy.roles.some((role) => hasRole(user, role))) forbidden();
 }
 
 export function createPendingFile({ fileId, objectKey, user, purpose, file, detectedContentType, at }) {
@@ -431,8 +463,9 @@ export function markFileReady(file, at) {
 
 export function markFileDeletePending(file, user, at) {
   if (!file) fail(404, "file_not_found", "That file no longer exists. Refresh your uploads and try again.");
-  if (file.purpose === "verification_document") {
-    if (!user || user.role !== "supplier" || user.id !== file.ownerId) forbidden();
+  if (["verification_document", "rider_verification_document"].includes(file.purpose)) {
+    const ownerRole = file.purpose === "verification_document" ? "supplier" : "rider";
+    if (!user || !hasRole(user, ownerRole) || user.id !== file.ownerId) forbidden();
   } else if (!user || (user.id !== file.ownerId && !["ops_admin", "super_admin"].includes(user.role))) {
     forbidden();
   }
@@ -486,7 +519,9 @@ export function resolveFileTarget(store, purpose, body, user = null) {
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
-  const allowedFields = purpose === "verification_document"
+  const allowedFields = purpose === "rider_verification_document"
+    ? ["riderDocumentType", "expiresOn"]
+    : purpose === "verification_document"
     ? ["documentType", "replaceFileId"]
     : purpose === "service_image"
     ? ["supplierServiceId"]
@@ -543,6 +578,55 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       replacedFiles = currentFiles.filter((candidate) => currentType(candidate) === documentType);
     }
     return { type: "user", record, documentType, replacedFiles };
+  }
+  if (purpose === "rider_verification_document") {
+    const riderDocumentType = String(body?.riderDocumentType || "");
+    if (!RIDER_DOCUMENT_TYPE_SET.has(riderDocumentType)) {
+      fail(
+        400,
+        "invalid_rider_document_type",
+        "Choose drivers_license, or_cr, or selfie for this rider document.",
+        { allowed: RIDER_DOCUMENT_TYPES },
+      );
+    }
+    const record = (store.users || []).find((item) => item.id === user?.id);
+    if (!record || !hasRole(record, "rider")) forbidden();
+    const expiresOn = body?.expiresOn == null ? null : String(body.expiresOn);
+    if (riderDocumentType === "drivers_license") {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(expiresOn || "")) {
+        fail(
+          400,
+          "invalid_application",
+          "Send the driver's licence expiry as YYYY-MM-DD.",
+          { fields: { expiresOn: "is required in YYYY-MM-DD format" } },
+        );
+      }
+      const parsed = new Date(`${expiresOn}T00:00:00.000Z`);
+      if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== expiresOn) {
+        fail(400, "invalid_application", "Send a real calendar date for the driver's licence expiry.", {
+          fields: { expiresOn: "must be a real calendar date" },
+        });
+      }
+      if (expiresOn <= manilaDate()) {
+        fail(409, "document_expired", "Upload a driver's licence with a future expiry date.");
+      }
+    } else if (expiresOn != null) {
+      fail(400, "unexpected_target_field", "Remove `expiresOn`; only a driver's licence accepts an expiry date.", {
+        field: "expiresOn",
+      });
+    }
+    const replacedDocuments = (store.riderDocuments || []).filter(
+      (document) => document.riderId === record.id
+        && document.kind === riderDocumentType
+        && document.isCurrent !== false,
+    );
+    return {
+      type: "rider_document",
+      record,
+      kind: riderDocumentType,
+      ...(expiresOn ? { expiresOn } : {}),
+      replacedDocuments,
+    };
   }
   if (purpose === "service_image") {
     if (!body?.supplierServiceId) {
@@ -638,9 +722,16 @@ export function authorizeFileAttach(user, file, target) {
     return;
   }
   if (file.purpose === "verification_document") {
-    if (target?.type !== "user" || user.role !== "supplier" || target.record.id !== user.id) forbidden();
+    if (target?.type !== "user" || !hasRole(user, "supplier") || target.record.id !== user.id) forbidden();
     if (!VERIFICATION_DOCUMENT_TYPE_SET.has(target.documentType)) {
       fail(409, "file_metadata_invalid", "This verification document has no valid document type. Upload the file again.");
+    }
+    return;
+  }
+  if (file.purpose === "rider_verification_document") {
+    if (target?.type !== "rider_document" || !hasRole(user, "rider") || target.record.id !== user.id) forbidden();
+    if (!RIDER_DOCUMENT_TYPE_SET.has(target.kind)) {
+      fail(409, "file_metadata_invalid", "This rider document has no valid document type. Upload the file again.");
     }
     return;
   }
@@ -699,6 +790,37 @@ export function attachFileReference(file, target) {
   return field;
 }
 
+export function attachRiderDocument(store, file, target, { documentId, at }) {
+  if (file.purpose !== "rider_verification_document" || target?.type !== "rider_document") {
+    fail(409, "file_metadata_invalid", "This upload cannot be attached as a rider document.");
+  }
+  if (!Array.isArray(store.riderDocuments)) store.riderDocuments = [];
+  for (const replaced of target.replacedDocuments || []) {
+    replaced.isCurrent = false;
+    replaced.replacedAt = at;
+  }
+  const document = {
+    id: documentId,
+    riderId: target.record.id,
+    kind: target.kind,
+    fileId: file.fileId,
+    ...(target.expiresOn ? { expiresOn: target.expiresOn } : {}),
+    isCurrent: true,
+    uploadedAt: at,
+  };
+  store.riderDocuments.push(document);
+  if (!Array.isArray(file.references)) file.references = [];
+  file.references.push({ type: "rider_document", id: document.id, field: "fileId" });
+  const approvalCase = (store.approvalCases || []).find(
+    (candidate) => candidate.userId === target.record.id && candidate.kind === "rider",
+  );
+  if (target.kind === "drivers_license" && approvalCase?.status === "pending" && approvalCase.submittedAt == null) {
+    approvalCase.submittedAt = at;
+    approvalCase.updatedAt = at;
+  }
+  return { document, approvalCase: approvalCase || null };
+}
+
 function canReadReference(user, store, reference) {
   if (reference.type === "supplier_service") {
     const service = (store.supplierServices || []).find((item) => item.id === reference.id);
@@ -722,7 +844,11 @@ export function authorizeFileRead(user, store, file) {
   if (!user) forbidden();
   if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === "verification_document") {
-    if (user.role === "supplier" && file.ownerId === user.id) return;
+    if (hasRole(user, "supplier") && file.ownerId === user.id) return;
+    forbidden();
+  }
+  if (file.purpose === "rider_verification_document") {
+    if (hasRole(user, "rider") && file.ownerId === user.id) return;
     forbidden();
   }
   if (file.ownerId === user.id) return;

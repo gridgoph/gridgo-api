@@ -20,6 +20,11 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/auth/signup` | removed | always `404`; sign-up is owned by Clerk |
 | POST | `/auth/login` | removed | always `404`; sign-in is owned by Clerk |
 | POST | `/auth/clerk/activate` | Clerk JWT | create or add only the caller's personal client membership after Google/email SSO |
+| POST | `/auth/clerk/enroll/supplier` | Clerk JWT + `Idempotency-Key` | create or add a pending supplier membership/profile and draft category services |
+| POST | `/auth/clerk/enroll/rider` | Clerk JWT + `Idempotency-Key` | create or add an unsubmitted pending rider membership/profile |
+| POST | `/me/business-application` | client membership + `Idempotency-Key` | submit a pending business-client application without removing personal access |
+| POST | `/me/approval-cases/rider/submit` | rider membership + `Idempotency-Key` | idempotently confirm the current-licence gate and submit the pending case |
+| POST | `/me/approval-cases/:kind/reapply` | matching membership + `Idempotency-Key` | rejected applicant resubmission for `business-client`, `supplier`, or `rider` |
 | GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary |
 | GET | `/auth/me/client` | client membership | client profile, business case, and capabilities |
 | GET | `/auth/me/supplier` | supplier membership | supplier profile, case, readiness, and capabilities |
@@ -130,6 +135,17 @@ Used once after Google / public SSO. `/auth/me` does not create or email-link ac
 - An unmapped identity creates a client (`clerkUserId`, primary verified email, name, phone if present, and `accountType: "individual"`). Email is not used to merge identities.
 - Success is `200 { user }` (`publicUser`; no `clerkUserId`). The same Clerk JWT can immediately call `/auth/me`.
 - Unmapped JWT on `/auth/me` remains `401 unauthorized`. Role or status claims and Clerk metadata cannot elevate database memberships or approval cases.
+
+### Fixed enrollment and reapplication
+
+The URL fixes the membership and initial `pending` approval case. Callers cannot send `role`, status, commission, or live service state; unsupported input returns `400 unexpected_field`. All application routes require a nonblank `Idempotency-Key`. The first successful supplier, rider, or business application returns `201`; an exact retry returns the same application identifiers with `200`. A different request for an existing role application returns `409 application_already_exists`.
+
+- `POST /auth/clerk/enroll/supplier` accepts `{profile:{shopName,contactName,phone,location:{lat,lng,label}},serviceCategories:[...]}`. It creates one `draft` service per resolved active category and sets `submittedAt` immediately. An already-mapped client may deliberately add this membership to the same identity.
+- `POST /auth/clerk/enroll/rider` accepts `{profile:{phone,vehicleType,plateNumber,licenseNumber?}}`. It creates a pending case with `submittedAt: null`; `/auth/me/rider` reports `onboardingIncomplete: true` until the required current driver's-licence attachment succeeds. `POST /me/approval-cases/rider/submit` accepts `{expectedVersion}` and is an idempotent explicit completion check.
+- `POST /me/business-application` accepts `{businessName,businessNature}` after ordinary client activation. Personal ordering remains available while business approval is pending, rejected, or suspended.
+- `POST /me/approval-cases/:kind/reapply` accepts `{expectedVersion,correctionSummary}`. Only `rejected` may transition to `pending`; success increments both case `version` and `applicationRevision`, clears decision fields, and retains the profile, files, services, and prior immutable events.
+
+Validation failures use `400 invalid_application` with a `fields` map. Reapply state/version mismatches use `409 approval_state_conflict`; an incomplete or expired rider licence uses `409 rider_documents_incomplete` or `409 document_expired`.
 
 ## Approval queue and decisions
 

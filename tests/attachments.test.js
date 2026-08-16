@@ -8,6 +8,7 @@ import {
   AttachmentError,
   MAX_FILE_SIZE,
   attachFileReference,
+  attachRiderDocument,
   authorizeFileAttach,
   authorizeFileRead,
   authorizeFileUpload,
@@ -19,6 +20,7 @@ import {
   publicFile,
   resolveFileTarget,
   validateUpload,
+  RIDER_DOCUMENT_TYPES,
   VERIFICATION_DOCUMENT_TYPES,
 } from "../src/attachments.js";
 
@@ -184,9 +186,11 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   assert.doesNotThrow(() => authorizeFileUpload(rider, "delivery_photo"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "service_image"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "verification_document"));
+  assert.doesNotThrow(() => authorizeFileUpload(rider, "rider_verification_document"));
   expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
   expectError(() => authorizeFileUpload(client, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(rider, "verification_document"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(supplier, "rider_verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(supplier, "proof"), 400, "invalid_file_purpose");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "purpose_media_type_not_allowed");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
@@ -309,6 +313,90 @@ test("verification documents attach only to the uploader and support typed repla
   ]);
   expectError(() => markFileDeletePending(first, ops, "2026-08-09T00:00:00Z"), 403, "forbidden");
   assert.doesNotThrow(() => markFileDeletePending(first, supplier, "2026-08-09T00:00:00Z"));
+});
+
+test("rider licence attachment preserves replaced evidence and submits interrupted enrollment", () => {
+  const first = readyFile("rider_verification_document", {
+    fileId: "rider-license-old",
+    ownerId: rider.id,
+  });
+  const approvalCase = {
+    id: "case-rider",
+    userId: rider.id,
+    kind: "rider",
+    status: "pending",
+    version: 1,
+    applicationRevision: 1,
+    createdAt: "2026-08-16T00:00:00.000Z",
+    updatedAt: "2026-08-16T00:00:00.000Z",
+  };
+  const store = {
+    users: [rider],
+    files: [first],
+    riderDocuments: [],
+    approvalCases: [approvalCase],
+  };
+  const target = resolveFileTarget(
+    store,
+    first.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: "2028-06-30" },
+    rider,
+  );
+  assert.doesNotThrow(() => authorizeFileAttach(rider, first, target));
+  const attached = attachRiderDocument(store, first, target, {
+    documentId: "rider-document-old",
+    at: "2026-08-16T01:00:00.000Z",
+  });
+  assert.equal(attached.approvalCase.submittedAt, "2026-08-16T01:00:00.000Z");
+  assert.equal(attached.document.expiresOn, "2028-06-30");
+  assert.deepEqual(first.references, [{
+    type: "rider_document",
+    id: "rider-document-old",
+    field: "fileId",
+  }]);
+  assert.deepEqual(RIDER_DOCUMENT_TYPES, ["drivers_license", "or_cr", "selfie"]);
+
+  const replacement = readyFile("rider_verification_document", {
+    fileId: "rider-license-new",
+    ownerId: rider.id,
+  });
+  store.files.push(replacement);
+  const replacementTarget = resolveFileTarget(
+    store,
+    replacement.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: "2029-06-30" },
+    rider,
+  );
+  assert.deepEqual(replacementTarget.replacedDocuments.map(({ id }) => id), ["rider-document-old"]);
+  const replaced = attachRiderDocument(store, replacement, replacementTarget, {
+    documentId: "rider-document-new",
+    at: "2027-08-16T01:00:00.000Z",
+  });
+  assert.equal(attached.document.isCurrent, false);
+  assert.equal(attached.document.replacedAt, "2027-08-16T01:00:00.000Z");
+  assert.equal(replaced.document.isCurrent, true);
+  assert.equal(store.riderDocuments.length, 2);
+
+  expectError(
+    () => resolveFileTarget(
+      store,
+      replacement.purpose,
+      { riderDocumentType: "drivers_license", expiresOn: "2020-01-01" },
+      rider,
+    ),
+    409,
+    "document_expired",
+  );
+  expectError(
+    () => resolveFileTarget(
+      store,
+      replacement.purpose,
+      { riderDocumentType: "passport", expiresOn: "2029-01-01" },
+      rider,
+    ),
+    400,
+    "invalid_rider_document_type",
+  );
 });
 
 test("verification document reads never inherit order, service, or another supplier visibility", () => {

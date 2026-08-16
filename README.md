@@ -22,6 +22,7 @@ Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Autho
 - `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries, or `401 unauthorized` when the Clerk subject is unmapped.
 - Each app uses its fixed database projection: `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, or `/auth/me/admin`. The URL selects the required membership; request JSON cannot select or grant one.
 - `POST /auth/clerk/activate` is the explicit client-only Google/public SSO path. It creates a new personal client identity, or adds a personal client membership to an already-mapped identity, and returns `{ "user": ... }`; it never merges by email or grants another membership.
+- Fixed application routes add only the membership named by the URL: `/auth/clerk/enroll/supplier`, `/auth/clerk/enroll/rider`, and `/me/business-application`. They require `Idempotency-Key`; supplier/business submit immediately, while rider sign-in resumes document intake until a current licence is attached.
 - Supplier, rider, Operations, and administrator memberships are assigned through fixed onboarding or the audited GRIDGO role route. An activation request can never choose or inherit one of those memberships.
 - `POST /auth/logout` releases the optional FCM device token to the anonymous app-update pool. The app terminates its Clerk session with Clerk; the API has no local session to revoke.
 
@@ -91,7 +92,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 All routes except `/health`, `/catalog`, and the documented anonymous device registration calls require a verified Clerk bearer.
 
-- Identity: `/auth/me`, fixed `/auth/me/*` role projections, `/auth/clerk/activate`, `/auth/logout`
+- Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
