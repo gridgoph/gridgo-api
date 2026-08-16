@@ -98,6 +98,7 @@ test("pending suppliers stay private while approved complete catalog items publi
   const approved = fixture();
   const item = publicCatalogItem(approved, approved.catalogItems[0], { selectedOptionIds: ["a4"] });
   assert.equal(item.effectivePriceMinor, 125);
+  assert.equal(item.serviceVersion, 1);
   assert.deepEqual(item.acceptedFormats.map((format) => format.code), ["pdf"]);
   assert.equal(item.photos[0].url, "/catalog/media/photo");
   assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), { readyForApproval: true, missing: [] });
@@ -125,6 +126,7 @@ test("order-line helper writes immutable catalog, option, format, price, and spe
     orderId: "order",
     catalogItemId: "item",
     expectedVersion: 3,
+    expectedServiceVersion: 1,
     optionIds: ["a4", "gloss"],
     acceptedFormatCode: "pdf",
     quantity: 2,
@@ -145,7 +147,7 @@ test("order-line helper writes immutable catalog, option, format, price, and spe
   assert.deepEqual(store.orderLineItems[0].acceptedFormatCodesSnapshot, ["pdf"]);
 });
 
-test("order-line helper requires the selected catalog version", () => {
+test("order-line helper requires the selected catalog and service versions", () => {
   const store = fixture();
   assert.throws(
     () => appendOrderLineSnapshot(store, {
@@ -157,6 +159,44 @@ test("order-line helper requires the selected catalog version", () => {
       structuredSpec: { paper_size: "A4" },
     }),
     (error) => error.status === 400 && error.code === "expected_version_required",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "order",
+      catalogItemId: "item",
+      expectedVersion: 3,
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { paper_size: "A4" },
+    }),
+    (error) => error.status === 400 && error.code === "expected_service_version_required",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+});
+
+test("order-line helper rejects a stale service-derived projection", () => {
+  const store = fixture();
+  const selected = publicCatalogItem(store, store.catalogItems[0], { selectedOptionIds: ["a4"] });
+  store.supplierServices[0].pricingBasis = "per_piece";
+  store.supplierServices[0].version = 2;
+
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "order",
+      catalogItemId: "item",
+      expectedVersion: selected.version,
+      expectedServiceVersion: selected.serviceVersion,
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { paper_size: "A4" },
+    }),
+    (error) => error.status === 409
+      && error.code === "supplier_service_stale"
+      && error.details.currentVersion === 2,
   );
   assert.deepEqual(store.orderLineItems, []);
 });

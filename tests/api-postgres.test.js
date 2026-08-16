@@ -74,12 +74,13 @@ async function startApi(extraEnv = {}) {
   throw new Error(`API did not become healthy:\n${output}`);
 }
 
-async function request(api, pathname, { method = "GET", subject, claims, body } = {}) {
+async function request(api, pathname, { method = "GET", subject, claims, body, headers = {} } = {}) {
   const response = await fetch(`${api}${pathname}`, {
     method,
     headers: {
       ...(subject ? { Authorization: `Bearer ${token(subject, claims)}` } : {}),
       ...(body == null ? {} : { "Content-Type": "application/json" }),
+      ...headers,
     },
     ...(body == null ? {} : { body: JSON.stringify(body) }),
   });
@@ -1445,6 +1446,77 @@ test("file upload reaches the storage boundary instead of crashing in request se
   }
 });
 
+test("service image attachment checks and advances the service version", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.push({
+      fileId: "file_service_image", ownerId: "user_supplier", purpose: "service_image",
+      originalFilename: "service.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+      size: 100, state: "ready", objectKey: "service_image/service.jpg", references: [], createdAt: AT,
+    }, {
+      fileId: "file_service_image_stale", ownerId: "user_supplier", purpose: "service_image",
+      originalFilename: "stale.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+      size: 100, state: "ready", objectKey: "service_image/stale.jpg", references: [], createdAt: AT,
+    });
+    await saveStore(database, store);
+  });
+  const storagePort = await freePort();
+  const storageServer = http.createServer((req, res) => {
+    if (req.method !== "HEAD") {
+      res.writeHead(405).end();
+      return;
+    }
+    res.setHeader("Content-Length", req.url.includes("service_image/") ? "100" : "0");
+    res.setHeader("Last-Modified", new Date(AT).toUTCString());
+    res.setHeader("ETag", '"gridgo-test-etag"');
+    res.writeHead(200).end();
+  });
+  await new Promise((resolve, reject) => {
+    storageServer.once("error", reject);
+    storageServer.listen(storagePort, "127.0.0.1", resolve);
+  });
+  const storageEndpoint = `http://127.0.0.1:${storagePort}`;
+  const instance = await startApi({ MINIO_ENDPOINT: storageEndpoint, MINIO_PUBLIC_URL: storageEndpoint });
+  try {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const health = await request(instance.api, "/health");
+      if (health.body.storage.status === "available") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const missing = await request(instance.api, "/files/file_service_image/attach", {
+      method: "POST", subject: "clerk_supplier", body: { supplierServiceId: "svc_banner" },
+    });
+    assert.equal(missing.status, 400, JSON.stringify(missing.body));
+    assert.equal(missing.body.error, "expected_version_required");
+
+    const attached = await request(instance.api, "/files/file_service_image/attach", {
+      method: "POST", subject: "clerk_supplier", body: { supplierServiceId: "svc_banner" },
+      headers: { "If-Match": '"1"' },
+    });
+    assert.equal(attached.status, 200, JSON.stringify(attached.body));
+    assert.equal(attached.body.supplierService.version, 2);
+    assert.deepEqual(attached.body.supplierService.imageFileIds, ["file_service_image"]);
+
+    const stale = await request(instance.api, "/files/file_service_image_stale/attach", {
+      method: "POST", subject: "clerk_supplier", body: { supplierServiceId: "svc_banner" },
+      headers: { "If-Match": '"1"' },
+    });
+    assert.equal(stale.status, 409, JSON.stringify(stale.body));
+    assert.equal(stale.body.error, "supplier_service_stale");
+    assert.deepEqual((await database.query(`
+      SELECT version, data->'imageFileIds' AS image_file_ids
+        FROM supplier_services WHERE id = 'svc_banner'
+    `)).rows[0], { version: 2, image_file_ids: ["file_service_image"] });
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await new Promise((resolve) => storageServer.close(resolve));
+    await database.close();
+  }
+});
+
 test("money and reference inputs rejected by PostgreSQL are client errors at HTTP boundaries", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -1634,6 +1706,16 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(staleService.body.error, "supplier_service_stale");
     assert.equal(staleService.body.currentVersion, 2);
 
+    const canonicalAliasUpdate = await request(instance.api, "/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 2, categoryCode: "large_format" },
+    });
+    assert.equal(canonicalAliasUpdate.status, 200, JSON.stringify(canonicalAliasUpdate.body));
+    assert.equal(canonicalAliasUpdate.body.service.categoryCode, "marketing_collateral");
+    assert.equal(canonicalAliasUpdate.body.service.state, "live");
+    assert.equal(canonicalAliasUpdate.body.service.version, 3);
+
     const legacyAliasUpdate = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
       method: "PATCH",
       subject: "clerk_supplier",
@@ -1644,6 +1726,62 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal((await database.query(
       "SELECT category_code FROM supplier_services WHERE id = 'svc_legacy_alias'",
     )).rows[0].category_code, "large_format");
+
+    const privateIncompleteSubmit = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 2, state: "pending_verification" },
+    });
+    assert.equal(privateIncompleteSubmit.status, 409, JSON.stringify(privateIncompleteSubmit.body));
+    assert.equal(privateIncompleteSubmit.body.error, "service_not_review_ready");
+    assert.ok(privateIncompleteSubmit.body.blockers.includes("accepted_file_formats"));
+
+    const legacyIncompleteSubmit = await request(instance.api, "/supplier-services/svc_legacy_alias/submit", {
+      method: "POST", subject: "clerk_supplier", body: { expectedVersion: 2 },
+    });
+    assert.equal(legacyIncompleteSubmit.status, 409, JSON.stringify(legacyIncompleteSubmit.body));
+    assert.equal(legacyIncompleteSubmit.body.error, "service_not_review_ready");
+
+    const incompleteVerify = await request(instance.api, "/supplier-services/svc_legacy_alias/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 2 },
+    });
+    assert.equal(incompleteVerify.status, 409, JSON.stringify(incompleteVerify.body));
+    assert.equal(incompleteVerify.body.error, "service_not_review_ready");
+
+    const suspended = await request(instance.api, "/supplier-services/svc_banner/suspend", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 3, reason: "Catalog review" },
+    });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+    assert.equal(suspended.body.service.version, 4);
+    const resubmitted = await request(instance.api, "/supplier-services/svc_banner/submit", {
+      method: "POST", subject: "clerk_supplier", body: { expectedVersion: 4 },
+    });
+    assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
+    assert.equal(resubmitted.body.service.state, "pending_verification");
+    assert.equal(resubmitted.body.service.version, 5);
+    const reverified = await request(instance.api, "/supplier-services/svc_banner/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 5 },
+    });
+    assert.equal(reverified.status, 200, JSON.stringify(reverified.body));
+    assert.equal(reverified.body.service.state, "live");
+    assert.equal(reverified.body.service.version, 6);
+    const withdrawn = await request(instance.api, "/supplier-services/svc_banner/withdraw", {
+      method: "POST", subject: "clerk_supplier", body: { expectedVersion: 6 },
+    });
+    assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+    assert.equal(withdrawn.body.service.version, 7);
+    const withdrawnResubmitted = await request(instance.api, "/supplier-services/svc_banner/submit", {
+      method: "POST", subject: "clerk_supplier", body: { expectedVersion: 7 },
+    });
+    assert.equal(withdrawnResubmitted.status, 200, JSON.stringify(withdrawnResubmitted.body));
+    assert.equal(withdrawnResubmitted.body.service.state, "pending_verification");
+    assert.equal(withdrawnResubmitted.body.service.version, 8);
+    const withdrawnReverified = await request(instance.api, "/supplier-services/svc_banner/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 8 },
+    });
+    assert.equal(withdrawnReverified.status, 200, JSON.stringify(withdrawnReverified.body));
+    assert.equal(withdrawnReverified.body.service.state, "live");
+    assert.equal(withdrawnReverified.body.service.version, 9);
 
     await database.transaction(async () => {
       const store = await loadStore(database);
@@ -1658,6 +1796,7 @@ test("pending suppliers can edit catalog while public browse requires approval a
     const visible = await request(instance.api, "/catalog/items/catalog_poster");
     assert.equal(visible.status, 200, JSON.stringify(visible.body));
     assert.equal(visible.body.item.name, "Updated Poster");
+    assert.equal(visible.body.item.serviceVersion, 9);
     assert.deepEqual(visible.body.item.acceptedFormats.map((format) => format.code), ["pdf"]);
 
     const shops = await request(instance.api, "/catalog/shops?categoryCode=marketing_collateral");

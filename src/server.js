@@ -93,6 +93,7 @@ import { routeSupplierCatalog } from "./catalog-routes.js";
 import {
   advanceSupplierServiceVersion,
   assertExpectedVersion,
+  assertServiceLineReviewReady,
   supplierCatalogReadiness,
 } from "./supplier-catalog.js";
 import { createDatabase } from "./database.js";
@@ -1669,6 +1670,9 @@ async function handleRequest(req, res) {
       authorizeFileAttachOwner(user, file);
       const target = resolveFileTarget(store, file.purpose, body, user);
       authorizeFileAttach(user, file, target);
+      if (target.type === "supplier_service") {
+        assertExpectedVersion(req, body, "supplier_service_stale", target.record.version);
+      }
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
         throw new AttachmentError(
@@ -1687,9 +1691,16 @@ async function handleRequest(req, res) {
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
+        if (latestTarget.type === "supplier_service") {
+          assertExpectedVersion(req, body, "supplier_service_stale", latestTarget.record.version);
+        }
         attachFileReference(latestFile, latestTarget);
         const attachedAt = now();
-        latestTarget.record.updatedAt = attachedAt;
+        if (latestTarget.type === "supplier_service") {
+          advanceSupplierServiceVersion(latestTarget.record, attachedAt);
+        } else {
+          latestTarget.record.updatedAt = attachedAt;
+        }
         if (latestTarget.type === "order") {
           if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
           if (latestFile.purpose === "fulfilment_proof") {
@@ -2736,9 +2747,13 @@ async function handleRequest(req, res) {
       ];
       const prevCategory = service.categoryCode;
       const prevMaterials = [...(service.materialCodes || [])];
+      let resolvedCategoryCode = prevCategory;
 
       if (user.role === "supplier") {
-        if (body.categoryCode != null) service.categoryCode = activeCategoryFor(store.taxonomy, body.categoryCode).code;
+        if (body.categoryCode != null) {
+          resolvedCategoryCode = activeCategoryFor(store.taxonomy, body.categoryCode).code;
+          service.categoryCode = resolvedCategoryCode;
+        }
         if (body.materialCodes != null) service.materialCodes = body.materialCodes;
         if (body.finishCodes != null) service.finishCodes = body.finishCodes;
         if (body.productFamilyIds != null) service.productFamilyIds = body.productFamilyIds;
@@ -2754,7 +2769,7 @@ async function handleRequest(req, res) {
           }
         }
         // Capability expansion on a live service requires re-verification
-        const categoryChanged = body.categoryCode != null && body.categoryCode !== prevCategory;
+        const categoryChanged = body.categoryCode != null && resolvedCategoryCode !== prevCategory;
         const materialsExpanded =
           Array.isArray(body.materialCodes) &&
           body.materialCodes.some((c) => !prevMaterials.includes(c));
@@ -2793,6 +2808,7 @@ async function handleRequest(req, res) {
         // allow re-submit from draft or after suspension (reactivate path uses submit after draft-like)
       }
       if (service.state === "live") return send(res, 409, { error: "already_live" });
+      assertServiceLineReviewReady(store, service);
       if (service.state === "withdrawn") {
         // re-activation after withdraw needs verification
         service.withdrawnAt = null;
@@ -2827,6 +2843,7 @@ async function handleRequest(req, res) {
       if (service.state === "withdrawn") return send(res, 409, { error: "service_withdrawn" });
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
+      assertServiceLineReviewReady(store, service);
       service.state = "live";
       service.verifiedAt = now();
       service.verifiedBy = user.id;

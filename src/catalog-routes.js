@@ -2,6 +2,7 @@ import { identityHasMembership } from "./authorization-context.js";
 import {
   advanceSupplierServiceVersion,
   assertExpectedVersion,
+  assertServiceLineReviewReady,
   CatalogError,
   catalogGroupsForItem,
   catalogItemBlockers,
@@ -280,8 +281,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
           fail(400, "invalid_service_state", "Suppliers may set a service only to draft or pending_verification.");
         }
         if (body.state === "pending_verification") {
-          const blockers = serviceLineBlockers(store, { ...service, state: "pending_verification" });
-          if (blockers.length) fail(409, "service_not_review_ready", "Complete the service before submitting it for review.", { blockers });
+          assertServiceLineReviewReady(store, service);
         }
         service.state = body.state;
       }

@@ -163,6 +163,18 @@ export function serviceLineBlockers(store, service, { publicOnly = false } = {})
   return blockers;
 }
 
+export function assertServiceLineReviewReady(store, service) {
+  const blockers = serviceLineBlockers(store, { ...service, state: "pending_verification" });
+  if (blockers.length) {
+    throw new CatalogError(
+      409,
+      "service_not_review_ready",
+      "Complete the service before submitting it for review.",
+      { blockers },
+    );
+  }
+}
+
 export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
   const blockers = [];
   const service = (store.supplierServices || []).find((candidate) => candidate.id === item?.supplierServiceId);
@@ -342,6 +354,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     photos: publicPhotos(store, item.id),
     optionGroups: groups,
     version: item.version,
+    serviceVersion: service.version,
   };
 }
 
@@ -360,6 +373,7 @@ export function publicSupplierShop(store, supplierId) {
         .filter(Boolean);
       return items.length ? {
         id: service.id,
+        version: service.version,
         categoryCode: canonicalCategoryCode(store, service.categoryCode),
         pricingBasis: service.pricingBasis,
         turnaroundHours: Object.hasOwn(service, "standardTurnaroundHours")
@@ -412,6 +426,18 @@ export function createOrderLineSnapshot(store, selection, createId) {
       field: "expectedVersion",
     });
   }
+  if (selection.expectedServiceVersion == null) {
+    throw new CatalogError(
+      400,
+      "expected_service_version_required",
+      "expectedServiceVersion is required before checkout.",
+    );
+  }
+  if (!Number.isSafeInteger(selection.expectedServiceVersion) || selection.expectedServiceVersion < 1) {
+    throw new CatalogError(400, "invalid_catalog_item", "expectedServiceVersion must be a positive integer.", {
+      field: "expectedServiceVersion",
+    });
+  }
   const item = (store.catalogItems || []).find((candidate) => candidate.id === selection.catalogItemId);
   if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
     throw new CatalogError(409, "catalog_item_stale", "The catalog item changed or is no longer available.");
@@ -423,6 +449,12 @@ export function createOrderLineSnapshot(store, selection, createId) {
     });
   }
   const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
+  if (selection.expectedServiceVersion !== service.version) {
+    throw new CatalogError(409, "supplier_service_stale", "The supplier service changed. Refresh it before checkout.", {
+      expectedVersion: selection.expectedServiceVersion,
+      currentVersion: service.version,
+    });
+  }
   const order = (store.orders || []).find((candidate) => candidate.id === selection.orderId);
   if (order && order.supplierId !== item.supplierId) {
     throw new CatalogError(409, "catalog_item_stale", "The catalog item does not belong to the order's assigned supplier.");

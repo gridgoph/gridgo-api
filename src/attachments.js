@@ -489,7 +489,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
   const allowedFields = purpose === "verification_document"
     ? ["documentType", "replaceFileId"]
     : purpose === "service_image"
-    ? ["supplierServiceId"]
+    ? ["supplierServiceId", "expectedVersion"]
     : purpose === "fulfilment_proof"
       ? ["orderId", "milestoneCode"]
       : ["orderId"];

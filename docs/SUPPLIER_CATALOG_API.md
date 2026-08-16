@@ -8,6 +8,8 @@ Supplier catalog items are sellable offers beneath one taxonomy-governed supplie
 - `GET /catalog/shops/:supplierId` composes the approved shop profile, identity media references, live service lines, and complete active items.
 - `GET /catalog/items/:itemId` returns one eligible item. Optional repeated or comma-separated `optionIds` query values calculate `effectivePriceMinor`; every required group must have exactly one selected option and an optional group may have zero or one.
 
+Public items expose both `version` and `serviceVersion`. Checkout must return both as `expectedVersion` and `expectedServiceVersion` so service-derived pricing basis, turnaround, rush terms, and accepted formats cannot change behind a still-current item version.
+
 An item publishes only when its supplier approval case is `approved`, its service is complete and `live`, it is active, it has a ready photo, every option group has an active option, and its effective accepted-format set is nonempty. Effective price is `max(0, base price + selected modifiers)` using checked integer arithmetic.
 
 Media records expose opaque API URLs and never MinIO object keys. Task F owns the `catalog_item_photo` and `supplier_shop_image` upload/attach authorization, replacement, MIME/size checks, and serving of `/catalog/media/:fileId`.
@@ -32,9 +34,11 @@ Mutations of an existing service, item, or group require `expectedVersion` in JS
 
 The compatibility `/supplier-services/:id` PATCH, submit, verify, suspend, and withdraw writers use the same service version and precondition. Responses expose the resulting `version`; a write through either route family invalidates stale writes through the other.
 
+Attaching a `service_image` is also a service mutation. `POST /files/:fileId/attach` therefore requires the owning service's `expectedVersion` in JSON or an `If-Match` header and returns the advanced service version.
+
 Creating an option group includes a nonempty `options` array because the deferred database invariant requires every persisted group to have an active option. Bounds are six groups per item, twenty options per group, and eight photos per item. Deleting an item referenced by an order snapshot archives it as inactive; an unreferenced item may be removed.
 
-Service lines use `draft` while incomplete and `pending_verification` when review-ready. A live line returns to `pending_verification` when the supplier expands its governed category or accepted formats. Routine catalog, price, and option edits remain immediately derived from approval + live-service eligibility.
+Service lines use `draft` while incomplete and `pending_verification` when review-ready. Both self-service state changes and compatibility submit/verify actions reject incomplete lines with `service_not_review_ready`. Suspended and withdrawn complete lines may be resubmitted to `pending_verification`; suppliers cannot make a line live. A live line returns to `pending_verification` when the supplier expands its governed category or accepted formats. Routine catalog, price, and option edits remain immediately derived from approval + live-service eligibility.
 
 ## Format inheritance and readiness
 
@@ -46,4 +50,4 @@ An already-approved supplier remains grandfathered ready. The full projection ap
 
 ## Immutable checkout snapshots
 
-`src/supplier-catalog.js` exports `createOrderLineSnapshot` and `appendOrderLineSnapshot` for the later quote/order integration. The helper revalidates current approval, service, item, version, formats, option cardinality, modifier arithmetic, and specification bindings, then writes the section-7 line and option snapshot shape. Database triggers recheck line math and prevent mutation of snapshot values while allowing source foreign keys to become null if catalog records are retired.
+`src/supplier-catalog.js` exports `createOrderLineSnapshot` and `appendOrderLineSnapshot` for the later quote/order integration. The helper requires the selected item and service versions, revalidates current approval, service, item, formats, option cardinality, modifier arithmetic, and specification bindings, then writes the unchanged section-7 line and option snapshot shape. Database triggers recheck line math and prevent mutation of snapshot values while allowing source foreign keys to become null if catalog records are retired.
