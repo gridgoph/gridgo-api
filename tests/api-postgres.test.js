@@ -1949,7 +1949,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(changedSubmitRetry.status, 409, JSON.stringify(changedSubmitRetry.body));
     assert.equal(changedSubmitRetry.body.error, "approval_state_conflict");
     const riderReapplyBody = {
-      expectedVersion: 1,
+      expectedVersion: 2,
       correctionSummary: "Re-uploaded the driver's licence photo.",
     };
     const reapplyWithoutLicense = await request(instance.api, "/me/approval-cases/rider/reapply", {
@@ -1992,7 +1992,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     });
     assert.equal(riderReapplied.status, 200, JSON.stringify(riderReapplied.body));
     assert.equal(riderReapplied.body.approvalCase.status, "pending");
-    assert.equal(riderReapplied.body.approvalCase.version, 2);
+    assert.equal(riderReapplied.body.approvalCase.version, 3);
     assert.equal(riderReapplied.body.approvalCase.applicationRevision, 2);
     assert.notEqual(riderReapplied.body.approvalCase.submittedAt, null);
     const riderReappliedRetry = await request(instance.api, "/me/approval-cases/rider/reapply", {
@@ -2035,7 +2035,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       .map((service) => service.id);
 
     const reapplyBody = {
-      expectedVersion: 1,
+      expectedVersion: 3,
       correctionSummary: "Completed the category setup and reviewed the shop profile.",
     };
     const reapplyKey = "88888888-8888-4888-8888-888888888888";
@@ -2045,7 +2045,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     });
     assert.equal(reapplied.status, 200, JSON.stringify(reapplied.body));
     assert.equal(reapplied.body.approvalCase.status, "pending");
-    assert.equal(reapplied.body.approvalCase.version, 2);
+    assert.equal(reapplied.body.approvalCase.version, 4);
     assert.equal(reapplied.body.approvalCase.applicationRevision, 2);
     assert.equal(reapplied.body.approvalCase.rejectionReason, null);
     const reappliedRetry = await request(instance.api, "/me/approval-cases/supplier/reapply", {
