@@ -376,7 +376,8 @@ export async function up(pgm) {
         RAISE EXCEPTION 'order line snapshots are immutable'
           USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
       END IF;
-      IF NEW.order_id IS DISTINCT FROM OLD.order_id
+      IF NEW.id IS DISTINCT FROM OLD.id
+         OR NEW.order_id IS DISTINCT FROM OLD.order_id
          OR (NEW.source_catalog_item_id IS DISTINCT FROM OLD.source_catalog_item_id
              AND NOT (OLD.source_catalog_item_id IS NOT NULL AND NEW.source_catalog_item_id IS NULL))
          OR (NEW.source_supplier_service_id IS DISTINCT FROM OLD.source_supplier_service_id
@@ -434,7 +435,8 @@ export async function up(pgm) {
         RETURN OLD;
       END IF;
       IF NOT old_finalized AND NOT new_finalized THEN RETURN NEW; END IF;
-      IF NEW.order_line_item_id IS DISTINCT FROM OLD.order_line_item_id
+      IF NEW.id IS DISTINCT FROM OLD.id
+         OR NEW.order_line_item_id IS DISTINCT FROM OLD.order_line_item_id
          OR (NEW.source_option_group_id IS DISTINCT FROM OLD.source_option_group_id
              AND NOT (OLD.source_option_group_id IS NOT NULL AND NEW.source_option_group_id IS NULL))
          OR (NEW.source_option_id IS DISTINCT FROM OLD.source_option_id

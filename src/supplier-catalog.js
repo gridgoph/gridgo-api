@@ -21,6 +21,14 @@ function checkedNumber(value, field) {
   return Number(value);
 }
 
+function orderLineSortOrder(value) {
+  const sortOrder = Number(value);
+  if (!Number.isSafeInteger(sortOrder) || sortOrder < 0 || sortOrder > POSTGRES_INTEGER_MAX) {
+    throw new CatalogError(400, "invalid_catalog_item", "sortOrder must be a non-negative PostgreSQL integer.", { field: "sortOrder" });
+  }
+  return sortOrder;
+}
+
 function formatCode(record) {
   return typeof record === "string" ? record : record.formatCode;
 }
@@ -577,10 +585,7 @@ export function createOrderLineSnapshot(store, selection, createId) {
   if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > POSTGRES_INTEGER_MAX) {
     throw new CatalogError(400, "invalid_catalog_item", "quantity must be a positive PostgreSQL integer.", { field: "quantity" });
   }
-  const sortOrder = Number(selection.sortOrder ?? 0);
-  if (!Number.isSafeInteger(sortOrder) || sortOrder < 0 || sortOrder > POSTGRES_INTEGER_MAX) {
-    throw new CatalogError(400, "invalid_catalog_item", "sortOrder must be a non-negative PostgreSQL integer.", { field: "sortOrder" });
-  }
+  const sortOrder = orderLineSortOrder(selection.sortOrder ?? 0);
   const formats = effectiveAcceptedFormats(store, item).map((format) => format.code);
   if (!formats.includes(selection.acceptedFormatCode)) {
     throw new CatalogError(400, "invalid_file_format", "Choose one accepted format for this catalog item.", {
@@ -648,10 +653,21 @@ export function createOrderLineSnapshot(store, selection, createId) {
 }
 
 export function appendOrderLineSnapshot(store, selection, createId) {
-  const snapshot = createOrderLineSnapshot(store, selection, createId);
-  if (!Array.isArray(store.orderLineItems)) store.orderLineItems = [];
-  if (!Array.isArray(store.orderLineItemOptions)) store.orderLineItemOptions = [];
-  store.orderLineItems.push(snapshot.lineItem);
-  store.orderLineItemOptions.push(...snapshot.options);
+  const lineItems = Array.isArray(store.orderLineItems) ? store.orderLineItems : [];
+  const lineOptions = Array.isArray(store.orderLineItemOptions) ? store.orderLineItemOptions : [];
+  const orderLines = lineItems.filter((line) => line.orderId === selection.orderId);
+  const sortOrder = selection.sortOrder == null
+    ? orderLines.reduce((maximum, line) => Math.max(maximum, line.sortOrder), -1) + 1
+    : orderLineSortOrder(selection.sortOrder);
+  if (sortOrder > POSTGRES_INTEGER_MAX || orderLines.some((line) => line.sortOrder === sortOrder)) {
+    throw new CatalogError(409, "order_line_position_conflict", "That order line position is no longer available.", {
+      sortOrder,
+    });
+  }
+  const snapshot = createOrderLineSnapshot(store, { ...selection, sortOrder }, createId);
+  if (!Array.isArray(store.orderLineItems)) store.orderLineItems = lineItems;
+  if (!Array.isArray(store.orderLineItemOptions)) store.orderLineItemOptions = lineOptions;
+  lineItems.push(snapshot.lineItem);
+  lineOptions.push(...snapshot.options);
   return structuredClone(snapshot);
 }

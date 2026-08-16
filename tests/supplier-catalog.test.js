@@ -298,6 +298,34 @@ test("order-line helper requires the selected catalog and service versions", () 
   assert.deepEqual(store.orderLineItems, []);
 });
 
+test("order-line helper assigns append positions and rejects occupied positions", () => {
+  const store = fixture();
+  const selection = {
+    orderId: "order",
+    catalogItemId: "item",
+    expectedVersion: 3,
+    expectedServiceVersion: 1,
+    optionIds: ["a4"],
+    acceptedFormatCode: "pdf",
+    quantity: 1,
+    structuredSpec: { paper_size: "A4" },
+  };
+
+  const first = appendOrderLineSnapshot(store, { ...selection, lineItemId: "line_one" });
+  const second = appendOrderLineSnapshot(store, { ...selection, lineItemId: "line_two" });
+  assert.equal(first.lineItem.sortOrder, 0);
+  assert.equal(second.lineItem.sortOrder, 1);
+
+  assert.throws(
+    () => appendOrderLineSnapshot(store, { ...selection, lineItemId: "line_three", sortOrder: 1 }),
+    (error) => error.status === 409
+      && error.code === "order_line_position_conflict"
+      && error.details.sortOrder === 1,
+  );
+  assert.deepEqual(store.orderLineItems.map((line) => line.id), ["line_one", "line_two"]);
+  assert.equal(store.orderLineItemOptions.length, 2);
+});
+
 test("order-line helper rejects a missing order before appending snapshots", () => {
   const store = fixture();
   assert.throws(

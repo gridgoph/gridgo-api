@@ -584,6 +584,14 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
       VALUES ('line_two', 'order_two', 'item_two', 'service', 'Flyer', 'per_unit', 100,
         100, 1, 100, ARRAY['pdf'], '{}', 1, true, $1)
     `, [at]);
+    await assert.rejects(
+      client.query("UPDATE order_line_items SET id = 'line_two_rewritten' WHERE id = 'line_two'"),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_immutable_check",
+    );
+    await assert.rejects(
+      client.query("UPDATE order_line_item_options SET id = 'line_option_rewritten' WHERE id = 'line_option'"),
+      (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
+    );
 
     await client.query("BEGIN");
     await client.query(`
