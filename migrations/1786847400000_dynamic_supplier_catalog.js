@@ -377,11 +377,29 @@ export async function up(pgm) {
           USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
       END IF;
       IF NEW.id IS DISTINCT FROM OLD.id
-         OR NEW.order_id IS DISTINCT FROM OLD.order_id
-         OR (NEW.source_catalog_item_id IS DISTINCT FROM OLD.source_catalog_item_id
-             AND NOT (OLD.source_catalog_item_id IS NOT NULL AND NEW.source_catalog_item_id IS NULL))
-         OR (NEW.source_supplier_service_id IS DISTINCT FROM OLD.source_supplier_service_id
-             AND NOT (OLD.source_supplier_service_id IS NOT NULL AND NEW.source_supplier_service_id IS NULL)) THEN
+         OR NEW.order_id IS DISTINCT FROM OLD.order_id THEN
+        RAISE EXCEPTION 'order line snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
+      END IF;
+      IF NEW.source_catalog_item_id IS DISTINCT FROM OLD.source_catalog_item_id
+         AND NOT (
+           OLD.source_catalog_item_id IS NOT NULL
+           AND NEW.source_catalog_item_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM supplier_catalog_items WHERE id = OLD.source_catalog_item_id
+           )
+         ) THEN
+        RAISE EXCEPTION 'order line snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
+      END IF;
+      IF NEW.source_supplier_service_id IS DISTINCT FROM OLD.source_supplier_service_id
+         AND NOT (
+           OLD.source_supplier_service_id IS NOT NULL
+           AND NEW.source_supplier_service_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM supplier_services WHERE id = OLD.source_supplier_service_id
+           )
+         ) THEN
         RAISE EXCEPTION 'order line snapshots are immutable'
           USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
       END IF;
@@ -436,11 +454,29 @@ export async function up(pgm) {
       END IF;
       IF NOT old_finalized AND NOT new_finalized THEN RETURN NEW; END IF;
       IF NEW.id IS DISTINCT FROM OLD.id
-         OR NEW.order_line_item_id IS DISTINCT FROM OLD.order_line_item_id
-         OR (NEW.source_option_group_id IS DISTINCT FROM OLD.source_option_group_id
-             AND NOT (OLD.source_option_group_id IS NOT NULL AND NEW.source_option_group_id IS NULL))
-         OR (NEW.source_option_id IS DISTINCT FROM OLD.source_option_id
-             AND NOT (OLD.source_option_id IS NOT NULL AND NEW.source_option_id IS NULL)) THEN
+         OR NEW.order_line_item_id IS DISTINCT FROM OLD.order_line_item_id THEN
+        RAISE EXCEPTION 'order line option snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
+      END IF;
+      IF NEW.source_option_group_id IS DISTINCT FROM OLD.source_option_group_id
+         AND NOT (
+           OLD.source_option_group_id IS NOT NULL
+           AND NEW.source_option_group_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM supplier_catalog_option_groups WHERE id = OLD.source_option_group_id
+           )
+         ) THEN
+        RAISE EXCEPTION 'order line option snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
+      END IF;
+      IF NEW.source_option_id IS DISTINCT FROM OLD.source_option_id
+         AND NOT (
+           OLD.source_option_id IS NOT NULL
+           AND NEW.source_option_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM supplier_catalog_options WHERE id = OLD.source_option_id
+           )
+         ) THEN
         RAISE EXCEPTION 'order line option snapshots are immutable'
           USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
       END IF;

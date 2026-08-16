@@ -639,14 +639,57 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
       client.query("UPDATE order_line_item_options SET source_option_id = 'option_two' WHERE id = 'line_option'"),
       (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
     );
-    await client.query(`
-      UPDATE order_line_items
-         SET source_catalog_item_id = NULL, source_supplier_service_id = NULL
-       WHERE id = 'line';
-      UPDATE order_line_item_options
-         SET source_option_group_id = NULL, source_option_id = NULL
-       WHERE id = 'line_option'
-    `);
+    await assert.rejects(
+      client.query(`
+        UPDATE order_line_items
+           SET source_catalog_item_id = NULL, source_supplier_service_id = NULL
+         WHERE id = 'line'
+      `),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_immutable_check",
+    );
+    await assert.rejects(
+      client.query(`
+        UPDATE order_line_item_options
+           SET source_option_group_id = NULL, source_option_id = NULL
+         WHERE id = 'line_option'
+      `),
+      (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
+    );
+    await client.query("DELETE FROM supplier_catalog_options WHERE id = 'option'");
+    assert.deepEqual((await client.query(`
+      SELECT source_option_group_id, source_option_id, group_name_snapshot,
+             option_label_snapshot, price_modifier_minor
+        FROM order_line_item_options WHERE id = 'line_option'
+    `)).rows[0], {
+      source_option_group_id: "group",
+      source_option_id: null,
+      group_name_snapshot: "Paper size",
+      option_label_snapshot: "A3",
+      price_modifier_minor: "-150",
+    });
+    await client.query("DELETE FROM supplier_catalog_option_groups WHERE id = 'group'");
+    assert.equal((await client.query(`
+      SELECT source_option_group_id FROM order_line_item_options WHERE id = 'line_option'
+    `)).rows[0].source_option_group_id, null);
+    await client.query("DELETE FROM supplier_catalog_items WHERE id = 'item'");
+    assert.deepEqual((await client.query(`
+      SELECT source_catalog_item_id, source_supplier_service_id, item_name_snapshot,
+             pricing_basis_snapshot, base_unit_price_minor, effective_unit_price_minor
+        FROM order_line_items WHERE id = 'line'
+    `)).rows[0], {
+      source_catalog_item_id: null,
+      source_supplier_service_id: "service",
+      item_name_snapshot: "Poster",
+      pricing_basis_snapshot: "per_unit",
+      base_unit_price_minor: "100",
+      effective_unit_price_minor: "0",
+    });
+    await client.query("DELETE FROM supplier_catalog_items");
+    await client.query("DELETE FROM supplier_service_file_formats WHERE supplier_service_id = 'service'");
+    await client.query("DELETE FROM supplier_services WHERE id = 'service'");
+    assert.equal((await client.query(`
+      SELECT source_supplier_service_id FROM order_line_items WHERE id = 'line'
+    `)).rows[0].source_supplier_service_id, null);
     await assert.rejects(
       client.query("DELETE FROM order_line_item_options WHERE id = 'line_option'"),
       (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
