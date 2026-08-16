@@ -1,5 +1,7 @@
 # Operational Model v2 Design
 
+> Historical revision-1 design record. Its commission, fixed-installment, and POF-gated payout model is retired; use [`docs/OPERATIONAL_MODEL_V2_API.md`](../../OPERATIONAL_MODEL_V2_API.md) for the current contract.
+
 ## Purpose
 
 This design implements the captain's 2026-08-10 operational model while preserving the JSON-store and `node:http` architecture. It supersedes the supplier-proof, flat-zone-fee, one-shot payment, single-payout, and COD flows.

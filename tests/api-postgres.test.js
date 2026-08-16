@@ -86,6 +86,15 @@ async function request(api, pathname, { method = "GET", subject, claims, body } 
   return { status: response.status, body: await response.json() };
 }
 
+async function loadStoreEventually(database, predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const store = await loadStore(database);
+    if (predicate(store)) return store;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for the committed PostgreSQL state");
+}
+
 /** Sends rawPath exactly as given — fetch would normalize dot segments client-side. */
 function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
   const { hostname, port } = new URL(api);
@@ -621,7 +630,12 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     const promotedIdentity = await request(instance.api, "/auth/me", { subject: "clerk_promote" });
     assert.equal(promotedIdentity.body.user.role, "supplier");
     assert.deepEqual(promotedIdentity.body.memberships, [{ role: "supplier" }]);
-    const promotedStore = await loadStore(database);
+    const promotedStore = await loadStoreEventually(
+      database,
+      (store) => store.userRoleMemberships.some(
+        (membership) => membership.userId === "user_promote" && membership.role === "supplier",
+      ),
+    );
     assert.deepEqual(
       promotedStore.userRoleMemberships
         .filter((membership) => membership.userId === "user_promote")
@@ -646,7 +660,12 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     });
     assert.equal(movedShop.status, 200, JSON.stringify(movedShop.body));
     assert.deepEqual(movedShop.body.user.shop, movedShopPoint);
-    const movedShopStore = await loadStore(database);
+    const movedShopStore = await loadStoreEventually(
+      database,
+      (store) => store.supplierProfiles.some(
+        (profile) => profile.userId === "user_supplier" && profile.shop.label === movedShopPoint.label,
+      ),
+    );
     assert.deepEqual(
       movedShopStore.supplierProfiles.find((profile) => profile.userId === "user_supplier").shop,
       movedShopPoint,
@@ -710,7 +729,12 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     });
     assert.equal(pendingSuperseded.status, 200, JSON.stringify(pendingSuperseded.body));
     assert.equal(pendingSuperseded.body.order.pendingQuote.version, 2);
-    const pendingSupersessionStore = await loadStore(database);
+    const pendingSupersessionStore = await loadStoreEventually(
+      database,
+      (store) => store.auditLog.some(
+        (entry) => entry.action === "order.quote_superseded" && entry.orderId === orderId,
+      ),
+    );
     assert.equal(
       pendingSupersessionStore.auditLog.some(
         (entry) => entry.action === "order.quote_superseded"
@@ -772,7 +796,7 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/balance/confirm`, { method: "POST", subject: "clerk_ops", body: {} })).status, 200);
     for (const state of ["production", "supplier_self_qc", "ready_for_dispatch"]) {
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
-      assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
+      assert.equal(transitioned.status, 200, `${JSON.stringify(transitioned.body)}\n${instance.output()}`);
       if (state === "production") {
         assert.deepEqual(
           transitioned.body.order.payoutMilestones.map(({ code, amountMinor, status }) => ({ code, amountMinor, status })),

@@ -41,8 +41,10 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | PATCH | `/notifications/:id` | notification owner | set `{read:true|false}` |
 | PATCH | `/notifications/read-all` | notification owner | mark caller's list snapshot read |
 | DELETE | `/notifications/:id` | notification owner | persistent soft delete from caller's inbox |
-| GET | `/settings` | authenticated | global issue window and delivery bands |
-| PATCH | `/settings` | ops/super | replace either/both operational settings |
+| GET | `/settings` | authenticated | versioned service-fee rate, global issue window, and delivery bands |
+| PATCH | `/settings` | ops/super | audited compare-and-swap update of any operational setting |
+| GET | `/supplier-payment-terms[?supplierId=]` | supplier own; ops/super any | supplier delivery and pickup payment-plan preferences |
+| PATCH | `/supplier-payment-terms` | supplier | update the caller's payment-plan preferences |
 | GET | `/credits/balance` | client own; ops/super any `?clientId=` | pilot grant ledger only |
 | POST | `/credits/authorize` | authenticated | retired: always `410 payment_route_retired` |
 | POST | `/credits/grant` | super | non-cash pilot grant; audited |
@@ -499,7 +501,7 @@ PATCH /settings
 
 The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an actual JSON integer from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
 
-Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
+Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. `GET` returns the caller's terms to a supplier; Operations/Super Admin may select a supplier with `?supplierId=`. Supplier-only `PATCH` accepts any subset of `deliveryDownpaymentRateBps`, `pickupFullOnlineEnabled`, `pickupDownpaymentStoreEnabled`, and `pickupDownpaymentRateBps`, and returns `{ "terms": SupplierPaymentTerms }`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`, while disabling that mode clears its rate to `null`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
 ## Price estimate and exact money
 
@@ -534,7 +536,9 @@ POST /orders/:id/transition
 }
 ```
 
-The response state is `awaiting_checkout`. The quote carries immutable line/specification/format snapshots, the supplier shop and payment terms, and its `version`; it is not yet commercial history.
+The response state is `awaiting_checkout`. The versioned quote captures line/specification/format choices, the supplier shop, promised date, and payment terms; it is not yet commercial history.
+
+The assigned supplier may supersede a pending quote, or a client-accepted commitment whose payments are all still `not_submitted`, by issuing `supplier_accepted` again with a non-empty `reason`. The API archives the prior quote, audits `order.quote_superseded`, clears the prior commercial snapshot and payment plan, increments the quote version, and returns to `awaiting_checkout`. Once any payment submission or authorization has started, supersession returns `409 payment_authorization_started`.
 
 The owning client accepts the exact version and selects one offered fulfillment/payment plan:
 
@@ -563,7 +567,9 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 | initial online (25% supplier principal + fee) | 35000 | ₱350 | yes |
 | final online (supplier remainder + delivery) | 77500 | ₱775 | yes |
 
-`round_bps(x,bps) = floor((x*bps+5000)/10000)`. The service fee and initial supplier principal are rounded independently; the supplier remainder is subtraction, so it receives every principal-rounding cent. Delivery never enters the fee base, and the full service fee is allocated to the initial payment.
+`round_bps(x,bps) = floor((x*bps+5000)/10000)`. Application calculations use `BigInt`, PostgreSQL constraints recompute the formula with exact `numeric`, and the HTTP boundary rejects results outside the JavaScript safe-integer range. The service fee and initial supplier principal are rounded independently; the supplier remainder is subtraction, so it receives every principal-rounding cent. Delivery never enters the fee base, and the full service fee is allocated to the initial payment.
+
+For the rounding vector `supplierSubtotalMinor = 99999`, a 1,000-bps service fee is `10000` and a 2,500-bps initial supplier principal is `25000`; the supplier remainder is therefore `74999`. With the `2500` delivery pass-through, the initial online installment is `35000`, the final online installment is `77499`, and the client total is `112499`.
 
 ### Visibility authorization
 

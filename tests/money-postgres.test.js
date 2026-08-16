@@ -198,6 +198,7 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
     `),
     (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
   );
+  await database.query("DELETE FROM supplier_payment_terms WHERE supplier_id = 'money_supplier_2'");
   await assert.rejects(
     database.query(`
       UPDATE supplier_payment_terms

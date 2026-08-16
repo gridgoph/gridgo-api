@@ -745,7 +745,7 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
   const entry = {
     id: id("aud"),
     at: now(),
-    actorId: actor?.id || null,
+    actorId: actor?.role === "system" ? null : actor?.id || null,
     actorRole: actor?.role || null,
     action,
     entityType: entityType || null,

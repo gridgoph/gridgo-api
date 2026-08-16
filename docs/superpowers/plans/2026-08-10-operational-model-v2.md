@@ -1,5 +1,7 @@
 # Operational Model v2 Implementation Plan
 
+> Historical revision-1 implementation record. Its commission, fixed-installment, and POF-gated payout steps are retired; use [`docs/OPERATIONAL_MODEL_V2_API.md`](../../OPERATIONAL_MODEL_V2_API.md) for the current contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the pilot order flow with the captain's self-signup, commission, distance-band, split-payment, POF-milestone, expiring issue-window, and rider-checklist model.

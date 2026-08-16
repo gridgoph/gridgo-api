@@ -262,11 +262,13 @@ export async function up(pgm) {
     DECLARE profile supplier_profiles%ROWTYPE;
     DECLARE terms supplier_payment_terms%ROWTYPE;
     BEGIN
-      IF TG_TABLE_NAME = 'supplier_payment_terms' AND TG_OP = 'UPDATE' AND
-         NEW.supplier_id IS DISTINCT FROM OLD.supplier_id THEN
-        RAISE EXCEPTION 'supplier payment terms cannot be reassigned'
-          USING ERRCODE = '23514',
-                CONSTRAINT = 'supplier_payment_terms_supplier_immutable';
+      IF TG_TABLE_NAME = 'supplier_payment_terms' THEN
+        IF TG_OP = 'UPDATE' AND
+           NEW.supplier_id IS DISTINCT FROM OLD.supplier_id THEN
+          RAISE EXCEPTION 'supplier payment terms cannot be reassigned'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'supplier_payment_terms_supplier_immutable';
+        END IF;
       END IF;
       IF TG_OP = 'DELETE' THEN
         supplier_key := OLD.supplier_id;
