@@ -1482,6 +1482,13 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       supplierRetry.body.supplierServices.map((service) => service.id),
       supplier.body.supplierServices.map((service) => service.id),
     );
+    const supplierInjectedRetry = await request(instance.api, "/auth/clerk/enroll/supplier", {
+      method: "POST", subject: "clerk_supplier_new",
+      body: { ...supplierBody, role: "super_admin", status: "approved", live: true },
+      headers: { "Idempotency-Key": supplierKey },
+    });
+    assert.equal(supplierInjectedRetry.status, 400, JSON.stringify(supplierInjectedRetry.body));
+    assert.equal(supplierInjectedRetry.body.error, "unexpected_field");
     await database.transaction(async () => {
       const store = await loadStore(database);
       store.taxonomy.categories.find(({ code }) => code === "corporate_event_merch").active = false;

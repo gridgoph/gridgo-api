@@ -235,7 +235,7 @@ function addInitialCase(store, { user, kind, submittedAt, key, body, createId, a
   return approvalCase;
 }
 
-function validateSupplier(store, body) {
+function validateSupplierShape(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
   rejectUnexpected(body, ["profile", "serviceCategories"]);
   if (plainObject(body.profile)) {
@@ -244,6 +244,9 @@ function validateSupplier(store, body) {
       rejectUnexpected(body.profile.location, ["lat", "lng", "label"], "profile.location.");
     }
   }
+}
+
+function validateSupplier(store, body) {
   const profile = plainObject(body.profile) ? body.profile : {};
   const location = plainObject(profile.location) ? profile.location : {};
   const fields = {};
@@ -323,6 +326,7 @@ function retryResult(store, user, role, kind) {
 }
 
 export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotencyKey, createId, now }) {
+  validateSupplierShape(body);
   const existing = mappedUser(store, clerkUserId);
   if (existing && exactRetry(store, { kind: "supplier", user: existing, key: idempotencyKey, body })) {
     return retryResult(store, existing, "supplier", "supplier");

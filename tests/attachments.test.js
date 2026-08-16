@@ -24,6 +24,7 @@ import {
   RIDER_DOCUMENT_TYPES,
   VERIFICATION_DOCUMENT_TYPES,
 } from "../src/attachments.js";
+import { resolveAuthorizationContext } from "../src/authorization-context.js";
 
 function expectError(fn, status, code) {
   assert.throws(fn, (error) => {
@@ -253,6 +254,52 @@ test("all five purposes map to ID-only parent fields", () => {
     assert.equal(attachFileReference(file, target), field);
     assert.deepEqual(target.record[field], [file.fileId]);
   }
+});
+
+test("supplier membership can attach verification documents and service images", () => {
+  const member = { ...client, id: "client-supplier", verificationDocumentFileIds: [] };
+  const verificationDocument = readyFile("verification_document", {
+    fileId: "member-verification",
+    ownerId: member.id,
+  });
+  const serviceImage = readyFile("service_image", {
+    fileId: "member-service-image",
+    ownerId: member.id,
+  });
+  const supplierService = service({ id: "member-service", supplierId: member.id });
+  const store = {
+    users: [member],
+    userRoleMemberships: [
+      { userId: member.id, role: "client", createdAt: "2026-08-09T00:00:00Z" },
+      { userId: member.id, role: "supplier", createdAt: "2026-08-09T00:00:00Z" },
+    ],
+    files: [verificationDocument, serviceImage],
+    supplierServices: [supplierService],
+    orders: [],
+  };
+  resolveAuthorizationContext(store, member);
+
+  assert.doesNotThrow(() => authorizeFileUpload(member, verificationDocument.purpose));
+  const verificationTarget = resolveFileTarget(
+    store,
+    verificationDocument.purpose,
+    { documentType: "business_permit" },
+    member,
+  );
+  assert.doesNotThrow(() => authorizeFileAttach(member, verificationDocument, verificationTarget));
+  assert.equal(attachFileReference(verificationDocument, verificationTarget), "verificationDocumentFileIds");
+  assert.deepEqual(member.verificationDocumentFileIds, [verificationDocument.fileId]);
+
+  assert.doesNotThrow(() => authorizeFileUpload(member, serviceImage.purpose));
+  const serviceTarget = resolveFileTarget(
+    store,
+    serviceImage.purpose,
+    { supplierServiceId: supplierService.id },
+    member,
+  );
+  assert.doesNotThrow(() => authorizeFileAttach(member, serviceImage, serviceTarget));
+  assert.equal(attachFileReference(serviceImage, serviceTarget), "imageFileIds");
+  assert.deepEqual(supplierService.imageFileIds, [serviceImage.fileId]);
 });
 
 test("verification documents attach only to the uploader and support typed replacement", () => {

@@ -583,7 +583,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       );
     }
     const record = (store.users || []).find((item) => item.id === user?.id);
-    if (!record || record.role !== "supplier") forbidden();
+    if (!record || !hasRole(record, "supplier")) forbidden();
     const attachedIds = Array.isArray(record.verificationDocumentFileIds)
       ? record.verificationDocumentFileIds
       : [];
@@ -728,19 +728,19 @@ export function authorizeFileAttach(user, file, target) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
   if (file.purpose === "artwork") {
-    if (target?.type !== "order" || user.role !== "client" || record.clientId !== user.id) forbidden();
+    if (target?.type !== "order" || !hasRole(user, "client") || record.clientId !== user.id) forbidden();
     return;
   }
   if (file.purpose === "fulfilment_proof") {
     if (target?.type !== "order") forbidden();
     const requiredRole = FULFILMENT_MILESTONE_ACTOR[target.milestoneCode];
-    if (!requiredRole || user.role !== requiredRole) forbidden();
+    if (!requiredRole || !hasRole(user, requiredRole)) forbidden();
     if (requiredRole === "supplier" && record.supplierId !== user.id) forbidden();
     if (requiredRole === "rider" && record.riderId !== user.id) forbidden();
     return;
   }
   if (file.purpose === "delivery_photo") {
-    if (target?.type !== "order" || user.role !== "rider" || record.riderId !== user.id) forbidden();
+    if (target?.type !== "order" || !hasRole(user, "rider") || record.riderId !== user.id) forbidden();
     if (!DELIVERY_PHOTO_STATES.has(record.state)) {
       fail(
         409,
@@ -752,7 +752,7 @@ export function authorizeFileAttach(user, file, target) {
     return;
   }
   if (file.purpose === "service_image") {
-    if (target?.type !== "supplier_service" || user.role !== "supplier" || record.supplierId !== user.id) forbidden();
+    if (target?.type !== "supplier_service" || !hasRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     return;
   }
   if (file.purpose === "verification_document") {
