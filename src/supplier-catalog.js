@@ -296,6 +296,17 @@ export function assertServiceLineReviewReady(store, service, options) {
   }
 }
 
+export function assertSupplierServicePendingVerification(service) {
+  if (service?.state !== "pending_verification") {
+    throw new CatalogError(
+      409,
+      "invalid_service_state",
+      "Submit the service for verification before publishing it.",
+      { currentState: service?.state ?? null, requiredState: "pending_verification" },
+    );
+  }
+}
+
 export function assertServiceLineReadinessInvariant(store, service, options) {
   if (["draft", "withdrawn"].includes(service.state)) return;
   assertServiceLineReviewReady(store, service, options);

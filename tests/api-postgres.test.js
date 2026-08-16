@@ -1787,6 +1787,12 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(expansionVerified.status, 200, JSON.stringify(expansionVerified.body));
     assert.equal(expansionVerified.body.service.version, 5);
+    const liveVerify = await request(instance.api, "/supplier-services/svc_banner/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 5 },
+    });
+    assert.equal(liveVerify.status, 409, JSON.stringify(liveVerify.body));
+    assert.equal(liveVerify.body.error, "invalid_service_state");
+    assert.equal(liveVerify.body.currentState, "live");
     const formatsContracted = await request(instance.api, "/me/supplier-services/svc_banner/file-formats", {
       method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 5, formatCodes: ["pdf"] },
     });
@@ -1848,18 +1854,31 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(incompleteVerify.status, 409, JSON.stringify(incompleteVerify.body));
     assert.equal(incompleteVerify.body.error, "service_not_review_ready");
 
+    const completeDraftFormats = await request(instance.api, "/me/supplier-services/svc_legacy_alias/file-formats", {
+      method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 2, formatCodes: ["pdf"] },
+    });
+    assert.equal(completeDraftFormats.status, 200, JSON.stringify(completeDraftFormats.body));
+    assert.equal(completeDraftFormats.body.service.state, "draft");
+    assert.equal(completeDraftFormats.body.service.version, 3);
+    const draftVerify = await request(instance.api, "/supplier-services/svc_legacy_alias/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 3 },
+    });
+    assert.equal(draftVerify.status, 409, JSON.stringify(draftVerify.body));
+    assert.equal(draftVerify.body.error, "invalid_service_state");
+    assert.equal(draftVerify.body.currentState, "draft");
+
     const draftFormatRemoval = await request(instance.api, "/me/supplier-services/svc_legacy_alias/file-formats", {
-      method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 2, formatCodes: [] },
+      method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 3, formatCodes: [] },
     });
     assert.equal(draftFormatRemoval.status, 200, JSON.stringify(draftFormatRemoval.body));
     assert.equal(draftFormatRemoval.body.service.state, "draft");
-    assert.equal(draftFormatRemoval.body.service.version, 3);
+    assert.equal(draftFormatRemoval.body.service.version, 4);
     const privateWithdrawal = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
-      method: "DELETE", subject: "clerk_supplier", body: { expectedVersion: 3 },
+      method: "DELETE", subject: "clerk_supplier", body: { expectedVersion: 4 },
     });
     assert.equal(privateWithdrawal.status, 200, JSON.stringify(privateWithdrawal.body));
     assert.equal(privateWithdrawal.body.service.state, "withdrawn");
-    assert.equal(privateWithdrawal.body.service.version, 4);
+    assert.equal(privateWithdrawal.body.service.version, 5);
     const privateWithdrawalMetadata = await request(instance.api, "/supplier-services/svc_legacy_alias", {
       subject: "clerk_supplier",
     });
@@ -1868,11 +1887,11 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(privateWithdrawalMetadata.body.service.verifiedAt, null);
     assert.equal(privateWithdrawalMetadata.body.service.suspendedAt, null);
     const redrafted = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
-      method: "PATCH", subject: "clerk_supplier", body: { expectedVersion: 4, state: "draft" },
+      method: "PATCH", subject: "clerk_supplier", body: { expectedVersion: 5, state: "draft" },
     });
     assert.equal(redrafted.status, 200, JSON.stringify(redrafted.body));
     assert.equal(redrafted.body.service.state, "draft");
-    assert.equal(redrafted.body.service.version, 5);
+    assert.equal(redrafted.body.service.version, 6);
     const redraftedMetadata = await request(instance.api, "/supplier-services/svc_legacy_alias", {
       subject: "clerk_supplier",
     });
@@ -1891,6 +1910,12 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
     assert.equal(suspended.body.service.version, 7);
+    const suspendedVerify = await request(instance.api, "/supplier-services/svc_banner/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 7 },
+    });
+    assert.equal(suspendedVerify.status, 409, JSON.stringify(suspendedVerify.body));
+    assert.equal(suspendedVerify.body.error, "invalid_service_state");
+    assert.equal(suspendedVerify.body.currentState, "suspended");
     const resubmitted = await request(instance.api, "/supplier-services/svc_banner/submit", {
       method: "POST", subject: "clerk_supplier", body: { expectedVersion: 7 },
     });
@@ -1918,6 +1943,12 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.ok(withdrawn.body.service.withdrawnAt);
     assert.equal(withdrawn.body.service.verifiedAt, null);
     assert.equal(withdrawn.body.service.suspendedAt, null);
+    const withdrawnVerify = await request(instance.api, "/supplier-services/svc_banner/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 10 },
+    });
+    assert.equal(withdrawnVerify.status, 409, JSON.stringify(withdrawnVerify.body));
+    assert.equal(withdrawnVerify.body.error, "invalid_service_state");
+    assert.equal(withdrawnVerify.body.currentState, "withdrawn");
     const withdrawnResubmitted = await request(instance.api, "/me/supplier-services/svc_banner", {
       method: "PATCH", subject: "clerk_supplier", body: { expectedVersion: 10, state: "pending_verification" },
     });

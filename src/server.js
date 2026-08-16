@@ -95,6 +95,7 @@ import {
   assertExpectedVersion,
   assertServiceLineReadinessInvariant,
   assertServiceLineReviewReady,
+  assertSupplierServicePendingVerification,
   supplierCatalogReadiness,
   transitionSupplierServiceToLive,
   transitionSupplierServiceToPending,
@@ -2874,10 +2875,10 @@ async function handleRequest(req, res) {
       if (!owner || owner.verificationStatus !== "approved") {
         return send(res, 409, { error: "supplier_not_approved", verificationStatus: owner?.verificationStatus || null });
       }
-      if (service.state === "withdrawn") return send(res, 409, { error: "service_withdrawn" });
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       assertServiceLineReviewReady(store, service);
+      assertSupplierServicePendingVerification(service);
       const ts = now();
       transitionSupplierServiceToLive(service, ts, user.id);
       delete service.approvalSuspensionPreviousState;

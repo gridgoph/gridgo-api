@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   appendOrderLineSnapshot,
+  assertSupplierServicePendingVerification,
   createOrderLineSnapshot,
   effectiveAcceptedFormats,
   publicCatalogItem,
@@ -384,6 +385,20 @@ test("draft transition clears incompatible lifecycle metadata", () => {
     suspendReason: null,
     withdrawnAt: null,
   });
+});
+
+test("service verification requires the pending verification state", () => {
+  for (const state of ["draft", "suspended", "withdrawn", "live"]) {
+    assert.throws(
+      () => assertSupplierServicePendingVerification({ state }),
+      (error) => error.status === 409
+        && error.code === "invalid_service_state"
+        && error.details.currentState === state
+        && error.details.requiredState === "pending_verification",
+    );
+  }
+
+  assert.doesNotThrow(() => assertSupplierServicePendingVerification({ state: "pending_verification" }));
 });
 
 test("order-line helper assigns append positions and rejects occupied positions", () => {
