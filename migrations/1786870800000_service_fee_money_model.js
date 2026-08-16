@@ -231,7 +231,11 @@ export async function up(pgm) {
     ALTER TABLE payout_milestones DROP CONSTRAINT payout_milestones_code_check;
     ALTER TABLE payout_milestones
       ADD CONSTRAINT payout_milestones_code_check CHECK (code IN
-        ('printing','packaging_qc','delivered','pickup_handover','retention'));
+        ('printing','packaging_qc','delivered','pickup_handover','retention','initial','completion'));
+    ALTER TABLE payout_milestones DROP CONSTRAINT payout_milestones_status_check;
+    ALTER TABLE payout_milestones
+      ADD CONSTRAINT payout_milestones_status_check CHECK (status IN
+        ('pending','pending_pof','pof_attached','released'));
 
     CREATE TABLE supplier_payment_terms (
       supplier_id text PRIMARY KEY REFERENCES supplier_profiles(user_id)
@@ -258,6 +262,12 @@ export async function up(pgm) {
     DECLARE profile supplier_profiles%ROWTYPE;
     DECLARE terms supplier_payment_terms%ROWTYPE;
     BEGIN
+      IF TG_TABLE_NAME = 'supplier_payment_terms' AND TG_OP = 'UPDATE' AND
+         NEW.supplier_id IS DISTINCT FROM OLD.supplier_id THEN
+        RAISE EXCEPTION 'supplier payment terms cannot be reassigned'
+          USING ERRCODE = '23514',
+                CONSTRAINT = 'supplier_payment_terms_supplier_immutable';
+      END IF;
       IF TG_OP = 'DELETE' THEN
         supplier_key := OLD.supplier_id;
       ELSIF TG_TABLE_NAME = 'supplier_profiles' THEN
@@ -298,9 +308,13 @@ export async function up(pgm) {
     DECLARE committed orders%ROWTYPE;
     DECLARE expected_downpayment bigint;
     DECLARE expected_remainder bigint;
+    DECLARE expected_initial_payout bigint;
+    DECLARE expected_completion_payout bigint;
     DECLARE initial_amount bigint;
     DECLARE final_amount bigint;
     DECLARE payout_sum bigint;
+    DECLARE confirmed_supplier_principal bigint;
+    DECLARE released_supplier_principal bigint;
     BEGIN
       SELECT * INTO committed FROM orders WHERE id = target_order_id;
       IF committed.id IS NULL OR committed.money_model_version <> 2 OR
@@ -311,6 +325,8 @@ export async function up(pgm) {
         (committed.supplier_subtotal_minor::numeric * committed.supplier_downpayment_rate_bps + 5000) / 10000
       );
       expected_remainder := committed.supplier_subtotal_minor - expected_downpayment;
+      expected_initial_payout := LEAST(expected_downpayment, committed.supplier_platform_payout_minor);
+      expected_completion_payout := committed.supplier_platform_payout_minor - expected_initial_payout;
 
       SELECT amount_minor INTO initial_amount FROM order_payments
        WHERE order_id = committed.id AND code = 'initial';
@@ -353,12 +369,51 @@ export async function up(pgm) {
       SELECT COALESCE(sum(amount_minor), 0) INTO payout_sum
         FROM payout_milestones WHERE order_id = committed.id;
       IF payout_sum <> committed.supplier_platform_payout_minor OR
-         (committed.fulfillment_mode = 'delivery' AND
-           (SELECT count(*) FROM payout_milestones WHERE order_id = committed.id) <> 4) OR
-         (committed.fulfillment_mode = 'pickup' AND
-           (SELECT count(*) FROM payout_milestones WHERE order_id = committed.id) <> 2) THEN
+         EXISTS (SELECT 1 FROM payout_milestones
+                  WHERE order_id = committed.id AND code NOT IN ('initial','completion')) OR
+         (committed.supplier_downpayment_rate_bps = 0 AND (
+           (SELECT count(*) FROM payout_milestones WHERE order_id = committed.id) <> 1 OR
+           (SELECT amount_minor FROM payout_milestones
+             WHERE order_id = committed.id AND code = 'completion')
+             IS DISTINCT FROM expected_completion_payout
+         )) OR
+         (committed.supplier_downpayment_rate_bps > 0 AND (
+           (SELECT count(*) FROM payout_milestones WHERE order_id = committed.id) <>
+             1 + CASE WHEN expected_completion_payout > 0 THEN 1 ELSE 0 END OR
+           (SELECT amount_minor FROM payout_milestones
+             WHERE order_id = committed.id AND code = 'initial')
+             IS DISTINCT FROM expected_initial_payout OR
+           (expected_completion_payout > 0 AND
+             (SELECT amount_minor FROM payout_milestones
+               WHERE order_id = committed.id AND code = 'completion')
+               IS DISTINCT FROM expected_completion_payout) OR
+           (expected_completion_payout = 0 AND EXISTS (
+             SELECT 1 FROM payout_milestones
+              WHERE order_id = committed.id AND code = 'completion'
+           ))
+         )) THEN
         RAISE EXCEPTION 'payout milestones do not match committed supplier payout'
           USING ERRCODE = '23514', CONSTRAINT = 'payout_milestones_amount_check';
+      END IF;
+
+      SELECT COALESCE(sum(allocation.amount_minor), 0)
+        INTO confirmed_supplier_principal
+        FROM order_payment_allocations allocation
+        JOIN order_payments payment
+          ON payment.order_id = allocation.order_id
+         AND payment.code = allocation.payment_code
+       WHERE allocation.order_id = committed.id
+         AND allocation.component = 'supplier_principal'
+         AND payment.status = 'confirmed';
+      SELECT COALESCE(sum(amount_minor), 0)
+        INTO released_supplier_principal
+        FROM payout_milestones
+       WHERE order_id = committed.id
+         AND status = 'released';
+      IF released_supplier_principal > confirmed_supplier_principal THEN
+        RAISE EXCEPTION 'released payout exceeds confirmed supplier principal'
+          USING ERRCODE = '23514',
+                CONSTRAINT = 'payout_milestones_collected_principal_check';
       END IF;
     END;
     $$;
@@ -371,6 +426,9 @@ export async function up(pgm) {
       IF TG_OP = 'DELETE' THEN
         PERFORM validate_order_financial_children(OLD.order_id);
         RETURN OLD;
+      END IF;
+      IF TG_OP = 'UPDATE' AND NEW.order_id IS DISTINCT FROM OLD.order_id THEN
+        PERFORM validate_order_financial_children(OLD.order_id);
       END IF;
       PERFORM validate_order_financial_children(NEW.order_id);
       RETURN NEW;
@@ -540,9 +598,12 @@ export async function down(pgm) {
     DROP TABLE supplier_payment_terms;
 
     ALTER TABLE payout_milestones DROP CONSTRAINT payout_milestones_code_check;
-    DELETE FROM payout_milestones WHERE code = 'pickup_handover';
+    ALTER TABLE payout_milestones DROP CONSTRAINT payout_milestones_status_check;
+    DELETE FROM payout_milestones WHERE code IN ('pickup_handover','initial','completion');
     ALTER TABLE payout_milestones ADD CONSTRAINT payout_milestones_code_check
       CHECK (code IN ('printing','packaging_qc','delivered','retention'));
+    ALTER TABLE payout_milestones ADD CONSTRAINT payout_milestones_status_check
+      CHECK (status IN ('pending_pof','pof_attached','released'));
 
     DROP TABLE order_payment_allocations;
     DROP TRIGGER IF EXISTS platform_revenue_adjustments_append_only_trigger ON platform_revenue_adjustments;

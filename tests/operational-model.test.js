@@ -10,7 +10,7 @@ import {
   expireIssueWindows,
   moneyReportingForOrder,
   publicOrderFor,
-  releaseMilestone,
+  releaseEligibleSupplierPayouts,
   roundBps,
   validateOperationalSettings,
 } from "../src/operational-model.js";
@@ -41,6 +41,20 @@ test("requires service-fee settings to use an actual integer", () => {
       () => validateOperationalSettings({ ...defaultOperationalSettings(), serviceFeeRateBps }),
       400,
       "invalid_service_fee_rate",
+    );
+  }
+});
+
+test("requires delivery fee settings to use actual safe integers", () => {
+  const settings = defaultOperationalSettings();
+  for (const feeMinor of ["2500", "", null]) {
+    expectDomainError(
+      () => validateOperationalSettings({
+        ...settings,
+        deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }],
+      }),
+      400,
+      "invalid_money",
     );
   }
 });
@@ -114,7 +128,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     commercialCommittedAt: AT,
     ...money,
     ...schedule,
-    payoutMilestones: createPayoutMilestones(100_000),
+    payoutMilestones: createPayoutMilestones(money),
     acceptedQuote: {
       payments: structuredClone(schedule.payments),
       paymentTerms: { deliveryDownpaymentRateBps: 2_500 },
@@ -137,7 +151,9 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(supplierOrder.supplierSubtotalMinor, 100_000);
   assert.equal(supplierOrder.supplierSettlement.gridgoDeductionsMinor, 0);
   assert.equal(supplierOrder.supplierSettlement.totalSupplierEarningsMinor, 100_000);
-  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 50_000);
+  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 25_000);
+  assert.equal(supplierOrder.supplierSettlement.collectedSupplierPrincipalMinor, 25_000);
+  assert.equal(supplierOrder.supplierSettlement.protectedPaymentMinor, 25_000);
   assert.equal("reference" in supplierOrder.payments.initial, false);
 
   assert.equal(clientOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
@@ -179,16 +195,21 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal("paymentTerms" in riderOrder.acceptedQuote, false);
   assert.equal("supplierDownpaymentRateBps" in riderOrder.acceptedQuote, false);
 
+  const pickupMoney = plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_downpayment_store" });
+  const pickupSchedule = createPaymentSchedule(pickupMoney);
+  pickupSchedule.payments.initial.status = "confirmed";
   const pickupAtStore = {
     ...order,
-    ...plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_downpayment_store" }),
+    ...pickupMoney,
+    ...pickupSchedule,
     state: "delivered",
-    payoutMilestones: createPayoutMilestones(25_000, "pickup"),
+    payoutMilestones: createPayoutMilestones(pickupMoney),
   };
   assert.deepEqual(moneyReportingForOrder(pickupAtStore).supplierSettlement, {
     orderPriceMinor: 100_000,
     dueAtStoreMinor: 75_000,
     receivedAtStoreMinor: 0,
+    collectedSupplierPrincipalMinor: 25_000,
     protectedPaymentMinor: 25_000,
     gridgoDeductionsMinor: 0,
     totalSupplierEarningsMinor: 100_000,
@@ -197,56 +218,81 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   });
 });
 
-test("milestone shares sum exactly to supplier earnings and release is gated on POF", () => {
-  const milestones = createPayoutMilestones(100_001);
+test("uses 0, 25, and 50 percent supplier payout shapes", () => {
   assert.deepEqual(
-    milestones.map(({ code, sharePercent, amountMinor }) => ({ code, sharePercent, amountMinor })),
+    [0, 2_500, 5_000].map((supplierDownpaymentRateBps) => {
+      const money = plan({ supplierDownpaymentRateBps });
+      return createPayoutMilestones(money).map(({ code, sharePercent, amountMinor }) => ({
+        code,
+        sharePercent,
+        amountMinor,
+      }));
+    }),
     [
-      { code: "printing", sharePercent: 50, amountMinor: 50_001 },
-      { code: "packaging_qc", sharePercent: 15, amountMinor: 15_000 },
-      { code: "delivered", sharePercent: 25, amountMinor: 25_000 },
-      { code: "retention", sharePercent: 10, amountMinor: 10_000 },
+      [{ code: "completion", sharePercent: 100, amountMinor: 100_000 }],
+      [
+        { code: "initial", sharePercent: 25, amountMinor: 25_000 },
+        { code: "completion", sharePercent: 75, amountMinor: 75_000 },
+      ],
+      [
+        { code: "initial", sharePercent: 50, amountMinor: 50_000 },
+        { code: "completion", sharePercent: 50, amountMinor: 50_000 },
+      ],
     ],
-  );
-  assert.equal(milestones.reduce((sum, item) => sum + item.amountMinor, 0), 100_001);
-
-  const order = { id: "ord-a", state: "production", payoutHold: false, payoutMilestones: milestones };
-  expectDomainError(() => releaseMilestone(order, "printing", { id: "ops-a", role: "ops_admin" }, AT), 409, "pof_required");
-  milestones[0].pofFileIds.push("file-printing");
-  const released = releaseMilestone(order, "printing", { id: "ops-a", role: "ops_admin" }, AT);
-  assert.equal(released.status, "released");
-  assert.equal(released.releasedAt, AT);
-  assert.equal(released.releasedBy, "ops-a");
-  milestones[1].pofFileIds.push("file-packaging");
-  expectDomainError(
-    () => releaseMilestone(order, "packaging_qc", { id: "ops-a", role: "ops_admin" }, AT),
-    409,
-    "milestone_not_reached",
-  );
-
-  const pickupMilestones = createPayoutMilestones(25_000, "pickup");
-  pickupMilestones[0].pofFileIds.push("file-pickup");
-  const pickupOrder = {
-    id: "ord-pickup",
-    state: "awaiting_initial_payment",
-    fulfillmentMode: "pickup",
-    payoutHold: false,
-    payoutMilestones: pickupMilestones,
-  };
-  expectDomainError(
-    () => releaseMilestone(pickupOrder, "pickup_handover", { id: "ops-a", role: "ops_admin" }, AT),
-    409,
-    "pickup_payout_not_available",
   );
 });
 
-test("elapsed global issue window completes the order and releases retained earnings", () => {
-  const milestones = createPayoutMilestones(100_000);
-  for (const milestone of milestones.slice(0, 3)) {
-    milestone.pofFileIds.push(`file-${milestone.code}`);
-    milestone.status = "released";
+test("caps automatic supplier payouts at confirmed collected principal", () => {
+  for (const supplierDownpaymentRateBps of [0, 2_500, 5_000]) {
+    const money = plan({ supplierDownpaymentRateBps });
+    const schedule = createPaymentSchedule(money);
+    schedule.payments.initial.status = "confirmed";
+    const order = {
+      id: `ord-${supplierDownpaymentRateBps}`,
+      fulfillmentMode: "delivery",
+      state: "production",
+      payoutHold: false,
+      ...money,
+      ...schedule,
+      payoutMilestones: createPayoutMilestones(money),
+    };
+    const initialReleases = releaseEligibleSupplierPayouts(
+      order,
+      { id: "system", role: "system" },
+      AT,
+      { claims: [] },
+    );
+    assert.deepEqual(initialReleases.map((milestone) => milestone.amountMinor),
+      supplierDownpaymentRateBps === 0 ? [] : [money.initialSupplierPrincipalMinor]);
+
+    order.state = "delivered";
+    expectDomainError(
+      () => releaseEligibleSupplierPayouts(order, { id: "system", role: "system" }, AT, { claims: [] }),
+      409,
+      "supplier_principal_not_collected",
+    );
+    order.payments.final_online.status = "confirmed";
+    const completionReleases = releaseEligibleSupplierPayouts(
+      order,
+      { id: "system", role: "system" },
+      AT,
+      { claims: [] },
+    );
+    assert.deepEqual(completionReleases.map((milestone) => milestone.amountMinor), [money.supplierRemainderMinor]);
+    assert.equal(
+      order.payoutMilestones.reduce(
+        (sum, milestone) => sum + (milestone.status === "released" ? milestone.amountMinor : 0),
+        0,
+      ),
+      money.supplierSubtotalMinor,
+    );
   }
-  milestones[3].pofFileIds.push("file-delivered");
+});
+
+test("elapsed global issue window completes an already settled order", () => {
+  const money = plan();
+  const milestones = createPayoutMilestones(money);
+  for (const milestone of milestones) milestone.status = "released";
   const store = {
     claims: [],
     settings: defaultOperationalSettings(),
@@ -264,7 +310,6 @@ test("elapsed global issue window completes the order and releases retained earn
 
   assert.equal(expireIssueWindows(store, AT), true);
   assert.equal(store.orders[0].state, "completed");
-  assert.equal(store.orders[0].payoutMilestones[3].status, "released");
-  assert.equal(store.orders[0].payoutMilestones[3].releasedBy, "system");
+  assert.equal(store.orders[0].payoutMilestones.every((milestone) => milestone.status === "released"), true);
   assert.equal(expireIssueWindows(store, AT), false);
 });

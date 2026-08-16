@@ -79,7 +79,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/orders/:id/payments/:installment/submit` | owning client | submit QR reference |
 | POST | `/orders/:id/payments/:installment/confirm` | ops/super | manual confirmation |
 | POST | `/orders/:id/payments/:installment/reject` | ops/super | reject submitted reference with client-visible reason |
-| POST | `/orders/:id/milestones/:code/release` | ops/super | POF-gated supplier payout release |
+| POST | `/orders/:id/milestones/:code/release` | ops/super | retry an eligible collection-capped supplier payout |
 | GET | `/claims` | ops/super | list claims; filters `orderId`, `status` |
 | POST | `/claims` | ops/super | raise claim; holds unless `hold:false` |
 | GET | `/claims/:id` | ops/super | claim detail |
@@ -497,7 +497,7 @@ PATCH /settings
 }
 ```
 
-The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an integer from 0 through 10,000; `issueWindowHours` is 1 through 720. Band maxima increase strictly and the final maximum is `null`. Settings changes affect only future commercial commitments.
+The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an actual JSON integer from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
@@ -567,7 +567,7 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 
 ### Visibility authorization
 
-- Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and milestone codes/status/POF IDs; never platform supplier-payout amounts.
+- Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and payout milestone codes/status; never platform supplier-payout amounts.
 - Assigned supplier: its full supplier subtotal, zero-deduction settlement card, and milestone amounts; never client payment references. For pickup-at-store plans, the card reports the amount due separately and keeps received-at-store at zero until a later lifecycle owns an explicit receipt signal.
 - Rider: client-safe order totals; no supplier payout, allocation, milestone, or client-reference details.
 - Operations/Super Admin: full client totals, allocations, supplier settlement, service-fee revenue fields, and milestone amounts.
@@ -680,32 +680,23 @@ Exact rejection errors:
 | 409 | `payment_not_pending` | installment has no submitted payment awaiting review; refresh before acting. |
 | 409 | `payment_already_confirmed` | installment is `confirmed`; accepted money cannot be reversed through this route and needs manual reconciliation. |
 
-## Payout milestones and POF
+## Supplier payout milestones
 
 ```json
 {
   "payoutMilestones": [
-    { "code": "printing", "sharePercent": 50, "amountMinor": 50000, "status": "pending_pof", "pofFileIds": [] },
-    { "code": "packaging_qc", "sharePercent": 15, "amountMinor": 15000, "status": "pending_pof", "pofFileIds": [] },
-    { "code": "delivered", "sharePercent": 25, "amountMinor": 25000, "status": "pending_pof", "pofFileIds": [] },
-    { "code": "retention", "sharePercent": 10, "amountMinor": 10000, "status": "pending_pof", "pofFileIds": [] }
+    { "code": "initial", "sharePercent": 25, "amountMinor": 25000, "status": "pending" },
+    { "code": "completion", "sharePercent": 75, "amountMinor": 75000, "status": "pending" }
   ]
 }
 ```
 
-Statuses: `pending_pof | pof_attached | released`. Delivery milestones split the full supplier subtotal. Pickup milestone shapes split only `supplierPlatformPayoutMinor`; any direct-at-store remainder remains due and unconfirmed. Retention receives the exact integer remainder. Pickup milestone release returns `409 pickup_payout_not_available` until Task H provides the handover signal.
+Statuses for current commitments are `pending | released`. The supplier original price is the supplier subtotal, never the client total with the service fee. Delivery terms produce these exact payout shapes:
 
-POF uses the existing file flow with `purpose=fulfilment_proof`, then:
+- 0%: one `completion` payout for the full supplier subtotal.
+- 25% or 50%: one `initial` payout for that percentage and one `completion` payout for the remainder.
 
-```http
-POST /files/:fileId/attach
-```
-
-```json
-{ "orderId": "ord_123", "milestoneCode": "printing" }
-```
-
-Uploader authorization: assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`. Direct retention upload is invalid; delivered POF links to both delivered and retention.
+The initial payout releases automatically when production starts. The completion payout releases automatically when delivery is recorded. Both are capped cumulatively by confirmed `supplier_principal` payment allocations, so GRIDGO never fronts supplier cash. An active Operations or claim hold leaves an otherwise eligible milestone pending. Pickup payout remains unavailable until Task H supplies a handover signal; direct-at-store money remains due and unconfirmed.
 
 Release:
 
@@ -714,10 +705,10 @@ POST /orders/:id/milestones/:code/release
 ```
 
 ```json
-{ "note": "POF reviewed" }
+{ "note": "Hold resolved; retry eligible payout" }
 ```
 
-Only Operations/Super Admin. Missing POF is `409 pof_required`; an early production-stage release is `409 milestone_not_reached`; active claim is `409 payout_held`; delivered share additionally needs recorded delivery and confirmed final-online payment; retention needs completed issue-window expiry. `completed -> payout_released` is permitted only after every milestone is released.
+Only Operations/Super Admin. This is a recovery path when an automatic release was held. An early initial release is `409 milestone_not_reached`; an early completion release is `409 fulfilment_required`; insufficient confirmed principal is `409 supplier_principal_not_collected`; an active claim is `409 payout_held`. `completed -> payout_released` is permitted only after every milestone is released.
 
 ## Order states and transitions
 
@@ -737,7 +728,7 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `supplier_assigned` | `approved_for_matching` | assigned supplier | decline/rematch |
 | `supplier_assigned` | `awaiting_checkout` | assigned approved supplier | request says `supplier_accepted`; creates the next final quote version |
 | `awaiting_checkout` | `awaiting_initial_payment` | owning client | accepts exact quote version and snapshots money/fulfillment |
-| `payment_authorized` | `production` | assigned supplier | after confirmed initial payment |
+| `payment_authorized` | `production` | assigned supplier | after confirmed initial payment; automatically releases an eligible 25%/50% initial supplier payout |
 | `production` | `supplier_self_qc` | assigned supplier | production complete |
 | `supplier_self_qc` | `ready_for_dispatch` | assigned supplier | ready for pickup |
 | `ready_for_dispatch` | `rider_assigned` | approved rider/ops/super | normally dispatch accept; rider must be approved |
@@ -795,7 +786,7 @@ The rider is notified and must resubmit all six checks.
 
 ## Delivery and issue window
 
-Upload/attach rider `delivery_photo` evidence and delivered `fulfilment_proof`, then:
+Upload and attach rider `delivery_photo` evidence, then:
 
 ```http
 POST /dispatch/:id/delivery
@@ -805,7 +796,7 @@ POST /dispatch/:id/delivery
 { "evidenceFileId": "file_123", "evidenceType": "photo" }
 ```
 
-`evidenceType` is `photo | signature`; signature is allowed when the camera cannot be used. The assigned rider, passed checklist/active transport, confirmed digital balance, attached ready evidence, and delivered POF are required. Success stores `deliveryEvidence`, appends delivered history, then opens:
+`evidenceType` is `photo | signature`; signature is allowed when the camera cannot be used. The assigned rider, passed checklist/active transport, confirmed digital balance, and attached ready evidence are required. Success stores `deliveryEvidence`, appends delivered history, automatically releases eligible remaining supplier principal, then opens:
 
 ```json
 {
@@ -815,7 +806,7 @@ POST /dispatch/:id/delivery
 }
 ```
 
-The hours snapshot comes from the one global setting. Request processing expires elapsed windows transactionally. A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed` and automatically releases retention when delivered POF is present.
+The hours snapshot comes from the one global setting. Request processing expires elapsed windows transactionally. A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed`; supplier principal was already released at delivery unless an active hold prevented it.
 
 ## Persistence contract
 

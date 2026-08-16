@@ -48,7 +48,7 @@ function committedOrder(id, options) {
     payoutHold: false,
     pickup: SHOP,
     dropoff: options.fulfillmentMode === "delivery" ? DROPOFF : null,
-    payoutMilestones: createPayoutMilestones(money.supplierPlatformPayoutMinor, options.fulfillmentMode),
+    payoutMilestones: createPayoutMilestones(money),
     timeline: [],
     createdAt: AT,
     updatedAt: AT,
@@ -64,13 +64,18 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
   store.users = [
     { id: "money_client", clerkUserId: "clerk_money_client", email: "money-client@gridgo.test", name: "Money Client", role: "client", accountType: "individual", createdAt: AT },
     { id: "money_supplier", clerkUserId: "clerk_money_supplier", email: "money-supplier@gridgo.test", name: "Money Supplier", role: "supplier", verificationStatus: "approved", shop: SHOP, createdAt: AT },
+    { id: "money_supplier_2", clerkUserId: "clerk_money_supplier_2", email: "money-supplier-2@gridgo.test", name: "Money Supplier 2", role: "supplier", verificationStatus: "approved", shop: SHOP, createdAt: AT },
   ];
   store.userRoleMemberships = [
     { userId: "money_client", role: "client", createdAt: AT },
     { userId: "money_supplier", role: "supplier", createdAt: AT },
+    { userId: "money_supplier_2", role: "supplier", createdAt: AT },
   ];
   store.clientProfiles = [{ userId: "money_client", clientKind: "personal", updatedAt: AT }];
-  store.supplierProfiles = [{ userId: "money_supplier", shopName: "Davao Shop", contactName: "Money Supplier", shop: SHOP, pickupAvailable: true, updatedAt: AT }];
+  store.supplierProfiles = [
+    { userId: "money_supplier", shopName: "Davao Shop", contactName: "Money Supplier", shop: SHOP, pickupAvailable: true, updatedAt: AT },
+    { userId: "money_supplier_2", shopName: "Davao Shop 2", contactName: "Money Supplier 2", shop: SHOP, pickupAvailable: false, updatedAt: AT },
+  ];
   store.supplierPaymentTerms = [{
     supplierId: "money_supplier",
     deliveryDownpaymentRateBps: 2_500,
@@ -96,6 +101,20 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       paymentPlan: "pickup_downpayment_store",
       supplierDownpaymentRateBps: 2_500,
     }),
+    {
+      id: "uncommitted_target",
+      clientId: "money_client",
+      supplierId: "money_supplier_2",
+      riderId: null,
+      productId: null,
+      state: "draft",
+      payments: {},
+      paymentAllocations: [],
+      payoutMilestones: [],
+      timeline: [],
+      createdAt: AT,
+      updatedAt: AT,
+    },
   ];
 
   await database.transaction(() => saveStore(database, store));
@@ -160,6 +179,32 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
          AND component = 'service_fee'
     `),
     (error) => error.code === "23514" && error.constraint === "order_payment_allocations_shape_check",
+  );
+  await assert.rejects(
+    database.query(`
+      UPDATE payout_milestones
+         SET status = 'released'
+       WHERE order_id = 'delivery_rounding'
+         AND code = 'initial'
+    `),
+    (error) => error.code === "23514" && error.constraint === "payout_milestones_collected_principal_check",
+  );
+  await assert.rejects(
+    database.query(`
+      UPDATE payout_milestones
+         SET order_id = 'uncommitted_target'
+       WHERE order_id = 'delivery_rounding'
+         AND code = 'initial'
+    `),
+    (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
+  );
+  await assert.rejects(
+    database.query(`
+      UPDATE supplier_payment_terms
+         SET supplier_id = 'money_supplier_2'
+       WHERE supplier_id = 'money_supplier'
+    `),
+    (error) => error.code === "23514" && error.constraint === "supplier_payment_terms_supplier_immutable",
   );
 
   await clear(database);

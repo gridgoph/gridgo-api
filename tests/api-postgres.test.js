@@ -7,7 +7,6 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
-import { createPayoutMilestones } from "../src/operational-model.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
 
@@ -178,12 +177,22 @@ async function clearAndFixture(database) {
       turnaroundHours: 24, capacityDaily: 20, capacityWeekly: 100, zones: ["davao_central"],
       state: "live", verifiedAt: AT, verifiedBy: "user_ops", createdAt: AT, updatedAt: AT,
     });
-    const milestones = createPayoutMilestones(100000);
+    const milestones = [
+      ["printing", 50, 50000],
+      ["packaging_qc", 15, 15000],
+      ["delivered", 25, 25000],
+      ["retention", 10, 10000],
+    ].map(([code, sharePercent, amountMinor]) => ({
+      code,
+      sharePercent,
+      amountMinor,
+      status: "released",
+      pofFileIds: ["file_pof"],
+      releasedAt: AT,
+      releasedBy: "user_ops",
+    }));
     for (const milestone of milestones) {
       milestone.status = "released";
-      milestone.pofFileIds = ["file_pof"];
-      milestone.releasedAt = AT;
-      milestone.releasedBy = "user_ops";
     }
     milestones[0].status = "pof_attached";
     milestones[0].releasedAt = null;
@@ -662,6 +671,12 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
     }
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned", supplierId: "user_supplier" } })).status, 200);
+    const payoutTerms = await request(instance.api, "/supplier-payment-terms", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { deliveryDownpaymentRateBps: 2500 },
+    });
+    assert.equal(payoutTerms.status, 200, JSON.stringify(payoutTerms.body));
     for (const supplierSubtotalMinor of [null, "", "100000"]) {
       const invalidSubtotal = await request(instance.api, `/orders/${orderId}/transition`, {
         method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierSubtotalMinor },
@@ -758,6 +773,15 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     for (const state of ["production", "supplier_self_qc", "ready_for_dispatch"]) {
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
       assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
+      if (state === "production") {
+        assert.deepEqual(
+          transitioned.body.order.payoutMilestones.map(({ code, amountMinor, status }) => ({ code, amountMinor, status })),
+          [
+            { code: "initial", amountMinor: 30000, status: "released" },
+            { code: "completion", amountMinor: 90000, status: "pending" },
+          ],
+        );
+      }
     }
     assert.equal((await request(instance.api, `/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} })).status, 200);
     const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"]
@@ -823,6 +847,18 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     });
     assert.equal(stringRate.status, 400);
     assert.equal(stringRate.body.error, "invalid_service_fee_rate");
+
+    const stringDeliveryFee = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: {
+        expectedVersion: current.body.version,
+        deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: "2500" }],
+        reason: "Invalid string delivery fee",
+      },
+    });
+    assert.equal(stringDeliveryFee.status, 400);
+    assert.equal(stringDeliveryFee.body.error, "invalid_money");
 
     const updated = await request(instance.api, "/settings", {
       method: "PATCH",

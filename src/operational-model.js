@@ -79,7 +79,7 @@ export function validateOperationalSettings(settings) {
       { field: "serviceFeeRateBps" },
     );
   }
-  const issueWindowHours = Number(settings?.issueWindowHours);
+  const issueWindowHours = settings?.issueWindowHours;
   if (!Number.isInteger(issueWindowHours) || issueWindowHours < 1 || issueWindowHours > 720) {
     fail(
       400,
@@ -99,7 +99,14 @@ export function validateOperationalSettings(settings) {
   let previous = -1;
   for (let index = 0; index < bands.length; index += 1) {
     const band = bands[index];
-    finiteMinor(band?.feeMinor, `deliveryFeeBands[${index}].feeMinor`);
+    if (!Number.isSafeInteger(band?.feeMinor) || band.feeMinor < 0) {
+      fail(
+        400,
+        "invalid_money",
+        `deliveryFeeBands[${index}].feeMinor must be a non-negative integer in PHP minor units.`,
+        { field: `deliveryFeeBands[${index}].feeMinor` },
+      );
+    }
     const last = index === bands.length - 1;
     if (last) {
       if (band?.maxDistanceMeters !== null) {
@@ -111,8 +118,8 @@ export function validateOperationalSettings(settings) {
       }
       continue;
     }
-    const maximum = Number(band?.maxDistanceMeters);
-    if (!Number.isInteger(maximum) || maximum <= previous) {
+    const maximum = band?.maxDistanceMeters;
+    if (!Number.isSafeInteger(maximum) || maximum < 0 || maximum <= previous) {
       fail(
         400,
         "invalid_delivery_fee_bands",
@@ -316,41 +323,46 @@ export function estimatePriceRange({ supplierSubtotalCandidatesMinor }) {
   };
 }
 
-export function createPayoutMilestones(supplierPlatformPayoutMinor, fulfillmentMode = "delivery") {
-  const payoutBase = finiteMinor(supplierPlatformPayoutMinor, "supplierPlatformPayoutMinor");
-  if (fulfillmentMode === "pickup") {
-    const handover = roundBps(payoutBase, 9_000);
-    return [
-      ["pickup_handover", 90, handover],
-      ["retention", 10, payoutBase - handover],
-    ].map(([code, sharePercent, amountMinor]) => ({
-      code,
-      sharePercent,
-      amountMinor,
-      status: "pending_pof",
-      pofFileIds: [],
-      releasedAt: null,
-      releasedBy: null,
-    }));
+export function createPayoutMilestones(money) {
+  const payoutBase = finiteMinor(money?.supplierPlatformPayoutMinor, "supplierPlatformPayoutMinor");
+  const supplierSubtotal = finiteMinor(money?.supplierSubtotalMinor, "supplierSubtotalMinor");
+  const downpaymentRate = finiteBps(
+    money?.supplierDownpaymentRateBps,
+    "supplierDownpaymentRateBps",
+    [0, 2_500, 5_000, 10_000],
+  );
+  const initialPrincipal = Math.min(roundBps(supplierSubtotal, downpaymentRate), payoutBase);
+  const completionPrincipal = payoutBase - initialPrincipal;
+  const rows = [];
+  if (downpaymentRate > 0) {
+    rows.push(["initial", downpaymentRate / 100, initialPrincipal]);
   }
-  const printing = roundBps(payoutBase, 5_000);
-  const packaging = roundBps(payoutBase, 1_500);
-  const delivered = roundBps(payoutBase, 2_500);
-  const retention = payoutBase - printing - packaging - delivered;
-  return [
-    ["printing", 50, printing],
-    ["packaging_qc", 15, packaging],
-    ["delivered", 25, delivered],
-    ["retention", 10, retention],
-  ].map(([code, sharePercent, amountMinor]) => ({
+  if (completionPrincipal > 0 || rows.length === 0) {
+    const sharePercent = supplierSubtotal === 0 ? 0 : (10_000 - downpaymentRate) / 100;
+    rows.push(["completion", sharePercent, completionPrincipal]);
+  }
+  return rows.map(([code, sharePercent, amountMinor]) => ({
     code,
     sharePercent,
     amountMinor,
-    status: "pending_pof",
+    status: "pending",
     pofFileIds: [],
     releasedAt: null,
     releasedBy: null,
   }));
+}
+
+export function collectedSupplierPrincipalMinor(order) {
+  const confirmedPayments = new Set(
+    Object.entries(order?.payments || {})
+      .filter(([, payment]) => payment?.status === "confirmed")
+      .map(([code]) => code),
+  );
+  return (order?.paymentAllocations || [])
+    .filter(
+      (allocation) => allocation.component === "supplier_principal" && confirmedPayments.has(allocation.paymentCode),
+    )
+    .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
 }
 
 export function moneyReportingForOrder(order) {
@@ -371,12 +383,18 @@ export function moneyReportingForOrder(order) {
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
   const handedOver = ["delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
   const receivedAtStoreMinor = 0;
+  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+  const protectedPaymentMinor = Math.max(
+    0,
+    Math.min(order.supplierPlatformPayoutMinor || 0, collectedPrincipalMinor) - releasedThroughPlatformMinor,
+  );
   return {
     supplierSettlement: {
       orderPriceMinor: order.supplierSubtotalMinor,
       dueAtStoreMinor: order.directStoreDueMinor || 0,
       receivedAtStoreMinor,
-      protectedPaymentMinor: order.supplierPlatformPayoutMinor,
+      collectedSupplierPrincipalMinor: collectedPrincipalMinor,
+      protectedPaymentMinor,
       gridgoDeductionsMinor: 0,
       totalSupplierEarningsMinor: order.supplierSubtotalMinor,
       supplierReleasedMinor: releasedThroughPlatformMinor,
@@ -420,6 +438,58 @@ export function releaseMilestone(order, code, actor, at, store = null) {
       "Pickup payout release remains unavailable until the pickup handover lifecycle records fulfilment.",
       { milestoneCode: code },
     );
+  }
+  const currentPolicy = code === "initial" || code === "completion";
+  if (currentPolicy) {
+    if (activePayoutHold(store, order)) {
+      fail(
+        409,
+        "payout_held",
+        "A claim is holding this payout. Resolve or release the claim before releasing the milestone.",
+        { milestoneCode: code },
+      );
+    }
+    const productionStates = new Set([
+      "production",
+      "supplier_self_qc",
+      "ready_for_dispatch",
+      "rider_assigned",
+      "picked_up",
+      "out_for_delivery",
+      "delivered",
+      "issue_window_open",
+      "completed",
+      "payout_released",
+    ]);
+    const completionStates = new Set(["delivered", "issue_window_open", "completed", "payout_released"]);
+    if (code === "initial" && !productionStates.has(order.state)) {
+      fail(409, "milestone_not_reached", "Start production before releasing the supplier downpayment.", {
+        milestoneCode: code,
+        state: order.state,
+      });
+    }
+    if (code === "completion" && !completionStates.has(order.state)) {
+      fail(409, "fulfilment_required", "Record fulfilment before releasing the remaining supplier principal.", {
+        milestoneCode: code,
+        state: order.state,
+      });
+    }
+    const releasedPrincipalMinor = (order.payoutMilestones || [])
+      .filter((item) => item.status === "released")
+      .reduce((sum, item) => sum + finiteMinor(item.amountMinor, "milestone.amountMinor"), 0);
+    const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+    if (releasedPrincipalMinor + finiteMinor(milestone.amountMinor, "milestone.amountMinor") > collectedPrincipalMinor) {
+      fail(
+        409,
+        "supplier_principal_not_collected",
+        "Confirmed client payments do not yet cover this supplier payout.",
+        { milestoneCode: code, collectedPrincipalMinor, releasedPrincipalMinor },
+      );
+    }
+    milestone.status = "released";
+    milestone.releasedAt = at;
+    milestone.releasedBy = actor.id || "system";
+    return milestone;
   }
   if (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0) {
     fail(
@@ -487,6 +557,31 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   milestone.releasedAt = at;
   milestone.releasedBy = actor.id || "system";
   return milestone;
+}
+
+export function releaseEligibleSupplierPayouts(order, actor, at, store = null) {
+  if (order?.fulfillmentMode === "pickup" || activePayoutHold(store, order)) return [];
+  const productionReached = new Set([
+    "production",
+    "supplier_self_qc",
+    "ready_for_dispatch",
+    "rider_assigned",
+    "picked_up",
+    "out_for_delivery",
+    "delivered",
+    "issue_window_open",
+    "completed",
+    "payout_released",
+  ]).has(order?.state);
+  const fulfilmentReached = new Set(["delivered", "issue_window_open", "completed", "payout_released"]).has(order?.state);
+  const eligibleCodes = [
+    ...(productionReached ? ["initial"] : []),
+    ...(fulfilmentReached ? ["completion"] : []),
+  ];
+  return eligibleCodes
+    .map((code) => (order.payoutMilestones || []).find((milestone) => milestone.code === code))
+    .filter((milestone) => milestone && milestone.status !== "released")
+    .map((milestone) => releaseMilestone(order, milestone.code, actor, at, store));
 }
 
 export function publicOrderFor(order, user) {

@@ -38,7 +38,7 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 - Orders snapshot client dropoff, assigned supplier pickup, distance band, delivery fee, and accepted price.
 - The service fee is seeded at 1,000 bps on the supplier subtotal and snapshotted with the accepted quote; delivery is a separate pass-through.
 - Generalized online installments, component allocations, and supplier payout milestones have independent relational records.
-- Supplier milestone release is gated by Proof of Fulfilment.
+- Supplier payout never exceeds confirmed supplier-principal collection: 25% or 50% terms release that initial share at production, while 0% waits and the remaining principal releases at fulfilment.
 - Claims hold payout. Client issues during the global issue window create an automatic claim hold.
 - Rider pickup requires all six checks; failures create an Operations escalation.
 - Delivery requires file-backed photo or signature evidence and opens the issue window.
@@ -69,7 +69,7 @@ Notifications are durable, caller-scoped PostgreSQL rows delivered through list,
 
 - Real PostgreSQL constraints, foreign keys, indexes, ordered migrations, and transactional multi-row mutations.
 - Clerk JWT verification with exact issuer and authorized-party checks; unauthenticated and wrong-role requests fail closed.
-- Complete v2 lifecycle for order, QR payment, POF payout, dispatch, issue, claim, audit, and notification behavior.
+- Complete v2 lifecycle for order, QR payment, collection-capped payout, dispatch, issue, claim, audit, and notification behavior.
 - Compose starts PostgreSQL, migrates, seeds reference data, initializes MinIO, and serves healthy API responses.
 - CI tests against PostgreSQL 17 and proves the named database volume survives API replacement and PostgreSQL container recreation.
 - Deployment requirements and first-administrator bootstrap are unambiguous in `docs/DEPLOYMENT.md`.

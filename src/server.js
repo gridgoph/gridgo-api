@@ -73,6 +73,7 @@ import {
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
   publicOrderFor,
+  releaseEligibleSupplierPayouts,
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
@@ -755,6 +756,29 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
   };
   store.auditLog.push(entry);
   return entry;
+}
+
+function recordAutomaticSupplierPayouts(store, order, at) {
+  const actor = { id: "system", role: "system" };
+  const released = releaseEligibleSupplierPayouts(order, actor, at, store);
+  for (const milestone of released) {
+    order.timeline.push({
+      at,
+      state: order.state,
+      by: actor.id,
+      note: `${milestone.code} supplier payout released automatically`,
+      milestoneCode: milestone.code,
+    });
+    audit(store, {
+      actor,
+      action: "payout_milestone.release",
+      entityType: "order",
+      entityId: order.id,
+      orderId: order.id,
+      detail: { milestoneCode: milestone.code, amountMinor: milestone.amountMinor, source: "automatic" },
+    });
+  }
+  return released;
 }
 
 async function load() {
@@ -1774,6 +1798,10 @@ async function handleRequest(req, res) {
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
       };
       validateOperationalSettings(next);
+      next.deliveryFeeBands = next.deliveryFeeBands.map((band) => ({
+        maxDistanceMeters: band.maxDistanceMeters,
+        feeMinor: band.feeMinor,
+      }));
       const previous = structuredClone(store.settings);
       store.settings = structuredClone(next);
       store.version += 1;
@@ -3495,7 +3523,7 @@ async function handleRequest(req, res) {
         if (unreleased.length) {
           return send(res, 409, {
             error: "milestones_not_released",
-            message: "Release every Proof-of-Fulfilment-gated milestone before closing the supplier payout.",
+            message: "Release every eligible supplier payout milestone before closing the supplier payout.",
             milestoneCodes: unreleased.map((milestone) => milestone.code),
           });
         }
@@ -3692,7 +3720,7 @@ async function handleRequest(req, res) {
           order.riderId = null;
         }
         order.priceRange.deliveryFeeStatus = "final";
-        order.payoutMilestones = createPayoutMilestones(order.supplierPlatformPayoutMinor, fulfillmentMode);
+        order.payoutMilestones = createPayoutMilestones(order);
         order.state = "awaiting_initial_payment";
         order.updatedAt = committedAt;
         order.timeline.push({
@@ -3751,6 +3779,7 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
+      if (next === "production") recordAutomaticSupplierPayouts(store, order, order.updatedAt);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user) });
     }
@@ -3997,13 +4026,15 @@ async function handleRequest(req, res) {
           message: "Operations must confirm the client's final online payment before the rider completes delivery.",
         });
       }
-      const deliveredMilestone = (order.payoutMilestones || []).find((milestone) => milestone.code === "delivered");
-      if (!deliveredMilestone?.pofFileIds?.length) {
-        return send(res, 409, {
-          error: "pof_required",
-          message: "Attach the delivered Proof of Fulfilment before completing this delivery.",
-          milestoneCode: "delivered",
-        });
+      if (order.moneyModelVersion === 1) {
+        const deliveredMilestone = (order.payoutMilestones || []).find((milestone) => milestone.code === "delivered");
+        if (!deliveredMilestone?.pofFileIds?.length) {
+          return send(res, 409, {
+            error: "pof_required",
+            message: "Attach the delivered Proof of Fulfilment before completing this legacy delivery.",
+            milestoneCode: "delivered",
+          });
+        }
       }
       const body = await readBody(req);
       if (!["photo", "signature"].includes(body.evidenceType)) {
@@ -4035,6 +4066,7 @@ async function handleRequest(req, res) {
         note: body.evidenceType === "photo" ? "Delivery completed with photo evidence" : "Delivery completed with signature evidence",
         fileId: evidenceFileId,
       });
+      recordAutomaticSupplierPayouts(store, order, deliveredAt);
       order.issueWindowOpenedAt = deliveredAt;
       order.issueWindowExpiresAt = issueWindowExpiresAt(deliveredAt, store.settings.issueWindowHours);
       order.state = "issue_window_open";
