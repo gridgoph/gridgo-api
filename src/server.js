@@ -11,6 +11,14 @@ import {
   verifyClerkClaims,
 } from "./auth.js";
 import {
+  approvalCaseFor,
+  approvalCaseSummary,
+  contextHasMembership,
+  identityHasMembership,
+  membershipFor,
+  membershipSummary,
+} from "./authorization-context.js";
+import {
   AttachmentError,
   attachFileReference,
   authorizeFileAttach,
@@ -339,6 +347,13 @@ async function verifyClerkBeforeMutation(req, pathname) {
 
 /** Client account types for branding (GRIDGO vs GRIDGO Business). Not inferred from orgName. */
 const CLIENT_ACCOUNT_TYPES = new Set(["individual", "business", "organization"]);
+const FIXED_AUTH_ROLES = new Map([
+  ["/auth/me/client", "client"],
+  ["/auth/me/supplier", "supplier"],
+  ["/auth/me/rider", "rider"],
+  ["/auth/me/ops", "ops_admin"],
+  ["/auth/me/admin", "super_admin"],
+]);
 
 /**
  * Safe default when a client has no recorded type: individual.
@@ -366,12 +381,158 @@ function publicUser(u) {
   return rest;
 }
 
+function publicIdentity(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    ...(user.phone ? { phone: user.phone } : {}),
+    createdAt: user.createdAt,
+  };
+}
+
+function clientProfileProjection(store, userId) {
+  const profile = (store.clientProfiles || []).find((candidate) => candidate.userId === userId);
+  if (!profile) return null;
+  return {
+    clientKind: profile.clientKind,
+    businessName: profile.businessName ?? null,
+    businessNature: profile.businessNature ?? null,
+    updatedAt: profile.updatedAt,
+  };
+}
+
+function supplierProfileProjection(store, userId) {
+  const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === userId);
+  if (!profile) return null;
+  return {
+    shopName: profile.shopName,
+    contactName: profile.contactName,
+    shop: profile.shop,
+    pickupAvailable: profile.pickupAvailable,
+    updatedAt: profile.updatedAt,
+  };
+}
+
+function riderProfileProjection(store, userId) {
+  const profile = (store.riderProfiles || []).find((candidate) => candidate.userId === userId);
+  if (!profile) return null;
+  return {
+    vehicleType: profile.vehicleType,
+    plateNumber: profile.plateNumber,
+    licenseNumber: profile.licenseNumber ?? null,
+    updatedAt: profile.updatedAt,
+  };
+}
+
+function supplierReadiness(store, userId, approvalCase) {
+  // Task B can evaluate the task-A profile plus the existing governed service
+  // line. Catalog/media/payment-term blockers are added by their owning schema
+  // tasks; an already-approved legacy supplier remains grandfathered ready.
+  if (approvalCase?.status === "approved") return { readyForApproval: true, missing: [] };
+  const missing = [];
+  if (!(store.supplierProfiles || []).some((profile) => profile.userId === userId)) {
+    missing.push("supplier_profile");
+  }
+  if (!(store.supplierServices || []).some((service) => service.supplierId === userId)) {
+    missing.push("supplier_service");
+  }
+  return { readyForApproval: missing.length === 0, missing };
+}
+
+function currentRiderDocuments(store, userId) {
+  return (store.riderDocuments || [])
+    .filter((document) => document.riderId === userId && document.isCurrent !== false)
+    .map((document) => ({
+      id: document.id,
+      kind: document.kind,
+      fileId: document.fileId,
+      expiresOn: document.expiresOn ?? null,
+      uploadedAt: document.uploadedAt,
+    }));
+}
+
+function fixedAuthProjection(store, auth, role) {
+  const context = auth.authorization;
+  const membership = membershipSummary(membershipFor(context, role));
+  const base = { user: publicIdentity(auth.user), membership };
+  if (role === "client") {
+    const approvalCase = approvalCaseFor(context, "business_client");
+    const approved = approvalCase?.status === "approved";
+    return {
+      ...base,
+      clientProfile: clientProfileProjection(store, auth.user.id),
+      approvalCase: approvalCaseSummary(approvalCase),
+      capabilities: {
+        placePersonalOrders: true,
+        maintainBusinessProfile: Boolean(approvalCase),
+        placeBusinessOrders: approved,
+        requestOfficialReceipts: approved,
+      },
+    };
+  }
+  if (role === "supplier") {
+    const approvalCase = approvalCaseFor(context, "supplier");
+    const canEdit = approvalCase?.status !== "suspended";
+    const approved = approvalCase?.status === "approved";
+    return {
+      ...base,
+      supplierProfile: supplierProfileProjection(store, auth.user.id),
+      approvalCase: approvalCaseSummary(approvalCase),
+      readiness: supplierReadiness(store, auth.user.id, approvalCase),
+      capabilities: {
+        editCatalogue: canEdit,
+        editSettings: canEdit,
+        receiveJobOffers: approved,
+        acceptJobs: approved,
+      },
+    };
+  }
+  if (role === "rider") {
+    const approvalCase = approvalCaseFor(context, "rider");
+    const documents = currentRiderDocuments(store, auth.user.id);
+    const approved = approvalCase?.status === "approved";
+    return {
+      ...base,
+      riderProfile: riderProfileProjection(store, auth.user.id),
+      approvalCase: approvalCaseSummary(approvalCase),
+      documents,
+      capabilities: {
+        maintainProfile: true,
+        uploadDocuments: true,
+        receiveDispatchOffers: approved,
+        acceptAssignments: approved,
+        startTracking: approved,
+      },
+    };
+  }
+  if (role === "ops_admin") {
+    return {
+      ...base,
+      capabilities: {
+        manageApprovalCases: true,
+        manageOperations: true,
+      },
+    };
+  }
+  return {
+    ...base,
+    capabilities: {
+      manageApprovalCases: true,
+      manageOperations: true,
+      manageRoleMemberships: true,
+      managePlatformSettings: true,
+    },
+  };
+}
+
 function isOps(user) {
-  return user && (user.role === "ops_admin" || user.role === "super_admin");
+  return identityHasMembership(user, "ops_admin") || identityHasMembership(user, "super_admin");
 }
 
 function isSuper(user) {
-  return user && user.role === "super_admin";
+  return identityHasMembership(user, "super_admin");
 }
 
 /**
@@ -437,6 +598,73 @@ function verificationUserResponse(store, target) {
     user: publicUser(target),
     ...(target.role === "supplier" ? { verificationDocuments: verificationDocumentsFor(store, target) } : {}),
   };
+}
+
+/**
+ * The legacy verification and role routes stay the only decision surfaces for
+ * one release, so their transactions must also keep the membership-era approval
+ * case truthful: fixed projections and existing work gates read different
+ * owners. The legacy `unverified` status has no case equivalent and maps to
+ * `pending`; a demoted then re-promoted supplier or rider re-earns approval,
+ * and approval never transfers between the supplier and rider kinds.
+ */
+function syncApprovalCaseWithVerification(store, target, status, actor, reason, { createMissing = true } = {}) {
+  const caseStatus = status === "unverified" ? "pending" : status;
+  const decisionReason = typeof reason === "string" && reason.trim() ? reason.trim() : null;
+  const at = now();
+  if (!Array.isArray(store.approvalCases)) store.approvalCases = [];
+  if (!Array.isArray(store.approvalCaseEvents)) store.approvalCaseEvents = [];
+  let approvalCase = store.approvalCases.find(
+    (candidate) => candidate.userId === target.id && candidate.kind === target.role,
+  );
+  const fromStatus = approvalCase?.status ?? null;
+  if (!approvalCase) {
+    if (!createMissing) return;
+    approvalCase = {
+      id: id("apc"),
+      userId: target.id,
+      kind: target.role,
+      status: caseStatus,
+      version: 1,
+      applicationRevision: 1,
+      createdAt: at,
+      updatedAt: at,
+    };
+    store.approvalCases.push(approvalCase);
+  }
+  approvalCase.status = caseStatus;
+  approvalCase.updatedAt = at;
+  delete approvalCase.rejectionReason;
+  delete approvalCase.suspensionReason;
+  if (caseStatus === "pending") {
+    delete approvalCase.decidedAt;
+    delete approvalCase.decidedBy;
+  } else {
+    approvalCase.decidedAt = at;
+    approvalCase.decidedBy = actor.id;
+    if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
+    if (caseStatus === "rejected") {
+      approvalCase.rejectionReason = decisionReason || "Verification rejected";
+    }
+    if (caseStatus === "suspended") {
+      approvalCase.suspensionReason = decisionReason || "Verification suspended";
+    }
+  }
+  if (fromStatus !== caseStatus) {
+    store.approvalCaseEvents.push({
+      id: id("ace"),
+      approvalCaseId: approvalCase.id,
+      applicationRevision: approvalCase.applicationRevision,
+      ...(fromStatus ? { fromStatus } : {}),
+      toStatus: caseStatus,
+      actorUserId: actor.id,
+      actorKind: "approver",
+      ...(decisionReason ? { reason: decisionReason } : {}),
+      requestId: id("acr"),
+      snapshot: {},
+      createdAt: at,
+    });
+  }
 }
 
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
@@ -953,7 +1181,31 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
-      return send(res, 200, { user: publicUser(auth.user) });
+      return send(res, 200, {
+        user: publicUser(auth.user),
+        memberships: auth.authorization.memberships.map(membershipSummary),
+        approvalCases: auth.authorization.approvalCases.map(approvalCaseSummary),
+      });
+    }
+
+    const fixedAuthRole = FIXED_AUTH_ROLES.get(pathname);
+    if (req.method === "GET" && fixedAuthRole) {
+      const auth = await authenticateRequest(req, store);
+      if (!auth.user) return send(res, auth.status || 401, { error: "unauthorized" });
+      if (!contextHasMembership(auth.authorization, fixedAuthRole)) {
+        if (fixedAuthRole === "supplier") {
+          return send(res, 403, {
+            error: "supplier_account_not_found",
+            message: "This identity has no supplier account. Sign up as a supplier or use another account.",
+          });
+        }
+        return send(res, 403, {
+          error: "membership_required",
+          message: `This surface requires the ${fixedAuthRole} membership assigned in GRIDGO.`,
+          requiredRole: fixedAuthRole,
+        });
+      }
+      return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/activate") {
@@ -1673,15 +1925,37 @@ async function handleRequest(req, res) {
         return send(res, 400, { error: "invalid_role", allowed: allowedRoles });
       }
       const prev = target.role;
-      if (prev === body.role) {
+      const requestedMembership = (store.userRoleMemberships || []).find(
+        (membership) => membership.userId === target.id && membership.role === body.role,
+      );
+      if (prev === body.role && requestedMembership) {
         return send(res, 200, { user: publicUser(target) });
       }
       // Administrator bootstrap closes permanently after first use, so losing
       // the final super_admin would lock role management until manual SQL.
-      if (prev === "super_admin" && !store.users.some((u) => u.role === "super_admin" && u.id !== target.id)) {
+      if (
+        prev === "super_admin"
+        && body.role !== "super_admin"
+        && !store.userRoleMemberships.some(
+          (membership) => membership.role === "super_admin" && membership.userId !== target.id,
+        )
+      ) {
         return send(res, 409, {
           error: "last_super_admin",
           message: "GRIDGO must keep at least one Super Admin. Promote another user to super_admin before changing this account's role.",
+        });
+      }
+      if (prev !== body.role) {
+        store.userRoleMemberships = store.userRoleMemberships.filter(
+          (membership) => !(membership.userId === target.id && membership.role === prev),
+        );
+      }
+      if (!requestedMembership) {
+        store.userRoleMemberships.push({
+          userId: target.id,
+          role: body.role,
+          createdAt: now(),
+          createdBy: user.id,
         });
       }
       target.role = body.role;
@@ -1691,8 +1965,12 @@ async function handleRequest(req, res) {
         delete target.accountType;
         delete target.orgName;
       }
-      if (["supplier", "rider"].includes(body.role) && target.verificationStatus == null) {
+      if (["supplier", "rider"].includes(body.role) && (prev !== body.role || target.verificationStatus == null)) {
         target.verificationStatus = "unverified";
+        delete target.verificationNote;
+        delete target.verifiedAt;
+        delete target.verifiedBy;
+        syncApprovalCaseWithVerification(store, target, "unverified", user, null, { createMissing: false });
       }
       if (body.role === "supplier" && !Array.isArray(target.verificationDocumentFileIds)) {
         target.verificationDocumentFileIds = [];
@@ -1758,6 +2036,7 @@ async function handleRequest(req, res) {
           }
         }
       }
+      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       audit(store, {
         actor: user,
         action: "user.verification",

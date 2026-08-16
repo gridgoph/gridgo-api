@@ -1,5 +1,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 
+import { resolveAuthorizationContext } from "./authorization-context.js";
+
 function configurationError(problem, fix) {
   return new Error(`${problem} ${fix}`);
 }
@@ -111,13 +113,45 @@ function invitationRequired(message) {
   return { status: 403, error: "invitation_required", message, user: null, mutated: false };
 }
 
+function ensureClientMembership(store, user, now) {
+  let mutated = false;
+  if (!Array.isArray(store.userRoleMemberships)) store.userRoleMemberships = [];
+  if (!store.userRoleMemberships.some(
+    (membership) => membership.userId === user.id && membership.role === "client",
+  )) {
+    store.userRoleMemberships.push({
+      userId: user.id,
+      role: "client",
+      createdAt: now(),
+    });
+    mutated = true;
+  }
+
+  if (!Array.isArray(store.clientProfiles)) store.clientProfiles = [];
+  if (!store.clientProfiles.some((clientProfile) => clientProfile.userId === user.id)) {
+    store.clientProfiles.push({
+      userId: user.id,
+      clientKind: "personal",
+      updatedAt: now(),
+    });
+    mutated = true;
+  }
+  return mutated;
+}
+
 export async function authenticateBearerToken(token, store, config, preVerified = null) {
   if (!token) return { user: null, status: 401, kind: null };
   const verified = preVerified || (await verifyClerkClaims(token, config));
   if (!verified.claims?.sub) return { user: null, status: 401, kind: "clerk" };
   const matches = (store.users || []).filter((candidate) => candidate.clerkUserId === verified.claims.sub);
   if (matches.length !== 1) return { user: null, status: 401, kind: "clerk" };
-  return { user: matches[0], status: null, kind: "clerk" };
+  const user = matches[0];
+  return {
+    user,
+    authorization: resolveAuthorizationContext(store, user),
+    status: null,
+    kind: "clerk",
+  };
 }
 
 /** Explicit first-use entry for public SSO. It can only create a client. */
@@ -137,8 +171,10 @@ export async function activateClerkClientProfile({
   const clerkUserId = verified.claims.sub;
   const linked = (store.users || []).filter((candidate) => candidate.clerkUserId === clerkUserId);
   if (linked.length > 1) return unauthorized();
-  if (linked.length === 1 && linked[0].role !== "client") {
-    return invitationRequired("This Clerk identity is already assigned to a non-client GRIDGO role.");
+  if (linked.length === 1) {
+    const user = linked[0];
+    const mutated = ensureClientMembership(store, user, now);
+    return { status: 200, error: null, message: null, user, mutated };
   }
 
   let clerkUser = preloadedClerkUser ? preloadedClerkUser.clerkUser : undefined;
@@ -153,34 +189,33 @@ export async function activateClerkClientProfile({
     return { status: 502, error: "clerk_unavailable", message: "Could not load this Clerk user. Retry Google sign-in in a moment.", user: null, mutated: false };
   }
   const profile = clerkClientProfile(clerkUser);
-  let user = linked[0] || null;
+  let user = null;
   let mutated = false;
 
-  if (!user) {
-    if (!profile.email || !profile.email.includes("@")) {
-      return { status: 400, error: "email_required", message: "This Google account has no email address GRIDGO can use. Add an email in Clerk and try again.", user: null, mutated: false };
-    }
-    const emailMatches = (store.users || []).filter(
-      (candidate) => String(candidate.email || "").toLowerCase() === profile.email,
-    );
-    if (emailMatches.some((candidate) => candidate.role !== "client")) {
-      return invitationRequired("This email belongs to a non-client GRIDGO account. Ask an administrator to link the Clerk identity.");
-    }
-    if (emailMatches.length > 0) {
-      return { status: 409, error: "email_already_registered", message: "This email is already assigned to another GRIDGO identity. Ask an administrator to resolve the account conflict.", user: null, mutated: false };
-    }
-    user = {
-      id: createId("user"),
-      clerkUserId,
-      email: profile.email,
-      name: profile.name || profile.email.split("@")[0],
-      role: "client",
-      accountType: "individual",
-      createdAt: now(),
-    };
-    if (profile.phone) user.phone = profile.phone;
-    store.users.push(user);
-    mutated = true;
+  if (!profile.email || !profile.email.includes("@")) {
+    return { status: 400, error: "email_required", message: "This Google account has no email address GRIDGO can use. Add an email in Clerk and try again.", user: null, mutated: false };
   }
+  const emailMatches = (store.users || []).filter(
+    (candidate) => String(candidate.email || "").toLowerCase() === profile.email,
+  );
+  if (emailMatches.some((candidate) => candidate.role !== "client")) {
+    return invitationRequired("This email belongs to a non-client GRIDGO account. Ask an administrator to link the Clerk identity.");
+  }
+  if (emailMatches.length > 0) {
+    return { status: 409, error: "email_already_registered", message: "This email is already assigned to another GRIDGO identity. Ask an administrator to resolve the account conflict.", user: null, mutated: false };
+  }
+  user = {
+    id: createId("user"),
+    clerkUserId,
+    email: profile.email,
+    name: profile.name || profile.email.split("@")[0],
+    role: "client",
+    accountType: "individual",
+    createdAt: now(),
+  };
+  if (profile.phone) user.phone = profile.phone;
+  store.users.push(user);
+  mutated = true;
+  mutated = ensureClientMembership(store, user, now) || mutated;
   return { status: 200, error: null, message: null, user, mutated };
 }

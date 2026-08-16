@@ -17,11 +17,12 @@ The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_M
 
 There is no `AUTH_MODE`, password login, local signup, local session table, demo password, or demo user seed. `POST /auth/login` and `POST /auth/signup` return `404 not_found`; the API never issues an access token.
 
-Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Authorization: Bearer <Clerk session JWT>`. GRIDGO roles are authoritative in PostgreSQL, not in a client-settable Clerk claim.
+Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Authorization: Bearer <Clerk session JWT>`. GRIDGO memberships and approval cases are authoritative in PostgreSQL, not in a client-settable Clerk claim or metadata value.
 
-- `GET /auth/me` resolves an already-mapped Clerk subject or returns `401 unauthorized`.
-- `POST /auth/clerk/activate` is the explicit first-use Google/public SSO path. It creates a `client` only and returns `{ "user": ... }`; it never merges by email.
-- Supplier, rider, Operations, and administrator roles are assigned through the audited GRIDGO role route after activation. An activation request can never choose or inherit one of those roles.
+- `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries, or `401 unauthorized` when the Clerk subject is unmapped.
+- Each app uses its fixed database projection: `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, or `/auth/me/admin`. The URL selects the required membership; request JSON cannot select or grant one.
+- `POST /auth/clerk/activate` is the explicit client-only Google/public SSO path. It creates a new personal client identity, or adds a personal client membership to an already-mapped identity, and returns `{ "user": ... }`; it never merges by email or grants another membership.
+- Supplier, rider, Operations, and administrator memberships are assigned through fixed onboarding or the audited GRIDGO role route. An activation request can never choose or inherit one of those memberships.
 - `POST /auth/logout` releases the optional FCM device token to the anonymous app-update pool. The app terminates its Clerk session with Clerk; the API has no local session to revoke.
 
 This preserves the existing Google activation response shape. Follow-up app/dashboard work must remove calls expecting `{token,user}` from API login/signup, use Clerk JWTs directly, and call authenticated `POST /devices` after sign-in to claim a phone.
@@ -34,7 +35,7 @@ After creating the first identity in the correct Clerk instance, run:
 npm run bootstrap-admin -- --clerk-user-id user_...
 ```
 
-The command loads the identity from Clerk and inserts/promotes it as `super_admin` only while no Operations or Super Admin row exists. It writes an audit record and an immutable database completion marker. Once completed, the command refuses even if roles later change. This one-time CLI bootstrap is the only first-administrator path: there is no bootstrap HTTP route and no redeemable bootstrap token.
+The command loads the identity from Clerk and inserts/promotes it with a `super_admin` membership only while no Operations or Super Admin membership exists. It writes an audit record and an immutable database completion marker. Once completed, the command refuses even if memberships later change. This one-time CLI bootstrap is the only first-administrator path: there is no bootstrap HTTP route and no redeemable bootstrap token.
 
 ## Local start
 
@@ -90,7 +91,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 All routes except `/health`, `/catalog`, and the documented anonymous device registration calls require a verified Clerk bearer.
 
-- Identity: `/auth/me`, `/auth/clerk/activate`, `/auth/logout`
+- Identity: `/auth/me`, fixed `/auth/me/*` role projections, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues

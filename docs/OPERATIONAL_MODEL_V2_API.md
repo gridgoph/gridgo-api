@@ -7,8 +7,8 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 - Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
-- Roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`.
-- Verification: `unverified | pending | approved | suspended | rejected`. Only `approved` supplier/rider accounts can receive work.
+- Membership roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`. Clerk claims and metadata never grant them.
+- Approval cases: `pending | approved | suspended | rejected`. Only `approved` supplier/rider cases can receive work.
 - Client `accountType`: `individual | business | organization`. Clerk self-activation creates an `individual` client; Operations can update the profile later.
 
 ## Complete route index
@@ -19,8 +19,13 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/catalog` | public | demo product catalogue |
 | POST | `/auth/signup` | removed | always `404`; sign-up is owned by Clerk |
 | POST | `/auth/login` | removed | always `404`; sign-in is owned by Clerk |
-| POST | `/auth/clerk/activate` | Clerk JWT | create the caller's first GRIDGO client row after Google/email SSO |
-| GET | `/auth/me` | authenticated | `{user}` without password |
+| POST | `/auth/clerk/activate` | Clerk JWT | create or add only the caller's personal client membership after Google/email SSO |
+| GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary |
+| GET | `/auth/me/client` | client membership | client profile, business case, and capabilities |
+| GET | `/auth/me/supplier` | supplier membership | supplier profile, case, readiness, and capabilities |
+| GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
+| GET | `/auth/me/ops` | `ops_admin` membership | fixed Operations projection |
+| GET | `/auth/me/admin` | `super_admin` membership | fixed Super Admin projection |
 | POST | `/auth/logout` | authenticated | optionally releases this phone back to unclaimed; the client signs out of Clerk |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
@@ -99,7 +104,9 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 Clerk owns sign-up, sign-in, password recovery, Google SSO, sessions, and JWT refresh. The API has no passwords or locally issued sessions. The former `/auth/signup` and `/auth/login` endpoints return `404 not_found`.
 
-The first authenticated activation creates an `individual` client. Supplier, rider, Operations, and Super Admin access is granted only by a database role change performed by an existing Super Admin. The database role is authoritative for every authorization decision; Clerk client-settable metadata is ignored. Supplier/rider verification remains a separate Operations-controlled approval.
+The first authenticated activation creates an `individual` client identity, membership, and profile. The same fixed endpoint may add a client membership to an already-mapped non-client identity. Supplier, rider, Operations, and Super Admin access comes only from database memberships. Clerk client-settable metadata is ignored, and supplier/rider approval remains a separate Postgres case. During the one-release compatibility window, a `POST /users/:id/verification` decision also updates the target's matching supplier or rider approval case in the same transaction (legacy `unverified` maps to case `pending`), so fixed projections and legacy work gates report the same approval state. Any `PATCH /users/:id/role` change into supplier or rider — a re-promotion or a direct supplier↔rider switch — re-initializes legacy verification to `unverified` and resets any stale decided approval case of the target kind to `pending`: a demoted then re-promoted supplier or rider re-earns approval, and supplier approval never grants rider approval or vice versa.
+
+`GET /auth/me` returns the identity plus every membership and approval-case summary. The fixed projections `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, and `/auth/me/admin` derive the required membership from the URL alone; request JSON can never select or grant one. A verified but unmapped Clerk subject stays `401 unauthorized`. A mapped identity missing the required membership receives `403 supplier_account_not_found` on `/auth/me/supplier` and `403 membership_required` (with `requiredRole`) on the other four projections.
 
 `PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
 
@@ -110,11 +117,11 @@ Auth: `Authorization: Bearer <Clerk session JWT>`. Empty body.
 Used once after Google / public SSO. `/auth/me` does not create or email-link accounts.
 
 - Verifies the JWT the same way other Clerk routes do (signature, issuer, `azp`, expiry).
-- Loads the Clerk user with the Backend API.
-- A previously mapped Clerk identity returns its existing database user.
+- Loads an unmapped Clerk user with the Backend API.
+- A previously mapped Clerk identity idempotently keeps or adds only its `client` membership and personal client profile.
 - An unmapped identity creates a client (`clerkUserId`, primary verified email, name, phone if present, and `accountType: "individual"`). Email is not used to merge identities.
 - Success is `200 { user }` (`publicUser`; no `clerkUserId`). The same Clerk JWT can immediately call `/auth/me`.
-- Unmapped JWT on `/auth/me` remains `401 unauthorized`. Role claims or public metadata cannot elevate the database role.
+- Unmapped JWT on `/auth/me` remains `401 unauthorized`. Role or status claims and Clerk metadata cannot elevate database memberships or approval cases.
 
 ## Supplier shop and verification profile
 
