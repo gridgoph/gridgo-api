@@ -41,29 +41,26 @@ MINIO_PUBLIC_URL=http://192.168.1.10:9000
 
 Then restart Compose so the exact binding takes effect. This is an explicit LAN-only opt-in and is off by default. Never use `0.0.0.0` or a bare Docker port mapping; the Compose preflight accepts only one explicit IPv4 address and rejects wildcard/IPv6 forms. Docker-published ports bypass host `ufw`; do not expose MinIO on an untrusted LAN or the internet. The console stays on `127.0.0.1` in every mode. The bucket is private, and possession of a signed URL grants read access only until its five-minute expiry.
 
-For the hosted pilot, `MINIO_ENDPOINT` remains a loopback origin while `MINIO_PUBLIC_URL` must be the Cloudflare-facing public HTTPS origin. Caddy receives plain HTTP from Cloudflare Flexible TLS and exposes only the signed private-bucket path, never the MinIO port or console. Production startup rejects an absent or non-HTTPS public URL. See [`docs/DEPLOYMENT.md`](DEPLOYMENT.md#3-private-minio) for the exact Cloudflare/Caddy topology, backup, and restore procedure.
+For the hosted pilot, `MINIO_ENDPOINT` is the single-label MinIO container origin on the private network while `MINIO_PUBLIC_URL` is the Cloudflare-facing public HTTPS origin. Caddy receives plain HTTP from Cloudflare Flexible TLS and exposes only the signed private-bucket path, never the MinIO port or console. Production startup rejects an absent or non-HTTPS public URL. See [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) for the exact topology, backup, and restore procedure.
 
 ## Base conventions
 
 - API example base: `http://127.0.0.1:18787`
-- Auth header on every route below: `Authorization: Bearer <token>`
+- Auth header on every route below: `Authorization: Bearer <Clerk session JWT>`
 - Errors: JSON `{ "error": "snake_case", "message": "concrete problem and recovery" }`, with only the documented additive detail fields
 - Upload field names: exactly one binary `file` and one text `purpose`
 - The client must not supply a bucket, object key, URL, owner ID, lifecycle state, size, or detected MIME
 - IDs are opaque. Clients may persist `fileId`, never an object key or presigned URL.
 
-Local-development login helpers used below (never use the committed password on a hosted deployment):
+Obtain Clerk session JWTs from the corresponding signed-in development clients,
+then export them for the examples below. The API never issues local tokens:
 
 ```bash
 API=http://127.0.0.1:18787
-CLIENT_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"felyciaaa0220@gmail.com","password":"Ilovegridgo-0990"}' | jq -r .token)
-SUPPLIER_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"markdavidprado@gmail.com","password":"Ilovegridgo-0990"}' | jq -r .token)
-RIDER_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"mddprado00290@usep.edu.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
-OPS_TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  --data '{"email":"ops@gridgo.ph","password":"Ilovegridgo-0990"}' | jq -r .token)
+CLIENT_TOKEN='<Clerk client session JWT>'
+SUPPLIER_TOKEN='<Clerk supplier session JWT>'
+RIDER_TOKEN='<Clerk rider session JWT>'
+OPS_TOKEN='<Clerk Operations session JWT>'
 ```
 
 ## File metadata and parent references
@@ -126,7 +123,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image` and `verification_document`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo`. A pending supplier may upload verification documents using the token returned by supplier signup. Clients, riders, Operations, and Super Admin cannot upload documents on a supplier's behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image` and `verification_document`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo`. A pending supplier may upload verification documents with their Clerk bearer after activation and role assignment. Clients, riders, Operations, and Super Admin cannot upload documents on a supplier's behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -293,7 +290,7 @@ POF is a milestone gate, not an order-state approval loop. Upload the bytes, att
 | `packaging_qc` | assigned supplier | packaging/QC milestone becomes `pof_attached` |
 | `delivered` | assigned rider | delivered and retention milestones become `pof_attached` |
 
-The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions. Load-time migration moves existing orders in those states to `awaiting_downpayment` and preserves their legacy `proofFileIds`.
+The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions or valid PostgreSQL order states. New POF uses `fulfilment_proof` file references only.
 
 ## Error contract
 
@@ -341,18 +338,18 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 
 | Trap | Resolution in this contract |
 |---|---|
-| Blobs/base64 in JSON | Prohibited; only metadata and file IDs enter `store.json`. |
+| Blobs/base64 in PostgreSQL | Prohibited; only metadata, private object keys, and opaque file references enter the database. |
 | Public bucket | Prohibited; reads require an API-authorized five-minute signed GET. The signed path exposes bucket/key text only as part of that opaque capability. |
 | Client-supplied keys | Prohibited for upload, attach, read, presign, and delete; keys are generated server-side. |
 | Persist signed/raw URLs as identity | Prohibited; persist only `fileId`. URLs are ephemeral response data. |
 | Rewrite host after signing | Prohibited; signer uses fixed `MINIO_PUBLIC_URL`. |
 | Trust extension or declared MIME alone | Prohibited; extension, optional specific declared MIME, and magic bytes must agree. |
 | Turn 200 MiB into multiple buffers | Avoided; multipart is streamed to disk, with only parser tail/signature bytes retained, then disk is streamed to MinIO. |
-| Assume object put + JSON save are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
+| Assume object put + database commit are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
 | Delete referenced evidence on uploader request | Prohibited; `409 file_in_use`. |
 | API uses root credentials | Prohibited; Compose provisions a separate bucket-policy API user. Root credentials are init/console only. |
 | Floating MinIO image | Prohibited; both `minio/minio` and `minio/mc` use pinned release tags. |
 
-## Existing-store migration
+## PostgreSQL reconciliation
 
-`load()` additively creates top-level `files: []`, order `artworkFileIds`, legacy `proofFileIds`, `fulfilmentProofFileIds`, and `deliveryPhotoFileIds`, and supplier-service `imageFileIds` only when missing. It never fabricates an object from `artworkName`, overwrites valid file metadata, removes orders, or changes unrelated collections. Running it twice produces no second change. Never reset a live/demo store to obtain these fields.
+Versioned migrations create file metadata and reference tables; there is no JSON import or load-time structural migration. On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted` in a transaction.

@@ -2,20 +2,26 @@
   "name": "gridgo-api",
   "version": "0.1.0",
   "private": true,
-  "description": "GRIDGO local demo API — temporary, replaceable backend for all GRIDGO apps",
+  "description": "GRIDGO PostgreSQL API for client, supplier, rider, and operations apps",
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test tests/*.test.js",
+    "test": "DATABASE_URL=${DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node --test --test-concurrency=1 tests/*.test.js",
+    "migrate": "node-pg-migrate up --migrations-dir migrations",
     "seed": "node src/seed.js",
-    "reset": "node src/seed.js --reset"
+    "bootstrap-admin": "node src/bootstrap-admin.js"
   },
   "engines": {
     "node": ">=20.9.0"
   },
   "dependencies": {
     "@clerk/backend": "3.16.5",
-    "minio": "8.0.7"
+    "minio": "8.0.7",
+    "node-pg-migrate": "^8.0.3",
+    "pg": "^8.16.3"
+  },
+  "overrides": {
+    "glob": "11.1.0"
   }
 }

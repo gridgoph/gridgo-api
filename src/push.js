@@ -2,10 +2,10 @@
  * Firebase Cloud Messaging (HTTP v1) push delivery.
  *
  * Two separable halves live here, for the same reason `attachments.js` keeps
- * store rules apart from `object-storage.js`:
+ * domain rules apart from `object-storage.js`:
  *
- *   - Device-token store rules (register / unregister / lookup / prune). Pure
- *     functions over the JSON store, so ownership can be tested without a
+ *   - Device-token domain rules (register / unregister / lookup / prune). Pure
+ *     functions over an in-memory transaction snapshot, so ownership can be tested without a
  *     network or a server process.
  *   - `createPushDelivery()`, the FCM client. It signs a service-account JWT
  *     with `node:crypto` (RS256), exchanges it for a cached OAuth2 access
@@ -74,16 +74,13 @@ export class PushAudienceError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Device-token store rules
+// Device-token domain rules
 // ---------------------------------------------------------------------------
 
 /**
- * Additive migration for legacy stores: a store written before push existed
- * has no device tokens at all, and one written before anonymous registration
- * has no `userId` key on a row that predates the field. Idempotent — a second
- * run changes nothing.
+ * Normalize a caller-created snapshot before applying device-token rules.
  */
-export function backfillDeviceTokens(store) {
+export function ensureDeviceTokens(store) {
   if (!Array.isArray(store.deviceTokens)) {
     store.deviceTokens = [];
     return true;
@@ -163,7 +160,7 @@ export function publicDevice(record) {
  * Returns `{ device, created, reassignedFrom, changed }`.
  */
 export function registerDeviceToken(store, { userId, token, platform, at }) {
-  backfillDeviceTokens(store);
+  ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
 
   if (!existing) {
@@ -253,7 +250,7 @@ function evictOldestUnclaimed(store, keep) {
  *     launch, when the app re-registers. Claimed rows are never evicted.
  */
 export function registerUnclaimedDeviceToken(store, { token, platform, at, limit = UNCLAIMED_DEVICE_LIMIT }) {
-  backfillDeviceTokens(store);
+  ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
   if (existing) {
     if (isClaimedDevice(existing)) {
@@ -279,7 +276,7 @@ export function registerUnclaimedDeviceToken(store, { token, platform, at, limit
  * step.
  */
 export function claimDeviceToken(store, { token, userId, at }) {
-  backfillDeviceTokens(store);
+  ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
   if (!existing) return { device: null, claimed: false, changed: false, previousUserId: null };
   if (existing.userId === userId) {
@@ -301,7 +298,7 @@ export function claimDeviceToken(store, { token, userId, at }) {
  * the same immediacy an unregister gave.
  */
 export function releaseDeviceToken(store, { token, userId, at }) {
-  backfillDeviceTokens(store);
+  ensureDeviceTokens(store);
   const record = store.deviceTokens.find(
     (candidate) => candidate.token === token && isClaimedDevice(candidate) && candidate.userId === userId,
   );
@@ -323,7 +320,7 @@ export function releaseDeviceToken(store, { token, userId, at }) {
  * requires its owner's bearer token.
  */
 export function unregisterDeviceToken(store, { userId = null, token }) {
-  backfillDeviceTokens(store);
+  ensureDeviceTokens(store);
   const index = store.deviceTokens.findIndex((record) =>
     record.token === token &&
     (userId == null ? !isClaimedDevice(record) : record.userId === userId),
@@ -335,7 +332,7 @@ export function unregisterDeviceToken(store, { userId = null, token }) {
 
 /** Drop registrations FCM has reported as dead. Returns the number removed. */
 export function removeDeviceTokenIds(store, ids) {
-  backfillDeviceTokens(store);
+  ensureDeviceTokens(store);
   const doomed = new Set(ids);
   if (doomed.size === 0) return 0;
   const before = store.deviceTokens.length;

@@ -11,7 +11,6 @@ import {
   authorizeFileAttach,
   authorizeFileRead,
   authorizeFileUpload,
-  backfillFiles,
   createPendingFile,
   markFileDeleted,
   markFileDeletePending,
@@ -193,28 +192,6 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
 });
 
-test("file registry backfill is additive and byte-idempotent", () => {
-  const store = {
-    users: [{ id: "supplier-a", role: "supplier" }, { id: "client-a", role: "client" }],
-    orders: [{ id: "order-a", artworkName: "legacy.pdf" }],
-    supplierServices: [{ id: "service-a" }],
-    claims: [{ id: "untouched" }],
-  };
-  assert.equal(backfillFiles(store), true);
-  assert.deepEqual(store.files, []);
-  assert.deepEqual(store.orders[0].artworkFileIds, []);
-  assert.deepEqual(store.orders[0].proofFileIds, []);
-  assert.deepEqual(store.orders[0].fulfilmentProofFileIds, []);
-  assert.deepEqual(store.orders[0].deliveryPhotoFileIds, []);
-  assert.equal(store.orders[0].artworkName, "legacy.pdf");
-  assert.deepEqual(store.supplierServices[0].imageFileIds, []);
-  assert.deepEqual(store.users[0].verificationDocumentFileIds, []);
-  assert.equal("verificationDocumentFileIds" in store.users[1], false);
-  assert.deepEqual(store.claims, [{ id: "untouched" }]);
-  const once = JSON.stringify(store);
-  assert.equal(backfillFiles(store), false);
-  assert.equal(JSON.stringify(store), once);
-});
 
 test("pending -> ready -> delete_pending -> deleted never exposes objectKey", () => {
   const file = createPendingFile({ fileId: "file-a", objectKey: "artwork/private", user: client, purpose: "artwork", file: { originalFilename: "layout.pdf", declaredContentType: "application/octet-stream", size: 42 }, detectedContentType: "application/pdf", at: "2026-08-09T00:00:00Z" });

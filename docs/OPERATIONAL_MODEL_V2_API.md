@@ -4,24 +4,24 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 ## Conventions
 
-- Bearer auth: `Authorization: Bearer <token>` except `/health`, `/catalog`, `/auth/signup`, `/auth/login`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
+- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
 - Roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`.
-- Verification: `unverified | pending | approved | suspended | rejected`. Supplier/rider signup starts `pending`; only `approved` accounts can receive work.
-- Client `accountType`: `individual | business | organization`. Signup accepts `personal` as an alias and stores/returns `individual` so existing branding contracts remain stable.
+- Verification: `unverified | pending | approved | suspended | rejected`. Only `approved` supplier/rider accounts can receive work.
+- Client `accountType`: `individual | business | organization`. Clerk self-activation creates an `individual` client; Operations can update the profile later.
 
 ## Complete route index
 
 | Method | Path | Authorization | Contract |
 |---|---|---|---|
-| GET | `/health` | public | service/storage health, plus `commit`/`builtAt` build identity |
+| GET | `/health` | public | service/database/storage/push health, plus `commit`/`builtAt` build identity |
 | GET | `/catalog` | public | demo product catalogue |
-| POST | `/auth/signup` | public | self-signup for client/supplier/rider |
-| POST | `/auth/login` | public | `{email,password}` → `{token,user}` |
-| POST | `/auth/clerk/activate` | Clerk JWT when `AUTH_MODE` is `dual` or `clerk` | link or create a client after Google / public SSO; `404` in `legacy` |
+| POST | `/auth/signup` | removed | always `404`; sign-up is owned by Clerk |
+| POST | `/auth/login` | removed | always `404`; sign-in is owned by Clerk |
+| POST | `/auth/clerk/activate` | Clerk JWT | create the caller's first GRIDGO client row after Google/email SSO |
 | GET | `/auth/me` | authenticated | `{user}` without password |
-| POST | `/auth/logout` | authenticated/token optional | invalidates current token; optionally releases this phone back to unclaimed |
+| POST | `/auth/logout` | authenticated | optionally releases this phone back to unclaimed; the client signs out of Clerk |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
 | GET | `/files/:fileId/download-url` | same as file read | five-minute signed GET |
@@ -47,7 +47,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/users/:id/verification-documents` | owning supplier; ops/super any supplier | private attached verification-document metadata |
 | PATCH | `/users/:id/role` | super | role change; audited |
 | POST | `/users/:id/verification` | ops/super | supplier/rider approval decision |
-| GET | `/zones` | authenticated | legacy address-zone records; fees are not used for v2 pricing |
+| GET | `/zones` | authenticated | address-zone records; order creation requires an active zone code, but zone fees are not used for v2 pricing |
 | POST | `/zones` | super | create zone |
 | PATCH | `/zones/:idOrCode` | super | update zone |
 | GET | `/taxonomy` | authenticated | flat taxonomy plus derived `categoryTree` |
@@ -95,78 +95,26 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/dispatch/:id/proof` | authenticated | retired: always `410 dispatch_proof_route_retired` |
 | GET | `/jobs` | supplier | only the caller's assigned supplier jobs |
 
-## Signup
+## Clerk identity and role provisioning
 
-### `POST /auth/signup`
+Clerk owns sign-up, sign-in, password recovery, Google SSO, sessions, and JWT refresh. The API has no passwords or locally issued sessions. The former `/auth/signup` and `/auth/login` endpoints return `404 not_found`.
 
-Common required request fields:
+The first authenticated activation creates an `individual` client. Supplier, rider, Operations, and Super Admin access is granted only by a database role change performed by an existing Super Admin. The database role is authoritative for every authorization decision; Clerk client-settable metadata is ignored. Supplier/rider verification remains a separate Operations-controlled approval.
 
-```json
-{
-  "role": "client",
-  "email": "ana@example.com",
-  "password": "at-least-8-characters",
-  "name": "Ana Santos",
-  "phone": "+639171234567"
-}
-```
-
-Client adds:
-
-```json
-{
-  "accountType": "individual",
-  "orgName": "required for business or organization"
-}
-```
-
-Supplier adds:
-
-```json
-{
-  "supplierName": "PrintRight Davao",
-  "shop": { "lat": 7.064, "lng": 125.6085, "label": "C.M. Recto St, Davao City" },
-  "categoryRanks": [
-    { "categoryCode": "marketing_collateral", "rank": 1 },
-    { "categoryCode": "corporate_event_merch", "rank": 2 }
-  ]
-}
-```
-
-`categoryCode` accepts a live canonical category or retired alias and stores the canonical code. Entries are unique and ranks must be exactly `1..n` with no gaps. The response user has `verificationStatus: "pending"`.
-
-Rider adds:
-
-```json
-{
-  "riderProfile": {
-    "vehicleType": "motorcycle",
-    "vehiclePlate": "ABC 1234",
-    "licenseNumber": "N01-23-456789"
-  }
-}
-```
-
-The response user has `verificationStatus: "pending"`. Success for every role is `201 {token,user}`. Duplicate email is `409 email_already_registered`.
-
-Supplier signup also creates an authenticated session immediately: the `201` response token is valid while `verificationStatus` remains `pending`. The supplier uses that token to upload and attach the required business permit, valid ID, and sample-work photos after the account exists. Pending status does not block profile/document setup, but it continues to block matching and accepting work.
-
-Approval is the existing `POST /users/:id/verification` body `{ "status": "approved", "reason": "..." }`. Pending suppliers cannot be assigned by the transition endpoint; pending riders cannot list, accept, or transition into dispatch assignment.
+`PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
 
 ### `POST /auth/clerk/activate`
 
-Auth: `Authorization: Bearer <Clerk session JWT>` when `AUTH_MODE` is `dual` or `clerk`. Empty body. `legacy` returns `404 not_found`.
+Auth: `Authorization: Bearer <Clerk session JWT>`. Empty body.
 
 Used once after Google / public SSO. `/auth/me` does not create or email-link accounts.
 
 - Verifies the JWT the same way other Clerk routes do (signature, issuer, `azp`, expiry).
 - Loads the Clerk user with the Backend API.
-- Only `role=client` may self-activate. A Clerk or local supplier/rider/ops identity is `403 invitation_required`.
-- If exactly one existing local user has the same email, `role=client`, and no `clerkUserId`, that profile is linked. No merge across roles.
-- If no such user exists, a client is created (`clerkUserId`, email, name, phone if present). `accountType` is left unset until the client app collects it.
-- Writes Clerk `publicMetadata.gridgoRole=client` so later session tokens carry `gridgo_role`.
-- Success is `200 { user }` (`publicUser`; no `clerkUserId`). Call `/auth/me` again with a **fresh** token that includes `gridgo_role=client`.
-- Unmapped JWT on `/auth/me` remains `401 unauthorized`. A linked identity with a missing or mismatched role claim remains `403 forbidden`.
+- A previously mapped Clerk identity returns its existing database user.
+- An unmapped identity creates a client (`clerkUserId`, primary verified email, name, phone if present, and `accountType: "individual"`). Email is not used to merge identities.
+- Success is `200 { user }` (`publicUser`; no `clerkUserId`). The same Clerk JWT can immediately call `/auth/me`.
+- Unmapped JWT on `/auth/me` remains `401 unauthorized`. Role claims or public metadata cannot elevate the database role.
 
 ## Supplier shop and verification profile
 
@@ -245,7 +193,7 @@ When the deployment has no FCM credential installed, every route below still wor
 - Re-registering the same token under the same account updates the existing record instead of adding a second one. Apps should re-register on every launch and on every Firebase token refresh; it is idempotent and cheap.
 - The server deletes a registration as soon as FCM reports it unregistered or its token invalid. An app that finds itself receiving nothing should simply register again.
 - **Registrations are strictly caller-owned.** Ownership is established exactly as it is for `/notifications` — from the bearer token. There is no operations override and no route through which one account can read, move, or delete another account's registrations.
-- **A registration is bound to the account, not to its login address.** The stored record holds `userId`; it never holds an email. Changing an account's sign-in address — including the pilot move from `@gridgo.local` to `@gridgo.ph` described under *Migration contract* — leaves the phone registered to the same person, and apps do not need to re-register after one.
+- **A registration is bound to the account, not to its login address.** The stored record holds `userId`; it never holds an email. Changing an account's Clerk sign-in address leaves the phone registered to the same person, and apps do not need to re-register afterward.
 
 ### `POST /devices`
 
@@ -309,17 +257,7 @@ Called with **no** `Authorization` header, this route removes an unclaimed regis
 
 ### Signing in and signing out
 
-`POST /auth/login` accepts an optional device token and **claims** that registration for the account signing in:
-
-```json
-{ "email": "…", "password": "…", "deviceToken": "fcm-registration-token-from-firebase" }
-```
-
-```json
-{ "token": "tok_…", "user": { … }, "deviceClaimed": true }
-```
-
-`deviceClaimed` is `true` when a registration for that token existed and now belongs to this account — the normal case for a phone that registered anonymously before anyone signed in. It is `false` when no `deviceToken` was sent, when the token was already this account's, or when the server has never seen it (a login carries no `platform`, so it cannot create a registration). **After any sign-in the app should still call `POST /devices`**; that path registers *and* claims, and is the only one that works for a token the server has not seen.
+Clerk owns sign-in. After Clerk returns a session, the app calls authenticated `POST /devices`; that path registers and claims the installation in one idempotent operation.
 
 `POST /auth/logout` accepts an optional device token and **releases** it in the same call:
 
@@ -331,9 +269,9 @@ Called with **no** `Authorization` header, this route removes an unclaimed regis
 { "ok": true, "deviceUnregistered": true, "deviceUnclaimed": true }
 ```
 
-**Prefer this over a separate unregister call.** After logout the bearer token is invalid, so a phone that logs out first can no longer authenticate `POST /devices/unregister` and would keep receiving the previous user's notifications.
+**Call this before ending the Clerk session.** After Clerk signs out, the phone can no longer authenticate the release and would otherwise keep receiving the previous user's notifications.
 
-The registration is **released, not deleted**: the row survives holding no identity, so the handset stays on the app-update channel while continuing to receive nothing personal. Signing out is exactly when a phone is most likely to be stuck on a build that needs updating. `deviceUnregistered` keeps its published meaning — this phone no longer receives the caller's notifications — and `deviceUnclaimed` is the same boolean under the name that now describes what happened. Both are `false` when no token was sent, when the session had already expired, or when the token belongs to another account; the body is still `200` and the sign-out still happens. Sending no body remains valid and behaves exactly as before.
+The registration is **released, not deleted**: the row survives holding no identity, so the handset stays on the app-update channel while continuing to receive nothing personal. `deviceUnregistered` keeps its published meaning — this phone no longer receives the caller's notifications — and `deviceUnclaimed` describes the same release. Both are `false` when no token was sent or when the token belongs to another account; the body is still `200`. Sending no body remains valid. The API does not revoke or mint Clerk sessions.
 
 ### Reaching a phone that has never signed in
 
@@ -566,6 +504,8 @@ At `POST /orders`, `priceRange` is client-safe and commission-inclusive:
 
 It is derived from current product and live-service reference prices. No supplier or delivery point is selected yet, so delivery is pending. It is an estimate, not an authorization.
 
+Order creation validates its inputs before drafting anything: `quantity` must be a positive integer (omitted means `1`) or the request is `400 invalid_quantity`, and `zone` must be an active zone code from `GET /zones` (omitted means `davao_central`) or the request is `400 invalid_zone`. When the reference catalog has not been seeded, creation fails with `409 catalog_not_seeded` instead of estimating from missing data.
+
 Supplier acceptance uses the existing transition endpoint with a new exact field:
 
 ```http
@@ -645,7 +585,7 @@ Order payment shape:
 }
 ```
 
-Statuses: `not_submitted | pending_confirmation | confirmed | legacy_confirmed`. `legacy_confirmed` appears only on migrated progressed orders.
+Statuses: `not_submitted | pending_confirmation | confirmed`.
 
 Client submission:
 
@@ -696,7 +636,7 @@ Exact rejection errors:
 | 403 | `forbidden` | caller is not Operations or Super Admin. |
 | 404 | `order_not_found` | no order has that ID. |
 | 409 | `payment_not_pending` | installment has no submitted payment awaiting review; refresh before acting. |
-| 409 | `payment_already_confirmed` | installment is `confirmed` or `legacy_confirmed`; accepted money cannot be reversed through this route and needs manual reconciliation. |
+| 409 | `payment_already_confirmed` | installment is `confirmed`; accepted money cannot be reversed through this route and needs manual reconciliation. |
 
 ## Payout milestones and POF
 
@@ -769,7 +709,7 @@ Endpoint-owned steps:
 - `picked_up|out_for_delivery -> delivered -> issue_window_open`: delivery evidence route atomically records delivery and opens window; no direct transition bypass.
 - `issue_window_open -> completed`: system only, when `issueWindowExpiresAt` has elapsed and no active hold. No actor can close it early.
 
-Retired states are never accepted: `supplier_proof_review`, `supplier_proof_changes_requested`, `supplier_proof_approved`, `awaiting_payment`. Migration maps them to `awaiting_downpayment` without deleting legacy proof files.
+Retired states are never accepted or stored: `supplier_proof_review`, `supplier_proof_changes_requested`, `supplier_proof_approved`, `awaiting_payment`.
 
 ## Rider pickup checklist and escalation
 
@@ -832,24 +772,10 @@ POST /dispatch/:id/delivery
 }
 ```
 
-The hours snapshot comes from the one global setting. Every store load expires elapsed windows. A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed` and automatically releases retention when delivered POF is present.
+The hours snapshot comes from the one global setting. Request processing expires elapsed windows transactionally. A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed` and automatically releases retention when delivered POF is present.
 
-## Migration contract
+## Persistence contract
 
-Load-time `backfillOperationalModel()` is idempotent:
+PostgreSQL is the only persistence system. Versioned forward migrations create the schema; startup never creates or repairs tables. Order transitions, payment and payout movements, credits, claims, and issue handling run inside database transactions guarded against concurrent lost updates.
 
-- adds `settings` and `escalations` collections;
-- removes retired `zones[].deliveryFeeMinor`; delivery pricing comes only from `settings.deliveryFeeBands`;
-- fills complete v2 order money, split payment, milestone, checklist, and issue-window fields;
-- preserves legacy client-visible subtotal: old `totalMinor` becomes `subtotalMinor`; supplier price is reverse-derived and commission is the exact remainder; delivery is then added to new `totalMinor`;
-- maps old COD payment records to `digital_manual_legacy`, removes `codEligible`, and creates coherent installment status from lifecycle progress;
-- maps supplier-proof/old payment entry states to `awaiting_downpayment` and creates the assignment notification once;
-- preserves `proofFileIds`, file objects, uploaded object metadata, artwork names, and every unrelated collection.
-
-The structural file backfill also adds missing `verificationDocumentFileIds: []` only to supplier users. It never replaces an existing array or document metadata and is byte-idempotent on the second run.
-
-A store written before push gains an empty `deviceTokens: []` on its first load and is byte-identical on every load after that. Registrations are only ever created by a real device calling `POST /devices`; none are seeded, because a fabricated FCM token can only fail and then be pruned. Existing registrations are never rewritten: a claimed row keeps its `userId`, and `userId: null` is the stored spelling of unclaimed.
-
-A separate load-time pass renames the six shipped pilot identities off the retired `@gridgo.local` addresses onto `@gridgo.ph`, in place. It runs before every backfill and rewrites `user.email` and nothing else, so a phone registered under the old address stays registered, keeps its `dev_…` id, and continues to receive that account's pushes; the account also keeps its notifications, orders and live sessions, all of which reference `user.id`. Apps require no migration step — only the new login addresses. Because that guarantee depends on registrations never storing a login, startup refuses (mutating nothing) if a `deviceTokens` record is found carrying an email instead of a `userId`. Operator detail: `docs/DEPLOYMENT.md`.
-
-See `docs/V2_MIGRATION_CHECKSUMS.md` for the copied-live-store proof and exact hashes.
+Fresh seed creates only reference data: taxonomy, catalog, zones, and settings. It creates no users, orders, sessions, devices, or operational records. Files remain private object-storage objects; PostgreSQL stores only file metadata and opaque relationships.

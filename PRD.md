@@ -1,209 +1,75 @@
-# GRIDGO Demo API — PRD (MVP)
+# GRIDGO API — Product Requirements
 
-> Source: GRIDGO Product Requirements Document (tinker), Supplier presentation (2026-08-04), captain MVP direction, blueprint PR (service catalogue / taxonomy).
->
-> Captain's operational model v2 supersedes the original payment/fulfilment flow. The exact implemented contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
+> The exact mobile/API state contract is `docs/OPERATIONAL_MODEL_V2_API.md`. File and taxonomy contracts are `docs/STORAGE_API.md` and `docs/TAXONOMY_API.md`.
 
 ## Purpose
 
-Temporary, **replaceable** local backend used by every GRIDGO surface (client, supplier, rider, ops/admin web) for demonstration and local development. Not production.
+GRIDGO is a centralized Davao printing platform connecting clients, accredited print suppliers, riders, Operations, and Super Admin. The API supports the Order → Print → Deliver lifecycle while keeping platform governance and money movement under server control.
 
-## Non-goals (MVP)
+## Platform foundations
 
-- Clerk, Supabase Auth/DB, PayMongo live collection
-- Real card vaulting, provider sub-accounts, or KYC
-- Google Maps billing / Navigation SDK server side (client apps may use OSM + OSRM with API coords)
-- Multi-region HA
-- Runtime geocoding of free-text addresses on the server
-- Auto-matcher that assigns suppliers without Operations
+- PostgreSQL 17 is the only domain persistence system. MinIO stores private file bytes; PostgreSQL stores metadata only.
+- Clerk is the only identity/session provider, including Google sign-in. GRIDGO roles remain authoritative in PostgreSQL.
+- Money uses integer PHP minor units. Payments are manually confirmed digital QR installments: 75% downpayment and 25% balance. COD is unavailable.
+- Fresh seed creates catalog, taxonomy, zones, and settings only. It creates no accounts or operational data.
 
-## Goals
+## Roles and onboarding
 
-1. One process all mobile apps and the web portal can call (`http://127.0.0.1:8787` or LAN IP).
-2. Custom auth with self-signup for clients, suppliers, and riders plus role claims.
-3. Order lifecycle transitions aligned with operational model v2.
-4. Manually confirmed digital QR payment: 75% downpayment and 25% balance; no COD.
-5. Dispatch offers, location pings, six-check pickup gate, evidence-backed escalation, and file-backed delivery evidence.
-6. Stable route shapes so mobile `lib/api.ts` and the web portal survive a future cloud swap.
-7. Order geography for maps: `pickup` / `dropoff` coords (Davao pilot) so apps do not geocode at runtime.
-8. **Platform-governed supplier service catalogue** and matching eligibility for Operations.
-9. **Ops / Super Admin surface**: users, roles, verification, zones/fees, credit grants, claims/holds, issues, audit.
-10. Private MinIO files for artwork, milestone POFs, delivery/checklist photos, and supplier-service images: streamed API uploads, explicit file-ID attach, and authorized short-lived presigned GETs.
-
-## Roles served
-
-| Role | Local login | App |
+| Role | Provisioning | Operational gate |
 |---|---|---|
-| client | felyciaaa0220@gmail.com / Ilovegridgo-0990 | gridgo-client — Fely Cia, Clerk Development, `accountType: "individual"` |
-| supplier | markdavidprado@gmail.com / Ilovegridgo-0990 | gridgo-supplier — Mark David Prado, approved |
-| rider | mddprado00290@usep.edu.ph / Ilovegridgo-0990 | gridgo-rider — Mark David Prado, approved |
-| ops_admin | ops@gridgo.ph / Ilovegridgo-0990 | web Operations (hosted `AUTH_MODE=legacy` fixture) |
-| super_admin | admin@gridgo.ph / Ilovegridgo-0990 | web Super Admin (hosted `AUTH_MODE=legacy` fixture) |
+| client | Clerk sign-in then `POST /auth/clerk/activate` | active immediately |
+| supplier | activate as client, then Super Admin role assignment | Operations approval required for live services and matching |
+| rider | activate as client, then Super Admin role assignment | Operations approval required for dispatch |
+| ops_admin | Super Admin role assignment | database role is authoritative |
+| super_admin | one-time CLI bootstrap for the first admin; later audited role assignment | database role is authoritative |
 
-Do not advertise `client@` / `individual@` / `supplier@` / `rider@` `@gridgo.ph` as the people to log in as. Those rows remain hosted-legacy / local scenario identities so Ana Client's orders are not attached to Fely.
+The API stores no passwords and issues no sessions. `/auth/login` and `/auth/signup` are removed. Client-settable Clerk metadata never grants a GRIDGO role.
 
-## Client account type
+Client users have explicit `accountType: individual | business | organization`. Activation defaults to `individual`; it is never inferred from `orgName`. Non-client roles omit the field.
 
-Authoritative field on **client** users for logo lockup (plain **GRIDGO** vs **GRIDGO Business**). Exposed through `publicUser` on login, `/auth/me`, and user list/detail.
+## Product and supplier catalogue
 
-| Field | Values | Notes |
-|---|---|---|
-| `accountType` | `"individual"` \| `"business"` \| `"organization"` | **Not** inferred from `orgName`; signup accepts `personal` as alias for `individual` |
+The platform-governed taxonomy contains four categories and seventeen subcategories. Materials and finishes reference flat category codes. `GET /taxonomy` derives `categoryTree` per response and never persists it.
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Default when missing | `"individual"` | Business branding is opt-in; consumers never see `undefined` |
-| API write this pilot | `POST /auth/signup` | Business/organization accounts require `orgName` |
-| Non-client roles | field omitted | Same role-specific pattern as `orgName` / `shop` |
+Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Operations/Super Admin verifies live capability. Matching remains explainable and manual: an approved supplier needs at least one live service covering product family, material, quantity, and zone.
 
-Backfill on `load()`: any client without a valid `accountType` gets `"individual"`; existing valid values are never overwritten.
+## Orders, money, and fulfilment
 
-## Ecosystem (from supplier presentation)
+- Orders snapshot client dropoff, assigned supplier pickup, distance band, delivery fee, and accepted price.
+- Commission is 10% on top of supplier price.
+- Payments and the four supplier payout milestones have independent relational records.
+- Supplier milestone release is gated by Proof of Fulfilment.
+- Claims hold payout. Client issues during the global issue window create an automatic claim hold.
+- Rider pickup requires all six checks; failures create an Operations escalation.
+- Delivery requires file-backed photo or signature evidence and opens the issue window.
+- Order/payment/payout/credit/claim/issue changes commit atomically with audit and notification records.
 
-GRIDGO is a **centralized digital printing platform**: market (users/businesses) ↔ platform ↔ print suppliers (signage, apparel, trophies, …) with a **rider system** for logistics.
+Clients never receive supplier price, commission, or supplier milestone amounts. Use the role-aware projection in `src/operational-model.js` for every order response.
 
-Simplified fulfilment: **Order → Print → Deliver**.
+## Geography
 
-Surfaces: **mobile apps + website portal**. User types: Admin, Supplier, Business (client), Rider.
+Orders carry `pickup` and `dropoff` map points; suppliers carry a shop point; rider pings retain timestamped coordinates. Current queries retrieve a point or the latest ping for one order, so constrained latitude/longitude columns are sufficient. Introduce PostGIS only when SQL radius or nearest-neighbor matching becomes a real query.
 
-## Supplier value props to support in API/data
+## Files and notifications
 
-1. **Client acquisition** — orders routed to accredited suppliers via live service catalogue eligibility.
-2. **Guaranteed payout model** — four POF-gated supplier milestones; claims/holds gate release.
-3. **QA & centralized communication** — single order inbox / timeline + platform audit log.
-4. **Service listing** — taxonomy-backed supplier services (not free-form marketing blurbs).
+Artwork, fulfilment proof, delivery evidence, supplier images, and verification documents remain private MinIO objects. API records use opaque file IDs and authorize short-lived signed downloads.
 
-Onboarding path: Apply → Get accredited / list shop + service catalogue → Start receiving GRIDGO orders.
+Notifications are durable, caller-scoped PostgreSQL rows delivered through list, SSE, and optional FCM. A failed push never fails the committed action. Unclaimed devices receive only `everyone` announcements and never personal data.
 
-## Product categories (catalog)
+## Non-goals
 
-Marketing & promo: flyers, brochures, posters/standees, business cards, stickers/labels, tarpaulins/banners.  
-Corporate/event merch: lanyards/IDs, custom apparel, drinkware, giveaways.
+- live PayMongo/card collection, provider sub-accounts, or cash custody;
+- automatic supplier assignment;
+- runtime geocoding;
+- PostGIS before spatial database queries exist;
+- storing file blobs in PostgreSQL;
+- local passwords, demo users, JSON persistence, or data import from the retired store.
 
-Client catalog (`/catalog`) is what clients request. **Service taxonomy** is what suppliers declare they can produce (capability categories, materials, finishes, product-family links). Super Admin owns taxonomy codes; suppliers select only.
+## Acceptance
 
-## Supplier service catalogue (blueprint §4.2)
-
-| Concern | Source | Editable by |
-|---|---|---|
-| Category / material / finish codes | Super Admin taxonomy | Super Admin only |
-| Size/qty ranges, pricing basis, rates (minor), turnaround, capacity, zones, notes | Supplier service line | Supplier (portal) |
-| Live for matching | Verification gate | Ops/super verify; supplier submits |
-
-States: `draft` | `pending_verification` | `live` | `suspended` | `withdrawn`.
-
-Rules:
-
-- First publish and new capability/material claims require verification before `live`.
-- Routine price/turnaround/capacity edits within a verified envelope stay live (audited).
-- Withdraw/suspend removes **new** matching only; accepted in-flight orders stay assigned.
-- Unverified suppliers have no live services and are not matchable.
-
-### Matching support
-
-`GET /orders/:id/eligible-suppliers` (ops/super) returns explainable candidates. Assignment remains manual via transition `supplier_assigned` with `supplierId` (optional `matchingServiceIds` recorded on the order).
-
-Eligibility basis:
-
-1. Supplier `verificationStatus === "approved"`
-2. At least one **live** service covering product family, material (when set), quantity band, and delivery zone
-3. Ranking inputs exposed (turnaround, capacity, service counts) — not auto-applied
-
-## Order geography
-
-Additive fields on every order (do not remove `address` / `zone`):
-
-| Field | Shape | Notes |
-|---|---|---|
-| `pickup` | `{ lat, lng, label } \| null` | Supplier shop; null if no supplier yet |
-| `dropoff` | `{ lat, lng, label }` | Delivery point; `label` = order `address` |
-| `matchingServiceIds` | `string[] \| null` | Service lines that justified assignment |
-| `payoutHold` | `boolean` | True while claim hold active |
-| `finish` | `string` | Optional finish note/code on order |
-
-Supplier user may include `shop: { lat, lng, label }` and `verificationStatus`.
-
-## Zones and v2 distance fees
-
-`GET /zones` retains compatibility/address zones. V2 snapshots a configurable distance-band fee from supplier `pickup` to client `dropoff`; Operations/Super Admin manage the global bands through `GET|PATCH /settings`.
-
-## Pilot Credits granting
-
-`POST /credits/grant` (super_admin): `{ clientId, amountMinor, reason }` appends a `grant` ledger entry. Not a purchase; non-cash, non-transferable pilot instrument.
-
-Clients only read their own balance; ops/super may pass `?clientId=`.
-
-## Claims & payout holds
-
-Operations raises claims on orders and holds/releases payout with reasons. Active hold blocks `completed` → `payout_released` with `409 payout_held` (transition edges themselves unchanged).
-
-## Issue reports
-
-While `issue_window_open`, the order client may `POST /orders/:id/issues`. Consequence: auto payout hold claim. Ops resolves via `POST /issues/:id/resolve` (optional `releasePayout`).
-
-## Audit trail
-
-**Separate** platform `auditLog` (`GET /audit`) vs per-order `timeline`:
-
-| Store | Scope | Audience |
-|---|---|---|
-| `order.timeline` | State/notes on one order | Client, supplier, rider, ops on that order |
-| `auditLog` | Platform actions across users, credits, taxonomy, services, claims, issues, roles | Ops / Super Admin only |
-
-Role changes, credit grants, verification, taxonomy edits, and matching assignments write audit entries.
-
-## Rider location read
-
-| Method | Path | Who | Response |
-|---|---|---|---|
-| GET | `/dispatch/:id/location` | assigned rider, order client, assigned supplier, ops/super | `{ ping }` latest or `{ ping: null }` if none |
-| POST | `/dispatch/:id/location` | assigned rider (active tracking states) | `{ ping }` created |
-
-No server-side staleness flag — callers use `ping.at`.
-
-## Backfill (existing live stores)
-
-`data/store.json` is gitignored. On every `load()`, idempotent backfill fills missing:
-
-- geography: `shop` / `dropoff` / `pickup` (never overwrite existing coords)
-- platform: `taxonomy`, `zones`, `supplierServices`, `claims`, `issues`, `auditLog`
-- supplier `verificationStatus` (demo supplier → approved when missing)
-- empty services → seed PrintRight live lines for demo supplier
-- client `accountType` → `"individual"` when missing/invalid (never overwrite valid value)
-- top-level `files: []`, order file-ID arrays, and supplier-service `imageFileIds: []` when missing (never synthesize an object from legacy `artworkName`)
-
-Never requires `npm run reset` (which would wipe captain demo orders).
-
-## Acceptance (API)
-
-- [x] Health endpoint
-- [x] Login issues token; role on user
-- [x] Role-scoped order/job/offer lists
-- [x] Transitions refuse illegal role/state pairs
-- [x] 75%/25% QR installments with manual Operations confirmation; COD paths retired
-- [x] Rider accept + six-check pickup + attached delivery evidence advances job
-- [x] Order pickup/dropoff Davao coords; new orders get dropoff
-- [x] GET latest rider location (role-gated; empty = `{ ping: null }`)
-- [x] Service taxonomy CRUD (super) + read (auth)
-- [x] Supplier services lifecycle + isolation
-- [x] Eligible suppliers for matching (explainable)
-- [x] User directory + role change + verification
-- [x] Zones/fees read + super write
-- [x] Pilot Credits grant (super)
-- [x] Claims hold/release
-- [x] Client issue report in global configured window + real load-time expiry
-- [x] Platform audit log
-- [x] Idempotent backfill without data loss
-- [x] Client `accountType` (`individual` \| `business` \| `organization`) via publicUser; backfill default individual
-- [ ] Idempotency keys on writes
-- [x] Persistent private MinIO storage + streamed file/attach/presigned-GET contract (`docs/STORAGE_API.md`)
-- [ ] Webhook-shaped payment events for future PayMongo
-
-## Replace map
-
-| Today | Later |
-|---|---|
-| Bearer token JSON sessions | Clerk session + role claim |
-| `data/store.json` | Supabase Postgres + RLS |
-| In-process transitions | Edge Functions + idempotency |
-| Manually confirmed QR installments | Provider adapter/webhook on the same installment records |
+- Real PostgreSQL constraints, foreign keys, indexes, ordered migrations, and transactional multi-row mutations.
+- Clerk JWT verification with exact issuer and authorized-party checks; unauthenticated and wrong-role requests fail closed.
+- Complete v2 lifecycle for order, QR payment, POF payout, dispatch, issue, claim, audit, and notification behavior.
+- Compose starts PostgreSQL, migrates, seeds reference data, initializes MinIO, and serves healthy API responses.
+- CI tests against PostgreSQL 17 and proves the named database volume survives API replacement and PostgreSQL container recreation.
+- Deployment requirements and first-administrator bootstrap are unambiguous in `docs/DEPLOYMENT.md`.

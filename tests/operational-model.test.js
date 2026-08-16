@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 
 import {
   OperationalError,
-  backfillOperationalModel,
   calculateFinalPrice,
   createPayoutMilestones,
   defaultOperationalSettings,
@@ -151,90 +150,4 @@ test("elapsed global issue window completes the order and releases retained earn
   assert.equal(store.orders[0].payoutMilestones[3].status, "released");
   assert.equal(store.orders[0].payoutMilestones[3].releasedBy, "system");
   assert.equal(expireIssueWindows(store, AT), false);
-});
-
-test("v2 backfill migrates supplier proof and COD coherently and is byte-idempotent", () => {
-  const untouched = {
-    users: [{ id: "client-a", role: "client" }, { id: "supplier-a", role: "supplier" }],
-    sessions: { token: { userId: "client-a" } },
-    files: [{ fileId: "legacy-proof", purpose: "proof", state: "ready" }],
-    credits: { "client-a": { balanceMinor: 123, ledger: [] } },
-    claims: [],
-    issues: [],
-    locationPings: [{ id: "ping-a" }],
-    proofs: [{ id: "proof-a", kind: "cod" }],
-  };
-  const store = {
-    ...structuredClone(untouched),
-    zones: [{ id: "zone-a", code: "davao_central", deliveryFeeMinor: 15_000, active: true }],
-    notifications: [],
-    orders: [
-      {
-        id: "ord-legacy",
-        clientId: "client-a",
-        supplierId: "supplier-a",
-        state: "supplier_proof_review",
-        totalMinor: 110_000,
-        deliveryFeeMinor: 2_500,
-        paymentMethod: "COD",
-        paymentStatus: "authorized",
-        proofFileIds: ["legacy-proof"],
-        timeline: [],
-        createdAt: "2026-08-09T00:00:00.000Z",
-      },
-    ],
-  };
-
-  assert.equal(backfillOperationalModel(store, AT), true);
-  const order = store.orders[0];
-  assert.equal(order.state, "awaiting_downpayment");
-  assert.equal(order.subtotalMinor, 110_000);
-  assert.equal(order.supplierPriceMinor + order.commissionMinor, 110_000);
-  assert.equal(order.totalMinor, 112_500);
-  assert.equal(order.paymentMethod, "digital_manual_legacy");
-  assert.equal("codEligible" in order, false);
-  assert.equal(order.payments.downpayment.status, "legacy_confirmed");
-  assert.equal(order.payments.balance.status, "not_submitted");
-  assert.equal(order.payments.downpayment.rejectedAt, null);
-  assert.equal(order.payments.downpayment.rejectedBy, null);
-  assert.equal(order.payments.downpayment.rejectionReason, null);
-  assert.equal(order.payments.balance.rejectedAt, null);
-  assert.equal(order.payments.balance.rejectedBy, null);
-  assert.equal(order.payments.balance.rejectionReason, null);
-  assert.equal(order.assignmentNotificationId, store.notifications[0].id);
-  assert.deepEqual(order.proofFileIds, ["legacy-proof"]);
-  assert.equal(Object.hasOwn(store.zones[0], "deliveryFeeMinor"), false);
-  for (const key of Object.keys(untouched)) assert.deepEqual(store[key], untouched[key], `${key} changed`);
-
-  const afterFirst = JSON.stringify(store);
-  assert.equal(backfillOperationalModel(store, AT), false);
-  assert.equal(JSON.stringify(store), afterFirst);
-});
-
-test("legacy issue-window migration never releases retention before the window expires", () => {
-  const store = {
-    users: [],
-    notifications: [],
-    claims: [{ id: "claim-a", orderId: "ord-window", status: "payout_held" }],
-    orders: [
-      {
-        id: "ord-window",
-        clientId: "client-a",
-        supplierId: "supplier-a",
-        state: "issue_window_open",
-        totalMinor: 110_000,
-        deliveryFeeMinor: 2_500,
-        payoutHold: true,
-        timeline: [{ at: "2026-08-10T11:00:00.000Z", state: "issue_window_open", by: "system", note: "legacy" }],
-        createdAt: "2026-08-09T00:00:00.000Z",
-        updatedAt: "2026-08-10T11:00:00.000Z",
-      },
-    ],
-  };
-
-  backfillOperationalModel(store, AT);
-  const delivered = store.orders[0].payoutMilestones.find((item) => item.code === "delivered");
-  const retention = store.orders[0].payoutMilestones.find((item) => item.code === "retention");
-  assert.equal(delivered.status, "released");
-  assert.equal(retention.status, "pending_pof");
 });

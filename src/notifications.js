@@ -1,26 +1,3 @@
-/**
- * Additive notification migration for legacy stores.
- *
- * A missing read flag means unread. Deletion metadata is intentionally sparse:
- * an absent deletedAt means the notification is still visible.
- */
-export function backfillNotifications(store) {
-  let changed = false;
-  if (!Array.isArray(store.notifications)) {
-    store.notifications = [];
-    return true;
-  }
-
-  for (const notification of store.notifications) {
-    if (!Object.hasOwn(notification, "read")) {
-      notification.read = false;
-      changed = true;
-    }
-  }
-
-  return changed;
-}
-
 export function notificationSnapshot(notifications, userId) {
   for (let index = notifications.length - 1; index >= 0; index -= 1) {
     if (notifications[index].userId === userId) return notifications[index].id;

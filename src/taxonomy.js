@@ -268,35 +268,6 @@ const CATEGORY_ALIASES = [
   },
 ];
 
-/**
- * Legacy category code -> canonical category code(s), applied to
- * `materials[].categoryCodes` and `finishes[].categoryCodes` only. Deliberately
- * one-to-one: a record that listed both `large_format` and `signage` still ends up
- * in both chart categories through the union, without over-broadening a record
- * that only listed one of them.
- */
-const LEGACY_CATEGORY_CODE_MAP = {
-  large_format: ["marketing_collateral"],
-  offset: ["marketing_collateral"],
-  apparel_sublimation: ["corporate_event_merch"],
-  signage: ["recognition_awards_signage"],
-};
-
-/**
- * Record-level overrides, keyed `${kind}:${record.code}`, for the platform-governed
- * records where the mechanical map is wrong. `none` is a finish that applies to
- * every category, including specialized_prototyping, which has no legacy equivalent
- * and so cannot be reached by mapping legacy codes.
- */
-const LEGACY_CATEGORY_CODE_OVERRIDES = {
-  "finishes:none": [
-    "marketing_collateral",
-    "corporate_event_merch",
-    "recognition_awards_signage",
-    "specialized_prototyping",
-  ],
-};
-
 const MATERIALS = [
   {
     id: "taxm_13oz",
@@ -354,11 +325,6 @@ const FINISHES = [
   },
 ];
 
-/** Fields a category owns; used by backfill to fill only what is missing. */
-const CATEGORY_FIELDS = ["name", "bestFor", "sortOrder", "productFamilyIds", "active"];
-const SUBCATEGORY_FIELDS = ["name", "categoryCode", "examples", "sortOrder", "active"];
-const ALIAS_FIELDS = ["name", "categoryCode", "ambiguous", "note", "active"];
-
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -373,7 +339,7 @@ export function defaultTaxonomy() {
   };
 }
 
-export const LEGACY_CATEGORY_CODES = Object.keys(LEGACY_CATEGORY_CODE_MAP);
+export const LEGACY_CATEGORY_CODES = CATEGORY_ALIASES.map((alias) => alias.code);
 
 /**
  * Canonical category for a code, accepting a retired legacy code through
@@ -412,102 +378,4 @@ export function buildCategoryTree(taxonomy) {
       ...category,
       subcategories: subcategories.filter((s) => s.categoryCode === category.code).sort(byOrder),
     }));
-}
-
-/**
- * Map one `categoryCodes` array off the legacy codes. Returns the same array
- * instance when nothing legacy is present, so callers can detect a no-op.
- */
-export function remapCategoryCodes(kind, record) {
-  const codes = record?.categoryCodes;
-  if (!Array.isArray(codes)) return codes;
-  if (!codes.some((c) => Object.hasOwn(LEGACY_CATEGORY_CODE_MAP, c))) return codes;
-
-  const override = LEGACY_CATEGORY_CODE_OVERRIDES[`${kind}:${record.code}`];
-  if (override) return clone(override);
-
-  const out = [];
-  for (const code of codes) {
-    for (const mapped of LEGACY_CATEGORY_CODE_MAP[code] || [code]) {
-      if (!out.includes(mapped)) out.push(mapped);
-    }
-  }
-  return out;
-}
-
-/** Upsert by `code`: create when absent, otherwise fill only fields that are missing. */
-function upsertByCode(list, defaults, fields) {
-  let changed = false;
-  for (const definition of defaults) {
-    const existing = list.find((item) => item.code === definition.code);
-    if (!existing) {
-      list.push(clone(definition));
-      changed = true;
-      continue;
-    }
-    if (definition.id != null && existing.id == null) {
-      existing.id = definition.id;
-      changed = true;
-    }
-    for (const field of fields) {
-      if (existing[field] === undefined || existing[field] === null) {
-        existing[field] = clone(definition[field]);
-        changed = true;
-      }
-    }
-  }
-  return changed;
-}
-
-/**
- * Idempotent load-time backfill onto the captain's chart taxonomy.
- *
- * Backfill semantics (see AGENTS.md): fills what is missing, never overwrites an
- * existing value, never touches a non-taxonomy collection. The one removal is the
- * four pre-chart *seed* category records, matched by their exact legacy code; each
- * is retired into `categoryAliases` so every stored reference still resolves.
- * Categories created by ops that are neither canonical nor a known legacy code are
- * left completely alone.
- *
- * Returns true if the store was mutated.
- */
-export function backfillTaxonomy(store) {
-  let changed = false;
-  if (!store.taxonomy || typeof store.taxonomy !== "object") {
-    store.taxonomy = defaultTaxonomy();
-    return true;
-  }
-  const taxonomy = store.taxonomy;
-
-  for (const key of ["categories", "subcategories", "categoryAliases", "materials", "finishes"]) {
-    if (!Array.isArray(taxonomy[key])) {
-      taxonomy[key] = [];
-      changed = true;
-    }
-  }
-
-  // Retire pre-chart category records; the alias keeps the code resolvable.
-  for (const legacyCode of LEGACY_CATEGORY_CODES) {
-    const index = taxonomy.categories.findIndex((c) => c.code === legacyCode);
-    if (index !== -1) {
-      taxonomy.categories.splice(index, 1);
-      changed = true;
-    }
-  }
-
-  if (upsertByCode(taxonomy.categories, CATEGORIES, CATEGORY_FIELDS)) changed = true;
-  if (upsertByCode(taxonomy.subcategories, SUBCATEGORIES, SUBCATEGORY_FIELDS)) changed = true;
-  if (upsertByCode(taxonomy.categoryAliases, CATEGORY_ALIASES, ALIAS_FIELDS)) changed = true;
-
-  for (const kind of ["materials", "finishes"]) {
-    for (const record of taxonomy[kind]) {
-      const mapped = remapCategoryCodes(kind, record);
-      if (mapped !== record.categoryCodes) {
-        record.categoryCodes = mapped;
-        changed = true;
-      }
-    }
-  }
-
-  return changed;
 }

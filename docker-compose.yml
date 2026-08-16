@@ -1,4 +1,48 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gridgo}
+      POSTGRES_USER: ${POSTGRES_USER:-gridgo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gridgo_dev}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55439}:5432"
+    volumes:
+      - gridgo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    networks:
+      - default
+      - gridgo-storage
+
+  migrate:
+    build: .
+    command: ["npm", "run", "migrate"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gridgo}:${POSTGRES_PASSWORD:-gridgo_dev}@postgres:5432/${POSTGRES_DB:-gridgo}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - gridgo-storage
+
+  seed:
+    build: .
+    command: ["npm", "run", "seed"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gridgo}:${POSTGRES_PASSWORD:-gridgo_dev}@postgres:5432/${POSTGRES_DB:-gridgo}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks:
+      - gridgo-storage
+
   minio-bind-check:
     image: minio/mc:RELEASE.2025-07-21T05-28-08Z
     environment:
@@ -37,6 +81,9 @@ services:
     depends_on:
       minio-bind-check:
         condition: service_completed_successfully
+    networks:
+      - default
+      - gridgo-storage
 
   minio-init:
     image: minio/mc:RELEASE.2025-07-21T05-28-08Z
@@ -56,9 +103,44 @@ services:
         mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing local/gridgo-uploads
         mc admin user info local "$${MINIO_ACCESS_KEY}" >/dev/null 2>&1 || mc admin user add local "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
-        mc admin policy create local gridgo-api /gridgo-api-policy.json
+        mc admin policy create local gridgo-api /gridgo-api-policy.json 2>/dev/null || true
         mc admin policy attach local gridgo-api --user "$${MINIO_ACCESS_KEY}"
     restart: "no"
+    networks:
+      - gridgo-storage
+
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:${API_PORT:-18787}:8787"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gridgo}:${POSTGRES_PASSWORD:-gridgo_dev}@postgres:5432/${POSTGRES_DB:-gridgo}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?set CLERK_SECRET_KEY in .env}
+      CLERK_ISSUER: ${CLERK_ISSUER:?set CLERK_ISSUER in .env}
+      CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:?set CLERK_AUTHORIZED_PARTIES in .env}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-gridgo_api_7f3a91c2}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ggo_api_m1n10_9f41b7c3e68a2d55}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://127.0.0.1:9000}
+      MINIO_BUCKET: ${MINIO_BUCKET:-gridgo-uploads}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - default
+      - gridgo-storage
 
 volumes:
+  gridgo_postgres_data:
   gridgo_minio_data:
+
+networks:
+  gridgo-storage:
+    name: gridgo-api-storage-local
+    internal: true

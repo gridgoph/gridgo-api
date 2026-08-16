@@ -8,7 +8,7 @@ import {
   UNCLAIMED_DEVICE_LIMIT,
   announcementPushMessage,
   assertStrangerSafeMessage,
-  backfillDeviceTokens,
+  ensureDeviceTokens,
   claimDeviceToken,
   classifyFcmFailure,
   createPushDelivery,
@@ -69,14 +69,14 @@ const silentLogger = { warn() {} };
 // Store rules
 // ---------------------------------------------------------------------------
 
-test("device-token backfill is additive and byte-idempotent", () => {
+test("device-token snapshot initialization is idempotent", () => {
   const store = { users: [] };
-  assert.equal(backfillDeviceTokens(store), true);
+  assert.equal(ensureDeviceTokens(store), true);
   assert.deepEqual(store.deviceTokens, []);
   const afterFirst = JSON.stringify(store);
 
-  assert.equal(backfillDeviceTokens(store), false);
-  assert.equal(JSON.stringify(store), afterFirst, "second backfill changed the store");
+  assert.equal(ensureDeviceTokens(store), false);
+  assert.equal(JSON.stringify(store), afterFirst, "second normalization changed the snapshot");
 });
 
 test("re-registering the same token updates one row instead of duplicating it", () => {
@@ -182,16 +182,16 @@ test("pruning removes exactly the named registrations", () => {
 // Handsets nobody has signed in on
 // ---------------------------------------------------------------------------
 
-test("a registration written before the field gains an explicit unclaimed userId, once", () => {
+test("a registration without ownership gains an explicit unclaimed userId once", () => {
   const store = {
     deviceTokens: [{ id: "dev_legacy", token: "legacy-phone", platform: "android", createdAt: AT, updatedAt: AT }],
   };
-  assert.equal(backfillDeviceTokens(store), true);
+  assert.equal(ensureDeviceTokens(store), true);
   assert.equal(store.deviceTokens[0].userId, null);
   const afterFirst = JSON.stringify(store);
 
-  assert.equal(backfillDeviceTokens(store), false);
-  assert.equal(JSON.stringify(store), afterFirst, "second backfill changed the store");
+  assert.equal(ensureDeviceTokens(store), false);
+  assert.equal(JSON.stringify(store), afterFirst, "second normalization changed the snapshot");
 });
 
 test("an unclaimed registration answers to nobody, not to an empty caller", () => {
