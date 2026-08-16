@@ -13,6 +13,7 @@ import {
   authorizeFileRead,
   authorizeFileUpload,
   createPendingFile,
+  invalidateRiderDocumentsForFile,
   markFileDeleted,
   markFileDeletePending,
   markFileReady,
@@ -397,6 +398,64 @@ test("rider licence attachment preserves replaced evidence and submits interrupt
     400,
     "invalid_rider_document_type",
   );
+});
+
+test("deleting rider licence evidence invalidates its document and reverts unsubmitted intake", () => {
+  const license = readyFile("rider_verification_document", { fileId: "rider-license-live", ownerId: rider.id });
+  const approvalCase = {
+    id: "case-rider-delete",
+    userId: rider.id,
+    kind: "rider",
+    status: "pending",
+    version: 1,
+    applicationRevision: 1,
+    createdAt: "2026-08-16T00:00:00.000Z",
+    updatedAt: "2026-08-16T00:00:00.000Z",
+  };
+  const store = { users: [rider], files: [license], riderDocuments: [], approvalCases: [approvalCase] };
+  const target = resolveFileTarget(
+    store,
+    license.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: "2028-06-30" },
+    rider,
+  );
+  attachRiderDocument(store, license, target, { documentId: "rider-document-live", at: "2026-08-16T01:00:00.000Z" });
+  assert.equal(approvalCase.submittedAt, "2026-08-16T01:00:00.000Z");
+
+  assert.doesNotThrow(() => markFileDeletePending(license, rider, "2026-08-16T02:00:00.000Z"));
+  const invalidated = invalidateRiderDocumentsForFile(store, license, "2026-08-16T02:00:00.000Z");
+  assert.deepEqual(invalidated.map(({ id }) => id), ["rider-document-live"]);
+  assert.equal(store.riderDocuments.length, 1);
+  assert.equal(store.riderDocuments[0].isCurrent, false);
+  assert.equal(store.riderDocuments[0].replacedAt, "2026-08-16T02:00:00.000Z");
+  assert.equal(approvalCase.submittedAt, null);
+
+  const replacement = readyFile("rider_verification_document", { fileId: "rider-license-next", ownerId: rider.id });
+  store.files.push(replacement);
+  const replacementTarget = resolveFileTarget(
+    store,
+    replacement.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: "2029-06-30" },
+    rider,
+  );
+  attachRiderDocument(store, replacement, replacementTarget, {
+    documentId: "rider-document-next",
+    at: "2026-08-16T03:00:00.000Z",
+  });
+  assert.equal(approvalCase.submittedAt, "2026-08-16T03:00:00.000Z");
+
+  const selfie = readyFile("rider_verification_document", { fileId: "rider-selfie", ownerId: rider.id });
+  store.files.push(selfie);
+  const selfieTarget = resolveFileTarget(store, selfie.purpose, { riderDocumentType: "selfie" }, rider);
+  attachRiderDocument(store, selfie, selfieTarget, {
+    documentId: "rider-document-selfie",
+    at: "2026-08-16T04:00:00.000Z",
+  });
+  assert.doesNotThrow(() => markFileDeletePending(selfie, rider, "2026-08-16T05:00:00.000Z"));
+  invalidateRiderDocumentsForFile(store, selfie, "2026-08-16T05:00:00.000Z");
+  assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-selfie").isCurrent, false);
+  assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-next").isCurrent, true);
+  assert.equal(approvalCase.submittedAt, "2026-08-16T03:00:00.000Z");
 });
 
 test("verification document reads never inherit order, service, or another supplier visibility", () => {

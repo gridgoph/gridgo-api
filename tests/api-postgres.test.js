@@ -1583,6 +1583,95 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
     assert.equal(submitted.body.approvalCase.submittedAt, "2026-08-16T02:00:00.000Z");
 
+    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+      method: "DELETE", subject: "clerk_rider_new",
+    });
+    assert.equal(licenseDeleted.status, 200, JSON.stringify(licenseDeleted.body));
+    assert.equal(licenseDeleted.body.file.state, "deleted");
+    const afterDeletion = await loadStore(database);
+    const invalidatedDocument = afterDeletion.riderDocuments.find(
+      (document) => document.id === "rdoc_new_license",
+    );
+    assert.equal(invalidatedDocument.isCurrent, false);
+    const incompleteAgain = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider_new" });
+    assert.equal(incompleteAgain.status, 200, JSON.stringify(incompleteAgain.body));
+    assert.equal(incompleteAgain.body.onboardingIncomplete, true);
+    assert.equal(incompleteAgain.body.approvalCase.submittedAt, null);
+    assert.deepEqual(incompleteAgain.body.documents, []);
+    const deletedResubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777778" },
+    });
+    assert.equal(deletedResubmit.status, 409, JSON.stringify(deletedResubmit.body));
+    assert.equal(deletedResubmit.body.error, "rider_documents_incomplete");
+
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const enrolledRider = store.users.find((candidate) => candidate.clerkUserId === "clerk_rider_new");
+      const riderCase = store.approvalCases.find(
+        (candidate) => candidate.userId === enrolledRider.id && candidate.kind === "rider",
+      );
+      riderCase.status = "rejected";
+      riderCase.decidedAt = "2026-08-16T04:00:00.000Z";
+      riderCase.rejectionReason = "Licence evidence missing";
+      riderCase.updatedAt = riderCase.decidedAt;
+      await saveStore(database, store);
+    });
+    const riderReapplyBody = {
+      expectedVersion: 1,
+      correctionSummary: "Re-uploaded the driver's licence photo.",
+    };
+    const reapplyWithoutLicense = await request(instance.api, "/me/approval-cases/rider/reapply", {
+      method: "POST", subject: "clerk_rider_new", body: riderReapplyBody,
+      headers: { "Idempotency-Key": "99999999-9999-4999-8999-999999999999" },
+    });
+    assert.equal(reapplyWithoutLicense.status, 409, JSON.stringify(reapplyWithoutLicense.body));
+    assert.equal(reapplyWithoutLicense.body.error, "rider_documents_incomplete");
+
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const enrolledRider = store.users.find((candidate) => candidate.clerkUserId === "clerk_rider_new");
+      const file = {
+        fileId: "file_rider_license_replacement",
+        ownerId: enrolledRider.id,
+        purpose: "rider_verification_document",
+        originalFilename: "license-2.png",
+        declaredContentType: "image/png",
+        detectedContentType: "image/png",
+        size: 128,
+        state: "ready",
+        objectKey: "rider_verification_document/license-2.png",
+        references: [],
+        createdAt: AT,
+        readyAt: AT,
+      };
+      store.files.push(file);
+      attachRiderDocument(store, file, {
+        type: "rider_document",
+        record: enrolledRider,
+        kind: "drivers_license",
+        expiresOn: "2029-06-30",
+        replacedDocuments: [],
+      }, { documentId: "rdoc_replacement_license", at: "2026-08-16T05:00:00.000Z" });
+      await saveStore(database, store);
+    });
+    const riderReapplied = await request(instance.api, "/me/approval-cases/rider/reapply", {
+      method: "POST", subject: "clerk_rider_new", body: riderReapplyBody,
+      headers: { "Idempotency-Key": "99999999-9999-4999-8999-99999999999a" },
+    });
+    assert.equal(riderReapplied.status, 200, JSON.stringify(riderReapplied.body));
+    assert.equal(riderReapplied.body.approvalCase.status, "pending");
+    assert.equal(riderReapplied.body.approvalCase.version, 2);
+    assert.equal(riderReapplied.body.approvalCase.applicationRevision, 2);
+    assert.notEqual(riderReapplied.body.approvalCase.submittedAt, null);
+    const afterRiderReapply = await loadStore(database);
+    assert.deepEqual(
+      afterRiderReapply.riderDocuments
+        .filter((document) => document.riderId === invalidatedDocument.riderId)
+        .map((document) => [document.id, document.isCurrent !== false]),
+      [["rdoc_new_license", false], ["rdoc_replacement_license", true]],
+    );
+
     let retainedServiceIds;
     await database.transaction(async () => {
       const store = await loadStore(database);

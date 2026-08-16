@@ -455,7 +455,10 @@ function currentFutureLicense(store, userId, today) {
       && document.kind === "drivers_license"
       && document.isCurrent !== false
       && typeof document.expiresOn === "string"
-      && document.expiresOn > today,
+      && document.expiresOn > today
+      && (store.files || []).some(
+        (file) => file.fileId === document.fileId && file.state === "ready",
+      ),
   ) || null;
 }
 

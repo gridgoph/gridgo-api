@@ -37,6 +37,7 @@ import {
   createPendingFile,
   findFile,
   markFileDeleted,
+  invalidateRiderDocumentsForFile,
   markFileDeletePending,
   markFileReady,
   parseMultipartStream,
@@ -1815,7 +1816,9 @@ async function handleRequest(req, res) {
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";
-        markFileDeletePending(latestFile, latestUser, now());
+        const deleteRequestedAt = now();
+        markFileDeletePending(latestFile, latestUser, deleteRequestedAt);
+        invalidateRiderDocumentsForFile(latestStore, latestFile, deleteRequestedAt);
         await save(latestStore);
         return { alreadyDeleted, file: latestFile, objectKey: latestFile.objectKey };
       });

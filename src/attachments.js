@@ -473,12 +473,46 @@ export function markFileDeletePending(file, user, at) {
   if (file.state !== "ready") {
     fail(409, "file_state_conflict", "This file is not ready to delete. Refresh its status and try again.");
   }
-  if ((file.references || []).length) {
+  if ((file.references || []).some((reference) => reference.type !== "rider_document")) {
     fail(409, "file_in_use", "This file is attached to a GRIDGO record. Remove that reference before deleting the file.");
   }
   file.state = "delete_pending";
   file.deleteRequestedAt = at;
   return file;
+}
+
+// Deleting rider evidence must never leave a current rider_documents row
+// pointing at absent bytes: the rows flip non-current in the same transaction,
+// and a pending case whose only current licence evidence disappeared reverts
+// to unsubmitted (null submitted_at) intake.
+export function invalidateRiderDocumentsForFile(store, file, at) {
+  if (file?.purpose !== "rider_verification_document") return [];
+  const invalidated = (store.riderDocuments || []).filter(
+    (document) => document.fileId === file.fileId && document.isCurrent !== false,
+  );
+  for (const document of invalidated) {
+    document.isCurrent = false;
+    document.replacedAt = at;
+  }
+  for (const riderId of new Set(invalidated.map((document) => document.riderId))) {
+    const hasReadyLicense = (store.riderDocuments || []).some(
+      (document) => document.riderId === riderId
+        && document.kind === "drivers_license"
+        && document.isCurrent !== false
+        && (store.files || []).some(
+          (candidate) => candidate.fileId === document.fileId && candidate.state === "ready",
+        ),
+    );
+    if (hasReadyLicense) continue;
+    const approvalCase = (store.approvalCases || []).find(
+      (candidate) => candidate.userId === riderId && candidate.kind === "rider",
+    );
+    if (approvalCase?.status === "pending" && approvalCase.submittedAt != null) {
+      approvalCase.submittedAt = null;
+      approvalCase.updatedAt = at;
+    }
+  }
+  return invalidated;
 }
 
 export function markFileDeleted(file, at) {
