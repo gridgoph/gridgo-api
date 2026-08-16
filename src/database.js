@@ -13,6 +13,7 @@ types.setTypeParser(20, (value) => {
   return Number(parsed);
 });
 types.setTypeParser(1184, (value) => new Date(value).toISOString());
+types.setTypeParser(1082, (value) => value);
 
 function configurationError(message) {
   return new Error(`${message} Set DATABASE_URL to a PostgreSQL connection string and restart.`);

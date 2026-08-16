@@ -80,6 +80,42 @@ test("relational store round-trips typed money, relationships, and composite rou
   await database.close();
 });
 
+test("relational store maps memberships, approval records, profiles, and rider documents", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clear(database);
+  const store = emptyStore();
+  store.users = [
+    { id: "user_supplier", clerkUserId: "clerk_supplier_roles", email: "supplier-roles@gridgo.test", name: "Supplier", role: "supplier", verificationStatus: "pending", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, createdAt: AT },
+    { id: "user_rider", clerkUserId: "clerk_rider_roles", email: "rider-roles@gridgo.test", name: "Rider", role: "rider", verificationStatus: "pending", createdAt: AT },
+  ];
+  store.userRoleMemberships = [
+    { userId: "user_supplier", role: "supplier", createdAt: AT },
+    { userId: "user_rider", role: "rider", createdAt: AT, createdBy: "user_supplier" },
+  ];
+  store.supplierProfiles = [{ userId: "user_supplier", shopName: "PrintRight", contactName: "Supplier", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, pickupAvailable: true, updatedAt: AT }];
+  store.riderProfiles = [{ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC-123", licenseNumber: "LIC-123", updatedAt: AT }];
+  store.approvalCases = [{ id: "case_rider", userId: "user_rider", kind: "rider", status: "pending", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT }];
+  store.approvalCaseEvents = [{ id: "event_rider", approvalCaseId: "case_rider", applicationRevision: 1, toStatus: "pending", actorUserId: "user_rider", actorKind: "applicant", requestId: "request-rider", snapshot: { vehicleType: "motorcycle" }, createdAt: AT }];
+  store.files = [{ fileId: "file_license", ownerId: "user_rider", purpose: "rider_verification_document", originalFilename: "license.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: "riders/license.jpg", references: [{ type: "rider_document", id: "document_rider", field: "fileId" }], createdAt: AT }];
+  store.riderDocuments = [{ id: "document_rider", riderId: "user_rider", kind: "drivers_license", fileId: "file_license", expiresOn: "2027-08-16", isCurrent: true, uploadedAt: AT }];
+
+  await database.transaction(async () => saveStore(database, store));
+  const reloaded = await loadStore(database);
+
+  assert.deepEqual(reloaded.userRoleMemberships, [...store.userRoleMemberships].sort((a, b) => a.userId.localeCompare(b.userId)));
+  assert.deepEqual(reloaded.supplierProfiles, store.supplierProfiles);
+  assert.deepEqual(reloaded.riderProfiles, store.riderProfiles);
+  assert.deepEqual(reloaded.approvalCases, store.approvalCases);
+  assert.deepEqual(reloaded.approvalCaseEvents, store.approvalCaseEvents);
+  assert.deepEqual(reloaded.riderDocuments, store.riderDocuments);
+
+  reloaded.approvalCaseEvents[0].reason = "events cannot be rewritten";
+  await assert.rejects(database.transaction(() => saveStore(database, reloaded)), /approval_case_events rows are append-only/);
+
+  await clear(database);
+  await database.close();
+});
+
 async function seedRaceFixture(database, tokens) {
   await clear(database);
   const store = emptyStore();

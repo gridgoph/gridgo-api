@@ -31,6 +31,12 @@ function rowKey(row, columns) {
 const TABLES = [
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
   { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "shop_lat", "shop_lng", "shop_label", "created_at", "position", "data"] },
+  { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
+  { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "updated_at"] },
+  { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "updated_at"] },
+  { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
+  { name: "approval_case_events", keys: ["id"], columns: ["id", "approval_case_id", "application_revision", "from_status", "to_status", "actor_user_id", "actor_kind", "reason", "request_id", "snapshot", "created_at"], appendOnly: true },
   { name: "catalog_products", keys: ["id"], columns: ["id", "name", "family", "base_price_minor", "unit", "position", "data"] },
   { name: "taxonomy_categories", keys: ["id"], columns: ["id", "code", "name", "active", "sort_order", "position", "data"] },
   { name: "taxonomy_category_aliases", keys: ["code"], columns: ["code", "category_code", "position", "data"] },
@@ -44,6 +50,7 @@ const TABLES = [
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "file_references", keys: ["file_id", "reference_type", "reference_id", "field"], columns: ["file_id", "reference_type", "reference_id", "field", "position", "data"] },
+  { name: "rider_documents", keys: ["id"], columns: ["id", "rider_id", "kind", "file_id", "expires_on", "is_current", "uploaded_at", "replaced_at"] },
   { name: "credit_accounts", keys: ["user_id"], columns: ["user_id", "balance_minor", "data"] },
   { name: "credit_ledger", keys: ["id"], columns: ["id", "user_id", "amount_minor", "balance_after_minor", "created_at", "position", "data"] },
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
@@ -60,6 +67,12 @@ export function emptyStore() {
   return {
     version: 3,
     users: [],
+    userRoleMemberships: [],
+    clientProfiles: [],
+    supplierProfiles: [],
+    riderProfiles: [],
+    approvalCases: [],
+    approvalCaseEvents: [],
     catalog: [],
     taxonomy: { categories: [], categoryAliases: [], subcategories: [], materials: [], finishes: [] },
     settings: {},
@@ -67,6 +80,7 @@ export function emptyStore() {
     supplierServices: [],
     orders: [],
     files: [],
+    riderDocuments: [],
     credits: {},
     claims: [],
     issues: [],
@@ -100,6 +114,36 @@ function rowsFromStore(store) {
       created_at: user.createdAt,
       position,
       data: without(user, ["id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "shop", "createdAt"]),
+    });
+  }
+  for (const membership of (store.userRoleMemberships || [])) {
+    rows.user_role_memberships.push({ user_id: membership.userId, role: membership.role, created_at: membership.createdAt, created_by: membership.createdBy ?? null });
+  }
+  for (const profile of (store.clientProfiles || [])) {
+    rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, updated_at: profile.updatedAt });
+  }
+  for (const profile of (store.supplierProfiles || [])) {
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), updated_at: profile.updatedAt });
+  }
+  for (const profile of (store.riderProfiles || [])) {
+    rows.rider_profiles.push({ user_id: profile.userId, vehicle_type: profile.vehicleType, plate_number: profile.plateNumber, license_number: profile.licenseNumber ?? null, updated_at: profile.updatedAt });
+  }
+  for (const approvalCase of (store.approvalCases || [])) {
+    rows.approval_cases.push({
+      id: approvalCase.id, user_id: approvalCase.userId, kind: approvalCase.kind, status: approvalCase.status,
+      version: approvalCase.version, application_revision: approvalCase.applicationRevision,
+      submitted_at: approvalCase.submittedAt ?? null, decided_at: approvalCase.decidedAt ?? null,
+      decided_by: approvalCase.decidedBy ?? null, rejection_reason: approvalCase.rejectionReason ?? null,
+      suspension_reason: approvalCase.suspensionReason ?? null, created_at: approvalCase.createdAt,
+      updated_at: approvalCase.updatedAt,
+    });
+  }
+  for (const event of (store.approvalCaseEvents || [])) {
+    rows.approval_case_events.push({
+      id: event.id, approval_case_id: event.approvalCaseId, application_revision: event.applicationRevision,
+      from_status: event.fromStatus ?? null, to_status: event.toStatus, actor_user_id: event.actorUserId ?? null,
+      actor_kind: event.actorKind, reason: event.reason ?? null, request_id: event.requestId,
+      snapshot: event.snapshot || {}, created_at: event.createdAt,
     });
   }
   for (const [position, item] of (store.catalog || []).entries()) {
@@ -160,6 +204,9 @@ function rowsFromStore(store) {
       rows.file_references.push({ file_id: file.fileId, reference_type: reference.type, reference_id: reference.id, field: reference.field, position: referencePosition, data: without(reference, ["type", "id", "field"]) });
     }
   }
+  for (const document of (store.riderDocuments || [])) {
+    rows.rider_documents.push({ id: document.id, rider_id: document.riderId, kind: document.kind, file_id: document.fileId, expires_on: document.expiresOn ?? null, is_current: document.isCurrent !== false, uploaded_at: document.uploadedAt, replaced_at: document.replacedAt ?? null });
+  }
   for (const [userId, account] of Object.entries(store.credits || {})) {
     rows.credit_accounts.push({ user_id: userId, balance_minor: money(account.balanceMinor, "credits.balanceMinor"), data: without(account, ["balanceMinor", "ledger"]) });
     for (const [position, entry] of (account.ledger || []).entries()) {
@@ -196,6 +243,16 @@ function ordered(rows) {
   return [...rows].sort((a, b) => a.position - b.position);
 }
 
+function orderedBy(rows, ...columns) {
+  return [...rows].sort((a, b) => {
+    for (const column of columns) {
+      const comparison = String(a[column] ?? "").localeCompare(String(b[column] ?? ""));
+      if (comparison) return comparison;
+    }
+    return 0;
+  });
+}
+
 export async function loadStore(database) {
   if (!database.inTransaction()) return database.snapshot(() => loadStore(database));
   const loaded = {};
@@ -210,6 +267,39 @@ export async function loadStore(database) {
     const item = { ...row.data, id: row.id, clerkUserId: row.clerk_user_id, email: row.email, name: row.name, role: row.role, createdAt: row.created_at };
     present(item, "phone", row.phone); present(item, "accountType", row.account_type); present(item, "orgName", row.org_name); present(item, "verificationStatus", row.verification_status);
     if (row.shop_lat != null) item.shop = { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label };
+    return item;
+  });
+  store.userRoleMemberships = orderedBy(loaded.user_role_memberships, "user_id", "role").map((row) => {
+    const item = { userId: row.user_id, role: row.role, createdAt: row.created_at };
+    present(item, "createdBy", row.created_by);
+    return item;
+  });
+  store.clientProfiles = orderedBy(loaded.client_profiles, "user_id").map((row) => {
+    const item = { userId: row.user_id, clientKind: row.client_kind, updatedAt: row.updated_at };
+    present(item, "businessName", row.business_name);
+    present(item, "businessNature", row.business_nature);
+    return item;
+  });
+  store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => ({ userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, updatedAt: row.updated_at }));
+  store.riderProfiles = orderedBy(loaded.rider_profiles, "user_id").map((row) => {
+    const item = { userId: row.user_id, vehicleType: row.vehicle_type, plateNumber: row.plate_number, updatedAt: row.updated_at };
+    present(item, "licenseNumber", row.license_number);
+    return item;
+  });
+  store.approvalCases = orderedBy(loaded.approval_cases, "created_at", "id").map((row) => {
+    const item = { id: row.id, userId: row.user_id, kind: row.kind, status: row.status, version: row.version, applicationRevision: row.application_revision, createdAt: row.created_at, updatedAt: row.updated_at };
+    present(item, "submittedAt", row.submitted_at);
+    present(item, "decidedAt", row.decided_at);
+    present(item, "decidedBy", row.decided_by);
+    present(item, "rejectionReason", row.rejection_reason);
+    present(item, "suspensionReason", row.suspension_reason);
+    return item;
+  });
+  store.approvalCaseEvents = orderedBy(loaded.approval_case_events, "created_at", "id").map((row) => {
+    const item = { id: row.id, approvalCaseId: row.approval_case_id, applicationRevision: row.application_revision, toStatus: row.to_status, actorKind: row.actor_kind, requestId: row.request_id, snapshot: row.snapshot, createdAt: row.created_at };
+    present(item, "fromStatus", row.from_status);
+    present(item, "actorUserId", row.actor_user_id);
+    present(item, "reason", row.reason);
     return item;
   });
   store.catalog = ordered(loaded.catalog_products).map((row) => ({ ...row.data, id: row.id, name: row.name, family: row.family, basePriceMinor: row.base_price_minor, unit: row.unit }));
@@ -244,6 +334,12 @@ export async function loadStore(database) {
     references.get(row.file_id).push({ ...row.data, type: row.reference_type, id: row.reference_id, field: row.field });
   }
   store.files = ordered(loaded.files).map((row) => ({ ...row.data, fileId: row.file_id, ownerId: row.owner_id, purpose: row.purpose, originalFilename: row.original_filename, declaredContentType: row.declared_content_type, detectedContentType: row.detected_content_type, size: row.size_bytes, state: row.state, objectKey: row.object_key, references: references.get(row.file_id) || [], createdAt: row.created_at }));
+  store.riderDocuments = orderedBy(loaded.rider_documents, "uploaded_at", "id").map((row) => {
+    const item = { id: row.id, riderId: row.rider_id, kind: row.kind, fileId: row.file_id, isCurrent: row.is_current, uploadedAt: row.uploaded_at };
+    present(item, "expiresOn", row.expires_on);
+    present(item, "replacedAt", row.replaced_at);
+    return item;
+  });
 
   const ledger = new Map();
   for (const row of ordered(loaded.credit_ledger)) {
@@ -318,6 +414,7 @@ function rowMap(rows, table) {
 async function deleteMissing(database, table, before, current) {
   for (const [key, row] of before) {
     if (current.has(key)) continue;
+    if (table.appendOnly) throw new Error(`${table.name} rows are append-only`);
     const where = table.keys.map((column, index) => `${column} = $${index + 1}`).join(" AND ");
     await database.query(`DELETE FROM ${table.name} WHERE ${where}`, table.keys.map((column) => row[column]));
   }
@@ -326,7 +423,15 @@ async function deleteMissing(database, table, before, current) {
 async function upsertChanged(database, table, before, current) {
   for (const [key, row] of current) {
     if (before.has(key) && stable(before.get(key)) === stable(row)) continue;
+    if (table.appendOnly && before.has(key)) throw new Error(`${table.name} rows are append-only`);
     const placeholders = table.columns.map((_, index) => `$${index + 1}`).join(", ");
+    if (table.appendOnly) {
+      await database.query(
+        `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders})`,
+        table.columns.map((column) => row[column]),
+      );
+      continue;
+    }
     const updates = table.columns.filter((column) => !table.keys.includes(column)).map((column) => `${column} = EXCLUDED.${column}`).join(", ");
     await database.query(
       `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) DO UPDATE SET ${updates}`,
