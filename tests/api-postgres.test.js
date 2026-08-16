@@ -631,7 +631,30 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal(demoted.body.error, "last_super_admin");
     assert.equal((await request(instance.api, "/auth/me", { subject: "clerk_super" })).body.user.role, "super_admin");
 
-    const created = await request(instance.api, "/orders", { method: "POST", subject: "clerk_client", body: { productId: "prod_tarpaulin", title: "API banner", quantity: 1, address: "Bajada", zone: "davao_central", submit: true } });
+    const movedShopPoint = { lat: 7.065, lng: 125.609, label: "Updated Davao Shop" };
+    const movedShop = await request(instance.api, "/users/user_supplier/shop", {
+      method: "PATCH", subject: "clerk_supplier", body: { shop: movedShopPoint },
+    });
+    assert.equal(movedShop.status, 200, JSON.stringify(movedShop.body));
+    assert.deepEqual(movedShop.body.user.shop, movedShopPoint);
+    const movedShopStore = await loadStore(database);
+    assert.deepEqual(
+      movedShopStore.supplierProfiles.find((profile) => profile.userId === "user_supplier").shop,
+      movedShopPoint,
+    );
+    assert.deepEqual(movedShopStore.orders.find((order) => order.id === "ord_payout").pickup, {
+      lat: 7.064, lng: 125.6085, label: "Davao Shop",
+    });
+
+    const created = await request(instance.api, "/orders", {
+      method: "POST",
+      subject: "clerk_client",
+      body: {
+        productId: "prod_tarpaulin", title: "API banner", quantity: 1,
+        size: "2m x 3m", material: "13oz tarpaulin", finish: "hemmed",
+        address: "Bajada", zone: "davao_central", submit: true,
+      },
+    });
     assert.equal(created.status, 201, JSON.stringify(created.body));
     const orderId = created.body.order.id;
     for (const state of ["needs_qa", "approved_for_matching"]) {
@@ -642,6 +665,15 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     const accepted = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierSubtotalMinor: 100000 } });
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.order.state, "awaiting_checkout");
+    assert.deepEqual(accepted.body.order.pendingQuote.supplierShop, movedShopPoint);
+    assert.deepEqual(
+      {
+        size: accepted.body.order.pendingQuote.orderLines[0].size,
+        material: accepted.body.order.pendingQuote.orderLines[0].material,
+        finish: accepted.body.order.pendingQuote.orderLines[0].finish,
+      },
+      { size: "2m x 3m", material: "13oz tarpaulin", finish: "hemmed" },
+    );
     const pendingWithoutReason = await request(instance.api, `/orders/${orderId}/transition`, {
       method: "POST",
       subject: "clerk_supplier",
@@ -681,6 +713,8 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal(committed.status, 200, JSON.stringify(committed.body));
     assert.equal(committed.body.order.state, "awaiting_initial_payment");
     assert.equal(committed.body.order.serviceFeeMinor, 10000);
+    assert.deepEqual(committed.body.order.acceptedQuote.supplierShop, movedShopPoint);
+    assert.equal(committed.body.order.acceptedQuote.orderLines[0].material, "13oz tarpaulin");
 
     const superseded = await request(instance.api, `/orders/${orderId}/transition`, {
       method: "POST",

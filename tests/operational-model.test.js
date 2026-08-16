@@ -115,6 +115,11 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     ...money,
     ...schedule,
     payoutMilestones: createPayoutMilestones(100_000),
+    acceptedQuote: {
+      payments: structuredClone(schedule.payments),
+      paymentTerms: { deliveryDownpaymentRateBps: 2_500 },
+      supplierDownpaymentRateBps: 2_500,
+    },
   };
   order.payments.initial.status = "confirmed";
   order.payments.initial.reference = "PRIVATE-GCASH-REFERENCE";
@@ -145,17 +150,33 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     billedMinor: 10_000,
     collectedMinor: 10_000,
     recognizedMinor: 0,
-    refundedAdjustedMinor: 0,
+    adjustedMinor: 0,
+    refundedMinor: 0,
   });
   const adjusted = structuredClone(order);
   adjusted.state = "delivered";
-  adjusted.revenueAdjustments = [{ amountMinor: -2_000 }];
+  adjusted.revenueAdjustments = [
+    { kind: "adjustment", amountMinor: -1_000 },
+    { kind: "refund", amountMinor: -2_000 },
+  ];
   assert.deepEqual(moneyReportingForOrder(adjusted).platformRevenue, {
     billedMinor: 10_000,
     collectedMinor: 10_000,
-    recognizedMinor: 8_000,
-    refundedAdjustedMinor: -2_000,
+    recognizedMinor: 7_000,
+    adjustedMinor: -1_000,
+    refundedMinor: -2_000,
   });
+
+  const riderOrder = publicOrderFor(order, { id: "rider-a", role: "rider" });
+  assert.equal("supplierDownpaymentRateBps" in riderOrder, false);
+  assert.equal("initialSupplierPrincipalMinor" in riderOrder, false);
+  assert.equal("supplierRemainderMinor" in riderOrder, false);
+  assert.equal("componentLines" in riderOrder.payments.initial, false);
+  assert.equal("supplierPrincipalRateBps" in riderOrder.payments.initial, false);
+  assert.equal("componentLines" in riderOrder.acceptedQuote.payments.initial, false);
+  assert.equal("supplierPrincipalRateBps" in riderOrder.acceptedQuote.payments.initial, false);
+  assert.equal("paymentTerms" in riderOrder.acceptedQuote, false);
+  assert.equal("supplierDownpaymentRateBps" in riderOrder.acceptedQuote, false);
 
   const pickupAtStore = {
     ...order,

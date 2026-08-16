@@ -1967,11 +1967,18 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const validation = validatedShop(body.shop);
       if (!validation.shop) return send(res, 400, validation);
-      const previousShop = target.shop ? { ...target.shop } : null;
+      const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === target.id);
+      const previousShop = profile?.shop
+        ? structuredClone(profile.shop)
+        : (target.shop ? structuredClone(target.shop) : null);
       const updatedAt = now();
-      target.shop = validation.shop;
+      target.shop = structuredClone(validation.shop);
       target.shopUpdatedAt = updatedAt;
       target.updatedAt = updatedAt;
+      if (profile) {
+        profile.shop = structuredClone(validation.shop);
+        profile.updatedAt = updatedAt;
+      }
       audit(store, {
         actor: user,
         action: "user.shop_update",
@@ -3568,6 +3575,9 @@ async function handleRequest(req, res) {
             label: order.title,
             quantity: order.quantity,
             amountMinor: supplierSubtotalMinor,
+            size: order.size || null,
+            material: order.material || null,
+            finish: order.finish || null,
             optionSnapshots: order.optionSnapshots || [],
             structuredSpecification: order.structuredSpecification || null,
             acceptedFormatCodes: order.acceptedFormatCodes || [],

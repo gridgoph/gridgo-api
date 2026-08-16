@@ -574,6 +574,8 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 
 All order-returning endpoints use this projection.
 
+Operations revenue cards expose `billedMinor`, `collectedMinor`, `recognizedMinor`, `adjustedMinor`, and `refundedMinor` separately. Adjustment and refund values retain their signed stored amounts; both contribute to recognized revenue only after fulfilment.
+
 ## Digital payment plans and allocations
 
 Canonical installment codes are `initial` and optional `final_online`. The legacy route aliases `downpayment` and `balance` map to those codes. COD is not an enum and is rejected with `400 payment_method_not_allowed`.

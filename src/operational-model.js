@@ -363,7 +363,11 @@ export function moneyReportingForOrder(order) {
       .filter((allocation) => allocation.paymentCode === "initial" && allocation.component === "service_fee")
       .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0)
     : 0;
-  const refundedAdjustedMinor = (order.revenueAdjustments || [])
+  const adjustedMinor = (order.revenueAdjustments || [])
+    .filter((adjustment) => adjustment.kind === "adjustment")
+    .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
+  const refundedMinor = (order.revenueAdjustments || [])
+    .filter((adjustment) => adjustment.kind === "refund")
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
   const handedOver = ["delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
   const receivedAtStoreMinor = 0;
@@ -384,8 +388,9 @@ export function moneyReportingForOrder(order) {
     platformRevenue: {
       billedMinor: order.commercialCommittedAt ? order.serviceFeeMinor : 0,
       collectedMinor: serviceFeeCollectedMinor,
-      recognizedMinor: handedOver ? Math.max(0, serviceFeeCollectedMinor + refundedAdjustedMinor) : 0,
-      refundedAdjustedMinor,
+      recognizedMinor: handedOver ? Math.max(0, serviceFeeCollectedMinor + adjustedMinor + refundedMinor) : 0,
+      adjustedMinor,
+      refundedMinor,
     },
   };
 }
@@ -492,6 +497,7 @@ export function publicOrderFor(order, user) {
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
+  const rider = user?.role === "rider";
   if (!ops) delete publicRecord.revenueAdjustments;
   if (!ops && !assignedSupplier) {
     delete publicRecord.supplierSubtotalMinor;
@@ -509,6 +515,24 @@ export function publicOrderFor(order, user) {
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;
     publicRecord.platformRevenue = reporting.platformRevenue;
+  }
+  if (rider) {
+    delete publicRecord.supplierDownpaymentRateBps;
+    delete publicRecord.initialSupplierPrincipalMinor;
+    delete publicRecord.supplierRemainderMinor;
+    const paymentCollections = [publicRecord.payments, publicRecord.acceptedQuote?.payments];
+    for (const payments of paymentCollections) {
+      if (!payments) continue;
+      for (const installment of Object.values(payments)) {
+        if (!installment || typeof installment !== "object") continue;
+        delete installment.componentLines;
+        delete installment.supplierPrincipalRateBps;
+      }
+    }
+    if (publicRecord.acceptedQuote) {
+      delete publicRecord.acceptedQuote.paymentTerms;
+      delete publicRecord.acceptedQuote.supplierDownpaymentRateBps;
+    }
   }
   if (!ops && !owningClient && publicRecord.payments) {
     for (const installment of Object.values(publicRecord.payments)) {
