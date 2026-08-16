@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 
 import {
   appendOrderLineSnapshot,
+  createOrderLineSnapshot,
   effectiveAcceptedFormats,
   publicCatalogItem,
   publicSupplierShop,
   publicSupplierShops,
   selectedCatalogPrice,
   supplierCatalogReadiness,
+  transitionSupplierServiceToDraft,
 } from "../src/supplier-catalog.js";
 
 const AT = "2026-08-16T00:00:00.000Z";
@@ -324,6 +326,64 @@ test("order-line helper requires the selected catalog and service versions", () 
     (error) => error.status === 400 && error.code === "expected_service_version_required",
   );
   assert.deepEqual(store.orderLineItems, []);
+});
+
+test("order-line helper rejects malformed selection records with domain errors", () => {
+  const store = fixture();
+  const selection = {
+    orderId: "order",
+    catalogItemId: "item",
+    expectedVersion: 3,
+    expectedServiceVersion: 1,
+    optionIds: ["a4"],
+    acceptedFormatCode: "pdf",
+    quantity: 1,
+    structuredSpec: { paper_size: "A4" },
+  };
+
+  assert.throws(
+    () => createOrderLineSnapshot(store, null),
+    (error) => error.status === 400 && error.code === "invalid_catalog_item" && error.details.field === "selection",
+  );
+  assert.throws(
+    () => appendOrderLineSnapshot(store, { ...selection, optionIds: "a4" }),
+    (error) => error.status === 400 && error.code === "invalid_catalog_options" && error.details.field === "optionIds",
+  );
+  assert.throws(
+    () => createOrderLineSnapshot(store, { ...selection, optionIds: [null] }, () => "generated"),
+    (error) => error.status === 400
+      && error.code === "invalid_catalog_options"
+      && error.details.fields[0] === "invalid_option_id",
+  );
+  assert.throws(
+    () => createOrderLineSnapshot(store, selection),
+    (error) => error.status === 400 && error.code === "invalid_catalog_item" && error.details.field === "lineItemId",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+  assert.deepEqual(store.orderLineItemOptions, []);
+});
+
+test("draft transition clears incompatible lifecycle metadata", () => {
+  const service = {
+    state: "withdrawn",
+    verifiedAt: AT,
+    verifiedBy: "ops",
+    suspendedAt: AT,
+    suspendedBy: "ops",
+    suspendReason: "Review",
+    withdrawnAt: AT,
+  };
+
+  transitionSupplierServiceToDraft(service);
+  assert.deepEqual(service, {
+    state: "draft",
+    verifiedAt: null,
+    verifiedBy: null,
+    suspendedAt: null,
+    suspendedBy: null,
+    suspendReason: null,
+    withdrawnAt: null,
+  });
 });
 
 test("order-line helper assigns append positions and rejects occupied positions", () => {

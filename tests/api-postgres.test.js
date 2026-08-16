@@ -1867,6 +1867,24 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.ok(privateWithdrawalMetadata.body.service.withdrawnAt);
     assert.equal(privateWithdrawalMetadata.body.service.verifiedAt, null);
     assert.equal(privateWithdrawalMetadata.body.service.suspendedAt, null);
+    const redrafted = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
+      method: "PATCH", subject: "clerk_supplier", body: { expectedVersion: 4, state: "draft" },
+    });
+    assert.equal(redrafted.status, 200, JSON.stringify(redrafted.body));
+    assert.equal(redrafted.body.service.state, "draft");
+    assert.equal(redrafted.body.service.version, 5);
+    const redraftedMetadata = await request(instance.api, "/supplier-services/svc_legacy_alias", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(redraftedMetadata.status, 200, JSON.stringify(redraftedMetadata.body));
+    assert.equal(redraftedMetadata.body.service.withdrawnAt, null);
+    assert.equal(redraftedMetadata.body.service.verifiedAt, null);
+    assert.equal(redraftedMetadata.body.service.suspendedAt, null);
+    assert.equal(redraftedMetadata.body.service.suspendReason, null);
+    const persistedRedraft = (await loadStore(database)).supplierServices
+      .find((service) => service.id === "svc_legacy_alias");
+    assert.equal(persistedRedraft.verifiedBy, null);
+    assert.equal(persistedRedraft.suspendedBy, null);
 
     const suspended = await request(instance.api, "/supplier-services/svc_banner/suspend", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 6, reason: "Catalog review" },

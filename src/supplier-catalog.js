@@ -199,8 +199,7 @@ export function advanceSupplierServiceVersion(service, at) {
   service.updatedAt = at;
 }
 
-export function transitionSupplierServiceToPending(service) {
-  service.state = "pending_verification";
+function clearSupplierServiceLifecycleMetadata(service) {
   service.verifiedAt = null;
   service.verifiedBy = null;
   service.suspendedAt = null;
@@ -209,24 +208,27 @@ export function transitionSupplierServiceToPending(service) {
   service.withdrawnAt = null;
 }
 
+export function transitionSupplierServiceToDraft(service) {
+  clearSupplierServiceLifecycleMetadata(service);
+  service.state = "draft";
+}
+
+export function transitionSupplierServiceToPending(service) {
+  clearSupplierServiceLifecycleMetadata(service);
+  service.state = "pending_verification";
+}
+
 export function transitionSupplierServiceToWithdrawn(service, at) {
+  clearSupplierServiceLifecycleMetadata(service);
   service.state = "withdrawn";
-  service.verifiedAt = null;
-  service.verifiedBy = null;
-  service.suspendedAt = null;
-  service.suspendedBy = null;
-  service.suspendReason = null;
   service.withdrawnAt = at;
 }
 
 export function transitionSupplierServiceToLive(service, at, verifiedBy) {
+  clearSupplierServiceLifecycleMetadata(service);
   service.state = "live";
   service.verifiedAt = at;
   service.verifiedBy = verifiedBy;
-  service.suspendedAt = null;
-  service.suspendedBy = null;
-  service.suspendReason = null;
-  service.withdrawnAt = null;
 }
 
 export function effectiveAcceptedFormats(store, item, { index } = {}) {
@@ -569,7 +571,41 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
   };
 }
 
+function normalizedSnapshotSelection(selection) {
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+    throw new CatalogError(400, "invalid_catalog_item", "selection must be a JSON object.", { field: "selection" });
+  }
+  if (!Array.isArray(selection.optionIds)) {
+    throw new CatalogError(400, "invalid_catalog_options", "optionIds must be an array.", { field: "optionIds" });
+  }
+  const normalized = { ...selection };
+  for (const field of ["orderId", "catalogItemId"]) {
+    if (typeof selection[field] !== "string" || !selection[field].trim()) {
+      throw new CatalogError(400, "invalid_catalog_item", `${field} must be a nonblank identifier.`, { field });
+    }
+    normalized[field] = selection[field].trim();
+  }
+  if (selection.lineItemId != null) {
+    if (typeof selection.lineItemId !== "string" || !selection.lineItemId.trim()) {
+      throw new CatalogError(400, "invalid_catalog_item", "lineItemId must be a nonblank identifier.", {
+        field: "lineItemId",
+      });
+    }
+    normalized.lineItemId = selection.lineItemId.trim();
+  }
+  normalized.optionIds = selection.optionIds.map((optionId, index) => {
+    if (typeof optionId !== "string" || !optionId.trim()) {
+      throw new CatalogError(400, "invalid_catalog_options", "Each optionId must be a nonblank identifier.", {
+        fields: { [index]: "invalid_option_id" },
+      });
+    }
+    return optionId.trim();
+  });
+  return normalized;
+}
+
 export function createOrderLineSnapshot(store, selection, createId) {
+  selection = normalizedSnapshotSelection(selection);
   if (selection.expectedVersion == null) {
     throw new CatalogError(400, "expected_version_required", "expectedVersion is required before checkout.");
   }
@@ -646,7 +682,9 @@ export function createOrderLineSnapshot(store, selection, createId) {
     "lineSubtotalMinor",
   );
   const lineItemId = selection.lineItemId || createId?.("oli");
-  if (!lineItemId) throw new TypeError("lineItemId or createId is required");
+  if (typeof lineItemId !== "string" || !lineItemId.trim()) {
+    throw new CatalogError(400, "invalid_catalog_item", "lineItemId or createId is required.", { field: "lineItemId" });
+  }
   const createdAt = selection.createdAt || new Date().toISOString();
   const options = selectedOptions
     .sort((left, right) => compareSortOrder(groups.get(left.optionGroupId), groups.get(right.optionGroupId)))
@@ -687,6 +725,7 @@ export function createOrderLineSnapshot(store, selection, createId) {
 }
 
 export function appendOrderLineSnapshot(store, selection, createId) {
+  selection = normalizedSnapshotSelection(selection);
   const lineItems = Array.isArray(store.orderLineItems) ? store.orderLineItems : [];
   const lineOptions = Array.isArray(store.orderLineItemOptions) ? store.orderLineItemOptions : [];
   const orderLines = lineItems.filter((line) => line.orderId === selection.orderId);

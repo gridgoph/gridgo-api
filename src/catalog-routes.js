@@ -12,6 +12,7 @@ import {
   publicSupplierShops,
   serviceLineBlockers,
   supplierCatalogReadiness,
+  transitionSupplierServiceToDraft,
   transitionSupplierServiceToPending,
   transitionSupplierServiceToWithdrawn,
   validateSpecBinding,
@@ -320,7 +321,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
           fail(400, "invalid_service_state", "Suppliers may set a service only to draft or pending_verification.");
         }
         if (body.state === "pending_verification") transitionSupplierServiceToPending(service);
-        else service.state = body.state;
+        else transitionSupplierServiceToDraft(service);
       }
       if (service.state === "live" && service.categoryCode !== priorCategory) {
         transitionSupplierServiceToPending(service);
