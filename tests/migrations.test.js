@@ -59,7 +59,41 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       assert.equal(legacyColumns.has(column), true, `${column} compatibility projection should remain`);
     }
 
+    assert.deepEqual(
+      (await client.query("SELECT name FROM pgmigrations ORDER BY id")).rows.map((row) => row.name),
+      [
+        "1786816800000_initial_schema",
+        "1786843800000_role_memberships_and_approvals",
+        "1786870800000_service_fee_money_model",
+        "1786874400000_enrollment_legacy_supplier_shop",
+      ],
+    );
+    await client.query(`
+      INSERT INTO users
+        (id, clerk_user_id, email, name, role, account_type,
+         shop_lat, shop_lng, shop_label, created_at, position, data)
+      VALUES
+        ('multi_role_shop', 'clerk_multi_role_shop', 'multi-role-shop@test.invalid',
+         'Multi Role Shop', 'client', 'individual', 7.0731, 125.6128,
+         'Bajada, Davao City', now(), 0, '{}')
+    `);
+    await assert.rejects(
+      client.query(`
+        INSERT INTO users
+          (id, clerk_user_id, email, name, role, account_type, org_name,
+           created_at, position, data)
+        VALUES
+          ('blank_org', 'clerk_blank_org', 'blank-org@test.invalid', 'Blank Org',
+           'client', 'business', '   ', now(), 1, '{}')
+      `),
+      (error) => error.code === "23514" && error.constraint === "users_org_name_check",
+    );
+
     await runner(migrationOptions(schema, "down", 1, client));
+    await assert.rejects(
+      client.query("UPDATE users SET shop_label = 'Updated shop' WHERE id = 'multi_role_shop'"),
+      (error) => error.code === "23514" && error.constraint === "users_legacy_supplier_shop_shape_check",
+    );
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal(
       (await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name,
@@ -130,7 +164,7 @@ test("service-fee migration backfills legacy money, payments, allocations, and s
         ('legacy_money', 'balance', 28125, 'qr_manual', 'not_submitted', 1, '{}');
     `);
 
-    await runner(migrationOptions(schema, "up", 2, client));
+    await runner(migrationOptions(schema, "up", 1, client));
 
     assert.deepEqual((await client.query("SELECT version, settings FROM platform_settings")).rows[0], {
       version: 7,
