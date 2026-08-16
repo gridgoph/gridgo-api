@@ -525,6 +525,80 @@ test("legacy verification decisions keep approval cases and fixed projections co
   }
 });
 
+test("legacy sync bumps case versions and demoted applicants get an explicit 409", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const riderSuspended = await request(instance.api, "/users/user_rider/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Documents expired" },
+    });
+    assert.equal(riderSuspended.status, 200, JSON.stringify(riderSuspended.body));
+
+    const staleRestore = await request(instance.api, "/approval-cases/case_rider/restore", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "restore-stale", note: "Stale restore" },
+    });
+    assert.equal(staleRestore.status, 409, JSON.stringify(staleRestore.body));
+    assert.equal(staleRestore.body.error, "approval_case_stale");
+
+    const freshRestore = await request(instance.api, "/approval-cases/case_rider/restore", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 2, requestId: "restore-fresh", note: "Documents renewed" },
+    });
+    assert.equal(freshRestore.status, 200, JSON.stringify(freshRestore.body));
+    assert.equal(freshRestore.body.approvalCase.version, 3);
+    assert.equal(freshRestore.body.approvalCase.status, "approved");
+
+    const demoted = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "client" },
+    });
+    assert.equal(demoted.status, 200, JSON.stringify(demoted.body));
+
+    const suspendDemoted = await request(instance.api, "/approval-cases/case_supplier/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "suspend-demoted", reason: "Post-departure review" },
+    });
+    assert.equal(suspendDemoted.status, 409, JSON.stringify(suspendDemoted.body));
+    assert.equal(suspendDemoted.body.error, "approval_case_role_mismatch");
+
+    const repromoted = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "supplier" },
+    });
+    assert.equal(repromoted.status, 200, JSON.stringify(repromoted.body));
+    const repromotedDetail = await request(instance.api, "/approval-cases/case_supplier", { subject: "clerk_ops" });
+    assert.equal(repromotedDetail.status, 200, JSON.stringify(repromotedDetail.body));
+    assert.equal(repromotedDetail.body.approvalCase.status, "pending");
+    assert.equal(repromotedDetail.body.approvalCase.version, 2, JSON.stringify(repromotedDetail.body.approvalCase));
+
+    const staleApprove = await request(instance.api, "/approval-cases/case_supplier/approve", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "approve-stale" },
+    });
+    assert.equal(staleApprove.status, 409, JSON.stringify(staleApprove.body));
+    assert.equal(staleApprove.body.error, "approval_case_stale");
+
+    const persisted = await loadStore(database);
+    const supplierCase = persisted.approvalCases.find((candidate) => candidate.id === "case_supplier");
+    assert.equal(supplierCase.status, "pending");
+    assert.equal(supplierCase.version, 2);
+    assert.equal(
+      persisted.approvalCaseEvents.some((event) => event.requestId === "suspend-demoted"),
+      false,
+    );
+    assert.equal(persisted.supplierServices.find((candidate) => candidate.id === "svc_banner").state, "live");
+    const supplierUser = persisted.users.find((candidate) => candidate.id === "user_supplier");
+    assert.equal(supplierUser.role, "supplier");
+    assert.equal(supplierUser.verificationStatus, "unverified");
+    const riderUser = persisted.users.find((candidate) => candidate.id === "user_rider");
+    assert.equal(riderUser.verificationStatus, "approved");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("approval queue, detail, and supplier decisions follow the settled transactional contract", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);

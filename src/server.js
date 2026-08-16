@@ -790,6 +790,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
     }
   }
   if (fromStatus !== caseStatus) {
+    if (fromStatus !== null) approvalCase.version += 1;
     store.approvalCaseEvents.push({
       id: id("ace"),
       approvalCaseId: approvalCase.id,

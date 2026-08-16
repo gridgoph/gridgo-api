@@ -12,6 +12,7 @@ const AT = "2026-08-16T00:00:00.000Z";
 function supplierStore() {
   return {
     users: [{ id: "supplier", role: "supplier", verificationStatus: "pending" }],
+    userRoleMemberships: [{ userId: "supplier", role: "supplier", createdAt: AT }],
     supplierProfiles: [{
       userId: "supplier",
       shopName: "Print Shop",
@@ -80,6 +81,69 @@ test("approval decision input is strict and requires transition-specific explana
     approvalDecisionInput("approve", { expectedVersion: 1, requestId: " r ", note: " ready " }),
     { expectedVersion: 1, requestId: "r", reason: "ready" },
   );
+});
+
+test("decisions on cases whose applicant lost the matching membership fail with 409", () => {
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_${sequence += 1}`;
+  const actor = { id: "ops", role: "client" };
+
+  const store = supplierStore();
+  store.approvalCases[0].status = "approved";
+  store.users[0] = { id: "supplier", role: "client", accountType: "individual" };
+  store.userRoleMemberships = [{ userId: "supplier", role: "client", createdAt: AT }];
+  assert.throws(
+    () => decideApprovalCase({
+      store,
+      caseId: "case_supplier",
+      action: "suspend",
+      input: { expectedVersion: 1, requestId: "request_demoted", reason: "Post-departure review" },
+      actor,
+      actorRole: "ops_admin",
+      at: AT,
+      createId,
+    }),
+    (error) => error.status === 409 && error.code === "approval_case_role_mismatch",
+  );
+  assert.equal(store.approvalCases[0].status, "approved");
+  assert.equal(store.approvalCases[0].version, 1);
+  assert.equal(Object.hasOwn(store.users[0], "verificationStatus"), false);
+  assert.equal(store.approvalCaseEvents.length, 0);
+  assert.equal(store.notifications.length, 0);
+});
+
+test("legacy verification stays untouched when the legacy role diverges from the case kind", () => {
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_${sequence += 1}`;
+  const actor = { id: "ops", role: "client" };
+
+  const store = supplierStore();
+  store.approvalCases[0].status = "approved";
+  store.users[0] = {
+    id: "supplier",
+    role: "rider",
+    verificationStatus: "approved",
+    verifiedAt: AT,
+    verifiedBy: "ops_original",
+  };
+  store.userRoleMemberships = [
+    { userId: "supplier", role: "supplier", createdAt: AT },
+    { userId: "supplier", role: "rider", createdAt: AT },
+  ];
+  const suspended = decideApprovalCase({
+    store,
+    caseId: "case_supplier",
+    action: "suspend",
+    input: { expectedVersion: 1, requestId: "request_switched", reason: "Supplier case review" },
+    actor,
+    actorRole: "ops_admin",
+    at: AT,
+    createId,
+  });
+  assert.equal(suspended.approvalCase.status, "suspended");
+  assert.equal(store.users[0].verificationStatus, "approved");
+  assert.equal(store.users[0].verifiedAt, AT);
+  assert.equal(store.users[0].verifiedBy, "ops_original");
 });
 
 test("supplier approve, suspend, and restore preserve explicit service review", () => {

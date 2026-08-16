@@ -11,6 +11,14 @@ const DECISION_TRANSITIONS = {
   restore: { from: "suspended", to: "approved" },
 };
 
+// Mirrors the deferred approval_cases_matching_membership_trigger: a decision
+// on a case whose applicant lost the matching membership could never commit.
+const CASE_KIND_MEMBERSHIP_ROLE = {
+  business_client: "client",
+  supplier: "supplier",
+  rider: "rider",
+};
+
 function nonblank(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -119,7 +127,7 @@ function fail(status, code, message, details = {}) {
 function updateLegacyVerification(store, approvalCase, action, actorId, at, reason) {
   if (!new Set(["supplier", "rider"]).has(approvalCase.kind)) return;
   const user = (store.users || []).find((candidate) => candidate.id === approvalCase.userId);
-  if (!user) return;
+  if (!user || user.role !== approvalCase.kind) return;
   user.verificationStatus = approvalCase.status;
   user.verificationNote = reason || null;
   if (approvalCase.status === "approved") {
@@ -193,6 +201,16 @@ export function decideApprovalCase({
 
   const approvalCase = (store.approvalCases || []).find((candidate) => candidate.id === caseId);
   if (!approvalCase) fail(404, "approval_case_not_found", "That approval case no longer exists.");
+  const requiredRole = CASE_KIND_MEMBERSHIP_ROLE[approvalCase.kind];
+  const holdsMembership = (store.userRoleMemberships || []).some(
+    (membership) => membership.userId === approvalCase.userId && membership.role === requiredRole,
+  );
+  if (!holdsMembership) {
+    fail(409, "approval_case_role_mismatch", `The applicant no longer holds the ${requiredRole} role this case verifies.`, {
+      approvalCase,
+      requiredRole,
+    });
+  }
   const transition = DECISION_TRANSITIONS[action];
   if (approvalCase.status !== transition.from) {
     if (approvalCase.version !== input.expectedVersion) {
