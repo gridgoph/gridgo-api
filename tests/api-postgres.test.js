@@ -506,6 +506,84 @@ test("role demotion and re-promotion reset the approval case so a returnee re-ea
   }
 });
 
+test("direct supplier and rider role switches never transfer approval across kinds", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const switched = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "rider", reason: "kind switch" },
+    });
+    assert.equal(switched.status, 200, JSON.stringify(switched.body));
+    assert.equal(switched.body.user.role, "rider");
+    assert.equal(switched.body.user.verificationStatus, "unverified");
+    assert.equal(Object.hasOwn(switched.body.user, "verifiedAt"), false);
+    const supplierGone = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(supplierGone.status, 403);
+    assert.equal(supplierGone.body.error, "supplier_account_not_found");
+    const asRider = await request(instance.api, "/auth/me/rider", { subject: "clerk_supplier" });
+    assert.equal(asRider.status, 200, JSON.stringify(asRider.body));
+    assert.deepEqual(asRider.body.membership, { role: "rider" });
+    assert.equal(asRider.body.approvalCase, null);
+    assert.equal(asRider.body.capabilities.receiveDispatchOffers, false);
+    assert.equal(asRider.body.capabilities.acceptAssignments, false);
+
+    const switchedBack = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "supplier", reason: "switch back" },
+    });
+    assert.equal(switchedBack.status, 200, JSON.stringify(switchedBack.body));
+    assert.equal(switchedBack.body.user.verificationStatus, "unverified");
+    const backProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(backProjection.status, 200, JSON.stringify(backProjection.body));
+    assert.equal(backProjection.body.approvalCase.status, "pending");
+    assert.equal(backProjection.body.approvalCase.decidedAt, null);
+    assert.equal(backProjection.body.capabilities.receiveJobOffers, false);
+    assert.equal(backProjection.body.capabilities.acceptJobs, false);
+
+    const riderSwitch = await request(instance.api, "/users/user_rider/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "supplier" },
+    });
+    assert.equal(riderSwitch.status, 200, JSON.stringify(riderSwitch.body));
+    assert.equal(riderSwitch.body.user.verificationStatus, "unverified");
+    const riderAsSupplier = await request(instance.api, "/auth/me/supplier", { subject: "clerk_rider" });
+    assert.equal(riderAsSupplier.status, 200, JSON.stringify(riderAsSupplier.body));
+    assert.equal(riderAsSupplier.body.approvalCase, null);
+    assert.equal(riderAsSupplier.body.capabilities.receiveJobOffers, false);
+    assert.equal((await request(instance.api, "/users/user_rider/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "rider" },
+    })).status, 200);
+    const riderBackProjection = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
+    assert.equal(riderBackProjection.status, 200, JSON.stringify(riderBackProjection.body));
+    assert.equal(riderBackProjection.body.approvalCase.status, "pending");
+    assert.equal(riderBackProjection.body.capabilities.receiveDispatchOffers, false);
+
+    const persisted = await loadStore(database);
+    const supplierCase = persisted.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
+    assert.equal(supplierCase.status, "pending");
+    assert.equal(supplierCase.decidedAt, undefined);
+    assert.equal(supplierCase.decidedBy, undefined);
+    const riderCase = persisted.approvalCases.find((approvalCase) => approvalCase.id === "case_rider");
+    assert.equal(riderCase.status, "pending");
+    const resetEvents = persisted.approvalCaseEvents.filter(
+      (event) => event.fromStatus === "approved" && event.toStatus === "pending",
+    );
+    assert.deepEqual(
+      resetEvents.map((event) => event.approvalCaseId).sort(),
+      ["case_rider", "case_supplier"],
+    );
+    const finalUsers = persisted.users.filter((candidate) => ["user_supplier", "user_rider"].includes(candidate.id));
+    for (const candidate of finalUsers) {
+      assert.equal(candidate.verificationStatus, "unverified");
+      assert.equal(candidate.verifiedAt, undefined);
+      assert.equal(candidate.verifiedBy, undefined);
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("PostgreSQL-backed order, payment, role, and payout behavior survives API restart", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);

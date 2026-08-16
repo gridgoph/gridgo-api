@@ -605,7 +605,8 @@ function verificationUserResponse(store, target) {
  * one release, so their transactions must also keep the membership-era approval
  * case truthful: fixed projections and existing work gates read different
  * owners. The legacy `unverified` status has no case equivalent and maps to
- * `pending`; a demoted then re-promoted supplier or rider re-earns approval.
+ * `pending`; a demoted then re-promoted supplier or rider re-earns approval,
+ * and approval never transfers between the supplier and rider kinds.
  */
 function syncApprovalCaseWithVerification(store, target, status, actor, reason, { createMissing = true } = {}) {
   const caseStatus = status === "unverified" ? "pending" : status;
@@ -1964,8 +1965,11 @@ async function handleRequest(req, res) {
         delete target.accountType;
         delete target.orgName;
       }
-      if (["supplier", "rider"].includes(body.role) && target.verificationStatus == null) {
+      if (["supplier", "rider"].includes(body.role) && (prev !== body.role || target.verificationStatus == null)) {
         target.verificationStatus = "unverified";
+        delete target.verificationNote;
+        delete target.verifiedAt;
+        delete target.verifiedBy;
         syncApprovalCaseWithVerification(store, target, "unverified", user, null, { createMissing: false });
       }
       if (body.role === "supplier" && !Array.isArray(target.verificationDocumentFileIds)) {
