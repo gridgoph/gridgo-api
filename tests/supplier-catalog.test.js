@@ -224,6 +224,34 @@ test("shop pagination resumes after a removed cursor without reprojecting off-pa
   assert.deepEqual(publicSupplierShops(bounded, { limit: 1 }).shops.map((shop) => shop.supplierId), ["supplier_a"]);
 });
 
+test("shop detail indexes unrelated catalog items once", () => {
+  const store = fixture();
+  store.supplierServices.push({
+    ...store.supplierServices[0],
+    id: "service_without_items",
+    sortOrder: 1,
+  });
+  store.supplierServiceFileFormats.push({ supplierServiceId: "service_without_items", formatCode: "pdf" });
+  let serviceReads = 0;
+  const unrelatedItem = {
+    id: "unrelated_item",
+    supplierId: "other_supplier",
+  };
+  Object.defineProperty(unrelatedItem, "supplierServiceId", {
+    enumerable: true,
+    get() {
+      serviceReads += 1;
+      return "unrelated_service";
+    },
+  });
+  store.catalogItems.push(unrelatedItem);
+
+  const shop = publicSupplierShop(store, "supplier");
+  assert.equal(shop.services.length, 1);
+  assert.equal(shop.services[0].id, "service");
+  assert.equal(serviceReads, 1);
+});
+
 test("approved suppliers remain grandfathered ready until approval is reopened", () => {
   const approved = fixture();
   approved.supplierProfiles.length = 0;

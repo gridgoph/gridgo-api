@@ -13,6 +13,7 @@ import {
   serviceLineBlockers,
   supplierCatalogReadiness,
   transitionSupplierServiceToPending,
+  transitionSupplierServiceToWithdrawn,
   validateSpecBinding,
 } from "./supplier-catalog.js";
 
@@ -287,8 +288,9 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     if (req.method === "DELETE") {
-      service.state = "withdrawn";
-      advanceSupplierServiceVersion(service, now());
+      const ts = now();
+      transitionSupplierServiceToWithdrawn(service, ts);
+      advanceSupplierServiceVersion(service, ts);
       auditChange(audit, store, user, "supplier_service.withdraw", "supplier_service", service.id);
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
     }
@@ -650,4 +652,12 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   }
 
   return null;
+}
+
+export function isPublicSupplierCatalogRoute(method, pathname) {
+  return method === "GET" && (
+    pathname === "/catalog/shops"
+    || /^\/catalog\/shops\/[^/]+$/.test(pathname)
+    || /^\/catalog\/items\/[^/]+$/.test(pathname)
+  );
 }

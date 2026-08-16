@@ -1660,6 +1660,11 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(invalidPrivateResponse.status, 401);
     assert.equal((await invalidPrivateResponse.json()).error, "unauthorized");
+    const invalidPublicResponse = await fetch(`${instance.api}/catalog/items/catalog_poster`, {
+      headers: { Authorization: "Bearer invalid-session" },
+    });
+    assert.equal(invalidPublicResponse.status, 401);
+    assert.equal((await invalidPublicResponse.json()).error, "unauthorized");
 
     const malformedPublicCatalogPath = await rawRequest(instance.api, "/catalog/items/%E0%A4%A", {
       method: "GET",
@@ -1849,6 +1854,19 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(draftFormatRemoval.status, 200, JSON.stringify(draftFormatRemoval.body));
     assert.equal(draftFormatRemoval.body.service.state, "draft");
     assert.equal(draftFormatRemoval.body.service.version, 3);
+    const privateWithdrawal = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
+      method: "DELETE", subject: "clerk_supplier", body: { expectedVersion: 3 },
+    });
+    assert.equal(privateWithdrawal.status, 200, JSON.stringify(privateWithdrawal.body));
+    assert.equal(privateWithdrawal.body.service.state, "withdrawn");
+    assert.equal(privateWithdrawal.body.service.version, 4);
+    const privateWithdrawalMetadata = await request(instance.api, "/supplier-services/svc_legacy_alias", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(privateWithdrawalMetadata.status, 200, JSON.stringify(privateWithdrawalMetadata.body));
+    assert.ok(privateWithdrawalMetadata.body.service.withdrawnAt);
+    assert.equal(privateWithdrawalMetadata.body.service.verifiedAt, null);
+    assert.equal(privateWithdrawalMetadata.body.service.suspendedAt, null);
 
     const suspended = await request(instance.api, "/supplier-services/svc_banner/suspend", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 6, reason: "Catalog review" },
@@ -1879,18 +1897,30 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
     assert.equal(withdrawn.body.service.version, 10);
-    const withdrawnResubmitted = await request(instance.api, "/supplier-services/svc_banner/submit", {
-      method: "POST", subject: "clerk_supplier", body: { expectedVersion: 10 },
+    assert.ok(withdrawn.body.service.withdrawnAt);
+    assert.equal(withdrawn.body.service.verifiedAt, null);
+    assert.equal(withdrawn.body.service.suspendedAt, null);
+    const withdrawnResubmitted = await request(instance.api, "/me/supplier-services/svc_banner", {
+      method: "PATCH", subject: "clerk_supplier", body: { expectedVersion: 10, state: "pending_verification" },
     });
     assert.equal(withdrawnResubmitted.status, 200, JSON.stringify(withdrawnResubmitted.body));
     assert.equal(withdrawnResubmitted.body.service.state, "pending_verification");
     assert.equal(withdrawnResubmitted.body.service.version, 11);
+    const resubmittedMetadata = await request(instance.api, "/supplier-services/svc_banner", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(resubmittedMetadata.status, 200, JSON.stringify(resubmittedMetadata.body));
+    assert.equal(resubmittedMetadata.body.service.withdrawnAt, null);
+    assert.equal(resubmittedMetadata.body.service.suspendedAt, null);
+    assert.equal(resubmittedMetadata.body.service.verifiedAt, null);
     const withdrawnReverified = await request(instance.api, "/supplier-services/svc_banner/verify", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 11 },
     });
     assert.equal(withdrawnReverified.status, 200, JSON.stringify(withdrawnReverified.body));
     assert.equal(withdrawnReverified.body.service.state, "live");
     assert.equal(withdrawnReverified.body.service.version, 12);
+    assert.equal(withdrawnReverified.body.service.withdrawnAt, null);
+    assert.equal(withdrawnReverified.body.service.suspendedAt, null);
 
     const liveFormatRemoval = await request(instance.api, "/me/supplier-services/svc_banner/file-formats", {
       method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 12, formatCodes: [] },

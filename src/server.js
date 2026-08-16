@@ -89,14 +89,16 @@ import {
   parseAllowedOrigins,
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
-import { routeSupplierCatalog } from "./catalog-routes.js";
+import { isPublicSupplierCatalogRoute, routeSupplierCatalog } from "./catalog-routes.js";
 import {
   advanceSupplierServiceVersion,
   assertExpectedVersion,
   assertServiceLineReadinessInvariant,
   assertServiceLineReviewReady,
   supplierCatalogReadiness,
+  transitionSupplierServiceToLive,
   transitionSupplierServiceToPending,
+  transitionSupplierServiceToWithdrawn,
 } from "./supplier-catalog.js";
 import { createDatabase } from "./database.js";
 import {
@@ -1459,6 +1461,15 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     const user = auth.user;
+
+    if (!user
+        && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
+        && isPublicSupplierCatalogRoute(req.method, pathname)) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
 
     const privateCatalogRoute = pathname === "/me/supplier-readiness"
       || pathname.startsWith("/me/supplier-services")
@@ -2867,15 +2878,11 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       assertServiceLineReviewReady(store, service);
-      service.state = "live";
-      service.verifiedAt = now();
-      service.verifiedBy = user.id;
-      service.suspendedAt = null;
-      service.suspendedBy = null;
-      service.suspendReason = null;
+      const ts = now();
+      transitionSupplierServiceToLive(service, ts, user.id);
       delete service.approvalSuspensionPreviousState;
       delete service.approvalSuspensionCaseId;
-      advanceSupplierServiceVersion(service, now());
+      advanceSupplierServiceVersion(service, ts);
       audit(store, {
         actor: user,
         action: "supplier_service.verify",
@@ -2920,9 +2927,9 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       // Withdrawal never cancels in-flight orders — only removes from new matching
-      service.state = "withdrawn";
-      service.withdrawnAt = now();
-      advanceSupplierServiceVersion(service, now());
+      const ts = now();
+      transitionSupplierServiceToWithdrawn(service, ts);
+      advanceSupplierServiceVersion(service, ts);
       audit(store, {
         actor: user,
         action: "supplier_service.withdraw",

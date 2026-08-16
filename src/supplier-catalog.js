@@ -203,6 +203,30 @@ export function transitionSupplierServiceToPending(service) {
   service.state = "pending_verification";
   service.verifiedAt = null;
   service.verifiedBy = null;
+  service.suspendedAt = null;
+  service.suspendedBy = null;
+  service.suspendReason = null;
+  service.withdrawnAt = null;
+}
+
+export function transitionSupplierServiceToWithdrawn(service, at) {
+  service.state = "withdrawn";
+  service.verifiedAt = null;
+  service.verifiedBy = null;
+  service.suspendedAt = null;
+  service.suspendedBy = null;
+  service.suspendReason = null;
+  service.withdrawnAt = at;
+}
+
+export function transitionSupplierServiceToLive(service, at, verifiedBy) {
+  service.state = "live";
+  service.verifiedAt = at;
+  service.verifiedBy = verifiedBy;
+  service.suspendedAt = null;
+  service.suspendedBy = null;
+  service.suspendReason = null;
+  service.withdrawnAt = null;
 }
 
 export function effectiveAcceptedFormats(store, item, { index } = {}) {
@@ -426,10 +450,12 @@ function publicShopMedia(store, supplierId, index) {
     .sort((left, right) => left.slot.localeCompare(right.slot));
 }
 
-export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
-  if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
-  const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
-  const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false }).map((group) => ({
+export function publicCatalogItem(store, item, { selectedOptionIds, index } = {}) {
+  if (catalogItemBlockers(store, item, { publicOnly: true, index }).length) return null;
+  const service = index
+    ? index.servicesById.get(item.supplierServiceId)
+    : store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
+  const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false, index }).map((group) => ({
     id: group.id,
     name: group.name,
     required: group.required,
@@ -463,8 +489,8 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
     } : null,
-    acceptedFormats: effectiveAcceptedFormats(store, item),
-    photos: publicPhotos(store, item.id),
+    acceptedFormats: effectiveAcceptedFormats(store, item, { index }),
+    photos: publicPhotos(store, item.id, index),
     optionGroups: groups,
     version: item.version,
     serviceVersion: service.version,
@@ -472,17 +498,17 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
 }
 
 export function publicSupplierShop(store, supplierId) {
-  if (!hasSupplierMembership(store, supplierId) || approvalStatus(store, supplierId) !== "approved") return null;
+  const index = buildCatalogIndex(store);
+  if (!hasSupplierMembership(store, supplierId, index) || approvalStatus(store, supplierId, index) !== "approved") return null;
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
   if (!profile) return null;
-  const services = (store.supplierServices || [])
-    .filter((service) => service.supplierId === supplierId && service.state === "live")
+  const services = (index.servicesBySupplier.get(supplierId) || [])
+    .filter((service) => service.state === "live")
     .sort(compareSortOrder)
     .map((service) => {
-      const items = (store.catalogItems || [])
-        .filter((item) => item.supplierServiceId === service.id)
+      const items = (index.catalogItemsByService.get(service.id) || [])
         .sort(compareSortOrder)
-        .map((item) => publicCatalogItem(store, item))
+        .map((item) => publicCatalogItem(store, item, { index }))
         .filter(Boolean);
       return items.length ? {
         id: service.id,
@@ -492,8 +518,8 @@ export function publicSupplierShop(store, supplierId) {
         turnaroundHours: Object.hasOwn(service, "standardTurnaroundHours")
           ? service.standardTurnaroundHours
           : service.turnaroundHours,
-        acceptedFormats: serviceFormatCodes(store, service.id)
-          .filter((code) => activeFormatRegistry(store).has(code)).sort(),
+        acceptedFormats: serviceFormatCodes(store, service.id, index)
+          .filter((code) => activeFormatRegistry(store, index).has(code)).sort(),
         items,
       } : null;
     })
@@ -503,7 +529,7 @@ export function publicSupplierShop(store, supplierId) {
     supplierId,
     shopName: profile.shopName,
     shop: profile.shop,
-    media: publicShopMedia(store, supplierId),
+    media: publicShopMedia(store, supplierId, index),
     categories: [...new Set(services.map((service) => service.categoryCode))],
     services,
   };
