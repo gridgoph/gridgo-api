@@ -117,6 +117,20 @@ function canonicalCategoryCode(store, code) {
   return alias?.categoryCode || code;
 }
 
+function activeCanonicalCategoryCode(store, code) {
+  const direct = (store.taxonomy?.categories || []).find(
+    (category) => category.active !== false && category.code === code,
+  );
+  if (direct) return direct.code;
+  const alias = (store.taxonomy?.categoryAliases || []).find(
+    (candidate) => candidate.active !== false && candidate.code === code,
+  );
+  if (!alias) return null;
+  return (store.taxonomy?.categories || []).find(
+    (category) => category.active !== false && category.code === alias.categoryCode,
+  )?.code || null;
+}
+
 function readyFile(store, fileId, index) {
   if (index) return index.readyFiles.get(fileId) || null;
   return (store.files || []).find(
@@ -226,7 +240,10 @@ export function serviceLineBlockers(store, service, { publicOnly = false, format
   if (acceptedFormatCodes.filter((code) => activeFormatRegistry(store, index).has(code)).length === 0) {
     blockers.push("accepted_file_formats");
   }
-  if (publicOnly && service?.state !== "live") blockers.push("service_not_live");
+  if (publicOnly) {
+    if (service?.state !== "live") blockers.push("service_not_live");
+    if (!activeCanonicalCategoryCode(store, service?.categoryCode)) blockers.push("service_category");
+  }
   if (!publicOnly && service && !["pending_verification", "live"].includes(service.state)) {
     blockers.push("service_not_review_ready");
   }
@@ -417,7 +434,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     id: item.id,
     supplierId: item.supplierId,
     supplierServiceId: item.supplierServiceId,
-    categoryCode: canonicalCategoryCode(store, service.categoryCode),
+    categoryCode: activeCanonicalCategoryCode(store, service.categoryCode),
     name: item.name,
     description: item.description,
     basePriceMinor: item.basePriceMinor,
@@ -454,7 +471,7 @@ export function publicSupplierShop(store, supplierId) {
       return items.length ? {
         id: service.id,
         version: service.version,
-        categoryCode: canonicalCategoryCode(store, service.categoryCode),
+        categoryCode: activeCanonicalCategoryCode(store, service.categoryCode),
         pricingBasis: service.pricingBasis,
         turnaroundHours: Object.hasOwn(service, "standardTurnaroundHours")
           ? service.standardTurnaroundHours
@@ -488,7 +505,7 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
       for (const item of index.catalogItemsByService.get(service.id) || []) {
         if (catalogItemBlockers(store, item, { publicOnly: true, index }).length) continue;
         itemCount += 1;
-        categories.add(canonicalCategoryCode(store, service.categoryCode));
+        categories.add(activeCanonicalCategoryCode(store, service.categoryCode));
       }
     }
     const categoryList = [...categories];
@@ -549,7 +566,10 @@ export function createOrderLineSnapshot(store, selection, createId) {
     });
   }
   const order = (store.orders || []).find((candidate) => candidate.id === selection.orderId);
-  if (order && order.supplierId !== item.supplierId) {
+  if (!order) {
+    throw new CatalogError(404, "order_not_found", "That order no longer exists. Refresh orders and try again.");
+  }
+  if (order.supplierId !== item.supplierId) {
     throw new CatalogError(409, "catalog_item_stale", "The catalog item does not belong to the order's assigned supplier.");
   }
   const { effectiveUnitPriceMinor, selectedOptions } = selectedCatalogPrice(store, item, selection.optionIds || []);

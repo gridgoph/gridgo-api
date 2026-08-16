@@ -68,6 +68,7 @@ function fixture({ approvalStatus = "approved", fileFormatMode = "inherit" } = {
       { id: "a4", optionGroupId: "size", label: "A4", priceModifierMinor: 25, specBinding: { fieldCode: "paper_size", valueCode: "A4" }, active: true, sortOrder: 1 },
       { id: "gloss", optionGroupId: "finish", label: "Gloss", priceModifierMinor: 20, active: true, sortOrder: 0 },
     ],
+    orders: [{ id: "order", supplierId: "supplier" }],
     orderLineItems: [],
     orderLineItemOptions: [],
   };
@@ -103,6 +104,7 @@ function supplierFixture(supplierId) {
     option.id = `${option.id}_${suffix}`;
     option.optionGroupId = groupIds.get(option.optionGroupId);
   });
+  Object.assign(store.orders[0], { id: `order_${suffix}`, supplierId });
   return store;
 }
 
@@ -173,6 +175,31 @@ test("public catalog and checkout require a current supplier membership", () => 
     }),
     (error) => error.status === 409 && error.code === "catalog_item_stale",
   );
+  assert.deepEqual(store.orderLineItems, []);
+  assert.deepEqual(store.orderLineItemOptions, []);
+});
+
+test("public catalog and checkout require an active canonical service category", () => {
+  const store = fixture();
+  store.taxonomy.categories[0].active = false;
+
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  assert.equal(publicSupplierShop(store, "supplier"), null);
+  assert.deepEqual(publicSupplierShops(store).shops, []);
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "order",
+      catalogItemId: "item",
+      expectedVersion: 3,
+      expectedServiceVersion: 1,
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { paper_size: "A4" },
+    }),
+    (error) => error.status === 409 && error.code === "catalog_item_stale",
+  );
+  assert.equal(store.supplierServices[0].categoryCode, "marketing_collateral");
   assert.deepEqual(store.orderLineItems, []);
   assert.deepEqual(store.orderLineItemOptions, []);
 });
@@ -268,6 +295,25 @@ test("order-line helper requires the selected catalog and service versions", () 
     (error) => error.status === 400 && error.code === "expected_service_version_required",
   );
   assert.deepEqual(store.orderLineItems, []);
+});
+
+test("order-line helper rejects a missing order before appending snapshots", () => {
+  const store = fixture();
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "missing_order",
+      catalogItemId: "item",
+      expectedVersion: 3,
+      expectedServiceVersion: 1,
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { paper_size: "A4" },
+    }),
+    (error) => error.status === 404 && error.code === "order_not_found",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+  assert.deepEqual(store.orderLineItemOptions, []);
 });
 
 test("order-line helper rejects a stale service-derived projection", () => {

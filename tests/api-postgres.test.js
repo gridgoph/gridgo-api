@@ -1977,6 +1977,33 @@ test("pending suppliers can edit catalog while public browse requires approval a
       standard_turnaround_hours: 24,
     });
 
+    await database.query(`
+      UPDATE taxonomy_categories SET active = false WHERE code = 'marketing_collateral'
+    `);
+    const inactiveCategoryItem = await request(instance.api, "/catalog/items/catalog_poster");
+    assert.equal(inactiveCategoryItem.status, 404, JSON.stringify(inactiveCategoryItem.body));
+    const inactiveCategoryShop = await request(instance.api, "/catalog/shops/user_supplier");
+    assert.equal(inactiveCategoryShop.status, 404, JSON.stringify(inactiveCategoryShop.body));
+    const inactiveCategoryShops = await request(instance.api, "/catalog/shops");
+    assert.equal(inactiveCategoryShops.status, 200, JSON.stringify(inactiveCategoryShops.body));
+    assert.deepEqual(inactiveCategoryShops.body.shops, []);
+    const inactiveCategoryFilter = await request(instance.api, "/catalog/shops?categoryCode=marketing_collateral");
+    assert.equal(inactiveCategoryFilter.status, 400, JSON.stringify(inactiveCategoryFilter.body));
+    assert.equal(inactiveCategoryFilter.body.error, "invalid_category_code");
+    const inactivePrivateService = await request(instance.api, "/me/supplier-services/svc_banner", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(inactivePrivateService.status, 200, JSON.stringify(inactivePrivateService.body));
+    assert.equal(inactivePrivateService.body.service.categoryCode, "marketing_collateral");
+    const inactivePrivateItem = await request(instance.api, "/me/catalog-items/catalog_poster", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(inactivePrivateItem.status, 200, JSON.stringify(inactivePrivateItem.body));
+    await database.query(`
+      UPDATE taxonomy_categories SET active = true WHERE code = 'marketing_collateral'
+    `);
+    assert.equal((await request(instance.api, "/catalog/items/catalog_poster")).status, 200);
+
     const deprovisioned = await request(instance.api, "/users/user_supplier/role", {
       method: "PATCH", subject: "clerk_super", body: { role: "client", reason: "Access removed" },
     });
