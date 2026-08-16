@@ -92,7 +92,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 All routes except `/health`, `/catalog`, and the documented anonymous device registration calls require a verified Clerk bearer.
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, `/auth/clerk/activate`, `/auth/logout`
-- Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/audit`
+- Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location

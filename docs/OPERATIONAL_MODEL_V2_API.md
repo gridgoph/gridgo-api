@@ -26,6 +26,12 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
 | GET | `/auth/me/ops` | `ops_admin` membership | fixed Operations projection |
 | GET | `/auth/me/admin` | `super_admin` membership | fixed Super Admin projection |
+| GET | `/approval-cases?status=&kind=&cursor=` | ops/super | submitted cases ordered oldest first; defaults to pending |
+| GET | `/approval-cases/:caseId` | ops/super | applicant profile, kind-specific review data, readiness, and immutable history |
+| POST | `/approval-cases/:caseId/approve` | ops/super | pending → approved with expected version and idempotency key |
+| POST | `/approval-cases/:caseId/reject` | ops/super | pending → rejected; reason required |
+| POST | `/approval-cases/:caseId/suspend` | ops/super | approved → suspended; reason required |
+| POST | `/approval-cases/:caseId/restore` | ops/super | suspended → approved; restore note required |
 | POST | `/auth/logout` | authenticated | optionally releases this phone back to unclaimed; the client signs out of Clerk |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
@@ -51,7 +57,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | PATCH | `/users/:id/shop` | owning supplier; ops/super any supplier | replace supplier shop pin; existing orders are unchanged |
 | GET | `/users/:id/verification-documents` | owning supplier; ops/super any supplier | private attached verification-document metadata |
 | PATCH | `/users/:id/role` | super | role change; audited |
-| POST | `/users/:id/verification` | ops/super | supplier/rider approval decision |
+| POST | `/users/:id/verification` | ops/super | one-release legacy supplier/rider verification compatibility path |
 | GET | `/zones` | authenticated | address-zone records; order creation requires an active zone code, but zone fees are not used for v2 pricing |
 | POST | `/zones` | super | create zone |
 | PATCH | `/zones/:idOrCode` | super | update zone |
@@ -122,6 +128,27 @@ Used once after Google / public SSO. `/auth/me` does not create or email-link ac
 - An unmapped identity creates a client (`clerkUserId`, primary verified email, name, phone if present, and `accountType: "individual"`). Email is not used to merge identities.
 - Success is `200 { user }` (`publicUser`; no `clerkUserId`). The same Clerk JWT can immediately call `/auth/me`.
 - Unmapped JWT on `/auth/me` remains `401 unauthorized`. Role or status claims and Clerk metadata cannot elevate database memberships or approval cases.
+
+## Approval queue and decisions
+
+`GET /approval-cases` is shared by Operations and Super Admin. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
+
+Decision bodies are:
+
+```text
+// approve
+{ "expectedVersion": 1, "requestId": "approval-uuid", "note": "optional" }
+
+// reject or suspend
+{ "expectedVersion": 2, "requestId": "approval-uuid", "reason": "required" }
+
+// restore
+{ "expectedVersion": 3, "requestId": "approval-uuid", "note": "required" }
+```
+
+Each committed decision increments `version` and atomically writes the case, immutable event, audit row, and applicant notification. Replaying the winning `requestId` is idempotent. A different stale/racing decision returns `409 approval_already_decided`; a stale version on an otherwise valid transition returns `409 approval_case_stale`.
+
+Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
 
 ## Supplier shop and verification profile
 

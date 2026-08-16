@@ -19,6 +19,14 @@ import {
   membershipSummary,
 } from "./authorization-context.js";
 import {
+  APPROVAL_CASE_KINDS,
+  APPROVAL_CASE_STATUSES,
+  APPROVAL_DECISIONS,
+  approvalDecisionInput,
+  decideApprovalCase,
+  supplierApprovalReadiness,
+} from "./approval-cases.js";
+import {
   AttachmentError,
   attachFileReference,
   authorizeFileAttach,
@@ -427,18 +435,8 @@ function riderProfileProjection(store, userId) {
 }
 
 function supplierReadiness(store, userId, approvalCase) {
-  // Task B can evaluate the task-A profile plus the existing governed service
-  // line. Catalog/media/payment-term blockers are added by their owning schema
-  // tasks; an already-approved legacy supplier remains grandfathered ready.
   if (approvalCase?.status === "approved") return { readyForApproval: true, missing: [] };
-  const missing = [];
-  if (!(store.supplierProfiles || []).some((profile) => profile.userId === userId)) {
-    missing.push("supplier_profile");
-  }
-  if (!(store.supplierServices || []).some((service) => service.supplierId === userId)) {
-    missing.push("supplier_service");
-  }
-  return { readyForApproval: missing.length === 0, missing };
+  return supplierApprovalReadiness(store, userId);
 }
 
 function currentRiderDocuments(store, userId) {
@@ -451,6 +449,147 @@ function currentRiderDocuments(store, userId) {
       expiresOn: document.expiresOn ?? null,
       uploadedAt: document.uploadedAt,
     }));
+}
+
+function approvalCaseForApprover(approvalCase) {
+  return {
+    ...approvalCaseSummary(approvalCase),
+    decidedBy: approvalCase.decidedBy ?? null,
+  };
+}
+
+function approvalHistoryFor(store, caseId) {
+  return (store.approvalCaseEvents || [])
+    .filter((event) => event.approvalCaseId === caseId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .map((event) => ({
+      id: event.id,
+      applicationRevision: event.applicationRevision,
+      fromStatus: event.fromStatus ?? null,
+      toStatus: event.toStatus,
+      actorUserId: event.actorUserId ?? null,
+      actorKind: event.actorKind,
+      reason: event.reason ?? null,
+      requestId: event.requestId,
+      snapshot: stripCommissionFields(event.snapshot || {}),
+      createdAt: event.createdAt,
+    }));
+}
+
+function stripCommissionFields(value) {
+  if (Array.isArray(value)) return value.map(stripCommissionFields);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !key.toLowerCase().includes("commission"))
+      .map(([key, child]) => [key, stripCommissionFields(child)]),
+  );
+}
+
+function riderDocumentsForApproval(store, userId) {
+  return currentRiderDocuments(store, userId).map((document) => {
+    const file = findFile(store, document.fileId);
+    return {
+      ...document,
+      file: file?.state === "ready" && file.ownerId === userId ? publicFile(file) : null,
+    };
+  });
+}
+
+function approvalCaseDetail(store, approvalCase) {
+  const applicant = (store.users || []).find((candidate) => candidate.id === approvalCase.userId);
+  const base = {
+    approvalCase: approvalCaseForApprover(approvalCase),
+    applicant: publicIdentity(applicant),
+    history: approvalHistoryFor(store, approvalCase.id),
+  };
+  if (approvalCase.kind === "business_client") {
+    return {
+      ...base,
+      clientProfile: clientProfileProjection(store, approvalCase.userId),
+    };
+  }
+  if (approvalCase.kind === "rider") {
+    return {
+      ...base,
+      riderProfile: riderProfileProjection(store, approvalCase.userId),
+      riderDocuments: riderDocumentsForApproval(store, approvalCase.userId),
+    };
+  }
+  const services = (store.supplierServices || [])
+    .filter((service) => service.supplierId === approvalCase.userId)
+    .map(summarizeService);
+  return {
+    ...base,
+    supplierProfile: supplierProfileProjection(store, approvalCase.userId),
+    categories: [...new Set(services.map((service) => service.categoryCode))],
+    services,
+    readiness: supplierReadiness(store, approvalCase.userId, approvalCase),
+    // Task E owns these settled sections. Stable placeholders keep this detail
+    // contract additive while its relational tables are absent on main.
+    pickupPaymentTerms: null,
+    shopMedia: [],
+    catalogPreview: [],
+  };
+}
+
+function encodeApprovalCursor(approvalCase) {
+  return Buffer.from(JSON.stringify({ submittedAt: approvalCase.submittedAt, id: approvalCase.id }))
+    .toString("base64url");
+}
+
+function decodeApprovalCursor(value) {
+  if (!value) return null;
+  try {
+    const cursor = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (typeof cursor.submittedAt !== "string" || typeof cursor.id !== "string") return null;
+    if (Number.isNaN(Date.parse(cursor.submittedAt)) || !cursor.id) return null;
+    return cursor;
+  } catch {
+    return null;
+  }
+}
+
+function approvalQueue(store, url) {
+  const status = url.searchParams.get("status") || "pending";
+  const kind = url.searchParams.get("kind");
+  if (!APPROVAL_CASE_STATUSES.has(status)) {
+    return { error: "invalid_approval_status", status: 400, allowed: [...APPROVAL_CASE_STATUSES] };
+  }
+  if (kind && !APPROVAL_CASE_KINDS.has(kind)) {
+    return { error: "invalid_approval_kind", status: 400, allowed: [...APPROVAL_CASE_KINDS] };
+  }
+  const encodedCursor = url.searchParams.get("cursor");
+  const cursor = decodeApprovalCursor(encodedCursor);
+  if (encodedCursor && !cursor) return { error: "invalid_cursor", status: 400 };
+
+  let cases = (store.approvalCases || [])
+    .filter((approvalCase) => approvalCase.submittedAt != null && approvalCase.status === status)
+    .filter((approvalCase) => !kind || approvalCase.kind === kind)
+    .sort(
+      (left, right) =>
+        left.submittedAt.localeCompare(right.submittedAt) || left.id.localeCompare(right.id),
+    );
+  if (cursor) {
+    cases = cases.filter(
+      (approvalCase) =>
+        approvalCase.submittedAt > cursor.submittedAt ||
+        (approvalCase.submittedAt === cursor.submittedAt && approvalCase.id > cursor.id),
+    );
+  }
+  const page = cases.slice(0, 51);
+  const hasMore = page.length > 50;
+  if (hasMore) page.pop();
+  return {
+    status: 200,
+    approvalCases: page.map((approvalCase) => ({
+      ...approvalCaseForApprover(approvalCase),
+      applicant: publicIdentity(
+        (store.users || []).find((candidate) => candidate.id === approvalCase.userId),
+      ),
+    })),
+    nextCursor: hasMore ? encodeApprovalCursor(page.at(-1)) : null,
+  };
 }
 
 function fixedAuthProjection(store, auth, role) {
@@ -1275,6 +1414,61 @@ async function handleRequest(req, res) {
       return send(res, 401, {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    // ---- shared Operations / Super Admin approval queue ----
+    if (req.method === "GET" && pathname === "/approval-cases") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const result = approvalQueue(store, url);
+      const { status: responseStatus, ...body } = result;
+      return send(res, responseStatus, body);
+    }
+
+    if (req.method === "GET" && /^\/approval-cases\/[^/]+$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const caseId = pathname.split("/")[2];
+      const approvalCase = (store.approvalCases || []).find((candidate) => candidate.id === caseId);
+      if (!approvalCase) return send(res, 404, { error: "approval_case_not_found" });
+      return send(res, 200, approvalCaseDetail(store, approvalCase));
+    }
+
+    if (req.method === "POST" && /^\/approval-cases\/[^/]+\/(approve|reject|suspend|restore)$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const [, , caseId, action] = pathname.split("/");
+      if (!APPROVAL_DECISIONS.has(action)) return send(res, 404, { error: "not_found", path: pathname });
+      const input = approvalDecisionInput(action, await readBody(req));
+      if (input.error) {
+        return send(res, input.status, { error: input.error, ...(input.details || {}) });
+      }
+
+      // Every decision request has already entered the global domain
+      // transaction. The row lock makes the optimistic case boundary explicit
+      // and remains necessary if the compatibility adapter is later narrowed.
+      const locked = await database.query(
+        "SELECT id FROM approval_cases WHERE id = $1 FOR UPDATE",
+        [caseId],
+      );
+      if (locked.rowCount === 0) return send(res, 404, { error: "approval_case_not_found" });
+      const actorRole = contextHasMembership(auth.authorization, "super_admin")
+        ? "super_admin"
+        : "ops_admin";
+      const outcome = decideApprovalCase({
+        store,
+        caseId,
+        action,
+        input,
+        actor: user,
+        actorRole,
+        at: now(),
+        createId: id,
+      });
+      if (!outcome.replayed) await save(store);
+      return send(res, 200, {
+        ...approvalCaseDetail(store, outcome.approvalCase),
+        publishedServiceIds: outcome.publishedServiceIds,
+        suspendedServiceIds: outcome.suspendedServiceIds,
+        replayed: outcome.replayed,
       });
     }
 
@@ -2491,6 +2685,8 @@ async function handleRequest(req, res) {
       service.suspendedAt = null;
       service.suspendedBy = null;
       service.suspendReason = null;
+      delete service.approvalSuspensionPreviousState;
+      delete service.approvalSuspensionCaseId;
       service.updatedAt = now();
       audit(store, {
         actor: user,

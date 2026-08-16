@@ -213,6 +213,95 @@ async function clearAndFixture(database) {
   });
 }
 
+async function addApprovalDecisionFixtures(database) {
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push(
+      {
+        id: "user_supplier_pending", clerkUserId: "clerk_supplier_pending",
+        email: "pending-supplier@gridgo.test", name: "Pending Supplier", role: "supplier",
+        verificationStatus: "pending", createdAt: AT,
+      },
+      {
+        id: "user_supplier_incomplete", clerkUserId: "clerk_supplier_incomplete",
+        email: "incomplete-supplier@gridgo.test", name: "Incomplete Supplier", role: "supplier",
+        verificationStatus: "pending", createdAt: AT,
+      },
+      {
+        id: "user_rider_intake", clerkUserId: "clerk_rider_intake",
+        email: "intake-rider@gridgo.test", name: "Intake Rider", role: "rider",
+        verificationStatus: "pending", createdAt: AT,
+      },
+      {
+        id: "user_business_pending", clerkUserId: "clerk_business_pending",
+        email: "business@gridgo.test", name: "Business Applicant", role: "client",
+        accountType: "business", orgName: "GRIDGO Buyer", createdAt: AT,
+      },
+    );
+    store.userRoleMemberships.push(
+      { userId: "user_supplier_pending", role: "supplier", createdAt: AT },
+      { userId: "user_supplier_incomplete", role: "supplier", createdAt: AT },
+      { userId: "user_rider_intake", role: "rider", createdAt: AT },
+      { userId: "user_business_pending", role: "client", createdAt: AT },
+    );
+    store.supplierProfiles.push(
+      {
+        userId: "user_supplier_pending", shopName: "Ready Prints", contactName: "Pending Supplier",
+        shop: { lat: 7.07, lng: 125.61, label: "Ready Shop" }, pickupAvailable: false, updatedAt: AT,
+      },
+      {
+        userId: "user_supplier_incomplete", shopName: "Draft Prints", contactName: "Incomplete Supplier",
+        shop: { lat: 7.08, lng: 125.62, label: "Draft Shop" }, pickupAvailable: false, updatedAt: AT,
+      },
+    );
+    store.riderProfiles.push({
+      userId: "user_rider_intake", vehicleType: "motorcycle", plateNumber: "INTAKE-1", updatedAt: AT,
+    });
+    store.clientProfiles.push({
+      userId: "user_business_pending", clientKind: "business",
+      businessName: "GRIDGO Buyer", businessNature: "Retail", updatedAt: AT,
+    });
+    store.approvalCases.push(
+      {
+        id: "case_supplier_pending", userId: "user_supplier_pending", kind: "supplier", status: "pending",
+        version: 1, applicationRevision: 1, submittedAt: "2026-08-15T00:00:00.000Z",
+        createdAt: AT, updatedAt: AT,
+      },
+      {
+        id: "case_supplier_incomplete", userId: "user_supplier_incomplete", kind: "supplier", status: "pending",
+        version: 1, applicationRevision: 1, submittedAt: "2026-08-15T01:00:00.000Z",
+        createdAt: AT, updatedAt: AT,
+      },
+      {
+        id: "case_rider_intake", userId: "user_rider_intake", kind: "rider", status: "pending",
+        version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT,
+      },
+      {
+        id: "case_business_pending", userId: "user_business_pending", kind: "business_client", status: "pending",
+        version: 1, applicationRevision: 1, submittedAt: "2026-08-15T02:00:00.000Z",
+        createdAt: AT, updatedAt: AT,
+      },
+    );
+    store.supplierServices.push(
+      {
+        id: "svc_pending_complete", supplierId: "user_supplier_pending",
+        categoryCode: "marketing_collateral", state: "pending_verification",
+        pricingBasis: "per_unit", referenceRateMinor: 2500, turnaroundHours: 24,
+        materialCodes: [], finishCodes: [], productFamilyIds: ["business_cards"], zones: [],
+        createdAt: AT, updatedAt: AT,
+      },
+      {
+        id: "svc_pending_incomplete", supplierId: "user_supplier_pending",
+        categoryCode: "marketing_collateral", state: "pending_verification",
+        pricingBasis: "", referenceRateMinor: 2500, turnaroundHours: 24,
+        materialCodes: [], finishCodes: [], productFamilyIds: [], zones: [],
+        createdAt: AT, updatedAt: AT,
+      },
+    );
+    await saveStore(database, store);
+  });
+}
+
 test("fixed auth projections authorize every state from memberships and approval cases", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -432,6 +521,193 @@ test("legacy verification decisions keep approval cases and fixed projections co
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("approval queue, detail, and supplier decisions follow the settled transactional contract", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await addApprovalDecisionFixtures(database);
+  const instance = await startApi();
+  try {
+    const denied = await request(instance.api, "/approval-cases?status=pending", { subject: "clerk_client" });
+    assert.equal(denied.status, 403);
+
+    const queue = await request(instance.api, "/approval-cases?status=pending&kind=supplier", { subject: "clerk_ops" });
+    assert.equal(queue.status, 200, JSON.stringify(queue.body));
+    assert.deepEqual(queue.body.approvalCases.map((approvalCase) => approvalCase.id), [
+      "case_supplier_pending",
+      "case_supplier_incomplete",
+    ]);
+    assert.equal(queue.body.nextCursor, null);
+
+    const allPending = await request(instance.api, "/approval-cases?status=pending", { subject: "clerk_super" });
+    assert.equal(allPending.status, 200, JSON.stringify(allPending.body));
+    assert.equal(allPending.body.approvalCases.some((approvalCase) => approvalCase.id === "case_rider_intake"), false);
+
+    const businessDetail = await request(instance.api, "/approval-cases/case_business_pending", { subject: "clerk_ops" });
+    assert.equal(businessDetail.status, 200, JSON.stringify(businessDetail.body));
+    assert.equal(businessDetail.body.clientProfile.businessName, "GRIDGO Buyer");
+    const riderDetail = await request(instance.api, "/approval-cases/case_rider_intake", { subject: "clerk_ops" });
+    assert.equal(riderDetail.status, 200, JSON.stringify(riderDetail.body));
+    assert.equal(riderDetail.body.riderProfile.plateNumber, "INTAKE-1");
+    assert.deepEqual(riderDetail.body.riderDocuments, []);
+
+    const detail = await request(instance.api, "/approval-cases/case_supplier_pending", { subject: "clerk_ops" });
+    assert.equal(detail.status, 200, JSON.stringify(detail.body));
+    assert.equal(detail.body.applicant.id, "user_supplier_pending");
+    assert.equal(detail.body.supplierProfile.shopName, "Ready Prints");
+    assert.deepEqual(detail.body.categories, ["marketing_collateral"]);
+    assert.deepEqual(detail.body.readiness.publishableServiceIds, ["svc_pending_complete"]);
+    assert.equal(JSON.stringify(detail.body).toLowerCase().includes("commission"), false);
+
+    const commissionInput = await request(instance.api, "/approval-cases/case_supplier_pending/approve", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "approval-with-commission", commissionPercent: 10 },
+    });
+    assert.equal(commissionInput.status, 400);
+    assert.equal(commissionInput.body.error, "unexpected_field");
+
+    const incomplete = await request(instance.api, "/approval-cases/case_supplier_incomplete/approve", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "approval-incomplete" },
+    });
+    assert.equal(incomplete.status, 409, JSON.stringify(incomplete.body));
+    assert.equal(incomplete.body.error, "supplier_profile_incomplete");
+    assert.deepEqual(incomplete.body.missing, ["review_ready_service_line"]);
+
+    const blankRejection = await request(instance.api, "/approval-cases/case_supplier_incomplete/reject", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "reject-blank", reason: " " },
+    });
+    assert.equal(blankRejection.status, 400);
+    assert.equal(blankRejection.body.error, "reason_required");
+    const rejected = await request(instance.api, "/approval-cases/case_supplier_incomplete/reject", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "reject-incomplete", reason: "Add a complete service line" },
+    });
+    assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
+    assert.equal(rejected.body.approvalCase.status, "rejected");
+
+    const approved = await request(instance.api, "/approval-cases/case_supplier_pending/approve", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "approval-winner", note: "Ready for launch" },
+    });
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(approved.body.approvalCase.status, "approved");
+    assert.equal(approved.body.approvalCase.version, 2);
+    assert.deepEqual(approved.body.publishedServiceIds, ["svc_pending_complete"]);
+    assert.equal(approved.body.replayed, false);
+
+    const replayed = await request(instance.api, "/approval-cases/case_supplier_pending/approve", {
+      method: "POST", subject: "clerk_super",
+      body: { expectedVersion: 1, requestId: "approval-winner", note: "Ready for launch" },
+    });
+    assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
+    assert.equal(replayed.body.replayed, true);
+    assert.deepEqual(replayed.body.publishedServiceIds, ["svc_pending_complete"]);
+
+    const blankSuspension = await request(instance.api, "/approval-cases/case_supplier_pending/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 2, requestId: "suspend-blank", reason: "   " },
+    });
+    assert.equal(blankSuspension.status, 400);
+    assert.equal(blankSuspension.body.error, "reason_required");
+
+    const suspended = await request(instance.api, "/approval-cases/case_supplier_pending/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 2, requestId: "suspend-account", reason: "Safety review" },
+    });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+    assert.equal(suspended.body.approvalCase.status, "suspended");
+    assert.deepEqual(suspended.body.suspendedServiceIds, ["svc_pending_complete"]);
+
+    const restored = await request(instance.api, "/approval-cases/case_supplier_pending/restore", {
+      method: "POST", subject: "clerk_super",
+      body: { expectedVersion: 3, requestId: "restore-account", note: "Account review cleared" },
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.equal(restored.body.approvalCase.status, "approved");
+
+    const beforeLineReview = (await request(instance.api, "/supplier-services/svc_pending_complete", {
+      subject: "clerk_ops",
+    })).body.service;
+    assert.equal(beforeLineReview.state, "suspended");
+    const lineRestored = await request(instance.api, "/supplier-services/svc_pending_complete/verify", {
+      method: "POST", subject: "clerk_ops", body: { reason: "Line reviewed" },
+    });
+    assert.equal(lineRestored.status, 200, JSON.stringify(lineRestored.body));
+    assert.equal(lineRestored.body.service.state, "live");
+
+    const persisted = await loadStore(database);
+    const caseEvents = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === "case_supplier_pending");
+    const caseNotices = persisted.notifications.filter((notice) => notice.approvalCaseId === "case_supplier_pending");
+    const caseAudits = persisted.auditLog.filter((entry) => entry.entityId === "case_supplier_pending");
+    assert.equal(caseEvents.length, 3);
+    assert.equal(caseNotices.length, 3);
+    assert.equal(caseAudits.length, 3);
+    assert.deepEqual(caseEvents.map((event) => event.requestId), [
+      "approval-winner",
+      "suspend-account",
+      "restore-account",
+    ]);
+    const service = persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_complete");
+    assert.equal(service.state, "live");
+    assert.equal(service.approvalSuspensionPreviousState, undefined);
+    assert.equal(persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_incomplete").state, "pending_verification");
+    assert.equal(persisted.users.find((candidate) => candidate.id === "user_supplier_pending").verificationStatus, "approved");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("racing approval decisions have one PostgreSQL winner and one set of side effects", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const rider = store.users.find((user) => user.id === "user_rider");
+    rider.verificationStatus = "pending";
+    const approvalCase = store.approvalCases.find((candidate) => candidate.id === "case_rider");
+    approvalCase.status = "pending";
+    approvalCase.version = 1;
+    delete approvalCase.decidedAt;
+    delete approvalCase.decidedBy;
+    await saveStore(database, store);
+  });
+  const firstApi = await startApi();
+  const secondApi = await startApi();
+  try {
+    const [approve, reject] = await Promise.all([
+      request(firstApi.api, "/approval-cases/case_rider/approve", {
+        method: "POST", subject: "clerk_ops",
+        body: { expectedVersion: 1, requestId: "race-approve" },
+      }),
+      request(secondApi.api, "/approval-cases/case_rider/reject", {
+        method: "POST", subject: "clerk_super",
+        body: { expectedVersion: 1, requestId: "race-reject", reason: "Race rejection" },
+      }),
+    ]);
+    assert.deepEqual([approve.status, reject.status].sort(), [200, 409]);
+    const loser = approve.status === 409 ? approve : reject;
+    assert.equal(loser.body.error, "approval_already_decided", JSON.stringify(loser.body));
+
+    const persisted = await loadStore(database);
+    const events = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === "case_rider");
+    const notices = persisted.notifications.filter((notice) => notice.approvalCaseId === "case_rider");
+    const audits = persisted.auditLog.filter((entry) => entry.entityId === "case_rider");
+    assert.equal(events.length, 1);
+    assert.equal(notices.length, 1);
+    assert.equal(audits.length, 1);
+    assert.equal(persisted.approvalCases.find((candidate) => candidate.id === "case_rider").version, 2);
+  } finally {
+    for (const instance of [firstApi, secondApi]) instance.child.kill("SIGTERM");
+    await Promise.all([firstApi, secondApi].map(
+      (instance) => new Promise((resolve) => instance.child.once("exit", resolve)),
+    ));
     await database.close();
   }
 });
