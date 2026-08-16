@@ -96,6 +96,7 @@ import {
   assertServiceLineReadinessInvariant,
   assertServiceLineReviewReady,
   supplierCatalogReadiness,
+  transitionSupplierServiceToPending,
 } from "./supplier-catalog.js";
 import { createDatabase } from "./database.js";
 import {
@@ -2789,9 +2790,7 @@ async function handleRequest(req, res) {
           Array.isArray(body.materialCodes) &&
           body.materialCodes.some((c) => !prevMaterials.includes(c));
         if (service.state === "live" && (categoryChanged || materialsExpanded)) {
-          service.state = "pending_verification";
-          service.verifiedAt = null;
-          service.verifiedBy = null;
+          transitionSupplierServiceToPending(service);
         }
         assertServiceLineReadinessInvariant(store, service);
         // Routine param edits on live stay live (blueprint: within verified envelope)
@@ -2835,7 +2834,7 @@ async function handleRequest(req, res) {
         service.suspendedBy = null;
         service.suspendReason = null;
       }
-      service.state = "pending_verification";
+      transitionSupplierServiceToPending(service);
       advanceSupplierServiceVersion(service, now());
       audit(store, {
         actor: user,

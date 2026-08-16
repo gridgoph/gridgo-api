@@ -12,6 +12,7 @@ import {
   publicSupplierShops,
   serviceLineBlockers,
   supplierCatalogReadiness,
+  transitionSupplierServiceToPending,
   validateSpecBinding,
 } from "./supplier-catalog.js";
 
@@ -51,6 +52,13 @@ function requiredText(value, field, maxLength = Number.MAX_SAFE_INTEGER) {
   const text = optionalText(value, field, maxLength).trim();
   if (!text) fail(400, "invalid_catalog_item", `${field} is required.`, { field });
   return text;
+}
+
+function catalogRecord(value, { code = "invalid_catalog_item", field = "body", message } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    fail(400, code, message || `${field} must be a JSON object.`, { field });
+  }
+  return value;
 }
 
 function supplierCase(store, userId) {
@@ -237,7 +245,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   }
   if (req.method === "POST" && pathname === "/me/supplier-services") {
     requireSupplier(store, user);
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     const canonicalCode = categoryInput(store, body.categoryCode);
     const ts = now();
     const standardTurnaroundHours = body.standardTurnaroundHours == null
@@ -264,7 +272,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const serviceId = decodeURIComponent(pathname.split("/")[3]);
     const service = ownService(store, user, serviceId);
     if (req.method === "GET") return { status: 200, body: { service: privateService(store, service) } };
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     if (req.method === "DELETE") {
       service.state = "withdrawn";
@@ -297,9 +305,12 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         if (!['draft', 'pending_verification'].includes(body.state)) {
           fail(400, "invalid_service_state", "Suppliers may set a service only to draft or pending_verification.");
         }
-        service.state = body.state;
+        if (body.state === "pending_verification") transitionSupplierServiceToPending(service);
+        else service.state = body.state;
       }
-      if (service.state === "live" && service.categoryCode !== priorCategory) service.state = "pending_verification";
+      if (service.state === "live" && service.categoryCode !== priorCategory) {
+        transitionSupplierServiceToPending(service);
+      }
       assertServiceLineReadinessInvariant(store, service);
       advanceSupplierServiceVersion(service, now());
       auditChange(audit, store, user, "supplier_service.update", "supplier_service", service.id, { state: service.state });
@@ -310,7 +321,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (/^\/me\/supplier-services\/[^/]+\/file-formats$/.test(pathname)) {
     const service = ownService(store, user, decodeURIComponent(pathname.split("/")[3]));
     if (req.method !== "PUT") return null;
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     const codes = activeFormatCodes(store, body.formatCodes);
     const previous = new Set((store.supplierServiceFileFormats || [])
@@ -319,7 +330,9 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     store.supplierServiceFileFormats = (store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId !== service.id);
     store.supplierServiceFileFormats.push(...codes.map((formatCode) => ({ supplierServiceId: service.id, formatCode })));
-    if (service.state === "live" && codes.some((code) => !previous.has(code))) service.state = "pending_verification";
+    if (service.state === "live" && codes.some((code) => !previous.has(code))) {
+      transitionSupplierServiceToPending(service);
+    }
     advanceSupplierServiceVersion(service, now());
     auditChange(audit, store, user, "supplier_service.formats_update", "supplier_service", service.id, { formatCodes: codes });
     return { status: 200, body: { service: privateService(store, service) }, mutated: true };
@@ -329,12 +342,17 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const service = ownService(store, user, decodeURIComponent(pathname.split("/")[3]));
     if (req.method === "GET") return { status: 200, body: { pricing: privateService(store, service).pricing, version: service.version } };
     if (req.method !== "PUT") return null;
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     if (!Array.isArray(body.tiers)) fail(400, "invalid_service_pricing", "tiers must be an array.");
     const codes = new Set();
     const positions = new Set();
-    const tiers = body.tiers.map((tier) => {
+    const tiers = body.tiers.map((candidate) => {
+      const tier = catalogRecord(candidate, {
+        code: "invalid_service_pricing",
+        field: "tiers",
+        message: "Every tier must be a JSON object.",
+      });
       const tierCode = requiredText(tier.tierCode, "tierCode", 80);
       const sortOrder = postgresInteger(tier.sortOrder, "sortOrder", { min: 0 });
       if (codes.has(tierCode) || positions.has(sortOrder)) fail(400, "invalid_service_pricing", "Tier codes and sort orders must be unique.");
@@ -361,7 +379,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   }
   if (req.method === "POST" && pathname === "/me/catalog-items") {
     requireSupplier(store, user);
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     const service = ownService(store, user, body.supplierServiceId);
     if (service.state === "withdrawn") fail(409, "service_withdrawn", "Choose an active supplier service.");
     const fileFormatMode = body.fileFormatMode || "inherit";
@@ -386,7 +404,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (/^\/me\/catalog-items\/[^/]+$/.test(pathname)) {
     const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
     if (req.method === "GET") return { status: 200, body: { item: privateItem(store, item) } };
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     if (req.method === "DELETE") {
       const referenced = (store.orderLineItems || []).some((line) => line.sourceCatalogItemId === item.id);
@@ -424,7 +442,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (/^\/me\/catalog-items\/[^/]+\/file-formats$/.test(pathname)) {
     if (req.method !== "PUT") return null;
     const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     const mode = String(body.mode || "");
     if (!["inherit", "override"].includes(mode)) fail(400, "invalid_file_format_mode", "Choose inherit or override.");
@@ -443,7 +461,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (/^\/me\/catalog-items\/[^/]+\/photos\/reorder$/.test(pathname)) {
     if (req.method !== "POST") return null;
     const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     if (!Array.isArray(body.fileIds)) fail(400, "invalid_photo_order", "fileIds must be an array.");
     const current = store.catalogItemPhotos.filter((photo) => photo.catalogItemId === item.id);
@@ -465,7 +483,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const item = ownItem(store, user, decodeURIComponent(parts[3]));
     const groupId = parts[5] ? decodeURIComponent(parts[5]) : null;
     if (req.method === "POST" && !groupId) {
-      const body = await readBody(req);
+      const body = catalogRecord(await readBody(req));
       assertExpectedVersion(req, body, "catalog_item_stale", item.version);
       if (!Array.isArray(body.options) || body.options.length === 0) {
         fail(400, "invalid_catalog_options", "Create an option group with at least one active option.");
@@ -486,7 +504,12 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       };
       const labels = new Set();
       const positions = new Set();
-      const options = body.options.map((candidate) => {
+      const options = body.options.map((value) => {
+        const candidate = catalogRecord(value, {
+          code: "invalid_catalog_options",
+          field: "options",
+          message: "Every option must be a JSON object.",
+        });
         const label = requiredText(candidate.label, "label", 100);
         const position = postgresInteger(candidate.sortOrder, "sortOrder", { min: 0, max: 19 });
         if (labels.has(label.toLowerCase()) || positions.has(position)) fail(400, "invalid_catalog_options", "Option labels and sort orders must be unique within a group.");
@@ -509,7 +532,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (groupId) {
       const group = store.catalogOptionGroups.find((candidate) => candidate.id === groupId && candidate.catalogItemId === item.id);
       if (!group) fail(404, "catalog_group_not_found", "That option group no longer exists.");
-      const body = await readBody(req);
+      const body = catalogRecord(await readBody(req));
       assertExpectedVersion(req, body, "catalog_group_stale", group.version);
       if (req.method === "DELETE") {
         store.catalogOptionGroups = store.catalogOptionGroups.filter((candidate) => candidate.id !== group.id);
@@ -549,7 +572,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const parts = pathname.split("/");
     const { group, item } = ownGroup(store, user, decodeURIComponent(parts[3]));
     const optionId = parts[5] ? decodeURIComponent(parts[5]) : null;
-    const body = await readBody(req);
+    const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_group_stale", group.version);
     if (req.method === "POST" && !optionId) {
       const sortOrder = postgresInteger(body.sortOrder, "sortOrder", { min: 0, max: 19 });

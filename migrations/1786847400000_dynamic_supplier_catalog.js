@@ -157,6 +157,29 @@ export async function up(pgm) {
       PRIMARY KEY (catalog_item_id, format_code)
     );
 
+    CREATE OR REPLACE FUNCTION preserve_supplier_catalog_parent()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_TABLE_NAME = 'supplier_catalog_options'
+         AND NEW.option_group_id IS DISTINCT FROM OLD.option_group_id THEN
+        RAISE EXCEPTION 'catalog option parent cannot change'
+          USING ERRCODE = '23514', CONSTRAINT = 'supplier_catalog_option_parent_immutable';
+      END IF;
+      IF TG_TABLE_NAME = 'supplier_catalog_item_file_formats'
+         AND NEW.catalog_item_id IS DISTINCT FROM OLD.catalog_item_id THEN
+        RAISE EXCEPTION 'catalog item format parent cannot change'
+          USING ERRCODE = '23514', CONSTRAINT = 'supplier_catalog_item_format_parent_immutable';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+    CREATE TRIGGER supplier_catalog_options_parent_trigger
+      BEFORE UPDATE OF option_group_id ON supplier_catalog_options
+      FOR EACH ROW EXECUTE FUNCTION preserve_supplier_catalog_parent();
+    CREATE TRIGGER supplier_catalog_item_formats_parent_trigger
+      BEFORE UPDATE OF catalog_item_id ON supplier_catalog_item_file_formats
+      FOR EACH ROW EXECUTE FUNCTION preserve_supplier_catalog_parent();
+
     CREATE OR REPLACE FUNCTION check_catalog_item_file_formats()
     RETURNS trigger LANGUAGE plpgsql AS $$
     DECLARE
@@ -405,8 +428,11 @@ export async function down(pgm) {
     DROP TRIGGER IF EXISTS supplier_catalog_groups_option_trigger ON supplier_catalog_option_groups;
     DROP TRIGGER IF EXISTS supplier_catalog_item_formats_mode_trigger ON supplier_catalog_item_file_formats;
     DROP TRIGGER IF EXISTS supplier_catalog_items_format_mode_trigger ON supplier_catalog_items;
+    DROP TRIGGER IF EXISTS supplier_catalog_options_parent_trigger ON supplier_catalog_options;
+    DROP TRIGGER IF EXISTS supplier_catalog_item_formats_parent_trigger ON supplier_catalog_item_file_formats;
     DROP FUNCTION IF EXISTS check_catalog_option_group_has_option();
     DROP FUNCTION IF EXISTS check_catalog_item_file_formats();
+    DROP FUNCTION IF EXISTS preserve_supplier_catalog_parent();
     DROP TABLE IF EXISTS supplier_catalog_item_file_formats;
     DROP TABLE IF EXISTS supplier_catalog_options;
     DROP TABLE IF EXISTS supplier_catalog_option_groups;

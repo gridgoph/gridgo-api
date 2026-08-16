@@ -73,6 +73,52 @@ function fixture({ approvalStatus = "approved", fileFormatMode = "inherit" } = {
   };
 }
 
+function supplierFixture(supplierId) {
+  const store = fixture();
+  const suffix = supplierId.replace(/^supplier_?/, "") || supplierId;
+  const serviceId = `service_${suffix}`;
+  const itemId = `item_${suffix}`;
+  const photoId = `photo_${suffix}`;
+  const logoId = `logo_${suffix}`;
+  const groupIds = new Map(store.catalogOptionGroups.map((group) => [group.id, `${group.id}_${suffix}`]));
+  store.users[0].id = supplierId;
+  store.userRoleMemberships[0].userId = supplierId;
+  store.supplierProfiles[0].userId = supplierId;
+  store.supplierProfiles[0].shopName = `Shop ${suffix}`;
+  store.supplierPaymentTerms[0].supplierId = supplierId;
+  store.approvalCases[0].userId = supplierId;
+  Object.assign(store.supplierServices[0], { id: serviceId, supplierId });
+  store.supplierServiceFileFormats.forEach((format) => { format.supplierServiceId = serviceId; });
+  Object.assign(store.catalogItems[0], { id: itemId, supplierId, supplierServiceId: serviceId });
+  store.catalogItemFileFormats.forEach((format) => { format.catalogItemId = itemId; });
+  Object.assign(store.files[0], { fileId: photoId, ownerId: supplierId });
+  Object.assign(store.files[1], { fileId: logoId, ownerId: supplierId });
+  Object.assign(store.catalogItemPhotos[0], { catalogItemId: itemId, fileId: photoId });
+  Object.assign(store.supplierShopMedia[0], { supplierId, fileId: logoId });
+  store.catalogOptionGroups.forEach((group) => {
+    group.id = groupIds.get(group.id);
+    group.catalogItemId = itemId;
+  });
+  store.catalogOptions.forEach((option) => {
+    option.id = `${option.id}_${suffix}`;
+    option.optionGroupId = groupIds.get(option.optionGroupId);
+  });
+  return store;
+}
+
+function mergeSupplierFixtures(...stores) {
+  const merged = structuredClone(stores[0]);
+  for (const key of Object.keys(merged)) {
+    if (Array.isArray(merged[key]) && !["acceptedFileFormats"].includes(key)) merged[key] = [];
+  }
+  for (const store of stores) {
+    for (const [key, value] of Object.entries(store)) {
+      if (Array.isArray(value) && key !== "acceptedFileFormats") merged[key].push(...value);
+    }
+  }
+  return merged;
+}
+
 test("effective accepted formats inherit service defaults and honor item overrides", () => {
   const inherited = fixture();
   assert.deepEqual(effectiveAcceptedFormats(inherited, inherited.catalogItems[0]).map((format) => format.code), ["pdf"]);
@@ -129,6 +175,26 @@ test("public catalog and checkout require a current supplier membership", () => 
   );
   assert.deepEqual(store.orderLineItems, []);
   assert.deepEqual(store.orderLineItemOptions, []);
+});
+
+test("shop pagination resumes after a removed cursor without reprojecting off-page items", () => {
+  const supplierA = supplierFixture("supplier_a");
+  const supplierB = supplierFixture("supplier_b");
+  const supplierC = supplierFixture("supplier_c");
+  const store = mergeSupplierFixtures(supplierA, supplierB, supplierC);
+  const first = publicSupplierShops(store, { limit: 2 });
+  assert.deepEqual(first.shops.map((shop) => shop.supplierId), ["supplier_a", "supplier_b"]);
+  assert.equal(first.nextCursor, "supplier_b");
+
+  store.userRoleMemberships = store.userRoleMemberships.filter((membership) => membership.userId !== "supplier_b");
+  const second = publicSupplierShops(store, { cursor: first.nextCursor, limit: 2 });
+  assert.deepEqual(second.shops.map((shop) => shop.supplierId), ["supplier_c"]);
+
+  const bounded = mergeSupplierFixtures(supplierFixture("supplier_a"), supplierFixture("supplier_b"));
+  Object.defineProperty(bounded.catalogItems.find((item) => item.supplierId === "supplier_b"), "description", {
+    get() { throw new Error("off-page item was fully projected"); },
+  });
+  assert.deepEqual(publicSupplierShops(bounded, { limit: 1 }).shops.map((shop) => shop.supplierId), ["supplier_a"]);
 });
 
 test("approved suppliers remain grandfathered ready until approval is reopened", () => {

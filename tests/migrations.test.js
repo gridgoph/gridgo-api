@@ -479,6 +479,53 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
 
     await client.query("BEGIN");
     await client.query(`
+      INSERT INTO supplier_catalog_option_groups
+        (id, catalog_item_id, name, sort_order, created_at, updated_at)
+      VALUES ('group_two', 'item_two', 'Finish', 0, $1, $1)
+    `, [at]);
+    await client.query(`
+      INSERT INTO supplier_catalog_options
+        (id, option_group_id, label, price_modifier_minor, sort_order, created_at, updated_at)
+      VALUES ('option_three', 'group_two', 'Matte', 0, 0, $1, $1)
+    `, [at]);
+    await client.query("COMMIT");
+    await assert.rejects(
+      client.query("UPDATE supplier_catalog_options SET option_group_id = 'group_two' WHERE id = 'option'"),
+      (error) => error.code === "23514" && error.constraint === "supplier_catalog_option_parent_immutable",
+    );
+    assert.equal((await client.query(
+      "SELECT option_group_id FROM supplier_catalog_options WHERE id = 'option'",
+    )).rows[0].option_group_id, "group");
+
+    await client.query("BEGIN");
+    await client.query(`
+      INSERT INTO supplier_catalog_items
+        (id, supplier_id, supplier_service_id, name, base_price_minor,
+         file_format_mode, sort_order, created_at, updated_at)
+      VALUES
+        ('override_one', 'supplier', 'service', 'Override one', 100, 'override', 2, $1, $1),
+        ('override_two', 'supplier', 'service', 'Override two', 100, 'override', 3, $1, $1)
+    `, [at]);
+    await client.query(`
+      INSERT INTO supplier_catalog_item_file_formats (catalog_item_id, format_code)
+      VALUES ('override_one', 'pdf'), ('override_two', 'png')
+    `);
+    await client.query("COMMIT");
+    await assert.rejects(
+      client.query(`
+        UPDATE supplier_catalog_item_file_formats
+           SET catalog_item_id = 'override_two'
+         WHERE catalog_item_id = 'override_one' AND format_code = 'pdf'
+      `),
+      (error) => error.code === "23514" && error.constraint === "supplier_catalog_item_format_parent_immutable",
+    );
+    assert.equal((await client.query(`
+      SELECT catalog_item_id FROM supplier_catalog_item_file_formats
+       WHERE format_code = 'pdf' AND catalog_item_id LIKE 'override_%'
+    `)).rows[0].catalog_item_id, "override_one");
+
+    await client.query("BEGIN");
+    await client.query(`
       INSERT INTO supplier_catalog_items
         (id, supplier_id, supplier_service_id, name, base_price_minor,
          file_format_mode, sort_order, created_at, updated_at)

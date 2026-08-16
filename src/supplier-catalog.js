@@ -25,31 +25,84 @@ function formatCode(record) {
   return typeof record === "string" ? record : record.formatCode;
 }
 
-function itemFormatCodes(store, itemId) {
-  return (store.catalogItemFileFormats || [])
-    .filter((record) => record.catalogItemId === itemId)
-    .map(formatCode);
+function appendIndexed(map, key, value) {
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push(value);
 }
 
-function serviceFormatCodes(store, serviceId) {
-  return (store.supplierServiceFileFormats || [])
-    .filter((record) => record.supplierServiceId === serviceId)
-    .map(formatCode);
+function buildCatalogIndex(store) {
+  const index = {
+    activeFormats: new Map((store.acceptedFileFormats || [])
+      .filter((format) => format.active !== false)
+      .map((format) => [format.code, format])),
+    approvals: new Map(),
+    catalogGroupsByItem: new Map(),
+    catalogItemsByService: new Map(),
+    catalogOptionsByGroup: new Map(),
+    itemFormats: new Map(),
+    photosByItem: new Map(),
+    readyFiles: new Map(),
+    serviceFormats: new Map(),
+    servicesById: new Map(),
+    servicesBySupplier: new Map(),
+    shopMediaBySupplier: new Map(),
+    supplierMemberships: new Set(),
+  };
+  for (const approvalCase of store.approvalCases || []) {
+    if (approvalCase.kind === "supplier" && !index.approvals.has(approvalCase.userId)) {
+      index.approvals.set(approvalCase.userId, approvalCase.status);
+    }
+  }
+  for (const membership of store.userRoleMemberships || []) {
+    if (membership.role === "supplier") index.supplierMemberships.add(membership.userId);
+  }
+  for (const file of store.files || []) {
+    if (file.state === "ready" && file.objectKey) index.readyFiles.set(file.fileId, file);
+  }
+  for (const service of store.supplierServices || []) {
+    index.servicesById.set(service.id, service);
+    appendIndexed(index.servicesBySupplier, service.supplierId, service);
+  }
+  for (const item of store.catalogItems || []) appendIndexed(index.catalogItemsByService, item.supplierServiceId, item);
+  for (const record of store.supplierServiceFileFormats || []) {
+    appendIndexed(index.serviceFormats, record.supplierServiceId, formatCode(record));
+  }
+  for (const record of store.catalogItemFileFormats || []) {
+    appendIndexed(index.itemFormats, record.catalogItemId, formatCode(record));
+  }
+  for (const photo of store.catalogItemPhotos || []) appendIndexed(index.photosByItem, photo.catalogItemId, photo);
+  for (const group of store.catalogOptionGroups || []) appendIndexed(index.catalogGroupsByItem, group.catalogItemId, group);
+  for (const option of store.catalogOptions || []) appendIndexed(index.catalogOptionsByGroup, option.optionGroupId, option);
+  for (const media of store.supplierShopMedia || []) appendIndexed(index.shopMediaBySupplier, media.supplierId, media);
+  return index;
 }
 
-function activeFormatRegistry(store) {
+function itemFormatCodes(store, itemId, index) {
+  if (index) return index.itemFormats.get(itemId) || [];
+  return (store.catalogItemFileFormats || []).filter((record) => record.catalogItemId === itemId).map(formatCode);
+}
+
+function serviceFormatCodes(store, serviceId, index) {
+  if (index) return index.serviceFormats.get(serviceId) || [];
+  return (store.supplierServiceFileFormats || []).filter((record) => record.supplierServiceId === serviceId).map(formatCode);
+}
+
+function activeFormatRegistry(store, index) {
+  if (index) return index.activeFormats;
   return new Map((store.acceptedFileFormats || [])
     .filter((format) => format.active !== false)
     .map((format) => [format.code, format]));
 }
 
-function approvalStatus(store, supplierId) {
+function approvalStatus(store, supplierId, index) {
+  if (index) return index.approvals.get(supplierId) || null;
   return (store.approvalCases || []).find(
     (approvalCase) => approvalCase.userId === supplierId && approvalCase.kind === "supplier",
   )?.status || null;
 }
 
-function hasSupplierMembership(store, supplierId) {
+function hasSupplierMembership(store, supplierId, index) {
+  if (index) return index.supplierMemberships.has(supplierId);
   return (store.userRoleMemberships || []).some(
     (membership) => membership.userId === supplierId && membership.role === "supplier",
   );
@@ -64,7 +117,8 @@ function canonicalCategoryCode(store, code) {
   return alias?.categoryCode || code;
 }
 
-function readyFile(store, fileId) {
+function readyFile(store, fileId, index) {
+  if (index) return index.readyFiles.get(fileId) || null;
   return (store.files || []).find(
     (file) => file.fileId === fileId && file.state === "ready" && file.objectKey,
   ) || null;
@@ -123,31 +177,38 @@ export function advanceSupplierServiceVersion(service, at) {
   service.updatedAt = at;
 }
 
-export function effectiveAcceptedFormats(store, item) {
-  const registry = activeFormatRegistry(store);
+export function transitionSupplierServiceToPending(service) {
+  service.state = "pending_verification";
+  service.verifiedAt = null;
+  service.verifiedBy = null;
+}
+
+export function effectiveAcceptedFormats(store, item, { index } = {}) {
+  const registry = activeFormatRegistry(store, index);
   const selected = item.fileFormatMode === "override"
-    ? itemFormatCodes(store, item.id)
-    : serviceFormatCodes(store, item.supplierServiceId);
+    ? itemFormatCodes(store, item.id, index)
+    : serviceFormatCodes(store, item.supplierServiceId, index);
   return [...new Set(selected)]
     .filter((code) => registry.has(code))
     .sort()
     .map((code) => ({ ...registry.get(code) }));
 }
 
-export function catalogGroupsForItem(store, itemId, { includeInactiveOptions = true } = {}) {
-  return (store.catalogOptionGroups || [])
-    .filter((group) => group.catalogItemId === itemId)
+export function catalogGroupsForItem(store, itemId, { includeInactiveOptions = true, index } = {}) {
+  const groups = index ? index.catalogGroupsByItem.get(itemId) || [] : (store.catalogOptionGroups || [])
+    .filter((group) => group.catalogItemId === itemId);
+  return groups
     .sort(compareSortOrder)
     .map((group) => ({
       ...group,
-      options: (store.catalogOptions || [])
-        .filter((option) => option.optionGroupId === group.id)
+      options: (index ? index.catalogOptionsByGroup.get(group.id) || [] : (store.catalogOptions || [])
+        .filter((option) => option.optionGroupId === group.id))
         .filter((option) => includeInactiveOptions || option.active !== false)
         .sort(compareSortOrder),
     }));
 }
 
-export function serviceLineBlockers(store, service, { publicOnly = false, formatCodes } = {}) {
+export function serviceLineBlockers(store, service, { publicOnly = false, formatCodes, index } = {}) {
   const blockers = [];
   const pricingBasis = String(service?.pricingBasis || "").trim();
   const turnaround = service && Object.hasOwn(service, "standardTurnaroundHours")
@@ -161,8 +222,8 @@ export function serviceLineBlockers(store, service, { publicOnly = false, format
     || !Number.isSafeInteger(service.rushPriceMinor)
     || service.rushPriceMinor < 0
   )) blockers.push("rush_terms");
-  const acceptedFormatCodes = formatCodes ?? serviceFormatCodes(store, service?.id);
-  if (acceptedFormatCodes.filter((code) => activeFormatRegistry(store).has(code)).length === 0) {
+  const acceptedFormatCodes = formatCodes ?? serviceFormatCodes(store, service?.id, index);
+  if (acceptedFormatCodes.filter((code) => activeFormatRegistry(store, index).has(code)).length === 0) {
     blockers.push("accepted_file_formats");
   }
   if (publicOnly && service?.state !== "live") blockers.push("service_not_live");
@@ -189,25 +250,27 @@ export function assertServiceLineReadinessInvariant(store, service, options) {
   assertServiceLineReviewReady(store, service, options);
 }
 
-export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
+export function catalogItemBlockers(store, item, { publicOnly = false, index } = {}) {
   const blockers = [];
-  const service = (store.supplierServices || []).find((candidate) => candidate.id === item?.supplierServiceId);
+  const service = index
+    ? index.servicesById.get(item?.supplierServiceId)
+    : (store.supplierServices || []).find((candidate) => candidate.id === item?.supplierServiceId);
   if (!item || !service || service.supplierId !== item.supplierId) return ["owning_service"];
   if (!String(item.name || "").trim()) blockers.push("name");
   if (!Number.isSafeInteger(item.basePriceMinor) || item.basePriceMinor < 0) blockers.push("base_price");
-  if (serviceLineBlockers(store, service, { publicOnly }).length) blockers.push("service_line");
-  if (effectiveAcceptedFormats(store, item).length === 0) blockers.push("accepted_file_formats");
-  const photos = (store.catalogItemPhotos || [])
-    .filter((photo) => photo.catalogItemId === item.id)
-    .filter((photo) => readyFile(store, photo.fileId));
+  if (serviceLineBlockers(store, service, { publicOnly, index }).length) blockers.push("service_line");
+  if (effectiveAcceptedFormats(store, item, { index }).length === 0) blockers.push("accepted_file_formats");
+  const photos = (index ? index.photosByItem.get(item.id) || [] : (store.catalogItemPhotos || [])
+    .filter((photo) => photo.catalogItemId === item.id))
+    .filter((photo) => readyFile(store, photo.fileId, index));
   if (photos.length === 0) blockers.push("photo");
-  for (const group of catalogGroupsForItem(store, item.id)) {
+  for (const group of catalogGroupsForItem(store, item.id, { index })) {
     if (!group.options.some((option) => option.active !== false)) blockers.push(`option_group:${group.id}`);
   }
   if (publicOnly) {
     if (item.active === false) blockers.push("item_inactive");
-    if (!hasSupplierMembership(store, item.supplierId)) blockers.push("supplier_membership");
-    if (approvalStatus(store, item.supplierId) !== "approved") blockers.push("supplier_not_approved");
+    if (!hasSupplierMembership(store, item.supplierId, index)) blockers.push("supplier_membership");
+    if (approvalStatus(store, item.supplierId, index) !== "approved") blockers.push("supplier_not_approved");
   }
   return blockers;
 }
@@ -308,21 +371,23 @@ export function selectedCatalogPrice(store, item, selectedOptionIds = []) {
   return { effectiveUnitPriceMinor: checkedNumber(total, "effectiveUnitPriceMinor"), selectedOptions };
 }
 
-function publicPhotos(store, itemId) {
-  return (store.catalogItemPhotos || [])
-    .filter((photo) => photo.catalogItemId === itemId)
+function publicPhotos(store, itemId, index) {
+  const photos = index ? index.photosByItem.get(itemId) || [] : (store.catalogItemPhotos || [])
+    .filter((photo) => photo.catalogItemId === itemId);
+  return photos
     .sort(compareSortOrder)
     .flatMap((photo) => {
-      const file = readyFile(store, photo.fileId);
+      const file = readyFile(store, photo.fileId, index);
       return file ? [mediaProjection(file, { sortOrder: photo.sortOrder, altText: photo.altText ?? null })] : [];
     });
 }
 
-function publicShopMedia(store, supplierId) {
-  return (store.supplierShopMedia || [])
-    .filter((media) => media.supplierId === supplierId)
+function publicShopMedia(store, supplierId, index) {
+  const mediaRecords = index ? index.shopMediaBySupplier.get(supplierId) || [] : (store.supplierShopMedia || [])
+    .filter((media) => media.supplierId === supplierId);
+  return mediaRecords
     .flatMap((media) => {
-      const file = readyFile(store, media.fileId);
+      const file = readyFile(store, media.fileId, index);
       return file ? [mediaProjection(file, { slot: media.slot })] : [];
     })
     .sort((left, right) => left.slot.localeCompare(right.slot));
@@ -412,23 +477,36 @@ export function publicSupplierShop(store, supplierId) {
 }
 
 export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } = {}) {
-  const shops = (store.supplierProfiles || [])
-    .map((profile) => publicSupplierShop(store, profile.userId))
-    .filter(Boolean)
-    .filter((shop) => !categoryCode || shop.categories.includes(categoryCode))
-    .sort((left, right) => left.supplierId.localeCompare(right.supplierId));
-  const start = cursor ? shops.findIndex((shop) => shop.supplierId === cursor) + 1 : 0;
-  const page = shops.slice(Math.max(0, start), Math.max(0, start) + limit);
+  const index = buildCatalogIndex(store);
+  const shops = (store.supplierProfiles || []).flatMap((profile) => {
+    if (!hasSupplierMembership(store, profile.userId, index)
+        || approvalStatus(store, profile.userId, index) !== "approved") return [];
+    const categories = new Set();
+    let itemCount = 0;
+    const services = [...(index.servicesBySupplier.get(profile.userId) || [])].sort(compareSortOrder);
+    for (const service of services) {
+      for (const item of index.catalogItemsByService.get(service.id) || []) {
+        if (catalogItemBlockers(store, item, { publicOnly: true, index }).length) continue;
+        itemCount += 1;
+        categories.add(canonicalCategoryCode(store, service.categoryCode));
+      }
+    }
+    const categoryList = [...categories];
+    if (itemCount === 0 || (categoryCode && !categoryList.includes(categoryCode))) return [];
+    return [{
+      supplierId: profile.userId,
+      shopName: profile.shopName,
+      shop: profile.shop,
+      categories: categoryList,
+      itemCount,
+    }];
+  }).sort((left, right) => left.supplierId.localeCompare(right.supplierId));
+  const remaining = cursor ? shops.filter((shop) => shop.supplierId.localeCompare(cursor) > 0) : shops;
+  const pageLimit = Math.max(0, limit);
+  const page = remaining.slice(0, pageLimit);
   return {
-    shops: page.map((shop) => ({
-      supplierId: shop.supplierId,
-      shopName: shop.shopName,
-      shop: shop.shop,
-      media: shop.media,
-      categories: shop.categories,
-      itemCount: shop.services.reduce((count, service) => count + service.items.length, 0),
-    })),
-    nextCursor: start + page.length < shops.length ? page.at(-1).supplierId : null,
+    shops: page.map((shop) => ({ ...shop, media: publicShopMedia(store, shop.supplierId, index) })),
+    nextCursor: page.length > 0 && page.length < remaining.length ? page.at(-1).supplierId : null,
   };
 }
 
