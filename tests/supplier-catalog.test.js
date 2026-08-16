@@ -324,6 +324,15 @@ test("order-line helper assigns append positions and rejects occupied positions"
   );
   assert.deepEqual(store.orderLineItems.map((line) => line.id), ["line_one", "line_two"]);
   assert.equal(store.orderLineItemOptions.length, 2);
+
+  assert.throws(
+    () => appendOrderLineSnapshot(store, { ...selection, lineItemId: "line_one", sortOrder: 2 }),
+    (error) => error.status === 409
+      && error.code === "order_line_id_conflict"
+      && error.details.lineItemId === "line_one",
+  );
+  assert.deepEqual(store.orderLineItems.map((line) => line.id), ["line_one", "line_two"]);
+  assert.equal(store.orderLineItemOptions.length, 2);
 });
 
 test("order-line helper rejects a missing order before appending snapshots", () => {
@@ -367,6 +376,34 @@ test("order-line helper rejects a stale service-derived projection", () => {
       && error.details.currentVersion === 2,
   );
   assert.deepEqual(store.orderLineItems, []);
+});
+
+test("public catalog and checkout reject bindings from a previous service category", () => {
+  const store = fixture();
+  store.taxonomy.categories.push({
+    code: "packaging",
+    active: true,
+    structuredFields: [{ code: "box_size", values: ["small", "large"] }],
+  });
+  store.supplierServices[0].categoryCode = "packaging";
+  store.supplierServices[0].version = 2;
+
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "order",
+      catalogItemId: "item",
+      expectedVersion: 3,
+      expectedServiceVersion: 2,
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { box_size: "small" },
+    }),
+    (error) => error.status === 409 && error.code === "catalog_item_stale",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+  assert.deepEqual(store.orderLineItemOptions, []);
 });
 
 test("order-line helper rejects values outside PostgreSQL integer columns", () => {

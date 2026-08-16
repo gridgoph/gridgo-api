@@ -592,6 +592,41 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
       client.query("UPDATE order_line_item_options SET id = 'line_option_rewritten' WHERE id = 'line_option'"),
       (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
     );
+    await assert.rejects(
+      client.query(`
+        INSERT INTO order_line_items
+          (id, order_id, item_name_snapshot, pricing_basis_snapshot,
+           base_unit_price_minor, effective_unit_price_minor, quantity, line_subtotal_minor,
+           accepted_format_codes_snapshot, structured_spec_snapshot, sort_order,
+           snapshot_finalized, created_at)
+        VALUES ('line_missing_sources', 'order_two', 'Missing sources', 'per_unit',
+          100, 100, 1, 100, ARRAY['pdf'], '{}', 2, true, $1)
+      `, [at]),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_snapshot_sources_check",
+    );
+
+    await client.query("BEGIN");
+    await client.query(`
+      INSERT INTO order_line_items
+        (id, order_id, source_catalog_item_id, source_supplier_service_id,
+         item_name_snapshot, pricing_basis_snapshot, base_unit_price_minor,
+         effective_unit_price_minor, quantity, line_subtotal_minor,
+         accepted_format_codes_snapshot, structured_spec_snapshot, sort_order, created_at)
+      VALUES ('line_missing_option_sources', 'order_two', 'item_two', 'service', 'Missing option sources',
+        'per_unit', 100, 100, 1, 100, ARRAY['pdf'], '{}', 2, $1)
+    `, [at]);
+    await client.query(`
+      INSERT INTO order_line_item_options
+        (id, order_line_item_id, group_name_snapshot, option_label_snapshot,
+         price_modifier_minor, sort_order)
+      VALUES ('line_option_missing_sources', 'line_missing_option_sources', 'Finish', 'Matte', 0, 0)
+    `);
+    await assert.rejects(
+      client.query("UPDATE order_line_items SET snapshot_finalized = true WHERE id = 'line_missing_option_sources'"),
+      (error) => error.code === "23514"
+        && error.constraint === "order_line_item_options_snapshot_sources_check",
+    );
+    await client.query("ROLLBACK");
 
     await client.query("BEGIN");
     await client.query(`
@@ -655,6 +690,34 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
       `),
       (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
     );
+    await client.query("BEGIN");
+    await client.query("DELETE FROM supplier_catalog_options WHERE id = 'option'");
+    await client.query(`
+      INSERT INTO supplier_catalog_options
+        (id, option_group_id, label, price_modifier_minor, sort_order, created_at, updated_at)
+      VALUES ('option', 'group', 'A3', -150, 0, $1, $1)
+    `, [at]);
+    await assert.rejects(
+      client.query("COMMIT"),
+      (error) => error.code === "23514"
+        && error.constraint === "order_line_item_options_source_retirement_check",
+    );
+    await client.query("ROLLBACK");
+
+    await client.query("BEGIN");
+    await client.query("DELETE FROM supplier_catalog_items WHERE id = 'item_two'");
+    await client.query(`
+      INSERT INTO supplier_catalog_items
+        (id, supplier_id, supplier_service_id, name, base_price_minor,
+         file_format_mode, sort_order, created_at, updated_at)
+      VALUES ('item_two', 'supplier', 'service', 'Flyer', 100, 'inherit', 1, $1, $1)
+    `, [at]);
+    await assert.rejects(
+      client.query("COMMIT"),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_source_retirement_check",
+    );
+    await client.query("ROLLBACK");
+
     await client.query("DELETE FROM supplier_catalog_options WHERE id = 'option'");
     assert.deepEqual((await client.query(`
       SELECT source_option_group_id, source_option_id, group_name_snapshot,
@@ -698,6 +761,20 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
       client.query("DELETE FROM order_line_items WHERE id = 'line'"),
       (error) => error.code === "23514" && error.constraint === "order_line_items_immutable_check",
     );
+    await client.query("BEGIN");
+    await client.query("DELETE FROM orders WHERE id = 'order'");
+    await client.query(`
+      INSERT INTO orders
+        (id, client_id, supplier_id, state, payout_hold,
+         dropoff_lat, dropoff_lng, dropoff_label, created_at, updated_at, position, data)
+      VALUES ('order', 'client', 'supplier', 'draft', false,
+        7.2, 125.7, 'Replacement dropoff', $1, $1, 0, '{}')
+    `, [at]);
+    await assert.rejects(
+      client.query("COMMIT"),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_parent_retirement_check",
+    );
+    await client.query("ROLLBACK");
     await client.query("DELETE FROM orders WHERE id IN ('order', 'order_two')");
     assert.equal((await client.query("SELECT count(*)::integer AS count FROM order_line_items")).rows[0].count, 0);
   });

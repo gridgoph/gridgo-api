@@ -184,12 +184,16 @@ function opaqueCursor(value) {
 
 function parseCursor(value) {
   if (!value) return null;
+  let parsed;
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-    return typeof parsed.after === "string" && parsed.after ? parsed.after : null;
+    parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
   } catch {
     fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
   }
+  if (!parsed || typeof parsed.after !== "string" || !parsed.after) {
+    fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
+  }
+  return parsed.after;
 }
 
 function pathIdentifier(value) {

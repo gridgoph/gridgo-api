@@ -291,6 +291,14 @@ export function catalogItemBlockers(store, item, { publicOnly = false, index } =
   if (photos.length === 0) blockers.push("photo");
   for (const group of catalogGroupsForItem(store, item.id, { index })) {
     if (!group.options.some((option) => option.active !== false)) blockers.push(`option_group:${group.id}`);
+    for (const option of group.options.filter((candidate) => candidate.active !== false)) {
+      try {
+        validateSpecBinding(store, service, option.specBinding);
+      } catch (error) {
+        if (!(error instanceof CatalogError) || error.code !== "invalid_spec_binding") throw error;
+        blockers.push(`option_spec_binding:${option.id}`);
+      }
+    }
   }
   if (publicOnly) {
     if (item.active === false) blockers.push("item_inactive");
@@ -665,6 +673,11 @@ export function appendOrderLineSnapshot(store, selection, createId) {
     });
   }
   const snapshot = createOrderLineSnapshot(store, { ...selection, sortOrder }, createId);
+  if (lineItems.some((line) => line.id === snapshot.lineItem.id)) {
+    throw new CatalogError(409, "order_line_id_conflict", "That order line identifier is already in use.", {
+      lineItemId: snapshot.lineItem.id,
+    });
+  }
   if (!Array.isArray(store.orderLineItems)) store.orderLineItems = lineItems;
   if (!Array.isArray(store.orderLineItemOptions)) store.orderLineItemOptions = lineOptions;
   lineItems.push(snapshot.lineItem);

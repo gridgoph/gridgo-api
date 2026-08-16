@@ -360,6 +360,102 @@ export async function up(pgm) {
       DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
       EXECUTE FUNCTION check_order_line_snapshot_finalized();
 
+    CREATE OR REPLACE FUNCTION validate_order_line_snapshot_finalization()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.snapshot_finalized = false THEN RETURN NEW; END IF;
+      IF TG_OP = 'UPDATE' AND OLD.snapshot_finalized = true THEN RETURN NEW; END IF;
+      IF NEW.source_catalog_item_id IS NULL OR NEW.source_supplier_service_id IS NULL THEN
+        RAISE EXCEPTION 'finalized order line snapshots require source identities'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_snapshot_sources_check';
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM order_line_item_options
+         WHERE order_line_item_id = NEW.id
+           AND (source_option_group_id IS NULL OR source_option_id IS NULL)
+      ) THEN
+        RAISE EXCEPTION 'finalized order line option snapshots require source identities'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_snapshot_sources_check';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+    CREATE TRIGGER order_line_items_finalization_sources_trigger
+      BEFORE INSERT OR UPDATE ON order_line_items FOR EACH ROW
+      EXECUTE FUNCTION validate_order_line_snapshot_finalization();
+
+    CREATE OR REPLACE FUNCTION check_order_line_source_retirement()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM order_line_items WHERE id = NEW.id) THEN RETURN NULL; END IF;
+      IF OLD.source_catalog_item_id IS NOT NULL
+         AND NEW.source_catalog_item_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM supplier_catalog_items WHERE id = OLD.source_catalog_item_id
+         ) THEN
+        RAISE EXCEPTION 'retired catalog item source identity was reused'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_source_retirement_check';
+      END IF;
+      IF OLD.source_supplier_service_id IS NOT NULL
+         AND NEW.source_supplier_service_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM supplier_services WHERE id = OLD.source_supplier_service_id
+         ) THEN
+        RAISE EXCEPTION 'retired supplier service source identity was reused'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_source_retirement_check';
+      END IF;
+      RETURN NULL;
+    END;
+    $$;
+    CREATE CONSTRAINT TRIGGER order_line_items_source_retirement_trigger
+      AFTER UPDATE OF source_catalog_item_id, source_supplier_service_id ON order_line_items
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      EXECUTE FUNCTION check_order_line_source_retirement();
+
+    CREATE OR REPLACE FUNCTION check_order_line_option_source_retirement()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM order_line_item_options WHERE id = NEW.id) THEN RETURN NULL; END IF;
+      IF OLD.source_option_group_id IS NOT NULL
+         AND NEW.source_option_group_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM supplier_catalog_option_groups WHERE id = OLD.source_option_group_id
+         ) THEN
+        RAISE EXCEPTION 'retired option group source identity was reused'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_source_retirement_check';
+      END IF;
+      IF OLD.source_option_id IS NOT NULL
+         AND NEW.source_option_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM supplier_catalog_options WHERE id = OLD.source_option_id
+         ) THEN
+        RAISE EXCEPTION 'retired option source identity was reused'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_source_retirement_check';
+      END IF;
+      RETURN NULL;
+    END;
+    $$;
+    CREATE CONSTRAINT TRIGGER order_line_item_options_source_retirement_trigger
+      AFTER UPDATE OF source_option_group_id, source_option_id ON order_line_item_options
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      EXECUTE FUNCTION check_order_line_option_source_retirement();
+
+    CREATE OR REPLACE FUNCTION check_order_line_parent_retirement()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF OLD.snapshot_finalized = true
+         AND EXISTS (SELECT 1 FROM orders WHERE id = OLD.order_id) THEN
+        RAISE EXCEPTION 'retired order identity was reused after snapshot deletion'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_parent_retirement_check';
+      END IF;
+      RETURN NULL;
+    END;
+    $$;
+    CREATE CONSTRAINT TRIGGER order_line_items_parent_retirement_trigger
+      AFTER DELETE ON order_line_items
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      EXECUTE FUNCTION check_order_line_parent_retirement();
+
     CREATE OR REPLACE FUNCTION preserve_order_line_snapshot()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -501,6 +597,10 @@ export async function up(pgm) {
 
 export async function down(pgm) {
   pgm.sql(`
+    DROP TRIGGER IF EXISTS order_line_items_parent_retirement_trigger ON order_line_items;
+    DROP TRIGGER IF EXISTS order_line_item_options_source_retirement_trigger ON order_line_item_options;
+    DROP TRIGGER IF EXISTS order_line_items_source_retirement_trigger ON order_line_items;
+    DROP TRIGGER IF EXISTS order_line_items_finalization_sources_trigger ON order_line_items;
     DROP TRIGGER IF EXISTS order_line_item_options_immutable_trigger ON order_line_item_options;
     DROP TRIGGER IF EXISTS order_line_items_immutable_trigger ON order_line_items;
     DROP TRIGGER IF EXISTS order_line_items_finalized_trigger ON order_line_items;
@@ -508,6 +608,10 @@ export async function down(pgm) {
     DROP TRIGGER IF EXISTS order_line_items_math_trigger ON order_line_items;
     DROP FUNCTION IF EXISTS preserve_order_line_option_snapshot();
     DROP FUNCTION IF EXISTS preserve_order_line_snapshot();
+    DROP FUNCTION IF EXISTS check_order_line_parent_retirement();
+    DROP FUNCTION IF EXISTS check_order_line_option_source_retirement();
+    DROP FUNCTION IF EXISTS check_order_line_source_retirement();
+    DROP FUNCTION IF EXISTS validate_order_line_snapshot_finalization();
     DROP FUNCTION IF EXISTS check_order_line_snapshot_finalized();
     DROP FUNCTION IF EXISTS check_order_line_item_math();
     DROP TABLE IF EXISTS order_line_item_options;

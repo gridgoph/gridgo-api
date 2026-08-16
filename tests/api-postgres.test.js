@@ -1673,6 +1673,11 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(malformedPrivateCatalogPath.status, 400, JSON.stringify(malformedPrivateCatalogPath.body));
     assert.equal(malformedPrivateCatalogPath.body.error, "invalid_catalog_path");
 
+    const schemaInvalidCursor = Buffer.from(JSON.stringify({})).toString("base64url");
+    const invalidCursorResponse = await request(instance.api, `/catalog/shops?cursor=${schemaInvalidCursor}`);
+    assert.equal(invalidCursorResponse.status, 400, JSON.stringify(invalidCursorResponse.body));
+    assert.equal(invalidCursorResponse.body.error, "invalid_cursor");
+
     const nullCatalogResponse = await fetch(`${instance.api}/me/supplier-services`, {
       method: "POST",
       headers: {
