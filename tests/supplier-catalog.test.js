@@ -13,6 +13,7 @@ import {
   selectedCatalogPrice,
   supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
+  supplierServiceIsAccountRestoreCandidate,
   transitionSupplierServiceToDraft,
 } from "../src/supplier-catalog.js";
 
@@ -316,6 +317,7 @@ test("account suspension retains approver ownership of service lifecycle", () =>
   const service = store.supplierServices[0];
   service.state = "suspended";
   service.approvalSuspensionCaseId = "case_supplier";
+  assert.equal(supplierServiceIsAccountRestoreCandidate(store, service), true);
   assert.throws(
     () => assertSupplierServiceLifecycleMutationAllowed(store, service),
     (error) => error.status === 409
@@ -324,11 +326,15 @@ test("account suspension retains approver ownership of service lifecycle", () =>
   );
 
   delete service.approvalSuspensionCaseId;
+  assert.equal(supplierServiceIsAccountRestoreCandidate(store, service), false);
   assert.throws(
     () => assertSupplierServiceLifecycleMutationAllowed(store, service),
     (error) => error.status === 409 && error.code === "service_account_suspended",
   );
+  service.state = "pending_verification";
+  assert.equal(supplierServiceIsAccountRestoreCandidate(store, service), true);
   store.approvalCases[0].status = "approved";
+  assert.equal(supplierServiceIsAccountRestoreCandidate(store, service), false);
   assert.doesNotThrow(() => assertSupplierServiceLifecycleMutationAllowed(store, service));
 });
 

@@ -1143,6 +1143,14 @@ test("account-suspended services support staged readiness remediation", { skip: 
   await database.transaction(async () => {
     const store = await loadStore(database);
     const capabilityFirst = store.supplierServices.find((service) => service.id === "svc_banner");
+    store.supplierServices.push({
+      ...structuredClone(capabilityFirst),
+      id: "svc_independent_review",
+      state: "suspended",
+      suspendedAt: AT,
+      suspendedBy: "user_ops",
+      suspendReason: "Independent line review",
+    });
     capabilityFirst.materialCodes = [];
     capabilityFirst.finishCodes = [];
     capabilityFirst.productFamilyIds = [];
@@ -1182,6 +1190,10 @@ test("account-suspended services support staged readiness remediation", { skip: 
     store.supplierServiceFileFormats = store.supplierServiceFileFormats.filter(
       (format) => !["svc_banner", "svc_formats_first"].includes(format.supplierServiceId),
     );
+    store.supplierServiceFileFormats.push({
+      supplierServiceId: "svc_independent_review",
+      formatCode: "pdf",
+    });
     await saveStore(database, store);
   });
 
@@ -1202,6 +1214,27 @@ test("account-suspended services support staged readiness remediation", { skip: 
     assert.equal(blockedRestore.body.error, "supplier_profile_incomplete");
     assert.ok(blockedRestore.body.missing.includes("supplier_service:svc_banner:materials"));
     assert.ok(blockedRestore.body.missing.includes("supplier_service:svc_banner:accepted_file_formats"));
+
+    for (const [pathname, body] of [
+      ["/me/supplier-services/svc_independent_review", { expectedVersion: 1, materialCodes: [] }],
+      ["/supplier-services/svc_independent_review", { expectedVersion: 1, finishCodes: [] }],
+      ["/me/supplier-services/svc_independent_review/file-formats", { expectedVersion: 1, formatCodes: [] }],
+    ]) {
+      const blockedEdit = await request(instance.api, pathname, {
+        method: pathname.endsWith("file-formats") ? "PUT" : "PATCH",
+        subject: "clerk_supplier",
+        body,
+      });
+      assert.equal(blockedEdit.status, 409, JSON.stringify(blockedEdit.body));
+      assert.equal(blockedEdit.body.error, "service_not_review_ready");
+    }
+    const blockedIndependentSubmit = await request(
+      instance.api,
+      "/supplier-services/svc_independent_review/submit",
+      { method: "POST", subject: "clerk_supplier", body: { expectedVersion: 1 } },
+    );
+    assert.equal(blockedIndependentSubmit.status, 409, JSON.stringify(blockedIndependentSubmit.body));
+    assert.equal(blockedIndependentSubmit.body.error, "service_account_suspended");
 
     const capabilityBody = {
       materialCodes: ["tarpaulin_13oz"],
@@ -1250,6 +1283,46 @@ test("account-suspended services support staged readiness remediation", { skip: 
       assert.equal(service.version, 5);
       assert.equal(service.catalogManaged, true);
     }
+    const independent = persisted.supplierServices.find(
+      (service) => service.id === "svc_independent_review",
+    );
+    assert.equal(independent.state, "suspended");
+    assert.equal(independent.version, 1);
+    assert.deepEqual(independent.materialCodes, ["tarpaulin_13oz"]);
+    assert.deepEqual(independent.finishCodes, ["none"]);
+    assert.deepEqual(
+      persisted.supplierServiceFileFormats.filter(
+        (format) => format.supplierServiceId === "svc_independent_review",
+      ).map((format) => format.formatCode),
+      ["pdf"],
+    );
+    const approvedIncompleteEdit = await request(
+      instance.api,
+      "/me/supplier-services/svc_independent_review/file-formats",
+      { method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 1, formatCodes: [] } },
+    );
+    assert.equal(approvedIncompleteEdit.status, 409, JSON.stringify(approvedIncompleteEdit.body));
+    assert.equal(approvedIncompleteEdit.body.error, "service_not_review_ready");
+    const independentEdited = await request(
+      instance.api,
+      "/me/supplier-services/svc_independent_review",
+      {
+        method: "PATCH",
+        subject: "clerk_supplier",
+        body: { expectedVersion: 1, equipmentNotes: "Independent remediation complete" },
+      },
+    );
+    assert.equal(independentEdited.status, 200, JSON.stringify(independentEdited.body));
+    assert.equal(independentEdited.body.service.state, "suspended");
+    assert.equal(independentEdited.body.service.version, 2);
+    const independentResubmitted = await request(
+      instance.api,
+      "/supplier-services/svc_independent_review/submit",
+      { method: "POST", subject: "clerk_supplier", body: { expectedVersion: 2 } },
+    );
+    assert.equal(independentResubmitted.status, 200, JSON.stringify(independentResubmitted.body));
+    assert.equal(independentResubmitted.body.service.state, "pending_verification");
+    assert.equal(independentResubmitted.body.service.version, 3);
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));

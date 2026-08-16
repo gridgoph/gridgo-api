@@ -268,6 +268,16 @@ export function supplierAccountSuspensionCase(store, supplierId) {
   ) || null;
 }
 
+function isSupplierRestoreServiceCandidate(service, approvalCase) {
+  return service?.state === "pending_verification"
+    || (service?.state === "suspended" && service.approvalSuspensionCaseId === approvalCase?.id);
+}
+
+export function supplierServiceIsAccountRestoreCandidate(store, service) {
+  const approvalCase = supplierAccountSuspensionCase(store, service?.supplierId);
+  return Boolean(approvalCase && isSupplierRestoreServiceCandidate(service, approvalCase));
+}
+
 export function assertSupplierServiceLifecycleMutationAllowed(store, service) {
   const approvalCase = supplierAccountSuspensionCase(store, service?.supplierId);
   if (approvalCase) {
@@ -475,8 +485,7 @@ export function supplierCatalogTransitionReadiness(store, supplierId, { restorin
     : ["pending_verification"];
   const services = (store.supplierServices || []).filter((service) => service.supplierId === supplierId);
   const candidates = services.filter((service) => restoring
-    ? (service.state === "suspended" && service.approvalSuspensionCaseId === approvalCase?.id)
-      || service.state === "pending_verification"
+    ? isSupplierRestoreServiceCandidate(service, approvalCase)
     : service.state === "pending_verification");
   const candidateIds = new Set(candidates.map((service) => service.id));
   const reviewReady = candidates.filter((service) => serviceLineBlockers(store, service, {

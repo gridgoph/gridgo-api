@@ -12,8 +12,8 @@ import {
   publicSupplierShop,
   publicSupplierShops,
   serviceLineBlockers,
-  supplierAccountSuspensionCase,
   supplierCatalogReadiness,
+  supplierServiceIsAccountRestoreCandidate,
   supplierServiceCapabilityBlockers,
   transitionSupplierServiceToDraft,
   transitionSupplierServiceToPending,
@@ -395,9 +395,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     }
     if (req.method === "PATCH") {
       if (body.state != null) assertSupplierServiceLifecycleMutationAllowed(store, service);
-      const stagedSuspensionRemediation = Boolean(
-        supplierAccountSuspensionCase(store, service.supplierId),
-      );
+      const stagedSuspensionRemediation = supplierServiceIsAccountRestoreCandidate(store, service);
       const nextCategory = body.categoryCode == null ? service.categoryCode : categoryInput(store, body.categoryCode);
       const envelopeInput = body.categoryCode != null
         || CAPABILITY_FIELDS.some((field) => Object.hasOwn(body, field));
@@ -465,7 +463,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const codes = activeFormatCodes(store, body.formatCodes);
     const previous = new Set((store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId === service.id).map((record) => record.formatCode));
-    if (!supplierAccountSuspensionCase(store, service.supplierId)) {
+    if (!supplierServiceIsAccountRestoreCandidate(store, service)) {
       assertServiceLineReadinessInvariant(store, service, { formatCodes: codes });
     }
     store.supplierServiceFileFormats = (store.supplierServiceFileFormats || [])

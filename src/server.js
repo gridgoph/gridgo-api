@@ -98,9 +98,9 @@ import {
   assertServiceLineReviewReady,
   assertSupplierServiceLifecycleMutationAllowed,
   assertSupplierServicePendingVerification,
-  supplierAccountSuspensionCase,
   supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
+  supplierServiceIsAccountRestoreCandidate,
   supplierServiceCapabilityBlockers,
   transitionSupplierServiceToLive,
   transitionSupplierServiceToPending,
@@ -2974,7 +2974,7 @@ async function handleRequest(req, res) {
           transitionSupplierServiceToPending(service);
         }
         if ((approvalRelevantChange || readinessOwningChange)
-            && !supplierAccountSuspensionCase(store, service.supplierId)) {
+            && !supplierServiceIsAccountRestoreCandidate(store, service)) {
           assertServiceLineReadinessInvariant(store, service);
         }
         // Routine param edits on live stay live (blueprint: within verified envelope)
