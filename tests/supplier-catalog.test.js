@@ -156,6 +156,18 @@ test("single-select modifiers use integer arithmetic and floor effective price a
     () => selectedCatalogPrice(store, store.catalogItems[0], []),
     (error) => error.code === "invalid_catalog_options" && error.details.fields.size === "choose_exactly_one",
   );
+
+  const requiredUnselected = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(requiredUnselected.effectivePriceMinor, null);
+
+  const optionalOnly = fixture();
+  optionalOnly.catalogOptionGroups = optionalOnly.catalogOptionGroups.filter((group) => group.id === "finish");
+  optionalOnly.catalogOptions = optionalOnly.catalogOptions.filter((option) => option.id === "gloss");
+  optionalOnly.catalogOptions[0].priceModifierMinor = -150;
+  assert.equal(publicCatalogItem(optionalOnly, optionalOnly.catalogItems[0]).effectivePriceMinor, 100);
+  assert.equal(publicCatalogItem(optionalOnly, optionalOnly.catalogItems[0], {
+    selectedOptionIds: ["gloss"],
+  }).effectivePriceMinor, 0);
 });
 
 test("pending suppliers stay private while approved complete catalog items publish", () => {
@@ -289,6 +301,14 @@ test("approved suppliers remain grandfathered ready until approval is reopened",
   assert.equal(reopened.readyForApproval, false);
   assert.ok(reopened.missing.includes("supplier_profile"));
   assert.ok(reopened.missing.includes("review_ready_service"));
+
+  const approvedWithIncompleteReview = fixture();
+  approvedWithIncompleteReview.supplierServices[0].state = "pending_verification";
+  approvedWithIncompleteReview.supplierServiceFileFormats.length = 0;
+  const nextReview = supplierCatalogReadiness(approvedWithIncompleteReview, "supplier");
+  assert.equal(nextReview.readyForApproval, false);
+  assert.deepEqual(nextReview.publishableServiceIds, []);
+  assert.ok(nextReview.missing.includes("supplier_service:service:accepted_file_formats"));
 });
 
 test("account suspension retains approver ownership of service lifecycle", () => {
@@ -337,6 +357,11 @@ test("catalog readiness exposes only complete eligible service lines", () => {
   });
 
   pending.approvalCases[0].status = "approved";
+  assert.deepEqual(supplierCatalogReadiness(pending, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: ["service"],
+  });
   assert.deepEqual(supplierCatalogPublicationReadiness(pending, "supplier"), {
     readyForApproval: true,
     missing: [],

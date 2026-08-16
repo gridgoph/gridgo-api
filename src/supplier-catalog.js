@@ -260,11 +260,17 @@ export function advanceSupplierServiceVersion(service, at) {
   service.updatedAt = at;
 }
 
+export function supplierAccountSuspensionCase(store, supplierId) {
+  return (store.approvalCases || []).find(
+    (candidate) => candidate.userId === supplierId
+      && candidate.kind === "supplier"
+      && candidate.status === "suspended",
+  ) || null;
+}
+
 export function assertSupplierServiceLifecycleMutationAllowed(store, service) {
-  const approvalCase = (store.approvalCases || []).find(
-    (candidate) => candidate.userId === service?.supplierId && candidate.kind === "supplier",
-  );
-  if (approvalCase?.status === "suspended") {
+  const approvalCase = supplierAccountSuspensionCase(store, service?.supplierId);
+  if (approvalCase) {
     throw new CatalogError(
       409,
       "service_account_suspended",
@@ -495,6 +501,12 @@ export function supplierCatalogTransitionReadiness(store, supplierId, { restorin
   if (publishableServiceIds.length === 0) {
     if (reviewReady.length === 0) missing.push("review_ready_service");
     if (completeItems.length === 0) missing.push("active_catalog_item");
+    for (const service of candidates) {
+      for (const blocker of serviceLineBlockers(store, service, {
+        allowedStates: allowedServiceStates,
+        requireActiveCategory: true,
+      })) missing.push(`supplier_service:${service.id}:${blocker}`);
+    }
     for (const item of activeItems) {
       for (const blocker of blockersForItem(item)) missing.push(`catalog_item:${item.id}:${blocker}`);
     }
@@ -514,7 +526,10 @@ export function supplierCatalogReadiness(store, supplierId) {
   const approvalCase = (store.approvalCases || []).find(
     (candidate) => candidate.userId === supplierId && candidate.kind === "supplier",
   );
-  if (approvalCase?.status === "approved") {
+  const hasPendingReview = (store.supplierServices || []).some(
+    (service) => service.supplierId === supplierId && service.state === "pending_verification",
+  );
+  if (approvalCase?.status === "approved" && !hasPendingReview) {
     return { readyForApproval: true, missing: [], publishableServiceIds: [] };
   }
   return supplierCatalogTransitionReadiness(store, supplierId, {
@@ -623,8 +638,10 @@ export function publicCatalogItem(store, item, { selectedOptionIds, index } = {}
       sortOrder: option.sortOrder,
     })),
   }));
-  let effectivePriceMinor = groups.length === 0 ? item.basePriceMinor : null;
-  if (selectedOptionIds) effectivePriceMinor = selectedCatalogPrice(store, item, selectedOptionIds).effectiveUnitPriceMinor;
+  let effectivePriceMinor = null;
+  if (selectedOptionIds !== undefined || !groups.some((group) => group.required)) {
+    effectivePriceMinor = selectedCatalogPrice(store, item, selectedOptionIds ?? []).effectiveUnitPriceMinor;
+  }
   return {
     id: item.id,
     supplierId: item.supplierId,

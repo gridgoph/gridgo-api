@@ -1044,11 +1044,19 @@ test("restore publishes eligible pending lines without prior live services", { s
       id: "catalog_independent_suspended",
       supplierServiceId: "svc_independent_suspended",
     });
+    const pendingPhoto = store.catalogItemPhotos.find(
+      (photo) => photo.catalogItemId === "catalog_restore_pending",
+    );
+    const pendingPhotoFile = store.files.find((file) => file.fileId === pendingPhoto.fileId);
+    store.files.push({
+      ...structuredClone(pendingPhotoFile),
+      fileId: "restore_independent_photo",
+      objectKey: "catalog/restore_independent_photo.jpg",
+    });
     store.catalogItemPhotos.push({
-      ...structuredClone(store.catalogItemPhotos.find(
-        (photo) => photo.catalogItemId === "catalog_restore_pending",
-      )),
+      ...structuredClone(pendingPhoto),
       catalogItemId: "catalog_independent_suspended",
+      fileId: "restore_independent_photo",
     });
     if (!store.supplierPaymentTerms.some((terms) => terms.supplierId === "user_supplier")) {
       store.supplierPaymentTerms.push({
@@ -1122,6 +1130,126 @@ test("restore publishes eligible pending lines without prior live services", { s
     );
     assert.equal(independentResubmission.status, 200, JSON.stringify(independentResubmission.body));
     assert.equal(independentResubmission.body.service.state, "pending_verification");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("account-suspended services support staged readiness remediation", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const capabilityFirst = store.supplierServices.find((service) => service.id === "svc_banner");
+    capabilityFirst.materialCodes = [];
+    capabilityFirst.finishCodes = [];
+    capabilityFirst.productFamilyIds = [];
+    capabilityFirst.zones = [];
+    delete capabilityFirst.catalogManaged;
+    store.supplierServices.push({
+      ...structuredClone(capabilityFirst),
+      id: "svc_formats_first",
+    });
+    addReadySupplierCatalog(store, {
+      supplierId: "user_supplier",
+      serviceId: "svc_banner",
+      itemId: "catalog_capability_first",
+      filePrefix: "staged_capability_first",
+      createService: false,
+    });
+    const firstItem = store.catalogItems.find((item) => item.id === "catalog_capability_first");
+    const firstPhoto = store.catalogItemPhotos.find(
+      (photo) => photo.catalogItemId === "catalog_capability_first",
+    );
+    const firstPhotoFile = store.files.find((file) => file.fileId === firstPhoto.fileId);
+    store.files.push({
+      ...structuredClone(firstPhotoFile),
+      fileId: "staged_formats_first_photo",
+      objectKey: "catalog/staged_formats_first_photo.jpg",
+    });
+    store.catalogItems.push({
+      ...structuredClone(firstItem),
+      id: "catalog_formats_first",
+      supplierServiceId: "svc_formats_first",
+    });
+    store.catalogItemPhotos.push({
+      ...structuredClone(firstPhoto),
+      catalogItemId: "catalog_formats_first",
+      fileId: "staged_formats_first_photo",
+    });
+    store.supplierServiceFileFormats = store.supplierServiceFileFormats.filter(
+      (format) => !["svc_banner", "svc_formats_first"].includes(format.supplierServiceId),
+    );
+    await saveStore(database, store);
+  });
+
+  const instance = await startApi();
+  try {
+    const suspended = await request(instance.api, "/approval-cases/case_supplier/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "suspend-staged-remediation", reason: "Catalog remediation" },
+    });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+    assert.deepEqual(suspended.body.suspendedServiceIds, ["svc_banner", "svc_formats_first"]);
+
+    const blockedRestore = await request(instance.api, "/approval-cases/case_supplier/restore", {
+      method: "POST", subject: "clerk_super",
+      body: { expectedVersion: 2, requestId: "restore-before-remediation", note: "Not ready" },
+    });
+    assert.equal(blockedRestore.status, 409, JSON.stringify(blockedRestore.body));
+    assert.equal(blockedRestore.body.error, "supplier_profile_incomplete");
+    assert.ok(blockedRestore.body.missing.includes("supplier_service:svc_banner:materials"));
+    assert.ok(blockedRestore.body.missing.includes("supplier_service:svc_banner:accepted_file_formats"));
+
+    const capabilityBody = {
+      materialCodes: ["tarpaulin_13oz"],
+      finishCodes: ["none"],
+      productFamilyIds: ["banner"],
+      zones: ["davao_central"],
+    };
+    const capabilityFirst = await request(instance.api, "/me/supplier-services/svc_banner", {
+      method: "PATCH", subject: "clerk_supplier",
+      body: { expectedVersion: 2, ...capabilityBody },
+    });
+    assert.equal(capabilityFirst.status, 200, JSON.stringify(capabilityFirst.body));
+    assert.equal(capabilityFirst.body.service.state, "suspended");
+    assert.ok(capabilityFirst.body.service.blockers.includes("accepted_file_formats"));
+    const capabilityFirstFormats = await request(
+      instance.api,
+      "/me/supplier-services/svc_banner/file-formats",
+      { method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 3, formatCodes: ["pdf"] } },
+    );
+    assert.equal(capabilityFirstFormats.status, 200, JSON.stringify(capabilityFirstFormats.body));
+
+    const formatsFirst = await request(
+      instance.api,
+      "/me/supplier-services/svc_formats_first/file-formats",
+      { method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 2, formatCodes: ["pdf"] } },
+    );
+    assert.equal(formatsFirst.status, 200, JSON.stringify(formatsFirst.body));
+    assert.ok(formatsFirst.body.service.blockers.includes("materials"));
+    const formatsFirstCapabilities = await request(instance.api, "/supplier-services/svc_formats_first", {
+      method: "PATCH", subject: "clerk_supplier",
+      body: { expectedVersion: 3, ...capabilityBody },
+    });
+    assert.equal(formatsFirstCapabilities.status, 200, JSON.stringify(formatsFirstCapabilities.body));
+    assert.equal(formatsFirstCapabilities.body.service.state, "suspended");
+
+    const restored = await request(instance.api, "/approval-cases/case_supplier/restore", {
+      method: "POST", subject: "clerk_super",
+      body: { expectedVersion: 2, requestId: "restore-after-remediation", note: "Catalog complete" },
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.deepEqual(restored.body.publishedServiceIds, ["svc_banner", "svc_formats_first"]);
+    const persisted = await loadStore(database);
+    for (const serviceId of ["svc_banner", "svc_formats_first"]) {
+      const service = persisted.supplierServices.find((candidate) => candidate.id === serviceId);
+      assert.equal(service.state, "live");
+      assert.equal(service.version, 5);
+      assert.equal(service.catalogManaged, true);
+    }
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -2121,6 +2249,19 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
     assert.equal(submitted.body.service.reviewReady, true);
+    const approvedPendingProjection = await request(instance.api, "/auth/me/supplier", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(approvedPendingProjection.status, 200, JSON.stringify(approvedPendingProjection.body));
+    assert.deepEqual(approvedPendingProjection.body.readiness, {
+      readyForApproval: true,
+      missing: [],
+      publishableServiceIds: [serviceId],
+    });
+    const approvedPendingReadiness = await request(instance.api, "/me/supplier-readiness", {
+      subject: "clerk_supplier",
+    });
+    assert.deepEqual(approvedPendingReadiness.body.readiness, approvedPendingProjection.body.readiness);
     const verified = await request(instance.api, `/supplier-services/${serviceId}/verify`, {
       method: "POST",
       subject: "clerk_ops",
@@ -2128,6 +2269,29 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     });
     assert.equal(verified.status, 200, JSON.stringify(verified.body));
     assert.equal(verified.body.service.state, "live");
+
+    const optionalGroup = await request(instance.api, `/me/catalog-items/${itemId}/option-groups`, {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        expectedVersion: 1,
+        name: "Optional promotion",
+        required: false,
+        sortOrder: 0,
+        options: [{ label: "Promotion", priceModifierMinor: -60000, sortOrder: 0 }],
+      },
+    });
+    assert.equal(optionalGroup.status, 201, JSON.stringify(optionalGroup.body));
+    const optionalSelectionId = optionalGroup.body.group.options[0].id;
+    const unselectedOptional = await request(instance.api, `/catalog/items/${itemId}`);
+    assert.equal(unselectedOptional.status, 200, JSON.stringify(unselectedOptional.body));
+    assert.equal(unselectedOptional.body.item.effectivePriceMinor, 50000);
+    const selectedOptional = await request(
+      instance.api,
+      `/catalog/items/${itemId}?optionIds=${encodeURIComponent(optionalSelectionId)}`,
+    );
+    assert.equal(selectedOptional.status, 200, JSON.stringify(selectedOptional.body));
+    assert.equal(selectedOptional.body.item.effectivePriceMinor, 0);
 
     const widened = await request(instance.api, `/me/supplier-services/${serviceId}`, {
       method: "PATCH",

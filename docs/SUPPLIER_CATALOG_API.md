@@ -6,7 +6,7 @@ Supplier catalog items are sellable offers beneath one taxonomy-governed supplie
 
 - `GET /catalog/shops?categoryCode=&cursor=` lists approved suppliers that currently have at least one complete active item under a live service. `categoryCode` accepts an active canonical code or retired input alias and is resolved canonically; invalid values return `invalid_category_code`. `cursor` is opaque.
 - `GET /catalog/shops/:supplierId` composes the approved shop profile, identity media references, live service lines, and complete active items.
-- `GET /catalog/items/:itemId` returns one eligible item. Optional repeated or comma-separated `optionIds` query values calculate `effectivePriceMinor`; every required group must have exactly one selected option and an optional group may have zero or one.
+- `GET /catalog/items/:itemId` returns one eligible item. Optional repeated or comma-separated `optionIds` query values calculate `effectivePriceMinor`; every required group must have exactly one selected option and an optional group may have zero or one. With no `optionIds`, an item containing only optional groups returns the valid empty-selection price, while an unselected required group leaves `effectivePriceMinor` null.
 
 Public items expose both `version` and `serviceVersion`. Checkout must return both as `expectedVersion` and `expectedServiceVersion` so service-derived pricing basis, turnaround, rush terms, and accepted formats cannot change behind a still-current item version.
 
@@ -16,7 +16,7 @@ Media records expose opaque API URLs and never MinIO object keys. Task F owns th
 
 ## Supplier editor
 
-These routes require the caller's database `supplier` membership and resource ownership. Pending and rejected suppliers may edit; a suspended supplier may not.
+These routes require the caller's database `supplier` membership and resource ownership. Pending and rejected suppliers may edit. Account-suspended suppliers may make safe catalog, settings, capability-envelope, and accepted-format remediation edits, but may not change lifecycle state, publish, or restore a line.
 
 ```text
 GET, POST              /me/supplier-services
@@ -48,7 +48,7 @@ Service lines use `draft` while incomplete and `pending_verification` when revie
 
 Each service line remains the matchable capability envelope above its items. The supplier editor persists and returns its material, finish, product-family, size, quantity, capacity, zone, reference-price, turnaround, and lifecycle fields. Product families must be a subset governed by the resolved active category; materials and finishes must be active for that category; zones must be active platform zones. Those supported-code arrays are normalized as sets, so ordering and duplicate input do not change the envelope. Review requires explicit nonempty material, finish, product-family, and zone subsets. Every approver-driven publish or restore marks the line as catalog-managed, so it fails closed at matching if that envelope is missing or invalid. Governed material and finish matching resolves only an exact active taxonomy code or exact case-insensitive taxonomy name; arbitrary substring text never widens the envelope. Only legacy lines that were already live remain grandfathered with fuzzy material matching until their next approval-relevant transition or meaningful envelope change; routine notes do not opt them in.
 
-Readiness-owning edits must leave `pending_verification`, `live`, and `suspended` lines complete. In particular, replacing service formats with an empty effective set returns `service_not_review_ready` without changing formats, state, or version. A supplier must first move the line to `draft` or `withdrawn` before making it incomplete, then complete and resubmit it for approval.
+Readiness-owning edits must leave `pending_verification`, `live`, and independently `suspended` lines complete. In particular, replacing service formats with an empty effective set returns `service_not_review_ready` without changing formats, state, or version. During an account suspension, capability-envelope and accepted-format remediation may be staged in either order while the line remains non-public and lifecycle-locked; the approver's restore transaction enforces the complete readiness contract. Outside that account-level remediation boundary, a supplier must first move the line to `draft` or `withdrawn` before making it incomplete, then complete and resubmit it for approval.
 
 ## Format inheritance and readiness
 
@@ -56,7 +56,7 @@ Readiness-owning edits must leave `pending_verification`, `live`, and `suspended
 
 `GET /me/supplier-readiness` and `/auth/me/supplier` return the same catalog readiness projection. It identifies profile, payment-term integration, review-ready service, complete active item, item-specific, shop-media, and pickup-mode blockers, plus the service IDs eligible for the next approval-driven publish or restore. Item blockers are scoped to services participating in that transition: unrelated live, draft, withdrawn, or incomplete lines remain unpublished without blocking an eligible candidate. Supplier payment terms are owned by task H; until that schema is integrated, `supplier_payment_terms` remains an explicit blocker.
 
-An already-approved supplier remains grandfathered ready. The full projection applies again when its approval is reopened or an approver reviews a new or resubmitted line, so the next approval-relevant transition consumes the new requirements without retroactively invalidating an existing approval. Account suspension does not run readiness. Restore may publish complete lines marked as suspended by that account case and complete `pending_verification` review lines, including a recovery line when no service was live at suspension; independently suspended, withdrawn, draft, incomplete, and unrelated lines remain unpublished.
+An already-approved supplier remains grandfathered ready when it has no pending review line. Once any line is `pending_verification`, both readiness endpoints expose the full next-review projection, including eligible `publishableServiceIds` or service/item-specific blockers, without retroactively invalidating existing live lines. The full projection also applies when approval is reopened. The suspension transition itself is never readiness-blocked; the projection guides remediation, and restore enforces it atomically. Restore may publish complete lines marked as suspended by that account case and complete `pending_verification` review lines, including a recovery line when no service was live at suspension; independently suspended, withdrawn, draft, incomplete, and unrelated lines remain unpublished.
 
 ## Immutable checkout snapshots
 

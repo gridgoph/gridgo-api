@@ -98,6 +98,7 @@ import {
   assertServiceLineReviewReady,
   assertSupplierServiceLifecycleMutationAllowed,
   assertSupplierServicePendingVerification,
+  supplierAccountSuspensionCase,
   supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
   supplierServiceCapabilityBlockers,
@@ -2972,7 +2973,8 @@ async function handleRequest(req, res) {
         if (service.state === "live" && approvalRelevantChange) {
           transitionSupplierServiceToPending(service);
         }
-        if (approvalRelevantChange || readinessOwningChange) {
+        if ((approvalRelevantChange || readinessOwningChange)
+            && !supplierAccountSuspensionCase(store, service.supplierId)) {
           assertServiceLineReadinessInvariant(store, service);
         }
         // Routine param edits on live stay live (blueprint: within verified envelope)

@@ -12,6 +12,7 @@ import {
   publicSupplierShop,
   publicSupplierShops,
   serviceLineBlockers,
+  supplierAccountSuspensionCase,
   supplierCatalogReadiness,
   supplierServiceCapabilityBlockers,
   transitionSupplierServiceToDraft,
@@ -394,6 +395,9 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     }
     if (req.method === "PATCH") {
       if (body.state != null) assertSupplierServiceLifecycleMutationAllowed(store, service);
+      const stagedSuspensionRemediation = Boolean(
+        supplierAccountSuspensionCase(store, service.supplierId),
+      );
       const nextCategory = body.categoryCode == null ? service.categoryCode : categoryInput(store, body.categoryCode);
       const envelopeInput = body.categoryCode != null
         || CAPABILITY_FIELDS.some((field) => Object.hasOwn(body, field));
@@ -444,7 +448,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       const readinessChanged = Object.entries(previousReadiness).some(
         ([field, value]) => Object.hasOwn(body, field) && (service[field] ?? null) !== value,
       );
-      if (body.state != null || envelopeChanged || readinessChanged) {
+      if (!stagedSuspensionRemediation && (body.state != null || envelopeChanged || readinessChanged)) {
         assertServiceLineReadinessInvariant(store, service);
       }
       advanceSupplierServiceVersion(service, now());
@@ -461,7 +465,9 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const codes = activeFormatCodes(store, body.formatCodes);
     const previous = new Set((store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId === service.id).map((record) => record.formatCode));
-    assertServiceLineReadinessInvariant(store, service, { formatCodes: codes });
+    if (!supplierAccountSuspensionCase(store, service.supplierId)) {
+      assertServiceLineReadinessInvariant(store, service, { formatCodes: codes });
+    }
     store.supplierServiceFileFormats = (store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId !== service.id);
     store.supplierServiceFileFormats.push(...codes.map((formatCode) => ({ supplierServiceId: service.id, formatCode })));
