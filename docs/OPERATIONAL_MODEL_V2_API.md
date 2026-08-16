@@ -146,7 +146,7 @@ Decision bodies are:
 { "expectedVersion": 3, "requestId": "approval-uuid", "note": "required" }
 ```
 
-Each committed decision increments `version` and atomically writes the case, immutable event, audit row, and applicant notification. Replaying the winning `requestId` is idempotent. A different stale/racing decision returns `409 approval_already_decided`; a stale version on an otherwise valid transition returns `409 approval_case_stale`; a case whose applicant no longer holds the matching role membership returns `409 approval_case_role_mismatch`.
+Each committed decision increments `version` and atomically writes the case, immutable event, audit row, and applicant notification. Replaying the winning `requestId` is idempotent; reusing it for a different case or action returns `409 request_id_conflict`. A different stale/racing decision returns `409 approval_already_decided`; a stale version on an otherwise valid transition returns `409 approval_case_stale`; a case whose applicant no longer holds the matching role membership returns `409 approval_case_role_mismatch`.
 
 Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
 
