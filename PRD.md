@@ -1,6 +1,6 @@
 # GRIDGO API — Product Requirements
 
-> The exact mobile/API state contract is `docs/OPERATIONAL_MODEL_V2_API.md`. File and taxonomy contracts are `docs/STORAGE_API.md` and `docs/TAXONOMY_API.md`.
+> The exact mobile/API state contract is `docs/OPERATIONAL_MODEL_V2_API.md`. Supplier catalog, file, and taxonomy contracts are `docs/SUPPLIER_CATALOG_API.md`, `docs/STORAGE_API.md`, and `docs/TAXONOMY_API.md`.
 
 ## Purpose
 
