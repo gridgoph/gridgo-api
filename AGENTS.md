@@ -41,6 +41,8 @@ Coordinates use constrained latitude/longitude columns. Current database queries
 
 `docs/TAXONOMY_API.md` is authoritative. The store is flat: references hold category codes and `categoryTree` is derived per request. Retired input aliases still resolve, but supplier service records are not silently rewritten.
 
+`docs/SUPPLIER_CATALOG_API.md` owns the bounded supplier catalog, format inheritance, readiness, public storefront, optimistic-version, and immutable order-line snapshot contracts.
+
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 
 ## Files and push

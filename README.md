@@ -2,7 +2,7 @@
 
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and Firebase Cloud Messaging as an optional notification delivery leg.
 
-The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_MODEL_V2_API.md), [Storage API](docs/STORAGE_API.md), and [Taxonomy API](docs/TAXONOMY_API.md). Production setup, cutover, backup, and recovery are in [Deployment](docs/DEPLOYMENT.md).
+The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_MODEL_V2_API.md), [Supplier Catalog API](docs/SUPPLIER_CATALOG_API.md), [Storage API](docs/STORAGE_API.md), and [Taxonomy API](docs/TAXONOMY_API.md). Production setup, cutover, backup, and recovery are in [Deployment](docs/DEPLOYMENT.md).
 
 ## Architecture decisions
 
@@ -89,11 +89,12 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, and the documented anonymous device registration calls require a verified Clerk bearer.
+All routes except `/health`, `/catalog`, `/catalog/shops*`, `/catalog/items/*`, and the documented anonymous device registration calls require a verified Clerk bearer.
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
+- Supplier catalog: `/me/supplier-services`, `/me/catalog-items`, `/me/supplier-readiness`, public `/catalog/shops` and `/catalog/items`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes

@@ -45,13 +45,24 @@ const TABLES = [
   { name: "taxonomy_materials", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "taxonomy_finishes", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "zones", keys: ["id"], columns: ["id", "code", "name", "active", "position", "data"] },
-  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "created_at", "updated_at", "position", "data"] },
+  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "pricing_basis", "standard_turnaround_hours", "rush_enabled", "rush_turnaround_hours", "rush_price_minor", "version", "created_at", "updated_at", "position", "data"] },
+  { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
+  { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
+  { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "name", "description", "base_price_minor", "file_format_mode", "active", "sort_order", "version", "created_at", "updated_at"] },
+  { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
+  { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
+  { name: "supplier_catalog_item_file_formats", keys: ["catalog_item_id", "format_code"], columns: ["catalog_item_id", "format_code"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "created_at", "updated_at", "position", "data"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "sort_order", "created_at"] },
+  { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
   { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
+  { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
+  { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "file_references", keys: ["file_id", "reference_type", "reference_id", "field"], columns: ["file_id", "reference_type", "reference_id", "field", "position", "data"] },
   { name: "rider_documents", keys: ["id"], columns: ["id", "rider_id", "kind", "file_id", "expires_on", "is_current", "uploaded_at", "replaced_at"] },
   { name: "credit_accounts", keys: ["user_id"], columns: ["user_id", "balance_minor", "data"] },
@@ -82,7 +93,18 @@ export function emptyStore() {
     settings: {},
     zones: [],
     supplierServices: [],
+    supplierServicePriceTiers: [],
+    acceptedFileFormats: [],
+    supplierServiceFileFormats: [],
+    catalogItems: [],
+    catalogItemPhotos: [],
+    supplierShopMedia: [],
+    catalogOptionGroups: [],
+    catalogOptions: [],
+    catalogItemFileFormats: [],
     orders: [],
+    orderLineItems: [],
+    orderLineItemOptions: [],
     files: [],
     riderDocuments: [],
     credits: {},
@@ -197,9 +219,63 @@ function rowsFromStore(store) {
     rows.supplier_services.push({
       id: service.id, supplier_id: service.supplierId, category_code: service.categoryCode, state: service.state,
       reference_rate_minor: money(service.referenceRateMinor, "supplierService.referenceRateMinor"),
-      turnaround_hours: service.turnaroundHours, created_at: service.createdAt, updated_at: service.updatedAt,
-      position, data: without(service, ["id", "supplierId", "categoryCode", "state", "referenceRateMinor", "turnaroundHours", "createdAt", "updatedAt"]),
+      turnaround_hours: service.turnaroundHours ?? service.standardTurnaroundHours,
+      pricing_basis: service.pricingBasis ?? null,
+      standard_turnaround_hours: Object.hasOwn(service, "standardTurnaroundHours")
+        ? service.standardTurnaroundHours
+        : service.turnaroundHours,
+      rush_enabled: Boolean(service.rushEnabled),
+      rush_turnaround_hours: service.rushEnabled ? service.rushTurnaroundHours : null,
+      rush_price_minor: service.rushEnabled ? money(service.rushPriceMinor, "supplierService.rushPriceMinor") : null,
+      version: service.version || 1,
+      created_at: service.createdAt, updated_at: service.updatedAt,
+      position, data: without(service, ["id", "supplierId", "categoryCode", "state", "referenceRateMinor", "turnaroundHours", "pricingBasis", "standardTurnaroundHours", "rushEnabled", "rushTurnaroundHours", "rushPriceMinor", "version", "createdAt", "updatedAt"]),
     });
+  }
+  for (const tier of (store.supplierServicePriceTiers || [])) {
+    rows.supplier_service_price_tiers.push({
+      id: tier.id, supplier_service_id: tier.supplierServiceId, tier_code: tier.tierCode,
+      color_tier: tier.colorTier ?? null, min_quantity: tier.minQuantity ?? 1,
+      max_quantity: tier.maxQuantity ?? null, unit_price_minor: money(tier.unitPriceMinor, "supplierServicePriceTier.unitPriceMinor"),
+      sort_order: tier.sortOrder,
+    });
+  }
+  for (const format of (store.acceptedFileFormats || [])) {
+    rows.accepted_file_formats.push({
+      code: format.code, display_name: format.displayName, input_kind: format.inputKind,
+      extensions: format.extensions || [], mime_types: format.mimeTypes || [], active: format.active !== false,
+    });
+  }
+  for (const format of (store.supplierServiceFileFormats || [])) {
+    rows.supplier_service_file_formats.push({ supplier_service_id: format.supplierServiceId, format_code: format.formatCode });
+  }
+  for (const item of (store.catalogItems || [])) {
+    rows.supplier_catalog_items.push({
+      id: item.id, supplier_id: item.supplierId, supplier_service_id: item.supplierServiceId,
+      name: item.name, description: item.description || "",
+      base_price_minor: money(item.basePriceMinor, "catalogItem.basePriceMinor"),
+      file_format_mode: item.fileFormatMode || "inherit", active: item.active !== false,
+      sort_order: item.sortOrder, version: item.version || 1,
+      created_at: item.createdAt, updated_at: item.updatedAt,
+    });
+  }
+  for (const group of (store.catalogOptionGroups || [])) {
+    rows.supplier_catalog_option_groups.push({
+      id: group.id, catalog_item_id: group.catalogItemId, name: group.name,
+      required: group.required !== false, selection_mode: "single", sort_order: group.sortOrder,
+      version: group.version || 1, created_at: group.createdAt, updated_at: group.updatedAt,
+    });
+  }
+  for (const option of (store.catalogOptions || [])) {
+    rows.supplier_catalog_options.push({
+      id: option.id, option_group_id: option.optionGroupId, label: option.label,
+      price_modifier_minor: money(option.priceModifierMinor ?? 0, "catalogOption.priceModifierMinor"),
+      spec_binding: option.specBinding ?? null, active: option.active !== false,
+      sort_order: option.sortOrder, created_at: option.createdAt, updated_at: option.updatedAt,
+    });
+  }
+  for (const format of (store.catalogItemFileFormats || [])) {
+    rows.supplier_catalog_item_file_formats.push({ catalog_item_id: format.catalogItemId, format_code: format.formatCode });
   }
   for (const [position, order] of (store.orders || []).entries()) {
     rows.orders.push({
@@ -249,11 +325,46 @@ function rowsFromStore(store) {
       rows.payout_milestones.push({ order_id: order.id, code: milestone.code, share_percent: milestone.sharePercent, amount_minor: money(milestone.amountMinor, "payoutMilestone.amountMinor"), status: milestone.status, position: milestonePosition, data: without(milestone, ["code", "sharePercent", "amountMinor", "status"]) });
     }
   }
+  for (const line of (store.orderLineItems || [])) {
+    rows.order_line_items.push({
+      id: line.id, order_id: line.orderId, source_catalog_item_id: line.sourceCatalogItemId ?? null,
+      source_supplier_service_id: line.sourceSupplierServiceId ?? null,
+      item_name_snapshot: line.itemNameSnapshot, description_snapshot: line.descriptionSnapshot || "",
+      pricing_basis_snapshot: line.pricingBasisSnapshot,
+      base_unit_price_minor: money(line.baseUnitPriceMinor, "orderLineItem.baseUnitPriceMinor"),
+      effective_unit_price_minor: money(line.effectiveUnitPriceMinor, "orderLineItem.effectiveUnitPriceMinor"),
+      quantity: line.quantity, line_subtotal_minor: money(line.lineSubtotalMinor, "orderLineItem.lineSubtotalMinor"),
+      accepted_format_codes_snapshot: line.acceptedFormatCodesSnapshot,
+      structured_spec_snapshot: line.structuredSpecSnapshot,
+      sort_order: line.sortOrder, created_at: line.createdAt,
+    });
+  }
+  for (const option of (store.orderLineItemOptions || [])) {
+    rows.order_line_item_options.push({
+      id: option.id, order_line_item_id: option.orderLineItemId,
+      source_option_group_id: option.sourceOptionGroupId ?? null,
+      source_option_id: option.sourceOptionId ?? null,
+      group_name_snapshot: option.groupNameSnapshot, option_label_snapshot: option.optionLabelSnapshot,
+      price_modifier_minor: money(option.priceModifierMinor, "orderLineItemOption.priceModifierMinor"),
+      sort_order: option.sortOrder,
+    });
+  }
   for (const [position, file] of (store.files || []).entries()) {
     rows.files.push({ file_id: file.fileId, owner_id: file.ownerId, purpose: file.purpose, original_filename: file.originalFilename, declared_content_type: file.declaredContentType, detected_content_type: file.detectedContentType ?? null, size_bytes: file.size ?? null, state: file.state, object_key: file.objectKey, created_at: file.createdAt, position, data: without(file, ["fileId", "ownerId", "purpose", "originalFilename", "declaredContentType", "detectedContentType", "size", "state", "objectKey", "createdAt", "references"]) });
     for (const [referencePosition, reference] of (file.references || []).entries()) {
       rows.file_references.push({ file_id: file.fileId, reference_type: reference.type, reference_id: reference.id, field: reference.field, position: referencePosition, data: without(reference, ["type", "id", "field"]) });
     }
+  }
+  for (const photo of (store.catalogItemPhotos || [])) {
+    rows.supplier_catalog_item_photos.push({
+      catalog_item_id: photo.catalogItemId, file_id: photo.fileId, sort_order: photo.sortOrder,
+      alt_text: photo.altText ?? null, created_at: photo.createdAt,
+    });
+  }
+  for (const media of (store.supplierShopMedia || [])) {
+    rows.supplier_shop_media.push({
+      supplier_id: media.supplierId, slot: media.slot, file_id: media.fileId, updated_at: media.updatedAt,
+    });
   }
   for (const document of (store.riderDocuments || [])) {
     rows.rider_documents.push({ id: document.id, rider_id: document.riderId, kind: document.kind, file_id: document.fileId, expires_on: document.expiresOn ?? null, is_current: document.isCurrent !== false, uploaded_at: document.uploadedAt, replaced_at: document.replacedAt ?? null });
@@ -297,7 +408,11 @@ function ordered(rows) {
 function orderedBy(rows, ...columns) {
   return [...rows].sort((a, b) => {
     for (const column of columns) {
-      const comparison = String(a[column] ?? "").localeCompare(String(b[column] ?? ""));
+      const left = a[column];
+      const right = b[column];
+      const comparison = typeof left === "number" && typeof right === "number"
+        ? left - right
+        : String(left ?? "").localeCompare(String(right ?? ""));
       if (comparison) return comparison;
     }
     return 0;
@@ -368,7 +483,54 @@ export async function loadStore(database) {
   store.taxonomy.materials = ordered(loaded.taxonomy_materials).map((row) => ({ ...row.data, id: row.id, code: row.code, name: row.name, categoryCodes: row.category_codes, active: row.active }));
   store.taxonomy.finishes = ordered(loaded.taxonomy_finishes).map((row) => ({ ...row.data, id: row.id, code: row.code, name: row.name, categoryCodes: row.category_codes, active: row.active }));
   store.zones = ordered(loaded.zones).map((row) => ({ ...row.data, id: row.id, code: row.code, name: row.name, active: row.active }));
-  store.supplierServices = ordered(loaded.supplier_services).map((row) => ({ ...row.data, id: row.id, supplierId: row.supplier_id, categoryCode: row.category_code, state: row.state, referenceRateMinor: row.reference_rate_minor, turnaroundHours: row.turnaround_hours, createdAt: row.created_at, updatedAt: row.updated_at }));
+  store.supplierServices = ordered(loaded.supplier_services).map((row) => ({
+    ...row.data,
+    id: row.id,
+    supplierId: row.supplier_id,
+    categoryCode: row.category_code,
+    state: row.state,
+    referenceRateMinor: row.reference_rate_minor,
+    turnaroundHours: row.turnaround_hours,
+    pricingBasis: row.pricing_basis,
+    standardTurnaroundHours: row.standard_turnaround_hours,
+    rushEnabled: row.rush_enabled,
+    rushTurnaroundHours: row.rush_turnaround_hours,
+    rushPriceMinor: row.rush_price_minor,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+  store.supplierServicePriceTiers = orderedBy(loaded.supplier_service_price_tiers, "supplier_service_id", "sort_order", "id").map((row) => ({
+    id: row.id, supplierServiceId: row.supplier_service_id, tierCode: row.tier_code,
+    colorTier: row.color_tier, minQuantity: row.min_quantity, maxQuantity: row.max_quantity,
+    unitPriceMinor: row.unit_price_minor, sortOrder: row.sort_order,
+  }));
+  store.acceptedFileFormats = orderedBy(loaded.accepted_file_formats, "code").map((row) => ({
+    code: row.code, displayName: row.display_name, inputKind: row.input_kind,
+    extensions: row.extensions, mimeTypes: row.mime_types, active: row.active,
+  }));
+  store.supplierServiceFileFormats = orderedBy(loaded.supplier_service_file_formats, "supplier_service_id", "format_code").map((row) => ({
+    supplierServiceId: row.supplier_service_id, formatCode: row.format_code,
+  }));
+  store.catalogItems = orderedBy(loaded.supplier_catalog_items, "supplier_id", "sort_order", "id").map((row) => ({
+    id: row.id, supplierId: row.supplier_id, supplierServiceId: row.supplier_service_id,
+    name: row.name, description: row.description, basePriceMinor: row.base_price_minor,
+    fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
+    version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogOptionGroups = orderedBy(loaded.supplier_catalog_option_groups, "catalog_item_id", "sort_order", "id").map((row) => ({
+    id: row.id, catalogItemId: row.catalog_item_id, name: row.name, required: row.required,
+    selectionMode: row.selection_mode, sortOrder: row.sort_order, version: row.version,
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogOptions = orderedBy(loaded.supplier_catalog_options, "option_group_id", "sort_order", "id").map((row) => ({
+    id: row.id, optionGroupId: row.option_group_id, label: row.label,
+    priceModifierMinor: row.price_modifier_minor, specBinding: row.spec_binding,
+    active: row.active, sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogItemFileFormats = orderedBy(loaded.supplier_catalog_item_file_formats, "catalog_item_id", "format_code").map((row) => ({
+    catalogItemId: row.catalog_item_id, formatCode: row.format_code,
+  }));
 
   const payments = new Map();
   for (const row of ordered(loaded.order_payments)) {
@@ -440,6 +602,22 @@ export async function loadStore(database) {
     present(item, "issueWindowExpiresAt", row.issue_window_expires_at);
     return item;
   });
+  store.orderLineItems = orderedBy(loaded.order_line_items, "order_id", "sort_order", "id").map((row) => ({
+    id: row.id, orderId: row.order_id, sourceCatalogItemId: row.source_catalog_item_id,
+    sourceSupplierServiceId: row.source_supplier_service_id,
+    itemNameSnapshot: row.item_name_snapshot, descriptionSnapshot: row.description_snapshot,
+    pricingBasisSnapshot: row.pricing_basis_snapshot,
+    baseUnitPriceMinor: row.base_unit_price_minor, effectiveUnitPriceMinor: row.effective_unit_price_minor,
+    quantity: row.quantity, lineSubtotalMinor: row.line_subtotal_minor,
+    acceptedFormatCodesSnapshot: row.accepted_format_codes_snapshot,
+    structuredSpecSnapshot: row.structured_spec_snapshot, sortOrder: row.sort_order, createdAt: row.created_at,
+  }));
+  store.orderLineItemOptions = orderedBy(loaded.order_line_item_options, "order_line_item_id", "sort_order", "id").map((row) => ({
+    id: row.id, orderLineItemId: row.order_line_item_id,
+    sourceOptionGroupId: row.source_option_group_id, sourceOptionId: row.source_option_id,
+    groupNameSnapshot: row.group_name_snapshot, optionLabelSnapshot: row.option_label_snapshot,
+    priceModifierMinor: row.price_modifier_minor, sortOrder: row.sort_order,
+  }));
 
   const references = new Map();
   for (const row of ordered(loaded.file_references)) {
@@ -447,6 +625,13 @@ export async function loadStore(database) {
     references.get(row.file_id).push({ ...row.data, type: row.reference_type, id: row.reference_id, field: row.field });
   }
   store.files = ordered(loaded.files).map((row) => ({ ...row.data, fileId: row.file_id, ownerId: row.owner_id, purpose: row.purpose, originalFilename: row.original_filename, declaredContentType: row.declared_content_type, detectedContentType: row.detected_content_type, size: row.size_bytes, state: row.state, objectKey: row.object_key, references: references.get(row.file_id) || [], createdAt: row.created_at }));
+  store.catalogItemPhotos = orderedBy(loaded.supplier_catalog_item_photos, "catalog_item_id", "sort_order", "file_id").map((row) => ({
+    catalogItemId: row.catalog_item_id, fileId: row.file_id, sortOrder: row.sort_order,
+    altText: row.alt_text, createdAt: row.created_at,
+  }));
+  store.supplierShopMedia = orderedBy(loaded.supplier_shop_media, "supplier_id", "slot").map((row) => ({
+    supplierId: row.supplier_id, slot: row.slot, fileId: row.file_id, updatedAt: row.updated_at,
+  }));
   store.riderDocuments = orderedBy(loaded.rider_documents, "uploaded_at", "id").map((row) => {
     const item = { id: row.id, riderId: row.rider_id, kind: row.kind, fileId: row.file_id, isCurrent: row.is_current, uploadedAt: row.uploaded_at };
     present(item, "expiresOn", row.expires_on);
@@ -546,8 +731,9 @@ async function upsertChanged(database, table, before, current) {
       continue;
     }
     const updates = table.columns.filter((column) => !table.keys.includes(column)).map((column) => `${column} = EXCLUDED.${column}`).join(", ");
+    const conflictAction = updates ? `DO UPDATE SET ${updates}` : "DO NOTHING";
     await database.query(
-      `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) DO UPDATE SET ${updates}`,
+      `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) ${conflictAction}`,
       table.columns.map((column) => row[column]),
     );
   }

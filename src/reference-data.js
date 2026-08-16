@@ -21,11 +21,24 @@ export function defaultZones() {
   ];
 }
 
+export function defaultAcceptedFileFormats() {
+  return [
+    { code: "pdf", displayName: "PDF", inputKind: "file", extensions: ["pdf"], mimeTypes: ["application/pdf"], active: true },
+    { code: "png", displayName: "PNG", inputKind: "file", extensions: ["png"], mimeTypes: ["image/png"], active: true },
+    { code: "jpeg", displayName: "JPEG", inputKind: "file", extensions: ["jpg", "jpeg"], mimeTypes: ["image/jpeg"], active: true },
+    { code: "psd", displayName: "Adobe Photoshop", inputKind: "file", extensions: ["psd"], mimeTypes: ["image/vnd.adobe.photoshop", "application/octet-stream"], active: true },
+    { code: "canva_link", displayName: "Canva link", inputKind: "url", extensions: [], mimeTypes: [], active: true },
+    { code: "3mf", displayName: "3MF", inputKind: "file", extensions: ["3mf"], mimeTypes: ["model/3mf", "application/vnd.ms-package.3dmanufacturing-3dmodel+xml"], active: true },
+    { code: "stl", displayName: "STL", inputKind: "file", extensions: ["stl"], mimeTypes: ["model/stl", "application/sla"], active: true },
+  ];
+}
+
 export function referenceData() {
   return {
     catalog: defaultCatalog(),
     taxonomy: defaultTaxonomy(),
     settings: defaultOperationalSettings(),
     zones: defaultZones(),
+    acceptedFileFormats: defaultAcceptedFileFormats(),
   };
 }

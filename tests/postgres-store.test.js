@@ -14,7 +14,7 @@ async function clear(database) {
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, orders, supplier_services, zones,
     taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
-    taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
+    taxonomy_category_aliases, taxonomy_categories, catalog_products, accepted_file_formats, users,
     platform_settings RESTART IDENTITY CASCADE`);
 }
 
@@ -37,7 +37,13 @@ test("relational store round-trips typed money, relationships, and composite rou
   };
   store.settings = { serviceFeeRateBps: 1000, issueWindowHours: 24, deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 5000 }] };
   store.zones = [{ id: "zone_central", code: "davao_central", name: "Davao Central", active: true }];
-  store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], createdAt: AT, updatedAt: AT }];
+  store.supplierServices = [{
+    id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live",
+    referenceRateMinor: 100000, turnaroundHours: 24, pricingBasis: null,
+    standardTurnaroundHours: 24, rushEnabled: false, rushTurnaroundHours: null,
+    rushPriceMinor: null, version: 1, materialCodes: ["vinyl"], finishCodes: ["none"],
+    createdAt: AT, updatedAt: AT,
+  }];
   store.orders = [{
     id: "ord_one", clientId: "user_client", supplierId: "user_supplier", riderId: "user_rider",
     productId: "prod_banner", state: "issue_window_open", zone: "davao_central",

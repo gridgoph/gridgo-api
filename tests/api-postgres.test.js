@@ -1527,6 +1527,107 @@ test("order creation reports an unseeded catalog explicitly", { skip: !DATABASE_
   }
 });
 
+test("pending suppliers can edit catalog while public browse requires approval and rejects stale versions", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const approvalCase = store.approvalCases.find((candidate) => candidate.id === "case_supplier");
+    approvalCase.status = "pending";
+    delete approvalCase.decidedAt;
+    delete approvalCase.decidedBy;
+    store.supplierServiceFileFormats.push({ supplierServiceId: "svc_banner", formatCode: "pdf" });
+    store.files.push({
+      fileId: "catalog_photo", ownerId: "user_supplier", purpose: "catalog_item_photo",
+      originalFilename: "poster.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+      size: 100, state: "ready", objectKey: "catalog/poster.jpg", references: [], createdAt: AT,
+    });
+    store.catalogItems.push({
+      id: "catalog_poster", supplierId: "user_supplier", supplierServiceId: "svc_banner",
+      name: "Poster", description: "Photo poster", basePriceMinor: 10000,
+      fileFormatMode: "inherit", active: true, sortOrder: 0, version: 1,
+      createdAt: AT, updatedAt: AT,
+    });
+    store.catalogItemPhotos.push({
+      catalogItemId: "catalog_poster", fileId: "catalog_photo", sortOrder: 0, createdAt: AT,
+    });
+    await saveStore(database, store);
+  });
+
+  const instance = await startApi();
+  try {
+    const hidden = await request(instance.api, "/catalog/items/catalog_poster");
+    assert.equal(hidden.status, 404, JSON.stringify(hidden.body));
+
+    const updated = await request(instance.api, "/me/catalog-items/catalog_poster", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, name: "Updated Poster" },
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.item.version, 2);
+
+    const stale = await request(instance.api, "/me/catalog-items/catalog_poster", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, name: "Lost update" },
+    });
+    assert.equal(stale.status, 409, JSON.stringify(stale.body));
+    assert.equal(stale.body.error, "catalog_item_stale");
+    assert.equal(stale.body.currentVersion, 2);
+
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const approvalCase = store.approvalCases.find((candidate) => candidate.id === "case_supplier");
+      approvalCase.status = "approved";
+      approvalCase.decidedAt = AT;
+      approvalCase.decidedBy = "user_ops";
+      approvalCase.updatedAt = AT;
+      await saveStore(database, store);
+    });
+
+    const visible = await request(instance.api, "/catalog/items/catalog_poster");
+    assert.equal(visible.status, 200, JSON.stringify(visible.body));
+    assert.equal(visible.body.item.name, "Updated Poster");
+    assert.deepEqual(visible.body.item.acceptedFormats.map((format) => format.code), ["pdf"]);
+
+    const shops = await request(instance.api, "/catalog/shops?categoryCode=marketing_collateral");
+    assert.equal(shops.status, 200, JSON.stringify(shops.body));
+    assert.equal(shops.body.shops.length, 1);
+    assert.equal(shops.body.shops[0].supplierId, "user_supplier");
+
+    const override = await request(instance.api, "/me/catalog-items/catalog_poster/file-formats", {
+      method: "PUT",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 2, mode: "override", formatCodes: ["png"] },
+    });
+    assert.equal(override.status, 200, JSON.stringify(override.body));
+    assert.equal(override.body.item.version, 3);
+    assert.deepEqual(override.body.item.acceptedFormats.map((format) => format.code), ["png"]);
+
+    const overriddenPublic = await request(instance.api, "/catalog/items/catalog_poster");
+    assert.equal(overriddenPublic.status, 200, JSON.stringify(overriddenPublic.body));
+    assert.deepEqual(overriddenPublic.body.item.acceptedFormats.map((format) => format.code), ["png"]);
+
+    const aliasService = await request(instance.api, "/me/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        categoryCode: "large_format",
+        pricingBasis: "per_sqm",
+        standardTurnaroundHours: 24,
+        formatCodes: ["pdf"],
+      },
+    });
+    assert.equal(aliasService.status, 201, JSON.stringify(aliasService.body));
+    assert.equal(aliasService.body.service.categoryCode, "marketing_collateral");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("a deferred commit failure cannot crash the API by sending a second response", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);

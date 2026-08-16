@@ -37,7 +37,7 @@ async function withMigrationSchema(t, fn) {
   await fn({ schema, client });
 }
 
-test("fresh PostgreSQL migrates through onboarding and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
+test("fresh PostgreSQL migrates through onboarding, catalog, and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
 
@@ -49,6 +49,10 @@ test("fresh PostgreSQL migrates through onboarding and money additions and rever
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
+      "accepted_file_formats", "supplier_service_price_tiers", "supplier_service_file_formats",
+      "supplier_catalog_items", "supplier_catalog_item_photos", "supplier_shop_media",
+      "supplier_catalog_option_groups", "supplier_catalog_options", "supplier_catalog_item_file_formats",
+      "order_line_items", "order_line_item_options",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -59,7 +63,15 @@ test("fresh PostgreSQL migrates through onboarding and money additions and rever
       assert.equal(legacyColumns.has(column), true, `${column} compatibility projection should remain`);
     }
 
-    await runner(migrationOptions(schema, "down", 2, client));
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('supplier_payment_terms') AS table_name")).rows[0].table_name, null);
+    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, "supplier_catalog_items");
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, null);
+    assert.equal((await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name, "user_role_memberships");
+
+    await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name, null);
     assert.equal((await client.query("SELECT to_regclass('users') AS table_name")).rows[0].table_name, "users");
 
@@ -81,14 +93,14 @@ test("fresh PostgreSQL migrates through onboarding and money additions and rever
       (error) => error.code === "23514" && error.constraint === "file_references_reference_type_check",
     );
 
-    await runner(migrationOptions(schema, "up", 2, client));
+    await runner(migrationOptions(schema, "up", 3, client));
     assert.equal((await client.query("SELECT to_regclass('rider_documents') AS table_name")).rows[0].table_name, "rider_documents");
   });
 });
 
 test("service-fee migration backfills legacy money, payments, allocations, and settings", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
-    await runner(migrationOptions(schema, "up", 2, client));
+    await runner(migrationOptions(schema, "up", 3, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings)
       VALUES (true, 7, '{"issueWindowHours":48,"serviceFeeRateBps":750}');
@@ -354,6 +366,198 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
         VALUES ('license_one', 'rider_document', 'document_one', 'fileId', 0, '{}')
       `),
       (error) => error.code === "23514" && error.constraint === "file_references_reference_type_check",
+    );
+  });
+});
+
+test("catalog migration enforces bounds, deferred completeness, snapshot math, and immutability", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner(migrationOptions(schema, "up", undefined, client));
+    const at = "2026-08-16T00:00:00.000Z";
+    await client.query(`
+      INSERT INTO taxonomy_categories (id, code, name, active, sort_order, position, data)
+      VALUES ('cat_marketing', 'marketing_collateral', 'Marketing', true, 1, 0, '{}');
+      INSERT INTO users
+        (id, clerk_user_id, email, name, role, account_type, verification_status,
+         shop_lat, shop_lng, shop_label, created_at, position, data)
+      VALUES
+        ('supplier', 'clerk_supplier', 'supplier@catalog.test', 'Supplier', 'supplier', NULL, 'approved',
+         7.1, 125.6, 'Shop', '${at}', 0, '{}'),
+        ('client', 'clerk_client', 'client@catalog.test', 'Client', 'client', 'individual', NULL,
+         NULL, NULL, NULL, '${at}', 1, '{}');
+      INSERT INTO user_role_memberships (user_id, role, created_at)
+      VALUES ('supplier', 'supplier', '${at}'), ('client', 'client', '${at}');
+      INSERT INTO supplier_profiles
+        (user_id, shop_name, contact_name, shop_lat, shop_lng, shop_label, updated_at)
+      VALUES ('supplier', 'Catalog Shop', 'Supplier', 7.1, 125.6, 'Shop', '${at}');
+      INSERT INTO supplier_services
+        (id, supplier_id, category_code, state, reference_rate_minor, turnaround_hours,
+         pricing_basis, standard_turnaround_hours, created_at, updated_at, position, data)
+      VALUES ('service', 'supplier', 'marketing_collateral', 'live', 0, 24,
+        'per_unit', 24, '${at}', '${at}', 0, '{}');
+      INSERT INTO supplier_service_file_formats (supplier_service_id, format_code)
+      VALUES ('service', 'pdf');
+      INSERT INTO files
+        (file_id, owner_id, purpose, original_filename, declared_content_type,
+         detected_content_type, size_bytes, state, object_key, created_at, position, data)
+      VALUES
+        ('photo', 'supplier', 'catalog_item_photo', 'photo.jpg', 'image/jpeg',
+         'image/jpeg', 10, 'ready', 'catalog/photo.jpg', '${at}', 0, '{}'),
+        ('overflow_photo', 'supplier', 'catalog_item_photo', 'overflow.jpg', 'image/jpeg',
+         'image/jpeg', 10, 'ready', 'catalog/overflow.jpg', '${at}', 1, '{}');
+      INSERT INTO supplier_catalog_items
+        (id, supplier_id, supplier_service_id, name, base_price_minor,
+         file_format_mode, sort_order, created_at, updated_at)
+      VALUES ('item', 'supplier', 'service', 'Poster', 100, 'inherit', 0, '${at}', '${at}');
+      INSERT INTO supplier_catalog_item_photos
+        (catalog_item_id, file_id, sort_order, created_at)
+      VALUES ('item', 'photo', 0, '${at}');
+    `);
+
+    await assert.rejects(
+      client.query(`
+        INSERT INTO supplier_catalog_item_photos
+          (catalog_item_id, file_id, sort_order, created_at)
+        VALUES ('item', 'overflow_photo', 8, $1)
+      `, [at]),
+      (error) => error.code === "23514" && /sort_order/.test(error.constraint),
+    );
+    await assert.rejects(
+      client.query(`
+        INSERT INTO supplier_catalog_option_groups
+          (id, catalog_item_id, name, sort_order, created_at, updated_at)
+        VALUES ('group_overflow', 'item', 'Overflow', 6, $1, $1)
+      `, [at]),
+      (error) => error.code === "23514" && /sort_order/.test(error.constraint),
+    );
+
+    await client.query("BEGIN");
+    await client.query(`
+      INSERT INTO supplier_catalog_option_groups
+        (id, catalog_item_id, name, sort_order, created_at, updated_at)
+      VALUES ('group', 'item', 'Paper size', 0, $1, $1)
+    `, [at]);
+    await client.query(`
+      INSERT INTO supplier_catalog_options
+        (id, option_group_id, label, price_modifier_minor, sort_order, created_at, updated_at)
+      VALUES ('option', 'group', 'A3', -150, 0, $1, $1)
+    `, [at]);
+    await client.query("COMMIT");
+
+    await assert.rejects(
+      client.query(`
+        INSERT INTO supplier_catalog_options
+          (id, option_group_id, label, sort_order, created_at, updated_at)
+        VALUES ('option_overflow', 'group', 'Overflow', 20, $1, $1)
+      `, [at]),
+      (error) => error.code === "23514" && /sort_order/.test(error.constraint),
+    );
+
+    await client.query("BEGIN");
+    await client.query(`
+      INSERT INTO supplier_catalog_items
+        (id, supplier_id, supplier_service_id, name, base_price_minor,
+         file_format_mode, sort_order, created_at, updated_at)
+      VALUES ('bad_override', 'supplier', 'service', 'Bad override', 100, 'override', 1, $1, $1)
+    `, [at]);
+    await assert.rejects(
+      client.query("COMMIT"),
+      (error) => error.code === "23514" && error.constraint === "supplier_catalog_item_format_mode_check",
+    );
+    await client.query("ROLLBACK");
+
+    await client.query(`
+      INSERT INTO orders
+        (id, client_id, supplier_id, state, payout_hold,
+         dropoff_lat, dropoff_lng, dropoff_label, created_at, updated_at, position, data)
+      VALUES ('order', 'client', 'supplier', 'draft', false,
+        7.2, 125.7, 'Dropoff', $1, $1, 0, '{}')
+    `, [at]);
+    await client.query("BEGIN");
+    await client.query(`
+      INSERT INTO order_line_items
+        (id, order_id, source_catalog_item_id, source_supplier_service_id,
+         item_name_snapshot, pricing_basis_snapshot, base_unit_price_minor,
+         effective_unit_price_minor, quantity, line_subtotal_minor,
+         accepted_format_codes_snapshot, structured_spec_snapshot, sort_order, created_at)
+      VALUES ('line', 'order', 'item', 'service', 'Poster', 'per_unit', 100,
+        0, 2, 0, ARRAY['pdf'], '{"paper_size":"A3"}', 0, $1)
+    `, [at]);
+    await client.query(`
+      INSERT INTO order_line_item_options
+        (id, order_line_item_id, source_option_group_id, source_option_id,
+         group_name_snapshot, option_label_snapshot, price_modifier_minor, sort_order)
+      VALUES ('line_option', 'line', 'group', 'option', 'Paper size', 'A3', -150, 0)
+    `);
+    await client.query("COMMIT");
+
+    await client.query("UPDATE supplier_catalog_items SET name = 'Renamed', base_price_minor = 999 WHERE id = 'item'");
+    assert.deepEqual((await client.query(`
+      SELECT item_name_snapshot, base_unit_price_minor, effective_unit_price_minor, line_subtotal_minor
+        FROM order_line_items WHERE id = 'line'
+    `)).rows[0], {
+      item_name_snapshot: "Poster",
+      base_unit_price_minor: "100",
+      effective_unit_price_minor: "0",
+      line_subtotal_minor: "0",
+    });
+    await assert.rejects(
+      client.query("UPDATE order_line_items SET item_name_snapshot = 'Rewritten' WHERE id = 'line'"),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_immutable_check",
+    );
+    await assert.rejects(
+      client.query("DELETE FROM order_line_item_options WHERE id = 'line_option'"),
+      (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
+    );
+    await assert.rejects(
+      client.query("DELETE FROM order_line_items WHERE id = 'line'"),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_immutable_check",
+    );
+    await client.query("DELETE FROM orders WHERE id = 'order'");
+    assert.equal((await client.query("SELECT count(*)::integer AS count FROM order_line_items")).rows[0].count, 0);
+  });
+});
+
+test("catalog category foreign key preserves retired-code service rows without weakening new writes", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner(migrationOptions(schema, "up", 2, client));
+    const at = "2026-08-16T00:00:00.000Z";
+    await client.query(`
+      INSERT INTO taxonomy_categories (id, code, name, active, sort_order, position, data)
+      VALUES ('category', 'marketing_collateral', 'Marketing', true, 1, 0, '{}');
+      INSERT INTO taxonomy_category_aliases (code, category_code, position, data)
+      VALUES ('large_format', 'marketing_collateral', 0, '{"active":true}');
+      INSERT INTO users
+        (id, clerk_user_id, email, name, role, verification_status,
+         shop_lat, shop_lng, shop_label, created_at, position, data)
+      VALUES ('supplier', 'clerk_supplier_alias', 'supplier-alias@test.invalid', 'Supplier',
+        'supplier', 'approved', 7.1, 125.6, 'Shop', '${at}', 0, '{}');
+      INSERT INTO supplier_services
+        (id, supplier_id, category_code, state, reference_rate_minor,
+         turnaround_hours, created_at, updated_at, position, data)
+      VALUES ('legacy_service', 'supplier', 'large_format', 'live', 100, 24, '${at}', '${at}', 0, '{}')
+    `);
+
+    await runner(migrationOptions(schema, "up", 1, client));
+    assert.equal((await client.query(
+      "SELECT category_code FROM supplier_services WHERE id = 'legacy_service'",
+    )).rows[0].category_code, "large_format");
+    assert.equal((await client.query(`
+      SELECT convalidated FROM pg_constraint
+       WHERE conname = 'supplier_services_category_fk'
+         AND conrelid = 'supplier_services'::regclass
+    `)).rows[0].convalidated, false);
+
+    await assert.rejects(
+      client.query(`
+        INSERT INTO supplier_services
+          (id, supplier_id, category_code, state, reference_rate_minor,
+           turnaround_hours, pricing_basis, standard_turnaround_hours,
+           created_at, updated_at, position, data)
+        VALUES ('new_alias_service', 'supplier', 'large_format', 'draft', 0, 24,
+          'per_unit', 24, $1, $1, 1, '{}')
+      `, [at]),
+      (error) => error.code === "23503" && error.constraint === "supplier_services_category_fk",
     );
   });
 });

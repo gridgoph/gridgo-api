@@ -24,6 +24,7 @@ export async function seedReferenceData(database) {
       if (!Object.hasOwn(store.settings, key)) store.settings[key] = structuredClone(value);
     }
     appendMissing(store.zones, reference.zones, "code");
+    appendMissing(store.acceptedFileFormats, reference.acceptedFileFormats, "code");
     await saveStore(database, store);
   });
 }

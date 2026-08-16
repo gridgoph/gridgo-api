@@ -89,6 +89,8 @@ import {
   parseAllowedOrigins,
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
+import { routeSupplierCatalog } from "./catalog-routes.js";
+import { supplierCatalogReadiness } from "./supplier-catalog.js";
 import { createDatabase } from "./database.js";
 import {
   loadDeviceTokenStore,
@@ -438,7 +440,7 @@ function riderProfileProjection(store, userId) {
 
 function supplierReadiness(store, userId, approvalCase) {
   if (approvalCase?.status === "approved") return { readyForApproval: true, missing: [] };
-  return supplierApprovalReadiness(store, userId);
+  return supplierCatalogReadiness(store, userId);
 }
 
 function currentRiderDocuments(store, userId) {
@@ -1239,8 +1241,8 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
-        "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, If-Match",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
     }
@@ -1441,6 +1443,21 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     const user = auth.user;
+
+    const catalogResponse = await routeSupplierCatalog({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      id,
+      now,
+      audit,
+    });
+    if (catalogResponse) {
+      if (catalogResponse.mutated) await save(store);
+      return send(res, catalogResponse.status, catalogResponse.body);
+    }
 
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
@@ -2580,6 +2597,7 @@ async function handleRequest(req, res) {
       if (!body.categoryCode) return send(res, 400, { error: "invalid_service", need: "categoryCode" });
       const bad = validateTaxonomyRefs(store, body);
       if (bad) return send(res, 400, bad);
+      const category = activeCategoryFor(store.taxonomy, body.categoryCode);
       const referenceRateMinor = body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0;
       const turnaroundHours = body.turnaroundHours != null ? Number(body.turnaroundHours) : 48;
       if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
@@ -2592,7 +2610,7 @@ async function handleRequest(req, res) {
       const service = {
         id: id("svc"),
         supplierId: user.id,
-        categoryCode: body.categoryCode,
+        categoryCode: category.code,
         materialCodes: Array.isArray(body.materialCodes) ? body.materialCodes : [],
         finishCodes: Array.isArray(body.finishCodes) ? body.finishCodes : [],
         productFamilyIds: Array.isArray(body.productFamilyIds) ? body.productFamilyIds : [],
@@ -2700,7 +2718,7 @@ async function handleRequest(req, res) {
       const prevMaterials = [...(service.materialCodes || [])];
 
       if (user.role === "supplier") {
-        if (body.categoryCode != null) service.categoryCode = body.categoryCode;
+        if (body.categoryCode != null) service.categoryCode = activeCategoryFor(store.taxonomy, body.categoryCode).code;
         if (body.materialCodes != null) service.materialCodes = body.materialCodes;
         if (body.finishCodes != null) service.finishCodes = body.finishCodes;
         if (body.productFamilyIds != null) service.productFamilyIds = body.productFamilyIds;
@@ -4323,7 +4341,7 @@ const server = http.createServer((req, res) => {
   } catch {
     // handleRequest fails the same parse and answers 500 itself.
   }
-  const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // File transfers and MinIO calls stay outside database transactions. File routes
   // acquire one only for short load -> validate -> mutate -> commit sections.
   const isSelfQueuedFileMutation =
