@@ -42,7 +42,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
 | GET | `/files/:fileId/download-url` | same as file read | five-minute signed GET |
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
-| DELETE | `/files/:fileId` | owner/ops/super; unreferenced only | safe delete lifecycle |
+| DELETE | `/files/:fileId` | owner/ops/super; unreferenced only, except rider-owned rider evidence | safe delete lifecycle |
 | GET | `/devices` | authenticated | caller's own push registrations |
 | POST | `/devices` | authenticated **or** anonymous | register this phone's FCM token against the caller, or unclaimed when no bearer token is sent |
 | POST | `/devices/unregister` | authenticated **or** anonymous | stop push to one of the caller's own phones; an anonymous call may remove only an unclaimed registration |

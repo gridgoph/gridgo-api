@@ -264,9 +264,11 @@ curl -f "$DOWNLOAD_URL" --output ./artwork-readback.pdf
 cmp ./artwork.pdf ./artwork-readback.pdf
 ```
 
-## DELETE /files/:fileId — unreferenced file deletion
+## DELETE /files/:fileId — file deletion
 
-Auth: owner, `ops_admin`, or `super_admin` for ordinary purposes. A `verification_document` may be deleted only by its supplier owner. Only a `ready` file with `references: []` may be deleted. Attached artwork, proofs, service images, delivery evidence, and current verification documents return `409 file_in_use`; deletion never silently removes evidence. Replace a verification slot first, then the supplier may delete the now-unreferenced old file.
+Auth: owner, `ops_admin`, or `super_admin` for ordinary purposes. A `verification_document` may be deleted only by its supplier owner, and a `rider_verification_document` only by its rider owner. For every purpose except `rider_verification_document`, only a `ready` file with `references: []` may be deleted: attached artwork, proofs, service images, delivery evidence, and current verification documents return `409 file_in_use`; deletion never silently removes evidence. Replace a verification slot first, then the supplier may delete the now-unreferenced old file.
+
+`rider_verification_document` is the deliberate exception: the rider owner may delete their own uploaded evidence through this same flow even while rider-document rows still reference it. The same transaction that persists `delete_pending` marks every `rider_documents` row backed by that file non-current; the rows themselves are preserved as prior evidence. If that removes the rider's only current driver's licence backed by a `ready` file, a pending rider case reverts to unsubmitted intake (`submittedAt: null`); a case that already left `pending` is untouched. Every submit, reapply, and approval readiness gate rejects deleted or dangling licence evidence — a current rider-document row whose backing file is absent or not `ready` never satisfies any gate, so the rider must attach a replacement licence before submitting or reapplying.
 
 The API first persists `delete_pending`, then deletes MinIO, then persists `deleted`. If MinIO is unavailable, the durable `delete_pending` marker remains and startup reconciliation retries it.
 
@@ -281,7 +283,7 @@ curl -fsS -X DELETE "$API/files/$UNATTACHED_FILE_ID" \
 
 ```text
 pending_upload --PutObject + metadata commit--> ready
-ready --authorized unreferenced delete request--> delete_pending
+ready --authorized delete request--> delete_pending
 pending_upload --compensation/reconciliation--> deleted
 delete_pending --MinIO delete + metadata commit--> deleted
 ```
@@ -328,7 +330,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 409 | `file_already_attached` | File already has a parent reference; upload a new file for another record. |
 | 409 | `file_state_conflict` | Requested lifecycle operation is invalid for current state; refresh metadata. |
 | 409 | `file_metadata_invalid` | Purpose/media/key/size metadata is internally inconsistent; upload again. |
-| 409 | `file_in_use` | File has domain references; do not delete lifecycle evidence. |
+| 409 | `file_in_use` | File has domain references and is not rider-owned `rider_verification_document` evidence; do not delete lifecycle evidence. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
 | 409 | `verification_document_replacement_mismatch` | `replaceFileId` is not attached to the caller in the requested document slot; refresh the supplier's documents and choose the matching file. |
 | 409 | `transition_not_allowed` | Requested order step is not reachable from the current state/role; refresh and use an available action. |
@@ -358,7 +360,7 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 | Trust extension or declared MIME alone | Prohibited; extension, optional specific declared MIME, and magic bytes must agree. |
 | Turn 200 MiB into multiple buffers | Avoided; multipart is streamed to disk, with only parser tail/signature bytes retained, then disk is streamed to MinIO. |
 | Assume object put + database commit are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
-| Delete referenced evidence on uploader request | Prohibited; `409 file_in_use`. |
+| Delete referenced evidence on uploader request | Prohibited for every purpose except `rider_verification_document` (`409 file_in_use`). A rider deleting their own evidence invalidates the backing rider-document rows in the same transaction instead of orphaning them. |
 | API uses root credentials | Prohibited; Compose provisions a separate bucket-policy API user. Root credentials are init/console only. |
 | Floating MinIO image | Prohibited; both `minio/minio` and `minio/mc` use pinned release tags. |
 
