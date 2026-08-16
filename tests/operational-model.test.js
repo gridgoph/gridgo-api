@@ -134,6 +134,11 @@ test("role-aware projections expose client fee lines and truthful supplier settl
       paymentTerms: { deliveryDownpaymentRateBps: 2_500 },
       supplierDownpaymentRateBps: 2_500,
     },
+    quoteHistory: [{
+      payments: structuredClone(schedule.payments),
+      paymentTerms: { deliveryDownpaymentRateBps: 5_000 },
+      supplierDownpaymentRateBps: 5_000,
+    }],
   };
   order.payments.initial.status = "confirmed";
   order.payments.initial.reference = "PRIVATE-GCASH-REFERENCE";
@@ -188,6 +193,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal("initialSupplierPrincipalMinor" in riderOrder, false);
   assert.equal("supplierRemainderMinor" in riderOrder, false);
   assert.equal("payoutMilestones" in riderOrder, false);
+  assert.equal("quoteHistory" in riderOrder, false);
   assert.equal("componentLines" in riderOrder.payments.initial, false);
   assert.equal("supplierPrincipalRateBps" in riderOrder.payments.initial, false);
   assert.equal("componentLines" in riderOrder.acceptedQuote.payments.initial, false);

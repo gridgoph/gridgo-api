@@ -613,6 +613,7 @@ export function publicOrderFor(order, user) {
   }
   if (rider) {
     delete publicRecord.payoutMilestones;
+    delete publicRecord.quoteHistory;
     delete publicRecord.supplierDownpaymentRateBps;
     delete publicRecord.initialSupplierPrincipalMinor;
     delete publicRecord.supplierRemainderMinor;
