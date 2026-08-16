@@ -94,7 +94,7 @@ docker compose up -d --remove-orphans
 
 The seed inserts only catalog, the four-category taxonomy, zones, and operational settings. It creates no user, supplier service, order, file, payment, credit, claim, issue, audit, notification, ping, escalation, proof, or device registration.
 
-Do not run bootstrap until the Clerk user ID and instance are independently checked. The command succeeds only while no `ops_admin` or `super_admin` exists, records an audit entry plus an immutable completion row, and then closes permanently even if roles later change. There is no HTTP bootstrap route.
+Do not run bootstrap until the Clerk user ID and instance are independently checked. The command succeeds only while no `ops_admin` or `super_admin` exists, records an audit entry plus an immutable completion row, and then closes permanently even if roles later change. This one-time CLI bootstrap is the only first-administrator path: there is no HTTP bootstrap route and no redeemable bootstrap token.
 
 ## 4. Identity and role operations
 

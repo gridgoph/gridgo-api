@@ -461,6 +461,24 @@ test("money and reference inputs rejected by PostgreSQL are client errors at HTT
     });
     assert.equal(invalidZone.status, 400, JSON.stringify(invalidZone.body));
     assert.equal(invalidZone.body.error, "invalid_zone");
+
+    for (const quantity of [0, -3, 2.5, "lots", Number.MAX_SAFE_INTEGER + 1]) {
+      const invalidQuantity = await request(instance.api, "/orders", {
+        method: "POST",
+        subject: "clerk_client",
+        body: { productId: "prod_tarpaulin", quantity, address: "Davao", zone: "davao_central" },
+      });
+      assert.equal(invalidQuantity.status, 400, JSON.stringify({ quantity, response: invalidQuantity.body }));
+      assert.equal(invalidQuantity.body.error, "invalid_quantity");
+    }
+
+    const defaultQuantity = await request(instance.api, "/orders", {
+      method: "POST",
+      subject: "clerk_client",
+      body: { productId: "prod_tarpaulin", address: "Davao", zone: "davao_central" },
+    });
+    assert.equal(defaultQuantity.status, 201, JSON.stringify(defaultQuantity.body));
+    assert.equal(defaultQuantity.body.order.quantity, 1);
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));

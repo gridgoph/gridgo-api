@@ -34,7 +34,7 @@ After creating the first identity in the correct Clerk instance, run:
 npm run bootstrap-admin -- --clerk-user-id user_...
 ```
 
-The command loads the identity from Clerk and inserts/promotes it as `super_admin` only while no Operations or Super Admin row exists. It writes an audit record and an immutable database completion marker. Once completed, the command refuses even if roles later change. There is no bootstrap HTTP route.
+The command loads the identity from Clerk and inserts/promotes it as `super_admin` only while no Operations or Super Admin row exists. It writes an audit record and an immutable database completion marker. Once completed, the command refuses even if roles later change. This one-time CLI bootstrap is the only first-administrator path: there is no bootstrap HTTP route and no redeemable bootstrap token.
 
 ## Local start
 

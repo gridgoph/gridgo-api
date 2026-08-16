@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createDatabase } from "../src/database.js";
-import { emptyStore, loadStore, saveStore } from "../src/postgres-store.js";
+import { emptyStore, loadStore, saveStore, loadDeviceTokenStore, saveDeviceTokenStore } from "../src/postgres-store.js";
+import { claimDeviceToken, registerUnclaimedDeviceToken } from "../src/push.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const AT = "2026-08-16T00:00:00.000Z";
@@ -77,6 +78,74 @@ test("relational store round-trips typed money, relationships, and composite rou
 
   await clear(database);
   await database.close();
+});
+
+async function seedRaceFixture(database, tokens) {
+  await clear(database);
+  const store = emptyStore();
+  store.users.push({ id: "user_client", clerkUserId: "clerk_client", email: "race@gridgo.test", name: "Race", role: "client", accountType: "individual", createdAt: AT });
+  for (const [index, token] of tokens.entries()) {
+    store.deviceTokens.push({ id: `dev_race_${index}`, userId: null, token, platform: "android", createdAt: AT, updatedAt: AT });
+  }
+  await database.transaction(() => saveStore(database, store));
+}
+
+test("anonymous device registration cannot unclaim a token claimed under the domain lock", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  const rival = createDatabase({ DATABASE_URL });
+  const LATER = "2026-08-16T01:00:00.000Z";
+  const fcmToken = "race-claimed-mid-flight-token-0123456789012345678901234567890123456789";
+  await seedRaceFixture(database, [fcmToken]);
+
+  await database.transaction(async () => {
+    const deviceStore = await loadDeviceTokenStore(database);
+    await rival.transaction(async () => {
+      const full = await loadStore(rival);
+      claimDeviceToken(full, { token: fcmToken, userId: "user_client", at: LATER });
+      await saveStore(rival, full);
+    });
+    const outcome = registerUnclaimedDeviceToken(deviceStore, { token: fcmToken, platform: "web", at: LATER });
+    if (outcome.changed) await saveDeviceTokenStore(database, deviceStore);
+  }, { lockKey: "gridgo-device-tokens" });
+
+  const row = (await database.query("SELECT user_id, platform FROM device_tokens WHERE token = $1", [fcmToken])).rows[0];
+  assert.equal(row.user_id, "user_client");
+  assert.equal(row.platform, "android");
+
+  await clear(database);
+  await database.close();
+  await rival.close();
+});
+
+test("anonymous eviction cannot delete a token claimed under the domain lock", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  const rival = createDatabase({ DATABASE_URL });
+  const LATER = "2026-08-16T01:00:00.000Z";
+  const claimedToken = "race-evicted-after-claim-token-0123456789012345678901234567890123456789";
+  const freshToken = "race-brand-new-install-token-0123456789012345678901234567890123456789";
+  await seedRaceFixture(database, [claimedToken]);
+
+  await database.transaction(async () => {
+    const deviceStore = await loadDeviceTokenStore(database);
+    await rival.transaction(async () => {
+      const full = await loadStore(rival);
+      claimDeviceToken(full, { token: claimedToken, userId: "user_client", at: LATER });
+      await saveStore(rival, full);
+    });
+    const outcome = registerUnclaimedDeviceToken(deviceStore, { token: freshToken, platform: "android", at: LATER, limit: 1 });
+    assert.equal(outcome.evicted, 1);
+    if (outcome.changed) await saveDeviceTokenStore(database, deviceStore);
+  }, { lockKey: "gridgo-device-tokens" });
+
+  const rows = (await database.query("SELECT token, user_id FROM device_tokens ORDER BY token")).rows;
+  assert.deepEqual(rows, [
+    { token: freshToken, user_id: null },
+    { token: claimedToken, user_id: "user_client" },
+  ]);
+
+  await clear(database);
+  await database.close();
+  await rival.close();
 });
 
 test("store rejects money outside JavaScript's safe integer range", { skip: !DATABASE_URL }, async () => {

@@ -2962,7 +2962,13 @@ async function handleRequest(req, res) {
         });
       }
       const product = store.catalog.find((p) => p.id === body.productId) || store.catalog[0];
-      const qty = Number(body.quantity || 1);
+      const qty = body.quantity == null ? 1 : Number(body.quantity);
+      if (!Number.isSafeInteger(qty) || qty < 1) {
+        return send(res, 400, {
+          error: "invalid_quantity",
+          message: "quantity must be a positive integer.",
+        });
+      }
       const referenceCandidates = [(product?.basePriceMinor || 10000) * qty];
       for (const service of store.supplierServices || []) {
         if (service.state !== "live" || !Number.isSafeInteger(Number(service.referenceRateMinor))) continue;

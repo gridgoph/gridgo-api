@@ -266,6 +266,11 @@ export async function loadStore(database) {
  * Device-token-only store for routes that must not join the whole-store
  * domain transaction. The returned object works with the push.js device
  * functions and persists exclusively through saveDeviceTokenStore.
+ *
+ * These routes serialize under their own advisory lock, so this snapshot can
+ * go stale against a claim committed under the domain lock. saveDeviceTokenStore
+ * therefore guards every write on `user_id IS NULL`: a row claimed after the
+ * snapshot was taken is never updated, deleted, or unclaimed by this path.
  */
 export async function loadDeviceTokenStore(database) {
   if (!database.inTransaction()) throw new Error("loadDeviceTokenStore requires an active transaction");
@@ -279,8 +284,30 @@ export async function saveDeviceTokenStore(database, store) {
   const currentRows = (store.deviceTokens || []).map(deviceTokenRow);
   const before = rowMap(store[BASELINE]?.device_tokens || [], DEVICE_TOKENS_TABLE);
   const current = rowMap(currentRows, DEVICE_TOKENS_TABLE);
-  await deleteMissing(database, DEVICE_TOKENS_TABLE, before, current);
-  await upsertChanged(database, DEVICE_TOKENS_TABLE, before, current);
+  const { columns } = DEVICE_TOKENS_TABLE;
+  for (const [key, row] of before) {
+    if (current.has(key)) continue;
+    await database.query("DELETE FROM device_tokens WHERE id = $1 AND user_id IS NULL", [row.id]);
+  }
+  for (const [key, row] of current) {
+    const prior = before.get(key);
+    if (prior && stable(prior) === stable(row)) continue;
+    if (prior) {
+      const fields = columns.filter((column) => column !== "id");
+      const updates = fields.map((column, index) => `${column} = $${index + 2}`).join(", ");
+      await database.query(
+        `UPDATE device_tokens SET ${updates} WHERE id = $1 AND user_id IS NULL`,
+        [row.id, ...fields.map((column) => row[column])],
+      );
+    } else {
+      const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
+      const updates = columns.filter((column) => column !== "token").map((column) => `${column} = EXCLUDED.${column}`).join(", ");
+      await database.query(
+        `INSERT INTO device_tokens (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (token) DO UPDATE SET ${updates} WHERE device_tokens.user_id IS NULL`,
+        columns.map((column) => row[column]),
+      );
+    }
+  }
   store[BASELINE] = { device_tokens: structuredClone(currentRows) };
 }
 
