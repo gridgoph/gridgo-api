@@ -1331,6 +1331,25 @@ async function startMockClerkApi(usersBySubject) {
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
+async function startMockObjectStorage() {
+  const server = http.createServer((req, res) => {
+    if (req.method === "HEAD") {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+    if (req.method === "DELETE") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, url: `http://127.0.0.1:${server.address().port}` };
+}
+
 test("Clerk activation provisions only a client through the live API and PostgreSQL", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -1391,6 +1410,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     clerk_rider_new: clerkUserJson("clerk_rider_new", "rider-new@gridgo.test"),
     clerk_injected: clerkUserJson("clerk_injected", "injected@gridgo.test"),
   });
+  const storage = await startMockObjectStorage();
   let instance = null;
   const supplierBody = {
     profile: {
@@ -1410,7 +1430,23 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     },
   };
   try {
-    instance = await startApi({ CLERK_API_URL: clerk.url });
+    instance = await startApi({
+      CLERK_API_URL: clerk.url,
+      CORS_ALLOWED_ORIGINS: "https://app.gridgo.test",
+      MINIO_ENDPOINT: storage.url,
+      MINIO_BUCKET: "gridgo-enrollment-test",
+    });
+
+    const preflight = await fetch(`${instance.api}/auth/clerk/enroll/supplier`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://app.gridgo.test",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type,idempotency-key",
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.match(preflight.headers.get("access-control-allow-headers") || "", /(?:^|,\s*)Idempotency-Key(?:,|$)/i);
 
     const missingKey = await request(instance.api, "/auth/clerk/enroll/supplier", {
       method: "POST", subject: "clerk_supplier_new", body: supplierBody,
@@ -1446,6 +1482,22 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       supplierRetry.body.supplierServices.map((service) => service.id),
       supplier.body.supplierServices.map((service) => service.id),
     );
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.taxonomy.categories.find(({ code }) => code === "corporate_event_merch").active = false;
+      await saveStore(database, store);
+    });
+    const supplierRetryAfterTaxonomyChange = await request(instance.api, "/auth/clerk/enroll/supplier", {
+      method: "POST", subject: "clerk_supplier_new", body: supplierBody,
+      headers: { "Idempotency-Key": supplierKey },
+    });
+    assert.equal(supplierRetryAfterTaxonomyChange.status, 200, JSON.stringify(supplierRetryAfterTaxonomyChange.body));
+    assert.equal(supplierRetryAfterTaxonomyChange.body.approvalCase.id, supplier.body.approvalCase.id);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.taxonomy.categories.find(({ code }) => code === "corporate_event_merch").active = true;
+      await saveStore(database, store);
+    });
     const supplierDuplicate = await request(instance.api, "/auth/clerk/enroll/supplier", {
       method: "POST", subject: "clerk_supplier_new", body: supplierBody,
       headers: { "Idempotency-Key": "11111111-1111-4111-8111-111111111112" },
@@ -1473,6 +1525,10 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(sameIdentity.body.user.id, "user_client");
     const sameIdentityMe = await request(instance.api, "/auth/me", { subject: "clerk_client" });
     assert.deepEqual(sameIdentityMe.body.memberships, [{ role: "client" }, { role: "supplier" }]);
+    const sameIdentityPersisted = await loadStore(database);
+    const legacySupplier = sameIdentityPersisted.users.find(({ id }) => id === "user_client");
+    assert.equal(legacySupplier.supplierName, "Client's Second Hat");
+    assert.deepEqual(legacySupplier.shop, supplierBody.profile.location);
 
     const businessBody = {
       businessName: "Davao Events Co.",
@@ -1530,6 +1586,28 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     });
     assert.equal(riderInjection.status, 400, JSON.stringify(riderInjection.body));
     assert.equal(riderInjection.body.error, "unexpected_field");
+
+    const nullSubmitResponse = await fetch(`${instance.api}/me/approval-cases/rider/submit`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token("clerk_rider_new")}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "77777777-7777-4777-8777-777777777774",
+      },
+      body: "null",
+    });
+    const nullSubmit = await nullSubmitResponse.json();
+    assert.equal(nullSubmitResponse.status, 400, JSON.stringify(nullSubmit));
+    assert.equal(nullSubmit.error, "invalid_application");
+    assert.equal(nullSubmit.fields.body, "must be a JSON object");
+
+    const missingVersionSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
+      method: "POST", subject: "clerk_rider_new", body: {},
+      headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777775" },
+    });
+    assert.equal(missingVersionSubmit.status, 400, JSON.stringify(missingVersionSubmit.body));
+    assert.equal(missingVersionSubmit.body.error, "invalid_application");
+    assert.equal(missingVersionSubmit.body.fields.expectedVersion, "must be a positive integer");
 
     const incompleteSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
       method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
@@ -1605,18 +1683,29 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(deletedResubmit.status, 409, JSON.stringify(deletedResubmit.body));
     assert.equal(deletedResubmit.body.error, "rider_documents_incomplete");
 
-    await database.transaction(async () => {
-      const store = await loadStore(database);
-      const enrolledRider = store.users.find((candidate) => candidate.clerkUserId === "clerk_rider_new");
-      const riderCase = store.approvalCases.find(
-        (candidate) => candidate.userId === enrolledRider.id && candidate.kind === "rider",
-      );
-      riderCase.status = "rejected";
-      riderCase.decidedAt = "2026-08-16T04:00:00.000Z";
-      riderCase.rejectionReason = "Licence evidence missing";
-      riderCase.updatedAt = riderCase.decidedAt;
-      await saveStore(database, store);
+    const approvalWithoutLicense = await request(
+      instance.api,
+      `/users/${invalidatedDocument.riderId}/verification`,
+      { method: "POST", subject: "clerk_ops", body: { status: "approved" } },
+    );
+    assert.equal(approvalWithoutLicense.status, 409, JSON.stringify(approvalWithoutLicense.body));
+    assert.equal(approvalWithoutLicense.body.error, "rider_documents_incomplete");
+    const afterFailedApproval = await loadStore(database);
+    assert.equal(
+      afterFailedApproval.users.find(({ id }) => id === invalidatedDocument.riderId).verificationStatus,
+      "pending",
+    );
+    assert.equal(
+      afterFailedApproval.approvalCases.find(({ id }) => id === rider.body.approvalCase.id).submittedAt,
+      undefined,
+    );
+
+    const riderRejected = await request(instance.api, `/users/${invalidatedDocument.riderId}/verification`, {
+      method: "POST", subject: "clerk_ops",
+      body: { status: "rejected", reason: "Licence evidence missing" },
     });
+    assert.equal(riderRejected.status, 200, JSON.stringify(riderRejected.body));
+    assert.equal(riderRejected.body.user.verificationStatus, "rejected");
     const riderReapplyBody = {
       expectedVersion: 1,
       correctionSummary: "Re-uploaded the driver's licence photo.",
@@ -1665,6 +1754,9 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(riderReapplied.body.approvalCase.applicationRevision, 2);
     assert.notEqual(riderReapplied.body.approvalCase.submittedAt, null);
     const afterRiderReapply = await loadStore(database);
+    const legacyRider = afterRiderReapply.users.find(({ id }) => id === invalidatedDocument.riderId);
+    assert.equal(legacyRider.verificationStatus, "pending");
+    assert.equal(Object.hasOwn(legacyRider, "verificationNote"), false);
     assert.deepEqual(
       afterRiderReapply.riderDocuments
         .filter((document) => document.riderId === invalidatedDocument.riderId)
@@ -1672,26 +1764,26 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       [["rdoc_new_license", false], ["rdoc_replacement_license", true]],
     );
 
-    let retainedServiceIds;
-    await database.transaction(async () => {
-      const store = await loadStore(database);
-      const enrolledSupplier = store.users.find((candidate) => candidate.clerkUserId === "clerk_supplier_new");
-      const approvalCase = store.approvalCases.find(
-        (candidate) => candidate.userId === enrolledSupplier.id && candidate.kind === "supplier",
-      );
-      approvalCase.status = "rejected";
-      approvalCase.version = 2;
-      approvalCase.decidedAt = "2026-08-16T03:00:00.000Z";
-      approvalCase.rejectionReason = "Complete the category setup";
-      approvalCase.updatedAt = approvalCase.decidedAt;
-      retainedServiceIds = store.supplierServices
-        .filter((service) => service.supplierId === enrolledSupplier.id)
-        .map((service) => service.id);
-      await saveStore(database, store);
+    const supplierApproved = await request(instance.api, `/users/${supplier.body.user.id}/verification`, {
+      method: "POST", subject: "clerk_ops", body: { status: "approved" },
     });
+    assert.equal(supplierApproved.status, 200, JSON.stringify(supplierApproved.body));
+    const supplierRejected = await request(instance.api, `/users/${supplier.body.user.id}/verification`, {
+      method: "POST", subject: "clerk_ops",
+      body: { status: "rejected", reason: "Complete the category setup" },
+    });
+    assert.equal(supplierRejected.status, 200, JSON.stringify(supplierRejected.body));
+    assert.equal(supplierRejected.body.user.verificationStatus, "rejected");
+    const rejectedSupplierState = await loadStore(database);
+    const rejectedLegacySupplier = rejectedSupplierState.users.find(({ id }) => id === supplier.body.user.id);
+    assert.equal(rejectedLegacySupplier.verificationNote, "Complete the category setup");
+    assert.equal(rejectedLegacySupplier.verifiedBy, "user_ops");
+    const retainedServiceIds = rejectedSupplierState.supplierServices
+      .filter((service) => service.supplierId === supplier.body.user.id)
+      .map((service) => service.id);
 
     const reapplyBody = {
-      expectedVersion: 2,
+      expectedVersion: 1,
       correctionSummary: "Completed the category setup and reviewed the shop profile.",
     };
     const reapplyKey = "88888888-8888-4888-8888-888888888888";
@@ -1701,7 +1793,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     });
     assert.equal(reapplied.status, 200, JSON.stringify(reapplied.body));
     assert.equal(reapplied.body.approvalCase.status, "pending");
-    assert.equal(reapplied.body.approvalCase.version, 3);
+    assert.equal(reapplied.body.approvalCase.version, 2);
     assert.equal(reapplied.body.approvalCase.applicationRevision, 2);
     assert.equal(reapplied.body.approvalCase.rejectionReason, null);
     const reappliedRetry = await request(instance.api, "/me/approval-cases/supplier/reapply", {
@@ -1713,6 +1805,10 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
 
     const persisted = await loadStore(database);
     const enrolledSupplier = persisted.users.find((candidate) => candidate.clerkUserId === "clerk_supplier_new");
+    assert.equal(enrolledSupplier.verificationStatus, "pending");
+    assert.equal(Object.hasOwn(enrolledSupplier, "verificationNote"), false);
+    assert.equal(Object.hasOwn(enrolledSupplier, "verifiedAt"), false);
+    assert.equal(Object.hasOwn(enrolledSupplier, "verifiedBy"), false);
     assert.deepEqual(
       persisted.supplierServices
         .filter((service) => service.supplierId === enrolledSupplier.id)
@@ -1723,9 +1819,9 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       (candidate) => candidate.userId === enrolledSupplier.id && candidate.kind === "supplier",
     );
     const events = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === supplierCase.id);
-    assert.equal(events.length, 2);
-    assert.equal(events[1].reason, reapplyBody.correctionSummary);
-    assert.equal(events[1].applicationRevision, 2);
+    assert.equal(events.length, 4);
+    assert.equal(events.at(-1).reason, reapplyBody.correctionSummary);
+    assert.equal(events.at(-1).applicationRevision, 2);
     assert.equal(
       persisted.auditLog.some(
         (entry) => entry.action === "approval_case.reapply" && entry.entityId === supplierCase.id,
@@ -1742,6 +1838,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       await new Promise((resolve) => instance.child.once("exit", resolve));
     }
     await new Promise((resolve) => clerk.server.close(resolve));
+    await new Promise((resolve) => storage.server.close(resolve));
     await database.close();
   }
 });

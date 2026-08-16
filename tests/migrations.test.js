@@ -37,7 +37,7 @@ async function withMigrationSchema(t, fn) {
   await fn({ schema, client });
 }
 
-test("fresh PostgreSQL migrates through onboarding and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
+test("fresh PostgreSQL migrates through onboarding, enrollment, and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
 
@@ -59,7 +59,14 @@ test("fresh PostgreSQL migrates through onboarding and money additions and rever
       assert.equal(legacyColumns.has(column), true, `${column} compatibility projection should remain`);
     }
 
-    await runner(migrationOptions(schema, "down", 2, client));
+    await runner(migrationOptions(schema, "down", 1, client));
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal(
+      (await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name,
+      "user_role_memberships",
+    );
+
+    await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name, null);
     assert.equal((await client.query("SELECT to_regclass('users') AS table_name")).rows[0].table_name, "users");
 
@@ -81,7 +88,7 @@ test("fresh PostgreSQL migrates through onboarding and money additions and rever
       (error) => error.code === "23514" && error.constraint === "file_references_reference_type_check",
     );
 
-    await runner(migrationOptions(schema, "up", 2, client));
+    await runner(migrationOptions(schema, "up", 3, client));
     assert.equal((await client.query("SELECT to_regclass('rider_documents') AS table_name")).rows[0].table_name, "rider_documents");
   });
 });
@@ -123,7 +130,7 @@ test("service-fee migration backfills legacy money, payments, allocations, and s
         ('legacy_money', 'balance', 28125, 'qr_manual', 'not_submitted', 1, '{}');
     `);
 
-    await runner(migrationOptions(schema, "up", 1, client));
+    await runner(migrationOptions(schema, "up", 2, client));
 
     assert.deepEqual((await client.query("SELECT version, settings FROM platform_settings")).rows[0], {
       version: 7,

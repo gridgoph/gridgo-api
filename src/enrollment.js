@@ -319,17 +319,19 @@ function retryResult(store, user, role, kind) {
 }
 
 export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotencyKey, createId, now }) {
-  const application = validateSupplier(store, body);
-  const at = now();
   const existing = mappedUser(store, clerkUserId);
   if (existing && exactRetry(store, { kind: "supplier", user: existing, key: idempotencyKey, body })) {
     return retryResult(store, existing, "supplier", "supplier");
   }
+  const application = validateSupplier(store, body);
+  const at = now();
   const { user } = resolveOrCreateIdentity({
     store, clerkUserId, clerkUser, role: "supplier", application, createId, at,
   });
   ensureNoCase(store, user.id, "supplier");
   user.phone = application.phone;
+  user.supplierName = application.shopName;
+  user.shop = application.location;
   const membership = ensureMembership(store, user.id, "supplier", at);
   const currentProfile = (store.supplierProfiles || []).find((profile) => profile.userId === user.id);
   const profile = {
@@ -474,7 +476,23 @@ function manilaDate(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-export function submitRiderApplication({ store, user, expectedVersion, now }) {
+export function assertRiderApprovalReady(store, userId, at) {
+  if (!currentFutureLicense(store, userId, manilaDate(at))) {
+    fail(
+      409,
+      "rider_documents_incomplete",
+      "A ready current driver's licence with a future expiry is required before approving this rider.",
+      { missing: ["drivers_license"] },
+    );
+  }
+}
+
+export function submitRiderApplication({ store, user, body, now }) {
+  if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
+  rejectUnexpected(body, ["expectedVersion"]);
+  if (!Number.isInteger(body.expectedVersion) || body.expectedVersion <= 0) {
+    invalidApplication({ expectedVersion: "must be a positive integer" });
+  }
   if (!(store.userRoleMemberships || []).some(
     (membership) => membership.userId === user.id && membership.role === "rider",
   )) {
@@ -488,7 +506,7 @@ export function submitRiderApplication({ store, user, expectedVersion, now }) {
       approvalCase: caseProjection(approvalCase),
     });
   }
-  if (!Number.isInteger(expectedVersion) || expectedVersion !== approvalCase.version) {
+  if (body.expectedVersion !== approvalCase.version) {
     fail(409, "approval_state_conflict", "Refresh the rider application and submit its current version.", {
       approvalCase: caseProjection(approvalCase),
     });
@@ -584,6 +602,12 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
   delete approvalCase.decidedBy;
   delete approvalCase.rejectionReason;
   delete approvalCase.suspensionReason;
+  if (user.role === kind.role && ["supplier", "rider"].includes(kind.role)) {
+    user.verificationStatus = "pending";
+    delete user.verificationNote;
+    delete user.verifiedAt;
+    delete user.verifiedBy;
+  }
   store.approvalCaseEvents.push({
     id: createId("ace"),
     approvalCaseId: approvalCase.id,

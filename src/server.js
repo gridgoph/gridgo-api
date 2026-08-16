@@ -47,6 +47,7 @@ import {
 } from "./attachments.js";
 import {
   applyForBusiness,
+  assertRiderApprovalReady,
   enrollRider,
   enrollSupplier,
   reapplyForApproval,
@@ -1255,7 +1256,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key",
         "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -1583,18 +1584,10 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && pathname === "/me/approval-cases/rider/submit") {
       requireIdempotencyKey(req.headers["idempotency-key"]);
       const body = await readBody(req);
-      const unexpected = Object.keys(body || {}).find((field) => field !== "expectedVersion");
-      if (unexpected) {
-        return send(res, 400, {
-          error: "unexpected_field",
-          message: `Remove \`${unexpected}\`. Rider submission accepts only expectedVersion.`,
-          field: unexpected,
-        });
-      }
       const approvalCase = submitRiderApplication({
         store,
         user,
-        expectedVersion: body.expectedVersion,
+        body,
         now,
       });
       await save(store);
@@ -2443,6 +2436,10 @@ async function handleRequest(req, res) {
         return send(res, 400, { error: "invalid_verification_status", allowed });
       }
       const prev = target.verificationStatus || "unverified";
+      if (target.role === "rider" && body.status === "approved") {
+        assertRiderApprovalReady(store, target.id, now());
+      }
+      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       target.verificationStatus = body.status;
       target.verificationNote = body.reason || body.note || null;
       if (body.status === "approved") {
@@ -2463,7 +2460,6 @@ async function handleRequest(req, res) {
           }
         }
       }
-      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       audit(store, {
         actor: user,
         action: "user.verification",
