@@ -182,12 +182,12 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
 | `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | legacy commitments only: assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
-| `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
+| `service_image` | `{ "supplierServiceId": "...", "expectedVersion": 3 }` or `If-Match: "3"` | caller is `supplierService.supplierId`; version must match |
 | `verification_document` | `{ "documentType": "business_permit" }` or `{ "documentType": "sample_work", "replaceFileId": "..." }` | caller is a supplier; target is always derived from the token and cannot be supplied |
 
-Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
+Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. Attaching a `service_image` also rechecks the owning service version immediately before commit. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
 
-Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. On a legacy commitment, a POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention`.
+Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment; a service-image attachment advances and returns `supplierService.version`. On a legacy commitment, a POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention` because both gates use the same delivery evidence.
 
 Verification-document attachment rules:
 
@@ -210,7 +210,8 @@ curl -fsS -X POST "$API/files/$DELIVERY_FILE_ID/attach" -H "Authorization: Beare
   -H 'Content-Type: application/json' --data '{"orderId":"ord_active_delivery"}' | jq
 
 curl -fsS -X POST "$API/files/$SERVICE_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -H 'Content-Type: application/json' --data '{"supplierServiceId":"svc_demo_print"}' | jq
+  -H 'Content-Type: application/json' -H 'If-Match: "3"' \
+  --data '{"supplierServiceId":"svc_demo_print"}' | jq
 
 curl -fsS -X POST "$API/files/$VERIFICATION_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
   -H 'Content-Type: application/json' --data '{"documentType":"business_permit"}' | jq
@@ -307,6 +308,8 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 400 | `invalid_milestone_code` | POF target is not printing, packaging/QC, or delivered; choose the stage represented by the file. |
 | 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, or `sample_work`. |
 | 400 | `invalid_json` | Attach/transition JSON is malformed; fix JSON. |
+| 400 | `expected_version_required` | A service-image attach omitted both `expectedVersion` and `If-Match`; refresh the service and retry with its current version. |
+| 400 | `invalid_catalog_item` | A service-image `expectedVersion` is not a positive integer; refresh the service and send its returned version. |
 | 401 | `unauthorized` | Token absent, invalid, or expired; sign in and retry. |
 | 403 | `forbidden` | Wrong role, file owner, parent owner/assignee, or read relationship; open the caller's own record. |
 | 404 | `file_not_found` | No readable ready file for that ID; refresh parent metadata. |
@@ -317,6 +320,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 409 | `file_state_conflict` | Requested lifecycle operation is invalid for current state; refresh metadata. |
 | 409 | `file_metadata_invalid` | Purpose/media/key/size metadata is internally inconsistent; upload again. |
 | 409 | `file_in_use` | File has domain references; do not delete lifecycle evidence. |
+| 409 | `supplier_service_stale` | The service changed before its image could attach; refresh the service and retry with its current version. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
 | 409 | `verification_document_replacement_mismatch` | `replaceFileId` is not attached to the caller in the requested document slot; refresh the supplier's documents and choose the matching file. |
 | 409 | `transition_not_allowed` | Requested order step is not reachable from the current state/role; refresh and use an available action. |

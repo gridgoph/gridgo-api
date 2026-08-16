@@ -19,15 +19,19 @@ Media records expose opaque API URLs and never MinIO object keys. Task F owns th
 These routes require the caller's database `supplier` membership and resource ownership. Pending and rejected suppliers may edit; a suspended supplier may not.
 
 ```text
-GET/POST/PATCH/DELETE /me/supplier-services[/:id]
-PUT /me/supplier-services/:id/file-formats
-GET/PUT /me/supplier-services/:id/pricing
-GET/POST/PATCH/DELETE /me/catalog-items[/:id]
-PUT /me/catalog-items/:id/file-formats
-POST/PATCH/DELETE /me/catalog-items/:id/option-groups[/:groupId]
-POST/PATCH/DELETE /me/catalog-option-groups/:groupId/options[/:optionId]
-POST /me/catalog-items/:id/photos/reorder
-GET  /me/supplier-readiness
+GET, POST              /me/supplier-services
+GET, PATCH, DELETE     /me/supplier-services/:id
+PUT                    /me/supplier-services/:id/file-formats
+GET, PUT               /me/supplier-services/:id/pricing
+GET, POST              /me/catalog-items
+GET, PATCH, DELETE     /me/catalog-items/:id
+PUT                    /me/catalog-items/:id/file-formats
+POST                   /me/catalog-items/:id/option-groups
+PATCH, DELETE          /me/catalog-items/:id/option-groups/:groupId
+POST                   /me/catalog-option-groups/:groupId/options
+PATCH, DELETE          /me/catalog-option-groups/:groupId/options/:optionId
+POST                   /me/catalog-items/:id/photos/reorder
+GET                    /me/supplier-readiness
 ```
 
 Mutations of an existing service, item, or group require `expectedVersion` in JSON or an `If-Match` header. A mismatch returns `409` with `supplier_service_stale`, `catalog_item_stale`, or `catalog_group_stale`. Changing option rows advances both the group version and owning item version. Item format inheritance changes are atomic through the item file-formats endpoint.

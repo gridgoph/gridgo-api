@@ -192,9 +192,11 @@ deleted, so nothing that already references them becomes an orphan.
 | `signage` | `recognition_awards_signage` | no |
 
 **What accepts a retired code:** anywhere the API takes a `categoryCode`
-(`POST`/`PATCH /supplier-services`, `POST`/`PATCH /taxonomy/subcategories`). It
-resolves through the alias and the canonical code is what gets stored on new
-subcategories. An unknown code is still `400 {"error":"invalid_category_code"}`.
+(`POST /supplier-services`, `PATCH /supplier-services/:id`,
+`POST /me/supplier-services`, `PATCH /me/supplier-services/:id`, and the
+subcategory writers). It resolves through the alias. The canonical code is
+stored on new subcategories and on new or explicitly updated supplier services.
+An unknown code is still `400 {"error":"invalid_category_code"}`.
 
 **What was rewritten:** `materials[].categoryCodes` and `finishes[].categoryCodes`
 only.
