@@ -319,8 +319,8 @@ One FCM v1 message per registered device:
   "message": {
     "token": "<one device token>",
     "notification": {
-      "title": "Supplier assigned and final price ready",
-      "body": "A supplier accepted your order. Review the final price and submit the digital downpayment."
+      "title": "Final quote ready",
+      "body": "Review the final quote, fulfillment choice, and payment plan."
     },
     "data": {
       "notificationId": "ntf_9c1f3a",

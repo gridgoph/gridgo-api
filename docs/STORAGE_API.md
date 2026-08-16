@@ -280,9 +280,9 @@ delete_pending --MinIO delete + metadata commit--> deleted
 - On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted`.
 - No automatic age-based retention is enabled in this demo. `purpose` and references are durable so a future retention job can apply different policies without guessing from keys.
 
-## Proof of Fulfilment lifecycle
+## Legacy Proof of Fulfilment lifecycle
 
-POF is a milestone gate, not an order-state approval loop. Upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint.
+POF milestone gating applies only to legacy `moneyModelVersion: 1` commitments. Current v2 `initial` and `completion` payouts do not accept POF; they release automatically when their lifecycle and confirmed supplier-principal collection gates are satisfied. For a legacy commitment, upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint.
 
 | Milestone | Uploader | Attach result |
 |---|---|---|
@@ -290,7 +290,7 @@ POF is a milestone gate, not an order-state approval loop. Upload the bytes, att
 | `packaging_qc` | assigned supplier | packaging/QC milestone becomes `pof_attached` |
 | `delivered` | assigned rider | delivered and retention milestones become `pof_attached` |
 
-The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions or valid PostgreSQL order states. New POF uses `fulfilment_proof` file references only.
+The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions or valid PostgreSQL order states. Legacy POF compatibility uses `fulfilment_proof` file references only.
 
 ## Error contract
 
