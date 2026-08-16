@@ -8,10 +8,12 @@ import {
   AttachmentError,
   MAX_FILE_SIZE,
   attachFileReference,
+  attachRiderDocument,
   authorizeFileAttach,
   authorizeFileRead,
   authorizeFileUpload,
   createPendingFile,
+  invalidateRiderDocumentsForFile,
   markFileDeleted,
   markFileDeletePending,
   markFileReady,
@@ -19,8 +21,10 @@ import {
   publicFile,
   resolveFileTarget,
   validateUpload,
+  RIDER_DOCUMENT_TYPES,
   VERIFICATION_DOCUMENT_TYPES,
 } from "../src/attachments.js";
+import { resolveAuthorizationContext } from "../src/authorization-context.js";
 
 function expectError(fn, status, code) {
   assert.throws(fn, (error) => {
@@ -64,6 +68,12 @@ const otherSupplier = { id: "supplier-b", role: "supplier" };
 const rider = { id: "rider-a", role: "rider" };
 const ops = { id: "ops-a", role: "ops_admin" };
 const superAdmin = { id: "super-a", role: "super_admin" };
+const MANILA_YEAR = Number(new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Manila",
+  year: "numeric",
+}).format(new Date()));
+const LICENSE_EXPIRY = `${MANILA_YEAR + 2}-12-31`;
+const REPLACEMENT_LICENSE_EXPIRY = `${MANILA_YEAR + 3}-12-31`;
 
 function order(overrides = {}) {
   return {
@@ -184,9 +194,11 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   assert.doesNotThrow(() => authorizeFileUpload(rider, "delivery_photo"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "service_image"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "verification_document"));
+  assert.doesNotThrow(() => authorizeFileUpload(rider, "rider_verification_document"));
   expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
   expectError(() => authorizeFileUpload(client, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(rider, "verification_document"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(supplier, "rider_verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(supplier, "proof"), 400, "invalid_file_purpose");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "purpose_media_type_not_allowed");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
@@ -250,6 +262,52 @@ test("all five purposes map to ID-only parent fields", () => {
   }
 });
 
+test("supplier membership can attach verification documents and service images", () => {
+  const member = { ...client, id: "client-supplier", verificationDocumentFileIds: [] };
+  const verificationDocument = readyFile("verification_document", {
+    fileId: "member-verification",
+    ownerId: member.id,
+  });
+  const serviceImage = readyFile("service_image", {
+    fileId: "member-service-image",
+    ownerId: member.id,
+  });
+  const supplierService = service({ id: "member-service", supplierId: member.id });
+  const store = {
+    users: [member],
+    userRoleMemberships: [
+      { userId: member.id, role: "client", createdAt: "2026-08-09T00:00:00Z" },
+      { userId: member.id, role: "supplier", createdAt: "2026-08-09T00:00:00Z" },
+    ],
+    files: [verificationDocument, serviceImage],
+    supplierServices: [supplierService],
+    orders: [],
+  };
+  resolveAuthorizationContext(store, member);
+
+  assert.doesNotThrow(() => authorizeFileUpload(member, verificationDocument.purpose));
+  const verificationTarget = resolveFileTarget(
+    store,
+    verificationDocument.purpose,
+    { documentType: "business_permit" },
+    member,
+  );
+  assert.doesNotThrow(() => authorizeFileAttach(member, verificationDocument, verificationTarget));
+  assert.equal(attachFileReference(verificationDocument, verificationTarget), "verificationDocumentFileIds");
+  assert.deepEqual(member.verificationDocumentFileIds, [verificationDocument.fileId]);
+
+  assert.doesNotThrow(() => authorizeFileUpload(member, serviceImage.purpose));
+  const serviceTarget = resolveFileTarget(
+    store,
+    serviceImage.purpose,
+    { supplierServiceId: supplierService.id },
+    member,
+  );
+  assert.doesNotThrow(() => authorizeFileAttach(member, serviceImage, serviceTarget));
+  assert.equal(attachFileReference(serviceImage, serviceTarget), "imageFileIds");
+  assert.deepEqual(supplierService.imageFileIds, [serviceImage.fileId]);
+});
+
 test("verification documents attach only to the uploader and support typed replacement", () => {
   const first = readyFile("verification_document", { fileId: "permit-old" });
   const store = {
@@ -309,6 +367,150 @@ test("verification documents attach only to the uploader and support typed repla
   ]);
   expectError(() => markFileDeletePending(first, ops, "2026-08-09T00:00:00Z"), 403, "forbidden");
   assert.doesNotThrow(() => markFileDeletePending(first, supplier, "2026-08-09T00:00:00Z"));
+});
+
+test("rider licence attachment preserves evidence without submitting enrollment", () => {
+  const first = readyFile("rider_verification_document", {
+    fileId: "rider-license-old",
+    ownerId: rider.id,
+  });
+  const approvalCase = {
+    id: "case-rider",
+    userId: rider.id,
+    kind: "rider",
+    status: "pending",
+    version: 1,
+    applicationRevision: 1,
+    createdAt: "2026-08-16T00:00:00.000Z",
+    updatedAt: "2026-08-16T00:00:00.000Z",
+  };
+  const store = {
+    users: [rider],
+    files: [first],
+    riderDocuments: [],
+    approvalCases: [approvalCase],
+  };
+  const target = resolveFileTarget(
+    store,
+    first.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: LICENSE_EXPIRY },
+    rider,
+  );
+  assert.doesNotThrow(() => authorizeFileAttach(rider, first, target));
+  const attached = attachRiderDocument(store, first, target, {
+    documentId: "rider-document-old",
+    at: "2026-08-16T01:00:00.000Z",
+  });
+  assert.equal(attached.approvalCase.submittedAt, undefined);
+  assert.equal(attached.document.expiresOn, LICENSE_EXPIRY);
+  assert.deepEqual(first.references, [{
+    type: "rider_document",
+    id: "rider-document-old",
+    field: "fileId",
+  }]);
+  assert.deepEqual(RIDER_DOCUMENT_TYPES, ["drivers_license", "or_cr", "selfie"]);
+
+  const replacement = readyFile("rider_verification_document", {
+    fileId: "rider-license-new",
+    ownerId: rider.id,
+  });
+  store.files.push(replacement);
+  const replacementTarget = resolveFileTarget(
+    store,
+    replacement.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: REPLACEMENT_LICENSE_EXPIRY },
+    rider,
+  );
+  assert.deepEqual(replacementTarget.replacedDocuments.map(({ id }) => id), ["rider-document-old"]);
+  const replaced = attachRiderDocument(store, replacement, replacementTarget, {
+    documentId: "rider-document-new",
+    at: "2027-08-16T01:00:00.000Z",
+  });
+  assert.equal(attached.document.isCurrent, false);
+  assert.equal(attached.document.replacedAt, "2027-08-16T01:00:00.000Z");
+  assert.equal(replaced.document.isCurrent, true);
+  assert.equal(store.riderDocuments.length, 2);
+
+  expectError(
+    () => resolveFileTarget(
+      store,
+      replacement.purpose,
+      { riderDocumentType: "drivers_license", expiresOn: "2020-01-01" },
+      rider,
+    ),
+    409,
+    "document_expired",
+  );
+  expectError(
+    () => resolveFileTarget(
+      store,
+      replacement.purpose,
+      { riderDocumentType: "passport", expiresOn: LICENSE_EXPIRY },
+      rider,
+    ),
+    400,
+    "invalid_rider_document_type",
+  );
+});
+
+test("deleting rider licence evidence reverts a pending submission to intake", () => {
+  const license = readyFile("rider_verification_document", { fileId: "rider-license-live", ownerId: rider.id });
+  const approvalCase = {
+    id: "case-rider-delete",
+    userId: rider.id,
+    kind: "rider",
+    status: "pending",
+    version: 1,
+    applicationRevision: 1,
+    createdAt: "2026-08-16T00:00:00.000Z",
+    updatedAt: "2026-08-16T00:00:00.000Z",
+  };
+  const store = { users: [rider], files: [license], riderDocuments: [], approvalCases: [approvalCase] };
+  const target = resolveFileTarget(
+    store,
+    license.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: LICENSE_EXPIRY },
+    rider,
+  );
+  attachRiderDocument(store, license, target, { documentId: "rider-document-live", at: "2026-08-16T01:00:00.000Z" });
+  assert.equal(approvalCase.submittedAt, undefined);
+  approvalCase.submittedAt = "2026-08-16T01:30:00.000Z";
+  approvalCase.updatedAt = "2026-08-16T01:30:00.000Z";
+
+  assert.doesNotThrow(() => markFileDeletePending(license, rider, "2026-08-16T02:00:00.000Z"));
+  const invalidated = invalidateRiderDocumentsForFile(store, license, "2026-08-16T02:00:00.000Z");
+  assert.deepEqual(invalidated.map(({ id }) => id), ["rider-document-live"]);
+  assert.equal(store.riderDocuments.length, 1);
+  assert.equal(store.riderDocuments[0].isCurrent, false);
+  assert.equal(store.riderDocuments[0].replacedAt, "2026-08-16T02:00:00.000Z");
+  assert.equal(approvalCase.submittedAt, null);
+
+  const replacement = readyFile("rider_verification_document", { fileId: "rider-license-next", ownerId: rider.id });
+  store.files.push(replacement);
+  const replacementTarget = resolveFileTarget(
+    store,
+    replacement.purpose,
+    { riderDocumentType: "drivers_license", expiresOn: REPLACEMENT_LICENSE_EXPIRY },
+    rider,
+  );
+  attachRiderDocument(store, replacement, replacementTarget, {
+    documentId: "rider-document-next",
+    at: "2026-08-16T03:00:00.000Z",
+  });
+  assert.equal(approvalCase.submittedAt, null);
+
+  const selfie = readyFile("rider_verification_document", { fileId: "rider-selfie", ownerId: rider.id });
+  store.files.push(selfie);
+  const selfieTarget = resolveFileTarget(store, selfie.purpose, { riderDocumentType: "selfie" }, rider);
+  attachRiderDocument(store, selfie, selfieTarget, {
+    documentId: "rider-document-selfie",
+    at: "2026-08-16T04:00:00.000Z",
+  });
+  assert.doesNotThrow(() => markFileDeletePending(selfie, rider, "2026-08-16T05:00:00.000Z"));
+  invalidateRiderDocumentsForFile(store, selfie, "2026-08-16T05:00:00.000Z");
+  assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-selfie").isCurrent, false);
+  assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-next").isCurrent, true);
+  assert.equal(approvalCase.submittedAt, null);
 });
 
 test("verification document reads never inherit order, service, or another supplier visibility", () => {

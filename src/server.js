@@ -28,6 +28,7 @@ import {
 } from "./approval-cases.js";
 import {
   AttachmentError,
+  attachRiderDocument,
   attachFileReference,
   authorizeFileAttach,
   authorizeFileAttachOwner,
@@ -36,6 +37,7 @@ import {
   createPendingFile,
   findFile,
   markFileDeleted,
+  invalidateRiderDocumentsForFile,
   markFileDeletePending,
   markFileReady,
   parseMultipartStream,
@@ -43,6 +45,15 @@ import {
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
+import {
+  applyForBusiness,
+  assertRiderApprovalReady,
+  enrollRider,
+  enrollSupplier,
+  reapplyForApproval,
+  requireIdempotencyKey,
+  submitRiderApplication,
+} from "./enrollment.js";
 import {
   createNotificationEvents,
   formatNotificationEvent,
@@ -345,7 +356,12 @@ async function authenticateRequest(req, store) {
  */
 async function verifyClerkBeforeMutation(req, pathname) {
   const verified = await verifiedClerkClaimsFor(req);
-  if (req.method === "POST" && pathname === "/auth/clerk/activate" && verified?.claims?.sub) {
+  const needsClerkProfile = [
+    "/auth/clerk/activate",
+    "/auth/clerk/enroll/supplier",
+    "/auth/clerk/enroll/rider",
+  ].includes(pathname);
+  if (req.method === "POST" && needsClerkProfile && verified?.claims?.sub) {
     try {
       req.gridgoClerkUser = { clerkUser: await clerkBackend.users.getUser(verified.claims.sub) };
     } catch {
@@ -638,6 +654,7 @@ function fixedAuthProjection(store, auth, role) {
       ...base,
       riderProfile: riderProfileProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
+      onboardingIncomplete: approvalCase?.status === "pending" && approvalCase.submittedAt == null,
       documents,
       capabilities: {
         maintainProfile: true,
@@ -783,7 +800,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
   } else {
     approvalCase.decidedAt = at;
     approvalCase.decidedBy = actor.id;
-    if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
+    if (approvalCase.submittedAt == null && target.role !== "rider") approvalCase.submittedAt = at;
     if (caseStatus === "rejected") {
       approvalCase.rejectionReason = decisionReason || "Verification rejected";
     }
@@ -1239,7 +1256,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key",
         "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -1408,6 +1425,60 @@ async function handleRequest(req, res) {
       return send(res, 200, { user: publicUser(result.user) });
     }
 
+    if (req.method === "POST" && [
+      "/auth/clerk/enroll/supplier",
+      "/auth/clerk/enroll/rider",
+    ].includes(pathname)) {
+      const claims = req.gridgoVerifiedClaims?.claims;
+      if (!claims?.sub) {
+        return send(res, 401, {
+          error: "unauthorized",
+          message: "Sign in with Clerk before submitting this role application.",
+        });
+      }
+      const body = await readBody(req);
+      const idempotencyKey = requireIdempotencyKey(req.headers["idempotency-key"]);
+      const common = {
+        store,
+        clerkUserId: claims.sub,
+        clerkUser: req.gridgoClerkUser?.clerkUser || null,
+        body,
+        idempotencyKey,
+        createId: id,
+        now,
+      };
+      const role = pathname.endsWith("/supplier") ? "supplier" : "rider";
+      const result = role === "supplier" ? enrollSupplier(common) : enrollRider(common);
+      if (result.status === 201) await save(store);
+      const refreshed = await authenticateRequest(req, store);
+      const response = fixedAuthProjection(store, refreshed, role);
+      if (role === "supplier") {
+        response.supplierServices = (result.supplierServices || []).map(summarizeService);
+      }
+      return send(res, result.status, response);
+    }
+
+    if (req.method === "POST" && pathname === "/me/business-application") {
+      const auth = await authenticateRequest(req, store);
+      if (!auth.user) {
+        return send(res, auth.status || 401, {
+          error: "unauthorized",
+          message: "Activate ordinary client access before applying for GRIDGO Business.",
+        });
+      }
+      const result = applyForBusiness({
+        store,
+        user: auth.user,
+        body: await readBody(req),
+        idempotencyKey: requireIdempotencyKey(req.headers["idempotency-key"]),
+        createId: id,
+        now,
+      });
+      if (result.status === 201) await save(store);
+      const refreshed = await authenticateRequest(req, store);
+      return send(res, result.status, fixedAuthProjection(store, refreshed, "client"));
+    }
+
     if (req.method === "POST" && pathname === "/auth/logout") {
       // Signing out is the moment a phone must stop receiving that person's
       // notifications. Accepting the device token here removes the ordering
@@ -1508,6 +1579,36 @@ async function handleRequest(req, res) {
         suspendedServiceIds: outcome.suspendedServiceIds,
         replayed: outcome.replayed,
       });
+    }
+
+    if (req.method === "POST" && pathname === "/me/approval-cases/rider/submit") {
+      const idempotencyKey = requireIdempotencyKey(req.headers["idempotency-key"]);
+      const body = await readBody(req);
+      const result = submitRiderApplication({
+        store,
+        user,
+        body,
+        idempotencyKey,
+        createId: id,
+        now,
+      });
+      if (!result.replay) await save(store);
+      return send(res, 200, { approvalCase: approvalCaseSummary(result.approvalCase) });
+    }
+
+    const reapplyMatch = /^\/me\/approval-cases\/(business-client|supplier|rider)\/reapply$/.exec(pathname);
+    if (req.method === "POST" && reapplyMatch) {
+      const result = reapplyForApproval({
+        store,
+        user,
+        pathKind: reapplyMatch[1],
+        body: await readBody(req),
+        idempotencyKey: requireIdempotencyKey(req.headers["idempotency-key"]),
+        createId: id,
+        now,
+      });
+      if (!result.replay) await save(store);
+      return send(res, result.status, { approvalCase: approvalCaseSummary(result.approvalCase) });
     }
 
     const needsInitializedStorage =
@@ -1653,6 +1754,25 @@ async function handleRequest(req, res) {
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
+        if (latestTarget.type === "rider_document") {
+          const attachedAt = now();
+          const attached = attachRiderDocument(latestStore, latestFile, latestTarget, {
+            documentId: id("rdoc"),
+            at: attachedAt,
+          });
+          await save(latestStore);
+          return send(res, 200, {
+            file: publicFile(latestFile),
+            riderDocument: {
+              id: attached.document.id,
+              kind: attached.document.kind,
+              fileId: attached.document.fileId,
+              expiresOn: attached.document.expiresOn ?? null,
+              uploadedAt: attached.document.uploadedAt,
+            },
+            approvalCase: approvalCaseSummary(attached.approvalCase),
+          });
+        }
         attachFileReference(latestFile, latestTarget);
         const attachedAt = now();
         latestTarget.record.updatedAt = attachedAt;
@@ -1691,7 +1811,9 @@ async function handleRequest(req, res) {
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";
-        markFileDeletePending(latestFile, latestUser, now());
+        const deleteRequestedAt = now();
+        markFileDeletePending(latestFile, latestUser, deleteRequestedAt);
+        invalidateRiderDocumentsForFile(latestStore, latestFile, deleteRequestedAt);
         await save(latestStore);
         return { alreadyDeleted, file: latestFile, objectKey: latestFile.objectKey };
       });
@@ -2316,6 +2438,10 @@ async function handleRequest(req, res) {
         return send(res, 400, { error: "invalid_verification_status", allowed });
       }
       const prev = target.verificationStatus || "unverified";
+      if (target.role === "rider" && body.status === "approved") {
+        assertRiderApprovalReady(store, target.id, now());
+      }
+      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       target.verificationStatus = body.status;
       target.verificationNote = body.reason || body.note || null;
       if (body.status === "approved") {
@@ -2336,7 +2462,6 @@ async function handleRequest(req, res) {
           }
         }
       }
-      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       audit(store, {
         actor: user,
         action: "user.verification",

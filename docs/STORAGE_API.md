@@ -1,6 +1,6 @@
 # GRIDGO Storage API contract
 
-This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
+This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
 
@@ -49,6 +49,7 @@ For the hosted pilot, `MINIO_ENDPOINT` is the single-label MinIO container origi
 - Auth header on every route below: `Authorization: Bearer <Clerk session JWT>`
 - Errors: JSON `{ "error": "snake_case", "message": "concrete problem and recovery" }`, with only the documented additive detail fields
 - Upload field names: exactly one binary `file` and one text `purpose`
+- Upload, target-resolution, and attach role labels mean PostgreSQL memberships, not the legacy `users.role`; an identity that adds supplier membership can upload and attach its own supplier evidence and service images.
 - The client must not supply a bucket, object key, URL, owner ID, lifecycle state, size, or detected MIME
 - IDs are opaque. Clients may persist `fileId`, never an object key or presigned URL.
 
@@ -100,6 +101,7 @@ Parents contain IDs only:
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
 | `verification_document` | `supplier.verificationDocumentFileIds: string[]` (private; never part of `PublicUser`) |
+| `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 
 Legacy orders may still return `proofFileIds` containing retired supplier-proof files. They remain readable evidence but the `proof` upload purpose and supplier-proof workflow no longer accept writes.
 
@@ -112,10 +114,11 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | Purpose | Upload role | Allowed detected types | Maximum |
 |---|---|---|---|
 | `artwork` | client | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
-| `fulfilment_proof` | assigned supplier or rider | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
+| `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
+| `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 
 Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload.
 
@@ -123,7 +126,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image` and `verification_document`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo`. A pending supplier may upload verification documents with their Clerk bearer after activation and role assignment. Clients, riders, Operations, and Super Admin cannot upload documents on a supplier's behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -171,6 +174,9 @@ SERVICE_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPP
 
 VERIFICATION_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
   -F 'purpose=verification_document' -F 'file=@./business-permit.pdf;type=application/pdf' | tee /tmp/verification-upload.json | jq -r .file.fileId)
+
+RIDER_LICENSE_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $RIDER_TOKEN" \
+  -F 'purpose=rider_verification_document' -F 'file=@./drivers-license.jpg;type=image/jpeg' | tee /tmp/rider-license-upload.json | jq -r .file.fileId)
 ```
 
 ## POST /files/:fileId/attach — bind to a domain record
@@ -184,10 +190,13 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
 | `verification_document` | `{ "documentType": "business_permit" }` or `{ "documentType": "sample_work", "replaceFileId": "..." }` | caller is a supplier; target is always derived from the token and cannot be supplied |
+| `rider_verification_document` | `{ "riderDocumentType": "drivers_license", "expiresOn": "2028-06-30" }` | caller is the rider owner; licence requires a future expiry, while `or_cr` and `selfie` omit it |
 
 Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
 
 Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. On a legacy commitment, a POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention`.
+
+A rider-document attach returns `{file,riderDocument,approvalCase}`. Attaching `drivers_license` replaces the prior current licence without deleting it but remains evidence-only; the explicit rider submit endpoint rechecks readiness and sets `submittedAt`. Optional `or_cr` and `selfie` replace only their own current slots.
 
 Verification-document attachment rules:
 
@@ -197,7 +206,7 @@ Verification-document attachment rules:
 - `sample_work` without `replaceFileId` appends another photo/document. To replace one sample, send its currently attached `fileId` as `replaceFileId` with `documentType: "sample_work"`.
 - `replaceFileId` may also select the current permit or ID explicitly. It must be attached to the caller in the same type slot or the API returns `409 verification_document_replacement_mismatch`.
 
-Curl for all five targets:
+Curl for all six targets:
 
 ```bash
 curl -fsS -X POST "$API/files/$ARTWORK_FILE_ID/attach" -H "Authorization: Bearer $CLIENT_TOKEN" \
@@ -214,6 +223,9 @@ curl -fsS -X POST "$API/files/$SERVICE_FILE_ID/attach" -H "Authorization: Bearer
 
 curl -fsS -X POST "$API/files/$VERIFICATION_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
   -H 'Content-Type: application/json' --data '{"documentType":"business_permit"}' | jq
+
+curl -fsS -X POST "$API/files/$RIDER_LICENSE_FILE_ID/attach" -H "Authorization: Bearer $RIDER_TOKEN" \
+  -H 'Content-Type: application/json' --data '{"riderDocumentType":"drivers_license","expiresOn":"2028-06-30"}' | jq
 ```
 
 ## GET /files/:fileId — metadata
@@ -221,6 +233,8 @@ curl -fsS -X POST "$API/files/$VERIFICATION_FILE_ID/attach" -H "Authorization: B
 Auth for ordinary purposes: file owner, `ops_admin`, `super_admin`, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super.
 
 Auth for `verification_document` is intentionally stricter and never inherits order/service visibility: only the supplier owner, `ops_admin`, or `super_admin` may read metadata or request a download URL. Another supplier, client, and rider always receive `403 forbidden`, even if a malformed legacy reference points at one of their orders/services. Supplier document lists use `GET /users/:id/verification-documents` as specified in `docs/OPERATIONAL_MODEL_V2_API.md`.
+
+`rider_verification_document` is likewise private to its rider owner and Operations/Super Admin. It never inherits order or service visibility.
 
 Success: `200 { "file": File }`.
 
@@ -252,9 +266,11 @@ curl -f "$DOWNLOAD_URL" --output ./artwork-readback.pdf
 cmp ./artwork.pdf ./artwork-readback.pdf
 ```
 
-## DELETE /files/:fileId — unreferenced file deletion
+## DELETE /files/:fileId — file deletion
 
-Auth: owner, `ops_admin`, or `super_admin` for ordinary purposes. A `verification_document` may be deleted only by its supplier owner. Only a `ready` file with `references: []` may be deleted. Attached artwork, proofs, service images, delivery evidence, and current verification documents return `409 file_in_use`; deletion never silently removes evidence. Replace a verification slot first, then the supplier may delete the now-unreferenced old file.
+Auth: owner, `ops_admin`, or `super_admin` for ordinary purposes. A `verification_document` may be deleted only by its supplier owner, and a `rider_verification_document` only by its rider owner. For every purpose except `rider_verification_document`, only a `ready` file with `references: []` may be deleted: attached artwork, proofs, service images, delivery evidence, and current verification documents return `409 file_in_use`; deletion never silently removes evidence. Replace a verification slot first, then the supplier may delete the now-unreferenced old file.
+
+`rider_verification_document` is the deliberate exception: the rider owner may delete their own uploaded evidence through this same flow even while rider-document rows still reference it. The same transaction that persists `delete_pending` marks every `rider_documents` row backed by that file non-current; the rows themselves are preserved as prior evidence. If that removes the rider's only current driver's licence backed by a `ready` file, a pending rider case reverts to unsubmitted intake (`submittedAt: null`); a case that already left `pending` is untouched. Every submit, reapply, and approval readiness gate rejects deleted or dangling licence evidence — a current rider-document row whose backing file is absent or not `ready` never satisfies any gate, so the rider must attach a replacement licence before submitting or reapplying.
 
 The API first persists `delete_pending`, then deletes MinIO, then persists `deleted`. If MinIO is unavailable, the durable `delete_pending` marker remains and startup reconciliation retries it.
 
@@ -269,7 +285,7 @@ curl -fsS -X DELETE "$API/files/$UNATTACHED_FILE_ID" \
 
 ```text
 pending_upload --PutObject + metadata commit--> ready
-ready --authorized unreferenced delete request--> delete_pending
+ready --authorized delete request--> delete_pending
 pending_upload --compensation/reconciliation--> deleted
 delete_pending --MinIO delete + metadata commit--> deleted
 ```
@@ -306,6 +322,8 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 400 | `unexpected_target_field` | Attach JSON includes a field other than the purpose-specific target; remove it. |
 | 400 | `invalid_milestone_code` | POF target is not printing, packaging/QC, or delivered; choose the stage represented by the file. |
 | 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, or `sample_work`. |
+| 400 | `invalid_rider_document_type` | `riderDocumentType` is missing/unknown; choose `drivers_license`, `or_cr`, or `selfie`. |
+| 400 | `invalid_application` | A driver's-licence expiry is missing, malformed, or not a real calendar date; send `expiresOn` as `YYYY-MM-DD`. |
 | 400 | `invalid_json` | Attach/transition JSON is malformed; fix JSON. |
 | 401 | `unauthorized` | Token absent, invalid, or expired; sign in and retry. |
 | 403 | `forbidden` | Wrong role, file owner, parent owner/assignee, or read relationship; open the caller's own record. |
@@ -316,9 +334,10 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 409 | `file_already_attached` | File already has a parent reference; upload a new file for another record. |
 | 409 | `file_state_conflict` | Requested lifecycle operation is invalid for current state; refresh metadata. |
 | 409 | `file_metadata_invalid` | Purpose/media/key/size metadata is internally inconsistent; upload again. |
-| 409 | `file_in_use` | File has domain references; do not delete lifecycle evidence. |
+| 409 | `file_in_use` | File has domain references and is not rider-owned `rider_verification_document` evidence; do not delete lifecycle evidence. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
 | 409 | `verification_document_replacement_mismatch` | `replaceFileId` is not attached to the caller in the requested document slot; refresh the supplier's documents and choose the matching file. |
+| 409 | `document_expired` | The driver's-licence expiry is not in the future in Asia/Manila; upload current evidence. |
 | 409 | `transition_not_allowed` | Requested order step is not reachable from the current state/role; refresh and use an available action. |
 | 409 | `storage_object_missing` | Ready metadata has no MinIO object; upload and attach a replacement. |
 | 409 | `storage_object_mismatch` | MinIO byte size differs from metadata; upload and attach a replacement. |
@@ -346,7 +365,7 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 | Trust extension or declared MIME alone | Prohibited; extension, optional specific declared MIME, and magic bytes must agree. |
 | Turn 200 MiB into multiple buffers | Avoided; multipart is streamed to disk, with only parser tail/signature bytes retained, then disk is streamed to MinIO. |
 | Assume object put + database commit are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
-| Delete referenced evidence on uploader request | Prohibited; `409 file_in_use`. |
+| Delete referenced evidence on uploader request | Prohibited for every purpose except `rider_verification_document` (`409 file_in_use`). A rider deleting their own evidence invalidates the backing rider-document rows in the same transaction instead of orphaning them. |
 | API uses root credentials | Prohibited; Compose provisions a separate bucket-policy API user. Root credentials are init/console only. |
 | Floating MinIO image | Prohibited; both `minio/minio` and `minio/mc` use pinned release tags. |
 

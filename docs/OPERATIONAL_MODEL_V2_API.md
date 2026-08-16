@@ -20,6 +20,11 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/auth/signup` | removed | always `404`; sign-up is owned by Clerk |
 | POST | `/auth/login` | removed | always `404`; sign-in is owned by Clerk |
 | POST | `/auth/clerk/activate` | Clerk JWT | create or add only the caller's personal client membership after Google/email SSO |
+| POST | `/auth/clerk/enroll/supplier` | Clerk JWT + `Idempotency-Key` | create or add a pending supplier membership/profile and draft category services |
+| POST | `/auth/clerk/enroll/rider` | Clerk JWT + `Idempotency-Key` | create or add an unsubmitted pending rider membership/profile |
+| POST | `/me/business-application` | client membership + `Idempotency-Key` | submit a pending business-client application without removing personal access |
+| POST | `/me/approval-cases/rider/submit` | rider membership + `Idempotency-Key` | idempotently confirm the current-licence gate and submit the pending case |
+| POST | `/me/approval-cases/:kind/reapply` | matching membership + `Idempotency-Key` | rejected applicant resubmission for `business-client`, `supplier`, or `rider` |
 | GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary |
 | GET | `/auth/me/client` | client membership | client profile, business case, and capabilities |
 | GET | `/auth/me/supplier` | supplier membership | supplier profile, case, readiness, and capabilities |
@@ -37,7 +42,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
 | GET | `/files/:fileId/download-url` | same as file read | five-minute signed GET |
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
-| DELETE | `/files/:fileId` | owner/ops/super; unreferenced only | safe delete lifecycle |
+| DELETE | `/files/:fileId` | purpose-specific; see Storage API | safe delete lifecycle |
 | GET | `/devices` | authenticated | caller's own push registrations |
 | POST | `/devices` | authenticated **or** anonymous | register this phone's FCM token against the caller, or unclaimed when no bearer token is sent |
 | POST | `/devices/unregister` | authenticated **or** anonymous | stop push to one of the caller's own phones; an anonymous call may remove only an unclaimed registration |
@@ -131,6 +136,17 @@ Used once after Google / public SSO. `/auth/me` does not create or email-link ac
 - Success is `200 { user }` (`publicUser`; no `clerkUserId`). The same Clerk JWT can immediately call `/auth/me`.
 - Unmapped JWT on `/auth/me` remains `401 unauthorized`. Role or status claims and Clerk metadata cannot elevate database memberships or approval cases.
 
+### Fixed enrollment and reapplication
+
+The URL fixes the membership and initial `pending` approval case. Callers cannot send `role`, status, commission, or live service state; unsupported input returns `400 unexpected_field`. All application routes require an `Idempotency-Key` of 1–200 letters, numbers, dots, underscores, colons, or hyphens. The first successful supplier, rider, or business application returns `201`; an exact retry returns the same application identifiers with `200`. A different request for an existing role application returns `409 application_already_exists`. Supplier retries still undergo shape, unexpected-field, and taxonomy-independent field validation before replay lookup; active-category resolution follows replay lookup so an exact retry survives later taxonomy changes.
+
+- `POST /auth/clerk/enroll/supplier` accepts `{profile:{shopName,contactName,phone,location:{lat,lng,label}},serviceCategories:[...]}`. It creates one `draft` service per resolved active category and sets `submittedAt` immediately. An already-mapped identity with any existing memberships may deliberately add the supplier membership to the same identity.
+- `POST /auth/clerk/enroll/rider` accepts `{profile:{phone,vehicleType,plateNumber,licenseNumber?}}`. It creates a pending case with `submittedAt: null`; attaching the required current driver's licence records evidence but leaves onboarding incomplete. While the case remains pending and unsubmitted, `/auth/me/rider` returns `onboardingIncomplete: true` so the next sign-in resumes intake. `POST /me/approval-cases/rider/submit` accepts `{expectedVersion}`, rechecks the vehicle type, plate, and current licence, and atomically sets `submittedAt`; exact-key retries replay that success.
+- `POST /me/business-application` accepts `{businessName,businessNature}` after ordinary client activation. Personal ordering remains available while business approval is pending, rejected, or suspended.
+- `POST /me/approval-cases/:kind/reapply` accepts `{expectedVersion,correctionSummary}`. Only `rejected` may transition to `pending`; success increments both case `version` and `applicationRevision`, clears decision fields, and retains the profile, files, services, and prior immutable events.
+
+Enrollment-specific errors are `400 idempotency_key_required` for a missing key, `400 unexpected_field` for caller-controlled contract fields, `400 invalid_application` with a `fields` map for invalid input, `403 membership_required` when a mapped caller lacks the route's membership, `409 application_already_exists` for enrollment conflicts, and `409 approval_state_conflict` for submit/reapply state, version, or key conflicts. An incomplete or expired rider licence returns `409 rider_documents_incomplete` or `409 document_expired`. Identity provisioning may also return `401 unauthorized`, `409 email_already_registered`, or `502 clerk_unavailable`.
+
 ## Approval queue and decisions
 
 `GET /approval-cases` is shared by Operations and Super Admin. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
@@ -151,6 +167,8 @@ Decision bodies are:
 Each committed decision increments `version` and atomically writes the case, immutable event, audit row, and applicant notification. Replaying the winning `requestId` is idempotent; reusing it for a different case or action returns `409 request_id_conflict`. A different stale/racing decision returns `409 approval_already_decided`; a stale version on an otherwise valid transition returns `409 approval_case_stale`; a case whose applicant no longer holds the matching role membership returns `409 approval_case_role_mismatch`.
 
 Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
+
+Rider approval and restore, including approval through the one-release legacy verification route, require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
 
 ## Supplier shop and verification profile
 
