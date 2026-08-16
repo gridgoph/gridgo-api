@@ -1804,6 +1804,18 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(shops.body.shops.length, 1);
     assert.equal(shops.body.shops[0].supplierId, "user_supplier");
 
+    const aliasShops = await request(instance.api, "/catalog/shops?categoryCode=large_format");
+    assert.equal(aliasShops.status, 200, JSON.stringify(aliasShops.body));
+    assert.deepEqual(aliasShops.body.shops, shops.body.shops);
+
+    const invalidCategoryShops = await request(instance.api, "/catalog/shops?categoryCode=unknown_category");
+    assert.equal(invalidCategoryShops.status, 400, JSON.stringify(invalidCategoryShops.body));
+    assert.equal(invalidCategoryShops.body.error, "invalid_category_code");
+
+    const blankCategoryShops = await request(instance.api, "/catalog/shops?categoryCode=");
+    assert.equal(blankCategoryShops.status, 400, JSON.stringify(blankCategoryShops.body));
+    assert.equal(blankCategoryShops.body.error, "invalid_category_code");
+
     const override = await request(instance.api, "/me/catalog-items/catalog_poster/file-formats", {
       method: "PUT",
       subject: "clerk_supplier",
@@ -1816,6 +1828,65 @@ test("pending suppliers can edit catalog while public browse requires approval a
     const overriddenPublic = await request(instance.api, "/catalog/items/catalog_poster");
     assert.equal(overriddenPublic.status, 200, JSON.stringify(overriddenPublic.body));
     assert.deepEqual(overriddenPublic.body.item.acceptedFormats.map((format) => format.code), ["png"]);
+
+    const oversizedSortOrder = await request(instance.api, "/me/catalog-items", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        supplierServiceId: "svc_banner",
+        name: "Oversized sort order",
+        basePriceMinor: 100,
+        sortOrder: 3000000000,
+      },
+    });
+    assert.equal(oversizedSortOrder.status, 400, JSON.stringify(oversizedSortOrder.body));
+    assert.equal(oversizedSortOrder.body.error, "invalid_catalog_item");
+    assert.equal(oversizedSortOrder.body.field, "sortOrder");
+
+    const safeIntegerMoney = await request(instance.api, "/me/catalog-items", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        supplierServiceId: "svc_banner",
+        name: "Maximum safe integer price",
+        basePriceMinor: Number.MAX_SAFE_INTEGER,
+        sortOrder: 1,
+      },
+    });
+    assert.equal(safeIntegerMoney.status, 201, JSON.stringify(safeIntegerMoney.body));
+    assert.equal(safeIntegerMoney.body.item.basePriceMinor, Number.MAX_SAFE_INTEGER);
+
+    const oversizedTurnaround = await request(instance.api, "/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 9, turnaroundHours: 3000000000 },
+    });
+    assert.equal(oversizedTurnaround.status, 400, JSON.stringify(oversizedTurnaround.body));
+    assert.equal(oversizedTurnaround.body.error, "invalid_service");
+
+    const blankPricingBasis = await request(instance.api, "/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 9, pricingBasis: "   " },
+    });
+    assert.equal(blankPricingBasis.status, 400, JSON.stringify(blankPricingBasis.body));
+    assert.equal(blankPricingBasis.body.error, "invalid_service");
+
+    const oversizedPricingBasis = await request(instance.api, "/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 9, pricingBasis: "x".repeat(81) },
+    });
+    assert.equal(oversizedPricingBasis.status, 400, JSON.stringify(oversizedPricingBasis.body));
+    assert.equal(oversizedPricingBasis.body.error, "invalid_service");
+
+    const blankCreatePricingBasis = await request(instance.api, "/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: { categoryCode: "marketing_collateral", pricingBasis: "   " },
+    });
+    assert.equal(blankCreatePricingBasis.status, 400, JSON.stringify(blankCreatePricingBasis.body));
+    assert.equal(blankCreatePricingBasis.body.error, "invalid_service");
 
     const aliasService = await request(instance.api, "/me/supplier-services", {
       method: "POST",

@@ -15,6 +15,9 @@ import {
   validateSpecBinding,
 } from "./supplier-catalog.js";
 
+const POSTGRES_INTEGER_MIN = -2147483648;
+const POSTGRES_INTEGER_MAX = 2147483647;
+
 function fail(status, code, message, details = {}) {
   throw new CatalogError(status, code, message, details);
 }
@@ -25,6 +28,17 @@ function integer(value, field, { min = Number.MIN_SAFE_INTEGER, max = Number.MAX
     fail(400, "invalid_catalog_item", `${field} must be an integer from ${min} through ${max}.`, { field });
   }
   return parsed;
+}
+
+function postgresInteger(value, field, { min = POSTGRES_INTEGER_MIN, max = POSTGRES_INTEGER_MAX } = {}) {
+  return integer(value, field, {
+    min: Math.max(min, POSTGRES_INTEGER_MIN),
+    max: Math.min(max, POSTGRES_INTEGER_MAX),
+  });
+}
+
+function moneyMinor(value, field, options) {
+  return integer(value, field, options);
 }
 
 function optionalText(value, field, maxLength) {
@@ -111,6 +125,15 @@ function canonicalCategoryCode(store, code) {
   )?.code || null;
 }
 
+function categoryInput(store, value) {
+  const categoryCode = String(value ?? "").trim();
+  const canonicalCode = canonicalCategoryCode(store, categoryCode);
+  if (!categoryCode || categoryCode.length > 120 || !canonicalCode) {
+    fail(400, "invalid_category_code", "Choose an active governed category.", { categoryCode });
+  }
+  return canonicalCode;
+}
+
 function privateService(store, service) {
   return {
     id: service.id,
@@ -177,8 +200,11 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   const { pathname } = url;
 
   if (req.method === "GET" && pathname === "/catalog/shops") {
+    const categoryCode = url.searchParams.has("categoryCode")
+      ? categoryInput(store, url.searchParams.get("categoryCode"))
+      : undefined;
     const page = publicSupplierShops(store, {
-      categoryCode: url.searchParams.get("categoryCode") || undefined,
+      categoryCode,
       cursor: parseCursor(url.searchParams.get("cursor")),
     });
     return { status: 200, body: { ...page, nextCursor: opaqueCursor(page.nextCursor) } };
@@ -212,14 +238,10 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (req.method === "POST" && pathname === "/me/supplier-services") {
     requireSupplier(store, user);
     const body = await readBody(req);
-    const categoryCode = requiredText(body.categoryCode, "categoryCode", 120);
-    const canonicalCode = canonicalCategoryCode(store, categoryCode);
-    if (!canonicalCode) {
-      fail(400, "invalid_category_code", "Choose an active governed category.", { categoryCode });
-    }
+    const canonicalCode = categoryInput(store, body.categoryCode);
     const ts = now();
     const standardTurnaroundHours = body.standardTurnaroundHours == null
-      ? 48 : integer(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 });
+      ? 48 : postgresInteger(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 });
     const service = {
       id: id("svc"), supplierId: user.id, categoryCode: canonicalCode, state: "draft",
       referenceRateMinor: 0, turnaroundHours: standardTurnaroundHours,
@@ -227,15 +249,15 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       standardTurnaroundHours,
       rushEnabled: Boolean(body.rushEnabled),
       rushTurnaroundHours: body.rushEnabled
-        ? integer(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 }) : null,
+        ? postgresInteger(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 }) : null,
       rushPriceMinor: body.rushEnabled
-        ? integer(body.rushPriceMinor, "rushPriceMinor", { min: 0 }) : null,
+        ? moneyMinor(body.rushPriceMinor, "rushPriceMinor", { min: 0 }) : null,
       version: 1, createdAt: ts, updatedAt: ts,
     };
     store.supplierServices.push(service);
     const codes = activeFormatCodes(store, body.formatCodes || []);
     store.supplierServiceFileFormats.push(...codes.map((formatCode) => ({ supplierServiceId: service.id, formatCode })));
-    auditChange(audit, store, user, "supplier_service.create", "supplier_service", service.id, { categoryCode });
+    auditChange(audit, store, user, "supplier_service.create", "supplier_service", service.id, { categoryCode: canonicalCode });
     return { status: 201, body: { service: privateService(store, service) }, mutated: true };
   }
   if (/^\/me\/supplier-services\/[^/]+$/.test(pathname)) {
@@ -253,22 +275,17 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (req.method === "PATCH") {
       const priorCategory = service.categoryCode;
       if (body.categoryCode != null) {
-        const categoryCode = requiredText(body.categoryCode, "categoryCode", 120);
-        const canonicalCode = canonicalCategoryCode(store, categoryCode);
-        if (!canonicalCode) {
-          fail(400, "invalid_category_code", "Choose an active governed category.", { categoryCode });
-        }
-        service.categoryCode = canonicalCode;
+        service.categoryCode = categoryInput(store, body.categoryCode);
       }
       if (body.pricingBasis != null) service.pricingBasis = requiredText(body.pricingBasis, "pricingBasis", 80);
       if (body.standardTurnaroundHours != null) {
-        service.standardTurnaroundHours = integer(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 });
+        service.standardTurnaroundHours = postgresInteger(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 });
         service.turnaroundHours = service.standardTurnaroundHours;
       }
       if (body.rushEnabled != null) service.rushEnabled = Boolean(body.rushEnabled);
       if (service.rushEnabled) {
-        if (body.rushTurnaroundHours != null) service.rushTurnaroundHours = integer(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 });
-        if (body.rushPriceMinor != null) service.rushPriceMinor = integer(body.rushPriceMinor, "rushPriceMinor", { min: 0 });
+        if (body.rushTurnaroundHours != null) service.rushTurnaroundHours = postgresInteger(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 });
+        if (body.rushPriceMinor != null) service.rushPriceMinor = moneyMinor(body.rushPriceMinor, "rushPriceMinor", { min: 0 });
         if (!Number.isSafeInteger(service.rushTurnaroundHours) || !Number.isSafeInteger(service.rushPriceMinor)) {
           fail(400, "invalid_catalog_item", "Rush turnaround and price are required when rush is enabled.");
         }
@@ -320,16 +337,16 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const positions = new Set();
     const tiers = body.tiers.map((tier) => {
       const tierCode = requiredText(tier.tierCode, "tierCode", 80);
-      const sortOrder = integer(tier.sortOrder, "sortOrder", { min: 0 });
+      const sortOrder = postgresInteger(tier.sortOrder, "sortOrder", { min: 0 });
       if (codes.has(tierCode) || positions.has(sortOrder)) fail(400, "invalid_service_pricing", "Tier codes and sort orders must be unique.");
       codes.add(tierCode); positions.add(sortOrder);
-      const minQuantity = integer(tier.minQuantity ?? 1, "minQuantity", { min: 1 });
-      const maxQuantity = tier.maxQuantity == null ? null : integer(tier.maxQuantity, "maxQuantity", { min: minQuantity });
+      const minQuantity = postgresInteger(tier.minQuantity ?? 1, "minQuantity", { min: 1 });
+      const maxQuantity = tier.maxQuantity == null ? null : postgresInteger(tier.maxQuantity, "maxQuantity", { min: minQuantity });
       const colorTier = tier.colorTier == null ? null : String(tier.colorTier);
       if (colorTier != null && !["greyscale", "color"].includes(colorTier)) fail(400, "invalid_service_pricing", "colorTier must be greyscale or color.");
       return {
         id: id("spt"), supplierServiceId: service.id, tierCode, colorTier,
-        minQuantity, maxQuantity, unitPriceMinor: integer(tier.unitPriceMinor, "unitPriceMinor", { min: 0 }), sortOrder,
+        minQuantity, maxQuantity, unitPriceMinor: moneyMinor(tier.unitPriceMinor, "unitPriceMinor", { min: 0 }), sortOrder,
       };
     });
     store.supplierServicePriceTiers = (store.supplierServicePriceTiers || []).filter((tier) => tier.supplierServiceId !== service.id);
@@ -357,9 +374,9 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const item = {
       id: id("cat"), supplierId: user.id, supplierServiceId: service.id,
       name: requiredText(body.name, "name"), description: optionalText(body.description, "description", 4000),
-      basePriceMinor: integer(body.basePriceMinor, "basePriceMinor", { min: 0 }),
+      basePriceMinor: moneyMinor(body.basePriceMinor, "basePriceMinor", { min: 0 }),
       fileFormatMode, active: body.active !== false,
-      sortOrder: integer(body.sortOrder ?? 0, "sortOrder", { min: 0 }),
+      sortOrder: postgresInteger(body.sortOrder ?? 0, "sortOrder", { min: 0 }),
       version: 1, createdAt: ts, updatedAt: ts,
     };
     store.catalogItems.push(item);
@@ -392,9 +409,9 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (req.method === "PATCH") {
       if (body.name != null) item.name = requiredText(body.name, "name");
       if (body.description != null) item.description = optionalText(body.description, "description", 4000);
-      if (body.basePriceMinor != null) item.basePriceMinor = integer(body.basePriceMinor, "basePriceMinor", { min: 0 });
+      if (body.basePriceMinor != null) item.basePriceMinor = moneyMinor(body.basePriceMinor, "basePriceMinor", { min: 0 });
       if (body.active != null) item.active = Boolean(body.active);
-      if (body.sortOrder != null) item.sortOrder = integer(body.sortOrder, "sortOrder", { min: 0 });
+      if (body.sortOrder != null) item.sortOrder = postgresInteger(body.sortOrder, "sortOrder", { min: 0 });
       if (body.fileFormatMode != null && body.fileFormatMode !== item.fileFormatMode) {
         fail(400, "invalid_file_format_mode", "Use the item file-formats endpoint to change inheritance mode atomically.");
       }
@@ -454,7 +471,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       if (!Array.isArray(body.options) || body.options.length === 0) {
         fail(400, "invalid_catalog_options", "Create an option group with at least one active option.");
       }
-      const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 5 });
+      const sortOrder = postgresInteger(body.sortOrder, "sortOrder", { min: 0, max: 5 });
       const name = requiredText(body.name, "name", 80);
       if (store.catalogOptionGroups.some((group) => group.catalogItemId === item.id && group.sortOrder === sortOrder)) {
         fail(409, "catalog_group_exists", "That option-group sort position is already used.");
@@ -472,12 +489,12 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       const positions = new Set();
       const options = body.options.map((candidate) => {
         const label = requiredText(candidate.label, "label", 100);
-        const position = integer(candidate.sortOrder, "sortOrder", { min: 0, max: 19 });
+        const position = postgresInteger(candidate.sortOrder, "sortOrder", { min: 0, max: 19 });
         if (labels.has(label.toLowerCase()) || positions.has(position)) fail(400, "invalid_catalog_options", "Option labels and sort orders must be unique within a group.");
         labels.add(label.toLowerCase()); positions.add(position);
         return {
           id: id("cop"), optionGroupId: group.id, label,
-          priceModifierMinor: integer(candidate.priceModifierMinor ?? 0, "priceModifierMinor"),
+          priceModifierMinor: moneyMinor(candidate.priceModifierMinor ?? 0, "priceModifierMinor"),
           specBinding: validateSpecBinding(store, store.supplierServices.find((service) => service.id === item.supplierServiceId), candidate.specBinding),
           active: candidate.active !== false, sortOrder: position, createdAt: ts, updatedAt: ts,
         };
@@ -513,7 +530,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         }
         if (body.required != null) group.required = Boolean(body.required);
         if (body.sortOrder != null) {
-          const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 5 });
+          const sortOrder = postgresInteger(body.sortOrder, "sortOrder", { min: 0, max: 5 });
           if (store.catalogOptionGroups.some((candidate) => candidate.catalogItemId === item.id && candidate.id !== group.id && candidate.sortOrder === sortOrder)) {
             fail(409, "catalog_group_exists", "That option-group sort position is already used.");
           }
@@ -536,7 +553,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const body = await readBody(req);
     assertExpectedVersion(req, body, "catalog_group_stale", group.version);
     if (req.method === "POST" && !optionId) {
-      const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 19 });
+      const sortOrder = postgresInteger(body.sortOrder, "sortOrder", { min: 0, max: 19 });
       const label = requiredText(body.label, "label", 100);
       if (store.catalogOptions.some((option) => option.optionGroupId === group.id && option.sortOrder === sortOrder)) {
         fail(409, "catalog_option_exists", "That option sort position is already used.");
@@ -548,7 +565,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       const ts = now();
       const option = {
         id: id("cop"), optionGroupId: group.id, label,
-        priceModifierMinor: integer(body.priceModifierMinor ?? 0, "priceModifierMinor"),
+        priceModifierMinor: moneyMinor(body.priceModifierMinor ?? 0, "priceModifierMinor"),
         specBinding: validateSpecBinding(store, service, body.specBinding),
         active: body.active !== false, sortOrder, createdAt: ts, updatedAt: ts,
       };
@@ -572,7 +589,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
           }
           option.label = label;
         }
-        if (body.priceModifierMinor != null) option.priceModifierMinor = integer(body.priceModifierMinor, "priceModifierMinor");
+        if (body.priceModifierMinor != null) option.priceModifierMinor = moneyMinor(body.priceModifierMinor, "priceModifierMinor");
         if (body.specBinding !== undefined) {
           const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
           option.specBinding = validateSpecBinding(store, service, body.specBinding);
@@ -584,7 +601,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
           option.active = Boolean(body.active);
         }
         if (body.sortOrder != null) {
-          const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 19 });
+          const sortOrder = postgresInteger(body.sortOrder, "sortOrder", { min: 0, max: 19 });
           if (store.catalogOptions.some((candidate) => candidate.optionGroupId === group.id && candidate.id !== option.id && candidate.sortOrder === sortOrder)) {
             fail(409, "catalog_option_exists", "That option sort position is already used.");
           }

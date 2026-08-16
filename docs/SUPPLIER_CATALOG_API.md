@@ -4,7 +4,7 @@ Supplier catalog items are sellable offers beneath one taxonomy-governed supplie
 
 ## Public browse
 
-- `GET /catalog/shops?categoryCode=&cursor=` lists approved suppliers that currently have at least one complete active item under a live service. `cursor` is opaque.
+- `GET /catalog/shops?categoryCode=&cursor=` lists approved suppliers that currently have at least one complete active item under a live service. `categoryCode` accepts an active canonical code or retired input alias and is resolved canonically; invalid values return `invalid_category_code`. `cursor` is opaque.
 - `GET /catalog/shops/:supplierId` composes the approved shop profile, identity media references, live service lines, and complete active items.
 - `GET /catalog/items/:itemId` returns one eligible item. Optional repeated or comma-separated `optionIds` query values calculate `effectivePriceMinor`; every required group must have exactly one selected option and an optional group may have zero or one.
 
@@ -37,6 +37,8 @@ The compatibility `/supplier-services/:id` PATCH, submit, verify, suspend, and w
 Attaching a `service_image` is also a service mutation. `POST /files/:fileId/attach` therefore requires the owning service's `expectedVersion` in JSON or an `If-Match` header and returns the advanced service version.
 
 Creating an option group includes a nonempty `options` array because the deferred database invariant requires every persisted group to have an active option. Bounds are six groups per item, twenty options per group, and eight photos per item. Deleting an item referenced by an order snapshot archives it as inactive; an unreferenced item may be removed.
+
+Turnaround, quantity, and unbounded sort-order inputs must fit PostgreSQL `integer` (`0` through `2147483647` where the field permits zero). Minor-unit prices and modifiers instead use the full signed JavaScript-safe range supported by `money_minor`, subject to each field's nonnegative constraint.
 
 Service lines use `draft` while incomplete and `pending_verification` when review-ready. Both self-service state changes and compatibility submit/verify actions reject incomplete lines with `service_not_review_ready`. Suspended and withdrawn complete lines may be resubmitted to `pending_verification`; suppliers cannot make a line live. A live line returns to `pending_verification` when the supplier expands its governed category or accepted formats. Routine catalog, price, and option edits remain immediately derived from approval + live-service eligibility.
 

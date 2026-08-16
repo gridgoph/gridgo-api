@@ -136,6 +136,7 @@ const enqueueMutation = (mutation) => database.transaction(mutation);
 const enqueueDeviceMutation = (mutation) => database.transaction(mutation, { lockKey: "gridgo-device-tokens" });
 const notificationEvents = createNotificationEvents();
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
+const POSTGRES_INTEGER_MAX = 2147483647;
 let storageInitializing = true;
 
 async function save(store) {
@@ -1003,6 +1004,12 @@ function taxonomyCodeSet(taxonomy, kind) {
 function activeCategoryFor(taxonomy, code) {
   const category = resolveCategoryCode(taxonomy, code);
   return category && category.active !== false ? category : null;
+}
+
+function pricingBasisInput(value) {
+  const input = String(value ?? "");
+  const pricingBasis = input.trim();
+  return pricingBasis && input.length <= 80 ? pricingBasis : null;
 }
 
 function validateTaxonomyRefs(store, body) {
@@ -2628,10 +2635,13 @@ async function handleRequest(req, res) {
       const category = activeCategoryFor(store.taxonomy, body.categoryCode);
       const referenceRateMinor = body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0;
       const turnaroundHours = body.turnaroundHours != null ? Number(body.turnaroundHours) : 48;
-      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
+      const pricingBasis = body.pricingBasis == null ? "per_unit" : pricingBasisInput(body.pricingBasis);
+      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0
+          || !Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0 || turnaroundHours > POSTGRES_INTEGER_MAX
+          || !pricingBasis) {
         return send(res, 400, {
           error: "invalid_service",
-          message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
+          message: "Use a non-negative integer referenceRateMinor, a positive PostgreSQL integer turnaroundHours, and a nonblank pricingBasis of at most 80 characters.",
         });
       }
       const ts = now();
@@ -2646,7 +2656,7 @@ async function handleRequest(req, res) {
         sizeMax: body.sizeMax ?? null,
         qtyMin: body.qtyMin != null ? Number(body.qtyMin) : null,
         qtyMax: body.qtyMax != null ? Number(body.qtyMax) : null,
-        pricingBasis: body.pricingBasis || "per_unit",
+        pricingBasis,
         referenceRateMinor,
         turnaroundHours,
         standardTurnaroundHours: turnaroundHours,
@@ -2722,13 +2732,15 @@ async function handleRequest(req, res) {
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
       const turnaroundHours = body.turnaroundHours == null ? null : Number(body.turnaroundHours);
+      const pricingBasis = body.pricingBasis == null ? null : pricingBasisInput(body.pricingBasis);
       if (
         (referenceRateMinor != null && (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0)) ||
-        (turnaroundHours != null && (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0))
+        (turnaroundHours != null && (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0 || turnaroundHours > POSTGRES_INTEGER_MAX)) ||
+        (body.pricingBasis != null && !pricingBasis)
       ) {
         return send(res, 400, {
           error: "invalid_service",
-          message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
+          message: "Use a non-negative integer referenceRateMinor, a positive PostgreSQL integer turnaroundHours, and a nonblank pricingBasis of at most 80 characters.",
         });
       }
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
@@ -2763,6 +2775,8 @@ async function handleRequest(req, res) {
             if (["qtyMin", "qtyMax", "referenceRateMinor", "turnaroundHours", "capacityDaily", "capacityWeekly"].includes(k)) {
               service[k] = Number(body[k]);
               if (k === "turnaroundHours") service.standardTurnaroundHours = service[k];
+            } else if (k === "pricingBasis") {
+              service[k] = pricingBasis;
             } else {
               service[k] = body[k];
             }

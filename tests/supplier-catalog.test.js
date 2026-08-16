@@ -200,3 +200,32 @@ test("order-line helper rejects a stale service-derived projection", () => {
   );
   assert.deepEqual(store.orderLineItems, []);
 });
+
+test("order-line helper rejects values outside PostgreSQL integer columns", () => {
+  const store = fixture();
+  const selection = {
+    orderId: "order",
+    catalogItemId: "item",
+    expectedVersion: 3,
+    expectedServiceVersion: 1,
+    optionIds: ["a4"],
+    acceptedFormatCode: "pdf",
+    quantity: 1,
+    structuredSpec: { paper_size: "A4" },
+  };
+
+  assert.throws(
+    () => appendOrderLineSnapshot(store, { ...selection, quantity: 3000000000 }),
+    (error) => error.status === 400
+      && error.code === "invalid_catalog_item"
+      && error.details.field === "quantity",
+  );
+  assert.throws(
+    () => appendOrderLineSnapshot(store, { ...selection, sortOrder: 3000000000 }),
+    (error) => error.status === 400
+      && error.code === "invalid_catalog_item"
+      && error.details.field === "sortOrder",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+  assert.deepEqual(store.orderLineItemOptions, []);
+});

@@ -1,6 +1,8 @@
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_MINOR = -MAX_SAFE_MINOR;
 
+const POSTGRES_INTEGER_MAX = 2147483647;
+
 function compareSortOrder(left, right) {
   return (left.sortOrder ?? 0) - (right.sortOrder ?? 0) || left.id.localeCompare(right.id);
 }
@@ -461,8 +463,12 @@ export function createOrderLineSnapshot(store, selection, createId) {
   }
   const { effectiveUnitPriceMinor, selectedOptions } = selectedCatalogPrice(store, item, selection.optionIds || []);
   const quantity = Number(selection.quantity);
-  if (!Number.isSafeInteger(quantity) || quantity <= 0) {
-    throw new CatalogError(400, "invalid_catalog_item", "quantity must be a positive integer.", { field: "quantity" });
+  if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > POSTGRES_INTEGER_MAX) {
+    throw new CatalogError(400, "invalid_catalog_item", "quantity must be a positive PostgreSQL integer.", { field: "quantity" });
+  }
+  const sortOrder = Number(selection.sortOrder ?? 0);
+  if (!Number.isSafeInteger(sortOrder) || sortOrder < 0 || sortOrder > POSTGRES_INTEGER_MAX) {
+    throw new CatalogError(400, "invalid_catalog_item", "sortOrder must be a non-negative PostgreSQL integer.", { field: "sortOrder" });
   }
   const formats = effectiveAcceptedFormats(store, item).map((format) => format.code);
   if (!formats.includes(selection.acceptedFormatCode)) {
@@ -522,7 +528,7 @@ export function createOrderLineSnapshot(store, selection, createId) {
       lineSubtotalMinor: subtotal,
       acceptedFormatCodesSnapshot: formats,
       structuredSpecSnapshot: structuredClone(structuredSpec),
-      sortOrder: selection.sortOrder ?? 0,
+      sortOrder,
       createdAt,
     },
     options,
