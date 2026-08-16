@@ -314,16 +314,66 @@ async function addApprovalDecisionFixtures(database) {
         categoryCode: "marketing_collateral", state: "pending_verification",
         pricingBasis: "per_unit", referenceRateMinor: 2500, turnaroundHours: 24,
         materialCodes: [], finishCodes: [], productFamilyIds: ["business_cards"], zones: [],
-        createdAt: AT, updatedAt: AT,
+        version: 1, createdAt: AT, updatedAt: AT,
       },
       {
         id: "svc_pending_incomplete", supplierId: "user_supplier_pending",
         categoryCode: "marketing_collateral", state: "pending_verification",
-        pricingBasis: "", referenceRateMinor: 2500, turnaroundHours: 24,
+        pricingBasis: null, referenceRateMinor: 2500, turnaroundHours: 24,
         materialCodes: [], finishCodes: [], productFamilyIds: [], zones: [],
-        createdAt: AT, updatedAt: AT,
+        version: 1, createdAt: AT, updatedAt: AT,
+      },
+      {
+        id: "svc_pending_without_item", supplierId: "user_supplier_pending",
+        categoryCode: "marketing_collateral", state: "pending_verification",
+        pricingBasis: "per_unit", referenceRateMinor: 1500, turnaroundHours: 24,
+        materialCodes: [], finishCodes: [], productFamilyIds: ["flyers"], zones: [],
+        version: 1, createdAt: AT, updatedAt: AT,
       },
     );
+    store.supplierServiceFileFormats.push(
+      { supplierServiceId: "svc_pending_complete", formatCode: "pdf" },
+      { supplierServiceId: "svc_pending_incomplete", formatCode: "pdf" },
+      { supplierServiceId: "svc_pending_without_item", formatCode: "pdf" },
+    );
+    store.catalogItems.push({
+      id: "catalog_pending_complete",
+      supplierId: "user_supplier_pending",
+      supplierServiceId: "svc_pending_complete",
+      name: "Business cards",
+      description: "",
+      basePriceMinor: 2500,
+      fileFormatMode: "inherit",
+      active: true,
+      sortOrder: 0,
+      version: 1,
+      createdAt: AT,
+      updatedAt: AT,
+    });
+    store.files.push(
+      {
+        fileId: "file_pending_catalog_photo", ownerId: "user_supplier_pending",
+        purpose: "catalog_item_photo", originalFilename: "cards.jpg",
+        declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+        size: 100, state: "ready", objectKey: "catalog/cards.jpg", references: [],
+        createdAt: AT, readyAt: AT,
+      },
+      {
+        fileId: "file_pending_shop_logo", ownerId: "user_supplier_pending",
+        purpose: "supplier_shop_image", originalFilename: "logo.png",
+        declaredContentType: "image/png", detectedContentType: "image/png",
+        size: 100, state: "ready", objectKey: "catalog/logo.png", references: [],
+        createdAt: AT, readyAt: AT,
+      },
+    );
+    store.catalogItemPhotos.push({
+      catalogItemId: "catalog_pending_complete", fileId: "file_pending_catalog_photo",
+      sortOrder: 0, altText: "Business cards", createdAt: AT,
+    });
+    store.supplierShopMedia.push({
+      supplierId: "user_supplier_pending", slot: "logo",
+      fileId: "file_pending_shop_logo", updatedAt: AT,
+    });
     await saveStore(database, store);
   });
 }
@@ -675,7 +725,9 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     });
     assert.equal(incomplete.status, 409, JSON.stringify(incomplete.body));
     assert.equal(incomplete.body.error, "supplier_profile_incomplete");
-    assert.deepEqual(incomplete.body.missing, ["review_ready_service_line"]);
+    assert.ok(incomplete.body.missing.includes("review_ready_service"));
+    assert.ok(incomplete.body.missing.includes("active_catalog_item"));
+    assert.ok(incomplete.body.missing.includes("shop_identity_media"));
 
     const blankRejection = await request(instance.api, "/approval-cases/case_supplier_incomplete/reject", {
       method: "POST", subject: "clerk_ops",
@@ -698,6 +750,7 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(approved.body.approvalCase.status, "approved");
     assert.equal(approved.body.approvalCase.version, 2);
     assert.deepEqual(approved.body.publishedServiceIds, ["svc_pending_complete"]);
+    assert.equal(approved.body.services.find((service) => service.id === "svc_pending_complete").version, 2);
     assert.equal(approved.body.replayed, false);
 
     const replayed = await request(instance.api, "/approval-cases/case_supplier_pending/approve", {
@@ -722,6 +775,7 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
     assert.equal(suspended.body.approvalCase.status, "suspended");
     assert.deepEqual(suspended.body.suspendedServiceIds, ["svc_pending_complete"]);
+    assert.equal(suspended.body.services.find((service) => service.id === "svc_pending_complete").version, 3);
 
     const restored = await request(instance.api, "/approval-cases/case_supplier_pending/restore", {
       method: "POST", subject: "clerk_super",
@@ -729,16 +783,20 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     });
     assert.equal(restored.status, 200, JSON.stringify(restored.body));
     assert.equal(restored.body.approvalCase.status, "approved");
+    assert.deepEqual(restored.body.publishedServiceIds, ["svc_pending_complete"]);
+    assert.equal(restored.body.services.find((service) => service.id === "svc_pending_complete").version, 4);
 
-    const beforeLineReview = (await request(instance.api, "/supplier-services/svc_pending_complete", {
+    const restoredLine = (await request(instance.api, "/supplier-services/svc_pending_complete", {
       subject: "clerk_ops",
     })).body.service;
-    assert.equal(beforeLineReview.state, "suspended");
-    const lineRestored = await request(instance.api, "/supplier-services/svc_pending_complete/verify", {
-      method: "POST", subject: "clerk_ops", body: { reason: "Line reviewed" },
+    assert.equal(restoredLine.state, "live");
+    assert.equal(restoredLine.version, 4);
+
+    const newLineBlocked = await request(instance.api, "/supplier-services/svc_pending_without_item/verify", {
+      method: "POST", subject: "clerk_ops", body: { expectedVersion: 1 },
     });
-    assert.equal(lineRestored.status, 200, JSON.stringify(lineRestored.body));
-    assert.equal(lineRestored.body.service.state, "live");
+    assert.equal(newLineBlocked.status, 409, JSON.stringify(newLineBlocked.body));
+    assert.equal(newLineBlocked.body.error, "supplier_not_ready_for_publication");
 
     const persisted = await loadStore(database);
     const caseEvents = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === "case_supplier_pending");
@@ -754,8 +812,12 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     ]);
     const service = persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_complete");
     assert.equal(service.state, "live");
+    assert.equal(service.version, 4);
     assert.equal(service.approvalSuspensionPreviousState, undefined);
     assert.equal(persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_incomplete").state, "pending_verification");
+    const unpublished = persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_without_item");
+    assert.equal(unpublished.state, "pending_verification");
+    assert.equal(unpublished.version, 1);
     assert.equal(persisted.users.find((candidate) => candidate.id === "user_supplier_pending").verificationStatus, "approved");
   } finally {
     instance.child.kill("SIGTERM");
@@ -1617,6 +1679,10 @@ test("pending suppliers can edit catalog while public browse requires approval a
       fileId: "catalog_photo_two", ownerId: "user_supplier", purpose: "catalog_item_photo",
       originalFilename: "poster-two.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
       size: 100, state: "ready", objectKey: "catalog/poster-two.jpg", references: [], createdAt: AT,
+    }, {
+      fileId: "catalog_shop_logo", ownerId: "user_supplier", purpose: "supplier_shop_image",
+      originalFilename: "logo.png", declaredContentType: "image/png", detectedContentType: "image/png",
+      size: 100, state: "ready", objectKey: "catalog/logo.png", references: [], createdAt: AT,
     });
     store.catalogItems.push({
       id: "catalog_poster", supplierId: "user_supplier", supplierServiceId: "svc_banner",
@@ -1628,6 +1694,9 @@ test("pending suppliers can edit catalog while public browse requires approval a
       catalogItemId: "catalog_poster", fileId: "catalog_photo", sortOrder: 0, createdAt: AT,
     }, {
       catalogItemId: "catalog_poster", fileId: "catalog_photo_two", sortOrder: 1, createdAt: AT,
+    });
+    store.supplierShopMedia.push({
+      supplierId: "user_supplier", slot: "logo", fileId: "catalog_shop_logo", updatedAt: AT,
     });
     await saveStore(database, store);
   });

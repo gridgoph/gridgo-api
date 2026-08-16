@@ -256,7 +256,13 @@ export function catalogGroupsForItem(store, itemId, { includeInactiveOptions = t
     }));
 }
 
-export function serviceLineBlockers(store, service, { publicOnly = false, formatCodes, index } = {}) {
+export function serviceLineBlockers(store, service, {
+  publicOnly = false,
+  formatCodes,
+  index,
+  allowedStates = ["pending_verification", "live"],
+  requireActiveCategory = false,
+} = {}) {
   const blockers = [];
   const pricingBasis = String(service?.pricingBasis || "").trim();
   const turnaround = service && Object.hasOwn(service, "standardTurnaroundHours")
@@ -274,11 +280,13 @@ export function serviceLineBlockers(store, service, { publicOnly = false, format
   if (acceptedFormatCodes.filter((code) => activeFormatRegistry(store, index).has(code)).length === 0) {
     blockers.push("accepted_file_formats");
   }
-  if (publicOnly) {
-    if (service?.state !== "live") blockers.push("service_not_live");
+  if (publicOnly || requireActiveCategory) {
     if (!activeCanonicalCategoryCode(store, service?.categoryCode)) blockers.push("service_category");
   }
-  if (!publicOnly && service && !["pending_verification", "live"].includes(service.state)) {
+  if (publicOnly) {
+    if (service?.state !== "live") blockers.push("service_not_live");
+  }
+  if (!publicOnly && service && !allowedStates.includes(service.state)) {
     blockers.push("service_not_review_ready");
   }
   return blockers;
@@ -312,7 +320,12 @@ export function assertServiceLineReadinessInvariant(store, service, options) {
   assertServiceLineReviewReady(store, service, options);
 }
 
-export function catalogItemBlockers(store, item, { publicOnly = false, index } = {}) {
+export function catalogItemBlockers(store, item, {
+  publicOnly = false,
+  index,
+  allowedServiceStates,
+  requireActiveCategory = false,
+} = {}) {
   const blockers = [];
   const service = index
     ? index.servicesById.get(item?.supplierServiceId)
@@ -320,7 +333,12 @@ export function catalogItemBlockers(store, item, { publicOnly = false, index } =
   if (!item || !service || service.supplierId !== item.supplierId) return ["owning_service"];
   if (!String(item.name || "").trim()) blockers.push("name");
   if (!Number.isSafeInteger(item.basePriceMinor) || item.basePriceMinor < 0) blockers.push("base_price");
-  if (serviceLineBlockers(store, service, { publicOnly, index }).length) blockers.push("service_line");
+  if (serviceLineBlockers(store, service, {
+    publicOnly,
+    index,
+    allowedStates: allowedServiceStates,
+    requireActiveCategory,
+  }).length) blockers.push("service_line");
   if (effectiveAcceptedFormats(store, item, { index }).length === 0) blockers.push("accepted_file_formats");
   const photos = (index ? index.photosByItem.get(item.id) || [] : (store.catalogItemPhotos || [])
     .filter((photo) => photo.catalogItemId === item.id))
@@ -345,14 +363,16 @@ export function catalogItemBlockers(store, item, { publicOnly = false, index } =
   return blockers;
 }
 
-export function supplierCatalogReadiness(store, supplierId) {
-  if (approvalStatus(store, supplierId) === "approved") {
-    return { readyForApproval: true, missing: [] };
-  }
+function supplierCatalogTransitionReadiness(store, supplierId, { restoring }) {
+  const approvalCase = (store.approvalCases || []).find(
+    (candidate) => candidate.userId === supplierId && candidate.kind === "supplier",
+  );
   const missing = [];
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
   if (!profile || !String(profile.shopName || "").trim() || !String(profile.contactName || "").trim()
-      || !profile.shop || !String(profile.shop.label || "").trim()) {
+      || !profile.shop || !String(profile.shop.label || "").trim()
+      || !Number.isFinite(profile.shop.lat) || profile.shop.lat < -90 || profile.shop.lat > 90
+      || !Number.isFinite(profile.shop.lng) || profile.shop.lng < -180 || profile.shop.lng > 180) {
     missing.push("supplier_profile");
   }
 
@@ -365,21 +385,57 @@ export function supplierCatalogReadiness(store, supplierId) {
     missing.push("pickup_payment_mode");
   }
 
+  const allowedServiceStates = restoring ? ["suspended"] : ["pending_verification"];
   const services = (store.supplierServices || []).filter((service) => service.supplierId === supplierId);
-  const reviewReady = services.filter((service) => serviceLineBlockers(store, service).length === 0);
+  const candidates = services.filter((service) => restoring
+    ? service.state === "suspended" && service.approvalSuspensionCaseId === approvalCase.id
+    : service.state === "pending_verification");
+  const candidateIds = new Set(candidates.map((service) => service.id));
+  const reviewReady = candidates.filter((service) => serviceLineBlockers(store, service, {
+    allowedStates: allowedServiceStates,
+    requireActiveCategory: true,
+  }).length === 0);
   if (reviewReady.length === 0) missing.push("review_ready_service");
 
   const activeItems = (store.catalogItems || []).filter((item) => item.supplierId === supplierId && item.active !== false);
-  const completeItems = activeItems.filter((item) => catalogItemBlockers(store, item).length === 0);
+  const blockersForItem = (item) => {
+    const blockers = catalogItemBlockers(store, item, {
+      allowedServiceStates,
+      requireActiveCategory: true,
+    });
+    if (!candidateIds.has(item.supplierServiceId) && !blockers.includes("service_line")) blockers.push("service_line");
+    return blockers;
+  };
+  const completeItems = activeItems.filter((item) => blockersForItem(item).length === 0);
   if (completeItems.length === 0) missing.push("active_catalog_item");
   for (const item of activeItems) {
-    for (const blocker of catalogItemBlockers(store, item)) missing.push(`catalog_item:${item.id}:${blocker}`);
+    for (const blocker of blockersForItem(item)) missing.push(`catalog_item:${item.id}:${blocker}`);
   }
 
   const hasShopMedia = (store.supplierShopMedia || [])
     .some((media) => media.supplierId === supplierId && readyFile(store, media.fileId));
   if (!hasShopMedia) missing.push("shop_identity_media");
-  return { readyForApproval: missing.length === 0, missing };
+  const completeServiceIds = new Set(completeItems.map((item) => item.supplierServiceId));
+  const publishableServiceIds = reviewReady
+    .filter((service) => completeServiceIds.has(service.id))
+    .map((service) => service.id);
+  return { readyForApproval: missing.length === 0, missing, publishableServiceIds };
+}
+
+export function supplierCatalogPublicationReadiness(store, supplierId) {
+  return supplierCatalogTransitionReadiness(store, supplierId, { restoring: false });
+}
+
+export function supplierCatalogReadiness(store, supplierId) {
+  const approvalCase = (store.approvalCases || []).find(
+    (candidate) => candidate.userId === supplierId && candidate.kind === "supplier",
+  );
+  if (approvalCase?.status === "approved") {
+    return { readyForApproval: true, missing: [], publishableServiceIds: [] };
+  }
+  return supplierCatalogTransitionReadiness(store, supplierId, {
+    restoring: approvalCase?.status === "suspended",
+  });
 }
 
 export function validateSpecBinding(store, service, specBinding) {

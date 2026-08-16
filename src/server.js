@@ -24,7 +24,6 @@ import {
   APPROVAL_DECISIONS,
   approvalDecisionInput,
   decideApprovalCase,
-  supplierApprovalReadiness,
 } from "./approval-cases.js";
 import {
   AttachmentError,
@@ -91,11 +90,13 @@ import {
 } from "./runtime-config.js";
 import { isPublicSupplierCatalogRoute, routeSupplierCatalog } from "./catalog-routes.js";
 import {
+  CatalogError,
   advanceSupplierServiceVersion,
   assertExpectedVersion,
   assertServiceLineReadinessInvariant,
   assertServiceLineReviewReady,
   assertSupplierServicePendingVerification,
+  supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
   transitionSupplierServiceToLive,
   transitionSupplierServiceToPending,
@@ -2879,6 +2880,15 @@ async function handleRequest(req, res) {
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       assertServiceLineReviewReady(store, service);
       assertSupplierServicePendingVerification(service);
+      const readiness = supplierCatalogPublicationReadiness(store, service.supplierId);
+      if (!readiness.readyForApproval || !readiness.publishableServiceIds.includes(service.id)) {
+        throw new CatalogError(
+          409,
+          "supplier_not_ready_for_publication",
+          "Complete the supplier catalog readiness checklist before publishing this service.",
+          { missing: readiness.missing, serviceId: service.id },
+        );
+      }
       const ts = now();
       transitionSupplierServiceToLive(service, ts, user.id);
       delete service.approvalSuspensionPreviousState;

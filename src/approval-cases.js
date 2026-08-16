@@ -1,4 +1,8 @@
-import { resolveCategoryCode } from "./taxonomy.js";
+import {
+  advanceSupplierServiceVersion,
+  supplierCatalogReadiness,
+  transitionSupplierServiceToLive,
+} from "./supplier-catalog.js";
 
 export const APPROVAL_CASE_KINDS = new Set(["business_client", "supplier", "rider"]);
 export const APPROVAL_CASE_STATUSES = new Set(["pending", "approved", "rejected", "suspended"]);
@@ -21,61 +25,6 @@ const CASE_KIND_MEMBERSHIP_ROLE = {
 
 function nonblank(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function activeCategory(store, code) {
-  const category = resolveCategoryCode(store.taxonomy, code);
-  return category?.active !== false ? category : null;
-}
-
-/**
- * The task-E catalog tables intentionally are not guessed here. This function
- * is the single approval-readiness seam they extend after their forward
- * migration lands. On today's schema, a review-ready line is the strongest
- * complete publication unit available: an active governed category, pricing
- * basis/rate, and turnaround, already submitted for verification.
- */
-export function supplierApprovalReadiness(store, supplierId) {
-  const missing = [];
-  const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
-  if (!profile) {
-    missing.push("supplier_profile");
-  } else {
-    if (!nonblank(profile.shopName)) missing.push("shop_name");
-    if (!nonblank(profile.contactName)) missing.push("contact_name");
-    if (
-      !profile.shop ||
-      !Number.isFinite(profile.shop.lat) ||
-      profile.shop.lat < -90 ||
-      profile.shop.lat > 90 ||
-      !Number.isFinite(profile.shop.lng) ||
-      profile.shop.lng < -180 ||
-      profile.shop.lng > 180 ||
-      !nonblank(profile.shop.label)
-    ) {
-      missing.push("shop_location");
-    }
-  }
-
-  const pendingServices = (store.supplierServices || []).filter(
-    (service) => service.supplierId === supplierId && service.state === "pending_verification",
-  );
-  const publishableServices = pendingServices.filter(
-    (service) =>
-      Boolean(activeCategory(store, service.categoryCode)) &&
-      Boolean(nonblank(service.pricingBasis)) &&
-      Number.isSafeInteger(service.referenceRateMinor) &&
-      service.referenceRateMinor >= 0 &&
-      Number.isSafeInteger(service.turnaroundHours) &&
-      service.turnaroundHours > 0,
-  );
-  if (publishableServices.length === 0) missing.push("review_ready_service_line");
-
-  return {
-    readyForApproval: missing.length === 0,
-    missing,
-    publishableServiceIds: publishableServices.map((service) => service.id),
-  };
 }
 
 export function approvalDecisionInput(action, body) {
@@ -150,7 +99,7 @@ function suspendSupplierServices(store, approvalCase, actorId, at, reason) {
     service.suspendedAt = at;
     service.suspendedBy = actorId;
     service.suspendReason = reason;
-    service.updatedAt = at;
+    advanceSupplierServiceVersion(service, at);
     suspended.push(service.id);
   }
   return suspended;
@@ -162,13 +111,10 @@ function publishSupplierServices(store, approvalCase, serviceIds, actorId, at) {
   const published = [];
   for (const service of store.supplierServices || []) {
     if (!selected.has(service.id)) continue;
-    service.state = "live";
-    service.verifiedAt = at;
-    service.verifiedBy = actorId;
-    service.suspendedAt = null;
-    service.suspendedBy = null;
-    service.suspendReason = null;
-    service.updatedAt = at;
+    transitionSupplierServiceToLive(service, at, actorId);
+    delete service.approvalSuspensionPreviousState;
+    delete service.approvalSuspensionCaseId;
+    advanceSupplierServiceVersion(service, at);
     published.push(service.id);
   }
   return published;
@@ -233,8 +179,8 @@ export function decideApprovalCase({
   }
 
   let readiness = null;
-  if (action === "approve" && approvalCase.kind === "supplier") {
-    readiness = supplierApprovalReadiness(store, approvalCase.userId);
+  if (["approve", "restore"].includes(action) && approvalCase.kind === "supplier") {
+    readiness = supplierCatalogReadiness(store, approvalCase.userId);
     if (!readiness.readyForApproval) {
       fail(409, "supplier_profile_incomplete", "Complete the supplier approval checklist before approving.", {
         missing: readiness.missing,
@@ -253,14 +199,12 @@ export function decideApprovalCase({
   if (action === "reject") approvalCase.rejectionReason = input.reason;
   if (action === "suspend") approvalCase.suspensionReason = input.reason;
 
-  const publishedServiceIds = action === "approve"
+  const publishedServiceIds = ["approve", "restore"].includes(action)
     ? publishSupplierServices(store, approvalCase, readiness?.publishableServiceIds || [], actor.id, at)
     : [];
   const suspendedServiceIds = action === "suspend"
     ? suspendSupplierServices(store, approvalCase, actor.id, at, input.reason)
     : [];
-  // Restore intentionally changes only the account case. Every service line
-  // stays suspended until an approver explicitly reviews its verify route.
   updateLegacyVerification(store, approvalCase, action, actor.id, at, input.reason);
 
   const event = {

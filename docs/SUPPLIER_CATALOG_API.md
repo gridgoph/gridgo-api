@@ -52,9 +52,9 @@ Readiness-owning edits must leave `pending_verification`, `live`, and `suspended
 
 `accepted_file_formats` is the governed registry. Service formats are defaults. An item in `inherit` mode stores no item-format rows; an item in `override` mode stores at least one active format. The seeded codes are `pdf`, `png`, `jpeg`, `psd`, `canva_link`, `3mf`, and `stl`; Canva is a URL input kind.
 
-`GET /me/supplier-readiness` and `/auth/me/supplier` return the same catalog readiness projection. It identifies profile, payment-term integration, review-ready service, complete active item, item-specific, shop-media, and pickup-mode blockers. Supplier payment terms are owned by task H; until that schema is integrated, `supplier_payment_terms` remains an explicit blocker.
+`GET /me/supplier-readiness` and `/auth/me/supplier` return the same catalog readiness projection. It identifies profile, payment-term integration, review-ready service, complete active item, item-specific, shop-media, and pickup-mode blockers, plus the service IDs eligible for the next approval-driven publish or restore. Supplier payment terms are owned by task H; until that schema is integrated, `supplier_payment_terms` remains an explicit blocker.
 
-An already-approved supplier remains grandfathered ready. The full projection applies again when its approval is reopened, so the next approval-relevant transition consumes the new requirements without retroactively invalidating an existing approval.
+An already-approved supplier remains grandfathered ready. The full projection applies again when its approval is reopened or an approver reviews a new or resubmitted line, so the next approval-relevant transition consumes the new requirements without retroactively invalidating an existing approval. Account suspension does not run readiness; restore republishes only complete lines suspended by that account case and does not clear an independent line suspension.
 
 ## Immutable checkout snapshots
 

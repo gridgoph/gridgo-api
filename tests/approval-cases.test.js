@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   approvalDecisionInput,
   decideApprovalCase,
-  supplierApprovalReadiness,
 } from "../src/approval-cases.js";
 
 const AT = "2026-08-16T00:00:00.000Z";
@@ -31,9 +30,42 @@ function supplierStore() {
       referenceRateMinor: 1000,
       turnaroundHours: 24,
       state: "pending_verification",
+      version: 1,
       createdAt: AT,
       updatedAt: AT,
     }],
+    supplierPaymentTerms: [{
+      supplierId: "supplier",
+      deliveryDownpaymentRateBps: 0,
+      pickupFullOnlineEnabled: true,
+      pickupDownpaymentStoreEnabled: false,
+      updatedAt: AT,
+    }],
+    acceptedFileFormats: [{ code: "pdf", displayName: "PDF", inputKind: "file", active: true }],
+    supplierServiceFileFormats: [{ supplierServiceId: "service_complete", formatCode: "pdf" }],
+    catalogItems: [{
+      id: "item_complete",
+      supplierId: "supplier",
+      supplierServiceId: "service_complete",
+      name: "Poster",
+      description: "",
+      basePriceMinor: 1000,
+      fileFormatMode: "inherit",
+      active: true,
+      sortOrder: 0,
+      version: 1,
+      createdAt: AT,
+      updatedAt: AT,
+    }],
+    catalogItemFileFormats: [],
+    catalogOptionGroups: [],
+    catalogOptions: [],
+    files: [
+      { fileId: "photo", state: "ready", objectKey: "catalog/photo.jpg" },
+      { fileId: "logo", state: "ready", objectKey: "catalog/logo.png" },
+    ],
+    catalogItemPhotos: [{ catalogItemId: "item_complete", fileId: "photo", sortOrder: 0, createdAt: AT }],
+    supplierShopMedia: [{ supplierId: "supplier", slot: "logo", fileId: "logo", updatedAt: AT }],
     approvalCases: [{
       id: "case_supplier",
       userId: "supplier",
@@ -50,27 +82,6 @@ function supplierStore() {
     notifications: [],
   };
 }
-
-test("supplier approval readiness publishes only complete submitted service lines", () => {
-  const store = supplierStore();
-  store.supplierServices.push({
-    ...store.supplierServices[0],
-    id: "service_incomplete",
-    pricingBasis: "",
-  });
-  assert.deepEqual(supplierApprovalReadiness(store, "supplier"), {
-    readyForApproval: true,
-    missing: [],
-    publishableServiceIds: ["service_complete"],
-  });
-
-  store.supplierServices[0].state = "draft";
-  assert.deepEqual(supplierApprovalReadiness(store, "supplier"), {
-    readyForApproval: false,
-    missing: ["review_ready_service_line"],
-    publishableServiceIds: [],
-  });
-});
 
 test("approval decision input is strict and requires transition-specific explanations", () => {
   assert.equal(approvalDecisionInput("reject", { expectedVersion: 1, requestId: "r", reason: " " }).error, "reason_required");
@@ -146,7 +157,7 @@ test("legacy verification stays untouched when the legacy role diverges from the
   assert.equal(store.users[0].verifiedBy, "ops_original");
 });
 
-test("supplier approve, suspend, and restore preserve explicit service review", () => {
+test("supplier approve, suspend, and restore enforce readiness and service versions", () => {
   const store = supplierStore();
   let sequence = 0;
   const createId = (prefix) => `${prefix}_${sequence += 1}`;
@@ -166,6 +177,7 @@ test("supplier approve, suspend, and restore preserve explicit service review", 
   assert.equal(approved.approvalCase.version, 2);
   assert.deepEqual(approved.publishedServiceIds, ["service_complete"]);
   assert.equal(store.supplierServices[0].state, "live");
+  assert.equal(store.supplierServices[0].version, 2);
   assert.equal(store.notifications.length, 1);
 
   const replayed = decideApprovalCase({
@@ -193,9 +205,30 @@ test("supplier approve, suspend, and restore preserve explicit service review", 
     createId,
   });
   assert.equal(store.supplierServices[0].state, "suspended");
+  assert.equal(store.supplierServices[0].version, 3);
   assert.equal(store.supplierServices[0].approvalSuspensionPreviousState, "live");
 
-  decideApprovalCase({
+  store.catalogItemPhotos.length = 0;
+  assert.throws(
+    () => decideApprovalCase({
+      store,
+      caseId: "case_supplier",
+      action: "restore",
+      input: { expectedVersion: 3, requestId: "request_restore_blocked", reason: "Account cleared" },
+      actor,
+      actorRole: "ops_admin",
+      at: AT,
+      createId,
+    }),
+    (error) => error.status === 409
+      && error.code === "supplier_profile_incomplete"
+      && error.details.missing.includes("active_catalog_item"),
+  );
+  assert.equal(store.approvalCases[0].status, "suspended");
+  assert.equal(store.supplierServices[0].version, 3);
+
+  store.catalogItemPhotos.push({ catalogItemId: "item_complete", fileId: "photo", sortOrder: 0, createdAt: AT });
+  const restored = decideApprovalCase({
     store,
     caseId: "case_supplier",
     action: "restore",
@@ -206,5 +239,8 @@ test("supplier approve, suspend, and restore preserve explicit service review", 
     createId,
   });
   assert.equal(store.approvalCases[0].status, "approved");
-  assert.equal(store.supplierServices[0].state, "suspended");
+  assert.deepEqual(restored.publishedServiceIds, ["service_complete"]);
+  assert.equal(store.supplierServices[0].state, "live");
+  assert.equal(store.supplierServices[0].version, 4);
+  assert.equal(store.supplierServices[0].approvalSuspensionCaseId, undefined);
 });

@@ -10,6 +10,7 @@ import {
   publicSupplierShop,
   publicSupplierShops,
   selectedCatalogPrice,
+  supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
   transitionSupplierServiceToDraft,
 } from "../src/supplier-catalog.js";
@@ -28,7 +29,7 @@ function fixture({ approvalStatus = "approved", fileFormatMode = "inherit" } = {
       shop: { lat: 7.1, lng: 125.6, label: "Davao" }, pickupAvailable: false,
     }],
     supplierPaymentTerms: [{ supplierId: "supplier", pickupFullOnlineEnabled: true, pickupDownpaymentStoreEnabled: false }],
-    approvalCases: [{ userId: "supplier", kind: "supplier", status: approvalStatus }],
+    approvalCases: [{ id: "case_supplier", userId: "supplier", kind: "supplier", status: approvalStatus }],
     acceptedFileFormats: [
       { code: "pdf", displayName: "PDF", inputKind: "file", active: true },
       { code: "png", displayName: "PNG", inputKind: "file", active: true },
@@ -155,7 +156,11 @@ test("pending suppliers stay private while approved complete catalog items publi
   assert.equal(item.serviceVersion, 1);
   assert.deepEqual(item.acceptedFormats.map((format) => format.code), ["pdf"]);
   assert.equal(item.photos[0].url, "/catalog/media/photo");
-  assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), { readyForApproval: true, missing: [] });
+  assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: [],
+  });
 });
 
 test("public catalog and checkout require a current supplier membership", () => {
@@ -261,13 +266,55 @@ test("approved suppliers remain grandfathered ready until approval is reopened",
   approved.supplierServiceFileFormats.length = 0;
   approved.catalogItems.length = 0;
   approved.supplierShopMedia.length = 0;
-  assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), { readyForApproval: true, missing: [] });
+  assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: [],
+  });
 
   approved.approvalCases[0].status = "suspended";
   const reopened = supplierCatalogReadiness(approved, "supplier");
   assert.equal(reopened.readyForApproval, false);
   assert.ok(reopened.missing.includes("supplier_profile"));
   assert.ok(reopened.missing.includes("review_ready_service"));
+});
+
+test("catalog readiness exposes only complete eligible service lines", () => {
+  const pending = fixture({ approvalStatus: "pending" });
+  pending.supplierServices[0].state = "pending_verification";
+  assert.deepEqual(supplierCatalogReadiness(pending, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: ["service"],
+  });
+
+  pending.approvalCases[0].status = "approved";
+  assert.deepEqual(supplierCatalogPublicationReadiness(pending, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: ["service"],
+  });
+  pending.approvalCases[0].status = "pending";
+
+  pending.catalogItemPhotos.length = 0;
+  const incomplete = supplierCatalogReadiness(pending, "supplier");
+  assert.equal(incomplete.readyForApproval, false);
+  assert.deepEqual(incomplete.publishableServiceIds, []);
+  assert.ok(incomplete.missing.includes("active_catalog_item"));
+
+  const restoring = fixture({ approvalStatus: "suspended" });
+  restoring.supplierServices[0].state = "suspended";
+  restoring.supplierServices[0].approvalSuspensionCaseId = "case_supplier";
+  assert.deepEqual(supplierCatalogReadiness(restoring, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: ["service"],
+  });
+
+  delete restoring.supplierServices[0].approvalSuspensionCaseId;
+  const independentlySuspended = supplierCatalogReadiness(restoring, "supplier");
+  assert.equal(independentlySuspended.readyForApproval, false);
+  assert.deepEqual(independentlySuspended.publishableServiceIds, []);
 });
 
 test("order-line helper writes immutable catalog, option, format, price, and specification snapshots", () => {
