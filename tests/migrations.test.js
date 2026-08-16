@@ -200,7 +200,9 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
     await client.query(`
       INSERT INTO file_references
         (file_id, reference_type, reference_id, field, position, data)
-      VALUES ('license_one', 'rider_document', 'document_one', 'fileId', 0, '{}')
+      VALUES
+        ('license_one', 'rider_document', 'document_one', 'fileId', 0, '{}'),
+        ('license_two', 'user', 'rider_approved', 'fileId', 1, '{}')
     `);
 
     const indexNames = new Set((await client.query(
@@ -211,5 +213,19 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
       "user_role_memberships_role_idx", "approval_cases_queue_idx",
       "rider_documents_one_current_kind_idx", "rider_documents_expiry_idx",
     ]) assert.equal(indexNames.has(index), true, `${index} should exist`);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('rider_documents') AS table_name")).rows[0].table_name, null);
+    assert.deepEqual((await client.query("SELECT file_id, reference_type FROM file_references ORDER BY file_id")).rows, [
+      { file_id: "license_two", reference_type: "user" },
+    ]);
+    await assert.rejects(
+      client.query(`
+        INSERT INTO file_references
+          (file_id, reference_type, reference_id, field, position, data)
+        VALUES ('license_one', 'rider_document', 'document_one', 'fileId', 0, '{}')
+      `),
+      (error) => error.code === "23514" && error.constraint === "file_references_reference_type_check",
+    );
   });
 });

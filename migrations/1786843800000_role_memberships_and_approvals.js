@@ -272,6 +272,8 @@ export async function down(pgm) {
   pgm.sql(`
     DROP TABLE rider_documents;
 
+    DELETE FROM file_references WHERE reference_type = 'rider_document';
+
     ALTER TABLE file_references
       DROP CONSTRAINT file_references_reference_type_check,
       ADD CONSTRAINT file_references_reference_type_check
