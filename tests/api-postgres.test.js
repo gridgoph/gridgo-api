@@ -642,10 +642,34 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     const accepted = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierSubtotalMinor: 100000 } });
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.order.state, "awaiting_checkout");
+    const pendingWithoutReason = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: { state: "supplier_accepted", supplierSubtotalMinor: 100000 },
+    });
+    assert.equal(pendingWithoutReason.status, 400);
+    assert.equal(pendingWithoutReason.body.error, "quote_supersession_reason_required");
+    const pendingSuperseded = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: { state: "supplier_accepted", supplierSubtotalMinor: 100000, reason: "Corrected quote details" },
+    });
+    assert.equal(pendingSuperseded.status, 200, JSON.stringify(pendingSuperseded.body));
+    assert.equal(pendingSuperseded.body.order.pendingQuote.version, 2);
+    const pendingSupersessionStore = await loadStore(database);
+    assert.equal(
+      pendingSupersessionStore.auditLog.some(
+        (entry) => entry.action === "order.quote_superseded"
+          && entry.orderId === orderId
+          && entry.reason === "Corrected quote details"
+          && entry.detail.priorQuoteVersion === 1,
+      ),
+      true,
+    );
     const committed = await request(instance.api, `/orders/${orderId}/transition`, {
       method: "POST",
       subject: "clerk_client",
-      body: { state: "awaiting_initial_payment", quoteVersion: 1, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
+      body: { state: "awaiting_initial_payment", quoteVersion: 2, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
     });
     assert.equal(committed.status, 200, JSON.stringify(committed.body));
     assert.equal(committed.body.order.state, "awaiting_initial_payment");
@@ -658,18 +682,18 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     });
     assert.equal(superseded.status, 200, JSON.stringify(superseded.body));
     assert.equal(superseded.body.order.state, "awaiting_checkout");
-    assert.equal(superseded.body.order.pendingQuote.version, 2);
+    assert.equal(superseded.body.order.pendingQuote.version, 3);
     const staleQuote = await request(instance.api, `/orders/${orderId}/transition`, {
       method: "POST",
       subject: "clerk_client",
-      body: { state: "awaiting_initial_payment", quoteVersion: 1, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
+      body: { state: "awaiting_initial_payment", quoteVersion: 2, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
     });
     assert.equal(staleQuote.status, 409);
     assert.equal(staleQuote.body.error, "quote_stale");
     const recommitted = await request(instance.api, `/orders/${orderId}/transition`, {
       method: "POST",
       subject: "clerk_client",
-      body: { state: "awaiting_initial_payment", quoteVersion: 2, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
+      body: { state: "awaiting_initial_payment", quoteVersion: 3, fulfillmentMode: "delivery", paymentPlan: "delivery_online" },
     });
     assert.equal(recommitted.status, 200, JSON.stringify(recommitted.body));
     assert.equal(recommitted.body.order.serviceFeeMinor, 12000);

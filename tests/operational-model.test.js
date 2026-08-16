@@ -145,6 +145,23 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     recognizedMinor: 8_000,
     refundedAdjustedMinor: -2_000,
   });
+
+  const pickupAtStore = {
+    ...order,
+    ...plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_downpayment_store" }),
+    state: "delivered",
+    payoutMilestones: createPayoutMilestones(25_000, "pickup"),
+  };
+  assert.deepEqual(moneyReportingForOrder(pickupAtStore).supplierSettlement, {
+    orderPriceMinor: 100_000,
+    dueAtStoreMinor: 75_000,
+    receivedAtStoreMinor: 0,
+    protectedPaymentMinor: 25_000,
+    gridgoDeductionsMinor: 0,
+    totalSupplierEarningsMinor: 100_000,
+    supplierReleasedMinor: 0,
+    supplierOutstandingMinor: 100_000,
+  });
 });
 
 test("milestone shares sum exactly to supplier earnings and release is gated on POF", () => {

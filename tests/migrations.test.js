@@ -126,8 +126,8 @@ test("service-fee migration backfills legacy money, payments, allocations, and s
     await runner(migrationOptions(schema, "up", 1, client));
 
     assert.deepEqual((await client.query("SELECT version, settings FROM platform_settings")).rows[0], {
-      version: 8,
-      settings: { issueWindowHours: 48, pickupNoShowHours: 72, serviceFeeRateBps: 750 },
+      version: 7,
+      settings: { issueWindowHours: 48, serviceFeeRateBps: 750 },
     });
     const columns = new Set((await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'orders'",

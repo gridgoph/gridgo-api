@@ -35,7 +35,7 @@ test("relational store round-trips typed money, relationships, and composite rou
     materials: [{ id: "mat_vinyl", code: "vinyl", name: "Vinyl", categoryCodes: ["marketing"], active: true }],
     finishes: [{ id: "fin_none", code: "none", name: "None", categoryCodes: ["marketing"], active: true }],
   };
-  store.settings = { serviceFeeRateBps: 1000, pickupNoShowHours: 72, issueWindowHours: 24, deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 5000 }] };
+  store.settings = { serviceFeeRateBps: 1000, issueWindowHours: 24, deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 5000 }] };
   store.zones = [{ id: "zone_central", code: "davao_central", name: "Davao Central", active: true }];
   store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], createdAt: AT, updatedAt: AT }];
   store.orders = [{

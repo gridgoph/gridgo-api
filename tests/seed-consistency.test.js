@@ -36,6 +36,7 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
 
   await database.transaction(async () => {
     const customized = await loadStore(database);
+    customized.version += 1;
     customized.settings.issueWindowHours = 48;
     customized.taxonomy.categories.push({
       id: "taxc_ops",
@@ -48,6 +49,7 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
   });
   await seedReferenceData(database);
   const preserved = await loadStore(database);
+  assert.equal(preserved.version, first.version + 1);
   assert.equal(preserved.settings.issueWindowHours, 48);
   assert.ok(preserved.taxonomy.categories.some((item) => item.code === "ops_special"));
   await database.close();

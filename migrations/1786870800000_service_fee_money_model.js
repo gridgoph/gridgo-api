@@ -3,11 +3,9 @@ export async function up(pgm) {
     UPDATE platform_settings
        SET settings = settings
          || CASE WHEN settings ? 'serviceFeeRateBps' THEN '{}'::jsonb
-                 ELSE '{"serviceFeeRateBps":1000}'::jsonb END
-         || CASE WHEN settings ? 'pickupNoShowHours' THEN '{}'::jsonb
-                 ELSE '{"pickupNoShowHours":72}'::jsonb END,
+                 ELSE '{"serviceFeeRateBps":1000}'::jsonb END,
            version = version + CASE
-             WHEN settings ? 'serviceFeeRateBps' AND settings ? 'pickupNoShowHours' THEN 0
+             WHEN settings ? 'serviceFeeRateBps' THEN 0
              ELSE 1
            END;
 
@@ -90,9 +88,9 @@ export async function up(pgm) {
         'approved_for_matching', 'supplier_assigned', 'awaiting_checkout',
         'awaiting_initial_payment', 'initial_payment_review',
         'awaiting_downpayment', 'downpayment_review', 'payment_authorized',
-        'production', 'supplier_self_qc', 'ready_for_dispatch', 'ready_for_pickup',
+        'production', 'supplier_self_qc', 'ready_for_dispatch',
         'rider_assigned', 'picked_up', 'out_for_delivery', 'delivered',
-        'pickup_confirmed', 'issue_window_open', 'completed', 'payout_released'
+        'issue_window_open', 'completed', 'payout_released'
       )),
       ADD CONSTRAINT orders_supplier_subtotal_nonnegative_check
         CHECK (supplier_subtotal_minor IS NULL OR supplier_subtotal_minor >= 0),
@@ -561,8 +559,6 @@ export async function down(pgm) {
       WHEN 'awaiting_checkout' THEN 'supplier_assigned'
       WHEN 'awaiting_initial_payment' THEN 'awaiting_downpayment'
       WHEN 'initial_payment_review' THEN 'downpayment_review'
-      WHEN 'ready_for_pickup' THEN 'ready_for_dispatch'
-      WHEN 'pickup_confirmed' THEN 'delivered'
       ELSE state
     END;
 

@@ -467,7 +467,6 @@ Default `GET /settings` response:
   "version": 4,
   "settings": {
     "serviceFeeRateBps": 1000,
-    "pickupNoShowHours": 72,
     "issueWindowHours": 24,
     "deliveryFeeBands": [
       { "maxDistanceMeters": 4999, "feeMinor": 2500 },
@@ -488,7 +487,6 @@ PATCH /settings
 {
   "expectedVersion": 4,
   "serviceFeeRateBps": 1000,
-  "pickupNoShowHours": 72,
   "issueWindowHours": 48,
   "deliveryFeeBands": [
     { "maxDistanceMeters": 4999, "feeMinor": 3000 },
@@ -499,7 +497,7 @@ PATCH /settings
 }
 ```
 
-The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an integer from 0 through 10,000; `pickupNoShowHours` is 24 through 168; `issueWindowHours` is 1 through 720. Band maxima increase strictly and the final maximum is `null`. Settings changes affect only future commercial commitments.
+The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an integer from 0 through 10,000; `issueWindowHours` is 1 through 720. Band maxima increase strictly and the final maximum is `null`. Settings changes affect only future commercial commitments.
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
@@ -568,7 +566,7 @@ Acceptance snapshots the service-fee setting and every money/fulfillment field, 
 ### Visibility authorization
 
 - Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and milestone codes/status/POF IDs; never platform supplier-payout amounts.
-- Assigned supplier: its full supplier subtotal, zero-deduction settlement card, and milestone amounts; never client payment references.
+- Assigned supplier: its full supplier subtotal, zero-deduction settlement card, and milestone amounts; never client payment references. For pickup-at-store plans, the card reports the amount due separately and keeps received-at-store at zero until a later lifecycle owns an explicit receipt signal.
 - Rider: client-safe order totals; no supplier payout, allocation, milestone, or client-reference details.
 - Operations/Super Admin: full client totals, allocations, supplier settlement, service-fee revenue fields, and milestone amounts.
 

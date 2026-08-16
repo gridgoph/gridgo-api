@@ -15,7 +15,6 @@ export async function seedReferenceData(database) {
   await database.transaction(async () => {
     const store = await loadStore(database);
     const reference = referenceData();
-    store.version = 3;
     appendMissing(store.catalog, reference.catalog, "id");
     for (const key of ["categories", "categoryAliases", "subcategories", "materials", "finishes"]) {
       appendMissing(store.taxonomy[key], reference.taxonomy[key], "code");

@@ -60,7 +60,6 @@ export function roundBps(valueMinor, rateBps) {
 export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
-    pickupNoShowHours: 72,
     issueWindowHours: 24,
     deliveryFeeBands: [
       { maxDistanceMeters: 4_999, feeMinor: 2_500 },
@@ -78,15 +77,6 @@ export function validateOperationalSettings(settings) {
       "invalid_service_fee_rate",
       "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
       { field: "serviceFeeRateBps" },
-    );
-  }
-  const pickupNoShowHours = Number(settings?.pickupNoShowHours);
-  if (!Number.isInteger(pickupNoShowHours) || pickupNoShowHours < 24 || pickupNoShowHours > 168) {
-    fail(
-      400,
-      "invalid_pickup_no_show_hours",
-      "Set the pickup no-show window to a whole number from 24 to 168 hours.",
-      { field: "pickupNoShowHours" },
     );
   }
   const issueWindowHours = Number(settings?.issueWindowHours);
@@ -375,18 +365,20 @@ export function moneyReportingForOrder(order) {
     : 0;
   const refundedAdjustedMinor = (order.revenueAdjustments || [])
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
-  const handedOver = ["delivered", "pickup_confirmed", "issue_window_open", "completed", "payout_released"].includes(order.state);
+  const handedOver = ["delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
+  const receivedAtStoreMinor = 0;
   return {
     supplierSettlement: {
       orderPriceMinor: order.supplierSubtotalMinor,
-      receivedAtStoreMinor: order.directStoreDueMinor || 0,
+      dueAtStoreMinor: order.directStoreDueMinor || 0,
+      receivedAtStoreMinor,
       protectedPaymentMinor: order.supplierPlatformPayoutMinor,
       gridgoDeductionsMinor: 0,
       totalSupplierEarningsMinor: order.supplierSubtotalMinor,
       supplierReleasedMinor: releasedThroughPlatformMinor,
       supplierOutstandingMinor: Math.max(
         0,
-        (order.supplierSubtotalMinor || 0) - (order.directStoreDueMinor || 0) - releasedThroughPlatformMinor,
+        (order.supplierSubtotalMinor || 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
       ),
     },
     platformRevenue: {

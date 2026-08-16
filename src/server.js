@@ -1770,7 +1770,6 @@ async function handleRequest(req, res) {
       const next = {
         ...store.settings,
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
-        pickupNoShowHours: body.pickupNoShowHours ?? store.settings.pickupNoShowHours,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
       };
@@ -3504,7 +3503,8 @@ async function handleRequest(req, res) {
             message: "Operations must approve this supplier before the supplier can accept matched work.",
           });
         }
-        const superseding = Boolean(order.commercialCommittedAt);
+        const priorQuote = order.pendingQuote || order.acceptedQuote;
+        const superseding = Boolean(priorQuote || order.commercialCommittedAt);
         if (superseding) {
           if (Object.values(order.payments || {}).some((payment) => payment.status !== "not_submitted")) {
             return send(res, 409, { error: "payment_authorization_started" });
@@ -3512,7 +3512,7 @@ async function handleRequest(req, res) {
           const reason = String(body.reason || "").trim();
           if (!reason) return send(res, 400, { error: "quote_supersession_reason_required" });
           order.quoteHistory ||= [];
-          order.quoteHistory.push(structuredClone(order.acceptedQuote));
+          if (priorQuote) order.quoteHistory.push(structuredClone(priorQuote));
           order.dropoff = order.requestedDropoff ? structuredClone(order.requestedDropoff) : order.dropoff;
           for (const field of [
             "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor",
