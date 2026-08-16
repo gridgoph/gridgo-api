@@ -46,6 +46,8 @@ Turnaround, quantity, and unbounded sort-order inputs must fit PostgreSQL `integ
 
 Service lines use `draft` while incomplete and `pending_verification` when review-ready. Both self-service state changes and compatibility submit/verify actions reject incomplete lines with `service_not_review_ready`. Suspended and withdrawn complete lines may be resubmitted to `pending_verification`; suppliers cannot make a line live. A live line returns to `pending_verification` when the supplier expands its governed category or accepted formats. Routine catalog, price, and option edits remain immediately derived from approval + live-service eligibility.
 
+Each service line remains the matchable capability envelope above its items. The supplier editor persists and returns its material, finish, product-family, size, quantity, capacity, zone, reference-price, turnaround, and lifecycle fields. Product families must be a subset governed by the resolved active category; materials and finishes must be active for that category; zones must be active platform zones. Review requires explicit nonempty material, finish, product-family, and zone subsets. Catalog-managed lines also fail closed at matching if that envelope is missing or invalid, while already-live legacy lines remain grandfathered until their next approval-relevant transition.
+
 Readiness-owning edits must leave `pending_verification`, `live`, and `suspended` lines complete. In particular, replacing service formats with an empty effective set returns `service_not_review_ready` without changing formats, state, or version. A supplier must first move the line to `draft` or `withdrawn` before making it incomplete, then complete and resubmit it for approval.
 
 ## Format inheritance and readiness

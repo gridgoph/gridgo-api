@@ -139,6 +139,67 @@ function activeCanonicalCategoryCode(store, code) {
   )?.code || null;
 }
 
+function activeCategory(store, code) {
+  const canonicalCode = activeCanonicalCategoryCode(store, code);
+  if (!canonicalCode) return null;
+  return (store.taxonomy?.categories || []).find(
+    (category) => category.active !== false && category.code === canonicalCode,
+  ) || null;
+}
+
+function governedCodeBlockers(values, prefix, allowed, { requireComplete }) {
+  if (!Array.isArray(values)) return [`${prefix}_type`];
+  const normalized = values.map((value) => String(value).trim());
+  const blockers = [];
+  if (normalized.some((value) => !value)) blockers.push(`${prefix}_blank`);
+  if (new Set(normalized).size !== normalized.length) blockers.push(`${prefix}_duplicate`);
+  if (requireComplete && normalized.length === 0) blockers.push(prefix);
+  for (const code of normalized) {
+    if (code && !allowed.has(code)) blockers.push(`${prefix}:${code}`);
+  }
+  return [...new Set(blockers)];
+}
+
+export function supplierServiceCapabilityBlockers(store, service, { requireComplete = true } = {}) {
+  const category = activeCategory(store, service?.categoryCode);
+  if (!category) return ["service_category"];
+  const categoryCode = category.code;
+  const activeMaterials = new Set((store.taxonomy?.materials || [])
+    .filter((record) => record.active !== false && (record.categoryCodes || []).includes(categoryCode))
+    .map((record) => record.code));
+  const activeFinishes = new Set((store.taxonomy?.finishes || [])
+    .filter((record) => record.active !== false && (record.categoryCodes || []).includes(categoryCode))
+    .map((record) => record.code));
+  const activeZones = new Set((store.zones || [])
+    .filter((record) => record.active !== false)
+    .map((record) => record.code));
+  const blockers = [
+    ...governedCodeBlockers(
+      service?.productFamilyIds,
+      "product_families",
+      new Set(category.productFamilyIds || []),
+      { requireComplete },
+    ),
+    ...governedCodeBlockers(service?.materialCodes, "materials", activeMaterials, { requireComplete }),
+    ...governedCodeBlockers(service?.finishCodes, "finishes", activeFinishes, { requireComplete }),
+    ...governedCodeBlockers(service?.zones, "zones", activeZones, { requireComplete }),
+  ];
+  const positiveIntegerFields = ["qtyMin", "qtyMax", "capacityDaily", "capacityWeekly"];
+  for (const field of positiveIntegerFields) {
+    if (service?.[field] != null && (
+      !Number.isSafeInteger(service[field])
+      || service[field] < 1
+      || service[field] > POSTGRES_INTEGER_MAX
+    )) blockers.push(field);
+  }
+  if (Number.isSafeInteger(service?.qtyMin) && Number.isSafeInteger(service?.qtyMax)
+      && service.qtyMax < service.qtyMin) blockers.push("quantity_range");
+  if (Number.isSafeInteger(service?.capacityDaily) && Number.isSafeInteger(service?.capacityWeekly)
+      && service.capacityWeekly < service.capacityDaily) blockers.push("capacity_range");
+  if ((service?.sizeMin == null) !== (service?.sizeMax == null)) blockers.push("size_range");
+  return blockers;
+}
+
 function readyFile(store, fileId, index) {
   if (index) return index.readyFiles.get(fileId) || null;
   return (store.files || []).find(
@@ -283,13 +344,16 @@ export function serviceLineBlockers(store, service, {
   if (publicOnly || requireActiveCategory) {
     if (!activeCanonicalCategoryCode(store, service?.categoryCode)) blockers.push("service_category");
   }
+  if (!publicOnly || service?.catalogManaged === true) {
+    blockers.push(...supplierServiceCapabilityBlockers(store, service));
+  }
   if (publicOnly) {
     if (service?.state !== "live") blockers.push("service_not_live");
   }
   if (!publicOnly && service && !allowedStates.includes(service.state)) {
     blockers.push("service_not_review_ready");
   }
-  return blockers;
+  return [...new Set(blockers)];
 }
 
 export function assertServiceLineReviewReady(store, service, options) {

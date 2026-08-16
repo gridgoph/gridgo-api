@@ -255,6 +255,10 @@ function addReadySupplierCatalog(store, {
       pricingBasis: "per_unit",
       referenceRateMinor: 2500,
       turnaroundHours: 24,
+      materialCodes: ["gloss_cardstock"],
+      finishCodes: ["none"],
+      productFamilyIds: ["card"],
+      zones: ["davao_central"],
       version: 1,
       createdAt: AT,
       updatedAt: AT,
@@ -385,7 +389,8 @@ async function addApprovalDecisionFixtures(database) {
         id: "svc_pending_complete", supplierId: "user_supplier_pending",
         categoryCode: "marketing_collateral", state: "pending_verification",
         pricingBasis: "per_unit", referenceRateMinor: 2500, turnaroundHours: 24,
-        materialCodes: [], finishCodes: [], productFamilyIds: ["business_cards"], zones: [],
+        materialCodes: ["gloss_cardstock"], finishCodes: ["none"],
+        productFamilyIds: ["card"], zones: ["davao_central"],
         version: 1, createdAt: AT, updatedAt: AT,
       },
       {
@@ -399,7 +404,8 @@ async function addApprovalDecisionFixtures(database) {
         id: "svc_pending_without_item", supplierId: "user_supplier_pending",
         categoryCode: "marketing_collateral", state: "pending_verification",
         pricingBasis: "per_unit", referenceRateMinor: 1500, turnaroundHours: 24,
-        materialCodes: [], finishCodes: [], productFamilyIds: ["flyers"], zones: [],
+        materialCodes: ["matte_150gsm"], finishCodes: ["none"],
+        productFamilyIds: ["flyer"], zones: ["davao_central"],
         version: 1, createdAt: AT, updatedAt: AT,
       },
     );
@@ -1818,6 +1824,225 @@ test("order creation reports an unseeded catalog explicitly", { skip: !DATABASE_
   }
 });
 
+test("catalog-managed services preserve governed matching capability", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.query("UPDATE supplier_services SET state = 'withdrawn' WHERE id = 'svc_banner'");
+  const instance = await startApi();
+  try {
+    const invalidFamily = await request(instance.api, "/me/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        categoryCode: "marketing_collateral",
+        materialCodes: ["tarpaulin_13oz"],
+        finishCodes: ["none"],
+        productFamilyIds: ["apparel"],
+        zones: ["davao_central"],
+      },
+    });
+    assert.equal(invalidFamily.status, 400, JSON.stringify(invalidFamily.body));
+    assert.equal(invalidFamily.body.error, "invalid_service_capability");
+    assert.ok(invalidFamily.body.blockers.includes("product_families:apparel"));
+
+    const invalidZone = await request(instance.api, "/me/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        categoryCode: "marketing_collateral",
+        materialCodes: ["tarpaulin_13oz"],
+        finishCodes: ["none"],
+        productFamilyIds: ["banner"],
+        zones: ["not_a_zone"],
+      },
+    });
+    assert.equal(invalidZone.status, 400, JSON.stringify(invalidZone.body));
+    assert.equal(invalidZone.body.error, "invalid_service_capability");
+    assert.ok(invalidZone.body.blockers.includes("zones:not_a_zone"));
+
+    const incompleteDraft = await request(instance.api, "/me/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        categoryCode: "marketing_collateral",
+        pricingBasis: "per_sqm",
+        standardTurnaroundHours: 24,
+        formatCodes: ["pdf"],
+      },
+    });
+    assert.equal(incompleteDraft.status, 201, JSON.stringify(incompleteDraft.body));
+    const incompleteSubmit = await request(
+      instance.api,
+      `/me/supplier-services/${incompleteDraft.body.service.id}`,
+      {
+        method: "PATCH",
+        subject: "clerk_supplier",
+        body: { expectedVersion: 1, state: "pending_verification" },
+      },
+    );
+    assert.equal(incompleteSubmit.status, 409, JSON.stringify(incompleteSubmit.body));
+    assert.equal(incompleteSubmit.body.error, "service_not_review_ready");
+    assert.ok(incompleteSubmit.body.blockers.includes("product_families"));
+    assert.ok(incompleteSubmit.body.blockers.includes("zones"));
+
+    const created = await request(instance.api, "/me/supplier-services", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        categoryCode: "marketing_collateral",
+        materialCodes: ["tarpaulin_13oz"],
+        finishCodes: ["none"],
+        productFamilyIds: ["banner"],
+        sizeMin: "1m x 1m",
+        sizeMax: "5m x 5m",
+        qtyMin: 1,
+        qtyMax: 50,
+        capacityDaily: 10,
+        capacityWeekly: 50,
+        zones: ["davao_central"],
+        pricingBasis: "per_sqm",
+        referenceRateMinor: 50000,
+        standardTurnaroundHours: 24,
+        formatCodes: ["pdf"],
+      },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.deepEqual({
+      materialCodes: created.body.service.materialCodes,
+      finishCodes: created.body.service.finishCodes,
+      productFamilyIds: created.body.service.productFamilyIds,
+      sizeMin: created.body.service.sizeMin,
+      sizeMax: created.body.service.sizeMax,
+      qtyMin: created.body.service.qtyMin,
+      qtyMax: created.body.service.qtyMax,
+      capacityDaily: created.body.service.capacityDaily,
+      capacityWeekly: created.body.service.capacityWeekly,
+      zones: created.body.service.zones,
+    }, {
+      materialCodes: ["tarpaulin_13oz"],
+      finishCodes: ["none"],
+      productFamilyIds: ["banner"],
+      sizeMin: "1m x 1m",
+      sizeMax: "5m x 5m",
+      qtyMin: 1,
+      qtyMax: 50,
+      capacityDaily: 10,
+      capacityWeekly: 50,
+      zones: ["davao_central"],
+    });
+    const serviceId = created.body.service.id;
+
+    const item = await request(instance.api, "/me/catalog-items", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: {
+        supplierServiceId: serviceId,
+        name: "Governed banner",
+        basePriceMinor: 50000,
+        sortOrder: 0,
+      },
+    });
+    assert.equal(item.status, 201, JSON.stringify(item.body));
+    const itemId = item.body.item.id;
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.files.push(
+        {
+          fileId: "governed_catalog_photo", ownerId: "user_supplier", purpose: "catalog_item_photo",
+          originalFilename: "banner.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+          size: 100, state: "ready", objectKey: "catalog/governed-banner.jpg", references: [],
+          createdAt: AT, readyAt: AT,
+        },
+        {
+          fileId: "governed_shop_logo", ownerId: "user_supplier", purpose: "supplier_shop_image",
+          originalFilename: "logo.png", declaredContentType: "image/png", detectedContentType: "image/png",
+          size: 100, state: "ready", objectKey: "catalog/governed-logo.png", references: [],
+          createdAt: AT, readyAt: AT,
+        },
+      );
+      store.catalogItemPhotos.push({
+        catalogItemId: itemId, fileId: "governed_catalog_photo", sortOrder: 0, createdAt: AT,
+      });
+      store.supplierShopMedia.push({
+        supplierId: "user_supplier", slot: "logo", fileId: "governed_shop_logo", updatedAt: AT,
+      });
+      await saveStore(database, store);
+    });
+
+    const submitted = await request(instance.api, `/me/supplier-services/${serviceId}`, {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, state: "pending_verification" },
+    });
+    assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
+    assert.equal(submitted.body.service.reviewReady, true);
+    const verified = await request(instance.api, `/supplier-services/${serviceId}/verify`, {
+      method: "POST",
+      subject: "clerk_ops",
+      body: { expectedVersion: 2 },
+    });
+    assert.equal(verified.status, 200, JSON.stringify(verified.body));
+    assert.equal(verified.body.service.state, "live");
+
+    const widened = await request(instance.api, `/me/supplier-services/${serviceId}`, {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 3, productFamilyIds: ["apparel"] },
+    });
+    assert.equal(widened.status, 400, JSON.stringify(widened.body));
+    assert.equal(widened.body.error, "invalid_service_capability");
+    assert.equal((await request(instance.api, `/catalog/items/${itemId}`)).status, 200);
+
+    const prepareOrder = async (productId, zone) => {
+      const order = await request(instance.api, "/orders", {
+        method: "POST",
+        subject: "clerk_client",
+        body: { productId, quantity: 1, material: "13oz tarpaulin", address: "Davao", zone, submit: true },
+      });
+      assert.equal(order.status, 201, JSON.stringify(order.body));
+      for (const state of ["needs_qa", "approved_for_matching"]) {
+        const transitioned = await request(instance.api, `/orders/${order.body.order.id}/transition`, {
+          method: "POST", subject: "clerk_ops", body: { state },
+        });
+        assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
+      }
+      return order.body.order.id;
+    };
+    const intendedOrderId = await prepareOrder("prod_tarpaulin", "davao_central");
+    const unrelatedFamilyOrderId = await prepareOrder("prod_sticker", "davao_central");
+    const unrelatedZoneOrderId = await prepareOrder("prod_tarpaulin", "davao_south");
+
+    const candidateFor = async (orderId) => {
+      const response = await request(instance.api, `/orders/${orderId}/eligible-suppliers`, {
+        subject: "clerk_ops",
+      });
+      assert.equal(response.status, 200, JSON.stringify(response.body));
+      return response.body.candidates.find((candidate) => candidate.supplier.id === "user_supplier");
+    };
+    assert.deepEqual((await candidateFor(intendedOrderId)).matchingServiceIds, [serviceId]);
+    assert.equal((await candidateFor(unrelatedFamilyOrderId)).eligible, false);
+    assert.equal((await candidateFor(unrelatedZoneOrderId)).eligible, false);
+
+    const intendedAssignment = await request(instance.api, `/orders/${intendedOrderId}/transition`, {
+      method: "POST", subject: "clerk_ops",
+      body: { state: "supplier_assigned", supplierId: "user_supplier" },
+    });
+    assert.equal(intendedAssignment.status, 200, JSON.stringify(intendedAssignment.body));
+    for (const orderId of [unrelatedFamilyOrderId, unrelatedZoneOrderId]) {
+      const unrelatedAssignment = await request(instance.api, `/orders/${orderId}/transition`, {
+        method: "POST", subject: "clerk_ops",
+        body: { state: "supplier_assigned", supplierId: "user_supplier" },
+      });
+      assert.equal(unrelatedAssignment.status, 409, JSON.stringify(unrelatedAssignment.body));
+      assert.equal(unrelatedAssignment.body.error, "supplier_not_eligible");
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("pending suppliers can edit catalog while public browse requires approval and rejects stale versions", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -2029,10 +2254,19 @@ test("pending suppliers can edit catalog while public browse requires approval a
     const legacyAliasUpdate = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
       method: "PATCH",
       subject: "clerk_supplier",
-      body: { expectedVersion: 1, pricingBasis: "per_piece" },
+      body: {
+        expectedVersion: 1,
+        pricingBasis: "per_piece",
+        materialCodes: ["gloss_cardstock"],
+        finishCodes: ["none"],
+        productFamilyIds: ["card"],
+        zones: ["davao_central"],
+      },
     });
     assert.equal(legacyAliasUpdate.status, 200, JSON.stringify(legacyAliasUpdate.body));
     assert.equal(legacyAliasUpdate.body.service.categoryCode, "large_format");
+    assert.deepEqual(legacyAliasUpdate.body.service.productFamilyIds, ["card"]);
+    assert.deepEqual(legacyAliasUpdate.body.service.zones, ["davao_central"]);
     assert.equal((await database.query(
       "SELECT category_code FROM supplier_services WHERE id = 'svc_legacy_alias'",
     )).rows[0].category_code, "large_format");

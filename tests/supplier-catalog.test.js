@@ -20,8 +20,17 @@ const AT = "2026-08-16T00:00:00.000Z";
 function fixture({ approvalStatus = "approved", fileFormatMode = "inherit" } = {}) {
   return {
     taxonomy: {
-      categories: [{ code: "marketing_collateral", active: true, structuredFields: [{ code: "paper_size", values: ["A3", "A4"] }] }],
+      categories: [{
+        code: "marketing_collateral", active: true, productFamilyIds: ["banner"],
+        structuredFields: [{ code: "paper_size", values: ["A3", "A4"] }],
+      }],
+      materials: [{
+        code: "tarpaulin_13oz", name: "13oz tarpaulin",
+        categoryCodes: ["marketing_collateral"], active: true,
+      }],
+      finishes: [{ code: "none", name: "None", categoryCodes: ["marketing_collateral"], active: true }],
     },
+    zones: [{ code: "davao_central", active: true }],
     users: [{ id: "supplier", role: "supplier" }],
     userRoleMemberships: [{ userId: "supplier", role: "supplier" }],
     supplierProfiles: [{
@@ -38,6 +47,8 @@ function fixture({ approvalStatus = "approved", fileFormatMode = "inherit" } = {
     supplierServices: [{
       id: "service", supplierId: "supplier", categoryCode: "marketing_collateral",
       state: "live", pricingBasis: "per_unit", standardTurnaroundHours: 24,
+      materialCodes: ["tarpaulin_13oz"], finishCodes: ["none"],
+      productFamilyIds: ["banner"], zones: ["davao_central"],
       rushEnabled: false, version: 1,
     }],
     supplierServiceFileFormats: [

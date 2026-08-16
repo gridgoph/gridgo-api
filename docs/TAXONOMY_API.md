@@ -78,7 +78,7 @@ Authorization: Bearer <token>
 | `name` | string | display name, chart wording |
 | `bestFor` | string | the chart's audience line, **without** the `Best for:` prefix — render it yourself |
 | `sortOrder` | number | chart order, 1-based |
-| `productFamilyIds` | string[] | links to `/catalog` families; display/filtering metadata only |
+| `productFamilyIds` | string[] | links to `/catalog` families and governs each supplier service's supported subset |
 | `active` | boolean | `false` hides it from pickers; absent means active |
 
 ### subcategory

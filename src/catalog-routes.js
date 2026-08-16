@@ -12,6 +12,7 @@ import {
   publicSupplierShops,
   serviceLineBlockers,
   supplierCatalogReadiness,
+  supplierServiceCapabilityBlockers,
   transitionSupplierServiceToDraft,
   transitionSupplierServiceToPending,
   transitionSupplierServiceToWithdrawn,
@@ -144,17 +145,107 @@ function categoryInput(store, value) {
   return canonicalCode;
 }
 
+const CAPABILITY_ARRAY_FIELDS = ["materialCodes", "finishCodes", "productFamilyIds", "zones"];
+const CAPABILITY_INTEGER_FIELDS = ["qtyMin", "qtyMax", "capacityDaily", "capacityWeekly"];
+const CAPABILITY_FIELDS = [
+  ...CAPABILITY_ARRAY_FIELDS,
+  "sizeMin",
+  "sizeMax",
+  ...CAPABILITY_INTEGER_FIELDS,
+];
+
+function capabilityCodes(value, field) {
+  if (!Array.isArray(value)) {
+    fail(400, "invalid_service_capability", `${field} must be an array.`, { field });
+  }
+  const codes = value.map((code) => String(code).trim());
+  if (codes.some((code) => !code) || new Set(codes).size !== codes.length) {
+    fail(400, "invalid_service_capability", `${field} must contain unique nonblank codes.`, { field });
+  }
+  return codes;
+}
+
+function capabilityInteger(value, field) {
+  if (value == null) return null;
+  return postgresInteger(value, field, { min: 1 });
+}
+
+function capabilitySize(value, field) {
+  if (value == null) return null;
+  const text = optionalText(value, field, 120).trim();
+  return text || null;
+}
+
+function capabilityValues(store, body, service, categoryCode) {
+  const values = {
+    materialCodes: [...(service?.materialCodes || [])],
+    finishCodes: [...(service?.finishCodes || [])],
+    productFamilyIds: [...(service?.productFamilyIds || [])],
+    zones: [...(service?.zones || [])],
+    sizeMin: service?.sizeMin ?? null,
+    sizeMax: service?.sizeMax ?? null,
+    qtyMin: service?.qtyMin ?? null,
+    qtyMax: service?.qtyMax ?? null,
+    capacityDaily: service?.capacityDaily ?? null,
+    capacityWeekly: service?.capacityWeekly ?? null,
+  };
+  for (const field of CAPABILITY_ARRAY_FIELDS) {
+    if (Object.hasOwn(body, field)) values[field] = capabilityCodes(body[field], field);
+  }
+  for (const field of ["sizeMin", "sizeMax"]) {
+    if (Object.hasOwn(body, field)) values[field] = capabilitySize(body[field], field);
+  }
+  for (const field of CAPABILITY_INTEGER_FIELDS) {
+    if (Object.hasOwn(body, field)) values[field] = capabilityInteger(body[field], field);
+  }
+  const blockers = supplierServiceCapabilityBlockers(store, {
+    ...service,
+    ...values,
+    categoryCode,
+  }, { requireComplete: false });
+  if (blockers.length) {
+    fail(400, "invalid_service_capability", "Choose a valid capability subset for this category.", { blockers });
+  }
+  return values;
+}
+
+function capabilityChanged(service, values, categoryCode) {
+  if (service.categoryCode !== categoryCode) return true;
+  return CAPABILITY_FIELDS.some((field) => {
+    const current = CAPABILITY_ARRAY_FIELDS.includes(field) ? (service[field] || []) : (service[field] ?? null);
+    return JSON.stringify(current) !== JSON.stringify(values[field]);
+  });
+}
+
 function privateService(store, service) {
   return {
     id: service.id,
     supplierId: service.supplierId,
     categoryCode: service.categoryCode,
     state: service.state,
+    materialCodes: service.materialCodes || [],
+    finishCodes: service.finishCodes || [],
+    productFamilyIds: service.productFamilyIds || [],
+    sizeMin: service.sizeMin ?? null,
+    sizeMax: service.sizeMax ?? null,
+    qtyMin: service.qtyMin ?? null,
+    qtyMax: service.qtyMax ?? null,
+    capacityDaily: service.capacityDaily ?? null,
+    capacityWeekly: service.capacityWeekly ?? null,
+    zones: service.zones || [],
+    equipmentNotes: service.equipmentNotes || "",
     pricingBasis: service.pricingBasis,
+    referenceRateMinor: service.referenceRateMinor,
     standardTurnaroundHours: service.standardTurnaroundHours,
     rushEnabled: service.rushEnabled,
     rushTurnaroundHours: service.rushTurnaroundHours,
     rushPriceMinor: service.rushPriceMinor,
+    verifiedAt: service.verifiedAt ?? null,
+    verifiedBy: service.verifiedBy ?? null,
+    suspendedAt: service.suspendedAt ?? null,
+    suspendedBy: service.suspendedBy ?? null,
+    suspendReason: service.suspendReason ?? null,
+    withdrawnAt: service.withdrawnAt ?? null,
     acceptedFormats: formatsForService(store, service.id),
     pricing: (store.supplierServicePriceTiers || [])
       .filter((tier) => tier.supplierServiceId === service.id)
@@ -261,12 +352,16 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     requireSupplier(store, user);
     const body = catalogRecord(await readBody(req));
     const canonicalCode = categoryInput(store, body.categoryCode);
+    const capabilities = capabilityValues(store, body, null, canonicalCode);
     const ts = now();
     const standardTurnaroundHours = body.standardTurnaroundHours == null
       ? 48 : postgresInteger(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 });
     const service = {
       id: id("svc"), supplierId: user.id, categoryCode: canonicalCode, state: "draft",
-      referenceRateMinor: 0, turnaroundHours: standardTurnaroundHours,
+      ...capabilities,
+      referenceRateMinor: body.referenceRateMinor == null
+        ? 0 : moneyMinor(body.referenceRateMinor, "referenceRateMinor", { min: 0 }),
+      turnaroundHours: standardTurnaroundHours,
       pricingBasis: body.pricingBasis == null ? null : requiredText(body.pricingBasis, "pricingBasis", 80),
       standardTurnaroundHours,
       rushEnabled: Boolean(body.rushEnabled),
@@ -274,6 +369,8 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         ? postgresInteger(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 }) : null,
       rushPriceMinor: body.rushEnabled
         ? moneyMinor(body.rushPriceMinor, "rushPriceMinor", { min: 0 }) : null,
+      equipmentNotes: body.equipmentNotes == null ? "" : optionalText(body.equipmentNotes, "equipmentNotes", 2000),
+      catalogManaged: true,
       version: 1, createdAt: ts, updatedAt: ts,
     };
     store.supplierServices.push(service);
@@ -296,9 +393,16 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
     }
     if (req.method === "PATCH") {
-      const priorCategory = service.categoryCode;
-      if (body.categoryCode != null) {
-        service.categoryCode = categoryInput(store, body.categoryCode);
+      const nextCategory = body.categoryCode == null ? service.categoryCode : categoryInput(store, body.categoryCode);
+      const capabilities = capabilityValues(store, body, service, nextCategory);
+      const envelopeChanged = capabilityChanged(service, capabilities, nextCategory);
+      service.categoryCode = nextCategory;
+      Object.assign(service, capabilities);
+      if (Object.hasOwn(body, "referenceRateMinor")) {
+        service.referenceRateMinor = moneyMinor(body.referenceRateMinor, "referenceRateMinor", { min: 0 });
+      }
+      if (Object.hasOwn(body, "equipmentNotes")) {
+        service.equipmentNotes = optionalText(body.equipmentNotes, "equipmentNotes", 2000);
       }
       if (body.pricingBasis != null) service.pricingBasis = requiredText(body.pricingBasis, "pricingBasis", 80);
       if (body.standardTurnaroundHours != null) {
@@ -323,9 +427,10 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         if (body.state === "pending_verification") transitionSupplierServiceToPending(service);
         else transitionSupplierServiceToDraft(service);
       }
-      if (service.state === "live" && service.categoryCode !== priorCategory) {
+      if (service.state === "live" && envelopeChanged) {
         transitionSupplierServiceToPending(service);
       }
+      if (envelopeChanged) service.catalogManaged = true;
       assertServiceLineReadinessInvariant(store, service);
       advanceSupplierServiceVersion(service, now());
       auditChange(audit, store, user, "supplier_service.update", "supplier_service", service.id, { state: service.state });

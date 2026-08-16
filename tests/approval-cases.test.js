@@ -19,9 +19,15 @@ function supplierStore() {
       shop: { lat: 7.064, lng: 125.6085, label: "Davao Shop" },
     }],
     taxonomy: {
-      categories: [{ id: "category", code: "print", name: "Print", active: true }],
+      categories: [{
+        id: "category", code: "print", name: "Print", active: true,
+        productFamilyIds: ["poster"],
+      }],
       categoryAliases: [],
+      materials: [{ code: "paper", categoryCodes: ["print"], active: true }],
+      finishes: [{ code: "matte", categoryCodes: ["print"], active: true }],
     },
+    zones: [{ code: "davao_central", active: true }],
     supplierServices: [{
       id: "service_complete",
       supplierId: "supplier",
@@ -29,6 +35,10 @@ function supplierStore() {
       pricingBasis: "per_unit",
       referenceRateMinor: 1000,
       turnaroundHours: 24,
+      materialCodes: ["paper"],
+      finishCodes: ["matte"],
+      productFamilyIds: ["poster"],
+      zones: ["davao_central"],
       state: "pending_verification",
       version: 1,
       createdAt: AT,

@@ -99,6 +99,7 @@ import {
   assertSupplierServicePendingVerification,
   supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
+  supplierServiceCapabilityBlockers,
   transitionSupplierServiceToLive,
   transitionSupplierServiceToPending,
   transitionSupplierServiceToWithdrawn,
@@ -1031,20 +1032,45 @@ function pricingBasisInput(value) {
 function validateTaxonomyRefs(store, body) {
   const mats = taxonomyCodeSet(store.taxonomy, "materials");
   const fins = taxonomyCodeSet(store.taxonomy, "finishes");
-  if (body.categoryCode != null && !activeCategoryFor(store.taxonomy, body.categoryCode)) {
+  const category = body.categoryCode == null ? null : activeCategoryFor(store.taxonomy, body.categoryCode);
+  if (body.categoryCode != null && !category) {
     return { error: "invalid_category_code", code: body.categoryCode };
+  }
+  if (body.materialCodes != null && !Array.isArray(body.materialCodes)) {
+    return { error: "invalid_material_code", code: body.materialCodes };
   }
   if (Array.isArray(body.materialCodes)) {
     for (const c of body.materialCodes) {
-      if (!mats.has(c)) return { error: "invalid_material_code", code: c };
+      const material = (store.taxonomy?.materials || []).find((record) => record.code === c);
+      if (!mats.has(c) || (category && !(material.categoryCodes || []).includes(category.code))) {
+        return { error: "invalid_material_code", code: c };
+      }
     }
+  }
+  if (body.finishCodes != null && !Array.isArray(body.finishCodes)) {
+    return { error: "invalid_finish_code", code: body.finishCodes };
   }
   if (Array.isArray(body.finishCodes)) {
     for (const c of body.finishCodes) {
-      if (!fins.has(c)) return { error: "invalid_finish_code", code: c };
+      const finish = (store.taxonomy?.finishes || []).find((record) => record.code === c);
+      if (!fins.has(c) || (category && !(finish.categoryCodes || []).includes(category.code))) {
+        return { error: "invalid_finish_code", code: c };
+      }
+    }
+  }
+  if (body.productFamilyIds != null && !Array.isArray(body.productFamilyIds)) {
+    return { error: "invalid_product_family_id", code: body.productFamilyIds };
+  }
+  if (Array.isArray(body.productFamilyIds) && category) {
+    const governedFamilies = new Set(category.productFamilyIds || []);
+    for (const family of body.productFamilyIds) {
+      if (!governedFamilies.has(family)) return { error: "invalid_product_family_id", code: family };
     }
   }
   const zoneCodes = new Set((store.zones || []).filter((z) => z.active !== false).map((z) => z.code));
+  if (body.zones != null && !Array.isArray(body.zones)) {
+    return { error: "invalid_zone_code", code: body.zones };
+  }
   if (Array.isArray(body.zones)) {
     for (const z of body.zones) {
       if (!zoneCodes.has(z)) return { error: "invalid_zone_code", code: z };
@@ -1079,8 +1105,26 @@ function materialMatches(orderMaterial, materialCodes, taxonomy) {
   return false;
 }
 
-function serviceCoversOrder(service, order, product, taxonomy) {
+function finishMatches(orderFinish, finishCodes, taxonomy) {
+  if (!orderFinish) return true;
+  const raw = String(orderFinish).toLowerCase().trim();
+  return (finishCodes || []).some((code) => {
+    const normalizedCode = code.replace(/_/g, " ");
+    if (raw.includes(normalizedCode) || normalizedCode.includes(raw)) return true;
+    const finish = (taxonomy?.finishes || []).find((record) => record.code === code);
+    const name = String(finish?.name || "").toLowerCase();
+    return Boolean(name && (raw.includes(name) || name.includes(raw)));
+  });
+}
+
+function serviceCoversOrder(service, order, product, store) {
   if (service.state !== "live") return { ok: false, reason: "service_not_live" };
+  if (service.catalogManaged === true) {
+    const blockers = supplierServiceCapabilityBlockers(store, service);
+    if (blockers.length) {
+      return { ok: false, reason: "capability_envelope_incomplete", blockers };
+    }
+  }
   const family = product?.family;
   if (family && Array.isArray(service.productFamilyIds) && service.productFamilyIds.length) {
     if (!service.productFamilyIds.includes(family)) {
@@ -1101,8 +1145,12 @@ function serviceCoversOrder(service, order, product, taxonomy) {
       return { ok: false, reason: "qty_above_max", need: service.qtyMax, have: q };
     }
   }
-  if (order.material && !materialMatches(order.material, service.materialCodes, taxonomy)) {
+  if (order.material && !materialMatches(order.material, service.materialCodes, store.taxonomy)) {
     return { ok: false, reason: "material_mismatch", need: order.material, have: service.materialCodes };
+  }
+  if (service.catalogManaged === true && order.finish
+      && !finishMatches(order.finish, service.finishCodes, store.taxonomy)) {
+    return { ok: false, reason: "finish_mismatch", need: order.finish, have: service.finishCodes };
   }
   return { ok: true };
 }
@@ -1139,7 +1187,7 @@ function eligibleSuppliersForOrder(store, order) {
     const matching = [];
     const rejectNotes = [];
     for (const svc of live) {
-      const cover = serviceCoversOrder(svc, order, product, store.taxonomy);
+      const cover = serviceCoversOrder(svc, order, product, store);
       if (cover.ok) matching.push(svc);
       else rejectNotes.push(`${svc.id}:${cover.reason}`);
     }
@@ -2771,6 +2819,10 @@ async function handleRequest(req, res) {
         createdAt: ts,
         updatedAt: ts,
       };
+      const capabilityBlockers = supplierServiceCapabilityBlockers(store, service, { requireComplete: false });
+      if (capabilityBlockers.length) {
+        return send(res, 400, { error: "invalid_service_capability", blockers: capabilityBlockers });
+      }
       store.supplierServices.push(service);
       audit(store, {
         actor: user,
@@ -2811,17 +2863,10 @@ async function handleRequest(req, res) {
 
       const body = await readBody(req);
       // Suppliers cannot invent taxonomy codes
-      const checkBody = {
-        categoryCode: body.categoryCode,
-        materialCodes: body.materialCodes,
-        finishCodes: body.finishCodes,
-        zones: body.zones,
-      };
-      // only validate fields present
-      const toValidate = {};
-      if (body.categoryCode != null) toValidate.categoryCode = body.categoryCode;
+      const toValidate = { categoryCode: body.categoryCode ?? service.categoryCode };
       if (body.materialCodes != null) toValidate.materialCodes = body.materialCodes;
       if (body.finishCodes != null) toValidate.finishCodes = body.finishCodes;
+      if (body.productFamilyIds != null) toValidate.productFamilyIds = body.productFamilyIds;
       if (body.zones != null) toValidate.zones = body.zones;
       const bad = validateTaxonomyRefs(store, toValidate);
       if (bad) return send(res, 400, bad);
@@ -2854,6 +2899,10 @@ async function handleRequest(req, res) {
       ];
       const prevCategory = service.categoryCode;
       const prevMaterials = [...(service.materialCodes || [])];
+      const prevCapabilities = Object.fromEntries([
+        "materialCodes", "finishCodes", "productFamilyIds", "sizeMin", "sizeMax",
+        "qtyMin", "qtyMax", "capacityDaily", "capacityWeekly", "zones",
+      ].map((field) => [field, structuredClone(service[field] ?? null)]));
       const prevPricingBasis = service.pricingBasis;
       const prevTurnaroundHours = service.turnaroundHours;
       let resolvedCategoryCode = prevCategory;
@@ -2879,12 +2928,24 @@ async function handleRequest(req, res) {
             }
           }
         }
+        const capabilityBlockers = supplierServiceCapabilityBlockers(store, {
+          ...service,
+          materialCodes: service.materialCodes || [],
+          finishCodes: service.finishCodes || [],
+          productFamilyIds: service.productFamilyIds || [],
+          zones: service.zones || [],
+        }, { requireComplete: false });
+        if (capabilityBlockers.length) {
+          return send(res, 400, { error: "invalid_service_capability", blockers: capabilityBlockers });
+        }
         // Capability expansion on a live service requires re-verification
         const categoryChanged = body.categoryCode != null && resolvedCategoryCode !== prevCategory;
         const materialsExpanded =
           Array.isArray(body.materialCodes) &&
           body.materialCodes.some((c) => !prevMaterials.includes(c));
-        const approvalRelevantChange = categoryChanged || materialsExpanded;
+        const capabilityChanged = Object.entries(prevCapabilities).some(([field, value]) =>
+          JSON.stringify(service[field] ?? null) !== JSON.stringify(value));
+        const approvalRelevantChange = categoryChanged || materialsExpanded || capabilityChanged;
         const readinessOwningChange =
           (body.pricingBasis != null && service.pricingBasis !== prevPricingBasis) ||
           (body.turnaroundHours != null && service.turnaroundHours !== prevTurnaroundHours);
