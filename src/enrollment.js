@@ -235,7 +235,7 @@ function addInitialCase(store, { user, kind, submittedAt, key, body, createId, a
   return approvalCase;
 }
 
-function validateSupplierShape(body) {
+function validateSupplierInput(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
   rejectUnexpected(body, ["profile", "serviceCategories"]);
   if (plainObject(body.profile)) {
@@ -244,9 +244,6 @@ function validateSupplierShape(body) {
       rejectUnexpected(body.profile.location, ["lat", "lng", "label"], "profile.location.");
     }
   }
-}
-
-function validateSupplier(store, body) {
   const profile = plainObject(body.profile) ? body.profile : {};
   const location = plainObject(profile.location) ? profile.location : {};
   const fields = {};
@@ -267,15 +264,9 @@ function validateSupplier(store, body) {
   if (!Array.isArray(body.serviceCategories) || body.serviceCategories.length === 0) {
     fields.serviceCategories = "choose at least one active category";
   }
-  const categories = [];
   if (Array.isArray(body.serviceCategories)) {
     for (const [index, code] of body.serviceCategories.entries()) {
-      const category = typeof code === "string" ? resolveCategoryCode(store.taxonomy, code) : null;
-      if (!category || category.active === false) {
-        fields[`serviceCategories.${index}`] = "must identify an active governed category";
-      } else if (!categories.some((item) => item.code === category.code)) {
-        categories.push(category);
-      }
+      if (!nonblank(code)) fields[`serviceCategories.${index}`] = "must identify an active governed category";
     }
   }
   if (Object.keys(fields).length) invalidApplication(fields);
@@ -284,6 +275,27 @@ function validateSupplier(store, body) {
     contactName,
     phone,
     location: { lat: location.lat, lng: location.lng, label },
+    serviceCategories: body.serviceCategories,
+  };
+}
+
+function resolveSupplierCategories(store, validated) {
+  const fields = {};
+  const categories = [];
+  for (const [index, code] of validated.serviceCategories.entries()) {
+    const category = resolveCategoryCode(store.taxonomy, code);
+    if (!category || category.active === false) {
+      fields[`serviceCategories.${index}`] = "must identify an active governed category";
+    } else if (!categories.some((item) => item.code === category.code)) {
+      categories.push(category);
+    }
+  }
+  if (Object.keys(fields).length) invalidApplication(fields);
+  return {
+    shopName: validated.shopName,
+    contactName: validated.contactName,
+    phone: validated.phone,
+    location: validated.location,
     categoryCodes: categories.map((category) => category.code),
   };
 }
@@ -326,12 +338,12 @@ function retryResult(store, user, role, kind) {
 }
 
 export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotencyKey, createId, now }) {
-  validateSupplierShape(body);
+  const validated = validateSupplierInput(body);
   const existing = mappedUser(store, clerkUserId);
   if (existing && exactRetry(store, { kind: "supplier", user: existing, key: idempotencyKey, body })) {
     return retryResult(store, existing, "supplier", "supplier");
   }
-  const application = validateSupplier(store, body);
+  const application = resolveSupplierCategories(store, validated);
   const at = now();
   const { user } = resolveOrCreateIdentity({
     store, clerkUserId, clerkUser, role: "supplier", application, createId, at,

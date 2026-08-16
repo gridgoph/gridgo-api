@@ -1482,6 +1482,27 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       supplierRetry.body.supplierServices.map((service) => service.id),
       supplier.body.supplierServices.map((service) => service.id),
     );
+    const invalidSupplierRetries = [
+      [{ ...supplierBody, profile: null }, "profile.shopName"],
+      [{ ...supplierBody, profile: { ...supplierBody.profile, phone: "" } }, "profile.phone"],
+      [{
+        ...supplierBody,
+        profile: {
+          ...supplierBody.profile,
+          location: { ...supplierBody.profile.location, lat: 91 },
+        },
+      }, "profile.location.lat"],
+      [{ ...supplierBody, serviceCategories: [] }, "serviceCategories"],
+    ];
+    for (const [invalidBody, field] of invalidSupplierRetries) {
+      const invalidRetry = await request(instance.api, "/auth/clerk/enroll/supplier", {
+        method: "POST", subject: "clerk_supplier_new", body: invalidBody,
+        headers: { "Idempotency-Key": supplierKey },
+      });
+      assert.equal(invalidRetry.status, 400, JSON.stringify(invalidRetry.body));
+      assert.equal(invalidRetry.body.error, "invalid_application");
+      assert.equal(typeof invalidRetry.body.fields[field], "string");
+    }
     const supplierInjectedRetry = await request(instance.api, "/auth/clerk/enroll/supplier", {
       method: "POST", subject: "clerk_supplier_new",
       body: { ...supplierBody, role: "super_admin", status: "approved", live: true },
