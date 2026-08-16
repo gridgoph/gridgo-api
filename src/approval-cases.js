@@ -1,4 +1,5 @@
 import { resolveCategoryCode } from "./taxonomy.js";
+import { assertRiderApprovalReady } from "./enrollment.js";
 
 export const APPROVAL_CASE_KINDS = new Set(["business_client", "supplier", "rider"]);
 export const APPROVAL_CASE_STATUSES = new Set(["pending", "approved", "rejected", "suspended"]);
@@ -240,6 +241,9 @@ export function decideApprovalCase({
         missing: readiness.missing,
       });
     }
+  }
+  if ((action === "approve" || action === "restore") && approvalCase.kind === "rider") {
+    assertRiderApprovalReady(store, approvalCase.userId, at);
   }
 
   const fromStatus = approvalCase.status;

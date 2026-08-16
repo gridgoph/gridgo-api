@@ -7,7 +7,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
-import { attachRiderDocument } from "../src/attachments.js";
+import {
+  attachRiderDocument,
+  invalidateRiderDocumentsForFile,
+  markFileDeleted,
+} from "../src/attachments.js";
 import { createPayoutMilestones } from "../src/operational-model.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
@@ -243,6 +247,28 @@ async function clearAndFixture(database) {
       timeline: [], createdAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z",
     });
     store.files.push({ fileId: "file_pof", ownerId: "user_supplier", purpose: "fulfilment_proof", originalFilename: "proof.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: "proof/file_pof.jpg", references: [{ type: "order", id: "ord_payout", field: "fulfilmentProofFileIds", milestoneCode: "printing" }], createdAt: AT, readyAt: AT });
+    const riderLicense = {
+      fileId: "file_rider_license_fixture",
+      ownerId: "user_rider",
+      purpose: "rider_verification_document",
+      originalFilename: "license.png",
+      declaredContentType: "image/png",
+      detectedContentType: "image/png",
+      size: 128,
+      state: "ready",
+      objectKey: "rider_verification_document/fixture-license.png",
+      references: [],
+      createdAt: AT,
+      readyAt: AT,
+    };
+    store.files.push(riderLicense);
+    attachRiderDocument(store, riderLicense, {
+      type: "rider_document",
+      record: store.users.find((user) => user.id === "user_rider"),
+      kind: "drivers_license",
+      expiresOn: LICENSE_EXPIRY,
+      replacedDocuments: [],
+    }, { documentId: "rdoc_rider_license_fixture", at: AT });
     await saveStore(database, store);
   });
 }
@@ -427,7 +453,8 @@ test("fixed auth projections authorize every state from memberships and approval
     assert.equal(rider.status, 200, JSON.stringify(rider.body));
     assert.equal(rider.body.riderProfile.vehicleType, "motorcycle");
     assert.equal(rider.body.approvalCase.status, "approved");
-    assert.deepEqual(rider.body.documents, []);
+    assert.equal(rider.body.documents.length, 1);
+    assert.equal(rider.body.documents[0].kind, "drivers_license");
     assert.equal(rider.body.capabilities.receiveDispatchOffers, true);
 
     assert.equal((await request(instance.api, "/auth/me/ops", { subject: "clerk_ops" })).status, 200);
@@ -626,6 +653,82 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
     assert.equal(supplierUser.verificationStatus, "unverified");
     const riderUser = persisted.users.find((candidate) => candidate.id === "user_rider");
     assert.equal(riderUser.verificationStatus, "approved");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("canonical rider decisions enforce readiness after replay handling", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const suspended = await request(instance.api, "/approval-cases/case_rider/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "rider-readiness-suspend", reason: "Evidence review" },
+    });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+
+    const restored = await request(instance.api, "/approval-cases/case_rider/restore", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 2, requestId: "rider-readiness-restore", note: "Evidence ready" },
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.equal(restored.body.approvalCase.status, "approved");
+
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const file = store.files.find((candidate) => candidate.fileId === "file_rider_license_fixture");
+      file.state = "delete_pending";
+      invalidateRiderDocumentsForFile(store, file, AT);
+      markFileDeleted(file, AT);
+      await saveStore(database, store);
+    });
+
+    const replayed = await request(instance.api, "/approval-cases/case_rider/restore", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 2, requestId: "rider-readiness-restore", note: "Evidence ready" },
+    });
+    assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
+    assert.equal(replayed.body.replayed, true);
+
+    const resuspended = await request(instance.api, "/approval-cases/case_rider/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 3, requestId: "rider-readiness-resuspend", reason: "Evidence removed" },
+    });
+    assert.equal(resuspended.status, 200, JSON.stringify(resuspended.body));
+
+    const blockedRestore = await request(instance.api, "/approval-cases/case_rider/restore", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 4, requestId: "rider-readiness-blocked-restore", note: "Try restore" },
+    });
+    assert.equal(blockedRestore.status, 409, JSON.stringify(blockedRestore.body));
+    assert.equal(blockedRestore.body.error, "rider_documents_incomplete");
+
+    const reset = await request(instance.api, "/users/user_rider/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "unverified" },
+    });
+    assert.equal(reset.status, 200, JSON.stringify(reset.body));
+
+    const blockedApproval = await request(instance.api, "/approval-cases/case_rider/approve", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 5, requestId: "rider-readiness-blocked-approve" },
+    });
+    assert.equal(blockedApproval.status, 409, JSON.stringify(blockedApproval.body));
+    assert.equal(blockedApproval.body.error, "rider_documents_incomplete");
+
+    const persisted = await loadStore(database);
+    const approvalCase = persisted.approvalCases.find((candidate) => candidate.id === "case_rider");
+    assert.equal(approvalCase.status, "pending");
+    assert.equal(approvalCase.version, 5);
+    assert.equal(
+      persisted.approvalCaseEvents.some(
+        (event) => ["rider-readiness-blocked-restore", "rider-readiness-blocked-approve"].includes(event.requestId),
+      ),
+      false,
+    );
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
