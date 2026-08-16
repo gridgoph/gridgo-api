@@ -148,6 +148,10 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
     (error) => error.code === "23514" && error.constraint === "orders_committed_snapshot_immutable",
   );
   await assert.rejects(
+    database.query("UPDATE orders SET money_model_version = 1 WHERE id = 'delivery_rounding'"),
+    (error) => error.code === "23514" && error.constraint === "orders_committed_snapshot_immutable",
+  );
+  await assert.rejects(
     database.query(`
       UPDATE order_payment_allocations
          SET amount_minor = amount_minor + 1

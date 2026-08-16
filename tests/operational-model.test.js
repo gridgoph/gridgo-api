@@ -12,6 +12,7 @@ import {
   publicOrderFor,
   releaseMilestone,
   roundBps,
+  validateOperationalSettings,
 } from "../src/operational-model.js";
 
 const AT = "2026-08-10T12:00:00.000Z";
@@ -32,6 +33,16 @@ test("uses BigInt half-up basis-point rounding including the 99,999 remainder ve
   assert.equal(roundBps(99_999, 2_500), 25_000);
   assert.equal(99_999 - roundBps(99_999, 2_500), 74_999);
   assert.equal(roundBps(Number.MAX_SAFE_INTEGER, 10_000), Number.MAX_SAFE_INTEGER);
+});
+
+test("requires service-fee settings to use an actual integer", () => {
+  for (const serviceFeeRateBps of ["1000", "", null]) {
+    expectDomainError(
+      () => validateOperationalSettings({ ...defaultOperationalSettings(), serviceFeeRateBps }),
+      400,
+      "invalid_service_fee_rate",
+    );
+  }
 });
 
 function plan(overrides = {}) {
@@ -189,6 +200,21 @@ test("milestone shares sum exactly to supplier earnings and release is gated on 
     () => releaseMilestone(order, "packaging_qc", { id: "ops-a", role: "ops_admin" }, AT),
     409,
     "milestone_not_reached",
+  );
+
+  const pickupMilestones = createPayoutMilestones(25_000, "pickup");
+  pickupMilestones[0].pofFileIds.push("file-pickup");
+  const pickupOrder = {
+    id: "ord-pickup",
+    state: "awaiting_initial_payment",
+    fulfillmentMode: "pickup",
+    payoutHold: false,
+    payoutMilestones: pickupMilestones,
+  };
+  expectDomainError(
+    () => releaseMilestone(pickupOrder, "pickup_handover", { id: "ops-a", role: "ops_admin" }, AT),
+    409,
+    "pickup_payout_not_available",
   );
 });
 

@@ -549,6 +549,8 @@ The owning client accepts the exact version and selects one offered fulfillment/
 
 Acceptance snapshots the service-fee setting and every money/fulfillment field, creates generalized payments and component allocations, and returns `awaiting_initial_payment`. A mismatched version is `409 quote_stale`.
 
+Task G defines and validates both pickup financial shapes, but pickup commercial commitment remains contained until Task H owns handover. Selecting either pickup plan currently returns `409 pickup_fulfillment_not_available`; it does not create a payable pickup order or expose that order to rider dispatch.
+
 ### Worked example
 
 | Field | Minor units | Peso meaning | Client receives field? |
@@ -689,7 +691,7 @@ Exact rejection errors:
 }
 ```
 
-Statuses: `pending_pof | pof_attached | released`. Delivery milestones split the full supplier subtotal. Pickup milestones split only `supplierPlatformPayoutMinor`; any direct-at-store remainder is already supplier-received. Retention receives the exact integer remainder.
+Statuses: `pending_pof | pof_attached | released`. Delivery milestones split the full supplier subtotal. Pickup milestone shapes split only `supplierPlatformPayoutMinor`; any direct-at-store remainder remains due and unconfirmed. Retention receives the exact integer remainder. Pickup milestone release returns `409 pickup_payout_not_available` until Task H provides the handover signal.
 
 POF uses the existing file flow with `purpose=fulfilment_proof`, then:
 

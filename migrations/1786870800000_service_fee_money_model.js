@@ -476,10 +476,12 @@ export async function up(pgm) {
          OLD.state = 'awaiting_initial_payment' AND
          NEW.state = 'awaiting_checkout' AND
          NEW.commercial_committed_at IS NULL AND
+         NEW.money_model_version IS NOT DISTINCT FROM OLD.money_model_version AND
          NOT EXISTS (SELECT 1 FROM order_payments WHERE order_id = OLD.id) THEN
         RETURN NEW;
       END IF;
       IF OLD.commercial_committed_at IS NOT NULL AND (
+        NEW.money_model_version IS DISTINCT FROM OLD.money_model_version OR
         NEW.supplier_subtotal_minor IS DISTINCT FROM OLD.supplier_subtotal_minor OR
         NEW.subtotal_minor IS DISTINCT FROM OLD.subtotal_minor OR
         NEW.service_fee_rate_bps IS DISTINCT FROM OLD.service_fee_rate_bps OR

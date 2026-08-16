@@ -70,7 +70,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
-  const serviceFeeRateBps = Number(settings?.serviceFeeRateBps);
+  const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
     fail(
       400,
@@ -408,6 +408,14 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
   }
   if (milestone.status === "released") return milestone;
+  if (order.fulfillmentMode === "pickup") {
+    fail(
+      409,
+      "pickup_payout_not_available",
+      "Pickup payout release remains unavailable until the pickup handover lifecycle records fulfilment.",
+      { milestoneCode: code },
+    );
+  }
   if (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0) {
     fail(
       409,

@@ -666,6 +666,13 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       ),
       true,
     );
+    const pickupContained = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST",
+      subject: "clerk_client",
+      body: { state: "awaiting_initial_payment", quoteVersion: 2, fulfillmentMode: "pickup", paymentPlan: "pickup_full_online" },
+    });
+    assert.equal(pickupContained.status, 409);
+    assert.equal(pickupContained.body.error, "pickup_fulfillment_not_available");
     const committed = await request(instance.api, `/orders/${orderId}/transition`, {
       method: "POST",
       subject: "clerk_client",
@@ -767,6 +774,14 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     });
     assert.equal(stale.status, 409);
     assert.equal(stale.body.error, "settings_version_conflict");
+
+    const stringRate = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: { expectedVersion: current.body.version, serviceFeeRateBps: "1000", reason: "Invalid string rate" },
+    });
+    assert.equal(stringRate.status, 400);
+    assert.equal(stringRate.body.error, "invalid_service_fee_rate");
 
     const updated = await request(instance.api, "/settings", {
       method: "PATCH",

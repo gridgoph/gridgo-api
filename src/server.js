@@ -3434,6 +3434,9 @@ async function handleRequest(req, res) {
           });
         }
       }
+      if (order.fulfillmentMode === "pickup" && ["production", "rider_assigned"].includes(next)) {
+        return send(res, 409, { error: "pickup_fulfillment_not_available" });
+      }
       if (next === "rider_assigned") {
         const riderId = user.role === "rider" ? user.id : body.riderId;
         const rider = store.users.find((candidate) => candidate.id === riderId && candidate.role === "rider");
@@ -3628,6 +3631,12 @@ async function handleRequest(req, res) {
         } else {
           return send(res, 400, { error: "invalid_payment_plan" });
         }
+        if (fulfillmentMode === "pickup") {
+          return send(res, 409, {
+            error: "pickup_fulfillment_not_available",
+            message: "Pickup commercial commitment remains unavailable until the pickup handover lifecycle is implemented.",
+          });
+        }
         const supplierProfile = (store.supplierProfiles || []).find((candidate) => candidate.userId === order.supplierId);
         if (fulfillmentMode === "pickup" && (!supplierProfile?.pickupAvailable || !quote.supplierShop)) {
           return send(res, 409, { error: "pickup_not_available" });
@@ -3747,7 +3756,10 @@ async function handleRequest(req, res) {
           message: "Operations must approve this rider profile before dispatch offers become available.",
         });
       }
-      const offers = store.orders.filter((o) => o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id));
+      const offers = store.orders.filter(
+        (o) => o.fulfillmentMode !== "pickup"
+          && (o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id)),
+      );
       return send(res, 200, { offers: offers.map((order) => publicOrder(order, user)) });
     }
 
@@ -3762,6 +3774,9 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
       if (!order || order.state !== "ready_for_dispatch") return send(res, 409, { error: "not_offerable" });
+      if (order.fulfillmentMode === "pickup") {
+        return send(res, 409, { error: "pickup_fulfillment_not_available" });
+      }
       order.riderId = user.id;
       order.state = "rider_assigned";
       order.updatedAt = now();
