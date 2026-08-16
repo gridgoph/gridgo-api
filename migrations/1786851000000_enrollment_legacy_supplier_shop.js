@@ -5,8 +5,7 @@ export async function up(pgm) {
       ADD CONSTRAINT users_legacy_shop_shape_check CHECK (
         (shop_lat IS NULL AND shop_lng IS NULL AND shop_label IS NULL)
         OR (
-          role IN ('client', 'supplier')
-          AND shop_lat IS NOT NULL
+          shop_lat IS NOT NULL
           AND shop_lng IS NOT NULL
           AND shop_label IS NOT NULL
           AND btrim(shop_label) <> ''

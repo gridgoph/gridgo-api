@@ -115,6 +115,10 @@ function reapplyRequestId(kind, userId, key) {
   return `reapply:${kind}:${userId}:${key}`;
 }
 
+function riderSubmitRequestId(userId, key) {
+  return `rider-submit:${userId}:${key}`;
+}
+
 function eventForRequest(store, requestId) {
   return (store.approvalCaseEvents || []).find((event) => event.requestId === requestId) || null;
 }
@@ -487,7 +491,7 @@ export function assertRiderApprovalReady(store, userId, at) {
   }
 }
 
-export function submitRiderApplication({ store, user, body, now }) {
+export function submitRiderApplication({ store, user, body, idempotencyKey, createId, now }) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
   rejectUnexpected(body, ["expectedVersion"]);
   if (!Number.isInteger(body.expectedVersion) || body.expectedVersion <= 0) {
@@ -501,6 +505,16 @@ export function submitRiderApplication({ store, user, body, now }) {
   const approvalCase = (store.approvalCases || []).find(
     (candidate) => candidate.userId === user.id && candidate.kind === "rider",
   );
+  const requestId = riderSubmitRequestId(user.id, idempotencyKey);
+  const replay = eventForRequest(store, requestId);
+  if (replay) {
+    if (replay.snapshot?.requestPayloadHash !== payloadHash(body)) {
+      fail(409, "approval_state_conflict", "This idempotency key already submitted different rider input. Refresh the case.", {
+        approvalCase: caseProjection(approvalCase),
+      });
+    }
+    return { approvalCase: replay.snapshot.approvalCase, replay: true };
+  }
   if (!approvalCase || approvalCase.status !== "pending") {
     fail(409, "approval_state_conflict", "Only a pending rider application can be submitted.", {
       approvalCase: caseProjection(approvalCase),
@@ -511,28 +525,42 @@ export function submitRiderApplication({ store, user, body, now }) {
       approvalCase: caseProjection(approvalCase),
     });
   }
-  if (approvalCase.submittedAt) return approvalCase;
   const at = now();
-  const today = manilaDate(at);
-  const anyLicense = (store.riderDocuments || []).find(
-    (document) => document.riderId === user.id
-      && document.kind === "drivers_license"
-      && document.isCurrent !== false,
-  );
-  if (anyLicense && anyLicense.expiresOn <= today) {
-    fail(409, "document_expired", "Replace the expired driver's licence before submitting the rider application.");
-  }
-  if (!currentFutureLicense(store, user.id, today)) {
-    fail(
-      409,
-      "rider_documents_incomplete",
-      "Attach a current driver's licence photo with a future expiry before submitting the rider application.",
-      { missing: ["drivers_license"] },
+  if (!approvalCase.submittedAt) {
+    const today = manilaDate(at);
+    const anyLicense = (store.riderDocuments || []).find(
+      (document) => document.riderId === user.id
+        && document.kind === "drivers_license"
+        && document.isCurrent !== false,
     );
+    if (anyLicense && anyLicense.expiresOn <= today) {
+      fail(409, "document_expired", "Replace the expired driver's licence before submitting the rider application.");
+    }
+    if (!currentFutureLicense(store, user.id, today)) {
+      fail(
+        409,
+        "rider_documents_incomplete",
+        "Attach a current driver's licence photo with a future expiry before submitting the rider application.",
+        { missing: ["drivers_license"] },
+      );
+    }
+    approvalCase.submittedAt = at;
+    approvalCase.updatedAt = at;
   }
-  approvalCase.submittedAt = at;
-  approvalCase.updatedAt = at;
-  return approvalCase;
+  const response = caseProjection(approvalCase);
+  store.approvalCaseEvents.push({
+    id: createId("ace"),
+    approvalCaseId: approvalCase.id,
+    applicationRevision: approvalCase.applicationRevision,
+    fromStatus: "pending",
+    toStatus: "pending",
+    actorUserId: user.id,
+    actorKind: "applicant",
+    requestId,
+    snapshot: { requestPayloadHash: payloadHash(body), approvalCase: response },
+    createdAt: at,
+  });
+  return { approvalCase: response, replay: false };
 }
 
 export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey, createId, now }) {

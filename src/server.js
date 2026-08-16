@@ -1582,16 +1582,18 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/me/approval-cases/rider/submit") {
-      requireIdempotencyKey(req.headers["idempotency-key"]);
+      const idempotencyKey = requireIdempotencyKey(req.headers["idempotency-key"]);
       const body = await readBody(req);
-      const approvalCase = submitRiderApplication({
+      const result = submitRiderApplication({
         store,
         user,
         body,
+        idempotencyKey,
+        createId: id,
         now,
       });
-      await save(store);
-      return send(res, 200, { approvalCase: approvalCaseSummary(approvalCase) });
+      if (!result.replay) await save(store);
+      return send(res, 200, { approvalCase: approvalCaseSummary(result.approvalCase) });
     }
 
     const reapplyMatch = /^\/me\/approval-cases\/(business-client|supplier|rider)\/reapply$/.exec(pathname);
