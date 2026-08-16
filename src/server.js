@@ -601,13 +601,15 @@ function verificationUserResponse(store, target) {
 }
 
 /**
- * The legacy verification route stays the only decision surface for one
- * release, so its transaction must also keep the membership-era approval case
- * truthful: fixed projections and existing work gates read different owners.
- * The legacy `unverified` status has no case equivalent and maps to `pending`.
+ * The legacy verification and role routes stay the only decision surfaces for
+ * one release, so their transactions must also keep the membership-era approval
+ * case truthful: fixed projections and existing work gates read different
+ * owners. The legacy `unverified` status has no case equivalent and maps to
+ * `pending`; a demoted then re-promoted supplier or rider re-earns approval.
  */
-function syncApprovalCaseWithVerification(store, target, status, actor, reason) {
+function syncApprovalCaseWithVerification(store, target, status, actor, reason, { createMissing = true } = {}) {
   const caseStatus = status === "unverified" ? "pending" : status;
+  const decisionReason = typeof reason === "string" && reason.trim() ? reason.trim() : null;
   const at = now();
   if (!Array.isArray(store.approvalCases)) store.approvalCases = [];
   if (!Array.isArray(store.approvalCaseEvents)) store.approvalCaseEvents = [];
@@ -616,6 +618,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason) 
   );
   const fromStatus = approvalCase?.status ?? null;
   if (!approvalCase) {
+    if (!createMissing) return;
     approvalCase = {
       id: id("apc"),
       userId: target.id,
@@ -640,10 +643,10 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason) 
     approvalCase.decidedBy = actor.id;
     if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
     if (caseStatus === "rejected") {
-      approvalCase.rejectionReason = reason || "Verification rejected";
+      approvalCase.rejectionReason = decisionReason || "Verification rejected";
     }
     if (caseStatus === "suspended") {
-      approvalCase.suspensionReason = reason || "Verification suspended";
+      approvalCase.suspensionReason = decisionReason || "Verification suspended";
     }
   }
   if (fromStatus !== caseStatus) {
@@ -655,7 +658,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason) 
       toStatus: caseStatus,
       actorUserId: actor.id,
       actorKind: "approver",
-      ...(reason ? { reason } : {}),
+      ...(decisionReason ? { reason: decisionReason } : {}),
       requestId: id("acr"),
       snapshot: {},
       createdAt: at,
@@ -1963,6 +1966,7 @@ async function handleRequest(req, res) {
       }
       if (["supplier", "rider"].includes(body.role) && target.verificationStatus == null) {
         target.verificationStatus = "unverified";
+        syncApprovalCaseWithVerification(store, target, "unverified", user, null, { createMissing: false });
       }
       if (body.role === "supplier" && !Array.isArray(target.verificationDocumentFileIds)) {
         target.verificationDocumentFileIds = [];

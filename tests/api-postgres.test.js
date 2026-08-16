@@ -436,6 +436,76 @@ test("legacy verification decisions keep approval cases and fixed projections co
   }
 });
 
+test("role demotion and re-promotion reset the approval case so a returnee re-earns approval", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const demoted = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "client", reason: "offboarding" },
+    });
+    assert.equal(demoted.status, 200, JSON.stringify(demoted.body));
+    assert.equal(demoted.body.user.role, "client");
+    const demotedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(demotedProjection.status, 403);
+    assert.equal(demotedProjection.body.error, "supplier_account_not_found");
+
+    const repromoted = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "supplier", reason: "returning" },
+    });
+    assert.equal(repromoted.status, 200, JSON.stringify(repromoted.body));
+    assert.equal(repromoted.body.user.verificationStatus, "unverified");
+    const repromotedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(repromotedProjection.status, 200, JSON.stringify(repromotedProjection.body));
+    assert.equal(repromotedProjection.body.approvalCase.status, "pending");
+    assert.equal(repromotedProjection.body.approvalCase.decidedAt, null);
+    assert.equal(repromotedProjection.body.capabilities.receiveJobOffers, false);
+    assert.equal(repromotedProjection.body.capabilities.acceptJobs, false);
+
+    assert.equal((await request(instance.api, "/users/user_rider/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "client" },
+    })).status, 200);
+    const riderBack = await request(instance.api, "/users/user_rider/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "rider" },
+    });
+    assert.equal(riderBack.status, 200, JSON.stringify(riderBack.body));
+    assert.equal(riderBack.body.user.verificationStatus, "unverified");
+    const riderProjection = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
+    assert.equal(riderProjection.status, 200, JSON.stringify(riderProjection.body));
+    assert.equal(riderProjection.body.approvalCase.status, "pending");
+    assert.equal(riderProjection.body.capabilities.receiveDispatchOffers, false);
+
+    const blankSuspend = await request(instance.api, "/users/user_supplier/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "   " },
+    });
+    assert.equal(blankSuspend.status, 200, JSON.stringify(blankSuspend.body));
+    const suspendedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(suspendedProjection.body.approvalCase.status, "suspended");
+    assert.equal(suspendedProjection.body.approvalCase.suspensionReason, "Verification suspended");
+
+    const blankReject = await request(instance.api, "/users/user_rider/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "rejected", reason: "   " },
+    });
+    assert.equal(blankReject.status, 200, JSON.stringify(blankReject.body));
+    const rejectedProjection = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
+    assert.equal(rejectedProjection.body.approvalCase.status, "rejected");
+    assert.equal(rejectedProjection.body.approvalCase.rejectionReason, "Verification rejected");
+
+    const persisted = await loadStore(database);
+    const supplierCase = persisted.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
+    assert.equal(supplierCase.status, "suspended");
+    const supplierEvents = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === "case_supplier");
+    assert.equal(supplierEvents.length, 2);
+    assert.ok(supplierEvents.some((event) => event.fromStatus === "approved" && event.toStatus === "pending"));
+    assert.ok(supplierEvents.some((event) => event.fromStatus === "pending" && event.toStatus === "suspended"));
+    assert.equal(supplierEvents.every((event) => event.reason == null), true);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("PostgreSQL-backed order, payment, role, and payout behavior survives API restart", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
