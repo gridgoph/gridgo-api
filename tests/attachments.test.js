@@ -68,6 +68,12 @@ const otherSupplier = { id: "supplier-b", role: "supplier" };
 const rider = { id: "rider-a", role: "rider" };
 const ops = { id: "ops-a", role: "ops_admin" };
 const superAdmin = { id: "super-a", role: "super_admin" };
+const MANILA_YEAR = Number(new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Manila",
+  year: "numeric",
+}).format(new Date()));
+const LICENSE_EXPIRY = `${MANILA_YEAR + 2}-12-31`;
+const REPLACEMENT_LICENSE_EXPIRY = `${MANILA_YEAR + 3}-12-31`;
 
 function order(overrides = {}) {
   return {
@@ -387,7 +393,7 @@ test("rider licence attachment preserves evidence without submitting enrollment"
   const target = resolveFileTarget(
     store,
     first.purpose,
-    { riderDocumentType: "drivers_license", expiresOn: "2028-06-30" },
+    { riderDocumentType: "drivers_license", expiresOn: LICENSE_EXPIRY },
     rider,
   );
   assert.doesNotThrow(() => authorizeFileAttach(rider, first, target));
@@ -396,7 +402,7 @@ test("rider licence attachment preserves evidence without submitting enrollment"
     at: "2026-08-16T01:00:00.000Z",
   });
   assert.equal(attached.approvalCase.submittedAt, undefined);
-  assert.equal(attached.document.expiresOn, "2028-06-30");
+  assert.equal(attached.document.expiresOn, LICENSE_EXPIRY);
   assert.deepEqual(first.references, [{
     type: "rider_document",
     id: "rider-document-old",
@@ -412,7 +418,7 @@ test("rider licence attachment preserves evidence without submitting enrollment"
   const replacementTarget = resolveFileTarget(
     store,
     replacement.purpose,
-    { riderDocumentType: "drivers_license", expiresOn: "2029-06-30" },
+    { riderDocumentType: "drivers_license", expiresOn: REPLACEMENT_LICENSE_EXPIRY },
     rider,
   );
   assert.deepEqual(replacementTarget.replacedDocuments.map(({ id }) => id), ["rider-document-old"]);
@@ -439,7 +445,7 @@ test("rider licence attachment preserves evidence without submitting enrollment"
     () => resolveFileTarget(
       store,
       replacement.purpose,
-      { riderDocumentType: "passport", expiresOn: "2029-01-01" },
+      { riderDocumentType: "passport", expiresOn: LICENSE_EXPIRY },
       rider,
     ),
     400,
@@ -463,7 +469,7 @@ test("deleting rider licence evidence reverts a pending submission to intake", (
   const target = resolveFileTarget(
     store,
     license.purpose,
-    { riderDocumentType: "drivers_license", expiresOn: "2028-06-30" },
+    { riderDocumentType: "drivers_license", expiresOn: LICENSE_EXPIRY },
     rider,
   );
   attachRiderDocument(store, license, target, { documentId: "rider-document-live", at: "2026-08-16T01:00:00.000Z" });
@@ -484,7 +490,7 @@ test("deleting rider licence evidence reverts a pending submission to intake", (
   const replacementTarget = resolveFileTarget(
     store,
     replacement.purpose,
-    { riderDocumentType: "drivers_license", expiresOn: "2029-06-30" },
+    { riderDocumentType: "drivers_license", expiresOn: REPLACEMENT_LICENSE_EXPIRY },
     rider,
   );
   attachRiderDocument(store, replacement, replacementTarget, {

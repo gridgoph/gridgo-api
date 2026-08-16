@@ -18,6 +18,12 @@ const AUTHORIZED_PARTY = "http://localhost:19006";
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const JWT_KEY = publicKey.export({ type: "spki", format: "pem" });
 const AT = "2026-08-16T00:00:00.000Z";
+const MANILA_YEAR = Number(new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Manila",
+  year: "numeric",
+}).format(new Date()));
+const LICENSE_EXPIRY = `${MANILA_YEAR + 2}-12-31`;
+const REPLACEMENT_LICENSE_EXPIRY = `${MANILA_YEAR + 3}-12-31`;
 
 function token(subject, claims = {}) {
   const current = Math.floor(Date.now() / 1000);
@@ -1715,7 +1721,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
         type: "rider_document",
         record: enrolledRider,
         kind: "drivers_license",
-        expiresOn: "2028-06-30",
+        expiresOn: LICENSE_EXPIRY,
         replacedDocuments: [],
       }, { documentId: "rdoc_new_license", at: "2026-08-16T02:00:00.000Z" });
       assert.equal(attached.approvalCase.id, approvalCase.id);
@@ -1872,7 +1878,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
         type: "rider_document",
         record: enrolledRider,
         kind: "drivers_license",
-        expiresOn: "2029-06-30",
+        expiresOn: REPLACEMENT_LICENSE_EXPIRY,
         replacedDocuments: [],
       }, { documentId: "rdoc_replacement_license", at: "2026-08-16T05:00:00.000Z" });
       await saveStore(database, store);
