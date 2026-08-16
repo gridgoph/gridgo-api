@@ -37,7 +37,7 @@ async function withMigrationSchema(t, fn) {
   await fn({ schema, client });
 }
 
-test("fresh PostgreSQL migrates through onboarding and reverses only the forward addition", { skip: !DATABASE_URL }, async (t) => {
+test("fresh PostgreSQL migrates through onboarding and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
 
@@ -47,7 +47,8 @@ test("fresh PostgreSQL migrates through onboarding and reverses only the forward
     )).rows.map((row) => row.table_name));
     for (const table of [
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
-      "approval_cases", "approval_case_events", "rider_documents",
+      "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
+      "order_payment_allocations", "platform_revenue_adjustments",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -58,7 +59,7 @@ test("fresh PostgreSQL migrates through onboarding and reverses only the forward
       assert.equal(legacyColumns.has(column), true, `${column} compatibility projection should remain`);
     }
 
-    await runner(migrationOptions(schema, "down", 1, client));
+    await runner(migrationOptions(schema, "down", 2, client));
     assert.equal((await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name, null);
     assert.equal((await client.query("SELECT to_regclass('users') AS table_name")).rows[0].table_name, "users");
 
@@ -80,8 +81,135 @@ test("fresh PostgreSQL migrates through onboarding and reverses only the forward
       (error) => error.code === "23514" && error.constraint === "file_references_reference_type_check",
     );
 
-    await runner(migrationOptions(schema, "up", 1, client));
+    await runner(migrationOptions(schema, "up", 2, client));
     assert.equal((await client.query("SELECT to_regclass('rider_documents') AS table_name")).rows[0].table_name, "rider_documents");
+  });
+});
+
+test("service-fee migration backfills legacy money, payments, allocations, and settings", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner(migrationOptions(schema, "up", 2, client));
+    await client.query(`
+      INSERT INTO platform_settings (singleton, version, settings)
+      VALUES (true, 7, '{"issueWindowHours":48,"serviceFeeRateBps":750}');
+      INSERT INTO users
+        (id, clerk_user_id, email, name, role, account_type, verification_status,
+         shop_lat, shop_lng, shop_label, created_at, position, data)
+      VALUES
+        ('money_client', 'clerk_money_client', 'money-client@test.invalid', 'Money Client',
+         'client', 'individual', NULL, NULL, NULL, NULL, TIMESTAMPTZ '2026-08-16T00:00:00.000Z', 0, '{}'),
+        ('money_supplier', 'clerk_money_supplier', 'money-supplier@test.invalid', 'Money Supplier',
+         'supplier', NULL, 'approved', 7.064, 125.6085, 'Davao Shop', TIMESTAMPTZ '2026-08-16T00:00:00.000Z', 1,
+         '{"supplierName":"Money Shop","pickupAvailable":true}');
+      INSERT INTO user_role_memberships (user_id, role, created_at)
+      VALUES ('money_client', 'client', TIMESTAMPTZ '2026-08-16T00:00:00.000Z'), ('money_supplier', 'supplier', TIMESTAMPTZ '2026-08-16T00:00:00.000Z');
+      INSERT INTO supplier_profiles
+        (user_id, shop_name, contact_name, shop_lat, shop_lng, shop_label, pickup_available, updated_at)
+      VALUES ('money_supplier', 'Money Shop', 'Money Supplier', 7.064, 125.6085, 'Davao Shop', true, TIMESTAMPTZ '2026-08-16T00:00:00.000Z');
+      INSERT INTO orders
+        (id, client_id, supplier_id, state, supplier_price_minor, commission_minor,
+         subtotal_minor, delivery_fee_minor, total_minor, downpayment_minor, balance_minor,
+         pickup_lat, pickup_lng, pickup_label, dropoff_lat, dropoff_lng, dropoff_label,
+         payout_hold, created_at, updated_at, position, data)
+      VALUES
+        ('legacy_money', 'money_client', 'money_supplier', 'awaiting_downpayment',
+         100000, 10000, 110000, 2500, 112500, 84375, 28125,
+         7.064, 125.6085, 'Davao Shop', 7.08, 125.62, 'Client', false,
+         TIMESTAMPTZ '2026-08-16T00:00:00.000Z', TIMESTAMPTZ '2026-08-16T00:00:00.000Z', 0, '{}');
+      INSERT INTO order_payments
+        (order_id, code, amount_minor, method, status, position, data)
+      VALUES
+        ('legacy_money', 'downpayment', 84375, 'qr_manual', 'confirmed', 0, '{}'),
+        ('legacy_money', 'balance', 28125, 'qr_manual', 'not_submitted', 1, '{}');
+    `);
+
+    await runner(migrationOptions(schema, "up", 1, client));
+
+    assert.deepEqual((await client.query("SELECT version, settings FROM platform_settings")).rows[0], {
+      version: 7,
+      settings: { issueWindowHours: 48, serviceFeeRateBps: 750 },
+    });
+    const columns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'orders'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    assert.equal(columns.has("supplier_subtotal_minor"), true);
+    assert.equal(columns.has("service_fee_minor"), true);
+    assert.equal(columns.has("supplier_price_minor"), false);
+    assert.equal(columns.has("commission_minor"), false);
+
+    assert.deepEqual((await client.query(`
+      SELECT supplier_subtotal_minor, subtotal_minor, service_fee_rate_bps,
+             service_fee_minor, fulfillment_mode, payment_plan, quote_version,
+             online_due_minor, direct_store_due_minor, supplier_platform_payout_minor,
+             money_model_version
+        FROM orders WHERE id = 'legacy_money'
+    `)).rows[0], {
+      supplier_subtotal_minor: "100000",
+      subtotal_minor: "100000",
+      service_fee_rate_bps: 1000,
+      service_fee_minor: "10000",
+      fulfillment_mode: "delivery",
+      payment_plan: "delivery_online",
+      quote_version: 1,
+      online_due_minor: "112500",
+      direct_store_due_minor: "0",
+      supplier_platform_payout_minor: "100000",
+      money_model_version: 1,
+    });
+    assert.deepEqual((await client.query(
+      "SELECT code, amount_minor FROM order_payments WHERE order_id = 'legacy_money' ORDER BY position",
+    )).rows, [
+      { code: "initial", amount_minor: "84375" },
+      { code: "final_online", amount_minor: "28125" },
+    ]);
+    assert.deepEqual((await client.query(`
+      SELECT payment_code, component, amount_minor
+        FROM order_payment_allocations
+       WHERE order_id = 'legacy_money'
+       ORDER BY payment_code, component
+    `)).rows, [
+      { payment_code: "final_online", component: "delivery_pass_through", amount_minor: "2500" },
+      { payment_code: "final_online", component: "supplier_principal", amount_minor: "25625" },
+      { payment_code: "initial", component: "delivery_pass_through", amount_minor: "0" },
+      { payment_code: "initial", component: "service_fee", amount_minor: "10000" },
+      { payment_code: "initial", component: "supplier_principal", amount_minor: "74375" },
+    ]);
+    assert.deepEqual((await client.query(
+      "SELECT delivery_downpayment_rate_bps, pickup_full_online_enabled, pickup_downpayment_store_enabled FROM supplier_payment_terms WHERE supplier_id = 'money_supplier'",
+    )).rows[0], {
+      delivery_downpayment_rate_bps: 0,
+      pickup_full_online_enabled: true,
+      pickup_downpayment_store_enabled: false,
+    });
+    await client.query("BEGIN");
+    await client.query("DELETE FROM supplier_payment_terms WHERE supplier_id = 'money_supplier'");
+    await assert.rejects(
+      client.query("COMMIT"),
+      (error) => error.code === "23514" && error.constraint === "supplier_payment_terms_pickup_mode_check",
+    );
+    await client.query("ROLLBACK");
+
+    await client.query(`
+      INSERT INTO platform_revenue_adjustments
+        (id, order_id, kind, amount_minor, reason, created_by, created_at)
+      VALUES
+        ('revenue_refund', 'legacy_money', 'refund', -1000, 'Partial refund', 'money_supplier', now())
+    `);
+    await assert.rejects(
+      client.query("UPDATE platform_revenue_adjustments SET amount_minor = -500 WHERE id = 'revenue_refund'"),
+      (error) => error.code === "42501" && /append-only/.test(error.message),
+    );
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    const reversedColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'orders'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    assert.equal(reversedColumns.has("supplier_price_minor"), true);
+    assert.equal(reversedColumns.has("commission_minor"), true);
+    assert.equal((await client.query("SELECT code FROM order_payments WHERE order_id = 'legacy_money' ORDER BY position")).rows[0].code, "downpayment");
+    assert.equal((await client.query("SELECT settings->>'serviceFeeRateBps' AS rate FROM platform_settings")).rows[0].rate, "750");
   });
 });
 

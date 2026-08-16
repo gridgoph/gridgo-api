@@ -35,23 +35,33 @@ test("relational store round-trips typed money, relationships, and composite rou
     materials: [{ id: "mat_vinyl", code: "vinyl", name: "Vinyl", categoryCodes: ["marketing"], active: true }],
     finishes: [{ id: "fin_none", code: "none", name: "None", categoryCodes: ["marketing"], active: true }],
   };
-  store.settings = { issueWindowHours: 24, commissionPercent: 10, deliveryFeeBands: [{ maxKm: 5, feeMinor: 5000 }] };
+  store.settings = { serviceFeeRateBps: 1000, issueWindowHours: 24, deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 5000 }] };
   store.zones = [{ id: "zone_central", code: "davao_central", name: "Davao Central", active: true }];
   store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], createdAt: AT, updatedAt: AT }];
   store.orders = [{
     id: "ord_one", clientId: "user_client", supplierId: "user_supplier", riderId: "user_rider",
     productId: "prod_banner", state: "issue_window_open", zone: "davao_central",
-    supplierPriceMinor: 100000, commissionMinor: 10000, subtotalMinor: 110000,
-    deliveryFeeMinor: 5000, totalMinor: 115000, downpaymentMinor: 86250, balanceMinor: 28750,
+    supplierSubtotalMinor: 100000, subtotalMinor: 100000, serviceFeeRateBps: 1000, serviceFeeMinor: 10000,
+    deliveryFeeMinor: 5000, totalMinor: 115000, fulfillmentMode: "delivery", paymentPlan: "delivery_online",
+    quoteVersion: 1, supplierDownpaymentRateBps: null, onlineDueMinor: 115000, directStoreDueMinor: 0,
+    supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion: 1,
+    initialOnlineMinor: 86250, finalOnlineMinor: 28750,
     payoutHold: true, pickup: { lat: 7.064, lng: 125.6085, label: "Davao shop" },
     dropoff: { lat: 7.0731, lng: 125.6128, label: "Client address" },
     issueWindowOpenedAt: "2026-08-15T00:00:00.000Z",
     issueWindowExpiresAt: "2026-08-17T00:00:00.000Z",
     title: "Launch banner", quantity: 1, address: "Client address",
     payments: {
-      downpayment: { amountMinor: 86250, method: "qr_manual", status: "confirmed", reference: "DP-1" },
-      balance: { amountMinor: 28750, method: "qr_manual", status: "confirmed", reference: "BAL-1" },
+      initial: { amountMinor: 86250, method: "qr_manual", status: "confirmed", reference: "DP-1" },
+      final_online: { amountMinor: 28750, method: "qr_manual", status: "confirmed", reference: "BAL-1" },
     },
+    paymentAllocations: [
+      { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: 5000 },
+      { paymentCode: "final_online", component: "supplier_principal", amountMinor: 23750 },
+      { paymentCode: "initial", component: "service_fee", amountMinor: 10000 },
+      { paymentCode: "initial", component: "supplier_principal", amountMinor: 76250 },
+    ],
+    revenueAdjustments: [],
     payoutMilestones: [{ code: "printing", sharePercent: 50, amountMinor: 50000, status: "released", pofFileIds: ["file_pof"] }],
     pickupChecklist: { status: "passed", checks: [{ code: "sealed", passed: true }] },
     timeline: [{ at: AT, state: "issue_window_open", by: "system" }],
@@ -72,7 +82,7 @@ test("relational store round-trips typed money, relationships, and composite rou
 
   assert.deepEqual(reloaded, store);
   assert.equal(typeof reloaded.orders[0].totalMinor, "number");
-  assert.equal(reloaded.orders[0].payments.balance.amountMinor, 28750);
+  assert.equal(reloaded.orders[0].payments.final_online.amountMinor, 28750);
   assert.equal(reloaded.orders[0].payoutMilestones[0].amountMinor, 50000);
   assert.equal(reloaded.credits.user_client.balanceMinor, 500000);
 

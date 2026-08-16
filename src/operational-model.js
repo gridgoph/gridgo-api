@@ -1,5 +1,5 @@
-const COMMISSION_RATE_PERCENT = 10;
-const DOWNPAYMENT_PERCENT = 75;
+const BPS_DENOMINATOR = 10_000n;
+const BPS_HALF = 5_000n;
 
 export const PICKUP_CHECK_CODES = Object.freeze([
   "quantity_match",
@@ -38,8 +38,28 @@ function finiteMinor(value, field) {
   return number;
 }
 
+function finiteBps(value, field, allowed = null) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0 || number > 10_000 || (allowed && !allowed.includes(number))) {
+    fail(400, "invalid_basis_points", `${field} must be a supported whole-number basis-point rate.`, { field });
+  }
+  return number;
+}
+
+export function roundBps(valueMinor, rateBps) {
+  const value = finiteMinor(valueMinor, "valueMinor");
+  const rate = finiteBps(rateBps, "rateBps");
+  const rounded = (BigInt(value) * BigInt(rate) + BPS_HALF) / BPS_DENOMINATOR;
+  const result = Number(rounded);
+  if (!Number.isSafeInteger(result)) {
+    fail(400, "invalid_money", "The calculated money amount exceeds the safe API range.");
+  }
+  return result;
+}
+
 export function defaultOperationalSettings() {
   return {
+    serviceFeeRateBps: 1_000,
     issueWindowHours: 24,
     deliveryFeeBands: [
       { maxDistanceMeters: 4_999, feeMinor: 2_500 },
@@ -50,7 +70,16 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
-  const issueWindowHours = Number(settings?.issueWindowHours);
+  const serviceFeeRateBps = settings?.serviceFeeRateBps;
+  if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
+    fail(
+      400,
+      "invalid_service_fee_rate",
+      "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
+      { field: "serviceFeeRateBps" },
+    );
+  }
+  const issueWindowHours = settings?.issueWindowHours;
   if (!Number.isInteger(issueWindowHours) || issueWindowHours < 1 || issueWindowHours > 720) {
     fail(
       400,
@@ -70,7 +99,14 @@ export function validateOperationalSettings(settings) {
   let previous = -1;
   for (let index = 0; index < bands.length; index += 1) {
     const band = bands[index];
-    finiteMinor(band?.feeMinor, `deliveryFeeBands[${index}].feeMinor`);
+    if (!Number.isSafeInteger(band?.feeMinor) || band.feeMinor < 0) {
+      fail(
+        400,
+        "invalid_money",
+        `deliveryFeeBands[${index}].feeMinor must be a non-negative integer in PHP minor units.`,
+        { field: `deliveryFeeBands[${index}].feeMinor` },
+      );
+    }
     const last = index === bands.length - 1;
     if (last) {
       if (band?.maxDistanceMeters !== null) {
@@ -82,8 +118,8 @@ export function validateOperationalSettings(settings) {
       }
       continue;
     }
-    const maximum = Number(band?.maxDistanceMeters);
-    if (!Number.isInteger(maximum) || maximum <= previous) {
+    const maximum = band?.maxDistanceMeters;
+    if (!Number.isSafeInteger(maximum) || maximum < 0 || maximum <= previous) {
       fail(
         400,
         "invalid_delivery_fee_bands",
@@ -131,64 +167,250 @@ export function deliveryFeeForDistance(distanceMeters, settings) {
   return band.feeMinor;
 }
 
-export function calculateFinalPrice({ supplierPriceMinor, pickup, dropoff, distanceMeters, settings }) {
-  const supplierPrice = finiteMinor(supplierPriceMinor, "supplierPriceMinor");
-  if (supplierPrice === 0) {
-    fail(400, "invalid_supplier_price", "Enter a supplier price greater than zero in PHP minor units.");
+export function calculateOrderMoney({
+  supplierSubtotalMinor,
+  fulfillmentMode,
+  paymentPlan,
+  supplierDownpaymentRateBps,
+  pickup,
+  dropoff,
+  distanceMeters,
+  settings,
+}) {
+  validateOperationalSettings(settings);
+  const supplierSubtotal = finiteMinor(supplierSubtotalMinor, "supplierSubtotalMinor");
+  const serviceFeeRateBps = finiteBps(settings.serviceFeeRateBps, "serviceFeeRateBps");
+  const serviceFeeMinor = roundBps(supplierSubtotal, serviceFeeRateBps);
+  const allowedPlans = new Set(["delivery_online", "pickup_full_online", "pickup_downpayment_store"]);
+  if (!allowedPlans.has(paymentPlan)) {
+    fail(400, "invalid_payment_plan", "Choose one of the payment plans offered for this quote.");
   }
-  const resolvedDistance = distanceMeters == null ? distanceMetersBetween(pickup, dropoff) : Math.round(Number(distanceMeters));
-  const commissionMinor = Math.round((supplierPrice * COMMISSION_RATE_PERCENT) / 100);
-  const subtotalMinor = supplierPrice + commissionMinor;
-  const deliveryFeeMinor = deliveryFeeForDistance(resolvedDistance, settings);
-  const totalMinor = subtotalMinor + deliveryFeeMinor;
-  const downpaymentMinor = Math.round((totalMinor * DOWNPAYMENT_PERCENT) / 100);
+  if (!new Set(["delivery", "pickup"]).has(fulfillmentMode)) {
+    fail(400, "invalid_fulfillment_mode", "Choose delivery or pickup for this quote.");
+  }
+
+  let rate;
+  let resolvedDistance = 0;
+  let deliveryFeeMinor = 0;
+  if (paymentPlan === "delivery_online") {
+    if (fulfillmentMode !== "delivery") fail(400, "invalid_payment_plan", "Delivery requires the delivery online plan.");
+    rate = finiteBps(supplierDownpaymentRateBps, "supplierDownpaymentRateBps", [0, 2_500, 5_000]);
+    resolvedDistance = distanceMeters == null ? distanceMetersBetween(pickup, dropoff) : Math.round(Number(distanceMeters));
+    deliveryFeeMinor = deliveryFeeForDistance(resolvedDistance, settings);
+  } else if (paymentPlan === "pickup_full_online") {
+    if (fulfillmentMode !== "pickup") fail(400, "invalid_payment_plan", "Pickup full-online requires pickup fulfillment.");
+    rate = 10_000;
+  } else {
+    if (fulfillmentMode !== "pickup") fail(400, "invalid_payment_plan", "Pickup at-store payment requires pickup fulfillment.");
+    rate = finiteBps(supplierDownpaymentRateBps, "supplierDownpaymentRateBps", [2_500, 5_000]);
+  }
+
+  const initialSupplierPrincipalMinor = roundBps(supplierSubtotal, rate);
+  const supplierRemainderMinor = supplierSubtotal - initialSupplierPrincipalMinor;
+  const initialOnlineMinor = initialSupplierPrincipalMinor + serviceFeeMinor;
+  const finalOnlineMinor = paymentPlan === "delivery_online" ? supplierRemainderMinor + deliveryFeeMinor : 0;
+  const directStoreDueMinor = paymentPlan === "pickup_downpayment_store" ? supplierRemainderMinor : 0;
+  const totalMinor = supplierSubtotal + serviceFeeMinor + deliveryFeeMinor;
+  const onlineDueMinor = initialOnlineMinor + finalOnlineMinor;
+  const supplierPlatformPayoutMinor = supplierSubtotal - directStoreDueMinor;
+
+  for (const [field, amount] of Object.entries({
+    serviceFeeMinor,
+    deliveryFeeMinor,
+    totalMinor,
+    initialOnlineMinor,
+    finalOnlineMinor,
+    directStoreDueMinor,
+    onlineDueMinor,
+    supplierPlatformPayoutMinor,
+  })) finiteMinor(amount, field);
+
   return {
-    supplierPriceMinor: supplierPrice,
-    commissionRatePercent: COMMISSION_RATE_PERCENT,
-    commissionMinor,
-    subtotalMinor,
+    supplierSubtotalMinor: supplierSubtotal,
+    subtotalMinor: supplierSubtotal,
+    serviceFeeRateBps,
+    serviceFeeMinor,
     deliveryDistanceMeters: resolvedDistance,
     deliveryFeeMinor,
     totalMinor,
-    downpaymentMinor,
-    balanceMinor: totalMinor - downpaymentMinor,
+    fulfillmentMode,
+    paymentPlan,
+    supplierDownpaymentRateBps: rate,
+    initialSupplierPrincipalMinor,
+    supplierRemainderMinor,
+    initialOnlineMinor,
+    finalOnlineMinor,
+    onlineDueMinor,
+    directStoreDueMinor,
+    supplierPlatformPayoutMinor,
+    supplierEarningsMinor: supplierSubtotal,
   };
 }
 
-export function estimatePriceRange({ supplierPriceCandidatesMinor }) {
-  const candidates = (supplierPriceCandidatesMinor || [])
+function componentLine(component, amountMinor) {
+  const labels = {
+    supplier_principal: "Supplier principal",
+    service_fee: "GRIDGO service fee",
+    delivery_pass_through: "Delivery pass-through",
+  };
+  return { component, label: labels[component], amountMinor };
+}
+
+export function createPaymentSchedule(money) {
+  const initialLines = [
+    componentLine("supplier_principal", money.initialSupplierPrincipalMinor),
+    componentLine("service_fee", money.serviceFeeMinor),
+  ];
+  const payments = {
+    initial: {
+      amountMinor: money.initialOnlineMinor,
+      method: "qr_manual",
+      status: "not_submitted",
+      label: "Initial online payment",
+      supplierPrincipalRateBps: money.supplierDownpaymentRateBps,
+      percent: money.supplierDownpaymentRateBps / 100,
+      componentLines: clone(initialLines),
+      reference: null,
+      submittedAt: null,
+      confirmedAt: null,
+      confirmedBy: null,
+      confirmationSource: null,
+      rejectedAt: null,
+      rejectedBy: null,
+      rejectionReason: null,
+    },
+  };
+  const paymentAllocations = initialLines.map(({ component, amountMinor }) => ({ paymentCode: "initial", component, amountMinor }));
+  if (money.paymentPlan === "delivery_online") {
+    const finalLines = [
+      componentLine("supplier_principal", money.supplierRemainderMinor),
+      componentLine("delivery_pass_through", money.deliveryFeeMinor),
+    ];
+    payments.final_online = {
+      amountMinor: money.finalOnlineMinor,
+      method: "qr_manual",
+      status: "not_submitted",
+      label: "Final online payment",
+      supplierPrincipalRateBps: 10_000 - money.supplierDownpaymentRateBps,
+      percent: (10_000 - money.supplierDownpaymentRateBps) / 100,
+      componentLines: clone(finalLines),
+      reference: null,
+      submittedAt: null,
+      confirmedAt: null,
+      confirmedBy: null,
+      confirmationSource: null,
+      rejectedAt: null,
+      rejectedBy: null,
+      rejectionReason: null,
+    };
+    paymentAllocations.push(...finalLines.map(({ component, amountMinor }) => ({ paymentCode: "final_online", component, amountMinor })));
+  }
+  return { payments, paymentAllocations };
+}
+
+export function estimatePriceRange({ supplierSubtotalCandidatesMinor }) {
+  const candidates = (supplierSubtotalCandidatesMinor || [])
     .map((value) => Number(value))
     .filter((value) => Number.isSafeInteger(value) && value > 0);
   if (!candidates.length) candidates.push(10_000);
   const supplierMin = Math.min(...candidates);
   const supplierMax = Math.max(...candidates);
   return {
-    subtotalMinMinor: supplierMin + Math.round((supplierMin * COMMISSION_RATE_PERCENT) / 100),
-    subtotalMaxMinor: supplierMax + Math.round((supplierMax * COMMISSION_RATE_PERCENT) / 100),
+    supplierSubtotalMinMinor: supplierMin,
+    supplierSubtotalMaxMinor: supplierMax,
+    serviceFeeStatus: "calculated_at_quote_acceptance",
     deliveryFeeStatus: "pending_supplier_assignment",
   };
 }
 
-export function createPayoutMilestones(supplierPriceMinor) {
-  const supplierPrice = finiteMinor(supplierPriceMinor, "supplierPriceMinor");
-  const printing = Math.round(supplierPrice * 0.5);
-  const packaging = Math.round(supplierPrice * 0.15);
-  const delivered = Math.round(supplierPrice * 0.25);
-  const retention = supplierPrice - printing - packaging - delivered;
-  return [
-    ["printing", 50, printing],
-    ["packaging_qc", 15, packaging],
-    ["delivered", 25, delivered],
-    ["retention", 10, retention],
-  ].map(([code, sharePercent, amountMinor]) => ({
+export function createPayoutMilestones(money) {
+  const payoutBase = finiteMinor(money?.supplierPlatformPayoutMinor, "supplierPlatformPayoutMinor");
+  const supplierSubtotal = finiteMinor(money?.supplierSubtotalMinor, "supplierSubtotalMinor");
+  const downpaymentRate = finiteBps(
+    money?.supplierDownpaymentRateBps,
+    "supplierDownpaymentRateBps",
+    [0, 2_500, 5_000, 10_000],
+  );
+  const initialPrincipal = Math.min(roundBps(supplierSubtotal, downpaymentRate), payoutBase);
+  const completionPrincipal = payoutBase - initialPrincipal;
+  const rows = [];
+  if (downpaymentRate > 0) {
+    rows.push(["initial", downpaymentRate / 100, initialPrincipal]);
+  }
+  if (completionPrincipal > 0 || rows.length === 0) {
+    const sharePercent = supplierSubtotal === 0 ? 0 : (10_000 - downpaymentRate) / 100;
+    rows.push(["completion", sharePercent, completionPrincipal]);
+  }
+  return rows.map(([code, sharePercent, amountMinor]) => ({
     code,
     sharePercent,
     amountMinor,
-    status: "pending_pof",
+    status: "pending",
     pofFileIds: [],
     releasedAt: null,
     releasedBy: null,
   }));
+}
+
+export function collectedSupplierPrincipalMinor(order) {
+  const confirmedPayments = new Set(
+    Object.entries(order?.payments || {})
+      .filter(([, payment]) => payment?.status === "confirmed")
+      .map(([code]) => code),
+  );
+  return (order?.paymentAllocations || [])
+    .filter(
+      (allocation) => allocation.component === "supplier_principal" && confirmedPayments.has(allocation.paymentCode),
+    )
+    .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
+}
+
+export function moneyReportingForOrder(order) {
+  const releasedThroughPlatformMinor = (order.payoutMilestones || [])
+    .filter((milestone) => milestone.status === "released")
+    .reduce((sum, milestone) => sum + finiteMinor(milestone.amountMinor, "milestone.amountMinor"), 0);
+  const initialConfirmed = order.payments?.initial?.status === "confirmed";
+  const serviceFeeCollectedMinor = initialConfirmed
+    ? (order.paymentAllocations || [])
+      .filter((allocation) => allocation.paymentCode === "initial" && allocation.component === "service_fee")
+      .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0)
+    : 0;
+  const adjustedMinor = (order.revenueAdjustments || [])
+    .filter((adjustment) => adjustment.kind === "adjustment")
+    .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
+  const refundedMinor = (order.revenueAdjustments || [])
+    .filter((adjustment) => adjustment.kind === "refund")
+    .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
+  const handedOver = ["delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
+  const receivedAtStoreMinor = 0;
+  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+  const protectedPaymentMinor = Math.max(
+    0,
+    Math.min(order.supplierPlatformPayoutMinor || 0, collectedPrincipalMinor) - releasedThroughPlatformMinor,
+  );
+  return {
+    supplierSettlement: {
+      orderPriceMinor: order.supplierSubtotalMinor,
+      dueAtStoreMinor: order.directStoreDueMinor || 0,
+      receivedAtStoreMinor,
+      collectedSupplierPrincipalMinor: collectedPrincipalMinor,
+      protectedPaymentMinor,
+      gridgoDeductionsMinor: 0,
+      totalSupplierEarningsMinor: order.supplierSubtotalMinor,
+      supplierReleasedMinor: releasedThroughPlatformMinor,
+      supplierOutstandingMinor: Math.max(
+        0,
+        (order.supplierSubtotalMinor || 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
+      ),
+    },
+    platformRevenue: {
+      billedMinor: order.commercialCommittedAt ? order.serviceFeeMinor : 0,
+      collectedMinor: serviceFeeCollectedMinor,
+      recognizedMinor: handedOver ? Math.max(0, serviceFeeCollectedMinor + adjustedMinor + refundedMinor) : 0,
+      adjustedMinor,
+      refundedMinor,
+    },
+  };
 }
 
 function activePayoutHold(store, order) {
@@ -209,6 +431,66 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
   }
   if (milestone.status === "released") return milestone;
+  if (order.fulfillmentMode === "pickup") {
+    fail(
+      409,
+      "pickup_payout_not_available",
+      "Pickup payout release remains unavailable until the pickup handover lifecycle records fulfilment.",
+      { milestoneCode: code },
+    );
+  }
+  const currentPolicy = code === "initial" || code === "completion";
+  if (currentPolicy) {
+    if (activePayoutHold(store, order)) {
+      fail(
+        409,
+        "payout_held",
+        "A claim is holding this payout. Resolve or release the claim before releasing the milestone.",
+        { milestoneCode: code },
+      );
+    }
+    const productionStates = new Set([
+      "production",
+      "supplier_self_qc",
+      "ready_for_dispatch",
+      "rider_assigned",
+      "picked_up",
+      "out_for_delivery",
+      "delivered",
+      "issue_window_open",
+      "completed",
+      "payout_released",
+    ]);
+    const completionStates = new Set(["delivered", "issue_window_open", "completed", "payout_released"]);
+    if (code === "initial" && !productionStates.has(order.state)) {
+      fail(409, "milestone_not_reached", "Start production before releasing the supplier downpayment.", {
+        milestoneCode: code,
+        state: order.state,
+      });
+    }
+    if (code === "completion" && !completionStates.has(order.state)) {
+      fail(409, "fulfilment_required", "Record fulfilment before releasing the remaining supplier principal.", {
+        milestoneCode: code,
+        state: order.state,
+      });
+    }
+    const releasedPrincipalMinor = (order.payoutMilestones || [])
+      .filter((item) => item.status === "released")
+      .reduce((sum, item) => sum + finiteMinor(item.amountMinor, "milestone.amountMinor"), 0);
+    const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+    if (releasedPrincipalMinor + finiteMinor(milestone.amountMinor, "milestone.amountMinor") > collectedPrincipalMinor) {
+      fail(
+        409,
+        "supplier_principal_not_collected",
+        "Confirmed client payments do not yet cover this supplier payout.",
+        { milestoneCode: code, collectedPrincipalMinor, releasedPrincipalMinor },
+      );
+    }
+    milestone.status = "released";
+    milestone.releasedAt = at;
+    milestone.releasedBy = actor.id || "system";
+    return milestone;
+  }
   if (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0) {
     fail(
       409,
@@ -260,8 +542,8 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     if (!["issue_window_open", "completed", "payout_released"].includes(order.state)) {
       fail(409, "delivery_required", "Record delivery before releasing the delivered milestone.");
     }
-    if (order.payments?.balance?.status !== "confirmed") {
-      fail(409, "balance_not_confirmed", "Operations must confirm the digital balance before releasing delivery payout.");
+    if (order.payments?.final_online?.status !== "confirmed") {
+      fail(409, "final_payment_not_confirmed", "Operations must confirm the final online payment before releasing delivery payout.");
     }
   }
   if (code === "retention" && order.state !== "completed" && order.state !== "payout_released") {
@@ -277,24 +559,76 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   return milestone;
 }
 
+export function releaseEligibleSupplierPayouts(order, actor, at, store = null) {
+  if (order?.fulfillmentMode === "pickup" || activePayoutHold(store, order)) return [];
+  const productionReached = new Set([
+    "production",
+    "supplier_self_qc",
+    "ready_for_dispatch",
+    "rider_assigned",
+    "picked_up",
+    "out_for_delivery",
+    "delivered",
+    "issue_window_open",
+    "completed",
+    "payout_released",
+  ]).has(order?.state);
+  const fulfilmentReached = new Set(["delivered", "issue_window_open", "completed", "payout_released"]).has(order?.state);
+  const eligibleCodes = [
+    ...(productionReached ? ["initial"] : []),
+    ...(fulfilmentReached ? ["completion"] : []),
+  ];
+  return eligibleCodes
+    .map((code) => (order.payoutMilestones || []).find((milestone) => milestone.code === code))
+    .filter((milestone) => milestone && milestone.status !== "released")
+    .map((milestone) => releaseMilestone(order, milestone.code, actor, at, store));
+}
+
 export function publicOrderFor(order, user) {
   if (!order) return null;
   const publicRecord = clone(order);
+  const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
-  if (!ops) {
-    delete publicRecord.commissionMinor;
-    delete publicRecord.commissionRatePercent;
-  }
+  const rider = user?.role === "rider";
+  if (!ops) delete publicRecord.revenueAdjustments;
   if (!ops && !assignedSupplier) {
-    delete publicRecord.supplierPriceMinor;
+    delete publicRecord.supplierSubtotalMinor;
+    delete publicRecord.supplierPlatformPayoutMinor;
+    delete publicRecord.supplierEarningsMinor;
+    delete publicRecord.paymentAllocations;
     if (Array.isArray(publicRecord.payoutMilestones)) {
       publicRecord.payoutMilestones = publicRecord.payoutMilestones.map((milestone) => {
         const { amountMinor: _amountMinor, ...visible } = milestone;
         return visible;
       });
+    }
+  }
+  if (assignedSupplier && reporting) publicRecord.supplierSettlement = reporting.supplierSettlement;
+  if (ops && reporting) {
+    publicRecord.supplierSettlement = reporting.supplierSettlement;
+    publicRecord.platformRevenue = reporting.platformRevenue;
+  }
+  if (rider) {
+    delete publicRecord.payoutMilestones;
+    delete publicRecord.quoteHistory;
+    delete publicRecord.supplierDownpaymentRateBps;
+    delete publicRecord.initialSupplierPrincipalMinor;
+    delete publicRecord.supplierRemainderMinor;
+    const paymentCollections = [publicRecord.payments, publicRecord.acceptedQuote?.payments];
+    for (const payments of paymentCollections) {
+      if (!payments) continue;
+      for (const installment of Object.values(payments)) {
+        if (!installment || typeof installment !== "object") continue;
+        delete installment.componentLines;
+        delete installment.supplierPrincipalRateBps;
+      }
+    }
+    if (publicRecord.acceptedQuote) {
+      delete publicRecord.acceptedQuote.paymentTerms;
+      delete publicRecord.acceptedQuote.supplierDownpaymentRateBps;
     }
   }
   if (!ops && !owningClient && publicRecord.payments) {

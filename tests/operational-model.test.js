@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 
 import {
   OperationalError,
-  calculateFinalPrice,
+  calculateOrderMoney,
+  createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
   expireIssueWindows,
+  moneyReportingForOrder,
   publicOrderFor,
-  releaseMilestone,
+  releaseEligibleSupplierPayouts,
+  roundBps,
+  validateOperationalSettings,
 } from "../src/operational-model.js";
 
 const AT = "2026-08-10T12:00:00.000Z";
@@ -23,113 +27,278 @@ function expectDomainError(fn, status, code) {
   });
 }
 
-test("calculates the captain's exact commission, subtotal, delivery, total, and 75/25 split", () => {
-  const result = calculateFinalPrice({
-    supplierPriceMinor: 100_000,
+test("uses BigInt half-up basis-point rounding including the 99,999 remainder vector", () => {
+  assert.equal(roundBps(100_000, 1_000), 10_000);
+  assert.equal(roundBps(99_999, 1_000), 10_000);
+  assert.equal(roundBps(99_999, 2_500), 25_000);
+  assert.equal(99_999 - roundBps(99_999, 2_500), 74_999);
+  assert.equal(roundBps(Number.MAX_SAFE_INTEGER, 10_000), Number.MAX_SAFE_INTEGER);
+});
+
+test("requires service-fee settings to use an actual integer", () => {
+  for (const serviceFeeRateBps of ["1000", "", null]) {
+    expectDomainError(
+      () => validateOperationalSettings({ ...defaultOperationalSettings(), serviceFeeRateBps }),
+      400,
+      "invalid_service_fee_rate",
+    );
+  }
+});
+
+test("requires delivery fee settings to use actual safe integers", () => {
+  const settings = defaultOperationalSettings();
+  for (const feeMinor of ["2500", "", null]) {
+    expectDomainError(
+      () => validateOperationalSettings({
+        ...settings,
+        deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }],
+      }),
+      400,
+      "invalid_money",
+    );
+  }
+});
+
+function plan(overrides = {}) {
+  return calculateOrderMoney({
+    supplierSubtotalMinor: 100_000,
+    fulfillmentMode: "delivery",
+    paymentPlan: "delivery_online",
+    supplierDownpaymentRateBps: 2_500,
     pickup: { lat: 7.0731, lng: 125.6128 },
     dropoff: { lat: 7.0731, lng: 125.6128 },
     settings: defaultOperationalSettings(),
+    ...overrides,
   });
+}
 
-  assert.deepEqual(result, {
-    supplierPriceMinor: 100_000,
-    commissionRatePercent: 10,
-    commissionMinor: 10_000,
-    subtotalMinor: 110_000,
-    deliveryDistanceMeters: 0,
-    deliveryFeeMinor: 2_500,
-    totalMinor: 112_500,
-    downpaymentMinor: 84_375,
-    balanceMinor: 28_125,
-  });
+test("allocates delivery, pickup full-online, and pickup-at-store plans exactly", () => {
+  const delivery = plan();
+  assert.deepEqual(
+    {
+      fee: delivery.serviceFeeMinor,
+      principalNow: delivery.initialSupplierPrincipalMinor,
+      initial: delivery.initialOnlineMinor,
+      later: delivery.finalOnlineMinor,
+      store: delivery.directStoreDueMinor,
+      total: delivery.totalMinor,
+      supplierPayout: delivery.supplierPlatformPayoutMinor,
+    },
+    { fee: 10_000, principalNow: 25_000, initial: 35_000, later: 77_500, store: 0, total: 112_500, supplierPayout: 100_000 },
+  );
+
+  const fullOnline = plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_full_online", supplierDownpaymentRateBps: 10_000 });
+  assert.deepEqual(
+    [fullOnline.initialOnlineMinor, fullOnline.finalOnlineMinor, fullOnline.directStoreDueMinor, fullOnline.totalMinor],
+    [110_000, 0, 0, 110_000],
+  );
+
+  const atStore = plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_downpayment_store" });
+  assert.deepEqual(
+    [atStore.initialOnlineMinor, atStore.finalOnlineMinor, atStore.directStoreDueMinor, atStore.totalMinor, atStore.supplierPlatformPayoutMinor],
+    [35_000, 0, 75_000, 110_000, 25_000],
+  );
+
+  const schedule = createPaymentSchedule(delivery);
+  assert.deepEqual(Object.keys(schedule.payments), ["initial", "final_online"]);
+  assert.deepEqual(schedule.paymentAllocations, [
+    { paymentCode: "initial", component: "supplier_principal", amountMinor: 25_000 },
+    { paymentCode: "initial", component: "service_fee", amountMinor: 10_000 },
+    { paymentCode: "final_online", component: "supplier_principal", amountMinor: 75_000 },
+    { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: 2_500 },
+  ]);
 });
 
 test("uses the provisional configurable distance boundaries exactly", () => {
   const settings = defaultOperationalSettings();
-  assert.equal(calculateFinalPrice({ supplierPriceMinor: 1_000, distanceMeters: 4_999, settings }).deliveryFeeMinor, 2_500);
-  assert.equal(calculateFinalPrice({ supplierPriceMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 5_000);
-  assert.equal(calculateFinalPrice({ supplierPriceMinor: 1_000, distanceMeters: 10_000, settings }).deliveryFeeMinor, 5_000);
-  assert.equal(calculateFinalPrice({ supplierPriceMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 4_999, settings }).deliveryFeeMinor, 2_500);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 5_000);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_000, settings }).deliveryFeeMinor, 5_000);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
 });
 
-test("client order projection cannot expose supplier price, commission, or milestone amounts", () => {
+test("role-aware projections expose client fee lines and truthful supplier settlement", () => {
+  const money = plan();
+  const schedule = createPaymentSchedule(money);
   const order = {
     id: "ord-a",
     clientId: "client-a",
     supplierId: "supplier-a",
-    supplierPriceMinor: 100_000,
-    commissionRatePercent: 10,
-    commissionMinor: 10_000,
-    subtotalMinor: 110_000,
-    deliveryFeeMinor: 2_500,
-    totalMinor: 112_500,
-    payments: {
-      downpayment: { amountMinor: 84_375, status: "confirmed", reference: "PRIVATE-GCASH-REFERENCE" },
-      balance: { amountMinor: 28_125, status: "not_submitted", reference: null },
+    state: "production",
+    commercialCommittedAt: AT,
+    ...money,
+    ...schedule,
+    payoutMilestones: createPayoutMilestones(money),
+    acceptedQuote: {
+      payments: structuredClone(schedule.payments),
+      paymentTerms: { deliveryDownpaymentRateBps: 2_500 },
+      supplierDownpaymentRateBps: 2_500,
     },
-    payoutMilestones: createPayoutMilestones(100_000),
+    quoteHistory: [{
+      payments: structuredClone(schedule.payments),
+      paymentTerms: { deliveryDownpaymentRateBps: 5_000 },
+      supplierDownpaymentRateBps: 5_000,
+    }],
   };
+  order.payments.initial.status = "confirmed";
+  order.payments.initial.reference = "PRIVATE-GCASH-REFERENCE";
 
   const clientOrder = publicOrderFor(order, { id: "client-a", role: "client" });
-  const serialized = JSON.stringify(clientOrder);
-  assert.equal(serialized.includes("supplierPriceMinor"), false);
-  assert.equal(serialized.includes("commissionMinor"), false);
-  assert.equal(serialized.includes("commissionRatePercent"), false);
+  assert.equal("supplierSubtotalMinor" in clientOrder, false);
   assert.equal(clientOrder.payoutMilestones.some((milestone) => "amountMinor" in milestone), false);
-  assert.equal(clientOrder.payments.downpayment.amountMinor, 84_375);
-  assert.equal(clientOrder.subtotalMinor, 110_000);
+  assert.equal(clientOrder.payments.initial.amountMinor, 35_000);
+  assert.equal(clientOrder.subtotalMinor, 100_000);
+  assert.equal(clientOrder.serviceFeeMinor, 10_000);
   assert.equal(clientOrder.deliveryFeeMinor, 2_500);
   assert.equal(clientOrder.totalMinor, 112_500);
 
   const supplierOrder = publicOrderFor(order, { id: "supplier-a", role: "supplier" });
-  assert.equal(supplierOrder.supplierPriceMinor, 100_000);
-  assert.equal("commissionMinor" in supplierOrder, false);
-  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 50_000);
-  assert.equal("reference" in supplierOrder.payments.downpayment, false);
+  assert.equal(supplierOrder.supplierSubtotalMinor, 100_000);
+  assert.equal(supplierOrder.supplierSettlement.gridgoDeductionsMinor, 0);
+  assert.equal(supplierOrder.supplierSettlement.totalSupplierEarningsMinor, 100_000);
+  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 25_000);
+  assert.equal(supplierOrder.supplierSettlement.collectedSupplierPrincipalMinor, 25_000);
+  assert.equal(supplierOrder.supplierSettlement.protectedPaymentMinor, 25_000);
+  assert.equal("reference" in supplierOrder.payments.initial, false);
 
-  assert.equal(clientOrder.payments.downpayment.reference, "PRIVATE-GCASH-REFERENCE");
+  assert.equal(clientOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
 
   const opsOrder = publicOrderFor(order, { id: "ops-a", role: "ops_admin" });
-  assert.equal(opsOrder.supplierPriceMinor, 100_000);
-  assert.equal(opsOrder.commissionMinor, 10_000);
-  assert.equal(opsOrder.payments.downpayment.reference, "PRIVATE-GCASH-REFERENCE");
+  assert.equal(opsOrder.supplierSubtotalMinor, 100_000);
+  assert.equal(opsOrder.platformRevenue.collectedMinor, 10_000);
+  assert.equal(opsOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
+  assert.deepEqual(moneyReportingForOrder(order).platformRevenue, {
+    billedMinor: 10_000,
+    collectedMinor: 10_000,
+    recognizedMinor: 0,
+    adjustedMinor: 0,
+    refundedMinor: 0,
+  });
+  const adjusted = structuredClone(order);
+  adjusted.state = "delivered";
+  adjusted.revenueAdjustments = [
+    { kind: "adjustment", amountMinor: -1_000 },
+    { kind: "refund", amountMinor: -2_000 },
+  ];
+  assert.deepEqual(moneyReportingForOrder(adjusted).platformRevenue, {
+    billedMinor: 10_000,
+    collectedMinor: 10_000,
+    recognizedMinor: 7_000,
+    adjustedMinor: -1_000,
+    refundedMinor: -2_000,
+  });
+
+  const riderOrder = publicOrderFor(order, { id: "rider-a", role: "rider" });
+  assert.equal("supplierDownpaymentRateBps" in riderOrder, false);
+  assert.equal("initialSupplierPrincipalMinor" in riderOrder, false);
+  assert.equal("supplierRemainderMinor" in riderOrder, false);
+  assert.equal("payoutMilestones" in riderOrder, false);
+  assert.equal("quoteHistory" in riderOrder, false);
+  assert.equal("componentLines" in riderOrder.payments.initial, false);
+  assert.equal("supplierPrincipalRateBps" in riderOrder.payments.initial, false);
+  assert.equal("componentLines" in riderOrder.acceptedQuote.payments.initial, false);
+  assert.equal("supplierPrincipalRateBps" in riderOrder.acceptedQuote.payments.initial, false);
+  assert.equal("paymentTerms" in riderOrder.acceptedQuote, false);
+  assert.equal("supplierDownpaymentRateBps" in riderOrder.acceptedQuote, false);
+
+  const pickupMoney = plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_downpayment_store" });
+  const pickupSchedule = createPaymentSchedule(pickupMoney);
+  pickupSchedule.payments.initial.status = "confirmed";
+  const pickupAtStore = {
+    ...order,
+    ...pickupMoney,
+    ...pickupSchedule,
+    state: "delivered",
+    payoutMilestones: createPayoutMilestones(pickupMoney),
+  };
+  assert.deepEqual(moneyReportingForOrder(pickupAtStore).supplierSettlement, {
+    orderPriceMinor: 100_000,
+    dueAtStoreMinor: 75_000,
+    receivedAtStoreMinor: 0,
+    collectedSupplierPrincipalMinor: 25_000,
+    protectedPaymentMinor: 25_000,
+    gridgoDeductionsMinor: 0,
+    totalSupplierEarningsMinor: 100_000,
+    supplierReleasedMinor: 0,
+    supplierOutstandingMinor: 100_000,
+  });
 });
 
-test("milestone shares sum exactly to supplier earnings and release is gated on POF", () => {
-  const milestones = createPayoutMilestones(100_001);
+test("uses 0, 25, and 50 percent supplier payout shapes", () => {
   assert.deepEqual(
-    milestones.map(({ code, sharePercent, amountMinor }) => ({ code, sharePercent, amountMinor })),
+    [0, 2_500, 5_000].map((supplierDownpaymentRateBps) => {
+      const money = plan({ supplierDownpaymentRateBps });
+      return createPayoutMilestones(money).map(({ code, sharePercent, amountMinor }) => ({
+        code,
+        sharePercent,
+        amountMinor,
+      }));
+    }),
     [
-      { code: "printing", sharePercent: 50, amountMinor: 50_001 },
-      { code: "packaging_qc", sharePercent: 15, amountMinor: 15_000 },
-      { code: "delivered", sharePercent: 25, amountMinor: 25_000 },
-      { code: "retention", sharePercent: 10, amountMinor: 10_000 },
+      [{ code: "completion", sharePercent: 100, amountMinor: 100_000 }],
+      [
+        { code: "initial", sharePercent: 25, amountMinor: 25_000 },
+        { code: "completion", sharePercent: 75, amountMinor: 75_000 },
+      ],
+      [
+        { code: "initial", sharePercent: 50, amountMinor: 50_000 },
+        { code: "completion", sharePercent: 50, amountMinor: 50_000 },
+      ],
     ],
   );
-  assert.equal(milestones.reduce((sum, item) => sum + item.amountMinor, 0), 100_001);
-
-  const order = { id: "ord-a", state: "production", payoutHold: false, payoutMilestones: milestones };
-  expectDomainError(() => releaseMilestone(order, "printing", { id: "ops-a", role: "ops_admin" }, AT), 409, "pof_required");
-  milestones[0].pofFileIds.push("file-printing");
-  const released = releaseMilestone(order, "printing", { id: "ops-a", role: "ops_admin" }, AT);
-  assert.equal(released.status, "released");
-  assert.equal(released.releasedAt, AT);
-  assert.equal(released.releasedBy, "ops-a");
-  milestones[1].pofFileIds.push("file-packaging");
-  expectDomainError(
-    () => releaseMilestone(order, "packaging_qc", { id: "ops-a", role: "ops_admin" }, AT),
-    409,
-    "milestone_not_reached",
-  );
 });
 
-test("elapsed global issue window completes the order and releases retained earnings", () => {
-  const milestones = createPayoutMilestones(100_000);
-  for (const milestone of milestones.slice(0, 3)) {
-    milestone.pofFileIds.push(`file-${milestone.code}`);
-    milestone.status = "released";
+test("caps automatic supplier payouts at confirmed collected principal", () => {
+  for (const supplierDownpaymentRateBps of [0, 2_500, 5_000]) {
+    const money = plan({ supplierDownpaymentRateBps });
+    const schedule = createPaymentSchedule(money);
+    schedule.payments.initial.status = "confirmed";
+    const order = {
+      id: `ord-${supplierDownpaymentRateBps}`,
+      fulfillmentMode: "delivery",
+      state: "production",
+      payoutHold: false,
+      ...money,
+      ...schedule,
+      payoutMilestones: createPayoutMilestones(money),
+    };
+    const initialReleases = releaseEligibleSupplierPayouts(
+      order,
+      { id: "system", role: "system" },
+      AT,
+      { claims: [] },
+    );
+    assert.deepEqual(initialReleases.map((milestone) => milestone.amountMinor),
+      supplierDownpaymentRateBps === 0 ? [] : [money.initialSupplierPrincipalMinor]);
+
+    order.state = "delivered";
+    expectDomainError(
+      () => releaseEligibleSupplierPayouts(order, { id: "system", role: "system" }, AT, { claims: [] }),
+      409,
+      "supplier_principal_not_collected",
+    );
+    order.payments.final_online.status = "confirmed";
+    const completionReleases = releaseEligibleSupplierPayouts(
+      order,
+      { id: "system", role: "system" },
+      AT,
+      { claims: [] },
+    );
+    assert.deepEqual(completionReleases.map((milestone) => milestone.amountMinor), [money.supplierRemainderMinor]);
+    assert.equal(
+      order.payoutMilestones.reduce(
+        (sum, milestone) => sum + (milestone.status === "released" ? milestone.amountMinor : 0),
+        0,
+      ),
+      money.supplierSubtotalMinor,
+    );
   }
-  milestones[3].pofFileIds.push("file-delivered");
+});
+
+test("elapsed global issue window completes an already settled order", () => {
+  const money = plan();
+  const milestones = createPayoutMilestones(money);
+  for (const milestone of milestones) milestone.status = "released";
   const store = {
     claims: [],
     settings: defaultOperationalSettings(),
@@ -147,7 +316,6 @@ test("elapsed global issue window completes the order and releases retained earn
 
   assert.equal(expireIssueWindows(store, AT), true);
   assert.equal(store.orders[0].state, "completed");
-  assert.equal(store.orders[0].payoutMilestones[3].status, "released");
-  assert.equal(store.orders[0].payoutMilestones[3].releasedBy, "system");
+  assert.equal(store.orders[0].payoutMilestones.every((milestone) => milestone.status === "released"), true);
   assert.equal(expireIssueWindows(store, AT), false);
 });

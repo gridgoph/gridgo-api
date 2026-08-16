@@ -37,7 +37,7 @@ export const DEVICE_PLATFORMS = ["android", "ios", "web"];
 /**
  * The only notification fields that may cross onto a lock screen, as an
  * allowlist rather than a redaction list. A notification record is already
- * owner-scoped, but a future field (a supplier price, a commission split)
+ * owner-scoped, but a future field (a supplier subtotal or payout split)
  * added to those records must not reach a device by default — see the money
  * visibility rules in `operational-model.js`.
  */

@@ -180,14 +180,14 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | Purpose | Body | Required state/ownership |
 |---|---|---|
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
-| `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
+| `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | legacy commitments only: assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
 | `verification_document` | `{ "documentType": "business_permit" }` or `{ "documentType": "sample_work", "replaceFileId": "..." }` | caller is a supplier; target is always derived from the token and cannot be supplied |
 
 Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
 
-Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. A POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention` because both gates use the same delivery evidence.
+Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. On a legacy commitment, a POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention`.
 
 Verification-document attachment rules:
 
@@ -280,9 +280,9 @@ delete_pending --MinIO delete + metadata commit--> deleted
 - On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted`.
 - No automatic age-based retention is enabled in this demo. `purpose` and references are durable so a future retention job can apply different policies without guessing from keys.
 
-## Proof of Fulfilment lifecycle
+## Legacy Proof of Fulfilment lifecycle
 
-POF is a milestone gate, not an order-state approval loop. Upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint.
+POF milestone gating applies only to legacy `moneyModelVersion: 1` commitments. Current v2 `initial` and `completion` payouts do not accept POF; they release automatically when their lifecycle and confirmed supplier-principal collection gates are satisfied. For a legacy commitment, upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint.
 
 | Milestone | Uploader | Attach result |
 |---|---|---|
@@ -290,7 +290,7 @@ POF is a milestone gate, not an order-state approval loop. Upload the bytes, att
 | `packaging_qc` | assigned supplier | packaging/QC milestone becomes `pof_attached` |
 | `delivered` | assigned rider | delivered and retention milestones become `pof_attached` |
 
-The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions or valid PostgreSQL order states. New POF uses `fulfilment_proof` file references only.
+The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions or valid PostgreSQL order states. Legacy POF compatibility uses `fulfilment_proof` file references only.
 
 ## Error contract
 
