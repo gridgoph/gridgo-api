@@ -17,7 +17,7 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 - There is no `AUTH_MODE`, password login, local signup/session, demo password, or demo-user fixture. `/auth/login` and `/auth/signup` remain `404`.
 - `POST /auth/clerk/activate` is the explicit first-use Google/public SSO path. It only creates an `individual` client or idempotently adds a personal client membership to an already-mapped identity; it never links by email or grants another role.
 - `users.clerk_user_id` maps the Clerk subject. PostgreSQL membership rows are the authorization source; ignore Clerk role/status claims and metadata for authorization.
-- Supplier, rider, Operations, and Super Admin are audited database role assignments. Supplier/rider work also requires Operations approval.
+- Supplier/rider memberships come only from their fixed enrollment endpoints or an audited database role assignment; Operations and Super Admin remain assignment-only. Supplier/rider work also requires Operations approval.
 - Migration `1786843800000` adds `user_role_memberships`, role profile, approval-case, and `rider_documents` tables backfilled from legacy `users` columns. Auth context resolution, the fixed `/auth/me` projections, admin bootstrap, role management, and verification-decision sync now consume memberships and approval cases. Legacy `users.role` and its related columns remain authoritative only for untouched consumers during the one-release compatibility window — do not drop them.
 - First administrator bootstrap is the direct CLI `npm run bootstrap-admin -- --clerk-user-id user_...`. It works only while no ops/super row exists, writes audit plus an immutable completion marker, and then refuses permanently. Never add an HTTP bootstrap path.
 - `publicUser` never exposes `clerkUserId` or verification document IDs.
@@ -45,7 +45,7 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 
 ## Files and push
 
-`docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Verification documents stay private to their supplier owner and ops/super.
+`docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.
 
 - `save()` is the only place a notification push fires; publication occurs after transaction commit. Do not send at individual notification append sites.
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.

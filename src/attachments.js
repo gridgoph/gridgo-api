@@ -562,7 +562,6 @@ export function resolveFileTarget(store, purpose, body, user = null) {
     : purpose === "fulfilment_proof"
       ? ["orderId", "milestoneCode"]
       : ["orderId"];
-  const requiredField = allowedFields[0];
   const unexpectedField = Object.keys(body || {}).find((field) => !allowedFields.includes(field));
   if (unexpectedField) {
     fail(

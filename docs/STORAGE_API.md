@@ -1,6 +1,6 @@
 # GRIDGO Storage API contract
 
-This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
+This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
 
@@ -49,6 +49,7 @@ For the hosted pilot, `MINIO_ENDPOINT` is the single-label MinIO container origi
 - Auth header on every route below: `Authorization: Bearer <Clerk session JWT>`
 - Errors: JSON `{ "error": "snake_case", "message": "concrete problem and recovery" }`, with only the documented additive detail fields
 - Upload field names: exactly one binary `file` and one text `purpose`
+- Upload, target-resolution, and attach role labels mean PostgreSQL memberships, not the legacy `users.role`; an identity that adds supplier membership can upload and attach its own supplier evidence and service images.
 - The client must not supply a bucket, object key, URL, owner ID, lifecycle state, size, or detected MIME
 - IDs are opaque. Clients may persist `fileId`, never an object key or presigned URL.
 

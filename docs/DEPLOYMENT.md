@@ -100,14 +100,14 @@ Do not run bootstrap until the Clerk user ID and instance are independently chec
 
 Every authenticated request verifies a Clerk session JWT against the configured secret/JWK, exact issuer, and authorized-party allowlist. `users.clerk_user_id` is unique. Ordinary routes return `401` for a verified but unmapped Clerk subject.
 
-`POST /auth/clerk/activate` is the only public first-use provisioning path. It loads the Clerk user and creates `role=client`; its body cannot choose a role and it never merges identities by email. The database role is authoritative and no `gridgo_role` token/public-metadata value grants access.
+`POST /auth/clerk/activate` is the client-only first-use provisioning path. It loads the Clerk user and creates `role=client`; its body cannot choose a role and it never merges identities by email. Fixed supplier and rider enrollment routes are the only self-service role-application paths, hard-code the membership selected by their URL, and require `Idempotency-Key`. The database role is authoritative and no `gridgo_role` token/public-metadata value grants access. Exact enrollment methods and bodies are owned by `docs/OPERATIONAL_MODEL_V2_API.md`.
 
-Supplier/rider/Operations onboarding is:
+Identity onboarding is:
 
 1. create or invite the identity through Clerk;
-2. have the person sign in and call `/auth/clerk/activate` once;
-3. a Super Admin changes the database role through `PATCH /users/:id/role`;
-4. Operations completes supplier/rider verification before matching.
+2. have a client call `/auth/clerk/activate`, or have a supplier/rider call the matching fixed enrollment route; an already-mapped identity keeps its existing memberships;
+3. have a rider attach a current driver's licence and explicitly submit the pending case;
+4. Operations completes supplier/rider verification before matching or dispatch; apart from the first-administrator CLI bootstrap, Operations and administrator memberships still require audited assignment through `PATCH /users/:id/role`.
 
 `POST /auth/login` and `/auth/signup` are gone. Mobile/dashboard clients must send their Clerk JWT directly. `POST /auth/logout` only releases a named phone registration; the client terminates its Clerk session using the Clerk SDK.
 

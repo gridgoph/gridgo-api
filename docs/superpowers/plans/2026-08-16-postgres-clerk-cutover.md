@@ -218,7 +218,7 @@ Document PostgreSQL migration/seed/bootstrap/cutover, private networking, named-
 
 - [ ] **Step 2: Document identity and client contract changes**
 
-State that login/signup token issuance is gone, Google/Clerk activation remains `{ user }`, ordinary mapped Clerk requests need no GRIDGO role claim, logout only releases a device, roles live in PostgreSQL, and supplier/rider/ops users activate then are promoted by a super administrator.
+State the cutover behavior: login/signup token issuance is gone, Google/Clerk activation remains `{ user }`, ordinary mapped Clerk requests need no GRIDGO role claim, logout only releases a device, roles live in PostgreSQL, and supplier/rider/ops users were activated then promoted by a super administrator. The later fixed supplier/rider enrollment contract is owned by `docs/OPERATIONAL_MODEL_V2_API.md`.
 
 - [ ] **Step 3: Record the five PR decisions**
 

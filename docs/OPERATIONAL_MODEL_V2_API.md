@@ -42,7 +42,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
 | GET | `/files/:fileId/download-url` | same as file read | five-minute signed GET |
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
-| DELETE | `/files/:fileId` | owner/ops/super; unreferenced only, except rider-owned rider evidence | safe delete lifecycle |
+| DELETE | `/files/:fileId` | purpose-specific; see Storage API | safe delete lifecycle |
 | GET | `/devices` | authenticated | caller's own push registrations |
 | POST | `/devices` | authenticated **or** anonymous | register this phone's FCM token against the caller, or unclaimed when no bearer token is sent |
 | POST | `/devices/unregister` | authenticated **or** anonymous | stop push to one of the caller's own phones; an anonymous call may remove only an unclaimed registration |
@@ -138,10 +138,10 @@ Used once after Google / public SSO. `/auth/me` does not create or email-link ac
 
 ### Fixed enrollment and reapplication
 
-The URL fixes the membership and initial `pending` approval case. Callers cannot send `role`, status, commission, or live service state; unsupported input returns `400 unexpected_field`. All application routes require an `Idempotency-Key` of 1–200 letters, numbers, dots, underscores, colons, or hyphens. The first successful supplier, rider, or business application returns `201`; an exact retry returns the same application identifiers with `200`. A different request for an existing role application returns `409 application_already_exists`.
+The URL fixes the membership and initial `pending` approval case. Callers cannot send `role`, status, commission, or live service state; unsupported input returns `400 unexpected_field`. All application routes require an `Idempotency-Key` of 1–200 letters, numbers, dots, underscores, colons, or hyphens. The first successful supplier, rider, or business application returns `201`; an exact retry returns the same application identifiers with `200`. A different request for an existing role application returns `409 application_already_exists`. Supplier retries still undergo shape, unexpected-field, and taxonomy-independent field validation before replay lookup; active-category resolution follows replay lookup so an exact retry survives later taxonomy changes.
 
-- `POST /auth/clerk/enroll/supplier` accepts `{profile:{shopName,contactName,phone,location:{lat,lng,label}},serviceCategories:[...]}`. It creates one `draft` service per resolved active category and sets `submittedAt` immediately. An already-mapped client may deliberately add this membership to the same identity.
-- `POST /auth/clerk/enroll/rider` accepts `{profile:{phone,vehicleType,plateNumber,licenseNumber?}}`. It creates a pending case with `submittedAt: null`; attaching the required current driver's licence records evidence but leaves onboarding incomplete. `POST /me/approval-cases/rider/submit` accepts `{expectedVersion}`, rechecks the vehicle type, plate, and current licence, and atomically sets `submittedAt`; exact-key retries replay that success.
+- `POST /auth/clerk/enroll/supplier` accepts `{profile:{shopName,contactName,phone,location:{lat,lng,label}},serviceCategories:[...]}`. It creates one `draft` service per resolved active category and sets `submittedAt` immediately. An already-mapped identity with any existing memberships may deliberately add the supplier membership to the same identity.
+- `POST /auth/clerk/enroll/rider` accepts `{profile:{phone,vehicleType,plateNumber,licenseNumber?}}`. It creates a pending case with `submittedAt: null`; attaching the required current driver's licence records evidence but leaves onboarding incomplete. While the case remains pending and unsubmitted, `/auth/me/rider` returns `onboardingIncomplete: true` so the next sign-in resumes intake. `POST /me/approval-cases/rider/submit` accepts `{expectedVersion}`, rechecks the vehicle type, plate, and current licence, and atomically sets `submittedAt`; exact-key retries replay that success.
 - `POST /me/business-application` accepts `{businessName,businessNature}` after ordinary client activation. Personal ordering remains available while business approval is pending, rejected, or suspended.
 - `POST /me/approval-cases/:kind/reapply` accepts `{expectedVersion,correctionSummary}`. Only `rejected` may transition to `pending`; success increments both case `version` and `applicationRevision`, clears decision fields, and retains the profile, files, services, and prior immutable events.
 
@@ -167,6 +167,8 @@ Decision bodies are:
 Each committed decision increments `version` and atomically writes the case, immutable event, audit row, and applicant notification. Replaying the winning `requestId` is idempotent; reusing it for a different case or action returns `409 request_id_conflict`. A different stale/racing decision returns `409 approval_already_decided`; a stale version on an otherwise valid transition returns `409 approval_case_stale`; a case whose applicant no longer holds the matching role membership returns `409 approval_case_role_mismatch`.
 
 Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
+
+Rider approval and restore, including approval through the one-release legacy verification route, require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
 
 ## Supplier shop and verification profile
 

@@ -17,15 +17,15 @@ GRIDGO is a centralized Davao printing platform connecting clients, accredited p
 
 | Role | Provisioning | Operational gate |
 |---|---|---|
-| client | Clerk sign-in then `POST /auth/clerk/activate` | active immediately |
-| supplier | activate as client, then Super Admin role assignment | Operations approval required for live services and matching |
-| rider | activate as client, then Super Admin role assignment | Operations approval required for dispatch |
+| client | Clerk sign-in then `POST /auth/clerk/activate`; optional fixed business application | personal access is immediate; business capabilities require approval |
+| supplier | Clerk sign-in then fixed supplier enrollment; an existing identity keeps its other memberships | Operations approval required for live services and matching |
+| rider | Clerk sign-in then fixed rider enrollment, document intake, and explicit submit | Operations approval required for dispatch |
 | ops_admin | Super Admin role assignment | database role is authoritative |
 | super_admin | one-time CLI bootstrap for the first admin; later audited role assignment | database role is authoritative |
 
 The API stores no passwords and issues no sessions. `/auth/login` and `/auth/signup` are removed. Client-settable Clerk metadata never grants a GRIDGO role.
 
-Client users have explicit `accountType: individual | business | organization`. Activation defaults to `individual`; it is never inferred from `orgName`. Non-client roles omit the field.
+Client users have explicit `accountType: individual | business | organization`. Activation defaults to `individual`; a business application explicitly creates the business profile, and the type is never inferred from `orgName`. Non-client roles omit the field.
 
 ## Product and supplier catalogue
 
