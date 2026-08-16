@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   appendOrderLineSnapshot,
+  assertSupplierServiceLifecycleMutationAllowed,
   assertSupplierServicePendingVerification,
   createOrderLineSnapshot,
   effectiveAcceptedFormats,
@@ -288,6 +289,22 @@ test("approved suppliers remain grandfathered ready until approval is reopened",
   assert.equal(reopened.readyForApproval, false);
   assert.ok(reopened.missing.includes("supplier_profile"));
   assert.ok(reopened.missing.includes("review_ready_service"));
+});
+
+test("account suspension retains approver ownership of service lifecycle", () => {
+  const store = fixture({ approvalStatus: "suspended" });
+  const service = store.supplierServices[0];
+  service.state = "suspended";
+  service.approvalSuspensionCaseId = "case_supplier";
+  assert.throws(
+    () => assertSupplierServiceLifecycleMutationAllowed(store, service),
+    (error) => error.status === 409
+      && error.code === "service_account_suspended"
+      && error.details.approvalCaseId === "case_supplier",
+  );
+
+  delete service.approvalSuspensionCaseId;
+  assert.doesNotThrow(() => assertSupplierServiceLifecycleMutationAllowed(store, service));
 });
 
 test("catalog readiness exposes only complete eligible service lines", () => {

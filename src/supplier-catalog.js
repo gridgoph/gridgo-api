@@ -260,6 +260,22 @@ export function advanceSupplierServiceVersion(service, at) {
   service.updatedAt = at;
 }
 
+export function assertSupplierServiceLifecycleMutationAllowed(store, service) {
+  const approvalCase = (store.approvalCases || []).find(
+    (candidate) => candidate.id === service?.approvalSuspensionCaseId
+      && candidate.userId === service?.supplierId
+      && candidate.kind === "supplier",
+  );
+  if (approvalCase?.status === "suspended") {
+    throw new CatalogError(
+      409,
+      "service_account_suspended",
+      "Operations must restore this account-suspended service line.",
+      { approvalCaseId: approvalCase.id },
+    );
+  }
+}
+
 function clearSupplierServiceLifecycleMetadata(service) {
   service.verifiedAt = null;
   service.verifiedBy = null;

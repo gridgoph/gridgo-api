@@ -96,6 +96,7 @@ import {
   assertExpectedVersion,
   assertServiceLineReadinessInvariant,
   assertServiceLineReviewReady,
+  assertSupplierServiceLifecycleMutationAllowed,
   assertSupplierServicePendingVerification,
   supplierCatalogPublicationReadiness,
   supplierCatalogReadiness,
@@ -1077,6 +1078,19 @@ function validateTaxonomyRefs(store, body) {
     }
   }
   return null;
+}
+
+function normalizedCapabilityCodes(value) {
+  return [...new Set(value || [])].sort();
+}
+
+function capabilityValuesDiffer(field, previous, current) {
+  if (["materialCodes", "finishCodes", "productFamilyIds", "zones"].includes(field)) {
+    const left = normalizedCapabilityCodes(previous);
+    const right = normalizedCapabilityCodes(current);
+    return left.length !== right.length || left.some((value, index) => value !== right[index]);
+  }
+  return JSON.stringify(previous ?? null) !== JSON.stringify(current ?? null);
 }
 
 function materialMatches(orderMaterial, materialCodes, taxonomy) {
@@ -2792,9 +2806,9 @@ async function handleRequest(req, res) {
         id: id("svc"),
         supplierId: user.id,
         categoryCode: category.code,
-        materialCodes: Array.isArray(body.materialCodes) ? body.materialCodes : [],
-        finishCodes: Array.isArray(body.finishCodes) ? body.finishCodes : [],
-        productFamilyIds: Array.isArray(body.productFamilyIds) ? body.productFamilyIds : [],
+        materialCodes: normalizedCapabilityCodes(body.materialCodes),
+        finishCodes: normalizedCapabilityCodes(body.finishCodes),
+        productFamilyIds: normalizedCapabilityCodes(body.productFamilyIds),
         sizeMin: body.sizeMin ?? null,
         sizeMax: body.sizeMax ?? null,
         qtyMin: body.qtyMin != null ? Number(body.qtyMin) : null,
@@ -2805,7 +2819,7 @@ async function handleRequest(req, res) {
         standardTurnaroundHours: turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
-        zones: Array.isArray(body.zones) ? body.zones : [],
+        zones: normalizedCapabilityCodes(body.zones),
         equipmentNotes: body.equipmentNotes || "",
         state: "draft",
         verifiedAt: null,
@@ -2898,7 +2912,6 @@ async function handleRequest(req, res) {
         "equipmentNotes",
       ];
       const prevCategory = service.categoryCode;
-      const prevMaterials = [...(service.materialCodes || [])];
       const prevCapabilities = Object.fromEntries([
         "materialCodes", "finishCodes", "productFamilyIds", "sizeMin", "sizeMax",
         "qtyMin", "qtyMax", "capacityDaily", "capacityWeekly", "zones",
@@ -2912,10 +2925,10 @@ async function handleRequest(req, res) {
           resolvedCategoryCode = activeCategoryFor(store.taxonomy, body.categoryCode).code;
           service.categoryCode = resolvedCategoryCode;
         }
-        if (body.materialCodes != null) service.materialCodes = body.materialCodes;
-        if (body.finishCodes != null) service.finishCodes = body.finishCodes;
-        if (body.productFamilyIds != null) service.productFamilyIds = body.productFamilyIds;
-        if (body.zones != null) service.zones = body.zones;
+        if (body.materialCodes != null) service.materialCodes = normalizedCapabilityCodes(body.materialCodes);
+        if (body.finishCodes != null) service.finishCodes = normalizedCapabilityCodes(body.finishCodes);
+        if (body.productFamilyIds != null) service.productFamilyIds = normalizedCapabilityCodes(body.productFamilyIds);
+        if (body.zones != null) service.zones = normalizedCapabilityCodes(body.zones);
         for (const k of paramKeys) {
           if (body[k] != null) {
             if (["qtyMin", "qtyMax", "referenceRateMinor", "turnaroundHours", "capacityDaily", "capacityWeekly"].includes(k)) {
@@ -2940,12 +2953,9 @@ async function handleRequest(req, res) {
         }
         // Capability expansion on a live service requires re-verification
         const categoryChanged = body.categoryCode != null && resolvedCategoryCode !== prevCategory;
-        const materialsExpanded =
-          Array.isArray(body.materialCodes) &&
-          body.materialCodes.some((c) => !prevMaterials.includes(c));
         const capabilityChanged = Object.entries(prevCapabilities).some(([field, value]) =>
-          JSON.stringify(service[field] ?? null) !== JSON.stringify(value));
-        const approvalRelevantChange = categoryChanged || materialsExpanded || capabilityChanged;
+          capabilityValuesDiffer(field, value, service[field]));
+        const approvalRelevantChange = categoryChanged || capabilityChanged;
         const readinessOwningChange =
           (body.pricingBasis != null && service.pricingBasis !== prevPricingBasis) ||
           (body.turnaroundHours != null && service.turnaroundHours !== prevTurnaroundHours);
@@ -2981,6 +2991,7 @@ async function handleRequest(req, res) {
       if (service.supplierId !== user.id) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
+      assertSupplierServiceLifecycleMutationAllowed(store, service);
       if (!["draft", "suspended", "withdrawn"].includes(service.state) && service.state !== "pending_verification") {
         // allow re-submit from draft or after suspension (reactivate path uses submit after draft-like)
       }
@@ -3019,6 +3030,7 @@ async function handleRequest(req, res) {
       }
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
+      assertSupplierServiceLifecycleMutationAllowed(store, service);
       assertServiceLineReviewReady(store, service);
       assertSupplierServicePendingVerification(service);
       const readiness = supplierCatalogPublicationReadiness(store, service.supplierId);
@@ -3078,6 +3090,7 @@ async function handleRequest(req, res) {
       if (service.supplierId !== user.id) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
       assertExpectedVersion(req, body, "supplier_service_stale", service.version);
+      assertSupplierServiceLifecycleMutationAllowed(store, service);
       // Withdrawal never cancels in-flight orders — only removes from new matching
       const ts = now();
       transitionSupplierServiceToWithdrawn(service, ts);

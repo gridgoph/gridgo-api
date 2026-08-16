@@ -940,6 +940,26 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.deepEqual(suspended.body.suspendedServiceIds, ["svc_pending_complete"]);
     assert.equal(suspended.body.services.find((service) => service.id === "svc_pending_complete").version, 3);
 
+    const remediated = await request(instance.api, "/me/supplier-services/svc_pending_complete", {
+      method: "PATCH", subject: "clerk_supplier_pending",
+      body: { expectedVersion: 3, equipmentNotes: "Safety controls documented" },
+    });
+    assert.equal(remediated.status, 200, JSON.stringify(remediated.body));
+    assert.equal(remediated.body.service.state, "suspended");
+    assert.equal(remediated.body.service.version, 4);
+    for (const attempt of [
+      ["/me/supplier-services/svc_pending_complete", "PATCH", { expectedVersion: 4, state: "pending_verification" }],
+      ["/me/supplier-services/svc_pending_complete", "DELETE", { expectedVersion: 4 }],
+      ["/supplier-services/svc_pending_complete/submit", "POST", { expectedVersion: 4 }],
+      ["/supplier-services/svc_pending_complete/withdraw", "POST", { expectedVersion: 4 }],
+    ]) {
+      const blocked = await request(instance.api, attempt[0], {
+        method: attempt[1], subject: "clerk_supplier_pending", body: attempt[2],
+      });
+      assert.equal(blocked.status, 409, JSON.stringify(blocked.body));
+      assert.equal(blocked.body.error, "service_account_suspended");
+    }
+
     const restored = await request(instance.api, "/approval-cases/case_supplier_pending/restore", {
       method: "POST", subject: "clerk_super",
       body: { expectedVersion: 3, requestId: "restore-account", note: "Account review cleared" },
@@ -947,13 +967,13 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(restored.status, 200, JSON.stringify(restored.body));
     assert.equal(restored.body.approvalCase.status, "approved");
     assert.deepEqual(restored.body.publishedServiceIds, ["svc_pending_complete"]);
-    assert.equal(restored.body.services.find((service) => service.id === "svc_pending_complete").version, 4);
+    assert.equal(restored.body.services.find((service) => service.id === "svc_pending_complete").version, 5);
 
     const restoredLine = (await request(instance.api, "/supplier-services/svc_pending_complete", {
       subject: "clerk_ops",
     })).body.service;
     assert.equal(restoredLine.state, "live");
-    assert.equal(restoredLine.version, 4);
+    assert.equal(restoredLine.version, 5);
 
     const newLineBlocked = await request(instance.api, "/supplier-services/svc_pending_without_item/verify", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 1 },
@@ -975,7 +995,7 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     ]);
     const service = persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_complete");
     assert.equal(service.state, "live");
-    assert.equal(service.version, 4);
+    assert.equal(service.version, 5);
     assert.equal(service.approvalSuspensionPreviousState, undefined);
     assert.equal(persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_incomplete").state, "pending_verification");
     const unpublished = persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_without_item");
@@ -2079,7 +2099,21 @@ test("pending suppliers can edit catalog while public browse requires approval a
     approvalCase.status = "pending";
     delete approvalCase.decidedAt;
     delete approvalCase.decidedBy;
-    store.supplierServiceFileFormats.push({ supplierServiceId: "svc_banner", formatCode: "pdf" });
+    store.supplierServiceFileFormats.push(
+      { supplierServiceId: "svc_banner", formatCode: "pdf" },
+      { supplierServiceId: "svc_set_order", formatCode: "pdf" },
+    );
+    store.supplierServices.push({
+      id: "svc_set_order", supplierId: "user_supplier", categoryCode: "marketing_collateral",
+      materialCodes: ["tarpaulin_13oz", "mesh_banner"],
+      finishCodes: ["none", "lamination"],
+      productFamilyIds: ["banner", "sticker"],
+      zones: ["davao_central", "davao_south"],
+      pricingBasis: "per_unit", referenceRateMinor: 1000,
+      turnaroundHours: 24, standardTurnaroundHours: 24, rushEnabled: false,
+      state: "live", catalogManaged: true, version: 1,
+      verifiedAt: AT, verifiedBy: "user_ops", createdAt: AT, updatedAt: AT,
+    });
     store.files.push({
       fileId: "catalog_photo", ownerId: "user_supplier", purpose: "catalog_item_photo",
       originalFilename: "poster.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
@@ -2319,6 +2353,59 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(legacyLiveReadinessUpdate.status, 409, JSON.stringify(legacyLiveReadinessUpdate.body));
     assert.equal(legacyLiveReadinessUpdate.body.error, "service_not_review_ready");
+
+    const grandfatheredNotes = await request(instance.api, "/me/supplier-services/svc_legacy_live", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 2, equipmentNotes: "Private legacy press note" },
+    });
+    assert.equal(grandfatheredNotes.status, 200, JSON.stringify(grandfatheredNotes.body));
+    assert.equal(grandfatheredNotes.body.service.state, "live");
+    assert.equal(grandfatheredNotes.body.service.version, 3);
+    assert.equal(Object.hasOwn(
+      (await loadStore(database)).supplierServices.find((service) => service.id === "svc_legacy_live"),
+      "catalogManaged",
+    ), false);
+
+    const reorderedPrivate = await request(instance.api, "/me/supplier-services/svc_set_order", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: {
+        expectedVersion: 1,
+        materialCodes: ["mesh_banner", "tarpaulin_13oz", "mesh_banner"],
+        finishCodes: ["lamination", "none"],
+        productFamilyIds: ["sticker", "banner"],
+        zones: ["davao_south", "davao_central"],
+      },
+    });
+    assert.equal(reorderedPrivate.status, 200, JSON.stringify(reorderedPrivate.body));
+    assert.equal(reorderedPrivate.body.service.state, "live");
+    assert.equal(reorderedPrivate.body.service.version, 2);
+    assert.deepEqual(reorderedPrivate.body.service.materialCodes, ["mesh_banner", "tarpaulin_13oz"]);
+
+    const reorderedCompatibility = await request(instance.api, "/supplier-services/svc_set_order", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: {
+        expectedVersion: 2,
+        materialCodes: ["tarpaulin_13oz", "mesh_banner"],
+        finishCodes: ["none", "lamination"],
+        productFamilyIds: ["banner", "sticker"],
+        zones: ["davao_central", "davao_south"],
+      },
+    });
+    assert.equal(reorderedCompatibility.status, 200, JSON.stringify(reorderedCompatibility.body));
+    assert.equal(reorderedCompatibility.body.service.state, "live");
+    assert.equal(reorderedCompatibility.body.service.version, 3);
+
+    const changedCapability = await request(instance.api, "/me/supplier-services/svc_set_order", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 3, materialCodes: ["tarpaulin_13oz"] },
+    });
+    assert.equal(changedCapability.status, 200, JSON.stringify(changedCapability.body));
+    assert.equal(changedCapability.body.service.state, "pending_verification");
+    assert.equal(changedCapability.body.service.version, 4);
 
     const privateIncompleteSubmit = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
       method: "PATCH",

@@ -3,6 +3,7 @@ import {
   advanceSupplierServiceVersion,
   assertExpectedVersion,
   assertServiceLineReadinessInvariant,
+  assertSupplierServiceLifecycleMutationAllowed,
   CatalogError,
   catalogGroupsForItem,
   catalogItemBlockers,
@@ -64,17 +65,8 @@ function catalogRecord(value, { code = "invalid_catalog_item", field = "body", m
   return value;
 }
 
-function supplierCase(store, userId) {
-  return (store.approvalCases || []).find(
-    (approvalCase) => approvalCase.userId === userId && approvalCase.kind === "supplier",
-  ) || null;
-}
-
 function requireSupplier(store, user) {
   if (!user || !identityHasMembership(user, "supplier")) fail(403, "forbidden", "A supplier membership is required.");
-  if (supplierCase(store, user.id)?.status === "suspended") {
-    fail(403, "supplier_suspended", "This supplier account is suspended and cannot change its catalog.");
-  }
 }
 
 function ownService(store, user, serviceId) {
@@ -159,10 +151,10 @@ function capabilityCodes(value, field) {
     fail(400, "invalid_service_capability", `${field} must be an array.`, { field });
   }
   const codes = value.map((code) => String(code).trim());
-  if (codes.some((code) => !code) || new Set(codes).size !== codes.length) {
-    fail(400, "invalid_service_capability", `${field} must contain unique nonblank codes.`, { field });
+  if (codes.some((code) => !code)) {
+    fail(400, "invalid_service_capability", `${field} must contain nonblank codes.`, { field });
   }
-  return codes;
+  return [...new Set(codes)].sort();
 }
 
 function capabilityInteger(value, field) {
@@ -176,7 +168,7 @@ function capabilitySize(value, field) {
   return text || null;
 }
 
-function capabilityValues(store, body, service, categoryCode) {
+function capabilityValues(store, body, service, categoryCode, { validate = true } = {}) {
   const values = {
     materialCodes: [...(service?.materialCodes || [])],
     finishCodes: [...(service?.finishCodes || [])],
@@ -198,13 +190,15 @@ function capabilityValues(store, body, service, categoryCode) {
   for (const field of CAPABILITY_INTEGER_FIELDS) {
     if (Object.hasOwn(body, field)) values[field] = capabilityInteger(body[field], field);
   }
-  const blockers = supplierServiceCapabilityBlockers(store, {
-    ...service,
-    ...values,
-    categoryCode,
-  }, { requireComplete: false });
-  if (blockers.length) {
-    fail(400, "invalid_service_capability", "Choose a valid capability subset for this category.", { blockers });
+  if (validate) {
+    const blockers = supplierServiceCapabilityBlockers(store, {
+      ...service,
+      ...values,
+      categoryCode,
+    }, { requireComplete: false });
+    if (blockers.length) {
+      fail(400, "invalid_service_capability", "Choose a valid capability subset for this category.", { blockers });
+    }
   }
   return values;
 }
@@ -213,6 +207,11 @@ function capabilityChanged(service, values, categoryCode) {
   if (service.categoryCode !== categoryCode) return true;
   return CAPABILITY_FIELDS.some((field) => {
     const current = CAPABILITY_ARRAY_FIELDS.includes(field) ? (service[field] || []) : (service[field] ?? null);
+    if (CAPABILITY_ARRAY_FIELDS.includes(field)) {
+      const previous = [...new Set(current)].sort();
+      const next = [...new Set(values[field])].sort();
+      return previous.length !== next.length || previous.some((value, index) => value !== next[index]);
+    }
     return JSON.stringify(current) !== JSON.stringify(values[field]);
   });
 }
@@ -386,6 +385,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     if (req.method === "DELETE") {
+      assertSupplierServiceLifecycleMutationAllowed(store, service);
       const ts = now();
       transitionSupplierServiceToWithdrawn(service, ts);
       advanceSupplierServiceVersion(service, ts);
@@ -393,9 +393,19 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
     }
     if (req.method === "PATCH") {
+      if (body.state != null) assertSupplierServiceLifecycleMutationAllowed(store, service);
       const nextCategory = body.categoryCode == null ? service.categoryCode : categoryInput(store, body.categoryCode);
-      const capabilities = capabilityValues(store, body, service, nextCategory);
-      const envelopeChanged = capabilityChanged(service, capabilities, nextCategory);
+      const envelopeInput = body.categoryCode != null
+        || CAPABILITY_FIELDS.some((field) => Object.hasOwn(body, field));
+      const capabilities = capabilityValues(store, body, service, nextCategory, { validate: envelopeInput });
+      const envelopeChanged = envelopeInput && capabilityChanged(service, capabilities, nextCategory);
+      const previousReadiness = Object.fromEntries([
+        "pricingBasis",
+        "standardTurnaroundHours",
+        "rushEnabled",
+        "rushTurnaroundHours",
+        "rushPriceMinor",
+      ].map((field) => [field, service[field] ?? null]));
       service.categoryCode = nextCategory;
       Object.assign(service, capabilities);
       if (Object.hasOwn(body, "referenceRateMinor")) {
@@ -431,7 +441,12 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         transitionSupplierServiceToPending(service);
       }
       if (envelopeChanged) service.catalogManaged = true;
-      assertServiceLineReadinessInvariant(store, service);
+      const readinessChanged = Object.entries(previousReadiness).some(
+        ([field, value]) => Object.hasOwn(body, field) && (service[field] ?? null) !== value,
+      );
+      if (body.state != null || envelopeChanged || readinessChanged) {
+        assertServiceLineReadinessInvariant(store, service);
+      }
       advanceSupplierServiceVersion(service, now());
       auditChange(audit, store, user, "supplier_service.update", "supplier_service", service.id, { state: service.state });
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
