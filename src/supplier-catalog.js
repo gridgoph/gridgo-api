@@ -287,6 +287,7 @@ export function transitionSupplierServiceToWithdrawn(service, at) {
 
 export function transitionSupplierServiceToLive(service, at, verifiedBy) {
   clearSupplierServiceLifecycleMetadata(service);
+  service.catalogManaged = true;
   service.state = "live";
   service.verifiedAt = at;
   service.verifiedBy = verifiedBy;

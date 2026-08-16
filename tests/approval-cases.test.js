@@ -187,6 +187,7 @@ test("supplier approve, suspend, and restore enforce readiness and service versi
   assert.equal(approved.approvalCase.version, 2);
   assert.deepEqual(approved.publishedServiceIds, ["service_complete"]);
   assert.equal(store.supplierServices[0].state, "live");
+  assert.equal(store.supplierServices[0].catalogManaged, true);
   assert.equal(store.supplierServices[0].version, 2);
   assert.equal(store.notifications.length, 1);
 

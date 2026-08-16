@@ -1827,7 +1827,6 @@ test("order creation reports an unseeded catalog explicitly", { skip: !DATABASE_
 test("catalog-managed services preserve governed matching capability", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
-  await database.query("UPDATE supplier_services SET state = 'withdrawn' WHERE id = 'svc_banner'");
   const instance = await startApi();
   try {
     const invalidFamily = await request(instance.api, "/me/supplier-services", {
@@ -1885,7 +1884,7 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     assert.ok(incompleteSubmit.body.blockers.includes("product_families"));
     assert.ok(incompleteSubmit.body.blockers.includes("zones"));
 
-    const created = await request(instance.api, "/me/supplier-services", {
+    const created = await request(instance.api, "/supplier-services", {
       method: "POST",
       subject: "clerk_supplier",
       body: {
@@ -1902,8 +1901,7 @@ test("catalog-managed services preserve governed matching capability", { skip: !
         zones: ["davao_central"],
         pricingBasis: "per_sqm",
         referenceRateMinor: 50000,
-        standardTurnaroundHours: 24,
-        formatCodes: ["pdf"],
+        turnaroundHours: 24,
       },
     });
     assert.equal(created.status, 201, JSON.stringify(created.body));
@@ -1931,6 +1929,13 @@ test("catalog-managed services preserve governed matching capability", { skip: !
       zones: ["davao_central"],
     });
     const serviceId = created.body.service.id;
+
+    const formats = await request(instance.api, `/me/supplier-services/${serviceId}/file-formats`, {
+      method: "PUT",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, formatCodes: ["pdf"] },
+    });
+    assert.equal(formats.status, 200, JSON.stringify(formats.body));
 
     const item = await request(instance.api, "/me/catalog-items", {
       method: "POST",
@@ -1972,14 +1977,14 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     const submitted = await request(instance.api, `/me/supplier-services/${serviceId}`, {
       method: "PATCH",
       subject: "clerk_supplier",
-      body: { expectedVersion: 1, state: "pending_verification" },
+      body: { expectedVersion: 2, state: "pending_verification" },
     });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
     assert.equal(submitted.body.service.reviewReady, true);
     const verified = await request(instance.api, `/supplier-services/${serviceId}/verify`, {
       method: "POST",
       subject: "clerk_ops",
-      body: { expectedVersion: 2 },
+      body: { expectedVersion: 3 },
     });
     assert.equal(verified.status, 200, JSON.stringify(verified.body));
     assert.equal(verified.body.service.state, "live");
@@ -1987,17 +1992,25 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     const widened = await request(instance.api, `/me/supplier-services/${serviceId}`, {
       method: "PATCH",
       subject: "clerk_supplier",
-      body: { expectedVersion: 3, productFamilyIds: ["apparel"] },
+      body: { expectedVersion: 4, productFamilyIds: ["apparel"] },
     });
     assert.equal(widened.status, 400, JSON.stringify(widened.body));
     assert.equal(widened.body.error, "invalid_service_capability");
     assert.equal((await request(instance.api, `/catalog/items/${itemId}`)).status, 200);
 
-    const prepareOrder = async (productId, zone) => {
+    const prepareOrder = async (productId, zone, finish) => {
       const order = await request(instance.api, "/orders", {
         method: "POST",
         subject: "clerk_client",
-        body: { productId, quantity: 1, material: "13oz tarpaulin", address: "Davao", zone, submit: true },
+        body: {
+          productId,
+          quantity: 1,
+          material: "13oz tarpaulin",
+          address: "Davao",
+          zone,
+          finish,
+          submit: true,
+        },
       });
       assert.equal(order.status, 201, JSON.stringify(order.body));
       for (const state of ["needs_qa", "approved_for_matching"]) {
@@ -2011,6 +2024,7 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     const intendedOrderId = await prepareOrder("prod_tarpaulin", "davao_central");
     const unrelatedFamilyOrderId = await prepareOrder("prod_sticker", "davao_central");
     const unrelatedZoneOrderId = await prepareOrder("prod_tarpaulin", "davao_south");
+    const laminationOrderId = await prepareOrder("prod_tarpaulin", "davao_central", "lamination");
 
     const candidateFor = async (orderId) => {
       const response = await request(instance.api, `/orders/${orderId}/eligible-suppliers`, {
@@ -2019,15 +2033,28 @@ test("catalog-managed services preserve governed matching capability", { skip: !
       assert.equal(response.status, 200, JSON.stringify(response.body));
       return response.body.candidates.find((candidate) => candidate.supplier.id === "user_supplier");
     };
-    assert.deepEqual((await candidateFor(intendedOrderId)).matchingServiceIds, [serviceId]);
+    assert.deepEqual((await candidateFor(intendedOrderId)).matchingServiceIds, ["svc_banner", serviceId]);
     assert.equal((await candidateFor(unrelatedFamilyOrderId)).eligible, false);
     assert.equal((await candidateFor(unrelatedZoneOrderId)).eligible, false);
+    assert.deepEqual((await candidateFor(laminationOrderId)).matchingServiceIds, ["svc_banner"]);
+
+    const persisted = await loadStore(database);
+    assert.equal(persisted.supplierServices.find((service) => service.id === serviceId).catalogManaged, true);
+    assert.equal(Object.hasOwn(
+      persisted.supplierServices.find((service) => service.id === "svc_banner"),
+      "catalogManaged",
+    ), false);
 
     const intendedAssignment = await request(instance.api, `/orders/${intendedOrderId}/transition`, {
       method: "POST", subject: "clerk_ops",
       body: { state: "supplier_assigned", supplierId: "user_supplier" },
     });
     assert.equal(intendedAssignment.status, 200, JSON.stringify(intendedAssignment.body));
+    const grandfatheredAssignment = await request(instance.api, `/orders/${laminationOrderId}/transition`, {
+      method: "POST", subject: "clerk_ops",
+      body: { state: "supplier_assigned", supplierId: "user_supplier" },
+    });
+    assert.equal(grandfatheredAssignment.status, 200, JSON.stringify(grandfatheredAssignment.body));
     for (const orderId of [unrelatedFamilyOrderId, unrelatedZoneOrderId]) {
       const unrelatedAssignment = await request(instance.api, `/orders/${orderId}/transition`, {
         method: "POST", subject: "clerk_ops",
