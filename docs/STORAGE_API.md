@@ -100,6 +100,7 @@ Parents contain IDs only:
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
 | `verification_document` | `supplier.verificationDocumentFileIds: string[]` (private; never part of `PublicUser`) |
+| `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 
 Legacy orders may still return `proofFileIds` containing retired supplier-proof files. They remain readable evidence but the `proof` upload purpose and supplier-proof workflow no longer accept writes.
 
@@ -112,7 +113,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | Purpose | Upload role | Allowed detected types | Maximum |
 |---|---|---|---|
 | `artwork` | client | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
-| `fulfilment_proof` | assigned supplier or rider | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
+| `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
@@ -124,7 +125,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image` and `verification_document`; assigned suppliers and riders for `fulfilment_proof`; rider for `delivery_photo` and `rider_verification_document`. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -204,7 +205,7 @@ Verification-document attachment rules:
 - `sample_work` without `replaceFileId` appends another photo/document. To replace one sample, send its currently attached `fileId` as `replaceFileId` with `documentType: "sample_work"`.
 - `replaceFileId` may also select the current permit or ID explicitly. It must be attached to the caller in the same type slot or the API returns `409 verification_document_replacement_mismatch`.
 
-Curl for all five targets:
+Curl for all six targets:
 
 ```bash
 curl -fsS -X POST "$API/files/$ARTWORK_FILE_ID/attach" -H "Authorization: Bearer $CLIENT_TOKEN" \
@@ -320,6 +321,8 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 400 | `unexpected_target_field` | Attach JSON includes a field other than the purpose-specific target; remove it. |
 | 400 | `invalid_milestone_code` | POF target is not printing, packaging/QC, or delivered; choose the stage represented by the file. |
 | 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, or `sample_work`. |
+| 400 | `invalid_rider_document_type` | `riderDocumentType` is missing/unknown; choose `drivers_license`, `or_cr`, or `selfie`. |
+| 400 | `invalid_application` | A driver's-licence expiry is missing, malformed, or not a real calendar date; send `expiresOn` as `YYYY-MM-DD`. |
 | 400 | `invalid_json` | Attach/transition JSON is malformed; fix JSON. |
 | 401 | `unauthorized` | Token absent, invalid, or expired; sign in and retry. |
 | 403 | `forbidden` | Wrong role, file owner, parent owner/assignee, or read relationship; open the caller's own record. |
@@ -333,6 +336,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 409 | `file_in_use` | File has domain references and is not rider-owned `rider_verification_document` evidence; do not delete lifecycle evidence. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
 | 409 | `verification_document_replacement_mismatch` | `replaceFileId` is not attached to the caller in the requested document slot; refresh the supplier's documents and choose the matching file. |
+| 409 | `document_expired` | The driver's-licence expiry is not in the future in Asia/Manila; upload current evidence. |
 | 409 | `transition_not_allowed` | Requested order step is not reachable from the current state/role; refresh and use an available action. |
 | 409 | `storage_object_missing` | Ready metadata has no MinIO object; upload and attach a replacement. |
 | 409 | `storage_object_mismatch` | MinIO byte size differs from metadata; upload and attach a replacement. |

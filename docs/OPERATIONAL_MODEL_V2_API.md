@@ -138,14 +138,14 @@ Used once after Google / public SSO. `/auth/me` does not create or email-link ac
 
 ### Fixed enrollment and reapplication
 
-The URL fixes the membership and initial `pending` approval case. Callers cannot send `role`, status, commission, or live service state; unsupported input returns `400 unexpected_field`. All application routes require a nonblank `Idempotency-Key`. The first successful supplier, rider, or business application returns `201`; an exact retry returns the same application identifiers with `200`. A different request for an existing role application returns `409 application_already_exists`.
+The URL fixes the membership and initial `pending` approval case. Callers cannot send `role`, status, commission, or live service state; unsupported input returns `400 unexpected_field`. All application routes require an `Idempotency-Key` of 1–200 letters, numbers, dots, underscores, colons, or hyphens. The first successful supplier, rider, or business application returns `201`; an exact retry returns the same application identifiers with `200`. A different request for an existing role application returns `409 application_already_exists`.
 
 - `POST /auth/clerk/enroll/supplier` accepts `{profile:{shopName,contactName,phone,location:{lat,lng,label}},serviceCategories:[...]}`. It creates one `draft` service per resolved active category and sets `submittedAt` immediately. An already-mapped client may deliberately add this membership to the same identity.
 - `POST /auth/clerk/enroll/rider` accepts `{profile:{phone,vehicleType,plateNumber,licenseNumber?}}`. It creates a pending case with `submittedAt: null`; attaching the required current driver's licence records evidence but leaves onboarding incomplete. `POST /me/approval-cases/rider/submit` accepts `{expectedVersion}`, rechecks the vehicle type, plate, and current licence, and atomically sets `submittedAt`; exact-key retries replay that success.
 - `POST /me/business-application` accepts `{businessName,businessNature}` after ordinary client activation. Personal ordering remains available while business approval is pending, rejected, or suspended.
 - `POST /me/approval-cases/:kind/reapply` accepts `{expectedVersion,correctionSummary}`. Only `rejected` may transition to `pending`; success increments both case `version` and `applicationRevision`, clears decision fields, and retains the profile, files, services, and prior immutable events.
 
-Validation failures use `400 invalid_application` with a `fields` map. Reapply state/version mismatches use `409 approval_state_conflict`; an incomplete or expired rider licence uses `409 rider_documents_incomplete` or `409 document_expired`.
+Enrollment-specific errors are `400 idempotency_key_required` for a missing key, `400 unexpected_field` for caller-controlled contract fields, `400 invalid_application` with a `fields` map for invalid input, `403 membership_required` when a mapped caller lacks the route's membership, `409 application_already_exists` for enrollment conflicts, and `409 approval_state_conflict` for submit/reapply state, version, or key conflicts. An incomplete or expired rider licence returns `409 rider_documents_incomplete` or `409 document_expired`. Identity provisioning may also return `401 unauthorized`, `409 email_already_registered`, or `502 clerk_unavailable`.
 
 ## Approval queue and decisions
 
