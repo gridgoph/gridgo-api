@@ -49,6 +49,12 @@ function approvalStatus(store, supplierId) {
   )?.status || null;
 }
 
+function hasSupplierMembership(store, supplierId) {
+  return (store.userRoleMemberships || []).some(
+    (membership) => membership.userId === supplierId && membership.role === "supplier",
+  );
+}
+
 function canonicalCategoryCode(store, code) {
   const direct = (store.taxonomy?.categories || []).find((category) => category.code === code);
   if (direct) return direct.code;
@@ -141,7 +147,7 @@ export function catalogGroupsForItem(store, itemId, { includeInactiveOptions = t
     }));
 }
 
-export function serviceLineBlockers(store, service, { publicOnly = false } = {}) {
+export function serviceLineBlockers(store, service, { publicOnly = false, formatCodes } = {}) {
   const blockers = [];
   const pricingBasis = String(service?.pricingBasis || "").trim();
   const turnaround = service && Object.hasOwn(service, "standardTurnaroundHours")
@@ -155,7 +161,8 @@ export function serviceLineBlockers(store, service, { publicOnly = false } = {})
     || !Number.isSafeInteger(service.rushPriceMinor)
     || service.rushPriceMinor < 0
   )) blockers.push("rush_terms");
-  if (serviceFormatCodes(store, service?.id).filter((code) => activeFormatRegistry(store).has(code)).length === 0) {
+  const acceptedFormatCodes = formatCodes ?? serviceFormatCodes(store, service?.id);
+  if (acceptedFormatCodes.filter((code) => activeFormatRegistry(store).has(code)).length === 0) {
     blockers.push("accepted_file_formats");
   }
   if (publicOnly && service?.state !== "live") blockers.push("service_not_live");
@@ -165,8 +172,8 @@ export function serviceLineBlockers(store, service, { publicOnly = false } = {})
   return blockers;
 }
 
-export function assertServiceLineReviewReady(store, service) {
-  const blockers = serviceLineBlockers(store, { ...service, state: "pending_verification" });
+export function assertServiceLineReviewReady(store, service, options) {
+  const blockers = serviceLineBlockers(store, { ...service, state: "pending_verification" }, options);
   if (blockers.length) {
     throw new CatalogError(
       409,
@@ -175,6 +182,11 @@ export function assertServiceLineReviewReady(store, service) {
       { blockers },
     );
   }
+}
+
+export function assertServiceLineReadinessInvariant(store, service, options) {
+  if (["draft", "withdrawn"].includes(service.state)) return;
+  assertServiceLineReviewReady(store, service, options);
 }
 
 export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
@@ -194,6 +206,7 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
   }
   if (publicOnly) {
     if (item.active === false) blockers.push("item_inactive");
+    if (!hasSupplierMembership(store, item.supplierId)) blockers.push("supplier_membership");
     if (approvalStatus(store, item.supplierId) !== "approved") blockers.push("supplier_not_approved");
   }
   return blockers;
@@ -361,7 +374,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
 }
 
 export function publicSupplierShop(store, supplierId) {
-  if (approvalStatus(store, supplierId) !== "approved") return null;
+  if (!hasSupplierMembership(store, supplierId) || approvalStatus(store, supplierId) !== "approved") return null;
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
   if (!profile) return null;
   const services = (store.supplierServices || [])

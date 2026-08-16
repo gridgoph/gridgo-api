@@ -1748,6 +1748,13 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(incompleteVerify.status, 409, JSON.stringify(incompleteVerify.body));
     assert.equal(incompleteVerify.body.error, "service_not_review_ready");
 
+    const draftFormatRemoval = await request(instance.api, "/me/supplier-services/svc_legacy_alias/file-formats", {
+      method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 2, formatCodes: [] },
+    });
+    assert.equal(draftFormatRemoval.status, 200, JSON.stringify(draftFormatRemoval.body));
+    assert.equal(draftFormatRemoval.body.service.state, "draft");
+    assert.equal(draftFormatRemoval.body.service.version, 3);
+
     const suspended = await request(instance.api, "/supplier-services/svc_banner/suspend", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 3, reason: "Catalog review" },
     });
@@ -1759,6 +1766,12 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
     assert.equal(resubmitted.body.service.state, "pending_verification");
     assert.equal(resubmitted.body.service.version, 5);
+    const pendingFormatRemoval = await request(instance.api, "/me/supplier-services/svc_banner/file-formats", {
+      method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 5, formatCodes: [] },
+    });
+    assert.equal(pendingFormatRemoval.status, 409, JSON.stringify(pendingFormatRemoval.body));
+    assert.equal(pendingFormatRemoval.body.error, "service_not_review_ready");
+    assert.ok(pendingFormatRemoval.body.blockers.includes("accepted_file_formats"));
     const reverified = await request(instance.api, "/supplier-services/svc_banner/verify", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 5 },
     });
@@ -1782,6 +1795,13 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(withdrawnReverified.status, 200, JSON.stringify(withdrawnReverified.body));
     assert.equal(withdrawnReverified.body.service.state, "live");
     assert.equal(withdrawnReverified.body.service.version, 9);
+
+    const liveFormatRemoval = await request(instance.api, "/me/supplier-services/svc_banner/file-formats", {
+      method: "PUT", subject: "clerk_supplier", body: { expectedVersion: 9, formatCodes: [] },
+    });
+    assert.equal(liveFormatRemoval.status, 409, JSON.stringify(liveFormatRemoval.body));
+    assert.equal(liveFormatRemoval.body.error, "service_not_review_ready");
+    assert.ok(liveFormatRemoval.body.blockers.includes("accepted_file_formats"));
 
     await database.transaction(async () => {
       const store = await loadStore(database);
@@ -1907,6 +1927,25 @@ test("pending suppliers can edit catalog while public browse requires approval a
       turnaround_hours: 24,
       standard_turnaround_hours: 24,
     });
+
+    const deprovisioned = await request(instance.api, "/users/user_supplier/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "client", reason: "Access removed" },
+    });
+    assert.equal(deprovisioned.status, 200, JSON.stringify(deprovisioned.body));
+    assert.equal((await request(instance.api, "/catalog/items/catalog_poster")).status, 404);
+    assert.equal((await request(instance.api, "/catalog/shops/user_supplier")).status, 404);
+    const shopsAfterDeprovision = await request(instance.api, "/catalog/shops");
+    assert.equal(shopsAfterDeprovision.status, 200, JSON.stringify(shopsAfterDeprovision.body));
+    assert.deepEqual(shopsAfterDeprovision.body.shops, []);
+    assert.equal((await database.query(`
+      SELECT count(*)::integer AS membership_count
+        FROM user_role_memberships
+       WHERE user_id = 'user_supplier' AND role = 'supplier'
+    `)).rows[0].membership_count, 0);
+    assert.equal((await database.query(`
+      SELECT status FROM approval_cases
+       WHERE user_id = 'user_supplier' AND kind = 'supplier'
+    `)).rows[0].status, "approved");
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));

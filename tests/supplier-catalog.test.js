@@ -5,6 +5,8 @@ import {
   appendOrderLineSnapshot,
   effectiveAcceptedFormats,
   publicCatalogItem,
+  publicSupplierShop,
+  publicSupplierShops,
   selectedCatalogPrice,
   supplierCatalogReadiness,
 } from "../src/supplier-catalog.js";
@@ -16,7 +18,8 @@ function fixture({ approvalStatus = "approved", fileFormatMode = "inherit" } = {
     taxonomy: {
       categories: [{ code: "marketing_collateral", active: true, structuredFields: [{ code: "paper_size", values: ["A3", "A4"] }] }],
     },
-    users: [{ id: "supplier" }],
+    users: [{ id: "supplier", role: "supplier" }],
+    userRoleMemberships: [{ userId: "supplier", role: "supplier" }],
     supplierProfiles: [{
       userId: "supplier", shopName: "Print Shop", contactName: "Supplier",
       shop: { lat: 7.1, lng: 125.6, label: "Davao" }, pickupAvailable: false,
@@ -102,6 +105,30 @@ test("pending suppliers stay private while approved complete catalog items publi
   assert.deepEqual(item.acceptedFormats.map((format) => format.code), ["pdf"]);
   assert.equal(item.photos[0].url, "/catalog/media/photo");
   assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), { readyForApproval: true, missing: [] });
+});
+
+test("public catalog and checkout require a current supplier membership", () => {
+  const store = fixture();
+  store.userRoleMemberships.length = 0;
+
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  assert.equal(publicSupplierShop(store, "supplier"), null);
+  assert.deepEqual(publicSupplierShops(store).shops, []);
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "order",
+      catalogItemId: "item",
+      expectedVersion: 3,
+      expectedServiceVersion: 1,
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { paper_size: "A4" },
+    }),
+    (error) => error.status === 409 && error.code === "catalog_item_stale",
+  );
+  assert.deepEqual(store.orderLineItems, []);
+  assert.deepEqual(store.orderLineItemOptions, []);
 });
 
 test("approved suppliers remain grandfathered ready until approval is reopened", () => {

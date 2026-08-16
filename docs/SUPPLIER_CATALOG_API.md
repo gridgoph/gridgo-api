@@ -10,7 +10,7 @@ Supplier catalog items are sellable offers beneath one taxonomy-governed supplie
 
 Public items expose both `version` and `serviceVersion`. Checkout must return both as `expectedVersion` and `expectedServiceVersion` so service-derived pricing basis, turnaround, rush terms, and accepted formats cannot change behind a still-current item version.
 
-An item publishes only when its supplier approval case is `approved`, its service is complete and `live`, it is active, it has a ready photo, every option group has an active option, and its effective accepted-format set is nonempty. Effective price is `max(0, base price + selected modifiers)` using checked integer arithmetic.
+An item publishes only when its owner still has a current database `supplier` membership, its supplier approval case is `approved`, its service is complete and `live`, it is active, it has a ready photo, every option group has an active option, and its effective accepted-format set is nonempty. Checkout rechecks the same membership and publication boundary. Effective price is `max(0, base price + selected modifiers)` using checked integer arithmetic.
 
 Media records expose opaque API URLs and never MinIO object keys. Task F owns the `catalog_item_photo` and `supplier_shop_image` upload/attach authorization, replacement, MIME/size checks, and serving of `/catalog/media/:fileId`.
 
@@ -41,6 +41,8 @@ Creating an option group includes a nonempty `options` array because the deferre
 Turnaround, quantity, and unbounded sort-order inputs must fit PostgreSQL `integer` (`0` through `2147483647` where the field permits zero). Minor-unit prices and modifiers instead use the full signed JavaScript-safe range supported by `money_minor`, subject to each field's nonnegative constraint.
 
 Service lines use `draft` while incomplete and `pending_verification` when review-ready. Both self-service state changes and compatibility submit/verify actions reject incomplete lines with `service_not_review_ready`. Suspended and withdrawn complete lines may be resubmitted to `pending_verification`; suppliers cannot make a line live. A live line returns to `pending_verification` when the supplier expands its governed category or accepted formats. Routine catalog, price, and option edits remain immediately derived from approval + live-service eligibility.
+
+Readiness-owning edits must leave `pending_verification`, `live`, and `suspended` lines complete. In particular, replacing service formats with an empty effective set returns `service_not_review_ready` without changing formats, state, or version. A supplier must first move the line to `draft` or `withdrawn` before making it incomplete, then complete and resubmit it for approval.
 
 ## Format inheritance and readiness
 

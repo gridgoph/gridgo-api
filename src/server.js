@@ -93,6 +93,7 @@ import { routeSupplierCatalog } from "./catalog-routes.js";
 import {
   advanceSupplierServiceVersion,
   assertExpectedVersion,
+  assertServiceLineReadinessInvariant,
   assertServiceLineReviewReady,
   supplierCatalogReadiness,
 } from "./supplier-catalog.js";
@@ -2792,6 +2793,7 @@ async function handleRequest(req, res) {
           service.verifiedAt = null;
           service.verifiedBy = null;
         }
+        assertServiceLineReadinessInvariant(store, service);
         // Routine param edits on live stay live (blueprint: within verified envelope)
       } else if (isOps(user)) {
         // ops can annotate notes fields only via PATCH; state changes use action routes

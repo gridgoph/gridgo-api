@@ -2,7 +2,7 @@ import { identityHasMembership } from "./authorization-context.js";
 import {
   advanceSupplierServiceVersion,
   assertExpectedVersion,
-  assertServiceLineReviewReady,
+  assertServiceLineReadinessInvariant,
   CatalogError,
   catalogGroupsForItem,
   catalogItemBlockers,
@@ -297,12 +297,10 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         if (!['draft', 'pending_verification'].includes(body.state)) {
           fail(400, "invalid_service_state", "Suppliers may set a service only to draft or pending_verification.");
         }
-        if (body.state === "pending_verification") {
-          assertServiceLineReviewReady(store, service);
-        }
         service.state = body.state;
       }
       if (service.state === "live" && service.categoryCode !== priorCategory) service.state = "pending_verification";
+      assertServiceLineReadinessInvariant(store, service);
       advanceSupplierServiceVersion(service, now());
       auditChange(audit, store, user, "supplier_service.update", "supplier_service", service.id, { state: service.state });
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
@@ -317,6 +315,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const codes = activeFormatCodes(store, body.formatCodes);
     const previous = new Set((store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId === service.id).map((record) => record.formatCode));
+    assertServiceLineReadinessInvariant(store, service, { formatCodes: codes });
     store.supplierServiceFileFormats = (store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId !== service.id);
     store.supplierServiceFileFormats.push(...codes.map((formatCode) => ({ supplierServiceId: service.id, formatCode })));
