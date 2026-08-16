@@ -600,6 +600,69 @@ function verificationUserResponse(store, target) {
   };
 }
 
+/**
+ * The legacy verification route stays the only decision surface for one
+ * release, so its transaction must also keep the membership-era approval case
+ * truthful: fixed projections and existing work gates read different owners.
+ * The legacy `unverified` status has no case equivalent and maps to `pending`.
+ */
+function syncApprovalCaseWithVerification(store, target, status, actor, reason) {
+  const caseStatus = status === "unverified" ? "pending" : status;
+  const at = now();
+  if (!Array.isArray(store.approvalCases)) store.approvalCases = [];
+  if (!Array.isArray(store.approvalCaseEvents)) store.approvalCaseEvents = [];
+  let approvalCase = store.approvalCases.find(
+    (candidate) => candidate.userId === target.id && candidate.kind === target.role,
+  );
+  const fromStatus = approvalCase?.status ?? null;
+  if (!approvalCase) {
+    approvalCase = {
+      id: id("apc"),
+      userId: target.id,
+      kind: target.role,
+      status: caseStatus,
+      version: 1,
+      applicationRevision: 1,
+      createdAt: at,
+      updatedAt: at,
+    };
+    store.approvalCases.push(approvalCase);
+  }
+  approvalCase.status = caseStatus;
+  approvalCase.updatedAt = at;
+  delete approvalCase.rejectionReason;
+  delete approvalCase.suspensionReason;
+  if (caseStatus === "pending") {
+    delete approvalCase.decidedAt;
+    delete approvalCase.decidedBy;
+  } else {
+    approvalCase.decidedAt = at;
+    approvalCase.decidedBy = actor.id;
+    if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
+    if (caseStatus === "rejected") {
+      approvalCase.rejectionReason = reason || "Verification rejected";
+    }
+    if (caseStatus === "suspended") {
+      approvalCase.suspensionReason = reason || "Verification suspended";
+    }
+  }
+  if (fromStatus !== caseStatus) {
+    store.approvalCaseEvents.push({
+      id: id("ace"),
+      approvalCaseId: approvalCase.id,
+      applicationRevision: approvalCase.applicationRevision,
+      ...(fromStatus ? { fromStatus } : {}),
+      toStatus: caseStatus,
+      actorUserId: actor.id,
+      actorKind: "approver",
+      ...(reason ? { reason } : {}),
+      requestId: id("acr"),
+      snapshot: {},
+      createdAt: at,
+    });
+  }
+}
+
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
 const ZONE_COORDS = {
   davao_central: { lat: 7.0865, lng: 125.6135 }, // Bajada / JP Laurel
@@ -1965,6 +2028,7 @@ async function handleRequest(req, res) {
           }
         }
       }
+      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       audit(store, {
         actor: user,
         action: "user.verification",
