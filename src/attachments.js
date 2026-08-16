@@ -848,10 +848,6 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
   const approvalCase = (store.approvalCases || []).find(
     (candidate) => candidate.userId === target.record.id && candidate.kind === "rider",
   );
-  if (target.kind === "drivers_license" && approvalCase?.status === "pending" && approvalCase.submittedAt == null) {
-    approvalCase.submittedAt = at;
-    approvalCase.updatedAt = at;
-  }
   return { document, approvalCase: approvalCase || null };
 }
 

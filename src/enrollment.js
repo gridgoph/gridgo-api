@@ -496,15 +496,41 @@ function manilaDate(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-export function assertRiderApprovalReady(store, userId, at) {
-  if (!currentFutureLicense(store, userId, manilaDate(at))) {
-    fail(
-      409,
-      "rider_documents_incomplete",
-      "A ready current driver's licence with a future expiry is required before approving this rider.",
-      { missing: ["drivers_license"] },
-    );
+function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage }) {
+  const profile = (store.riderProfiles || []).find((candidate) => candidate.userId === userId);
+  const fields = {};
+  if (!profile || !VEHICLE_TYPES.has(nonblank(profile.vehicleType))) {
+    fields["profile.vehicleType"] = "choose motorcycle, car, van, truck, or bicycle";
   }
+  const plateNumber = nonblank(profile?.plateNumber);
+  if (!plateNumber || plateNumber === "PROFILE-COMPLETION-REQUIRED") {
+    fields["profile.plateNumber"] = "is required";
+  }
+  if (Object.keys(fields).length) invalidApplication(fields);
+
+  const today = manilaDate(at);
+  if (currentFutureLicense(store, userId, today)) return;
+  const currentLicense = (store.riderDocuments || []).find(
+    (document) => document.riderId === userId
+      && document.kind === "drivers_license"
+      && document.isCurrent !== false,
+  );
+  if (currentLicense && currentLicense.expiresOn <= today) {
+    fail(409, "document_expired", expiredMessage);
+  }
+  fail(
+    409,
+    "rider_documents_incomplete",
+    incompleteMessage,
+    { missing: ["drivers_license"] },
+  );
+}
+
+export function assertRiderApprovalReady(store, userId, at) {
+  assertRiderReady(store, userId, at, {
+    expiredMessage: "Replace the expired driver's licence before approving this rider.",
+    incompleteMessage: "A ready current driver's licence with a future expiry is required before approving this rider.",
+  });
 }
 
 export function submitRiderApplication({ store, user, body, idempotencyKey, createId, now }) {
@@ -541,28 +567,18 @@ export function submitRiderApplication({ store, user, body, idempotencyKey, crea
       approvalCase: caseProjection(approvalCase),
     });
   }
-  const at = now();
-  if (!approvalCase.submittedAt) {
-    const today = manilaDate(at);
-    const anyLicense = (store.riderDocuments || []).find(
-      (document) => document.riderId === user.id
-        && document.kind === "drivers_license"
-        && document.isCurrent !== false,
-    );
-    if (anyLicense && anyLicense.expiresOn <= today) {
-      fail(409, "document_expired", "Replace the expired driver's licence before submitting the rider application.");
-    }
-    if (!currentFutureLicense(store, user.id, today)) {
-      fail(
-        409,
-        "rider_documents_incomplete",
-        "Attach a current driver's licence photo with a future expiry before submitting the rider application.",
-        { missing: ["drivers_license"] },
-      );
-    }
-    approvalCase.submittedAt = at;
-    approvalCase.updatedAt = at;
+  if (approvalCase.submittedAt) {
+    fail(409, "approval_state_conflict", "This rider application is already submitted. Refresh its current state.", {
+      approvalCase: caseProjection(approvalCase),
+    });
   }
+  const at = now();
+  assertRiderReady(store, user.id, at, {
+    expiredMessage: "Replace the expired driver's licence before submitting the rider application.",
+    incompleteMessage: "Attach a current driver's licence photo with a future expiry before submitting the rider application.",
+  });
+  approvalCase.submittedAt = at;
+  approvalCase.updatedAt = at;
   const response = caseProjection(approvalCase);
   store.approvalCaseEvents.push({
     id: createId("ace"),
@@ -618,23 +634,10 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
   }
   const at = now();
   if (kind.caseKind === "rider") {
-    const today = manilaDate(at);
-    const currentLicense = (store.riderDocuments || []).find(
-      (document) => document.riderId === user.id
-        && document.kind === "drivers_license"
-        && document.isCurrent !== false,
-    );
-    if (currentLicense && currentLicense.expiresOn <= today) {
-      fail(409, "document_expired", "Replace the expired driver's licence before reapplying.");
-    }
-    if (!currentFutureLicense(store, user.id, today)) {
-      fail(
-        409,
-        "rider_documents_incomplete",
-        "Attach a current driver's licence photo with a future expiry before reapplying.",
-        { missing: ["drivers_license"] },
-      );
-    }
+    assertRiderReady(store, user.id, at, {
+      expiredMessage: "Replace the expired driver's licence before reapplying.",
+      incompleteMessage: "Attach a current driver's licence photo with a future expiry before reapplying.",
+    });
   }
   const previous = caseProjection(approvalCase);
   approvalCase.status = "pending";

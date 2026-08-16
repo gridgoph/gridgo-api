@@ -363,7 +363,7 @@ test("verification documents attach only to the uploader and support typed repla
   assert.doesNotThrow(() => markFileDeletePending(first, supplier, "2026-08-09T00:00:00Z"));
 });
 
-test("rider licence attachment preserves replaced evidence and submits interrupted enrollment", () => {
+test("rider licence attachment preserves evidence without submitting enrollment", () => {
   const first = readyFile("rider_verification_document", {
     fileId: "rider-license-old",
     ownerId: rider.id,
@@ -395,7 +395,7 @@ test("rider licence attachment preserves replaced evidence and submits interrupt
     documentId: "rider-document-old",
     at: "2026-08-16T01:00:00.000Z",
   });
-  assert.equal(attached.approvalCase.submittedAt, "2026-08-16T01:00:00.000Z");
+  assert.equal(attached.approvalCase.submittedAt, undefined);
   assert.equal(attached.document.expiresOn, "2028-06-30");
   assert.deepEqual(first.references, [{
     type: "rider_document",
@@ -447,7 +447,7 @@ test("rider licence attachment preserves replaced evidence and submits interrupt
   );
 });
 
-test("deleting rider licence evidence invalidates its document and reverts unsubmitted intake", () => {
+test("deleting rider licence evidence reverts a pending submission to intake", () => {
   const license = readyFile("rider_verification_document", { fileId: "rider-license-live", ownerId: rider.id });
   const approvalCase = {
     id: "case-rider-delete",
@@ -467,7 +467,9 @@ test("deleting rider licence evidence invalidates its document and reverts unsub
     rider,
   );
   attachRiderDocument(store, license, target, { documentId: "rider-document-live", at: "2026-08-16T01:00:00.000Z" });
-  assert.equal(approvalCase.submittedAt, "2026-08-16T01:00:00.000Z");
+  assert.equal(approvalCase.submittedAt, undefined);
+  approvalCase.submittedAt = "2026-08-16T01:30:00.000Z";
+  approvalCase.updatedAt = "2026-08-16T01:30:00.000Z";
 
   assert.doesNotThrow(() => markFileDeletePending(license, rider, "2026-08-16T02:00:00.000Z"));
   const invalidated = invalidateRiderDocumentsForFile(store, license, "2026-08-16T02:00:00.000Z");
@@ -489,7 +491,7 @@ test("deleting rider licence evidence invalidates its document and reverts unsub
     documentId: "rider-document-next",
     at: "2026-08-16T03:00:00.000Z",
   });
-  assert.equal(approvalCase.submittedAt, "2026-08-16T03:00:00.000Z");
+  assert.equal(approvalCase.submittedAt, null);
 
   const selfie = readyFile("rider_verification_document", { fileId: "rider-selfie", ownerId: rider.id });
   store.files.push(selfie);
@@ -502,7 +504,7 @@ test("deleting rider licence evidence invalidates its document and reverts unsub
   invalidateRiderDocumentsForFile(store, selfie, "2026-08-16T05:00:00.000Z");
   assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-selfie").isCurrent, false);
   assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-next").isCurrent, true);
-  assert.equal(approvalCase.submittedAt, "2026-08-16T03:00:00.000Z");
+  assert.equal(approvalCase.submittedAt, null);
 });
 
 test("verification document reads never inherit order, service, or another supplier visibility", () => {

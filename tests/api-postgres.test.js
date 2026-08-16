@@ -1719,21 +1719,52 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
         replacedDocuments: [],
       }, { documentId: "rdoc_new_license", at: "2026-08-16T02:00:00.000Z" });
       assert.equal(attached.approvalCase.id, approvalCase.id);
-      assert.equal(attached.approvalCase.submittedAt, "2026-08-16T02:00:00.000Z");
+      assert.equal(attached.approvalCase.submittedAt, undefined);
+      store.riderProfiles.find((profile) => profile.userId === enrolledRider.id).plateNumber =
+        "PROFILE-COMPLETION-REQUIRED";
       await saveStore(database, store);
     });
 
     const resumed = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider_new" });
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
-    assert.equal(resumed.body.onboardingIncomplete, false);
-    assert.equal(resumed.body.approvalCase.submittedAt, "2026-08-16T02:00:00.000Z");
+    assert.equal(resumed.body.onboardingIncomplete, true);
+    assert.equal(resumed.body.approvalCase.submittedAt, null);
     assert.equal(resumed.body.documents[0].kind, "drivers_license");
+    const incompleteProfileSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      headers: { "Idempotency-Key": "rider-submit-incomplete-profile" },
+    });
+    assert.equal(incompleteProfileSubmit.status, 400, JSON.stringify(incompleteProfileSubmit.body));
+    assert.equal(incompleteProfileSubmit.body.error, "invalid_application");
+    assert.equal(incompleteProfileSubmit.body.fields["profile.plateNumber"], "is required");
+    const incompleteProfileApproval = await request(
+      instance.api,
+      `/users/${rider.body.user.id}/verification`,
+      { method: "POST", subject: "clerk_ops", body: { status: "approved" } },
+    );
+    assert.equal(incompleteProfileApproval.status, 400, JSON.stringify(incompleteProfileApproval.body));
+    assert.equal(incompleteProfileApproval.body.error, "invalid_application");
+    assert.equal(incompleteProfileApproval.body.fields["profile.plateNumber"], "is required");
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.riderProfiles.find((profile) => profile.userId === rider.body.user.id).plateNumber = "NEW 1234";
+      await saveStore(database, store);
+    });
     const submitted = await request(instance.api, "/me/approval-cases/rider/submit", {
       method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
       headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777777" },
     });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
-    assert.equal(submitted.body.approvalCase.submittedAt, "2026-08-16T02:00:00.000Z");
+    assert.notEqual(submitted.body.approvalCase.submittedAt, null);
+    const completed = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider_new" });
+    assert.equal(completed.body.onboardingIncomplete, false);
+    assert.equal(completed.body.approvalCase.submittedAt, submitted.body.approvalCase.submittedAt);
+    const duplicateSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      headers: { "Idempotency-Key": "rider-submit-second-key" },
+    });
+    assert.equal(duplicateSubmit.status, 409, JSON.stringify(duplicateSubmit.body));
+    assert.equal(duplicateSubmit.body.error, "approval_state_conflict");
 
     const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
       method: "DELETE", subject: "clerk_rider_new",

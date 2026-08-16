@@ -194,7 +194,7 @@ Immediately before commit the API revalidates: `state === "ready"`, caller equal
 
 Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. On a legacy commitment, a POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention`.
 
-A rider-document attach returns `{file,riderDocument,approvalCase}`. Attaching `drivers_license` replaces the prior current licence without deleting it and atomically sets a pending interrupted rider case's `submittedAt`; optional `or_cr` and `selfie` replace only their own current slots.
+A rider-document attach returns `{file,riderDocument,approvalCase}`. Attaching `drivers_license` replaces the prior current licence without deleting it but remains evidence-only; the explicit rider submit endpoint rechecks readiness and sets `submittedAt`. Optional `or_cr` and `selfie` replace only their own current slots.
 
 Verification-document attachment rules:
 
