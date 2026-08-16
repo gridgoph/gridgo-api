@@ -517,6 +517,7 @@ export function publicOrderFor(order, user) {
     publicRecord.platformRevenue = reporting.platformRevenue;
   }
   if (rider) {
+    delete publicRecord.payoutMilestones;
     delete publicRecord.supplierDownpaymentRateBps;
     delete publicRecord.initialSupplierPrincipalMinor;
     delete publicRecord.supplierRemainderMinor;

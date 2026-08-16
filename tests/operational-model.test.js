@@ -171,6 +171,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal("supplierDownpaymentRateBps" in riderOrder, false);
   assert.equal("initialSupplierPrincipalMinor" in riderOrder, false);
   assert.equal("supplierRemainderMinor" in riderOrder, false);
+  assert.equal("payoutMilestones" in riderOrder, false);
   assert.equal("componentLines" in riderOrder.payments.initial, false);
   assert.equal("supplierPrincipalRateBps" in riderOrder.payments.initial, false);
   assert.equal("componentLines" in riderOrder.acceptedQuote.payments.initial, false);

@@ -662,6 +662,13 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
     }
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned", supplierId: "user_supplier" } })).status, 200);
+    for (const supplierSubtotalMinor of [null, "", "100000"]) {
+      const invalidSubtotal = await request(instance.api, `/orders/${orderId}/transition`, {
+        method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierSubtotalMinor },
+      });
+      assert.equal(invalidSubtotal.status, 400);
+      assert.equal(invalidSubtotal.body.error, "invalid_supplier_subtotal");
+    }
     const accepted = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state: "supplier_accepted", supplierSubtotalMinor: 100000 } });
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.order.state, "awaiting_checkout");

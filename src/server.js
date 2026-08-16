@@ -3548,7 +3548,7 @@ async function handleRequest(req, res) {
             reason,
           });
         }
-        const supplierSubtotalMinor = Number(body.supplierSubtotalMinor);
+        const supplierSubtotalMinor = body.supplierSubtotalMinor;
         if (!Number.isSafeInteger(supplierSubtotalMinor) || supplierSubtotalMinor < 0) {
           return send(res, 400, {
             error: "invalid_supplier_subtotal",
