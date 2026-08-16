@@ -1,6 +1,6 @@
 import {
   advanceSupplierServiceVersion,
-  supplierCatalogReadiness,
+  supplierCatalogTransitionReadiness,
   transitionSupplierServiceToLive,
 } from "./supplier-catalog.js";
 
@@ -120,6 +120,36 @@ function publishSupplierServices(store, approvalCase, serviceIds, actorId, at) {
   return published;
 }
 
+export function applySupplierApprovalServiceTransition({
+  store,
+  approvalCase,
+  action,
+  actorId,
+  at,
+  reason,
+}) {
+  let readiness = null;
+  if (["approve", "restore"].includes(action) && approvalCase.kind === "supplier") {
+    readiness = supplierCatalogTransitionReadiness(store, approvalCase.userId, {
+      restoring: action === "restore",
+    });
+    if (!readiness.readyForApproval) {
+      fail(409, "supplier_profile_incomplete", "Complete the supplier approval checklist before approving.", {
+        missing: readiness.missing,
+      });
+    }
+  }
+  return {
+    readiness,
+    publishedServiceIds: ["approve", "restore"].includes(action)
+      ? publishSupplierServices(store, approvalCase, readiness?.publishableServiceIds || [], actorId, at)
+      : [],
+    suspendedServiceIds: action === "suspend"
+      ? suspendSupplierServices(store, approvalCase, actorId, at, reason)
+      : [],
+  };
+}
+
 export function decideApprovalCase({
   store,
   caseId,
@@ -178,15 +208,14 @@ export function decideApprovalCase({
     });
   }
 
-  let readiness = null;
-  if (["approve", "restore"].includes(action) && approvalCase.kind === "supplier") {
-    readiness = supplierCatalogReadiness(store, approvalCase.userId);
-    if (!readiness.readyForApproval) {
-      fail(409, "supplier_profile_incomplete", "Complete the supplier approval checklist before approving.", {
-        missing: readiness.missing,
-      });
-    }
-  }
+  const serviceOutcome = applySupplierApprovalServiceTransition({
+    store,
+    approvalCase,
+    action,
+    actorId: actor.id,
+    at,
+    reason: input.reason,
+  });
 
   const fromStatus = approvalCase.status;
   approvalCase.status = transition.to;
@@ -199,12 +228,7 @@ export function decideApprovalCase({
   if (action === "reject") approvalCase.rejectionReason = input.reason;
   if (action === "suspend") approvalCase.suspensionReason = input.reason;
 
-  const publishedServiceIds = ["approve", "restore"].includes(action)
-    ? publishSupplierServices(store, approvalCase, readiness?.publishableServiceIds || [], actor.id, at)
-    : [];
-  const suspendedServiceIds = action === "suspend"
-    ? suspendSupplierServices(store, approvalCase, actor.id, at, input.reason)
-    : [];
+  const { publishedServiceIds, suspendedServiceIds } = serviceOutcome;
   updateLegacyVerification(store, approvalCase, action, actor.id, at, input.reason);
 
   const event = {

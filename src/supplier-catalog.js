@@ -363,7 +363,7 @@ export function catalogItemBlockers(store, item, {
   return blockers;
 }
 
-function supplierCatalogTransitionReadiness(store, supplierId, { restoring }) {
+export function supplierCatalogTransitionReadiness(store, supplierId, { restoring }) {
   const approvalCase = (store.approvalCases || []).find(
     (candidate) => candidate.userId === supplierId && candidate.kind === "supplier",
   );
@@ -395,30 +395,32 @@ function supplierCatalogTransitionReadiness(store, supplierId, { restoring }) {
     allowedStates: allowedServiceStates,
     requireActiveCategory: true,
   }).length === 0);
-  if (reviewReady.length === 0) missing.push("review_ready_service");
 
-  const activeItems = (store.catalogItems || []).filter((item) => item.supplierId === supplierId && item.active !== false);
+  const activeItems = (store.catalogItems || []).filter(
+    (item) => item.supplierId === supplierId && item.active !== false && candidateIds.has(item.supplierServiceId),
+  );
   const blockersForItem = (item) => {
-    const blockers = catalogItemBlockers(store, item, {
+    return catalogItemBlockers(store, item, {
       allowedServiceStates,
       requireActiveCategory: true,
     });
-    if (!candidateIds.has(item.supplierServiceId) && !blockers.includes("service_line")) blockers.push("service_line");
-    return blockers;
   };
   const completeItems = activeItems.filter((item) => blockersForItem(item).length === 0);
-  if (completeItems.length === 0) missing.push("active_catalog_item");
-  for (const item of activeItems) {
-    for (const blocker of blockersForItem(item)) missing.push(`catalog_item:${item.id}:${blocker}`);
+  const completeServiceIds = new Set(completeItems.map((item) => item.supplierServiceId));
+  const publishableServiceIds = reviewReady
+    .filter((service) => completeServiceIds.has(service.id))
+    .map((service) => service.id);
+  if (publishableServiceIds.length === 0) {
+    if (reviewReady.length === 0) missing.push("review_ready_service");
+    if (completeItems.length === 0) missing.push("active_catalog_item");
+    for (const item of activeItems) {
+      for (const blocker of blockersForItem(item)) missing.push(`catalog_item:${item.id}:${blocker}`);
+    }
   }
 
   const hasShopMedia = (store.supplierShopMedia || [])
     .some((media) => media.supplierId === supplierId && readyFile(store, media.fileId));
   if (!hasShopMedia) missing.push("shop_identity_media");
-  const completeServiceIds = new Set(completeItems.map((item) => item.supplierServiceId));
-  const publishableServiceIds = reviewReady
-    .filter((service) => completeServiceIds.has(service.id))
-    .map((service) => service.id);
   return { readyForApproval: missing.length === 0, missing, publishableServiceIds };
 }
 

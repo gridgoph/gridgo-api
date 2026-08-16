@@ -37,7 +37,7 @@ async function withMigrationSchema(t, fn) {
   await fn({ schema, client });
 }
 
-test("fresh PostgreSQL migrates through onboarding, catalog, and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
+test("fresh PostgreSQL migrates through onboarding, money, and catalog additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
 
@@ -64,11 +64,11 @@ test("fresh PostgreSQL migrates through onboarding, catalog, and money additions
     }
 
     await runner(migrationOptions(schema, "down", 1, client));
-    assert.equal((await client.query("SELECT to_regclass('supplier_payment_terms') AS table_name")).rows[0].table_name, null);
-    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, "supplier_catalog_items");
+    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, null);
+    assert.equal((await client.query("SELECT to_regclass('supplier_payment_terms') AS table_name")).rows[0].table_name, "supplier_payment_terms");
 
     await runner(migrationOptions(schema, "down", 1, client));
-    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, null);
+    assert.equal((await client.query("SELECT to_regclass('supplier_payment_terms') AS table_name")).rows[0].table_name, null);
     assert.equal((await client.query("SELECT to_regclass('user_role_memberships') AS table_name")).rows[0].table_name, "user_role_memberships");
 
     await runner(migrationOptions(schema, "down", 1, client));
@@ -100,7 +100,7 @@ test("fresh PostgreSQL migrates through onboarding, catalog, and money additions
 
 test("service-fee migration backfills legacy money, payments, allocations, and settings", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
-    await runner(migrationOptions(schema, "up", 3, client));
+    await runner(migrationOptions(schema, "up", 2, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings)
       VALUES (true, 7, '{"issueWindowHours":48,"serviceFeeRateBps":750}');
@@ -222,6 +222,29 @@ test("service-fee migration backfills legacy money, payments, allocations, and s
     assert.equal(reversedColumns.has("commission_minor"), true);
     assert.equal((await client.query("SELECT code FROM order_payments WHERE order_id = 'legacy_money' ORDER BY position")).rows[0].code, "downpayment");
     assert.equal((await client.query("SELECT settings->>'serviceFeeRateBps' AS rate FROM platform_settings")).rows[0].rate, "750");
+  });
+});
+
+test("catalog migration applies after an existing service-fee migration history", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner(migrationOptions(schema, "up", 3, client));
+    assert.deepEqual((await client.query(
+      "SELECT name FROM pgmigrations ORDER BY id",
+    )).rows.map((row) => row.name), [
+      "1786816800000_initial_schema",
+      "1786843800000_role_memberships_and_approvals",
+      "1786870800000_service_fee_money_model",
+    ]);
+
+    await runner(migrationOptions(schema, "up", 1, client));
+    assert.equal(
+      (await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name,
+      "1786874400000_dynamic_supplier_catalog",
+    );
+    assert.equal(
+      (await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name,
+      "supplier_catalog_items",
+    );
   });
 });
 
@@ -800,7 +823,7 @@ test("catalog category foreign key preserves retired-code service rows without w
       VALUES ('legacy_service', 'supplier', 'large_format', 'live', 100, 24, '${at}', '${at}', 0, '{}')
     `);
 
-    await runner(migrationOptions(schema, "up", 1, client));
+    await runner(migrationOptions(schema, "up", 2, client));
     assert.equal((await client.query(
       "SELECT category_code FROM supplier_services WHERE id = 'legacy_service'",
     )).rows[0].category_code, "large_format");

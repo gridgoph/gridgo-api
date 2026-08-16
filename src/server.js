@@ -22,6 +22,7 @@ import {
   APPROVAL_CASE_KINDS,
   APPROVAL_CASE_STATUSES,
   APPROVAL_DECISIONS,
+  applySupplierApprovalServiceTransition,
   approvalDecisionInput,
   decideApprovalCase,
 } from "./approval-cases.js";
@@ -450,8 +451,7 @@ function riderProfileProjection(store, userId) {
   };
 }
 
-function supplierReadiness(store, userId, approvalCase) {
-  if (approvalCase?.status === "approved") return { readyForApproval: true, missing: [] };
+function supplierReadiness(store, userId) {
   return supplierCatalogReadiness(store, userId);
 }
 
@@ -540,7 +540,7 @@ function approvalCaseDetail(store, approvalCase) {
     supplierProfile: supplierProfileProjection(store, approvalCase.userId),
     categories: [...new Set(services.map((service) => service.categoryCode))],
     services,
-    readiness: supplierReadiness(store, approvalCase.userId, approvalCase),
+    readiness: supplierReadiness(store, approvalCase.userId),
     // Task E owns these settled sections. Stable placeholders keep this detail
     // contract additive while its relational tables are absent on main.
     pickupPaymentTerms: null,
@@ -635,7 +635,7 @@ function fixedAuthProjection(store, auth, role) {
       ...base,
       supplierProfile: supplierProfileProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
-      readiness: supplierReadiness(store, auth.user.id, approvalCase),
+      readiness: supplierReadiness(store, auth.user.id),
       capabilities: {
         editCatalogue: canEdit,
         editSettings: canEdit,
@@ -763,10 +763,17 @@ function verificationUserResponse(store, target) {
  * `pending`; a demoted then re-promoted supplier or rider re-earns approval,
  * and approval never transfers between the supplier and rider kinds.
  */
-function syncApprovalCaseWithVerification(store, target, status, actor, reason, { createMissing = true } = {}) {
+function syncApprovalCaseWithVerification(
+  store,
+  target,
+  status,
+  actor,
+  reason,
+  { createMissing = true, snapshot = {}, decisionAt = null } = {},
+) {
   const caseStatus = status === "unverified" ? "pending" : status;
   const decisionReason = typeof reason === "string" && reason.trim() ? reason.trim() : null;
-  const at = now();
+  const at = decisionAt || now();
   if (!Array.isArray(store.approvalCases)) store.approvalCases = [];
   if (!Array.isArray(store.approvalCaseEvents)) store.approvalCaseEvents = [];
   let approvalCase = store.approvalCases.find(
@@ -807,7 +814,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
   }
   if (fromStatus !== caseStatus) {
     if (fromStatus !== null) approvalCase.version += 1;
-    store.approvalCaseEvents.push({
+    const event = {
       id: id("ace"),
       approvalCaseId: approvalCase.id,
       applicationRevision: approvalCase.applicationRevision,
@@ -817,10 +824,13 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
       actorKind: "approver",
       ...(decisionReason ? { reason: decisionReason } : {}),
       requestId: id("acr"),
-      snapshot: {},
+      snapshot: { ...snapshot, version: approvalCase.version },
       createdAt: at,
-    });
+    };
+    store.approvalCaseEvents.push(event);
+    return { approvalCase, event };
   }
+  return { approvalCase, event: null };
 }
 
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
@@ -2383,33 +2393,103 @@ async function handleRequest(req, res) {
         return send(res, 400, { error: "invalid_verification_status", allowed });
       }
       const prev = target.verificationStatus || "unverified";
+      const decisionAt = now();
+      const decisionReason = typeof (body.reason || body.note) === "string" && (body.reason || body.note).trim()
+        ? (body.reason || body.note).trim()
+        : null;
+      let serviceAction = null;
+      let serviceOutcome = { publishedServiceIds: [], suspendedServiceIds: [] };
+      if (!Array.isArray(store.approvalCases)) store.approvalCases = [];
+      let approvalCase = (store.approvalCases || []).find(
+        (candidate) => candidate.userId === target.id && candidate.kind === target.role,
+      );
+      if (target.role === "supplier") {
+        if (!approvalCase) {
+          approvalCase = {
+            id: id("apc"),
+            userId: target.id,
+            kind: "supplier",
+            status: "pending",
+            version: 1,
+            applicationRevision: 1,
+            createdAt: decisionAt,
+            updatedAt: decisionAt,
+          };
+          store.approvalCases.push(approvalCase);
+        }
+        const hasAccountSuspendedServices = (store.supplierServices || []).some(
+          (service) => service.supplierId === target.id
+            && service.state === "suspended"
+            && service.approvalSuspensionCaseId === approvalCase.id,
+        );
+        if (body.status === "approved" && approvalCase.status !== "approved") {
+          serviceAction = approvalCase.status === "suspended" || hasAccountSuspendedServices
+            ? "restore"
+            : "approve";
+        } else if (["suspended", "rejected"].includes(body.status) && approvalCase.status !== body.status) {
+          serviceAction = "suspend";
+        } else if (["pending", "unverified"].includes(body.status) && approvalCase.status === "approved") {
+          serviceAction = "suspend";
+        }
+        if (serviceAction) {
+          serviceOutcome = applySupplierApprovalServiceTransition({
+            store,
+            approvalCase,
+            action: serviceAction,
+            actorId: user.id,
+            at: decisionAt,
+            reason: decisionReason || (body.status === "rejected" ? "Verification rejected" : "Verification suspended"),
+          });
+        }
+      }
       target.verificationStatus = body.status;
       target.verificationNote = body.reason || body.note || null;
       if (body.status === "approved") {
-        target.verifiedAt = now();
+        target.verifiedAt = decisionAt;
         target.verifiedBy = user.id;
+      } else {
+        delete target.verifiedAt;
+        delete target.verifiedBy;
       }
-      if (body.status === "suspended" || body.status === "rejected") {
-        // suspend all live services for suppliers (new matching only; in-flight orders kept)
-        if (target.role === "supplier") {
-          for (const svc of store.supplierServices || []) {
-            if (svc.supplierId === target.id && svc.state === "live") {
-              svc.state = "suspended";
-              svc.suspendedAt = now();
-              svc.suspendedBy = user.id;
-              svc.suspendReason = body.reason || "supplier_verification_suspended";
-              advanceSupplierServiceVersion(svc, now());
-            }
-          }
-        }
+      const syncOutcome = syncApprovalCaseWithVerification(store, target, body.status, user, decisionReason, {
+        decisionAt,
+        snapshot: {
+          action: body.status === "approved" ? (serviceAction || "approve") : body.status,
+          publishedServiceIds: serviceOutcome.publishedServiceIds,
+          suspendedServiceIds: serviceOutcome.suspendedServiceIds,
+        },
+      });
+      if (syncOutcome?.event) {
+        const approvalAuditAction = body.status === "approved"
+          ? (serviceAction || "approve")
+          : ({ suspended: "suspend", rejected: "reject" })[body.status] || body.status;
+        audit(store, {
+          actor: user,
+          action: `approval_case.${approvalAuditAction}`,
+          entityType: "approval_case",
+          entityId: syncOutcome.approvalCase.id,
+          detail: {
+            from: syncOutcome.event.fromStatus ?? null,
+            to: syncOutcome.event.toStatus,
+            version: syncOutcome.approvalCase.version,
+            requestId: syncOutcome.event.requestId,
+            publishedServiceIds: serviceOutcome.publishedServiceIds,
+            suspendedServiceIds: serviceOutcome.suspendedServiceIds,
+          },
+          reason: decisionReason,
+        });
       }
-      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       audit(store, {
         actor: user,
         action: "user.verification",
         entityType: "user",
         entityId: target.id,
-        detail: { from: prev, to: body.status },
+        detail: {
+          from: prev,
+          to: body.status,
+          publishedServiceIds: serviceOutcome.publishedServiceIds,
+          suspendedServiceIds: serviceOutcome.suspendedServiceIds,
+        },
         reason: body.reason || body.note || null,
       });
       await save(store);

@@ -282,6 +282,21 @@ test("approved suppliers remain grandfathered ready until approval is reopened",
 test("catalog readiness exposes only complete eligible service lines", () => {
   const pending = fixture({ approvalStatus: "pending" });
   pending.supplierServices[0].state = "pending_verification";
+  pending.supplierServices.push(
+    { ...pending.supplierServices[0], id: "service_live", state: "live" },
+    { ...pending.supplierServices[0], id: "service_draft", state: "draft" },
+    { ...pending.supplierServices[0], id: "service_incomplete", pricingBasis: "" },
+  );
+  pending.supplierServiceFileFormats.push(
+    { supplierServiceId: "service_live", formatCode: "pdf" },
+    { supplierServiceId: "service_draft", formatCode: "pdf" },
+    { supplierServiceId: "service_incomplete", formatCode: "pdf" },
+  );
+  pending.catalogItems.push(
+    { ...pending.catalogItems[0], id: "item_live", supplierServiceId: "service_live" },
+    { ...pending.catalogItems[0], id: "item_draft", supplierServiceId: "service_draft" },
+    { ...pending.catalogItems[0], id: "item_incomplete", supplierServiceId: "service_incomplete" },
+  );
   assert.deepEqual(supplierCatalogReadiness(pending, "supplier"), {
     readyForApproval: true,
     missing: [],

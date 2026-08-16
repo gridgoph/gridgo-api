@@ -239,6 +239,78 @@ async function clearAndFixture(database) {
   });
 }
 
+function addReadySupplierCatalog(store, {
+  supplierId,
+  serviceId,
+  itemId,
+  filePrefix,
+  createService = true,
+}) {
+  if (createService) {
+    store.supplierServices.push({
+      id: serviceId,
+      supplierId,
+      categoryCode: "marketing_collateral",
+      state: "pending_verification",
+      pricingBasis: "per_unit",
+      referenceRateMinor: 2500,
+      turnaroundHours: 24,
+      version: 1,
+      createdAt: AT,
+      updatedAt: AT,
+    });
+  }
+  store.supplierServiceFileFormats.push({ supplierServiceId: serviceId, formatCode: "pdf" });
+  store.catalogItems.push({
+    id: itemId,
+    supplierId,
+    supplierServiceId: serviceId,
+    name: "Print item",
+    description: "",
+    basePriceMinor: 2500,
+    fileFormatMode: "inherit",
+    active: true,
+    sortOrder: 0,
+    version: 1,
+    createdAt: AT,
+    updatedAt: AT,
+  });
+  const photoId = `${filePrefix}_photo`;
+  const logoId = `${filePrefix}_logo`;
+  store.files.push(
+    {
+      fileId: photoId,
+      ownerId: supplierId,
+      purpose: "catalog_item_photo",
+      originalFilename: "item.jpg",
+      declaredContentType: "image/jpeg",
+      detectedContentType: "image/jpeg",
+      size: 100,
+      state: "ready",
+      objectKey: `catalog/${photoId}.jpg`,
+      references: [],
+      createdAt: AT,
+      readyAt: AT,
+    },
+    {
+      fileId: logoId,
+      ownerId: supplierId,
+      purpose: "supplier_shop_image",
+      originalFilename: "logo.png",
+      declaredContentType: "image/png",
+      detectedContentType: "image/png",
+      size: 100,
+      state: "ready",
+      objectKey: `catalog/${logoId}.png`,
+      references: [],
+      createdAt: AT,
+      readyAt: AT,
+    },
+  );
+  store.catalogItemPhotos.push({ catalogItemId: itemId, fileId: photoId, sortOrder: 0, createdAt: AT });
+  store.supplierShopMedia.push({ supplierId, slot: "logo", fileId: logoId, updatedAt: AT });
+}
+
 async function addApprovalDecisionFixtures(database) {
   await database.transaction(async () => {
     const store = await loadStore(database);
@@ -336,20 +408,36 @@ async function addApprovalDecisionFixtures(database) {
       { supplierServiceId: "svc_pending_incomplete", formatCode: "pdf" },
       { supplierServiceId: "svc_pending_without_item", formatCode: "pdf" },
     );
-    store.catalogItems.push({
-      id: "catalog_pending_complete",
-      supplierId: "user_supplier_pending",
-      supplierServiceId: "svc_pending_complete",
-      name: "Business cards",
-      description: "",
-      basePriceMinor: 2500,
-      fileFormatMode: "inherit",
-      active: true,
-      sortOrder: 0,
-      version: 1,
-      createdAt: AT,
-      updatedAt: AT,
-    });
+    store.catalogItems.push(
+      {
+        id: "catalog_pending_complete",
+        supplierId: "user_supplier_pending",
+        supplierServiceId: "svc_pending_complete",
+        name: "Business cards",
+        description: "",
+        basePriceMinor: 2500,
+        fileFormatMode: "inherit",
+        active: true,
+        sortOrder: 0,
+        version: 1,
+        createdAt: AT,
+        updatedAt: AT,
+      },
+      {
+        id: "catalog_pending_incomplete",
+        supplierId: "user_supplier_pending",
+        supplierServiceId: "svc_pending_without_item",
+        name: "Flyers",
+        description: "",
+        basePriceMinor: 1500,
+        fileFormatMode: "inherit",
+        active: true,
+        sortOrder: 1,
+        version: 1,
+        createdAt: AT,
+        updatedAt: AT,
+      },
+    );
     store.files.push(
       {
         fileId: "file_pending_catalog_photo", ownerId: "user_supplier_pending",
@@ -503,6 +591,19 @@ test("legacy verification decisions keep approval cases and fixed projections co
       status: "pending", version: 1, applicationRevision: 1, submittedAt: AT,
       createdAt: AT, updatedAt: AT,
     });
+    addReadySupplierCatalog(store, {
+      supplierId: "user_supplier_applicant",
+      serviceId: "svc_supplier_applicant",
+      itemId: "catalog_supplier_applicant",
+      filePrefix: "supplier_applicant",
+    });
+    addReadySupplierCatalog(store, {
+      supplierId: "user_supplier",
+      serviceId: "svc_banner",
+      itemId: "catalog_supplier_legacy",
+      filePrefix: "supplier_legacy",
+      createService: false,
+    });
     await saveStore(database, store);
   });
 
@@ -519,11 +620,21 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.user.verificationStatus, "approved");
     assert.ok(Array.isArray(approved.body.verificationDocuments));
+    assert.equal(Object.hasOwn(approved.body, "publishedServiceIds"), false);
 
     const approvedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier_applicant" });
     assert.equal(approvedProjection.body.approvalCase.status, "approved");
+    assert.deepEqual(approvedProjection.body.readiness, {
+      readyForApproval: true,
+      missing: [],
+      publishableServiceIds: [],
+    });
     assert.equal(approvedProjection.body.capabilities.receiveJobOffers, true);
     assert.equal(approvedProjection.body.capabilities.acceptJobs, true);
+    const privateReadiness = await request(instance.api, "/me/supplier-readiness", {
+      subject: "clerk_supplier_applicant",
+    });
+    assert.deepEqual(privateReadiness.body.readiness, approvedProjection.body.readiness);
 
     const suspended = await request(instance.api, "/users/user_supplier/verification", {
       method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Quality hold" },
@@ -534,6 +645,12 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(suspendedProjection.body.approvalCase.suspensionReason, "Quality hold");
     assert.equal(suspendedProjection.body.capabilities.receiveJobOffers, false);
     assert.equal(suspendedProjection.body.capabilities.editCatalogue, false);
+
+    const supplierRestored = await request(instance.api, "/users/user_supplier/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "approved", note: "Quality hold cleared" },
+    });
+    assert.equal(supplierRestored.status, 200, JSON.stringify(supplierRestored.body));
+    assert.equal(supplierRestored.body.user.verificationStatus, "approved");
 
     const riderSuspended = await request(instance.api, "/users/user_rider/verification", {
       method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Documents expired" },
@@ -567,27 +684,67 @@ test("legacy verification decisions keep approval cases and fixed projections co
     const promotedDecision = await request(instance.api, "/users/user_promote/verification", {
       method: "POST", subject: "clerk_ops", body: { status: "approved" },
     });
-    assert.equal(promotedDecision.status, 200, JSON.stringify(promotedDecision.body));
+    assert.equal(promotedDecision.status, 409, JSON.stringify(promotedDecision.body));
+    assert.equal(promotedDecision.body.error, "supplier_profile_incomplete");
     const promotedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_promote" });
     assert.equal(promotedProjection.status, 200, JSON.stringify(promotedProjection.body));
-    assert.equal(promotedProjection.body.approvalCase.status, "approved");
-    assert.equal(promotedProjection.body.capabilities.receiveJobOffers, true);
+    assert.equal(promotedProjection.body.approvalCase, null);
+    assert.equal(promotedProjection.body.capabilities.receiveJobOffers, false);
 
     const persisted = await loadStore(database);
     const supplierCase = persisted.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
-    assert.equal(supplierCase.status, "suspended");
+    assert.equal(supplierCase.status, "approved");
+    assert.equal(supplierCase.version, 3);
     assert.equal(supplierCase.decidedBy, "user_ops");
     const supplierEvents = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === "case_supplier");
-    assert.equal(supplierEvents.length, 1);
+    assert.equal(supplierEvents.length, 2);
     assert.equal(supplierEvents[0].fromStatus, "approved");
     assert.equal(supplierEvents[0].toStatus, "suspended");
     assert.equal(supplierEvents[0].actorKind, "approver");
     assert.equal(supplierEvents[0].actorUserId, "user_ops");
+    assert.deepEqual(supplierEvents[0].snapshot.suspendedServiceIds, ["svc_banner"]);
+    assert.equal(supplierEvents[1].fromStatus, "suspended");
+    assert.equal(supplierEvents[1].toStatus, "approved");
+    assert.deepEqual(supplierEvents[1].snapshot.publishedServiceIds, ["svc_banner"]);
+    const legacyService = persisted.supplierServices.find((service) => service.id === "svc_banner");
+    assert.equal(legacyService.state, "live");
+    assert.equal(legacyService.version, 3);
+    assert.equal(legacyService.approvalSuspensionCaseId, undefined);
+    const applicantService = persisted.supplierServices.find(
+      (service) => service.id === "svc_supplier_applicant",
+    );
+    assert.equal(applicantService.state, "suspended");
+    assert.equal(applicantService.version, 3);
+    const supplierAudits = persisted.auditLog.filter(
+      (entry) => entry.action === "user.verification" && entry.entityId === "user_supplier",
+    );
+    assert.deepEqual(supplierAudits.map((entry) => entry.detail.suspendedServiceIds), [
+      ["svc_banner"],
+      [],
+    ]);
+    assert.deepEqual(supplierAudits.map((entry) => entry.detail.publishedServiceIds), [
+      [],
+      ["svc_banner"],
+    ]);
+    const supplierCaseAudits = persisted.auditLog.filter(
+      (entry) => entry.entityType === "approval_case" && entry.entityId === "case_supplier",
+    );
+    assert.deepEqual(supplierCaseAudits.map((entry) => entry.action), [
+      "approval_case.suspend",
+      "approval_case.restore",
+    ]);
+    assert.deepEqual(supplierCaseAudits.map((entry) => entry.detail.suspendedServiceIds), [
+      ["svc_banner"],
+      [],
+    ]);
+    assert.deepEqual(supplierCaseAudits.map((entry) => entry.detail.publishedServiceIds), [
+      [],
+      ["svc_banner"],
+    ]);
     const promotedCase = persisted.approvalCases.find(
       (approvalCase) => approvalCase.userId === "user_promote" && approvalCase.kind === "supplier",
     );
-    assert.equal(promotedCase.status, "approved");
-    assert.equal(promotedCase.decidedBy, "user_ops");
+    assert.equal(promotedCase, undefined);
     assert.equal(
       persisted.auditLog.some(
         (entry) => entry.action === "user.verification" && entry.entityId === "user_supplier",
