@@ -103,6 +103,21 @@ test("pending suppliers stay private while approved complete catalog items publi
   assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), { readyForApproval: true, missing: [] });
 });
 
+test("approved suppliers remain grandfathered ready until approval is reopened", () => {
+  const approved = fixture();
+  approved.supplierProfiles.length = 0;
+  approved.supplierServiceFileFormats.length = 0;
+  approved.catalogItems.length = 0;
+  approved.supplierShopMedia.length = 0;
+  assert.deepEqual(supplierCatalogReadiness(approved, "supplier"), { readyForApproval: true, missing: [] });
+
+  approved.approvalCases[0].status = "suspended";
+  const reopened = supplierCatalogReadiness(approved, "supplier");
+  assert.equal(reopened.readyForApproval, false);
+  assert.ok(reopened.missing.includes("supplier_profile"));
+  assert.ok(reopened.missing.includes("review_ready_service"));
+});
+
 test("order-line helper writes immutable catalog, option, format, price, and specification snapshots", () => {
   const store = fixture();
   let sequence = 0;
@@ -128,4 +143,20 @@ test("order-line helper writes immutable catalog, option, format, price, and spe
   assert.equal(store.orderLineItems[0].itemNameSnapshot, "Poster");
   assert.equal(store.orderLineItems[0].effectiveUnitPriceMinor, 145);
   assert.deepEqual(store.orderLineItems[0].acceptedFormatCodesSnapshot, ["pdf"]);
+});
+
+test("order-line helper requires the selected catalog version", () => {
+  const store = fixture();
+  assert.throws(
+    () => appendOrderLineSnapshot(store, {
+      orderId: "order",
+      catalogItemId: "item",
+      optionIds: ["a4"],
+      acceptedFormatCode: "pdf",
+      quantity: 1,
+      structuredSpec: { paper_size: "A4" },
+    }),
+    (error) => error.status === 400 && error.code === "expected_version_required",
+  );
+  assert.deepEqual(store.orderLineItems, []);
 });

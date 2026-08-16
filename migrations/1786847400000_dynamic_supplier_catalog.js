@@ -15,7 +15,9 @@ export async function up(pgm) {
       ADD CONSTRAINT supplier_services_rush_check CHECK (
         (rush_enabled = false AND rush_turnaround_hours IS NULL AND rush_price_minor IS NULL)
         OR
-        (rush_enabled = true AND rush_turnaround_hours > 0 AND rush_price_minor >= 0)
+        (rush_enabled = true
+          AND rush_turnaround_hours IS NOT NULL AND rush_turnaround_hours > 0
+          AND rush_price_minor IS NOT NULL AND rush_price_minor >= 0)
       );
 
     UPDATE supplier_services
@@ -100,7 +102,7 @@ export async function up(pgm) {
       alt_text text CHECK (alt_text IS NULL OR char_length(alt_text) <= 240),
       created_at timestamptz NOT NULL,
       PRIMARY KEY (catalog_item_id, file_id),
-      UNIQUE (catalog_item_id, sort_order)
+      UNIQUE (catalog_item_id, sort_order) DEFERRABLE INITIALLY DEFERRED
     );
 
     CREATE TABLE supplier_shop_media (
@@ -322,6 +324,14 @@ export async function up(pgm) {
         END IF;
         RETURN OLD;
       END IF;
+      IF NEW.order_id IS DISTINCT FROM OLD.order_id
+         OR (NEW.source_catalog_item_id IS DISTINCT FROM OLD.source_catalog_item_id
+             AND NOT (OLD.source_catalog_item_id IS NOT NULL AND NEW.source_catalog_item_id IS NULL))
+         OR (NEW.source_supplier_service_id IS DISTINCT FROM OLD.source_supplier_service_id
+             AND NOT (OLD.source_supplier_service_id IS NOT NULL AND NEW.source_supplier_service_id IS NULL)) THEN
+        RAISE EXCEPTION 'order line snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
+      END IF;
       IF ROW(
         NEW.item_name_snapshot, NEW.description_snapshot, NEW.pricing_basis_snapshot,
         NEW.base_unit_price_minor, NEW.effective_unit_price_minor, NEW.quantity,
@@ -352,6 +362,14 @@ export async function up(pgm) {
             USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
         END IF;
         RETURN OLD;
+      END IF;
+      IF NEW.order_line_item_id IS DISTINCT FROM OLD.order_line_item_id
+         OR (NEW.source_option_group_id IS DISTINCT FROM OLD.source_option_group_id
+             AND NOT (OLD.source_option_group_id IS NOT NULL AND NEW.source_option_group_id IS NULL))
+         OR (NEW.source_option_id IS DISTINCT FROM OLD.source_option_id
+             AND NOT (OLD.source_option_id IS NOT NULL AND NEW.source_option_id IS NULL)) THEN
+        RAISE EXCEPTION 'order line option snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
       END IF;
       IF ROW(
         NEW.group_name_snapshot, NEW.option_label_snapshot,

@@ -1,5 +1,7 @@
 import { identityHasMembership } from "./authorization-context.js";
 import {
+  advanceSupplierServiceVersion,
+  assertExpectedVersion,
   CatalogError,
   catalogGroupsForItem,
   catalogItemBlockers,
@@ -34,23 +36,6 @@ function requiredText(value, field, maxLength = Number.MAX_SAFE_INTEGER) {
   const text = optionalText(value, field, maxLength).trim();
   if (!text) fail(400, "invalid_catalog_item", `${field} is required.`, { field });
   return text;
-}
-
-function expectedVersion(req, body, code, currentVersion) {
-  let supplied = body?.expectedVersion;
-  if (supplied == null && req.headers["if-match"] != null) {
-    supplied = String(req.headers["if-match"]).trim().replace(/^W\//, "").replace(/^"|"$/g, "");
-  }
-  if (supplied == null || supplied === "") {
-    fail(400, "expected_version_required", "Send expectedVersion or If-Match before changing this record.");
-  }
-  const parsed = integer(supplied, "expectedVersion", { min: 1 });
-  if (parsed !== currentVersion) {
-    fail(409, code, "This catalog record changed in another session. Refresh it and retry.", {
-      expectedVersion: parsed,
-      currentVersion,
-    });
-  }
 }
 
 function supplierCase(store, userId) {
@@ -232,12 +217,13 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       fail(400, "invalid_category_code", "Choose an active governed category.", { categoryCode });
     }
     const ts = now();
+    const standardTurnaroundHours = body.standardTurnaroundHours == null
+      ? 48 : integer(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 });
     const service = {
       id: id("svc"), supplierId: user.id, categoryCode: canonicalCode, state: "draft",
-      referenceRateMinor: 0, turnaroundHours: 48,
+      referenceRateMinor: 0, turnaroundHours: standardTurnaroundHours,
       pricingBasis: body.pricingBasis == null ? null : requiredText(body.pricingBasis, "pricingBasis", 80),
-      standardTurnaroundHours: body.standardTurnaroundHours == null
-        ? null : integer(body.standardTurnaroundHours, "standardTurnaroundHours", { min: 1 }),
+      standardTurnaroundHours,
       rushEnabled: Boolean(body.rushEnabled),
       rushTurnaroundHours: body.rushEnabled
         ? integer(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 }) : null,
@@ -256,11 +242,10 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const service = ownService(store, user, serviceId);
     if (req.method === "GET") return { status: 200, body: { service: privateService(store, service) } };
     const body = await readBody(req);
-    expectedVersion(req, body, "supplier_service_stale", service.version);
+    assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     if (req.method === "DELETE") {
       service.state = "withdrawn";
-      service.version += 1;
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       auditChange(audit, store, user, "supplier_service.withdraw", "supplier_service", service.id);
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
     }
@@ -301,8 +286,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         service.state = body.state;
       }
       if (service.state === "live" && service.categoryCode !== priorCategory) service.state = "pending_verification";
-      service.version += 1;
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       auditChange(audit, store, user, "supplier_service.update", "supplier_service", service.id, { state: service.state });
       return { status: 200, body: { service: privateService(store, service) }, mutated: true };
     }
@@ -312,7 +296,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const service = ownService(store, user, decodeURIComponent(pathname.split("/")[3]));
     if (req.method !== "PUT") return null;
     const body = await readBody(req);
-    expectedVersion(req, body, "supplier_service_stale", service.version);
+    assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     const codes = activeFormatCodes(store, body.formatCodes);
     const previous = new Set((store.supplierServiceFileFormats || [])
       .filter((record) => record.supplierServiceId === service.id).map((record) => record.formatCode));
@@ -320,8 +304,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       .filter((record) => record.supplierServiceId !== service.id);
     store.supplierServiceFileFormats.push(...codes.map((formatCode) => ({ supplierServiceId: service.id, formatCode })));
     if (service.state === "live" && codes.some((code) => !previous.has(code))) service.state = "pending_verification";
-    service.version += 1;
-    service.updatedAt = now();
+    advanceSupplierServiceVersion(service, now());
     auditChange(audit, store, user, "supplier_service.formats_update", "supplier_service", service.id, { formatCodes: codes });
     return { status: 200, body: { service: privateService(store, service) }, mutated: true };
   }
@@ -331,7 +314,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (req.method === "GET") return { status: 200, body: { pricing: privateService(store, service).pricing, version: service.version } };
     if (req.method !== "PUT") return null;
     const body = await readBody(req);
-    expectedVersion(req, body, "supplier_service_stale", service.version);
+    assertExpectedVersion(req, body, "supplier_service_stale", service.version);
     if (!Array.isArray(body.tiers)) fail(400, "invalid_service_pricing", "tiers must be an array.");
     const codes = new Set();
     const positions = new Set();
@@ -351,8 +334,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     });
     store.supplierServicePriceTiers = (store.supplierServicePriceTiers || []).filter((tier) => tier.supplierServiceId !== service.id);
     store.supplierServicePriceTiers.push(...tiers);
-    service.version += 1;
-    service.updatedAt = now();
+    advanceSupplierServiceVersion(service, now());
     auditChange(audit, store, user, "supplier_service.pricing_update", "supplier_service", service.id, { tierCount: tiers.length });
     return { status: 200, body: { pricing: tiers, version: service.version }, mutated: true };
   }
@@ -389,7 +371,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
     if (req.method === "GET") return { status: 200, body: { item: privateItem(store, item) } };
     const body = await readBody(req);
-    expectedVersion(req, body, "catalog_item_stale", item.version);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     if (req.method === "DELETE") {
       const referenced = (store.orderLineItems || []).some((line) => line.sourceCatalogItemId === item.id);
       if (referenced) {
@@ -427,7 +409,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (req.method !== "PUT") return null;
     const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
     const body = await readBody(req);
-    expectedVersion(req, body, "catalog_item_stale", item.version);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     const mode = String(body.mode || "");
     if (!["inherit", "override"].includes(mode)) fail(400, "invalid_file_format_mode", "Choose inherit or override.");
     const codes = activeFormatCodes(store, body.formatCodes || []);
@@ -446,7 +428,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (req.method !== "POST") return null;
     const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
     const body = await readBody(req);
-    expectedVersion(req, body, "catalog_item_stale", item.version);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     if (!Array.isArray(body.fileIds)) fail(400, "invalid_photo_order", "fileIds must be an array.");
     const current = store.catalogItemPhotos.filter((photo) => photo.catalogItemId === item.id);
     if (body.fileIds.length !== current.length || new Set(body.fileIds).size !== current.length
@@ -468,7 +450,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const groupId = parts[5] ? decodeURIComponent(parts[5]) : null;
     if (req.method === "POST" && !groupId) {
       const body = await readBody(req);
-      expectedVersion(req, body, "catalog_item_stale", item.version);
+      assertExpectedVersion(req, body, "catalog_item_stale", item.version);
       if (!Array.isArray(body.options) || body.options.length === 0) {
         fail(400, "invalid_catalog_options", "Create an option group with at least one active option.");
       }
@@ -512,7 +494,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       const group = store.catalogOptionGroups.find((candidate) => candidate.id === groupId && candidate.catalogItemId === item.id);
       if (!group) fail(404, "catalog_group_not_found", "That option group no longer exists.");
       const body = await readBody(req);
-      expectedVersion(req, body, "catalog_group_stale", group.version);
+      assertExpectedVersion(req, body, "catalog_group_stale", group.version);
       if (req.method === "DELETE") {
         store.catalogOptionGroups = store.catalogOptionGroups.filter((candidate) => candidate.id !== group.id);
         store.catalogOptions = store.catalogOptions.filter((option) => option.optionGroupId !== group.id);
@@ -552,7 +534,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const { group, item } = ownGroup(store, user, decodeURIComponent(parts[3]));
     const optionId = parts[5] ? decodeURIComponent(parts[5]) : null;
     const body = await readBody(req);
-    expectedVersion(req, body, "catalog_group_stale", group.version);
+    assertExpectedVersion(req, body, "catalog_group_stale", group.version);
     if (req.method === "POST" && !optionId) {
       const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 19 });
       const label = requiredText(body.label, "label", 100);

@@ -30,6 +30,8 @@ GET  /me/supplier-readiness
 
 Mutations of an existing service, item, or group require `expectedVersion` in JSON or an `If-Match` header. A mismatch returns `409` with `supplier_service_stale`, `catalog_item_stale`, or `catalog_group_stale`. Changing option rows advances both the group version and owning item version. Item format inheritance changes are atomic through the item file-formats endpoint.
 
+The compatibility `/supplier-services/:id` PATCH, submit, verify, suspend, and withdraw writers use the same service version and precondition. Responses expose the resulting `version`; a write through either route family invalidates stale writes through the other.
+
 Creating an option group includes a nonempty `options` array because the deferred database invariant requires every persisted group to have an active option. Bounds are six groups per item, twenty options per group, and eight photos per item. Deleting an item referenced by an order snapshot archives it as inactive; an unreferenced item may be removed.
 
 Service lines use `draft` while incomplete and `pending_verification` when review-ready. A live line returns to `pending_verification` when the supplier expands its governed category or accepted formats. Routine catalog, price, and option edits remain immediately derived from approval + live-service eligibility.
@@ -39,6 +41,8 @@ Service lines use `draft` while incomplete and `pending_verification` when revie
 `accepted_file_formats` is the governed registry. Service formats are defaults. An item in `inherit` mode stores no item-format rows; an item in `override` mode stores at least one active format. The seeded codes are `pdf`, `png`, `jpeg`, `psd`, `canva_link`, `3mf`, and `stl`; Canva is a URL input kind.
 
 `GET /me/supplier-readiness` and `/auth/me/supplier` return the same catalog readiness projection. It identifies profile, payment-term integration, review-ready service, complete active item, item-specific, shop-media, and pickup-mode blockers. Supplier payment terms are owned by task H; until that schema is integrated, `supplier_payment_terms` remains an explicit blocker.
+
+An already-approved supplier remains grandfathered ready. The full projection applies again when its approval is reopened, so the next approval-relevant transition consumes the new requirements without retroactively invalidating an existing approval.
 
 ## Immutable checkout snapshots
 

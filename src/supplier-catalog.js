@@ -84,6 +84,37 @@ export class CatalogError extends Error {
   }
 }
 
+export function assertExpectedVersion(req, body, code, currentVersion) {
+  let supplied = body?.expectedVersion;
+  if (supplied == null && req.headers["if-match"] != null) {
+    supplied = String(req.headers["if-match"]).trim().replace(/^W\//, "").replace(/^"|"$/g, "");
+  }
+  if (supplied == null || supplied === "") {
+    throw new CatalogError(400, "expected_version_required", "Send expectedVersion or If-Match before changing this record.");
+  }
+  const parsed = Number(supplied);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new CatalogError(400, "invalid_catalog_item", "expectedVersion must be a positive integer.", {
+      field: "expectedVersion",
+    });
+  }
+  if (parsed !== currentVersion) {
+    throw new CatalogError(409, code, "This catalog record changed in another session. Refresh it and retry.", {
+      expectedVersion: parsed,
+      currentVersion,
+    });
+  }
+}
+
+export function advanceSupplierServiceVersion(service, at) {
+  const currentVersion = service.version ?? 1;
+  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+    throw new TypeError("supplier service version must be a positive safe integer");
+  }
+  service.version = currentVersion + 1;
+  service.updatedAt = at;
+}
+
 export function effectiveAcceptedFormats(store, item) {
   const registry = activeFormatRegistry(store);
   const selected = item.fileFormatMode === "override"
@@ -155,6 +186,9 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
 }
 
 export function supplierCatalogReadiness(store, supplierId) {
+  if (approvalStatus(store, supplierId) === "approved") {
+    return { readyForApproval: true, missing: [] };
+  }
   const missing = [];
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
   if (!profile || !String(profile.shopName || "").trim() || !String(profile.contactName || "").trim()
@@ -370,11 +404,19 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
 }
 
 export function createOrderLineSnapshot(store, selection, createId) {
+  if (selection.expectedVersion == null) {
+    throw new CatalogError(400, "expected_version_required", "expectedVersion is required before checkout.");
+  }
+  if (!Number.isSafeInteger(selection.expectedVersion) || selection.expectedVersion < 1) {
+    throw new CatalogError(400, "invalid_catalog_item", "expectedVersion must be a positive integer.", {
+      field: "expectedVersion",
+    });
+  }
   const item = (store.catalogItems || []).find((candidate) => candidate.id === selection.catalogItemId);
   if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
     throw new CatalogError(409, "catalog_item_stale", "The catalog item changed or is no longer available.");
   }
-  if (selection.expectedVersion != null && selection.expectedVersion !== item.version) {
+  if (selection.expectedVersion !== item.version) {
     throw new CatalogError(409, "catalog_item_stale", "The catalog item changed. Refresh it before checkout.", {
       expectedVersion: selection.expectedVersion,
       currentVersion: item.version,

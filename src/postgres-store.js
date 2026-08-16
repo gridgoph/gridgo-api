@@ -45,7 +45,7 @@ const TABLES = [
   { name: "taxonomy_materials", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "taxonomy_finishes", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "zones", keys: ["id"], columns: ["id", "code", "name", "active", "position", "data"] },
-  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "pricing_basis", "standard_turnaround_hours", "rush_enabled", "rush_turnaround_hours", "rush_price_minor", "version", "created_at", "updated_at", "position", "data"] },
+  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "pricing_basis", "standard_turnaround_hours", "rush_enabled", "rush_turnaround_hours", "rush_price_minor", "version", "created_at", "updated_at", "position", "data"], optimisticVersion: "version" },
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
@@ -653,7 +653,9 @@ export async function loadStore(database) {
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.proofs = ordered(loaded.proofs).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, uploaderId: row.uploader_id, createdAt: row.created_at }));
   store.deviceTokens = ordered(loaded.device_tokens).map(deviceTokenItem);
-  return attachBaseline(store, rowsFromStore(store));
+  const baseline = rowsFromStore(store);
+  if (!settings) baseline.platform_settings = [];
+  return attachBaseline(store, baseline);
 }
 
 /**
@@ -720,8 +722,36 @@ async function deleteMissing(database, table, before, current) {
 
 async function upsertChanged(database, table, before, current) {
   for (const [key, row] of current) {
-    if (before.has(key) && stable(before.get(key)) === stable(row)) continue;
-    if (table.appendOnly && before.has(key)) throw new Error(`${table.name} rows are append-only`);
+    const prior = before.get(key);
+    if (prior && stable(prior) === stable(row)) continue;
+    if (table.appendOnly && prior) throw new Error(`${table.name} rows are append-only`);
+    if (prior) {
+      const changed = table.columns.filter(
+        (column) => !table.keys.includes(column) && stable(prior[column]) !== stable(row[column]),
+      );
+      if (table.optimisticVersion) {
+        const version = table.optimisticVersion;
+        if (row[version] !== prior[version] + 1) {
+          throw new Error(`${table.name} updates must advance ${version} exactly once`);
+        }
+      }
+      const values = changed.map((column) => row[column]);
+      const assignments = changed.map((column, index) => `${column} = $${index + 1}`).join(", ");
+      const whereValues = table.keys.map((column) => prior[column]);
+      const where = table.keys.map((column, index) => `${column} = $${changed.length + index + 1}`).join(" AND ");
+      if (table.optimisticVersion) {
+        whereValues.push(prior[table.optimisticVersion]);
+      }
+      const versionGuard = table.optimisticVersion
+        ? ` AND ${table.optimisticVersion} = $${changed.length + table.keys.length + 1}`
+        : "";
+      const result = await database.query(
+        `UPDATE ${table.name} SET ${assignments} WHERE ${where}${versionGuard}`,
+        [...values, ...whereValues],
+      );
+      if (result.rowCount !== 1) throw new Error(`${table.name} changed concurrently`);
+      continue;
+    }
     const placeholders = table.columns.map((_, index) => `$${index + 1}`).join(", ");
     if (table.appendOnly) {
       await database.query(
@@ -730,10 +760,8 @@ async function upsertChanged(database, table, before, current) {
       );
       continue;
     }
-    const updates = table.columns.filter((column) => !table.keys.includes(column)).map((column) => `${column} = EXCLUDED.${column}`).join(", ");
-    const conflictAction = updates ? `DO UPDATE SET ${updates}` : "DO NOTHING";
     await database.query(
-      `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) ${conflictAction}`,
+      `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders})`,
       table.columns.map((column) => row[column]),
     );
   }

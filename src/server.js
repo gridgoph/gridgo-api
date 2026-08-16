@@ -90,7 +90,11 @@ import {
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
 import { routeSupplierCatalog } from "./catalog-routes.js";
-import { supplierCatalogReadiness } from "./supplier-catalog.js";
+import {
+  advanceSupplierServiceVersion,
+  assertExpectedVersion,
+  supplierCatalogReadiness,
+} from "./supplier-catalog.js";
 import { createDatabase } from "./database.js";
 import {
   loadDeviceTokenStore,
@@ -1166,6 +1170,7 @@ function summarizeService(s) {
     pricingBasis: s.pricingBasis,
     referenceRateMinor: s.referenceRateMinor,
     turnaroundHours: s.turnaroundHours,
+    standardTurnaroundHours: s.standardTurnaroundHours,
     capacityDaily: s.capacityDaily,
     capacityWeekly: s.capacityWeekly,
     zones: s.zones,
@@ -1178,6 +1183,7 @@ function summarizeService(s) {
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     imageFileIds: s.imageFileIds || [],
+    version: s.version,
   };
 }
 
@@ -1443,6 +1449,17 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     const user = auth.user;
+
+    const privateCatalogRoute = pathname === "/me/supplier-readiness"
+      || pathname.startsWith("/me/supplier-services")
+      || pathname.startsWith("/me/catalog-items")
+      || pathname.startsWith("/me/catalog-option-groups");
+    if (!user && privateCatalogRoute) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
 
     const catalogResponse = await routeSupplierCatalog({
       req,
@@ -2348,7 +2365,7 @@ async function handleRequest(req, res) {
               svc.suspendedAt = now();
               svc.suspendedBy = user.id;
               svc.suspendReason = body.reason || "supplier_verification_suspended";
-              svc.updatedAt = now();
+              advanceSupplierServiceVersion(svc, now());
             }
           }
         }
@@ -2621,6 +2638,7 @@ async function handleRequest(req, res) {
         pricingBasis: body.pricingBasis || "per_unit",
         referenceRateMinor,
         turnaroundHours,
+        standardTurnaroundHours: turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
         zones: Array.isArray(body.zones) ? body.zones : [],
@@ -2633,6 +2651,7 @@ async function handleRequest(req, res) {
         suspendReason: null,
         withdrawnAt: null,
         imageFileIds: [],
+        version: 1,
         createdAt: ts,
         updatedAt: ts,
       };
@@ -2701,6 +2720,7 @@ async function handleRequest(req, res) {
           message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
         });
       }
+      assertExpectedVersion(req, body, "supplier_service_stale", service.version);
 
       const paramKeys = [
         "sizeMin",
@@ -2727,6 +2747,7 @@ async function handleRequest(req, res) {
           if (body[k] != null) {
             if (["qtyMin", "qtyMax", "referenceRateMinor", "turnaroundHours", "capacityDaily", "capacityWeekly"].includes(k)) {
               service[k] = Number(body[k]);
+              if (k === "turnaroundHours") service.standardTurnaroundHours = service[k];
             } else {
               service[k] = body[k];
             }
@@ -2748,7 +2769,7 @@ async function handleRequest(req, res) {
         if (body.equipmentNotes != null) service.equipmentNotes = body.equipmentNotes;
       }
 
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       audit(store, {
         actor: user,
         action: "supplier_service.update",
@@ -2766,6 +2787,8 @@ async function handleRequest(req, res) {
       const service = (store.supplierServices || []).find((s) => s.id === sid);
       if (!service) return send(res, 404, { error: "service_not_found" });
       if (service.supplierId !== user.id) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       if (!["draft", "suspended", "withdrawn"].includes(service.state) && service.state !== "pending_verification") {
         // allow re-submit from draft or after suspension (reactivate path uses submit after draft-like)
       }
@@ -2781,7 +2804,7 @@ async function handleRequest(req, res) {
         service.suspendReason = null;
       }
       service.state = "pending_verification";
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       audit(store, {
         actor: user,
         action: "supplier_service.submit",
@@ -2803,6 +2826,7 @@ async function handleRequest(req, res) {
       }
       if (service.state === "withdrawn") return send(res, 409, { error: "service_withdrawn" });
       const body = await readBody(req);
+      assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       service.state = "live";
       service.verifiedAt = now();
       service.verifiedBy = user.id;
@@ -2811,7 +2835,7 @@ async function handleRequest(req, res) {
       service.suspendReason = null;
       delete service.approvalSuspensionPreviousState;
       delete service.approvalSuspensionCaseId;
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       audit(store, {
         actor: user,
         action: "supplier_service.verify",
@@ -2830,11 +2854,12 @@ async function handleRequest(req, res) {
       if (!service) return send(res, 404, { error: "service_not_found" });
       const body = await readBody(req);
       if (!body.reason) return send(res, 400, { error: "reason_required" });
+      assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       service.state = "suspended";
       service.suspendedAt = now();
       service.suspendedBy = user.id;
       service.suspendReason = body.reason;
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       audit(store, {
         actor: user,
         action: "supplier_service.suspend",
@@ -2852,10 +2877,12 @@ async function handleRequest(req, res) {
       const service = (store.supplierServices || []).find((s) => s.id === sid);
       if (!service) return send(res, 404, { error: "service_not_found" });
       if (service.supplierId !== user.id) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      assertExpectedVersion(req, body, "supplier_service_stale", service.version);
       // Withdrawal never cancels in-flight orders — only removes from new matching
       service.state = "withdrawn";
       service.withdrawnAt = now();
-      service.updatedAt = now();
+      advanceSupplierServiceVersion(service, now());
       audit(store, {
         actor: user,
         action: "supplier_service.withdraw",

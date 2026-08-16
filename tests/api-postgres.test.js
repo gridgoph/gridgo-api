@@ -1541,6 +1541,10 @@ test("pending suppliers can edit catalog while public browse requires approval a
       fileId: "catalog_photo", ownerId: "user_supplier", purpose: "catalog_item_photo",
       originalFilename: "poster.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
       size: 100, state: "ready", objectKey: "catalog/poster.jpg", references: [], createdAt: AT,
+    }, {
+      fileId: "catalog_photo_two", ownerId: "user_supplier", purpose: "catalog_item_photo",
+      originalFilename: "poster-two.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+      size: 100, state: "ready", objectKey: "catalog/poster-two.jpg", references: [], createdAt: AT,
     });
     store.catalogItems.push({
       id: "catalog_poster", supplierId: "user_supplier", supplierServiceId: "svc_banner",
@@ -1550,12 +1554,38 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     store.catalogItemPhotos.push({
       catalogItemId: "catalog_poster", fileId: "catalog_photo", sortOrder: 0, createdAt: AT,
+    }, {
+      catalogItemId: "catalog_poster", fileId: "catalog_photo_two", sortOrder: 1, createdAt: AT,
     });
     await saveStore(database, store);
+  });
+  await database.transaction(async () => {
+    await database.query("ALTER TABLE supplier_services DROP CONSTRAINT supplier_services_category_fk");
+    await database.query(`
+      INSERT INTO supplier_services
+        (id, supplier_id, category_code, state, reference_rate_minor, turnaround_hours,
+         pricing_basis, standard_turnaround_hours, version, created_at, updated_at, position, data)
+      VALUES ('svc_legacy_alias', 'user_supplier', 'large_format', 'draft', 0, 24,
+        'per_unit', 24, 1, $1, $1, 1, '{}')
+    `, [AT]);
+    await database.query(`
+      ALTER TABLE supplier_services
+        ADD CONSTRAINT supplier_services_category_fk FOREIGN KEY (category_code)
+          REFERENCES taxonomy_categories(code) ON UPDATE CASCADE ON DELETE RESTRICT NOT VALID
+    `);
   });
 
   const instance = await startApi();
   try {
+    const anonymousPrivate = await request(instance.api, "/me/supplier-services");
+    assert.equal(anonymousPrivate.status, 401, JSON.stringify(anonymousPrivate.body));
+    assert.equal(anonymousPrivate.body.error, "unauthorized");
+    const invalidPrivateResponse = await fetch(`${instance.api}/me/catalog-items`, {
+      headers: { Authorization: "Bearer invalid-session" },
+    });
+    assert.equal(invalidPrivateResponse.status, 401);
+    assert.equal((await invalidPrivateResponse.json()).error, "unauthorized");
+
     const hidden = await request(instance.api, "/catalog/items/catalog_poster");
     assert.equal(hidden.status, 404, JSON.stringify(hidden.body));
 
@@ -1575,6 +1605,45 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(stale.status, 409, JSON.stringify(stale.body));
     assert.equal(stale.body.error, "catalog_item_stale");
     assert.equal(stale.body.currentVersion, 2);
+
+    const reordered = await request(instance.api, "/me/catalog-items/catalog_poster/photos/reorder", {
+      method: "POST",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 2, fileIds: ["catalog_photo_two", "catalog_photo"] },
+    });
+    assert.equal(reordered.status, 200, JSON.stringify(reordered.body));
+    assert.equal(reordered.body.item.version, 3);
+    assert.deepEqual(reordered.body.item.photos.map((photo) => photo.fileId), ["catalog_photo_two", "catalog_photo"]);
+
+    const legacyUpdate = await request(instance.api, "/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, turnaroundHours: 12 },
+    });
+    assert.equal(legacyUpdate.status, 200, JSON.stringify(legacyUpdate.body));
+    assert.equal(legacyUpdate.body.service.version, 2);
+    assert.equal(legacyUpdate.body.service.turnaroundHours, 12);
+    assert.equal(legacyUpdate.body.service.standardTurnaroundHours, 12);
+
+    const staleService = await request(instance.api, "/me/supplier-services/svc_banner", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, pricingBasis: "per_piece" },
+    });
+    assert.equal(staleService.status, 409, JSON.stringify(staleService.body));
+    assert.equal(staleService.body.error, "supplier_service_stale");
+    assert.equal(staleService.body.currentVersion, 2);
+
+    const legacyAliasUpdate = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 1, pricingBasis: "per_piece" },
+    });
+    assert.equal(legacyAliasUpdate.status, 200, JSON.stringify(legacyAliasUpdate.body));
+    assert.equal(legacyAliasUpdate.body.service.categoryCode, "large_format");
+    assert.equal((await database.query(
+      "SELECT category_code FROM supplier_services WHERE id = 'svc_legacy_alias'",
+    )).rows[0].category_code, "large_format");
 
     await database.transaction(async () => {
       const store = await loadStore(database);
@@ -1599,10 +1668,10 @@ test("pending suppliers can edit catalog while public browse requires approval a
     const override = await request(instance.api, "/me/catalog-items/catalog_poster/file-formats", {
       method: "PUT",
       subject: "clerk_supplier",
-      body: { expectedVersion: 2, mode: "override", formatCodes: ["png"] },
+      body: { expectedVersion: 3, mode: "override", formatCodes: ["png"] },
     });
     assert.equal(override.status, 200, JSON.stringify(override.body));
-    assert.equal(override.body.item.version, 3);
+    assert.equal(override.body.item.version, 4);
     assert.deepEqual(override.body.item.acceptedFormats.map((format) => format.code), ["png"]);
 
     const overriddenPublic = await request(instance.api, "/catalog/items/catalog_poster");
@@ -1621,6 +1690,13 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(aliasService.status, 201, JSON.stringify(aliasService.body));
     assert.equal(aliasService.body.service.categoryCode, "marketing_collateral");
+    assert.deepEqual((await database.query(`
+      SELECT turnaround_hours, standard_turnaround_hours
+        FROM supplier_services WHERE id = $1
+    `, [aliasService.body.service.id])).rows[0], {
+      turnaround_hours: 24,
+      standard_turnaround_hours: 24,
+    });
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
