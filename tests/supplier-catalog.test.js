@@ -304,6 +304,11 @@ test("account suspension retains approver ownership of service lifecycle", () =>
   );
 
   delete service.approvalSuspensionCaseId;
+  assert.throws(
+    () => assertSupplierServiceLifecycleMutationAllowed(store, service),
+    (error) => error.status === 409 && error.code === "service_account_suspended",
+  );
+  store.approvalCases[0].status = "approved";
   assert.doesNotThrow(() => assertSupplierServiceLifecycleMutationAllowed(store, service));
 });
 
@@ -358,6 +363,24 @@ test("catalog readiness exposes only complete eligible service lines", () => {
   const independentlySuspended = supplierCatalogReadiness(restoring, "supplier");
   assert.equal(independentlySuspended.readyForApproval, false);
   assert.deepEqual(independentlySuspended.publishableServiceIds, []);
+
+  const pendingRestore = { ...restoring.supplierServices[0], id: "service_pending", state: "pending_verification" };
+  restoring.supplierServices.push(pendingRestore);
+  restoring.supplierServiceFileFormats.push({ supplierServiceId: "service_pending", formatCode: "pdf" });
+  restoring.catalogItems.push({
+    ...restoring.catalogItems[0],
+    id: "item_pending",
+    supplierServiceId: "service_pending",
+  });
+  restoring.catalogItemPhotos.push({
+    ...restoring.catalogItemPhotos[0],
+    catalogItemId: "item_pending",
+  });
+  assert.deepEqual(supplierCatalogReadiness(restoring, "supplier"), {
+    readyForApproval: true,
+    missing: [],
+    publishableServiceIds: ["service_pending"],
+  });
 });
 
 test("order-line helper writes immutable catalog, option, format, price, and specification snapshots", () => {

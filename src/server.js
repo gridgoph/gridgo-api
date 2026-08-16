@@ -631,7 +631,7 @@ function fixedAuthProjection(store, auth, role) {
   }
   if (role === "supplier") {
     const approvalCase = approvalCaseFor(context, "supplier");
-    const canEdit = approvalCase?.status !== "suspended";
+    const canChangeLifecycle = approvalCase?.status !== "suspended";
     const approved = approvalCase?.status === "approved";
     return {
       ...base,
@@ -639,8 +639,10 @@ function fixedAuthProjection(store, auth, role) {
       approvalCase: approvalCaseSummary(approvalCase),
       readiness: supplierReadiness(store, auth.user.id),
       capabilities: {
-        editCatalogue: canEdit,
-        editSettings: canEdit,
+        editCatalogue: true,
+        editSettings: true,
+        changeServiceLifecycle: canChangeLifecycle,
+        publishServiceLines: false,
         receiveJobOffers: approved,
         acceptJobs: approved,
       },
@@ -1119,16 +1121,15 @@ function materialMatches(orderMaterial, materialCodes, taxonomy) {
   return false;
 }
 
-function finishMatches(orderFinish, finishCodes, taxonomy) {
-  if (!orderFinish) return true;
-  const raw = String(orderFinish).toLowerCase().trim();
-  return (finishCodes || []).some((code) => {
-    const normalizedCode = code.replace(/_/g, " ");
-    if (raw.includes(normalizedCode) || normalizedCode.includes(raw)) return true;
-    const finish = (taxonomy?.finishes || []).find((record) => record.code === code);
-    const name = String(finish?.name || "").toLowerCase();
-    return Boolean(name && (raw.includes(name) || name.includes(raw)));
-  });
+function exactActiveTaxonomyCode(value, records) {
+  const input = String(value ?? "").trim().toLowerCase();
+  if (!input) return null;
+  const matches = (records || []).filter((record) => record.active !== false && (
+    String(record.code || "").toLowerCase() === input
+    || String(record.name || "").trim().toLowerCase() === input
+  ));
+  const codes = [...new Set(matches.map((record) => record.code))];
+  return codes.length === 1 ? codes[0] : null;
 }
 
 function serviceCoversOrder(service, order, product, store) {
@@ -1159,12 +1160,21 @@ function serviceCoversOrder(service, order, product, store) {
       return { ok: false, reason: "qty_above_max", need: service.qtyMax, have: q };
     }
   }
-  if (order.material && !materialMatches(order.material, service.materialCodes, store.taxonomy)) {
+  if (service.catalogManaged === true) {
+    if (order.material) {
+      const materialCode = exactActiveTaxonomyCode(order.material, store.taxonomy?.materials);
+      if (!materialCode || !service.materialCodes.includes(materialCode)) {
+        return { ok: false, reason: "material_mismatch", need: order.material, have: service.materialCodes };
+      }
+    }
+    if (order.finish) {
+      const finishCode = exactActiveTaxonomyCode(order.finish, store.taxonomy?.finishes);
+      if (!finishCode || !service.finishCodes.includes(finishCode)) {
+        return { ok: false, reason: "finish_mismatch", need: order.finish, have: service.finishCodes };
+      }
+    }
+  } else if (order.material && !materialMatches(order.material, service.materialCodes, store.taxonomy)) {
     return { ok: false, reason: "material_mismatch", need: order.material, have: service.materialCodes };
-  }
-  if (service.catalogManaged === true && order.finish
-      && !finishMatches(order.finish, service.finishCodes, store.taxonomy)) {
-    return { ok: false, reason: "finish_mismatch", need: order.finish, have: service.finishCodes };
   }
   return { ok: true };
 }

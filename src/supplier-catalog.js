@@ -262,15 +262,13 @@ export function advanceSupplierServiceVersion(service, at) {
 
 export function assertSupplierServiceLifecycleMutationAllowed(store, service) {
   const approvalCase = (store.approvalCases || []).find(
-    (candidate) => candidate.id === service?.approvalSuspensionCaseId
-      && candidate.userId === service?.supplierId
-      && candidate.kind === "supplier",
+    (candidate) => candidate.userId === service?.supplierId && candidate.kind === "supplier",
   );
   if (approvalCase?.status === "suspended") {
     throw new CatalogError(
       409,
       "service_account_suspended",
-      "Operations must restore this account-suspended service line.",
+      "Operations must restore the suspended supplier account before service lifecycle changes.",
       { approvalCaseId: approvalCase.id },
     );
   }
@@ -466,10 +464,13 @@ export function supplierCatalogTransitionReadiness(store, supplierId, { restorin
     missing.push("pickup_payment_mode");
   }
 
-  const allowedServiceStates = restoring ? ["suspended"] : ["pending_verification"];
+  const allowedServiceStates = restoring
+    ? ["suspended", "pending_verification"]
+    : ["pending_verification"];
   const services = (store.supplierServices || []).filter((service) => service.supplierId === supplierId);
   const candidates = services.filter((service) => restoring
-    ? service.state === "suspended" && service.approvalSuspensionCaseId === approvalCase.id
+    ? (service.state === "suspended" && service.approvalSuspensionCaseId === approvalCase?.id)
+      || service.state === "pending_verification"
     : service.state === "pending_verification");
   const candidateIds = new Set(candidates.map((service) => service.id));
   const reviewReady = candidates.filter((service) => serviceLineBlockers(store, service, {

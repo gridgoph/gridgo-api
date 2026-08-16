@@ -547,7 +547,10 @@ test("fixed auth projections authorize every state from memberships and approval
       assert.equal(projection.body.approvalCase.suspensionReason, status === "suspended" ? "Account review" : null);
       assert.equal(projection.body.capabilities.receiveJobOffers, status === "approved");
       assert.equal(projection.body.capabilities.acceptJobs, status === "approved");
-      assert.equal(projection.body.capabilities.editCatalogue, status !== "suspended");
+      assert.equal(projection.body.capabilities.editCatalogue, true);
+      assert.equal(projection.body.capabilities.editSettings, true);
+      assert.equal(projection.body.capabilities.changeServiceLifecycle, status !== "suspended");
+      assert.equal(projection.body.capabilities.publishServiceLines, false);
       assert.equal(typeof projection.body.readiness.readyForApproval, "boolean");
       assert.ok(Array.isArray(projection.body.readiness.missing));
     }
@@ -650,7 +653,10 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(suspendedProjection.body.approvalCase.status, "suspended");
     assert.equal(suspendedProjection.body.approvalCase.suspensionReason, "Quality hold");
     assert.equal(suspendedProjection.body.capabilities.receiveJobOffers, false);
-    assert.equal(suspendedProjection.body.capabilities.editCatalogue, false);
+    assert.equal(suspendedProjection.body.capabilities.editCatalogue, true);
+    assert.equal(suspendedProjection.body.capabilities.editSettings, true);
+    assert.equal(suspendedProjection.body.capabilities.changeServiceLifecycle, false);
+    assert.equal(suspendedProjection.body.capabilities.publishServiceLines, false);
 
     const supplierRestored = await request(instance.api, "/users/user_supplier/verification", {
       method: "POST", subject: "clerk_ops", body: { status: "approved", note: "Quality hold cleared" },
@@ -1002,6 +1008,120 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(unpublished.state, "pending_verification");
     assert.equal(unpublished.version, 1);
     assert.equal(persisted.users.find((candidate) => candidate.id === "user_supplier_pending").verificationStatus, "approved");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("restore publishes eligible pending lines without prior live services", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const legacy = store.supplierServices.find((service) => service.id === "svc_banner");
+    legacy.state = "withdrawn";
+    addReadySupplierCatalog(store, {
+      supplierId: "user_supplier",
+      serviceId: "svc_restore_pending",
+      itemId: "catalog_restore_pending",
+      filePrefix: "restore_pending",
+    });
+    const pending = store.supplierServices.find((service) => service.id === "svc_restore_pending");
+    const pendingItem = store.catalogItems.find((item) => item.id === "catalog_restore_pending");
+    store.supplierServices.push({
+      ...structuredClone(pending),
+      id: "svc_independent_suspended",
+      state: "suspended",
+    });
+    store.supplierServiceFileFormats.push({
+      supplierServiceId: "svc_independent_suspended",
+      formatCode: "pdf",
+    });
+    store.catalogItems.push({
+      ...structuredClone(pendingItem),
+      id: "catalog_independent_suspended",
+      supplierServiceId: "svc_independent_suspended",
+    });
+    store.catalogItemPhotos.push({
+      ...structuredClone(store.catalogItemPhotos.find(
+        (photo) => photo.catalogItemId === "catalog_restore_pending",
+      )),
+      catalogItemId: "catalog_independent_suspended",
+    });
+    if (!store.supplierPaymentTerms.some((terms) => terms.supplierId === "user_supplier")) {
+      store.supplierPaymentTerms.push({
+        supplierId: "user_supplier",
+        deliveryDownpaymentRateBps: 0,
+        pickupFullOnlineEnabled: true,
+        pickupDownpaymentStoreEnabled: false,
+        pickupDownpaymentRateBps: null,
+        updatedAt: AT,
+      });
+    }
+    await saveStore(database, store);
+  });
+
+  const instance = await startApi();
+  try {
+    const suspended = await request(instance.api, "/approval-cases/case_supplier/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "suspend-without-live", reason: "Account review" },
+    });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+    assert.deepEqual(suspended.body.suspendedServiceIds, []);
+
+    const projection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(projection.status, 200, JSON.stringify(projection.body));
+    assert.equal(projection.body.approvalCase.status, "suspended");
+    assert.equal(projection.body.capabilities.editCatalogue, true);
+    assert.equal(projection.body.capabilities.editSettings, true);
+    assert.equal(projection.body.capabilities.changeServiceLifecycle, false);
+    assert.equal(projection.body.capabilities.publishServiceLines, false);
+    assert.equal(projection.body.capabilities.receiveJobOffers, false);
+    assert.deepEqual(projection.body.readiness.publishableServiceIds, ["svc_restore_pending"]);
+
+    const remediated = await request(instance.api, "/me/supplier-services/svc_restore_pending", {
+      method: "PATCH", subject: "clerk_supplier",
+      body: { expectedVersion: 1, equipmentNotes: "Restore review evidence" },
+    });
+    assert.equal(remediated.status, 200, JSON.stringify(remediated.body));
+    assert.equal(remediated.body.service.state, "pending_verification");
+    assert.equal(remediated.body.service.version, 2);
+
+    for (const [pathname, expectedVersion] of [
+      ["/supplier-services/svc_restore_pending/withdraw", 2],
+      ["/supplier-services/svc_independent_suspended/submit", 1],
+      ["/supplier-services/svc_banner/submit", 1],
+    ]) {
+      const blocked = await request(instance.api, pathname, {
+        method: "POST", subject: "clerk_supplier", body: { expectedVersion },
+      });
+      assert.equal(blocked.status, 409, JSON.stringify(blocked.body));
+      assert.equal(blocked.body.error, "service_account_suspended");
+    }
+
+    const restored = await request(instance.api, "/approval-cases/case_supplier/restore", {
+      method: "POST", subject: "clerk_super",
+      body: { expectedVersion: 2, requestId: "restore-with-pending", note: "Review complete" },
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.deepEqual(restored.body.publishedServiceIds, ["svc_restore_pending"]);
+
+    const persisted = await loadStore(database);
+    assert.equal(persisted.supplierServices.find((service) => service.id === "svc_restore_pending").state, "live");
+    assert.equal(persisted.supplierServices.find((service) => service.id === "svc_restore_pending").version, 3);
+    assert.equal(persisted.supplierServices.find((service) => service.id === "svc_independent_suspended").state, "suspended");
+    assert.equal(persisted.supplierServices.find((service) => service.id === "svc_banner").state, "withdrawn");
+
+    const independentResubmission = await request(
+      instance.api,
+      "/supplier-services/svc_independent_suspended/submit",
+      { method: "POST", subject: "clerk_supplier", body: { expectedVersion: 1 } },
+    );
+    assert.equal(independentResubmission.status, 200, JSON.stringify(independentResubmission.body));
+    assert.equal(independentResubmission.body.service.state, "pending_verification");
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -2018,14 +2138,14 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     assert.equal(widened.body.error, "invalid_service_capability");
     assert.equal((await request(instance.api, `/catalog/items/${itemId}`)).status, 200);
 
-    const prepareOrder = async (productId, zone, finish) => {
+    const prepareOrder = async (productId, zone, { finish, material = "13oz tarpaulin" } = {}) => {
       const order = await request(instance.api, "/orders", {
         method: "POST",
         subject: "clerk_client",
         body: {
           productId,
           quantity: 1,
-          material: "13oz tarpaulin",
+          material,
           address: "Davao",
           zone,
           finish,
@@ -2044,7 +2164,16 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     const intendedOrderId = await prepareOrder("prod_tarpaulin", "davao_central");
     const unrelatedFamilyOrderId = await prepareOrder("prod_sticker", "davao_central");
     const unrelatedZoneOrderId = await prepareOrder("prod_tarpaulin", "davao_south");
-    const laminationOrderId = await prepareOrder("prod_tarpaulin", "davao_central", "lamination");
+    const exactCodeOrderId = await prepareOrder("prod_tarpaulin", "davao_central", {
+      material: "tarpaulin_13oz",
+      finish: "none",
+    });
+    const mismatchedMaterialOrderId = await prepareOrder("prod_tarpaulin", "davao_central", {
+      material: "10oz tarpaulin",
+    });
+    const laminationOrderId = await prepareOrder("prod_tarpaulin", "davao_central", {
+      finish: "lamination",
+    });
 
     const candidateFor = async (orderId) => {
       const response = await request(instance.api, `/orders/${orderId}/eligible-suppliers`, {
@@ -2056,6 +2185,8 @@ test("catalog-managed services preserve governed matching capability", { skip: !
     assert.deepEqual((await candidateFor(intendedOrderId)).matchingServiceIds, ["svc_banner", serviceId]);
     assert.equal((await candidateFor(unrelatedFamilyOrderId)).eligible, false);
     assert.equal((await candidateFor(unrelatedZoneOrderId)).eligible, false);
+    assert.deepEqual((await candidateFor(exactCodeOrderId)).matchingServiceIds, ["svc_banner", serviceId]);
+    assert.deepEqual((await candidateFor(mismatchedMaterialOrderId)).matchingServiceIds, ["svc_banner"]);
     assert.deepEqual((await candidateFor(laminationOrderId)).matchingServiceIds, ["svc_banner"]);
 
     const persisted = await loadStore(database);
@@ -2075,6 +2206,21 @@ test("catalog-managed services preserve governed matching capability", { skip: !
       body: { state: "supplier_assigned", supplierId: "user_supplier" },
     });
     assert.equal(grandfatheredAssignment.status, 200, JSON.stringify(grandfatheredAssignment.body));
+    const grandfatheredWithdrawal = await request(instance.api, "/supplier-services/svc_banner/withdraw", {
+      method: "POST", subject: "clerk_supplier", body: { expectedVersion: 1 },
+    });
+    assert.equal(grandfatheredWithdrawal.status, 200, JSON.stringify(grandfatheredWithdrawal.body));
+    assert.equal((await candidateFor(mismatchedMaterialOrderId)).eligible, false);
+    const mismatchedAssignment = await request(
+      instance.api,
+      `/orders/${mismatchedMaterialOrderId}/transition`,
+      {
+        method: "POST", subject: "clerk_ops",
+        body: { state: "supplier_assigned", supplierId: "user_supplier" },
+      },
+    );
+    assert.equal(mismatchedAssignment.status, 409, JSON.stringify(mismatchedAssignment.body));
+    assert.equal(mismatchedAssignment.body.error, "supplier_not_eligible");
     for (const orderId of [unrelatedFamilyOrderId, unrelatedZoneOrderId]) {
       const unrelatedAssignment = await request(instance.api, `/orders/${orderId}/transition`, {
         method: "POST", subject: "clerk_ops",
