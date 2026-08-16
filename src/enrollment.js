@@ -531,6 +531,14 @@ export function assertRiderApprovalReady(store, userId, at) {
     expiredMessage: "Replace the expired driver's licence before approving this rider.",
     incompleteMessage: "A ready current driver's licence with a future expiry is required before approving this rider.",
   });
+  const approvalCase = (store.approvalCases || []).find(
+    (candidate) => candidate.userId === userId && candidate.kind === "rider",
+  );
+  if (!approvalCase || approvalCase.submittedAt == null) {
+    fail(409, "approval_state_conflict", "The rider must explicitly submit this application before approval.", {
+      approvalCase: caseProjection(approvalCase),
+    });
+  }
 }
 
 export function submitRiderApplication({ store, user, body, idempotencyKey, createId, now }) {

@@ -800,7 +800,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
   } else {
     approvalCase.decidedAt = at;
     approvalCase.decidedBy = actor.id;
-    if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
+    if (approvalCase.submittedAt == null && target.role !== "rider") approvalCase.submittedAt = at;
     if (caseStatus === "rejected") {
       approvalCase.rejectionReason = decisionReason || "Verification rejected";
     }

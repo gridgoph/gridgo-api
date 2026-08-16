@@ -1750,6 +1750,22 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       store.riderProfiles.find((profile) => profile.userId === rider.body.user.id).plateNumber = "NEW 1234";
       await saveStore(database, store);
     });
+    const unsubmittedApproval = await request(
+      instance.api,
+      `/users/${rider.body.user.id}/verification`,
+      { method: "POST", subject: "clerk_ops", body: { status: "approved" } },
+    );
+    assert.equal(unsubmittedApproval.status, 409, JSON.stringify(unsubmittedApproval.body));
+    assert.equal(unsubmittedApproval.body.error, "approval_state_conflict");
+    const afterUnsubmittedApproval = await loadStore(database);
+    assert.equal(
+      afterUnsubmittedApproval.approvalCases.find(({ id }) => id === rider.body.approvalCase.id).submittedAt,
+      undefined,
+    );
+    assert.equal(
+      afterUnsubmittedApproval.users.find(({ id }) => id === rider.body.user.id).verificationStatus,
+      "pending",
+    );
     const submitted = await request(instance.api, "/me/approval-cases/rider/submit", {
       method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
       headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777777" },
