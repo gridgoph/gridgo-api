@@ -2761,6 +2761,8 @@ async function handleRequest(req, res) {
       ];
       const prevCategory = service.categoryCode;
       const prevMaterials = [...(service.materialCodes || [])];
+      const prevPricingBasis = service.pricingBasis;
+      const prevTurnaroundHours = service.turnaroundHours;
       let resolvedCategoryCode = prevCategory;
 
       if (user.role === "supplier") {
@@ -2789,10 +2791,16 @@ async function handleRequest(req, res) {
         const materialsExpanded =
           Array.isArray(body.materialCodes) &&
           body.materialCodes.some((c) => !prevMaterials.includes(c));
-        if (service.state === "live" && (categoryChanged || materialsExpanded)) {
+        const approvalRelevantChange = categoryChanged || materialsExpanded;
+        const readinessOwningChange =
+          (body.pricingBasis != null && service.pricingBasis !== prevPricingBasis) ||
+          (body.turnaroundHours != null && service.turnaroundHours !== prevTurnaroundHours);
+        if (service.state === "live" && approvalRelevantChange) {
           transitionSupplierServiceToPending(service);
         }
-        assertServiceLineReadinessInvariant(store, service);
+        if (approvalRelevantChange || readinessOwningChange) {
+          assertServiceLineReadinessInvariant(store, service);
+        }
         // Routine param edits on live stay live (blueprint: within verified envelope)
       } else if (isOps(user)) {
         // ops can annotate notes fields only via PATCH; state changes use action routes

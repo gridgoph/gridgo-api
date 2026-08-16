@@ -1637,8 +1637,11 @@ test("pending suppliers can edit catalog while public browse requires approval a
       INSERT INTO supplier_services
         (id, supplier_id, category_code, state, reference_rate_minor, turnaround_hours,
          pricing_basis, standard_turnaround_hours, version, created_at, updated_at, position, data)
-      VALUES ('svc_legacy_alias', 'user_supplier', 'large_format', 'draft', 0, 24,
-        'per_unit', 24, 1, $1, $1, 1, '{}')
+      VALUES
+        ('svc_legacy_alias', 'user_supplier', 'large_format', 'draft', 0, 24,
+          'per_unit', 24, 1, $1, $1, 1, '{}'),
+        ('svc_legacy_live', 'user_supplier', 'large_format', 'live', 0, 24,
+          'per_unit', 24, 1, $1, $1, 2, '{}')
     `, [AT]);
     await database.query(`
       ALTER TABLE supplier_services
@@ -1657,6 +1660,18 @@ test("pending suppliers can edit catalog while public browse requires approval a
     });
     assert.equal(invalidPrivateResponse.status, 401);
     assert.equal((await invalidPrivateResponse.json()).error, "unauthorized");
+
+    const malformedPublicCatalogPath = await rawRequest(instance.api, "/catalog/items/%E0%A4%A", {
+      method: "GET",
+    });
+    assert.equal(malformedPublicCatalogPath.status, 400, JSON.stringify(malformedPublicCatalogPath.body));
+    assert.equal(malformedPublicCatalogPath.body.error, "invalid_catalog_path");
+    const malformedPrivateCatalogPath = await rawRequest(instance.api, "/me/catalog-items/%E0%A4%A", {
+      method: "GET",
+      subject: "clerk_supplier",
+    });
+    assert.equal(malformedPrivateCatalogPath.status, 400, JSON.stringify(malformedPrivateCatalogPath.body));
+    assert.equal(malformedPrivateCatalogPath.body.error, "invalid_catalog_path");
 
     const nullCatalogResponse = await fetch(`${instance.api}/me/supplier-services`, {
       method: "POST",
@@ -1749,9 +1764,14 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal(expandedFormats.status, 200, JSON.stringify(expandedFormats.body));
     assert.equal(expandedFormats.body.service.state, "pending_verification");
     assert.equal(expandedFormats.body.service.version, 4);
-    assert.deepEqual((await database.query(`
-      SELECT verified_at, verified_by FROM supplier_services WHERE id = 'svc_banner'
-    `)).rows[0], { verified_at: null, verified_by: null });
+    const pendingCompatibilityService = await request(instance.api, "/supplier-services/svc_banner", {
+      subject: "clerk_supplier",
+    });
+    assert.equal(pendingCompatibilityService.status, 200, JSON.stringify(pendingCompatibilityService.body));
+    assert.equal(pendingCompatibilityService.body.service.verifiedAt, null);
+    const persistedPendingService = (await loadStore(database)).supplierServices
+      .find((service) => service.id === "svc_banner");
+    assert.equal(persistedPendingService.verifiedBy, null);
     const expansionVerified = await request(instance.api, "/supplier-services/svc_banner/verify", {
       method: "POST", subject: "clerk_ops", body: { expectedVersion: 4 },
     });
@@ -1774,6 +1794,28 @@ test("pending suppliers can edit catalog while public browse requires approval a
     assert.equal((await database.query(
       "SELECT category_code FROM supplier_services WHERE id = 'svc_legacy_alias'",
     )).rows[0].category_code, "large_format");
+
+    const legacyLiveUnrelatedUpdate = await request(instance.api, "/supplier-services/svc_legacy_live", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: {
+        expectedVersion: 1,
+        equipmentNotes: "Legacy press retained",
+        pricingBasis: "per_unit",
+        turnaroundHours: 24,
+      },
+    });
+    assert.equal(legacyLiveUnrelatedUpdate.status, 200, JSON.stringify(legacyLiveUnrelatedUpdate.body));
+    assert.equal(legacyLiveUnrelatedUpdate.body.service.state, "live");
+    assert.equal(legacyLiveUnrelatedUpdate.body.service.categoryCode, "large_format");
+    assert.equal(legacyLiveUnrelatedUpdate.body.service.version, 2);
+    const legacyLiveReadinessUpdate = await request(instance.api, "/supplier-services/svc_legacy_live", {
+      method: "PATCH",
+      subject: "clerk_supplier",
+      body: { expectedVersion: 2, pricingBasis: "per_piece" },
+    });
+    assert.equal(legacyLiveReadinessUpdate.status, 409, JSON.stringify(legacyLiveReadinessUpdate.body));
+    assert.equal(legacyLiveReadinessUpdate.body.error, "service_not_review_ready");
 
     const privateIncompleteSubmit = await request(instance.api, "/me/supplier-services/svc_legacy_alias", {
       method: "PATCH",

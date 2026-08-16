@@ -54,7 +54,7 @@ const TABLES = [
   { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_item_file_formats", keys: ["catalog_item_id", "format_code"], columns: ["catalog_item_id", "format_code"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "created_at", "updated_at", "position", "data"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "sort_order", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
@@ -336,7 +336,8 @@ function rowsFromStore(store) {
       quantity: line.quantity, line_subtotal_minor: money(line.lineSubtotalMinor, "orderLineItem.lineSubtotalMinor"),
       accepted_format_codes_snapshot: line.acceptedFormatCodesSnapshot,
       structured_spec_snapshot: line.structuredSpecSnapshot,
-      sort_order: line.sortOrder, created_at: line.createdAt,
+      sort_order: line.sortOrder, snapshot_finalized: line.snapshotFinalized !== false,
+      created_at: line.createdAt,
     });
   }
   for (const option of (store.orderLineItemOptions || [])) {
@@ -610,7 +611,8 @@ export async function loadStore(database) {
     baseUnitPriceMinor: row.base_unit_price_minor, effectiveUnitPriceMinor: row.effective_unit_price_minor,
     quantity: row.quantity, lineSubtotalMinor: row.line_subtotal_minor,
     acceptedFormatCodesSnapshot: row.accepted_format_codes_snapshot,
-    structuredSpecSnapshot: row.structured_spec_snapshot, sortOrder: row.sort_order, createdAt: row.created_at,
+    structuredSpecSnapshot: row.structured_spec_snapshot, sortOrder: row.sort_order,
+    snapshotFinalized: row.snapshot_finalized, createdAt: row.created_at,
   }));
   store.orderLineItemOptions = orderedBy(loaded.order_line_item_options, "order_line_item_id", "sort_order", "id").map((row) => ({
     id: row.id, orderLineItemId: row.order_line_item_id,
@@ -776,9 +778,26 @@ export async function saveStore(database, store) {
     const { before, current } = maps.get(table.name);
     await deleteMissing(database, table, before, current);
   }
+  const snapshotFinalizations = [];
   for (const table of TABLES) {
     const { before, current } = maps.get(table.name);
-    await upsertChanged(database, table, before, current);
+    if (table.name !== "order_line_items") {
+      await upsertChanged(database, table, before, current);
+      continue;
+    }
+    const staged = new Map([...current].map(([key, row]) => {
+      if (before.has(key) || row.snapshot_finalized !== true) return [key, row];
+      snapshotFinalizations.push(row.id);
+      return [key, { ...row, snapshot_finalized: false }];
+    }));
+    await upsertChanged(database, table, before, staged);
+  }
+  for (const lineId of snapshotFinalizations) {
+    const result = await database.query(
+      "UPDATE order_line_items SET snapshot_finalized = true WHERE id = $1 AND snapshot_finalized = false",
+      [lineId],
+    );
+    if (result.rowCount !== 1) throw new Error("order line snapshot could not be finalized");
   }
   if (Object.hasOwn(store, BASELINE)) {
     store[BASELINE] = structuredClone(currentRows);

@@ -640,6 +640,7 @@ export function createOrderLineSnapshot(store, selection, createId) {
       acceptedFormatCodesSnapshot: formats,
       structuredSpecSnapshot: structuredClone(structuredSpec),
       sortOrder,
+      snapshotFinalized: true,
       createdAt,
     },
     options,

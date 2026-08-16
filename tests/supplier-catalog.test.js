@@ -256,6 +256,7 @@ test("order-line helper writes immutable catalog, option, format, price, and spe
 
   assert.equal(snapshot.lineItem.effectiveUnitPriceMinor, 145);
   assert.equal(snapshot.lineItem.lineSubtotalMinor, 290);
+  assert.equal(snapshot.lineItem.snapshotFinalized, true);
   assert.deepEqual(snapshot.lineItem.acceptedFormatCodesSnapshot, ["pdf"]);
   assert.deepEqual(snapshot.options.map((option) => option.optionLabelSnapshot), ["A4", "Gloss"]);
 

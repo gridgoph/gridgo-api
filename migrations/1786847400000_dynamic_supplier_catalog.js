@@ -157,16 +157,20 @@ export async function up(pgm) {
       PRIMARY KEY (catalog_item_id, format_code)
     );
 
-    CREATE OR REPLACE FUNCTION preserve_supplier_catalog_parent()
+    CREATE OR REPLACE FUNCTION preserve_supplier_catalog_option_parent()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
-      IF TG_TABLE_NAME = 'supplier_catalog_options'
-         AND NEW.option_group_id IS DISTINCT FROM OLD.option_group_id THEN
+      IF NEW.option_group_id IS DISTINCT FROM OLD.option_group_id THEN
         RAISE EXCEPTION 'catalog option parent cannot change'
           USING ERRCODE = '23514', CONSTRAINT = 'supplier_catalog_option_parent_immutable';
       END IF;
-      IF TG_TABLE_NAME = 'supplier_catalog_item_file_formats'
-         AND NEW.catalog_item_id IS DISTINCT FROM OLD.catalog_item_id THEN
+      RETURN NEW;
+    END;
+    $$;
+    CREATE OR REPLACE FUNCTION preserve_supplier_catalog_item_format_parent()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.catalog_item_id IS DISTINCT FROM OLD.catalog_item_id THEN
         RAISE EXCEPTION 'catalog item format parent cannot change'
           USING ERRCODE = '23514', CONSTRAINT = 'supplier_catalog_item_format_parent_immutable';
       END IF;
@@ -175,10 +179,10 @@ export async function up(pgm) {
     $$;
     CREATE TRIGGER supplier_catalog_options_parent_trigger
       BEFORE UPDATE OF option_group_id ON supplier_catalog_options
-      FOR EACH ROW EXECUTE FUNCTION preserve_supplier_catalog_parent();
+      FOR EACH ROW EXECUTE FUNCTION preserve_supplier_catalog_option_parent();
     CREATE TRIGGER supplier_catalog_item_formats_parent_trigger
       BEFORE UPDATE OF catalog_item_id ON supplier_catalog_item_file_formats
-      FOR EACH ROW EXECUTE FUNCTION preserve_supplier_catalog_parent();
+      FOR EACH ROW EXECUTE FUNCTION preserve_supplier_catalog_item_format_parent();
 
     CREATE OR REPLACE FUNCTION check_catalog_item_file_formats()
     RETURNS trigger LANGUAGE plpgsql AS $$
@@ -267,6 +271,7 @@ export async function up(pgm) {
       accepted_format_codes_snapshot text[] NOT NULL CHECK (cardinality(accepted_format_codes_snapshot) > 0),
       structured_spec_snapshot jsonb NOT NULL CHECK (jsonb_typeof(structured_spec_snapshot) = 'object'),
       sort_order integer NOT NULL CHECK (sort_order >= 0),
+      snapshot_finalized boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL,
       UNIQUE (order_id, sort_order)
     );
@@ -337,15 +342,39 @@ export async function up(pgm) {
       DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
       EXECUTE FUNCTION check_order_line_item_math();
 
+    CREATE OR REPLACE FUNCTION check_order_line_snapshot_finalized()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM order_line_items
+         WHERE id = COALESCE(NEW.id, OLD.id) AND snapshot_finalized = false
+      ) THEN
+        RAISE EXCEPTION 'order line snapshot must be finalized before commit'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_snapshot_finalized_check';
+      END IF;
+      RETURN NULL;
+    END;
+    $$;
+    CREATE CONSTRAINT TRIGGER order_line_items_finalized_trigger
+      AFTER INSERT OR UPDATE ON order_line_items
+      DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+      EXECUTE FUNCTION check_order_line_snapshot_finalized();
+
     CREATE OR REPLACE FUNCTION preserve_order_line_snapshot()
     RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
       IF TG_OP = 'DELETE' THEN
+        IF OLD.snapshot_finalized = false THEN RETURN OLD; END IF;
         IF EXISTS (SELECT 1 FROM orders WHERE id = OLD.order_id) THEN
           RAISE EXCEPTION 'order line snapshots are immutable'
             USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
         END IF;
         RETURN OLD;
+      END IF;
+      IF OLD.snapshot_finalized = false THEN RETURN NEW; END IF;
+      IF NEW.snapshot_finalized IS DISTINCT FROM OLD.snapshot_finalized THEN
+        RAISE EXCEPTION 'order line snapshots are immutable'
+          USING ERRCODE = '23514', CONSTRAINT = 'order_line_items_immutable_check';
       END IF;
       IF NEW.order_id IS DISTINCT FROM OLD.order_id
          OR (NEW.source_catalog_item_id IS DISTINCT FROM OLD.source_catalog_item_id
@@ -378,14 +407,33 @@ export async function up(pgm) {
 
     CREATE OR REPLACE FUNCTION preserve_order_line_option_snapshot()
     RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE
+      old_finalized boolean := false;
+      new_finalized boolean := false;
     BEGIN
+      IF TG_OP <> 'INSERT' THEN
+        SELECT snapshot_finalized INTO old_finalized
+          FROM order_line_items WHERE id = OLD.order_line_item_id;
+      END IF;
+      IF TG_OP <> 'DELETE' THEN
+        SELECT snapshot_finalized INTO new_finalized
+          FROM order_line_items WHERE id = NEW.order_line_item_id;
+      END IF;
+      IF TG_OP = 'INSERT' THEN
+        IF new_finalized THEN
+          RAISE EXCEPTION 'order line option snapshots are immutable'
+            USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
+        END IF;
+        RETURN NEW;
+      END IF;
       IF TG_OP = 'DELETE' THEN
-        IF EXISTS (SELECT 1 FROM order_line_items WHERE id = OLD.order_line_item_id) THEN
+        IF old_finalized THEN
           RAISE EXCEPTION 'order line option snapshots are immutable'
             USING ERRCODE = '23514', CONSTRAINT = 'order_line_item_options_immutable_check';
         END IF;
         RETURN OLD;
       END IF;
+      IF NOT old_finalized AND NOT new_finalized THEN RETURN NEW; END IF;
       IF NEW.order_line_item_id IS DISTINCT FROM OLD.order_line_item_id
          OR (NEW.source_option_group_id IS DISTINCT FROM OLD.source_option_group_id
              AND NOT (OLD.source_option_group_id IS NOT NULL AND NEW.source_option_group_id IS NULL))
@@ -408,7 +456,7 @@ export async function up(pgm) {
     END;
     $$;
     CREATE TRIGGER order_line_item_options_immutable_trigger
-      BEFORE UPDATE OR DELETE ON order_line_item_options FOR EACH ROW
+      BEFORE INSERT OR UPDATE OR DELETE ON order_line_item_options FOR EACH ROW
       EXECUTE FUNCTION preserve_order_line_option_snapshot();
   `);
 }
@@ -417,10 +465,12 @@ export async function down(pgm) {
   pgm.sql(`
     DROP TRIGGER IF EXISTS order_line_item_options_immutable_trigger ON order_line_item_options;
     DROP TRIGGER IF EXISTS order_line_items_immutable_trigger ON order_line_items;
+    DROP TRIGGER IF EXISTS order_line_items_finalized_trigger ON order_line_items;
     DROP TRIGGER IF EXISTS order_line_item_options_math_trigger ON order_line_item_options;
     DROP TRIGGER IF EXISTS order_line_items_math_trigger ON order_line_items;
     DROP FUNCTION IF EXISTS preserve_order_line_option_snapshot();
     DROP FUNCTION IF EXISTS preserve_order_line_snapshot();
+    DROP FUNCTION IF EXISTS check_order_line_snapshot_finalized();
     DROP FUNCTION IF EXISTS check_order_line_item_math();
     DROP TABLE IF EXISTS order_line_item_options;
     DROP TABLE IF EXISTS order_line_items;
@@ -432,6 +482,8 @@ export async function down(pgm) {
     DROP TRIGGER IF EXISTS supplier_catalog_item_formats_parent_trigger ON supplier_catalog_item_file_formats;
     DROP FUNCTION IF EXISTS check_catalog_option_group_has_option();
     DROP FUNCTION IF EXISTS check_catalog_item_file_formats();
+    DROP FUNCTION IF EXISTS preserve_supplier_catalog_item_format_parent();
+    DROP FUNCTION IF EXISTS preserve_supplier_catalog_option_parent();
     DROP FUNCTION IF EXISTS preserve_supplier_catalog_parent();
     DROP TABLE IF EXISTS supplier_catalog_item_file_formats;
     DROP TABLE IF EXISTS supplier_catalog_options;

@@ -563,16 +563,43 @@ test("catalog migration enforces bounds, deferred completeness, snapshot math, a
          group_name_snapshot, option_label_snapshot, price_modifier_minor, sort_order)
       VALUES ('line_option', 'line', 'group', 'option', 'Paper size', 'A3', -150, 0)
     `);
+    await client.query("UPDATE order_line_items SET snapshot_finalized = true WHERE id = 'line'");
     await client.query("COMMIT");
+    await assert.rejects(
+      client.query(`
+        INSERT INTO order_line_item_options
+          (id, order_line_item_id, source_option_group_id, source_option_id,
+           group_name_snapshot, option_label_snapshot, price_modifier_minor, sort_order)
+        VALUES ('line_option_late', 'line', 'group', 'option_two', 'Paper size', 'A4', 0, 1)
+      `),
+      (error) => error.code === "23514" && error.constraint === "order_line_item_options_immutable_check",
+    );
+    await client.query(`
+      INSERT INTO order_line_items
+        (id, order_id, source_catalog_item_id, source_supplier_service_id,
+         item_name_snapshot, pricing_basis_snapshot, base_unit_price_minor,
+         effective_unit_price_minor, quantity, line_subtotal_minor,
+         accepted_format_codes_snapshot, structured_spec_snapshot, sort_order,
+         snapshot_finalized, created_at)
+      VALUES ('line_two', 'order_two', 'item_two', 'service', 'Flyer', 'per_unit', 100,
+        100, 1, 100, ARRAY['pdf'], '{}', 1, true, $1)
+    `, [at]);
+
+    await client.query("BEGIN");
     await client.query(`
       INSERT INTO order_line_items
         (id, order_id, source_catalog_item_id, source_supplier_service_id,
          item_name_snapshot, pricing_basis_snapshot, base_unit_price_minor,
          effective_unit_price_minor, quantity, line_subtotal_minor,
          accepted_format_codes_snapshot, structured_spec_snapshot, sort_order, created_at)
-      VALUES ('line_two', 'order_two', 'item_two', 'service', 'Flyer', 'per_unit', 100,
-        100, 1, 100, ARRAY['pdf'], '{}', 1, $1)
+      VALUES ('line_unfinalized', 'order', 'item', 'service', 'Draft line', 'per_unit', 100,
+        100, 1, 100, ARRAY['pdf'], '{}', 2, $1)
     `, [at]);
+    await assert.rejects(
+      client.query("COMMIT"),
+      (error) => error.code === "23514" && error.constraint === "order_line_items_snapshot_finalized_check",
+    );
+    await client.query("ROLLBACK");
 
     await client.query("UPDATE supplier_catalog_items SET name = 'Renamed', base_price_minor = 999 WHERE id = 'item'");
     assert.deepEqual((await client.query(`

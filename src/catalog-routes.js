@@ -192,6 +192,14 @@ function parseCursor(value) {
   }
 }
 
+function pathIdentifier(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    fail(400, "invalid_catalog_path", "The catalog identifier encoding is invalid.");
+  }
+}
+
 function selectedOptionIds(url) {
   if (!url.searchParams.has("optionIds")) return undefined;
   return url.searchParams.getAll("optionIds")
@@ -218,13 +226,13 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     return { status: 200, body: { ...page, nextCursor: opaqueCursor(page.nextCursor) } };
   }
   if (req.method === "GET" && /^\/catalog\/shops\/[^/]+$/.test(pathname)) {
-    const shop = publicSupplierShop(store, decodeURIComponent(pathname.split("/")[3]));
+    const shop = publicSupplierShop(store, pathIdentifier(pathname.split("/")[3]));
     return shop
       ? { status: 200, body: { shop } }
       : { status: 404, body: { error: "shop_not_found" } };
   }
   if (req.method === "GET" && /^\/catalog\/items\/[^/]+$/.test(pathname)) {
-    const item = (store.catalogItems || []).find((candidate) => candidate.id === decodeURIComponent(pathname.split("/")[3]));
+    const item = (store.catalogItems || []).find((candidate) => candidate.id === pathIdentifier(pathname.split("/")[3]));
     const projected = item ? publicCatalogItem(store, item, { selectedOptionIds: selectedOptionIds(url) }) : null;
     return projected
       ? { status: 200, body: { item: projected } }
@@ -269,7 +277,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     return { status: 201, body: { service: privateService(store, service) }, mutated: true };
   }
   if (/^\/me\/supplier-services\/[^/]+$/.test(pathname)) {
-    const serviceId = decodeURIComponent(pathname.split("/")[3]);
+    const serviceId = pathIdentifier(pathname.split("/")[3]);
     const service = ownService(store, user, serviceId);
     if (req.method === "GET") return { status: 200, body: { service: privateService(store, service) } };
     const body = catalogRecord(await readBody(req));
@@ -319,7 +327,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   }
 
   if (/^\/me\/supplier-services\/[^/]+\/file-formats$/.test(pathname)) {
-    const service = ownService(store, user, decodeURIComponent(pathname.split("/")[3]));
+    const service = ownService(store, user, pathIdentifier(pathname.split("/")[3]));
     if (req.method !== "PUT") return null;
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_service_stale", service.version);
@@ -339,7 +347,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   }
 
   if (/^\/me\/supplier-services\/[^/]+\/pricing$/.test(pathname)) {
-    const service = ownService(store, user, decodeURIComponent(pathname.split("/")[3]));
+    const service = ownService(store, user, pathIdentifier(pathname.split("/")[3]));
     if (req.method === "GET") return { status: 200, body: { pricing: privateService(store, service).pricing, version: service.version } };
     if (req.method !== "PUT") return null;
     const body = catalogRecord(await readBody(req));
@@ -402,7 +410,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     return { status: 201, body: { item: privateItem(store, item) }, mutated: true };
   }
   if (/^\/me\/catalog-items\/[^/]+$/.test(pathname)) {
-    const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
+    const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
     if (req.method === "GET") return { status: 200, body: { item: privateItem(store, item) } };
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version);
@@ -441,7 +449,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (/^\/me\/catalog-items\/[^/]+\/file-formats$/.test(pathname)) {
     if (req.method !== "PUT") return null;
-    const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
+    const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     const mode = String(body.mode || "");
@@ -460,7 +468,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (/^\/me\/catalog-items\/[^/]+\/photos\/reorder$/.test(pathname)) {
     if (req.method !== "POST") return null;
-    const item = ownItem(store, user, decodeURIComponent(pathname.split("/")[3]));
+    const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version);
     if (!Array.isArray(body.fileIds)) fail(400, "invalid_photo_order", "fileIds must be an array.");
@@ -480,8 +488,8 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (/^\/me\/catalog-items\/[^/]+\/option-groups(?:\/[^/]+)?$/.test(pathname)) {
     const parts = pathname.split("/");
-    const item = ownItem(store, user, decodeURIComponent(parts[3]));
-    const groupId = parts[5] ? decodeURIComponent(parts[5]) : null;
+    const item = ownItem(store, user, pathIdentifier(parts[3]));
+    const groupId = parts[5] ? pathIdentifier(parts[5]) : null;
     if (req.method === "POST" && !groupId) {
       const body = catalogRecord(await readBody(req));
       assertExpectedVersion(req, body, "catalog_item_stale", item.version);
@@ -570,8 +578,8 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (/^\/me\/catalog-option-groups\/[^/]+\/options(?:\/[^/]+)?$/.test(pathname)) {
     const parts = pathname.split("/");
-    const { group, item } = ownGroup(store, user, decodeURIComponent(parts[3]));
-    const optionId = parts[5] ? decodeURIComponent(parts[5]) : null;
+    const { group, item } = ownGroup(store, user, pathIdentifier(parts[3]));
+    const optionId = parts[5] ? pathIdentifier(parts[5]) : null;
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_group_stale", group.version);
     if (req.method === "POST" && !optionId) {
