@@ -47,7 +47,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/users/:id/verification-documents` | owning supplier; ops/super any supplier | private attached verification-document metadata |
 | PATCH | `/users/:id/role` | super | role change; audited |
 | POST | `/users/:id/verification` | ops/super | supplier/rider approval decision |
-| GET | `/zones` | authenticated | legacy address-zone records; fees are not used for v2 pricing |
+| GET | `/zones` | authenticated | address-zone records; order creation requires an active zone code, but zone fees are not used for v2 pricing |
 | POST | `/zones` | super | create zone |
 | PATCH | `/zones/:idOrCode` | super | update zone |
 | GET | `/taxonomy` | authenticated | flat taxonomy plus derived `categoryTree` |
@@ -503,6 +503,8 @@ At `POST /orders`, `priceRange` is client-safe and commission-inclusive:
 ```
 
 It is derived from current product and live-service reference prices. No supplier or delivery point is selected yet, so delivery is pending. It is an estimate, not an authorization.
+
+Order creation validates its inputs before drafting anything: `quantity` must be a positive integer (omitted means `1`) or the request is `400 invalid_quantity`, and `zone` must be an active zone code from `GET /zones` (omitted means `davao_central`) or the request is `400 invalid_zone`. When the reference catalog has not been seeded, creation fails with `409 catalog_not_seeded` instead of estimating from missing data.
 
 Supplier acceptance uses the existing transition endpoint with a new exact field:
 
