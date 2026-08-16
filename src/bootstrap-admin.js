@@ -37,7 +37,9 @@ export async function bootstrapAdministrator({
       throw new Error("Administrator bootstrap was already completed and is permanently closed.");
     }
     const store = await loadStore(database);
-    if (store.users.some((user) => user.role === "ops_admin" || user.role === "super_admin")) {
+    if ((store.userRoleMemberships || []).some(
+      (membership) => membership.role === "ops_admin" || membership.role === "super_admin",
+    )) {
       throw new Error("A privileged GRIDGO administrator already exists; administrator bootstrap is permanently closed.");
     }
     const linked = store.users.find((user) => user.clerkUserId === clerkUserId);
@@ -59,6 +61,17 @@ export async function bootstrapAdministrator({
     delete administrator.orgName;
     if (profile.phone) administrator.phone = profile.phone;
     if (!linked) store.users.push(administrator);
+    if (!Array.isArray(store.userRoleMemberships)) store.userRoleMemberships = [];
+    if (!store.userRoleMemberships.some(
+      (membership) => membership.userId === administrator.id && membership.role === "super_admin",
+    )) {
+      store.userRoleMemberships.push({
+        userId: administrator.id,
+        role: "super_admin",
+        createdAt: at,
+        createdBy: administrator.id,
+      });
+    }
     store.auditLog.push({
       id: createId("aud"),
       at,

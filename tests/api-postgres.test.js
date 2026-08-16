@@ -18,10 +18,13 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLen
 const JWT_KEY = publicKey.export({ type: "spki", format: "pem" });
 const AT = "2026-08-16T00:00:00.000Z";
 
-function token(subject) {
+function token(subject, claims = {}) {
   const current = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "gridgo-test-key" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ iss: ISSUER, sub: subject, sid: `sess_${subject}`, azp: AUTHORIZED_PARTY, iat: current - 5, nbf: current - 5, exp: current + 300 })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    iss: ISSUER, sub: subject, sid: `sess_${subject}`, azp: AUTHORIZED_PARTY,
+    iat: current - 5, nbf: current - 5, exp: current + 300, ...claims,
+  })).toString("base64url");
   const input = `${header}.${payload}`;
   return `${input}.${crypto.sign("RSA-SHA256", Buffer.from(input), privateKey).toString("base64url")}`;
 }
@@ -72,11 +75,11 @@ async function startApi(extraEnv = {}) {
   throw new Error(`API did not become healthy:\n${output}`);
 }
 
-async function request(api, pathname, { method = "GET", subject, body } = {}) {
+async function request(api, pathname, { method = "GET", subject, claims, body } = {}) {
   const response = await fetch(`${api}${pathname}`, {
     method,
     headers: {
-      ...(subject ? { Authorization: `Bearer ${token(subject)}` } : {}),
+      ...(subject ? { Authorization: `Bearer ${token(subject, claims)}` } : {}),
       ...(body == null ? {} : { "Content-Type": "application/json" }),
     },
     ...(body == null ? {} : { body: JSON.stringify(body) }),
@@ -136,6 +139,38 @@ async function clearAndFixture(database) {
       { id: "user_super", clerkUserId: "clerk_super", email: "super@gridgo.test", name: "Super", role: "super_admin", createdAt: AT },
       { id: "user_promote", clerkUserId: "clerk_promote", email: "promote@gridgo.test", name: "Promote", role: "client", accountType: "individual", createdAt: AT },
     );
+    store.userRoleMemberships.push(
+      { userId: "user_client", role: "client", createdAt: AT },
+      { userId: "user_supplier", role: "supplier", createdAt: AT },
+      { userId: "user_rider", role: "rider", createdAt: AT },
+      { userId: "user_ops", role: "ops_admin", createdAt: AT },
+      { userId: "user_super", role: "super_admin", createdAt: AT },
+      { userId: "user_promote", role: "client", createdAt: AT },
+    );
+    store.clientProfiles.push(
+      { userId: "user_client", clientKind: "personal", updatedAt: AT },
+      { userId: "user_promote", clientKind: "personal", updatedAt: AT },
+    );
+    store.supplierProfiles.push({
+      userId: "user_supplier", shopName: "Print Shop", contactName: "Supplier",
+      shop: { lat: 7.064, lng: 125.6085, label: "Davao Shop" },
+      pickupAvailable: false, updatedAt: AT,
+    });
+    store.riderProfiles.push({
+      userId: "user_rider", vehicleType: "motorcycle", plateNumber: "GRIDGO-1", updatedAt: AT,
+    });
+    store.approvalCases.push(
+      {
+        id: "case_supplier", userId: "user_supplier", kind: "supplier", status: "approved",
+        version: 1, applicationRevision: 1, submittedAt: AT, decidedAt: AT,
+        createdAt: AT, updatedAt: AT,
+      },
+      {
+        id: "case_rider", userId: "user_rider", kind: "rider", status: "approved",
+        version: 1, applicationRevision: 1, submittedAt: AT, decidedAt: AT,
+        createdAt: AT, updatedAt: AT,
+      },
+    );
     store.supplierServices.push({
       id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing_collateral",
       materialCodes: ["tarpaulin_13oz"], finishCodes: ["none"], productFamilyIds: ["banner"],
@@ -178,6 +213,110 @@ async function clearAndFixture(database) {
   });
 }
 
+test("fixed auth projections authorize every state from memberships and approval cases", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({
+      id: "user_no_membership", clerkUserId: "clerk_no_membership",
+      email: "nomembership@gridgo.test", name: "No Membership",
+      role: "super_admin", createdAt: AT,
+    });
+    for (const status of ["pending", "rejected", "suspended"]) {
+      const userId = `user_supplier_${status}`;
+      store.users.push({
+        id: userId, clerkUserId: `clerk_supplier_${status}`,
+        email: `supplier-${status}@gridgo.test`, name: `Supplier ${status}`,
+        role: "supplier", verificationStatus: status, createdAt: AT,
+      });
+      store.userRoleMemberships.push({ userId, role: "supplier", createdAt: AT });
+      store.supplierProfiles.push({
+        userId, shopName: `Shop ${status}`, contactName: `Supplier ${status}`,
+        shop: { lat: 7.064, lng: 125.6085, label: `Davao ${status}` },
+        pickupAvailable: false, updatedAt: AT,
+      });
+      store.approvalCases.push({
+        id: `case_supplier_${status}`, userId, kind: "supplier", status,
+        version: 2, applicationRevision: 1, submittedAt: AT,
+        ...(status === "rejected" ? { decidedAt: AT, rejectionReason: "Fix the application" } : {}),
+        ...(status === "suspended" ? { decidedAt: AT, suspensionReason: "Account review" } : {}),
+        createdAt: AT, updatedAt: AT,
+      });
+    }
+    await saveStore(database, store);
+  });
+
+  const instance = await startApi();
+  try {
+    const noMembership = await request(instance.api, "/auth/me", {
+      subject: "clerk_no_membership",
+      claims: {
+        gridgo_role: "super_admin",
+        role: "super_admin",
+        approvalStatus: "approved",
+        public_metadata: { gridgoRole: "super_admin", status: "approved" },
+      },
+    });
+    assert.equal(noMembership.status, 200, JSON.stringify(noMembership.body));
+    assert.deepEqual(noMembership.body.memberships, []);
+    assert.deepEqual(noMembership.body.approvalCases, []);
+    assert.equal((await request(instance.api, "/auth/me/supplier", { subject: "clerk_no_membership" })).body.error, "supplier_account_not_found");
+    const noAdmin = await request(instance.api, "/auth/me/admin", {
+      subject: "clerk_no_membership", claims: { gridgo_role: "super_admin" },
+    });
+    assert.equal(noAdmin.status, 403);
+    assert.equal(noAdmin.body.error, "membership_required");
+    assert.equal(noAdmin.body.requiredRole, "super_admin");
+    assert.equal((await request(instance.api, "/users", { subject: "clerk_no_membership" })).status, 403);
+
+    for (const status of ["pending", "approved", "rejected", "suspended"]) {
+      const subject = status === "approved" ? "clerk_supplier" : `clerk_supplier_${status}`;
+      const projection = await request(instance.api, "/auth/me/supplier", {
+        subject,
+        ...(status === "pending" ? {
+          claims: { approvalStatus: "approved", public_metadata: { status: "approved" } },
+        } : {}),
+      });
+      assert.equal(projection.status, 200, JSON.stringify(projection.body));
+      assert.deepEqual(projection.body.membership, { role: "supplier" });
+      assert.equal(Object.hasOwn(projection.body.user, "role"), false);
+      assert.equal(Object.hasOwn(projection.body.user, "clerkUserId"), false);
+      assert.equal(projection.body.supplierProfile.shopName, status === "approved" ? "Print Shop" : `Shop ${status}`);
+      assert.equal(projection.body.approvalCase.status, status);
+      assert.equal(projection.body.approvalCase.rejectionReason, status === "rejected" ? "Fix the application" : null);
+      assert.equal(projection.body.approvalCase.suspensionReason, status === "suspended" ? "Account review" : null);
+      assert.equal(projection.body.capabilities.receiveJobOffers, status === "approved");
+      assert.equal(projection.body.capabilities.acceptJobs, status === "approved");
+      assert.equal(projection.body.capabilities.editCatalogue, status !== "suspended");
+      assert.equal(typeof projection.body.readiness.readyForApproval, "boolean");
+      assert.ok(Array.isArray(projection.body.readiness.missing));
+    }
+
+    const client = await request(instance.api, "/auth/me/client", { subject: "clerk_client" });
+    assert.equal(client.status, 200, JSON.stringify(client.body));
+    assert.equal(client.body.clientProfile.clientKind, "personal");
+    assert.equal(client.body.approvalCase, null);
+    assert.equal(client.body.capabilities.placePersonalOrders, true);
+    assert.equal(client.body.capabilities.placeBusinessOrders, false);
+
+    const rider = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
+    assert.equal(rider.status, 200, JSON.stringify(rider.body));
+    assert.equal(rider.body.riderProfile.vehicleType, "motorcycle");
+    assert.equal(rider.body.approvalCase.status, "approved");
+    assert.deepEqual(rider.body.documents, []);
+    assert.equal(rider.body.capabilities.receiveDispatchOffers, true);
+
+    assert.equal((await request(instance.api, "/auth/me/ops", { subject: "clerk_ops" })).status, 200);
+    assert.equal((await request(instance.api, "/auth/me/admin", { subject: "clerk_super" })).status, 200);
+    assert.equal((await request(instance.api, "/auth/me/ops", { subject: "clerk_super" })).status, 403);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("PostgreSQL-backed order, payment, role, and payout behavior survives API restart", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -198,6 +337,20 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal(Object.hasOwn(promoted.body.user, "accountType"), false);
     const promotedIdentity = await request(instance.api, "/auth/me", { subject: "clerk_promote" });
     assert.equal(promotedIdentity.body.user.role, "supplier");
+    assert.deepEqual(promotedIdentity.body.memberships, [{ role: "supplier" }]);
+    const promotedStore = await loadStore(database);
+    assert.deepEqual(
+      promotedStore.userRoleMemberships
+        .filter((membership) => membership.userId === "user_promote")
+        .map((membership) => membership.role),
+      ["supplier"],
+    );
+    assert.equal(
+      promotedStore.auditLog.some(
+        (entry) => entry.action === "user.role_change" && entry.entityId === "user_promote",
+      ),
+      true,
+    );
 
     const demoted = await request(instance.api, "/users/user_super/role", { method: "PATCH", subject: "clerk_super", body: { role: "client" } });
     assert.equal(demoted.status, 409, JSON.stringify(demoted.body));
@@ -346,10 +499,16 @@ test("Clerk activation provisions only a client through the live API and Postgre
     assert.equal(me.status, 200);
     assert.equal(me.body.user.id, activated.body.user.id);
     assert.equal(me.body.user.role, "client");
+    assert.deepEqual(me.body.memberships, [{ role: "client" }]);
 
     const privileged = await request(instance.api, "/auth/clerk/activate", { method: "POST", subject: "clerk_ops", body: {} });
-    assert.equal(privileged.status, 403, JSON.stringify(privileged.body));
-    assert.equal(privileged.body.error, "invitation_required");
+    assert.equal(privileged.status, 200, JSON.stringify(privileged.body));
+    assert.equal(privileged.body.user.role, "ops_admin");
+    const privilegedClient = await request(instance.api, "/auth/me/client", { subject: "clerk_ops" });
+    assert.equal(privilegedClient.status, 200, JSON.stringify(privilegedClient.body));
+    assert.equal(privilegedClient.body.membership.role, "client");
+    assert.equal(privilegedClient.body.clientProfile.clientKind, "personal");
+    assert.equal((await request(instance.api, "/auth/me/ops", { subject: "clerk_ops" })).status, 200);
   } finally {
     if (instance) {
       instance.child.kill("SIGTERM");
