@@ -129,7 +129,7 @@ Auth: `Authorization: Bearer <Clerk session JWT>`. Empty body.
 
 Used once after Google / public SSO. `/auth/me` does not create or email-link accounts.
 
-- Verifies the JWT the same way other Clerk routes do (signature, issuer, `azp`, expiry).
+- Verifies the JWT the same way other Clerk routes do (signature, issuer, expiry). A present `azp` must be on `CLERK_AUTHORIZED_PARTIES`; Expo session tokens that omit `azp` are accepted.
 - Loads an unmapped Clerk user with the Backend API.
 - A previously mapped Clerk identity idempotently keeps or adds only its `client` membership and personal client profile.
 - An unmapped identity creates a client (`clerkUserId`, primary verified email, name, phone if present, and `accountType: "individual"`). Email is not used to merge identities.
