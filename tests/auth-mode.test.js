@@ -132,3 +132,67 @@ test("activation adds only a client membership to an existing privileged identit
   assert.equal(retry.status, 200);
   assert.equal(retry.mutated, false);
 });
+
+function mappedClientStore() {
+  return {
+    users: [{ id: "user_client", clerkUserId: "clerk_client", role: "client" }],
+    userRoleMemberships: [{ userId: "user_client", role: "client", createdAt: "2026-08-16T00:00:00.000Z" }],
+    approvalCases: [],
+  };
+}
+
+function activationBackend() {
+  return {
+    users: {
+      getUser: async () => ({
+        id: "clerk_client",
+        firstName: "Fely",
+        lastName: "Cia",
+        primaryEmailAddress: { emailAddress: "fely@example.com" },
+      }),
+    },
+  };
+}
+
+test("session token without azp authenticates and activates", async () => {
+  const config = authConfiguration(COMPLETE_ENV);
+  const token = signToken({ azp: undefined });
+  const authenticated = await authenticateBearerToken(token, mappedClientStore(), config);
+  assert.equal(authenticated.status, null);
+  assert.equal(authenticated.user.id, "user_client");
+
+  const activated = await activateClerkClientProfile({
+    token, store: { users: [] }, config, clerkBackend: activationBackend(),
+    createId: () => "user_new_client", now: () => "2026-08-16T00:00:00.000Z",
+  });
+  assert.equal(activated.status, 200);
+  assert.equal(activated.user.id, "user_new_client");
+});
+
+test("session token with an unknown azp is rejected", async () => {
+  const config = authConfiguration(COMPLETE_ENV);
+  const token = signToken({ azp: "https://unknown.example" });
+  assert.equal((await authenticateBearerToken(token, mappedClientStore(), config)).status, 401);
+
+  const activated = await activateClerkClientProfile({
+    token, store: { users: [] }, config,
+    clerkBackend: { users: { getUser: async () => { throw new Error("must not fetch unknown azp"); } } },
+    createId: () => "never", now: () => "2026-08-16T00:00:00.000Z",
+  });
+  assert.equal(activated.status, 401);
+});
+
+test("session token with a listed azp still authenticates and activates", async () => {
+  const config = authConfiguration(COMPLETE_ENV);
+  const token = signToken();
+  const authenticated = await authenticateBearerToken(token, mappedClientStore(), config);
+  assert.equal(authenticated.status, null);
+  assert.equal(authenticated.user.id, "user_client");
+
+  const activated = await activateClerkClientProfile({
+    token, store: { users: [] }, config, clerkBackend: activationBackend(),
+    createId: () => "user_listed_azp", now: () => "2026-08-16T00:00:00.000Z",
+  });
+  assert.equal(activated.status, 200);
+  assert.equal(activated.user.id, "user_listed_azp");
+});

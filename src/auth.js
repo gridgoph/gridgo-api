@@ -76,15 +76,19 @@ export function createClerkBackend(config) {
 export async function verifyClerkClaims(token, config) {
   let claims;
   try {
+    // Expo session JWTs omit azp. Clerk's verifyToken rejects a missing azp
+    // whenever authorizedParties is set, so check azp only after verification.
     claims = await verifyToken(token, {
       secretKey: config.secretKey,
-      authorizedParties: config.authorizedParties,
       ...(config.jwtKey ? { jwtKey: config.jwtKey } : {}),
     });
   } catch {
     return { claims: null, status: 401 };
   }
   if (claims.iss !== config.issuer) return { claims: null, status: 401 };
+  if (claims.azp != null && claims.azp !== "" && !config.authorizedParties.includes(claims.azp)) {
+    return { claims: null, status: 401 };
+  }
   return { claims, status: null };
 }
 

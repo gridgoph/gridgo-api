@@ -13,7 +13,7 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 ## Clerk-only identity
 
-- `src/auth.js` verifies Clerk session JWTs. `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES` are mandatory; issuer and `azp` must match exactly.
+- `src/auth.js` verifies Clerk session JWTs. `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES` are mandatory; issuer must match exactly. Do not pass `authorizedParties` into `verifyToken` (Clerk rejects a missing `azp`). Present `azp` values must be on the allowlist; Expo session tokens that omit `azp` are accepted after signature/expiry/issuer checks.
 - There is no `AUTH_MODE`, password login, local signup/session, demo password, or demo-user fixture. `/auth/login` and `/auth/signup` remain `404`.
 - `POST /auth/clerk/activate` is the explicit first-use Google/public SSO path. It only creates an `individual` client or idempotently adds a personal client membership to an already-mapped identity; it never links by email or grants another role.
 - `users.clerk_user_id` maps the Clerk subject. PostgreSQL membership rows are the authorization source; ignore Clerk role/status claims and metadata for authorization.
