@@ -2355,3 +2355,57 @@ test("GET /auth/me and the Clerk webhook refresh the person copy only", { skip: 
   }
 });
 
+test("legacy verification can approve a rider who enrolled with a typed licence number", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({
+      id: "user_jaylord",
+      clerkUserId: "clerk_jaylord",
+      email: "jaylord@gridgo.test",
+      name: "Jaylord",
+      role: "rider",
+      verificationStatus: "pending",
+      createdAt: AT,
+    });
+    store.userRoleMemberships.push({ userId: "user_jaylord", role: "rider", createdAt: AT });
+    store.riderProfiles.push({
+      userId: "user_jaylord",
+      vehicleType: "motorcycle",
+      plateNumber: "ABC 1234",
+      licenseNumber: "N01-1234",
+      updatedAt: AT,
+    });
+    store.approvalCases.push({
+      id: "apc_jaylord",
+      userId: "user_jaylord",
+      kind: "rider",
+      status: "pending",
+      version: 1,
+      applicationRevision: 1,
+      createdAt: AT,
+      updatedAt: AT,
+    });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const approved = await request(instance.api, "/users/user_jaylord/verification", {
+      method: "POST",
+      subject: "clerk_ops",
+      body: { status: "approved", note: "Pilot accreditation complete" },
+    });
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(approved.body.user.verificationStatus, "approved");
+    const persisted = await loadStore(database);
+    const approvalCase = persisted.approvalCases.find((candidate) => candidate.id === "apc_jaylord");
+    assert.equal(approvalCase.status, "approved");
+    assert.ok(approvalCase.submittedAt);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+

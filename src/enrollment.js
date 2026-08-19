@@ -496,7 +496,7 @@ function manilaDate(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage }) {
+function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage, allowTypedLicense = false }) {
   const profile = (store.riderProfiles || []).find((candidate) => candidate.userId === userId);
   const fields = {};
   if (!profile || !VEHICLE_TYPES.has(nonblank(profile.vehicleType))) {
@@ -510,13 +510,18 @@ function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage
 
   const today = manilaDate(at);
   if (currentFutureLicense(store, userId, today)) return;
-  const currentLicense = (store.riderDocuments || []).find(
-    (document) => document.riderId === userId
-      && document.kind === "drivers_license"
-      && document.isCurrent !== false,
+  const licenseDocuments = (store.riderDocuments || []).filter(
+    (document) => document.riderId === userId && document.kind === "drivers_license",
   );
+  const currentLicense = licenseDocuments.find((document) => document.isCurrent !== false);
   if (currentLicense && currentLicense.expiresOn <= today) {
     fail(409, "document_expired", expiredMessage);
+  }
+  // The rider app still enrolls with a typed licence number and no file. The
+  // legacy verification route may accept that number only when no licence
+  // file was ever attached — a deleted file still blocks approval.
+  if (allowTypedLicense && nonblank(profile.licenseNumber) && licenseDocuments.length === 0) {
+    return;
   }
   fail(
     409,
@@ -539,6 +544,20 @@ export function assertRiderApprovalReady(store, userId, at) {
       approvalCase: caseProjection(approvalCase),
     });
   }
+}
+
+/**
+ * The Operations sign-up queue still decides through POST /users/:id/verification.
+ * The rider app has not shipped file upload + explicit submit, so a typed
+ * licence number from enroll is enough on this compatibility path. Canonical
+ * case decisions keep asserting a ready file and a submitted case.
+ */
+export function assertRiderLegacyVerificationReady(store, userId, at) {
+  assertRiderReady(store, userId, at, {
+    expiredMessage: "Replace the expired driver's licence before approving this rider.",
+    incompleteMessage: "A ready current driver's licence with a future expiry is required before approving this rider.",
+    allowTypedLicense: true,
+  });
 }
 
 export function submitRiderApplication({ store, user, body, idempotencyKey, createId, now }) {

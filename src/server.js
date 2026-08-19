@@ -51,7 +51,7 @@ import {
 } from "./attachments.js";
 import {
   applyForBusiness,
-  assertRiderApprovalReady,
+  assertRiderLegacyVerificationReady,
   enrollRider,
   enrollSupplier,
   reapplyForApproval,
@@ -874,7 +874,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
   } else {
     approvalCase.decidedAt = at;
     approvalCase.decidedBy = actor.id;
-    if (approvalCase.submittedAt == null && target.role !== "rider") approvalCase.submittedAt = at;
+    if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
     if (caseStatus === "rejected") {
       approvalCase.rejectionReason = decisionReason || "Verification rejected";
     }
@@ -2552,7 +2552,7 @@ async function handleRequest(req, res) {
       }
       const prev = target.verificationStatus || "unverified";
       if (target.role === "rider" && body.status === "approved") {
-        assertRiderApprovalReady(store, target.id, now());
+        assertRiderLegacyVerificationReady(store, target.id, now());
       }
       syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       target.verificationStatus = body.status;

@@ -175,7 +175,9 @@ Each committed decision increments `version` and atomically writes the case, imm
 
 Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
 
-Rider approval and restore, including approval through the one-release legacy verification route, require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
+Rider approval and restore through the canonical `/approval-cases/:id/approve|restore` routes require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
+
+The one-release Operations queue still decides through `POST /users/:id/verification`. That compatibility path accepts the typed licence number from rider enroll when no licence file has ever been attached, and records `submittedAt` on the decision so the case matches the verification status. A licence file that was later removed still blocks approval.
 
 ## Supplier shop and verification profile
 
