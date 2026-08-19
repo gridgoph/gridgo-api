@@ -4,7 +4,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 ## Conventions
 
-- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
+- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, `POST /webhooks/clerk`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
 - Membership roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`. Clerk claims and metadata never grant them.
@@ -25,7 +25,8 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/me/business-application` | client membership + `Idempotency-Key` | submit a pending business-client application without removing personal access |
 | POST | `/me/approval-cases/rider/submit` | rider membership + `Idempotency-Key` | idempotently confirm the current-licence gate and submit the pending case |
 | POST | `/me/approval-cases/:kind/reapply` | matching membership + `Idempotency-Key` | rejected applicant resubmission for `business-client`, `supplier`, or `rider` |
-| GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary |
+| GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary; refreshes the person name and email copy from Clerk |
+| POST | `/webhooks/clerk` | Clerk Svix signature | refresh the person copy for a mapped account after a Clerk dashboard edit |
 | GET | `/auth/me/client` | client membership | client profile, business case, and capabilities |
 | GET | `/auth/me/supplier` | supplier membership | supplier profile, case, readiness, and capabilities |
 | GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
@@ -119,7 +120,13 @@ Clerk owns sign-up, sign-in, password recovery, Google SSO, sessions, and JWT re
 
 The first authenticated activation creates an `individual` client identity, membership, and profile. The same fixed endpoint may add a client membership to an already-mapped non-client identity. Supplier, rider, Operations, and Super Admin access comes only from database memberships. Clerk client-settable metadata is ignored, and supplier/rider approval remains a separate Postgres case. During the one-release compatibility window, a `POST /users/:id/verification` decision also updates the target's matching supplier or rider approval case in the same transaction (legacy `unverified` maps to case `pending`), so fixed projections and legacy work gates report the same approval state. Any `PATCH /users/:id/role` change into supplier or rider — a re-promotion or a direct supplier↔rider switch — re-initializes legacy verification to `unverified` and resets any stale decided approval case of the target kind to `pending`: a demoted then re-promoted supplier or rider re-earns approval, and supplier approval never grants rider approval or vice versa. Every legacy-surface status change on an existing case also increments the case `version`, so a decision holding a pre-change `expectedVersion` loses with `409 approval_case_stale`. Conversely, a canonical case decision requires the applicant to still hold the membership matching the case kind — deciding a case whose user was demoted or switched roles returns `409 approval_case_role_mismatch` and changes nothing — and legacy `verificationStatus` is synced only while the legacy role matches the case kind.
 
-`GET /auth/me` returns the identity plus every membership and approval-case summary. The fixed projections `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, and `/auth/me/admin` derive the required membership from the URL alone; request JSON can never select or grant one. A verified but unmapped Clerk subject stays `401 unauthorized`. A mapped identity missing the required membership receives `403 supplier_account_not_found` on `/auth/me/supplier` and `403 membership_required` (with `requiredRole`) on the other four projections.
+`GET /auth/me` returns the identity plus every membership and approval-case summary. After the JWT maps to a GRIDGO account, the handler loads the Clerk user and refreshes only the person copy: display name from first + last name (else username, else the email local part) and primary email. Shop name, pin, floor phone, and supplier floor contact are not overwritten. A Clerk email that already belongs to another GRIDGO account is left on the previous value rather than merged. A Clerk Backend read failure leaves the stored copy in place so the shop is not signed out. The fixed projections `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, and `/auth/me/admin` derive the required membership from the URL alone; request JSON can never select or grant one. A verified but unmapped Clerk subject stays `401 unauthorized`. A mapped identity missing the required membership receives `403 supplier_account_not_found` on `/auth/me/supplier` and `403 membership_required` (with `requiredRole`) on the other four projections.
+
+### `POST /webhooks/clerk`
+
+Public. No Bearer token. Body is the raw Clerk webhook payload. Required headers: `svix-id`, `svix-timestamp`, `svix-signature`. Verified with `CLERK_WEBHOOK_SIGNING_SECRET` through `@clerk/backend/webhooks`. A missing secret is `503 webhook_unconfigured`. A bad signature is `400 invalid_webhook`.
+
+Handles `user.updated` and `user.created` with the same person-copy rule as `/auth/me`. An unmapped Clerk user is ignored (`200 { ok: true }`) — accounts are still created only by activate/enroll. `user.deleted` is ignored in this pass. Applying an already-current copy is a no-op.
 
 `PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
 

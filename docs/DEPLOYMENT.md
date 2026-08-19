@@ -39,6 +39,8 @@ DATABASE_URL=postgresql://gridgo_api:<url-encoded-password>@gridgo-postgres:5432
 CLERK_SECRET_KEY=<production sk_live_ secret>
 CLERK_ISSUER=https://<production-instance>.clerk.accounts.dev
 CLERK_AUTHORIZED_PARTIES=https://<production-instance>.clerk.accounts.dev,https://gridgo-dash.talasora.com,<exact mobile parties>
+# Signing secret for POST /webhooks/clerk (Svix). Required for dashboard name/email edits to reach GRIDGO without a shop opening the app.
+CLERK_WEBHOOK_SIGNING_SECRET=whsec_<production signing secret>
 
 # Bucket-scoped MinIO identity; must match minio.env.
 MINIO_ACCESS_KEY=<bucket user>

@@ -1387,12 +1387,12 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 });
 
 /** Serves the Clerk Backend API surface `users.getUser` calls: GET /v1/users/:id. */
-function clerkUserJson(subject, email) {
+function clerkUserJson(subject, email, extras = {}) {
   return {
     object: "user",
     id: subject,
-    first_name: "Acti",
-    last_name: "Vator",
+    first_name: extras.firstName ?? "Acti",
+    last_name: extras.lastName ?? "Vator",
     username: null,
     image_url: "",
     has_image: false,
@@ -2273,3 +2273,85 @@ test("a deferred commit failure cannot crash the API by sending a second respons
     await database.close();
   }
 });
+
+function signClerkWebhook(secretBytes, payload) {
+  const id = "msg_clerk_identity_test";
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const body = JSON.stringify(payload);
+  const signature = crypto.createHmac("sha256", secretBytes).update(`${id}.${timestamp}.${body}`).digest("base64");
+  return {
+    body,
+    headers: {
+      "svix-id": id,
+      "svix-timestamp": timestamp,
+      "svix-signature": `v1,${signature}`,
+      "Content-Type": "application/json",
+    },
+  };
+}
+
+test("GET /auth/me and the Clerk webhook refresh the person copy only", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const clerk = await startMockClerkApi({
+    clerk_supplier: clerkUserJson("clerk_supplier", "supplier-renamed@gridgo.test", {
+      firstName: "Quinn",
+      lastName: "",
+    }),
+  });
+  const webhookSecretBytes = Buffer.from("gridgo-test-webhook-secret");
+  const webhookSecret = `whsec_${webhookSecretBytes.toString("base64")}`;
+  let instance = null;
+  try {
+    instance = await startApi({
+      CLERK_API_URL: clerk.url,
+      CLERK_WEBHOOK_SIGNING_SECRET: webhookSecret,
+    });
+
+    const me = await request(instance.api, "/auth/me", { subject: "clerk_supplier" });
+    assert.equal(me.status, 200, JSON.stringify(me.body));
+    assert.equal(me.body.user.name, "Quinn");
+    assert.equal(me.body.user.email, "supplier-renamed@gridgo.test");
+    assert.equal(me.body.user.supplierName, "Print Shop");
+
+    const profile = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(profile.body.supplierProfile.contactName, "Supplier");
+    assert.equal(profile.body.supplierProfile.shopName, "Print Shop");
+
+    const unsigned = await fetch(`${instance.api}/webhooks/clerk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "user.updated", data: { id: "clerk_supplier" } }),
+    });
+    assert.equal(unsigned.status, 400);
+    assert.equal((await unsigned.json()).error, "invalid_webhook");
+
+    const signed = signClerkWebhook(webhookSecretBytes, {
+      type: "user.updated",
+      data: {
+        id: "clerk_supplier",
+        first_name: "Quinn",
+        last_name: "Reyes",
+        primary_email_address_id: "idn_clerk_supplier",
+        email_addresses: [{ id: "idn_clerk_supplier", email_address: "quinn@gridgo.test" }],
+      },
+    });
+    const hook = await fetch(`${instance.api}/webhooks/clerk`, {
+      method: "POST",
+      headers: signed.headers,
+      body: signed.body,
+    });
+    assert.equal(hook.status, 200, await hook.text());
+    const afterHook = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(afterHook.body.user.name, "Quinn Reyes");
+    assert.equal(afterHook.body.supplierProfile.contactName, "Supplier");
+  } finally {
+    if (instance) {
+      instance.child.kill("SIGTERM");
+      await new Promise((resolve) => instance.child.once("exit", resolve));
+    }
+    await new Promise((resolve) => clerk.server.close(resolve));
+    await database.close();
+  }
+});
+

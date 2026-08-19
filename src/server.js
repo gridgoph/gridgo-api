@@ -3,8 +3,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyWebhook } from "@clerk/backend/webhooks";
 import {
   activateClerkClientProfile,
+  applyClerkIdentityCopy,
+  applyClerkWebhookEvent,
   authConfiguration,
   authenticateBearerToken,
   clientEmailAvailable,
@@ -270,6 +273,71 @@ function send(res, status, body) {
     ...(res.gridgoCorsHeaders || {}),
   });
   res.end(payload);
+}
+
+function clerkWebhookSigningSecret() {
+  return String(process.env.CLERK_WEBHOOK_SIGNING_SECRET || "").trim();
+}
+
+function readRawBody(req) {
+  if (Object.hasOwn(req, "gridgoRawBody")) return Promise.resolve(req.gridgoRawBody);
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024 && !tooLarge) {
+        tooLarge = true;
+        chunks.length = 0;
+        reject(
+          new AttachmentError(
+            413,
+            "request_body_too_large",
+            "This request body is larger than 1 MiB. Remove extra data and try again.",
+            { maxBytes: 1024 * 1024 },
+          ),
+        );
+      } else if (!tooLarge) {
+        chunks.push(chunk);
+      }
+    });
+    req.on("end", () => {
+      if (tooLarge) return;
+      req.gridgoRawBody = Buffer.concat(chunks);
+      resolve(req.gridgoRawBody);
+    });
+    req.on("error", reject);
+  });
+}
+
+async function verifiedClerkWebhookEvent(req) {
+  const signingSecret = clerkWebhookSigningSecret();
+  if (!signingSecret) {
+    const error = new Error("Clerk webhook signing secret is not configured.");
+    error.status = 503;
+    error.code = "webhook_unconfigured";
+    throw error;
+  }
+  const raw = await readRawBody(req);
+  const request = new Request("https://gridgo.invalid/webhooks/clerk", {
+    method: "POST",
+    headers: {
+      "svix-id": String(req.headers["svix-id"] || ""),
+      "svix-timestamp": String(req.headers["svix-timestamp"] || ""),
+      "svix-signature": String(req.headers["svix-signature"] || ""),
+      "content-type": "application/json",
+    },
+    body: raw,
+  });
+  try {
+    return await verifyWebhook(request, { signingSecret });
+  } catch {
+    const error = new Error("This Clerk webhook could not be verified. Check the signing secret and retry.");
+    error.status = 400;
+    error.code = "invalid_webhook";
+    throw error;
+  }
 }
 
 function readBody(req) {
@@ -1371,6 +1439,22 @@ async function handleRequest(req, res) {
       return send(res, 200, { ok: true });
     }
 
+    if (req.method === "POST" && pathname === "/webhooks/clerk") {
+      let event;
+      try {
+        event = await verifiedClerkWebhookEvent(req);
+      } catch (error) {
+        if (error.status === 503 || error.status === 400 || error.status === 413) {
+          return send(res, error.status, { error: error.code, message: error.message });
+        }
+        throw error;
+      }
+      const store = await load();
+      const { mutated } = applyClerkWebhookEvent(store, event);
+      if (mutated) await save(store);
+      return send(res, 200, { ok: true });
+    }
+
     await expireElapsedIssueWindows();
     const store = await load();
 
@@ -1381,8 +1465,26 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
+      let clerkUser = null;
+      try {
+        clerkUser = await clerkBackend.users.getUser(auth.user.clerkUserId);
+      } catch {
+        clerkUser = null;
+      }
+      let user = auth.user;
+      if (clerkUser) {
+        user = await enqueueMutation(async () => {
+          const latest = await load();
+          const latestUser = (latest.users || []).find((candidate) => candidate.id === auth.user.id);
+          if (!latestUser) return auth.user;
+          if (applyClerkIdentityCopy(latest, latestUser, clerkUser).mutated) {
+            await save(latest);
+          }
+          return latestUser;
+        });
+      }
       return send(res, 200, {
-        user: publicUser(auth.user),
+        user: publicUser(user),
         memberships: auth.authorization.memberships.map(membershipSummary),
         approvalCases: auth.authorization.approvalCases.map(approvalCaseSummary),
       });
@@ -4487,6 +4589,25 @@ const server = http.createServer((req, res) => {
     (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
   if (isSelfQueuedFileMutation) {
     void handleRequest(req, res);
+    return;
+  }
+  if (req.method === "POST" && pathname === "/webhooks/clerk") {
+    // Raw body and Svix headers are the credential. The generic mutation
+    // path would parse JSON first and demand a Clerk session JWT.
+    void enqueueMutation(() => handleRequest(req, res)).catch((error) => {
+      if (res.headersSent) {
+        res.destroy(error);
+        return;
+      }
+      if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+        sendDomainError(res, error);
+        return;
+      }
+      send(res, 500, {
+        error: "server_error",
+        message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
+      });
+    });
     return;
   }
   if (mutatesStore) {
