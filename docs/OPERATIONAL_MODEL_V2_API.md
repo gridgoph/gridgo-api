@@ -412,8 +412,12 @@ One general message to a whole audience, from Operations. `everyone` is the app-
 Authorization: `ops_admin` or `super_admin`.
 
 ```json
-{ "audience": "everyone", "title": "Update your app", "body": "GRIDGO 1.4 is available in the store." }
+{ "audience": "everyone", "title": "Update your app", "body": "GRIDGO 1.4 is available in the store.", "imageUrl": "https://cdn.example/update.png" }
 ```
+
+`imageUrl` is optional. It is either a public `http(s)` picture link, or a hosted path `/public/announcement-images/<fileId>` returned after `POST /files` with `purpose=announcement_image` (JPEG/PNG/WebP, 1 MiB). The picture is stored on each notification record and shown in-app. Lock-screen pictures are included in the FCM payload only when Google can fetch a public HTTPS URL — LAN and `http` links still reach the in-app list.
+
+`GET /public/announcement-images/:fileId` is unauthenticated and streams a ready `announcement_image` so FCM and the apps can load it without a signed MinIO URL.
 
 `201`:
 
@@ -424,6 +428,7 @@ Authorization: `ops_admin` or `super_admin`.
     "audience": "everyone",
     "title": "Update your app",
     "body": "GRIDGO 1.4 is available in the store.",
+    "imageUrl": "https://cdn.example/update.png",
     "at": "2026-08-11T02:00:00.000Z",
     "notifiedUsers": 6,
     "unclaimedDevices": 3
@@ -452,6 +457,7 @@ Write `everyone` announcements accordingly: the same words land on handsets nobo
 | `400` | `invalid_announcement_audience` | `audience` is not one of the five above; the response repeats `allowed` |
 | `400` | `invalid_announcement_title` | `title` empty or longer than 120 characters |
 | `400` | `invalid_announcement_body` | `body` empty or longer than 500 characters |
+| `400` | `invalid_announcement_image` | `imageUrl` is not an http(s) link or a hosted `/public/announcement-images/<fileId>` path |
 | `403` | `forbidden` | the caller is not ops or super |
 
 Every announcement is written to the platform audit log (`announcement.broadcast`) with its audience, title, and both counts.

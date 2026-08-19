@@ -193,8 +193,11 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   assert.doesNotThrow(() => authorizeFileUpload(rider, "fulfilment_proof"));
   assert.doesNotThrow(() => authorizeFileUpload(rider, "delivery_photo"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "service_image"));
+  assert.doesNotThrow(() => authorizeFileUpload(ops, "announcement_image"));
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "verification_document"));
   assert.doesNotThrow(() => authorizeFileUpload(rider, "rider_verification_document"));
+  expectError(() => authorizeFileUpload(supplier, "announcement_image"), 403, "forbidden");
+  expectError(() => resolveFileTarget({}, "announcement_image", { orderId: "ord_1" }, ops), 400, "announcement_image_not_attachable");
   expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
   expectError(() => authorizeFileUpload(client, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(rider, "verification_document"), 403, "forbidden");
@@ -202,6 +205,7 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   expectError(() => authorizeFileUpload(supplier, "proof"), 400, "invalid_file_purpose");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "purpose_media_type_not_allowed");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
+  expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 1024 * 1024 + 1 }, "announcement_image"), 413, "file_too_large");
 });
 
 

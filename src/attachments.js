@@ -12,6 +12,7 @@ const KINDS = new Set([
   "fulfilment_proof",
   "delivery_photo",
   "service_image",
+  "announcement_image",
   "verification_document",
   "rider_verification_document",
 ]);
@@ -29,6 +30,11 @@ export const PURPOSE_POLICIES = Object.freeze({
   service_image: {
     roles: ["supplier"],
     maxBytes: 20 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  announcement_image: {
+    roles: ["ops_admin", "super_admin"],
+    maxBytes: 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   verification_document: {
@@ -550,6 +556,13 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
+  if (purpose === "announcement_image") {
+    fail(
+      400,
+      "announcement_image_not_attachable",
+      "A broadcast picture is sent with the announcement. It is not attached to an order.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }

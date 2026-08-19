@@ -70,6 +70,7 @@ import {
   createPushDeliveryOrDisable,
   deviceTokensFor,
   isFcmTokenShaped,
+  normalizeAnnouncementImageUrl,
   normalizeDeviceToken,
   publicDevice,
   pushMessageFor,
@@ -195,9 +196,9 @@ function deliverPush(store, notification) {
  * one call site (`POST /announcements`), and `pushDelivery.send` refuses
  * anything but a stranger-safe message for these devices regardless.
  */
-function deliverAnnouncementPush(devices, { title, body }) {
+function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   if (!pushDelivery.configured || devices.length === 0) return;
-  fanOutPush("announcement", announcementPushMessage({ title, body }), devices);
+  fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
 }
 
 /**
@@ -392,6 +393,48 @@ function sendDomainError(res, error) {
     message: error.message,
     ...(error.details || {}),
   });
+}
+
+/**
+ * Lock-screen and in-app broadcast pictures. Unauthenticated on purpose: FCM
+ * fetches this URL from Google, and a signed MinIO URL would expire before a
+ * shop opened the alert. Only `announcement_image` files that are ready.
+ */
+async function serveAnnouncementImage(req, res, store, pathname) {
+  const fileId = pathname.slice("/public/announcement-images/".length);
+  const file = findFile(store, fileId);
+  if (
+    !file
+    || file.purpose !== "announcement_image"
+    || file.state !== "ready"
+    || file.deletedAt
+    || file.deleteRequestedAt
+    || !file.objectKey
+  ) {
+    return send(res, 404, { error: "announcement_image_not_found" });
+  }
+  try {
+    const stream = await objectStorage.getObject(file.objectKey);
+    res.writeHead(200, {
+      "Content-Type": file.detectedContentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Length": String(file.size),
+      ...(res.gridgoCorsHeaders || {}),
+    });
+    stream.on("error", () => {
+      if (!res.writableEnded) res.destroy();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+      return sendDomainError(res, error);
+    }
+    throw error;
+  }
 }
 
 /** Whether the caller presented a bearer token at all — valid or not. */
@@ -1458,6 +1501,10 @@ async function handleRequest(req, res) {
     await expireElapsedIssueWindows();
     const store = await load();
 
+    if (req.method === "GET" && pathname.startsWith("/public/announcement-images/")) {
+      return serveAnnouncementImage(req, res, store, pathname);
+    }
+
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
       return send(res, 404, { error: "not_found", path: pathname });
@@ -2158,6 +2205,14 @@ async function handleRequest(req, res) {
           message: `Enter announcement text of 1 to ${ANNOUNCEMENT_BODY_MAX} characters.`,
         });
       }
+      const image = normalizeAnnouncementImageUrl(body.imageUrl);
+      if (image.error) {
+        return send(res, 400, {
+          error: "invalid_announcement_image",
+          message: "Attach a JPEG, PNG or WebP, or paste an http(s) picture link. Nothing was sent.",
+        });
+      }
+      const imageUrl = image.imageUrl;
 
       const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
       const recipients = store.users.filter((candidate) => roles === null || roles.includes(candidate.role));
@@ -2172,6 +2227,7 @@ async function handleRequest(req, res) {
           announcementId,
           title,
           body: text,
+          ...(imageUrl ? { imageUrl } : {}),
           read: false,
           at,
         });
@@ -2190,17 +2246,19 @@ async function handleRequest(req, res) {
           title,
           notifiedUsers: recipients.length,
           unclaimedDevices: unclaimed.length,
+          hasImage: Boolean(imageUrl),
         },
         reason: body.reason || null,
       });
       await save(store);
-      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text }));
+      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text, imageUrl }));
       return send(res, 201, {
         announcement: {
           id: announcementId,
           audience,
           title,
           body: text,
+          imageUrl,
           at,
           notifiedUsers: recipients.length,
           unclaimedDevices: unclaimed.length,
