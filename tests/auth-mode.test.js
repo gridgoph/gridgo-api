@@ -6,6 +6,7 @@ import {
   activateClerkClientProfile,
   authConfiguration,
   authenticateBearerToken,
+  clientEmailAvailable,
 } from "../src/auth.js";
 
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
@@ -195,4 +196,20 @@ test("session token with a listed azp still authenticates and activates", async 
   });
   assert.equal(activated.status, 200);
   assert.equal(activated.user.id, "user_listed_azp");
+});
+
+test("client email availability never names the other role", () => {
+  const store = {
+    users: [
+      { id: "user_client", email: "client@gridgo.ph", role: "client" },
+      { id: "user_rider", email: "mddprado00290@usep.edu.ph", role: "rider" },
+      { id: "user_supplier", email: "shop@gridgo.ph", role: "supplier" },
+    ],
+  };
+  assert.equal(clientEmailAvailable(store, "client@gridgo.ph"), true);
+  assert.equal(clientEmailAvailable(store, "CLIENT@gridgo.ph"), true);
+  assert.equal(clientEmailAvailable(store, "new.client@gridgo.ph"), true);
+  assert.equal(clientEmailAvailable(store, "mddprado00290@usep.edu.ph"), false);
+  assert.equal(clientEmailAvailable(store, "shop@gridgo.ph"), false);
+  assert.equal(clientEmailAvailable(store, "not-an-email"), false);
 });

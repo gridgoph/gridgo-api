@@ -7,6 +7,7 @@ import {
   activateClerkClientProfile,
   authConfiguration,
   authenticateBearerToken,
+  clientEmailAvailable,
   createClerkBackend,
   verifyClerkClaims,
 } from "./auth.js";
@@ -258,6 +259,11 @@ async function compensatePendingFile(fileId, objectKey) {
 }
 
 function send(res, status, body) {
+  if (status >= 400 && body && typeof body === "object") {
+    res.gridgoError = typeof body.error === "string" ? body.error : "";
+    res.gridgoErrorFields =
+      body.fields && typeof body.fields === "object" ? Object.keys(body.fields) : [];
+  }
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -1400,6 +1406,11 @@ async function handleRequest(req, res) {
         });
       }
       return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
+    }
+
+    if (req.method === "POST" && pathname === "/auth/clerk/client-available") {
+      const body = await readBody(req);
+      return send(res, 200, { available: clientEmailAvailable(store, body?.email) });
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/activate") {
@@ -4438,6 +4449,24 @@ async function handleRequest(req, res) {
   }
 }
 
+function logHttpRequest(req, res, pathname, started) {
+  if (req.method === "GET" && pathname === "/health") return;
+  res.on("finish", () => {
+    const claims = req.gridgoVerifiedClaims?.claims;
+    let clerk = "clerk=none";
+    if (claims?.sub) clerk = `clerk=${String(claims.sub).slice(0, 10)}…`;
+    else if (hasBearerToken(req)) clerk = "clerk=unverified";
+    const error = res.gridgoError ? ` error=${res.gridgoError}` : "";
+    const fields =
+      Array.isArray(res.gridgoErrorFields) && res.gridgoErrorFields.length
+        ? ` fields=${res.gridgoErrorFields.join(",")}`
+        : "";
+    console.log(
+      `[gridgo-api] ${req.method} ${pathname} ${res.statusCode} ${Date.now() - started}ms auth=${hasBearerToken(req) ? "bearer" : "none"} ${clerk}${error}${fields}`,
+    );
+  });
+}
+
 const server = http.createServer((req, res) => {
   // The same WHATWG normalization handleRequest routes on — a raw string split
   // would let dot-segment paths reach a route the dispatch classified
@@ -4448,6 +4477,7 @@ const server = http.createServer((req, res) => {
   } catch {
     // handleRequest fails the same parse and answers 500 itself.
   }
+  logHttpRequest(req, res, pathname, Date.now());
   const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
   // File transfers and MinIO calls stay outside database transactions. File routes
   // acquire one only for short load -> validate -> mutate -> commit sections.

@@ -117,6 +117,23 @@ function invitationRequired(message) {
   return { status: 403, error: "invitation_required", message, user: null, mutated: false };
 }
 
+/**
+ * Whether this email may continue as a GRIDGO client.
+ *
+ * Unknown emails are allowed (new clients). An existing non-client identity
+ * is not — the Client app must refuse before Clerk emails a device-trust code.
+ * The answer never names the other role.
+ */
+export function clientEmailAvailable(store, email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized.includes("@")) return false;
+  const matches = (store.users || []).filter(
+    (candidate) => String(candidate.email || "").toLowerCase() === normalized,
+  );
+  if (matches.length === 0) return true;
+  return matches.every((candidate) => candidate.role === "client");
+}
+
 function ensureClientMembership(store, user, now) {
   let mutated = false;
   if (!Array.isArray(store.userRoleMemberships)) store.userRoleMemberships = [];
