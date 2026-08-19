@@ -7,6 +7,7 @@ import {
   catalogGroupsForItem,
   copyStarterIntoItem,
   listingStartersFor,
+  prepStepsForItem,
   privateCatalogItem,
   publicCatalogItem,
   publicCatalogMediaFile,
@@ -527,9 +528,16 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (/^\/me\/catalog-items\/[^/]+$/.test(pathname)) {
     const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
-    if (req.method === "GET") return { status: 200, body: { item: privateCatalogItem(store, item) } };
-    const body = catalogRecord(await readBody(req));
-    assertExpectedVersion(req, body, "catalog_item_stale", item.version);
+    if (req.method === "GET") {
+      const projected = privateCatalogItem(store, item);
+      if (!projected?.id) fail(500, "catalog_item_projection_failed", "That listing could not be loaded. Refresh and try again.");
+      return { status: 200, body: { item: projected } };
+    }
+    const parsed = await readBody(req);
+    const body = req.method === "DELETE"
+      ? (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {})
+      : catalogRecord(parsed);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
     if (req.method === "DELETE") {
       if (itemReferenced(store, item.id)) {
         item.active = false;
@@ -543,6 +551,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       store.catalogOptionGroups = (store.catalogOptionGroups || []).filter((group) => group.catalogItemId !== item.id);
       store.catalogOptions = (store.catalogOptions || []).filter((option) => !groupIds.has(option.optionGroupId));
       store.catalogItemFileFormats = (store.catalogItemFileFormats || []).filter((format) => format.catalogItemId !== item.id);
+      store.catalogPrepSteps = (store.catalogPrepSteps || []).filter((step) => step.catalogItemId !== item.id);
       auditChange(audit, store, user, "catalog_item.delete", "supplier_catalog_item", item.id, { archived: false });
       return { status: 200, body: { ok: true }, mutated: true };
     }
@@ -563,7 +572,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (/^\/me\/catalog-items\/[^/]+\/file-formats$/.test(pathname)) {
     const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
     const body = catalogRecord(await readBody(req));
-    assertExpectedVersion(req, body, "catalog_item_stale", item.version);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
     const mode = requiredText(body.mode || body.fileFormatMode, "mode", 20);
     if (!["inherit", "override"].includes(mode)) fail(400, "invalid_catalog_item", "mode must be inherit or override.", { field: "mode" });
     const codes = mode === "override" ? activeFormatCodes(store, body.formatCodes) : [];
@@ -579,7 +588,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   if (/^\/me\/catalog-items\/[^/]+\/photos\/reorder$/.test(pathname)) {
     const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
     const body = catalogRecord(await readBody(req));
-    assertExpectedVersion(req, body, "catalog_item_stale", item.version);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
     const fileIds = Array.isArray(body.fileIds) ? body.fileIds.map(String) : null;
     if (!fileIds) fail(400, "invalid_catalog_item", "fileIds must list every current photo.", { field: "fileIds" });
     const current = (store.catalogItemPhotos || []).filter((photo) => photo.catalogItemId === item.id);
@@ -596,6 +605,83 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }
 
+  if (/^\/me\/catalog-items\/[^/]+\/prep-steps\/reorder$/.test(pathname)) {
+    const item = ownItem(store, user, pathIdentifier(pathname.split("/")[3]));
+    const body = catalogRecord(await readBody(req));
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
+    const stepIds = Array.isArray(body.stepIds) ? body.stepIds.map(String) : null;
+    if (!stepIds) fail(400, "invalid_catalog_item", "stepIds must list every current prep step.", { field: "stepIds" });
+    const current = (store.catalogPrepSteps || []).filter((step) => step.catalogItemId === item.id);
+    if (stepIds.length !== current.length || new Set(stepIds).size !== stepIds.length
+        || current.some((step) => !stepIds.includes(step.id))) {
+      fail(409, "catalog_item_stale", "The prep-step set changed. Refresh it before reordering.");
+    }
+    for (const [sortOrder, stepId] of stepIds.entries()) {
+      current.find((step) => step.id === stepId).sortOrder = sortOrder;
+    }
+    bumpVersion(item, now());
+    auditChange(audit, store, user, "catalog_item.prep_steps_reorder", "supplier_catalog_item", item.id);
+    return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
+  }
+
+  if (/^\/me\/catalog-items\/[^/]+\/prep-steps(?:\/[^/]+)?$/.test(pathname)) {
+    const parts = pathname.split("/");
+    const item = ownItem(store, user, pathIdentifier(parts[3]));
+    const stepId = parts[5] ? pathIdentifier(parts[5]) : null;
+    if (req.method === "GET" && !stepId) {
+      return { status: 200, body: { prepSteps: prepStepsForItem(store, item.id), itemVersion: item.version } };
+    }
+    const parsedStep = await readBody(req);
+    const body = req.method === "DELETE"
+      ? (parsedStep && typeof parsedStep === "object" && !Array.isArray(parsedStep) ? parsedStep : {})
+      : catalogRecord(parsedStep);
+    assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
+    if (!Array.isArray(store.catalogPrepSteps)) store.catalogPrepSteps = [];
+    if (req.method === "POST" && !stepId) {
+      const existing = store.catalogPrepSteps.filter((step) => step.catalogItemId === item.id);
+      if (existing.length >= 8) fail(400, "invalid_catalog_item", "A listing can have at most eight prep steps.");
+      const at = now();
+      const step = {
+        id: id("cps"),
+        catalogItemId: item.id,
+        title: requiredText(body.title, "title", 80),
+        body: optionalText(body.body, "body", 1000),
+        sortOrder: integer(body.sortOrder ?? existing.length, "sortOrder", { min: 0, max: 7 }),
+        createdAt: at,
+        updatedAt: at,
+      };
+      if (existing.some((candidate) => candidate.sortOrder === step.sortOrder)) {
+        fail(409, "catalog_prep_step_exists", "That prep-step sort position is already used.");
+      }
+      store.catalogPrepSteps.push(step);
+      bumpVersion(item, at);
+      auditChange(audit, store, user, "catalog_prep_step.create", "supplier_catalog_prep_step", step.id);
+      return { status: 201, body: { prepStep: prepStepsForItem(store, item.id).find((candidate) => candidate.id === step.id), itemVersion: item.version }, mutated: true };
+    }
+    const step = store.catalogPrepSteps.find((candidate) => candidate.id === stepId && candidate.catalogItemId === item.id);
+    if (!step) fail(404, "catalog_prep_step_not_found", "That prep step no longer exists.");
+    if (req.method === "DELETE") {
+      store.catalogPrepSteps = store.catalogPrepSteps.filter((candidate) => candidate.id !== step.id);
+      bumpVersion(item, now());
+      auditChange(audit, store, user, "catalog_prep_step.delete", "supplier_catalog_prep_step", step.id);
+      return { status: 200, body: { itemVersion: item.version }, mutated: true };
+    }
+    if (req.method !== "PATCH") return null;
+    if (body.title != null) step.title = requiredText(body.title, "title", 80);
+    if (body.body != null) step.body = optionalText(body.body, "body", 1000);
+    if (body.sortOrder != null) {
+      const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 7 });
+      if (store.catalogPrepSteps.some((candidate) => candidate.catalogItemId === item.id && candidate.id !== step.id && candidate.sortOrder === sortOrder)) {
+        fail(409, "catalog_prep_step_exists", "That prep-step sort position is already used.");
+      }
+      step.sortOrder = sortOrder;
+    }
+    step.updatedAt = now();
+    bumpVersion(item, step.updatedAt);
+    auditChange(audit, store, user, "catalog_prep_step.update", "supplier_catalog_prep_step", step.id);
+    return { status: 200, body: { prepStep: prepStepsForItem(store, item.id).find((candidate) => candidate.id === step.id), itemVersion: item.version }, mutated: true };
+  }
+
   if (/^\/me\/catalog-items\/[^/]+\/option-groups(?:\/[^/]+)?$/.test(pathname)) {
     const parts = pathname.split("/");
     const item = ownItem(store, user, pathIdentifier(parts[3]));
@@ -603,7 +689,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const service = ownService(store, user, item.supplierServiceId);
     if (req.method === "POST" && !groupId) {
       const body = catalogRecord(await readBody(req));
-      assertExpectedVersion(req, body, "catalog_item_stale", item.version);
+      assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
       ensureGroupBounds(store, item.id, 1);
       const name = requiredText(body.name, "name", 80);
       const kind = body.kind == null ? "spec" : requiredText(body.kind, "kind", 10);
@@ -618,7 +704,6 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         fail(409, "catalog_group_exists", "That option-group name is already used.");
       }
       const optionValues = Array.isArray(body.options) ? body.options : [];
-      if (optionValues.length === 0) fail(400, "invalid_catalog_options", "Create an option group with at least one active option.");
       if (optionValues.length > 20) fail(400, "invalid_catalog_options", "An option group can have at most twenty options.");
       const at = now();
       const group = {
@@ -637,7 +722,6 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         positions.add(option.sortOrder);
         return { id: id("cop"), optionGroupId: group.id, ...option, specBinding: option.specBinding ?? null, createdAt: at, updatedAt: at };
       });
-      if (!options.some((option) => option.active)) fail(400, "invalid_catalog_options", "An option group requires an active option.");
       store.catalogOptionGroups.push(group);
       store.catalogOptions.push(...options);
       bumpVersion(item, at);
@@ -646,8 +730,11 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     }
     const group = (store.catalogOptionGroups || []).find((candidate) => candidate.id === groupId && candidate.catalogItemId === item.id);
     if (!group) fail(404, "catalog_group_not_found", "That option group no longer exists.");
-    const body = catalogRecord(await readBody(req));
-    assertExpectedVersion(req, body, "catalog_group_stale", group.version);
+    const parsedGroup = await readBody(req);
+    const body = req.method === "DELETE"
+      ? (parsedGroup && typeof parsedGroup === "object" && !Array.isArray(parsedGroup) ? parsedGroup : {})
+      : catalogRecord(parsedGroup);
+    assertExpectedVersion(req, body, "catalog_group_stale", group.version, url);
     if (req.method === "DELETE") {
       store.catalogOptionGroups = store.catalogOptionGroups.filter((candidate) => candidate.id !== group.id);
       store.catalogOptions = (store.catalogOptions || []).filter((option) => option.optionGroupId !== group.id);
@@ -694,8 +781,11 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const item = ownItem(store, user, group.catalogItemId);
     const service = ownService(store, user, item.supplierServiceId);
     const optionId = parts[5] ? pathIdentifier(parts[5]) : null;
-    const body = catalogRecord(await readBody(req));
-    assertExpectedVersion(req, body, "catalog_group_stale", group.version);
+    const parsedOption = await readBody(req);
+    const body = req.method === "DELETE"
+      ? (parsedOption && typeof parsedOption === "object" && !Array.isArray(parsedOption) ? parsedOption : {})
+      : catalogRecord(parsedOption);
+    assertExpectedVersion(req, body, "catalog_group_stale", group.version, url);
     if (req.method === "POST" && !optionId) {
       ensureOptionBounds(store, group.id, 1);
       const option = optionInput(body, service, store);
@@ -716,8 +806,6 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const option = (store.catalogOptions || []).find((candidate) => candidate.id === optionId && candidate.optionGroupId === group.id);
     if (!option) fail(404, "catalog_option_not_found", "That catalog option no longer exists.");
     if (req.method === "DELETE") {
-      const remainingActive = (store.catalogOptions || []).filter((candidate) => candidate.optionGroupId === group.id && candidate.id !== option.id && candidate.active !== false);
-      if (remainingActive.length === 0) fail(409, "catalog_group_requires_option", "An option group must keep at least one active option.");
       store.catalogOptions = store.catalogOptions.filter((candidate) => candidate.id !== option.id);
     } else if (req.method === "PATCH") {
       if (body.label != null) {
@@ -729,12 +817,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       }
       if (body.priceModifierMinor != null) option.priceModifierMinor = integer(body.priceModifierMinor, "priceModifierMinor");
       if (body.specBinding !== undefined) option.specBinding = validateSpecBinding(store, service, body.specBinding);
-      if (body.active != null) {
-        option.active = booleanValue(body.active, "active");
-        if (!option.active && (store.catalogOptions || []).filter((candidate) => candidate.optionGroupId === group.id && candidate.id !== option.id && candidate.active !== false).length === 0) {
-          fail(409, "catalog_group_requires_option", "An option group must keep at least one active option.");
-        }
-      }
+      if (body.active != null) option.active = booleanValue(body.active, "active");
       if (body.sortOrder != null) {
         const sortOrder = integer(body.sortOrder, "sortOrder", { min: 0, max: 19 });
         if ((store.catalogOptions || []).some((candidate) => candidate.optionGroupId === group.id && candidate.id !== option.id && candidate.sortOrder === sortOrder)) {

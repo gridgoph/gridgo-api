@@ -53,6 +53,7 @@ const TABLES = [
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
   { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_item_file_formats", keys: ["catalog_item_id", "format_code"], columns: ["catalog_item_id", "format_code"] },
+  { name: "supplier_catalog_prep_steps", keys: ["id"], columns: ["id", "catalog_item_id", "sort_order", "title", "body", "created_at", "updated_at"] },
   { name: "listing_starters", keys: ["id"], columns: ["id", "subcategory_code", "name", "default_pricing_unit", "default_package_qty", "default_turnaround_hours", "default_format_codes"] },
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "spec_binding", "sort_order"] },
@@ -105,6 +106,7 @@ export function emptyStore() {
     catalogOptionGroups: [],
     catalogOptions: [],
     catalogItemFileFormats: [],
+    catalogPrepSteps: [],
     listingStarters: [],
     listingStarterGroups: [],
     listingStarterOptions: [],
@@ -287,6 +289,12 @@ function rowsFromStore(store) {
   }
   for (const format of (store.catalogItemFileFormats || [])) {
     rows.supplier_catalog_item_file_formats.push({ catalog_item_id: format.catalogItemId, format_code: format.formatCode });
+  }
+  for (const step of (store.catalogPrepSteps || [])) {
+    rows.supplier_catalog_prep_steps.push({
+      id: step.id, catalog_item_id: step.catalogItemId, sort_order: step.sortOrder,
+      title: step.title, body: step.body || "", created_at: step.createdAt, updated_at: step.updatedAt,
+    });
   }
   for (const starter of (store.listingStarters || [])) {
     rows.listing_starters.push({
@@ -566,6 +574,10 @@ export async function loadStore(database) {
   }));
   store.catalogItemFileFormats = orderedBy(loaded.supplier_catalog_item_file_formats, "catalog_item_id", "format_code").map((row) => ({
     catalogItemId: row.catalog_item_id, formatCode: row.format_code,
+  }));
+  store.catalogPrepSteps = orderedBy(loaded.supplier_catalog_prep_steps, "catalog_item_id", "sort_order", "id").map((row) => ({
+    id: row.id, catalogItemId: row.catalog_item_id, sortOrder: row.sort_order,
+    title: row.title, body: row.body, createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.listingStarters = orderedBy(loaded.listing_starters, "subcategory_code", "id").map((row) => ({
     id: row.id, subcategoryCode: row.subcategory_code, name: row.name,

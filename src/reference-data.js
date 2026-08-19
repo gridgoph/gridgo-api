@@ -29,6 +29,10 @@ export function defaultAcceptedFileFormats() {
     { code: "jpeg", displayName: "JPEG", inputKind: "file", extensions: ["jpg", "jpeg"], mimeTypes: ["image/jpeg"], active: true },
     { code: "psd", displayName: "Adobe Photoshop", inputKind: "file", extensions: ["psd"], mimeTypes: ["image/vnd.adobe.photoshop", "application/octet-stream"], active: true },
     { code: "canva_link", displayName: "Canva link", inputKind: "url", extensions: [], mimeTypes: [], active: true },
+    { code: "google_drive", displayName: "Google Drive", inputKind: "url", extensions: [], mimeTypes: [], active: true },
+    { code: "dropbox", displayName: "Dropbox", inputKind: "url", extensions: [], mimeTypes: [], active: true },
+    { code: "we_transfer", displayName: "WeTransfer", inputKind: "url", extensions: [], mimeTypes: [], active: true },
+    { code: "other_link", displayName: "Other link", inputKind: "url", extensions: [], mimeTypes: [], active: true },
     { code: "3mf", displayName: "3MF", inputKind: "file", extensions: ["3mf"], mimeTypes: ["model/3mf", "application/vnd.ms-package.3dmanufacturing-3dmodel+xml"], active: true },
     { code: "stl", displayName: "STL", inputKind: "file", extensions: ["stl"], mimeTypes: ["model/stl", "application/sla"], active: true },
   ];

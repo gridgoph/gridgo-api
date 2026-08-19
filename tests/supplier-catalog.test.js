@@ -15,6 +15,7 @@ import {
   createOrderLineSnapshot,
   effectiveAcceptedFormats,
   listingStartersFor,
+  privateCatalogItem,
   publicCatalogItem,
   publicSupplierShop,
   selectedCatalogPrice,
@@ -193,14 +194,18 @@ test("single-select modifiers use integer arithmetic and floor effective price a
   assert.equal(selectedCatalogPrice(store, store.catalogItems[0], ["a4", "grommet"]).effectiveUnitPriceMinor, 145);
 });
 
-test("from price uses the cheapest required spec plus optional cheaper add-ons", () => {
+test("from price uses cheapest required specs and ignores add-ons until selected", () => {
   const store = fixture();
+  store.catalogItems[0].basePriceMinor = 10000;
+  store.catalogOptions.find((option) => option.id === "a3").priceModifierMinor = 500;
+  store.catalogOptions.find((option) => option.id === "a4").priceModifierMinor = 2500;
+  store.catalogOptions.find((option) => option.id === "grommet").priceModifierMinor = -4000;
   const item = publicCatalogItem(store, store.catalogItems[0]);
-  assert.equal(item.fromPriceMinor, 0);
+  assert.equal(item.fromPriceMinor, 10500);
+  assert.equal(item.acceptedFormats[0].inputKind, "file");
   assert.equal(item.subcategoryCode, "tarpaulins_outdoor_banners");
-  assert.equal(item.pricingUnit, "per_unit");
   assert.equal(item.optionGroups[1].kind, "addon");
-  assert.equal(item.optionGroups[0].helpText, "Pick a size");
+  assert.deepEqual(item.prepSteps, []);
 });
 
 test("pending suppliers stay private while approved complete catalog items publish", () => {
@@ -335,6 +340,155 @@ test("order-line helper writes immutable catalog, option, format, price, and lis
   assert.equal(store.orderLineItemOptions.length, 1);
 });
 
+test("POST option-groups accepts expectedVersion and an empty options array", async () => {
+  const store = fixture();
+  const response = await routeSupplierCatalog({
+    req: { method: "POST", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items/item/option-groups"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({ expectedVersion: 3, name: "Rush", kind: "addon" }),
+    id: (prefix) => `${prefix}_empty`,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(response.status, 201);
+  assert.equal(response.body.group.name, "Rush");
+  assert.deepEqual(response.body.group.options, []);
+  assert.ok(catalogItemBlockers(store, store.catalogItems[0]).some((blocker) => blocker.startsWith("option_group:")));
+});
+
+test("DELETE listing with If-Match removes a never-ordered item from the list", async () => {
+  const store = fixture();
+  const created = await routeSupplierCatalog({
+    req: { method: "POST", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({
+      supplierServiceId: "service",
+      name: "Draft flyer",
+      basePriceMinor: 1200,
+      subcategoryCode: "flyers",
+      pricingUnit: "per_unit",
+      turnaroundMode: "inherit",
+    }),
+    id: (prefix) => `${prefix}_remove`,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.item.id, "sci_remove");
+  const deleted = await routeSupplierCatalog({
+    req: { method: "DELETE", headers: { "if-match": String(created.body.item.version) } },
+    url: new URL("http://127.0.0.1/me/catalog-items/sci_remove"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(deleted.status, 200);
+  const listed = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(listed.body.items.some((item) => item.id === "sci_remove"), false);
+});
+
+test("GET item includes persisted photos after postgres round-trip", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await database.query(`TRUNCATE
+    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    issues, claims, credit_ledger, credit_accounts, file_references, files,
+    payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
+    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
+    supplier_catalog_item_file_formats, supplier_catalog_options, supplier_catalog_option_groups,
+    supplier_catalog_items, supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
+    listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
+    zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
+    taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
+    platform_settings RESTART IDENTITY CASCADE`);
+  await seedReferenceData(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({
+      id: "user_supplier", clerkUserId: "clerk_supplier_photos", email: "photos@gridgo.test",
+      name: "Supplier", role: "supplier", verificationStatus: "approved", createdAt: AT,
+    });
+    store.userRoleMemberships.push({ userId: "user_supplier", role: "supplier", createdAt: AT });
+    store.supplierProfiles.push({
+      userId: "user_supplier", shopName: "Photo Shop", contactName: "Supplier",
+      shop: { lat: 7.064, lng: 125.6085, label: "Davao Shop" }, pickupAvailable: false, updatedAt: AT,
+    });
+    store.supplierServices.push({
+      id: "svc_photo", supplierId: "user_supplier", categoryCode: "marketing_collateral",
+      state: "live", pricingBasis: "per_unit", referenceRateMinor: 1000, turnaroundHours: 24,
+      version: 1, createdAt: AT, updatedAt: AT,
+    });
+    store.catalogItems.push({
+      id: "sci_photo", supplierId: "user_supplier", supplierServiceId: "svc_photo",
+      subcategoryCode: "flyers", name: "Flyer", description: "", basePriceMinor: 1000,
+      pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit",
+      active: true, sortOrder: 0, version: 1, createdAt: AT, updatedAt: AT,
+    });
+    store.files.push({
+      fileId: "file_sample", ownerId: "user_supplier", purpose: "catalog_item_photo",
+      originalFilename: "sample.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+      size: 12, state: "ready", objectKey: "catalog/sample.jpg", references: [], createdAt: AT,
+    });
+    store.catalogItemPhotos.push({
+      catalogItemId: "sci_photo", fileId: "file_sample", sortOrder: 0, altText: "Board sample", createdAt: AT,
+    });
+    await saveStore(database, store);
+  });
+  const reloaded = await loadStore(database);
+  const item = privateCatalogItem(reloaded, reloaded.catalogItems.find((candidate) => candidate.id === "sci_photo"));
+  assert.equal(item.id, "sci_photo");
+  assert.equal(item.photos.length, 1);
+  assert.equal(item.photos[0].fileId, "file_sample");
+  assert.equal(item.photos[0].sortOrder, 0);
+  assert.equal(item.photos[0].altText, "Board sample");
+  await database.close();
+});
+
+test("prep steps persist on private and public item projections", async () => {
+  const store = fixture();
+  const created = await routeSupplierCatalog({
+    req: { method: "POST", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items/item/prep-steps"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({ expectedVersion: 3, title: "Flatten PNG", body: "Export art as a flattened PNG." }),
+    id: (prefix) => `${prefix}_guide`,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.prepStep.title, "Flatten PNG");
+  const got = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items/item"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(got.body.item.id, "item");
+  assert.equal(got.body.item.prepSteps[0].title, "Flatten PNG");
+  const published = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(published.prepSteps[0].body, "Export art as a flattened PNG.");
+});
+
 test("GET /listing-starters and public shop browse answer on the live API", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
@@ -342,8 +496,9 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
     administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
-    supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
-    supplier_catalog_options, supplier_catalog_option_groups, supplier_catalog_items,
+    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
+    supplier_catalog_item_file_formats, supplier_catalog_options, supplier_catalog_option_groups,
+    supplier_catalog_items,
     supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
     listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
     zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,

@@ -53,9 +53,16 @@ function readyFile(store, fileId) {
   return file?.state === "ready" && file.objectKey ? file : null;
 }
 
-export function assertExpectedVersion(req, body, code, currentVersion) {
+function headerVersion(req) {
   const header = req?.headers?.["if-match"] ?? req?.headers?.["If-Match"];
-  const raw = body?.expectedVersion ?? (typeof header === "string" ? header.replace(/^W\//, "").replaceAll('"', "").trim() : header);
+  if (typeof header !== "string") return header;
+  return header.replace(/^W\//, "").replaceAll('"', "").trim();
+}
+
+export function assertExpectedVersion(req, body, code, currentVersion, url) {
+  const raw = body?.expectedVersion
+    ?? headerVersion(req)
+    ?? url?.searchParams?.get("expectedVersion");
   if (raw == null || raw === "") {
     throw new CatalogError(400, "expected_version_required", "Send expectedVersion so GRIDGO can reject a stale edit.");
   }
@@ -93,6 +100,18 @@ export function effectiveAcceptedFormats(store, item) {
     .filter((code) => registry.has(code))
     .sort()
     .map((code) => ({ ...registry.get(code) }));
+}
+
+export function prepStepsForItem(store, itemId) {
+  return (store.catalogPrepSteps || [])
+    .filter((step) => step.catalogItemId === itemId)
+    .sort(compareSortOrder)
+    .map((step) => ({
+      id: step.id,
+      sortOrder: step.sortOrder,
+      title: step.title,
+      body: step.body || "",
+    }));
 }
 
 export function catalogGroupsForItem(store, itemId, { includeInactiveOptions = true } = {}) {
@@ -215,14 +234,10 @@ function minimumCatalogPrice(store, item) {
   const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false });
   let total = checkedMinor(item.basePriceMinor, "basePriceMinor");
   for (const group of groups) {
+    if ((group.kind || "spec") === "addon" || group.required === false) continue;
     const modifiers = group.options.map((option) => checkedMinor(option.priceModifierMinor, "priceModifierMinor"));
-    if (group.required) {
-      if (modifiers.length === 0) return null;
-      total += modifiers.reduce((lowest, value) => value < lowest ? value : lowest);
-    } else if (modifiers.length) {
-      const cheapest = modifiers.reduce((lowest, value) => value < lowest ? value : lowest);
-      if (cheapest < 0n) total += cheapest;
-    }
+    if (modifiers.length === 0) return null;
+    total += modifiers.reduce((lowest, value) => (value < lowest ? value : lowest));
   }
   if (total < 0n) total = 0n;
   return checkedNumber(total, "fromPriceMinor");
@@ -303,6 +318,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     } : null,
     acceptedFormats: effectiveAcceptedFormats(store, item),
     photos: publicPhotos(store, item.id),
+    prepSteps: prepStepsForItem(store, item.id),
     optionGroups: groups,
     version: item.version,
     serviceVersion: service.version || 1,
@@ -692,6 +708,7 @@ export function privateCatalogItem(store, item) {
         sortOrder: photo.sortOrder,
         altText: photo.altText ?? null,
       })),
+    prepSteps: prepStepsForItem(store, item.id),
     optionGroups: groups.map((group) => ({
       id: group.id,
       name: group.name,

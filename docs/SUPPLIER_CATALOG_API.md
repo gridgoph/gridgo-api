@@ -10,7 +10,7 @@ Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `
 
 - `GET /catalog/shops?categoryCode=&cursor=` lists approved shops that currently have at least one complete active item under a live service.
 - `GET /catalog/shops/:supplierId` returns the shop, live service lines, and complete active items.
-- `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is the cheapest valid selection. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor`.
+- `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
 - `GET /catalog/media/:fileId` returns metadata for a photo or shop image that is already public.
 
 A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item is active, it has a ready photo, every option group has an active option, and the effective accepted-format set is nonempty.
@@ -35,6 +35,9 @@ PATCH, DELETE          /me/catalog-items/:id/option-groups/:groupId
 POST                   /me/catalog-option-groups/:groupId/options
 PATCH, DELETE          /me/catalog-option-groups/:groupId/options/:optionId
 POST                   /me/catalog-items/:id/photos/reorder
+GET, POST              /me/catalog-items/:id/prep-steps
+PATCH, DELETE          /me/catalog-items/:id/prep-steps/:stepId
+POST                   /me/catalog-items/:id/prep-steps/reorder
 GET                    /me/supplier-readiness
 POST /files            purpose=catalog_item_photo | supplier_shop_image
 POST /files/:fileId/attach
@@ -44,10 +47,12 @@ POST /files/:fileId/attach
 
 `POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`. A starter is copied into catalog rows at create time and is never referenced after.
 
-Existing-record mutations require `expectedVersion` or `If-Match`. Caps: 8 photos, 6 option groups, 20 options per group. Option groups have `kind` `spec` | `addon` and optional `helpText`. Addon groups are optional. Options use integer `priceModifierMinor` and optional `specBinding` to governed fields only; a custom label with no binding is valid. Deleting an item referenced by an order snapshot archives it (`active=false`).
+Existing-record mutations require `expectedVersion` or `If-Match`. DELETE may send `If-Match` with no JSON body. Caps: 8 photos, 6 option groups, 20 options per group, 8 prep steps. Option groups have `kind` `spec` | `addon` and optional `helpText`. A group may be created with zero options; it cannot go on the board until it has an active option. Addon groups are optional. Options use integer `priceModifierMinor` and optional `specBinding` to governed fields only; a custom label with no binding is valid. Deleting an item referenced by an order snapshot archives it (`active=false`); a never-ordered item is removed.
+
+`GET /me/catalog-items/:id` always returns `{ item }` with `item.id` and `photos[]` of `{ fileId, sortOrder, altText }` (private photos may also include a short-lived `downloadUrl`). `prepSteps` is `[{ id, sortOrder, title, body }]`.
 
 ## Formats and snapshots
 
-Seeded codes: `pdf`, `png`, `jpeg`, `psd`, `canva_link`, `3mf`, `stl`. Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format.
+Seeded file codes: `pdf`, `png`, `jpeg`, `psd`, `3mf`, `stl` (`inputKind: "file"`). Seeded URL codes: `canva_link`, `google_drive`, `dropbox`, `we_transfer`, `other_link` (`inputKind: "url"`). Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format.
 
 `src/supplier-catalog.js` exports `createOrderLineSnapshot` and `appendOrderLineSnapshot`. They write the immutable line/option snapshot shape, including pricing unit, package qty, ready-in hours, and group kind. Checkout is not wired in this slice.

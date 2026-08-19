@@ -402,6 +402,25 @@ function sendDomainError(res, error) {
   });
 }
 
+async function decorateCatalogPhotoUrls(store, body) {
+  const items = [];
+  if (body?.item?.photos) items.push(body.item);
+  if (Array.isArray(body?.items)) items.push(...body.items.filter((item) => item?.photos));
+  for (const item of items) {
+    for (const photo of item.photos || []) {
+      const file = findFile(store, photo.fileId);
+      if (!file?.objectKey) continue;
+      try {
+        const signed = await objectStorage.presignGet(file.objectKey);
+        photo.downloadUrl = signed.url;
+        photo.downloadUrlExpiresAt = signed.expiresAt;
+      } catch {
+        // Keep fileId as the identity even if signing is unavailable.
+      }
+    }
+  }
+}
+
 /**
  * Lock-screen and in-app broadcast pictures. Unauthenticated on purpose: FCM
  * fetches this URL from Google, and a signed MinIO URL would expire before a
@@ -1724,6 +1743,9 @@ async function handleRequest(req, res) {
     });
     if (catalogResponse) {
       if (catalogResponse.mutated) await save(store);
+      if (catalogResponse.status < 400) {
+        await decorateCatalogPhotoUrls(store, catalogResponse.body);
+      }
       return send(res, catalogResponse.status, catalogResponse.body);
     }
 
@@ -1971,10 +1993,9 @@ async function handleRequest(req, res) {
         if (latestTarget.type === "supplier_catalog_item") {
           const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
           await save(latestStore);
-          return send(res, 200, {
-            file: publicFile(latestFile),
-            item: privateCatalogItem(latestStore, attached.item),
-          });
+          const item = privateCatalogItem(latestStore, attached.item);
+          await decorateCatalogPhotoUrls(latestStore, { item });
+          return send(res, 200, { file: publicFile(latestFile), item });
         }
         if (latestTarget.type === "supplier_shop_media") {
           const attached = attachSupplierShopImage(latestStore, latestFile, latestTarget, { at: now() });
