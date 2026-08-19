@@ -558,6 +558,18 @@ export function assertRiderLegacyVerificationReady(store, userId, at) {
     incompleteMessage: "A ready current driver's licence with a future expiry is required before approving this rider.",
     allowTypedLicense: true,
   });
+  const licenseDocuments = (store.riderDocuments || []).filter(
+    (document) => document.riderId === userId && document.kind === "drivers_license",
+  );
+  if (licenseDocuments.length === 0) return;
+  const approvalCase = (store.approvalCases || []).find(
+    (candidate) => candidate.userId === userId && candidate.kind === "rider",
+  );
+  if (!approvalCase || approvalCase.submittedAt == null) {
+    fail(409, "approval_state_conflict", "The rider must explicitly submit this application before approval.", {
+      approvalCase: caseProjection(approvalCase),
+    });
+  }
 }
 
 export function submitRiderApplication({ store, user, body, idempotencyKey, createId, now }) {

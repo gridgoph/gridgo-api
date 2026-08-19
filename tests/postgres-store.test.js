@@ -12,8 +12,12 @@ async function clear(database) {
   await database.query(`TRUNCATE
     administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
-    payout_milestones, order_payments, orders, supplier_services, zones,
-    taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
+    payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
+    supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
+    supplier_catalog_options, supplier_catalog_option_groups, supplier_catalog_items,
+    supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
+    listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
+    zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
     taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
     platform_settings RESTART IDENTITY CASCADE`);
 }
@@ -37,7 +41,7 @@ test("relational store round-trips typed money, relationships, and composite rou
   };
   store.settings = { serviceFeeRateBps: 1000, issueWindowHours: 24, deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 5000 }] };
   store.zones = [{ id: "zone_central", code: "davao_central", name: "Davao Central", active: true }];
-  store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], createdAt: AT, updatedAt: AT }];
+  store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], version: 1, createdAt: AT, updatedAt: AT }];
   store.orders = [{
     id: "ord_one", clientId: "user_client", supplierId: "user_supplier", riderId: "user_rider",
     productId: "prod_banner", state: "issue_window_open", zone: "davao_central",
@@ -102,7 +106,7 @@ test("relational store maps memberships, approval records, profiles, and rider d
     { userId: "user_supplier", role: "supplier", createdAt: AT },
     { userId: "user_rider", role: "rider", createdAt: AT, createdBy: "user_supplier" },
   ];
-  store.supplierProfiles = [{ userId: "user_supplier", shopName: "PrintRight", contactName: "Supplier", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, pickupAvailable: true, updatedAt: AT }];
+  store.supplierProfiles = [{ userId: "user_supplier", shopName: "PrintRight", contactName: "Supplier", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, pickupAvailable: true, version: 1, updatedAt: AT }];
   store.riderProfiles = [{ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC-123", licenseNumber: "LIC-123", updatedAt: AT }];
   store.approvalCases = [{ id: "case_rider", userId: "user_rider", kind: "rider", status: "pending", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT }];
   store.approvalCaseEvents = [{ id: "event_rider", approvalCaseId: "case_rider", applicationRevision: 1, toStatus: "pending", actorUserId: "user_rider", actorKind: "applicant", requestId: "request-rider", snapshot: { vehicleType: "motorcycle" }, createdAt: AT }];

@@ -43,6 +43,8 @@ Coordinates use constrained latitude/longitude columns. Current database queries
 
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 
+Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Starters are copied at create time.
+
 ## Files and push
 
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.

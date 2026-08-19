@@ -30,11 +30,8 @@ function activeCategory(store, code) {
 }
 
 /**
- * The task-E catalog tables intentionally are not guessed here. This function
- * is the single approval-readiness seam they extend after their forward
- * migration lands. On today's schema, a review-ready line is the strongest
- * complete publication unit available: an active governed category, pricing
- * basis/rate, and turnaround, already submitted for verification.
+ * Approval-queue readiness stays on profile + review-ready service lines.
+ * Listing completeness is exposed on GET /me/supplier-readiness.
  */
 export function supplierApprovalReadiness(store, supplierId) {
   const missing = [];

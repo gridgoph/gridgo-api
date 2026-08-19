@@ -32,6 +32,8 @@ import {
 } from "./approval-cases.js";
 import {
   AttachmentError,
+  attachCatalogItemPhoto,
+  attachSupplierShopImage,
   attachRiderDocument,
   attachFileReference,
   authorizeFileAttach,
@@ -49,6 +51,11 @@ import {
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
+import {
+  isPublicSupplierCatalogRoute,
+  routeSupplierCatalog,
+} from "./catalog-routes.js";
+import { privateCatalogItem } from "./supplier-catalog.js";
 import {
   applyForBusiness,
   assertRiderLegacyVerificationReady,
@@ -1682,6 +1689,44 @@ async function handleRequest(req, res) {
     const auth = await authenticateRequest(req, store);
     const user = auth.user;
 
+    if (!user
+        && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
+        && isPublicSupplierCatalogRoute(req.method, pathname)) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    const privateCatalogRoute = pathname === "/listing-starters"
+      || pathname === "/me/supplier-readiness"
+      || pathname === "/me/supplier-profile"
+      || pathname === "/me/supplier-payment-terms"
+      || pathname.startsWith("/me/supplier-services")
+      || pathname.startsWith("/me/catalog-items")
+      || pathname.startsWith("/me/catalog-option-groups");
+    if (!user && privateCatalogRoute) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    const catalogResponse = await routeSupplierCatalog({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      id,
+      now,
+      audit,
+    });
+    if (catalogResponse) {
+      if (catalogResponse.mutated) await save(store);
+      return send(res, catalogResponse.status, catalogResponse.body);
+    }
+
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
       return send(res, 200, { catalog: store.catalog });
@@ -1923,6 +1968,23 @@ async function handleRequest(req, res) {
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
+        if (latestTarget.type === "supplier_catalog_item") {
+          const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
+          await save(latestStore);
+          return send(res, 200, {
+            file: publicFile(latestFile),
+            item: privateCatalogItem(latestStore, attached.item),
+          });
+        }
+        if (latestTarget.type === "supplier_shop_media") {
+          const attached = attachSupplierShopImage(latestStore, latestFile, latestTarget, { at: now() });
+          await save(latestStore);
+          return send(res, 200, {
+            file: publicFile(latestFile),
+            profile: attached.profile,
+            media: attached.media,
+          });
+        }
         if (latestTarget.type === "rider_document") {
           const attachedAt = now();
           const attached = attachRiderDocument(latestStore, latestFile, latestTarget, {

@@ -145,8 +145,12 @@ async function clearAndFixture(database) {
   await database.query(`TRUNCATE
     administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
-    payout_milestones, order_payments, orders, supplier_services, zones,
-    taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
+    payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
+    supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
+    supplier_catalog_options, supplier_catalog_option_groups, supplier_catalog_items,
+    supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
+    listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
+    zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
     taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
     platform_settings RESTART IDENTITY CASCADE`);
   await seedReferenceData(database);
@@ -2398,7 +2402,10 @@ test("legacy verification can approve a rider who enrolled with a typed licence 
     });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.user.verificationStatus, "approved");
-    const persisted = await loadStore(database);
+    const persisted = await loadStoreEventually(database, (store) => {
+      const approvalCase = store.approvalCases.find((candidate) => candidate.id === "apc_jaylord");
+      return approvalCase?.status === "approved" && approvalCase.submittedAt;
+    });
     const approvalCase = persisted.approvalCases.find((candidate) => candidate.id === "apc_jaylord");
     assert.equal(approvalCase.status, "approved");
     assert.ok(approvalCase.submittedAt);

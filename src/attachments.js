@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { identityHasMembership } from "./authorization-context.js";
+import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
 export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
@@ -12,6 +13,8 @@ const KINDS = new Set([
   "fulfilment_proof",
   "delivery_photo",
   "service_image",
+  "catalog_item_photo",
+  "supplier_shop_image",
   "announcement_image",
   "verification_document",
   "rider_verification_document",
@@ -30,6 +33,16 @@ export const PURPOSE_POLICIES = Object.freeze({
   service_image: {
     roles: ["supplier"],
     maxBytes: 20 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  catalog_item_photo: {
+    roles: ["supplier"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  supplier_shop_image: {
+    roles: ["supplier"],
+    maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   announcement_image: {
@@ -572,6 +585,10 @@ export function resolveFileTarget(store, purpose, body, user = null) {
     ? ["documentType", "replaceFileId"]
     : purpose === "service_image"
     ? ["supplierServiceId"]
+    : purpose === "catalog_item_photo"
+    ? ["catalogItemId", "sortOrder", "altText", "expectedVersion"]
+    : purpose === "supplier_shop_image"
+    ? ["slot", "expectedVersion"]
     : purpose === "fulfilment_proof"
       ? ["orderId", "milestoneCode"]
       : ["orderId"];
@@ -684,6 +701,31 @@ export function resolveFileTarget(store, purpose, body, user = null) {
     if (!record) fail(404, "service_not_found", "That supplier service no longer exists. Refresh services and try again.");
     return { type: "supplier_service", record };
   }
+  if (purpose === "catalog_item_photo") {
+    if (!body?.catalogItemId) {
+      fail(400, "attachment_target_required", "Add `catalogItemId` so GRIDGO knows which listing receives this sample photo.", {
+        requiredField: "catalogItemId",
+      });
+    }
+    const record = (store.catalogItems || []).find((item) => item.id === body.catalogItemId);
+    if (!record) fail(404, "catalog_item_not_found", "That catalog item no longer exists. Refresh listings and try again.");
+    const sortOrder = body.sortOrder == null ? (store.catalogItemPhotos || []).filter((photo) => photo.catalogItemId === record.id).length : Number(body.sortOrder);
+    if (!Number.isSafeInteger(sortOrder) || sortOrder < 0 || sortOrder > 7) {
+      fail(400, "invalid_catalog_item", "sortOrder must be an integer from 0 through 7.", { field: "sortOrder" });
+    }
+    const altText = body.altText == null ? null : String(body.altText);
+    if (altText && altText.length > 240) fail(400, "invalid_catalog_item", "altText is too long.", { field: "altText" });
+    return { type: "supplier_catalog_item", record, sortOrder, altText, expectedVersion: body.expectedVersion };
+  }
+  if (purpose === "supplier_shop_image") {
+    const slot = String(body?.slot || "");
+    if (!["logo", "cover"].includes(slot)) {
+      fail(400, "attachment_target_required", "Add `slot` as logo or cover.", { requiredField: "slot" });
+    }
+    const record = (store.supplierProfiles || []).find((item) => item.userId === user?.id);
+    if (!record) fail(404, "supplier_profile_not_found", "Complete supplier enrollment first.");
+    return { type: "supplier_shop_media", record, slot, expectedVersion: body.expectedVersion };
+  }
   if (!body?.orderId) {
     fail(400, "attachment_target_required", "Add `orderId` so GRIDGO knows which order receives this file.", {
       requiredField: "orderId",
@@ -767,6 +809,14 @@ export function authorizeFileAttach(user, file, target) {
     if (target?.type !== "supplier_service" || !hasRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     return;
   }
+  if (file.purpose === "catalog_item_photo") {
+    if (target?.type !== "supplier_catalog_item" || !hasRole(user, "supplier") || record.supplierId !== user.id) forbidden();
+    return;
+  }
+  if (file.purpose === "supplier_shop_image") {
+    if (target?.type !== "supplier_shop_media" || !hasRole(user, "supplier") || record.userId !== user.id) forbidden();
+    return;
+  }
   if (file.purpose === "verification_document") {
     if (target?.type !== "user" || !hasRole(user, "supplier") || target.record.id !== user.id) forbidden();
     if (!VERIFICATION_DOCUMENT_TYPE_SET.has(target.documentType)) {
@@ -782,6 +832,67 @@ export function authorizeFileAttach(user, file, target) {
     return;
   }
   fail(409, "file_metadata_invalid", "This file purpose cannot be attached. Upload the file again.");
+}
+
+export function attachCatalogItemPhoto(store, file, target, { at }) {
+  if (file.purpose !== "catalog_item_photo" || target?.type !== "supplier_catalog_item") {
+    fail(409, "file_metadata_invalid", "This upload cannot be attached as a listing photo.");
+  }
+  if (!Array.isArray(store.catalogItemPhotos)) store.catalogItemPhotos = [];
+  const photos = store.catalogItemPhotos.filter((photo) => photo.catalogItemId === target.record.id);
+  const existingAtSlot = photos.find((photo) => photo.sortOrder === target.sortOrder);
+  if (!existingAtSlot && photos.length >= 8) {
+    fail(409, "catalog_photo_limit", "A listing can have at most eight sample photos.");
+  }
+  if (existingAtSlot) {
+    const replaced = (store.files || []).find((candidate) => candidate.fileId === existingAtSlot.fileId);
+    if (replaced) {
+      replaced.references = (replaced.references || []).filter(
+        (reference) => !(reference.type === "supplier_catalog_item" && reference.id === target.record.id),
+      );
+    }
+    store.catalogItemPhotos = store.catalogItemPhotos.filter((photo) => photo !== existingAtSlot);
+  }
+  store.catalogItemPhotos.push({
+    catalogItemId: target.record.id,
+    fileId: file.fileId,
+    sortOrder: target.sortOrder,
+    altText: target.altText ?? null,
+    createdAt: at,
+  });
+  if (!Array.isArray(file.references)) file.references = [];
+  file.references.push({ type: "supplier_catalog_item", id: target.record.id, field: "photos" });
+  target.record.version = (target.record.version || 1) + 1;
+  target.record.updatedAt = at;
+  return { photo: store.catalogItemPhotos.find((photo) => photo.fileId === file.fileId), item: target.record };
+}
+
+export function attachSupplierShopImage(store, file, target, { at }) {
+  if (file.purpose !== "supplier_shop_image" || target?.type !== "supplier_shop_media") {
+    fail(409, "file_metadata_invalid", "This upload cannot be attached as a shop image.");
+  }
+  if (!Array.isArray(store.supplierShopMedia)) store.supplierShopMedia = [];
+  const existing = store.supplierShopMedia.find((media) => media.supplierId === target.record.userId && media.slot === target.slot);
+  if (existing) {
+    const replaced = (store.files || []).find((candidate) => candidate.fileId === existing.fileId);
+    if (replaced) {
+      replaced.references = (replaced.references || []).filter(
+        (reference) => !(reference.type === "supplier_shop_media" && reference.id === target.record.userId && reference.field === target.slot),
+      );
+    }
+    store.supplierShopMedia = store.supplierShopMedia.filter((media) => media !== existing);
+  }
+  store.supplierShopMedia.push({
+    supplierId: target.record.userId,
+    slot: target.slot,
+    fileId: file.fileId,
+    updatedAt: at,
+  });
+  if (!Array.isArray(file.references)) file.references = [];
+  file.references.push({ type: "supplier_shop_media", id: target.record.userId, field: target.slot });
+  target.record.version = (target.record.version || 1) + 1;
+  target.record.updatedAt = at;
+  return { media: store.supplierShopMedia.find((media) => media.fileId === file.fileId), profile: target.record };
 }
 
 export function attachFileReference(file, target) {
@@ -864,6 +975,16 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
 }
 
 function canReadReference(user, store, reference) {
+  if (reference.type === "supplier_catalog_item") {
+    const item = (store.catalogItems || []).find((candidate) => candidate.id === reference.id);
+    if (!item) return false;
+    if (hasRole(user, "supplier") && item.supplierId === user.id) return true;
+    return Boolean(publicCatalogItem(store, item));
+  }
+  if (reference.type === "supplier_shop_media") {
+    if (hasRole(user, "supplier") && reference.id === user.id) return true;
+    return Boolean(publicSupplierShop(store, reference.id));
+  }
   if (reference.type === "supplier_service") {
     const service = (store.supplierServices || []).find((item) => item.id === reference.id);
     if (!service) return false;

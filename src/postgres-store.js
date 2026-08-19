@@ -33,8 +33,8 @@ const TABLES = [
   { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "shop_lat", "shop_lng", "shop_label", "created_at", "position", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
-  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "updated_at"] },
-  { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "version", "updated_at"] },
+  { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "updated_at"] },
   { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
   { name: "approval_case_events", keys: ["id"], columns: ["id", "approval_case_id", "application_revision", "from_status", "to_status", "actor_user_id", "actor_kind", "reason", "request_id", "snapshot", "created_at"], appendOnly: true },
@@ -45,13 +45,27 @@ const TABLES = [
   { name: "taxonomy_materials", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "taxonomy_finishes", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "zones", keys: ["id"], columns: ["id", "code", "name", "active", "position", "data"] },
-  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "created_at", "updated_at", "position", "data"] },
+  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "pricing_basis", "standard_turnaround_hours", "rush_enabled", "rush_turnaround_hours", "rush_price_minor", "version", "created_at", "updated_at", "position", "data"] },
+  { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
+  { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
+  { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "turnaround_mode", "turnaround_hours", "file_format_mode", "active", "sort_order", "version", "created_at", "updated_at"] },
+  { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
+  { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
+  { name: "supplier_catalog_item_file_formats", keys: ["catalog_item_id", "format_code"], columns: ["catalog_item_id", "format_code"] },
+  { name: "listing_starters", keys: ["id"], columns: ["id", "subcategory_code", "name", "default_pricing_unit", "default_package_qty", "default_turnaround_hours", "default_format_codes"] },
+  { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
+  { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "spec_binding", "sort_order"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "created_at", "updated_at", "position", "data"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
   { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
+  { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
+  { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "file_references", keys: ["file_id", "reference_type", "reference_id", "field"], columns: ["file_id", "reference_type", "reference_id", "field", "position", "data"] },
   { name: "rider_documents", keys: ["id"], columns: ["id", "rider_id", "kind", "file_id", "expires_on", "is_current", "uploaded_at", "replaced_at"] },
   { name: "credit_accounts", keys: ["user_id"], columns: ["user_id", "balance_minor", "data"] },
@@ -82,7 +96,21 @@ export function emptyStore() {
     settings: {},
     zones: [],
     supplierServices: [],
+    supplierServicePriceTiers: [],
+    acceptedFileFormats: [],
+    supplierServiceFileFormats: [],
+    catalogItems: [],
+    catalogItemPhotos: [],
+    supplierShopMedia: [],
+    catalogOptionGroups: [],
+    catalogOptions: [],
+    catalogItemFileFormats: [],
+    listingStarters: [],
+    listingStarterGroups: [],
+    listingStarterOptions: [],
     orders: [],
+    orderLineItems: [],
+    orderLineItemOptions: [],
     files: [],
     riderDocuments: [],
     credits: {},
@@ -127,7 +155,7 @@ function rowsFromStore(store) {
     rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, updated_at: profile.updatedAt });
   }
   for (const profile of (store.supplierProfiles || [])) {
-    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), updated_at: profile.updatedAt });
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), version: profile.version || 1, updated_at: profile.updatedAt });
   }
   for (const terms of (store.supplierPaymentTerms || [])) {
     rows.supplier_payment_terms.push({
@@ -136,6 +164,7 @@ function rowsFromStore(store) {
       pickup_full_online_enabled: terms.pickupFullOnlineEnabled,
       pickup_downpayment_store_enabled: terms.pickupDownpaymentStoreEnabled,
       pickup_downpayment_rate_bps: terms.pickupDownpaymentRateBps ?? null,
+      version: terms.version || 1,
       updated_at: terms.updatedAt,
     });
   }
@@ -148,6 +177,7 @@ function rowsFromStore(store) {
       pickup_full_online_enabled: true,
       pickup_downpayment_store_enabled: false,
       pickup_downpayment_rate_bps: null,
+      version: 1,
       updated_at: profile.updatedAt,
     });
   }
@@ -197,8 +227,87 @@ function rowsFromStore(store) {
     rows.supplier_services.push({
       id: service.id, supplier_id: service.supplierId, category_code: service.categoryCode, state: service.state,
       reference_rate_minor: money(service.referenceRateMinor, "supplierService.referenceRateMinor"),
-      turnaround_hours: service.turnaroundHours, created_at: service.createdAt, updated_at: service.updatedAt,
-      position, data: without(service, ["id", "supplierId", "categoryCode", "state", "referenceRateMinor", "turnaroundHours", "createdAt", "updatedAt"]),
+      turnaround_hours: service.turnaroundHours,
+      pricing_basis: String(service.pricingBasis || "").trim() || null,
+      standard_turnaround_hours: Object.hasOwn(service, "standardTurnaroundHours")
+        ? service.standardTurnaroundHours
+        : null,
+      rush_enabled: Boolean(service.rushEnabled),
+      rush_turnaround_hours: service.rushEnabled ? service.rushTurnaroundHours : null,
+      rush_price_minor: service.rushEnabled ? money(service.rushPriceMinor, "supplierService.rushPriceMinor") : null,
+      version: service.version || 1,
+      created_at: service.createdAt, updated_at: service.updatedAt,
+      position, data: without(service, ["id", "supplierId", "categoryCode", "state", "referenceRateMinor", "turnaroundHours", "pricingBasis", "standardTurnaroundHours", "rushEnabled", "rushTurnaroundHours", "rushPriceMinor", "version", "createdAt", "updatedAt"]),
+    });
+  }
+  for (const tier of (store.supplierServicePriceTiers || [])) {
+    rows.supplier_service_price_tiers.push({
+      id: tier.id, supplier_service_id: tier.supplierServiceId, tier_code: tier.tierCode,
+      color_tier: tier.colorTier ?? null, min_quantity: tier.minQuantity ?? 1,
+      max_quantity: tier.maxQuantity ?? null, unit_price_minor: money(tier.unitPriceMinor, "supplierServicePriceTier.unitPriceMinor"),
+      sort_order: tier.sortOrder,
+    });
+  }
+  for (const format of (store.acceptedFileFormats || [])) {
+    rows.accepted_file_formats.push({
+      code: format.code, display_name: format.displayName, input_kind: format.inputKind,
+      extensions: format.extensions || [], mime_types: format.mimeTypes || [], active: format.active !== false,
+    });
+  }
+  for (const format of (store.supplierServiceFileFormats || [])) {
+    rows.supplier_service_file_formats.push({ supplier_service_id: format.supplierServiceId, format_code: format.formatCode });
+  }
+  for (const item of (store.catalogItems || [])) {
+    rows.supplier_catalog_items.push({
+      id: item.id, supplier_id: item.supplierId, supplier_service_id: item.supplierServiceId,
+      subcategory_code: item.subcategoryCode, name: item.name, description: item.description || "",
+      base_price_minor: money(item.basePriceMinor, "catalogItem.basePriceMinor"),
+      pricing_unit: item.pricingUnit || "per_unit", package_qty: item.packageQty ?? null,
+      turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
+      file_format_mode: item.fileFormatMode || "inherit", active: item.active !== false,
+      sort_order: item.sortOrder, version: item.version || 1,
+      created_at: item.createdAt, updated_at: item.updatedAt,
+    });
+  }
+  for (const group of (store.catalogOptionGroups || [])) {
+    rows.supplier_catalog_option_groups.push({
+      id: group.id, catalog_item_id: group.catalogItemId, name: group.name,
+      kind: group.kind || "spec", help_text: group.helpText ?? null,
+      required: group.required !== false, selection_mode: "single", sort_order: group.sortOrder,
+      version: group.version || 1, created_at: group.createdAt, updated_at: group.updatedAt,
+    });
+  }
+  for (const option of (store.catalogOptions || [])) {
+    rows.supplier_catalog_options.push({
+      id: option.id, option_group_id: option.optionGroupId, label: option.label,
+      price_modifier_minor: money(option.priceModifierMinor ?? 0, "catalogOption.priceModifierMinor"),
+      spec_binding: option.specBinding ?? null, active: option.active !== false,
+      sort_order: option.sortOrder, created_at: option.createdAt, updated_at: option.updatedAt,
+    });
+  }
+  for (const format of (store.catalogItemFileFormats || [])) {
+    rows.supplier_catalog_item_file_formats.push({ catalog_item_id: format.catalogItemId, format_code: format.formatCode });
+  }
+  for (const starter of (store.listingStarters || [])) {
+    rows.listing_starters.push({
+      id: starter.id, subcategory_code: starter.subcategoryCode, name: starter.name,
+      default_pricing_unit: starter.defaultPricingUnit || "per_unit",
+      default_package_qty: starter.defaultPackageQty ?? null,
+      default_turnaround_hours: starter.defaultTurnaroundHours ?? null,
+      default_format_codes: starter.defaultFormatCodes || [],
+    });
+  }
+  for (const group of (store.listingStarterGroups || [])) {
+    rows.listing_starter_groups.push({
+      id: group.id, starter_id: group.starterId, name: group.name, kind: group.kind || "spec",
+      help_text: group.helpText ?? null, required: group.required !== false, sort_order: group.sortOrder,
+    });
+  }
+  for (const option of (store.listingStarterOptions || [])) {
+    rows.listing_starter_options.push({
+      id: option.id, starter_group_id: option.starterGroupId, label: option.label,
+      price_modifier_minor: money(option.priceModifierMinor ?? 0, "listingStarterOption.priceModifierMinor"),
+      spec_binding: option.specBinding ?? null, sort_order: option.sortOrder,
     });
   }
   for (const [position, order] of (store.orders || []).entries()) {
@@ -249,11 +358,52 @@ function rowsFromStore(store) {
       rows.payout_milestones.push({ order_id: order.id, code: milestone.code, share_percent: milestone.sharePercent, amount_minor: money(milestone.amountMinor, "payoutMilestone.amountMinor"), status: milestone.status, position: milestonePosition, data: without(milestone, ["code", "sharePercent", "amountMinor", "status"]) });
     }
   }
+  for (const line of (store.orderLineItems || [])) {
+    rows.order_line_items.push({
+      id: line.id, order_id: line.orderId,
+      source_catalog_item_id: line.sourceCatalogItemId ?? null,
+      source_supplier_service_id: line.sourceSupplierServiceId ?? null,
+      item_name_snapshot: line.itemNameSnapshot, description_snapshot: line.descriptionSnapshot || "",
+      pricing_basis_snapshot: line.pricingBasisSnapshot,
+      pricing_unit_snapshot: line.pricingUnitSnapshot || "per_unit",
+      package_qty_snapshot: line.packageQtySnapshot ?? null,
+      turnaround_hours_snapshot: line.turnaroundHoursSnapshot ?? null,
+      base_unit_price_minor: money(line.baseUnitPriceMinor, "orderLine.baseUnitPriceMinor"),
+      effective_unit_price_minor: money(line.effectiveUnitPriceMinor, "orderLine.effectiveUnitPriceMinor"),
+      quantity: line.quantity, line_subtotal_minor: money(line.lineSubtotalMinor, "orderLine.lineSubtotalMinor"),
+      accepted_format_codes_snapshot: line.acceptedFormatCodesSnapshot || [],
+      structured_spec_snapshot: line.structuredSpecSnapshot || {},
+      sort_order: line.sortOrder, snapshot_finalized: line.snapshotFinalized !== false, created_at: line.createdAt,
+    });
+  }
+  for (const option of (store.orderLineItemOptions || [])) {
+    rows.order_line_item_options.push({
+      id: option.id, order_line_item_id: option.orderLineItemId,
+      source_option_group_id: option.sourceOptionGroupId ?? null,
+      source_option_id: option.sourceOptionId ?? null,
+      group_name_snapshot: option.groupNameSnapshot,
+      group_kind_snapshot: option.groupKindSnapshot || "spec",
+      option_label_snapshot: option.optionLabelSnapshot,
+      price_modifier_minor: money(option.priceModifierMinor, "orderLineOption.priceModifierMinor"),
+      sort_order: option.sortOrder,
+    });
+  }
   for (const [position, file] of (store.files || []).entries()) {
     rows.files.push({ file_id: file.fileId, owner_id: file.ownerId, purpose: file.purpose, original_filename: file.originalFilename, declared_content_type: file.declaredContentType, detected_content_type: file.detectedContentType ?? null, size_bytes: file.size ?? null, state: file.state, object_key: file.objectKey, created_at: file.createdAt, position, data: without(file, ["fileId", "ownerId", "purpose", "originalFilename", "declaredContentType", "detectedContentType", "size", "state", "objectKey", "createdAt", "references"]) });
     for (const [referencePosition, reference] of (file.references || []).entries()) {
       rows.file_references.push({ file_id: file.fileId, reference_type: reference.type, reference_id: reference.id, field: reference.field, position: referencePosition, data: without(reference, ["type", "id", "field"]) });
     }
+  }
+  for (const photo of (store.catalogItemPhotos || [])) {
+    rows.supplier_catalog_item_photos.push({
+      catalog_item_id: photo.catalogItemId, file_id: photo.fileId, sort_order: photo.sortOrder,
+      alt_text: photo.altText ?? null, created_at: photo.createdAt,
+    });
+  }
+  for (const media of (store.supplierShopMedia || [])) {
+    rows.supplier_shop_media.push({
+      supplier_id: media.supplierId, slot: media.slot, file_id: media.fileId, updated_at: media.updatedAt,
+    });
   }
   for (const document of (store.riderDocuments || [])) {
     rows.rider_documents.push({ id: document.id, rider_id: document.riderId, kind: document.kind, file_id: document.fileId, expires_on: document.expiresOn ?? null, is_current: document.isCurrent !== false, uploaded_at: document.uploadedAt, replaced_at: document.replacedAt ?? null });
@@ -331,13 +481,14 @@ export async function loadStore(database) {
     present(item, "businessNature", row.business_nature);
     return item;
   });
-  store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => ({ userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, updatedAt: row.updated_at }));
+  store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => ({ userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, version: row.version || 1, updatedAt: row.updated_at }));
   store.supplierPaymentTerms = orderedBy(loaded.supplier_payment_terms, "supplier_id").map((row) => ({
     supplierId: row.supplier_id,
     deliveryDownpaymentRateBps: row.delivery_downpayment_rate_bps,
     pickupFullOnlineEnabled: row.pickup_full_online_enabled,
     pickupDownpaymentStoreEnabled: row.pickup_downpayment_store_enabled,
     pickupDownpaymentRateBps: row.pickup_downpayment_rate_bps,
+    version: row.version || 1,
     updatedAt: row.updated_at,
   }));
   store.riderProfiles = orderedBy(loaded.rider_profiles, "user_id").map((row) => {
@@ -368,7 +519,84 @@ export async function loadStore(database) {
   store.taxonomy.materials = ordered(loaded.taxonomy_materials).map((row) => ({ ...row.data, id: row.id, code: row.code, name: row.name, categoryCodes: row.category_codes, active: row.active }));
   store.taxonomy.finishes = ordered(loaded.taxonomy_finishes).map((row) => ({ ...row.data, id: row.id, code: row.code, name: row.name, categoryCodes: row.category_codes, active: row.active }));
   store.zones = ordered(loaded.zones).map((row) => ({ ...row.data, id: row.id, code: row.code, name: row.name, active: row.active }));
-  store.supplierServices = ordered(loaded.supplier_services).map((row) => ({ ...row.data, id: row.id, supplierId: row.supplier_id, categoryCode: row.category_code, state: row.state, referenceRateMinor: row.reference_rate_minor, turnaroundHours: row.turnaround_hours, createdAt: row.created_at, updatedAt: row.updated_at }));
+  store.supplierServices = ordered(loaded.supplier_services).map((row) => {
+    const item = {
+      ...row.data, id: row.id, supplierId: row.supplier_id, categoryCode: row.category_code, state: row.state,
+      referenceRateMinor: row.reference_rate_minor, turnaroundHours: row.turnaround_hours,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    };
+    present(item, "pricingBasis", row.pricing_basis);
+    present(item, "standardTurnaroundHours", row.standard_turnaround_hours);
+    if (row.rush_enabled) {
+      item.rushEnabled = true;
+      present(item, "rushTurnaroundHours", row.rush_turnaround_hours);
+      present(item, "rushPriceMinor", row.rush_price_minor);
+    }
+    if (row.version != null) item.version = row.version;
+    return item;
+  });
+  store.supplierServicePriceTiers = orderedBy(loaded.supplier_service_price_tiers, "supplier_service_id", "sort_order", "id").map((row) => ({
+    id: row.id, supplierServiceId: row.supplier_service_id, tierCode: row.tier_code, colorTier: row.color_tier,
+    minQuantity: row.min_quantity, maxQuantity: row.max_quantity, unitPriceMinor: row.unit_price_minor, sortOrder: row.sort_order,
+  }));
+  store.acceptedFileFormats = orderedBy(loaded.accepted_file_formats, "code").map((row) => ({
+    code: row.code, displayName: row.display_name, inputKind: row.input_kind,
+    extensions: row.extensions || [], mimeTypes: row.mime_types || [], active: row.active,
+  }));
+  store.supplierServiceFileFormats = orderedBy(loaded.supplier_service_file_formats, "supplier_service_id", "format_code").map((row) => ({
+    supplierServiceId: row.supplier_service_id, formatCode: row.format_code,
+  }));
+  store.catalogItems = orderedBy(loaded.supplier_catalog_items, "supplier_id", "sort_order", "id").map((row) => ({
+    id: row.id, supplierId: row.supplier_id, supplierServiceId: row.supplier_service_id,
+    subcategoryCode: row.subcategory_code, name: row.name, description: row.description,
+    basePriceMinor: row.base_price_minor, pricingUnit: row.pricing_unit, packageQty: row.package_qty,
+    turnaroundMode: row.turnaround_mode, turnaroundHours: row.turnaround_hours,
+    fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
+    version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogOptionGroups = orderedBy(loaded.supplier_catalog_option_groups, "catalog_item_id", "sort_order", "id").map((row) => ({
+    id: row.id, catalogItemId: row.catalog_item_id, name: row.name, kind: row.kind, helpText: row.help_text,
+    required: row.required, selectionMode: row.selection_mode, sortOrder: row.sort_order,
+    version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogOptions = orderedBy(loaded.supplier_catalog_options, "option_group_id", "sort_order", "id").map((row) => ({
+    id: row.id, optionGroupId: row.option_group_id, label: row.label,
+    priceModifierMinor: row.price_modifier_minor, specBinding: row.spec_binding,
+    active: row.active, sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogItemFileFormats = orderedBy(loaded.supplier_catalog_item_file_formats, "catalog_item_id", "format_code").map((row) => ({
+    catalogItemId: row.catalog_item_id, formatCode: row.format_code,
+  }));
+  store.listingStarters = orderedBy(loaded.listing_starters, "subcategory_code", "id").map((row) => ({
+    id: row.id, subcategoryCode: row.subcategory_code, name: row.name,
+    defaultPricingUnit: row.default_pricing_unit, defaultPackageQty: row.default_package_qty,
+    defaultTurnaroundHours: row.default_turnaround_hours, defaultFormatCodes: row.default_format_codes || [],
+  }));
+  store.listingStarterGroups = orderedBy(loaded.listing_starter_groups, "starter_id", "sort_order", "id").map((row) => ({
+    id: row.id, starterId: row.starter_id, name: row.name, kind: row.kind, helpText: row.help_text,
+    required: row.required, sortOrder: row.sort_order,
+  }));
+  store.listingStarterOptions = orderedBy(loaded.listing_starter_options, "starter_group_id", "sort_order", "id").map((row) => ({
+    id: row.id, starterGroupId: row.starter_group_id, label: row.label,
+    priceModifierMinor: row.price_modifier_minor, specBinding: row.spec_binding, sortOrder: row.sort_order,
+  }));
+  store.orderLineItems = orderedBy(loaded.order_line_items, "order_id", "sort_order", "id").map((row) => ({
+    id: row.id, orderId: row.order_id, sourceCatalogItemId: row.source_catalog_item_id,
+    sourceSupplierServiceId: row.source_supplier_service_id, itemNameSnapshot: row.item_name_snapshot,
+    descriptionSnapshot: row.description_snapshot, pricingBasisSnapshot: row.pricing_basis_snapshot,
+    pricingUnitSnapshot: row.pricing_unit_snapshot, packageQtySnapshot: row.package_qty_snapshot,
+    turnaroundHoursSnapshot: row.turnaround_hours_snapshot, baseUnitPriceMinor: row.base_unit_price_minor,
+    effectiveUnitPriceMinor: row.effective_unit_price_minor, quantity: row.quantity,
+    lineSubtotalMinor: row.line_subtotal_minor, acceptedFormatCodesSnapshot: row.accepted_format_codes_snapshot,
+    structuredSpecSnapshot: row.structured_spec_snapshot, sortOrder: row.sort_order,
+    snapshotFinalized: row.snapshot_finalized, createdAt: row.created_at,
+  }));
+  store.orderLineItemOptions = orderedBy(loaded.order_line_item_options, "order_line_item_id", "sort_order", "id").map((row) => ({
+    id: row.id, orderLineItemId: row.order_line_item_id, sourceOptionGroupId: row.source_option_group_id,
+    sourceOptionId: row.source_option_id, groupNameSnapshot: row.group_name_snapshot,
+    groupKindSnapshot: row.group_kind_snapshot, optionLabelSnapshot: row.option_label_snapshot,
+    priceModifierMinor: row.price_modifier_minor, sortOrder: row.sort_order,
+  }));
 
   const payments = new Map();
   for (const row of ordered(loaded.order_payments)) {
@@ -447,6 +675,12 @@ export async function loadStore(database) {
     references.get(row.file_id).push({ ...row.data, type: row.reference_type, id: row.reference_id, field: row.field });
   }
   store.files = ordered(loaded.files).map((row) => ({ ...row.data, fileId: row.file_id, ownerId: row.owner_id, purpose: row.purpose, originalFilename: row.original_filename, declaredContentType: row.declared_content_type, detectedContentType: row.detected_content_type, size: row.size_bytes, state: row.state, objectKey: row.object_key, references: references.get(row.file_id) || [], createdAt: row.created_at }));
+  store.catalogItemPhotos = orderedBy(loaded.supplier_catalog_item_photos, "catalog_item_id", "sort_order", "file_id").map((row) => ({
+    catalogItemId: row.catalog_item_id, fileId: row.file_id, sortOrder: row.sort_order, altText: row.alt_text, createdAt: row.created_at,
+  }));
+  store.supplierShopMedia = orderedBy(loaded.supplier_shop_media, "supplier_id", "slot").map((row) => ({
+    supplierId: row.supplier_id, slot: row.slot, fileId: row.file_id, updatedAt: row.updated_at,
+  }));
   store.riderDocuments = orderedBy(loaded.rider_documents, "uploaded_at", "id").map((row) => {
     const item = { id: row.id, riderId: row.rider_id, kind: row.kind, fileId: row.file_id, isCurrent: row.is_current, uploadedAt: row.uploaded_at };
     present(item, "expiresOn", row.expires_on);
@@ -564,7 +798,17 @@ export async function saveStore(database, store) {
   }
   for (const table of TABLES) {
     const { before, current } = maps.get(table.name);
+    if (table.name === "order_line_items") {
+      const unfinalized = new Map([...current].map(([key, row]) => [key, { ...row, snapshot_finalized: false }]));
+      await upsertChanged(database, table, before, unfinalized);
+      continue;
+    }
     await upsertChanged(database, table, before, current);
+  }
+  for (const row of currentRows.order_line_items || []) {
+    if (row.snapshot_finalized) {
+      await database.query("UPDATE order_line_items SET snapshot_finalized = true WHERE id = $1", [row.id]);
+    }
   }
   if (Object.hasOwn(store, BASELINE)) {
     store[BASELINE] = structuredClone(currentRows);

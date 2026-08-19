@@ -66,6 +66,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786843800000_role_memberships_and_approvals",
         "1786870800000_service_fee_money_model",
         "1786874400000_enrollment_legacy_supplier_shop",
+        "1786878000000_supplier_catalog_listings",
       ],
     );
     await client.query(`
@@ -89,6 +90,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       (error) => error.code === "23514" && error.constraint === "users_org_name_check",
     );
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, null);
     await runner(migrationOptions(schema, "down", 1, client));
     await assert.rejects(
       client.query("UPDATE users SET shop_label = 'Updated shop' WHERE id = 'multi_role_shop'"),

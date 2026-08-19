@@ -100,6 +100,8 @@ Parents contain IDs only:
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
+| `catalog_item_photo` | listing photo rows on `supplier_catalog_item` (`sortOrder` 0–7, optional `altText`) |
+| `supplier_shop_image` | shop media slot `logo` or `cover` |
 | `verification_document` | `supplier.verificationDocumentFileIds: string[]` (private; never part of `PublicUser`) |
 | `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 
@@ -117,6 +119,8 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
+| `catalog_item_photo` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
+| `supplier_shop_image` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 
@@ -126,7 +130,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
