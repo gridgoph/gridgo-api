@@ -415,7 +415,7 @@ Authorization: `ops_admin` or `super_admin`.
 { "audience": "everyone", "title": "Update your app", "body": "GRIDGO 1.4 is available in the store.", "imageUrl": "https://cdn.example/update.png" }
 ```
 
-`imageUrl` is optional. It is either a public `http(s)` picture link, or a hosted path `/public/announcement-images/<fileId>` returned after `POST /files` with `purpose=announcement_image` (JPEG/PNG/WebP, 1 MiB). The picture is stored on each notification record and shown in-app. Lock-screen pictures are included in the FCM payload only when Google can fetch a public HTTPS URL — LAN and `http` links still reach the in-app list.
+`imageUrl` is optional. It is either an `http(s)` picture link, or a hosted path `/public/announcement-images/<fileId>` returned after `POST /files` with `purpose=announcement_image` (JPEG/PNG/WebP, 1 MiB). The picture is stored on each notification record, shown in-app, and included in the FCM payload as an absolute URL the **handset** downloads. Hosted paths are joined to `GRIDGO_PUBLIC_API_ORIGIN`, or locally to the http `MINIO_PUBLIC_URL` host on this process's port.
 
 `GET /public/announcement-images/:fileId` is unauthenticated and streams a ready `announcement_image` so FCM and the apps can load it without a signed MinIO URL.
 

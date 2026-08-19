@@ -15,6 +15,7 @@ import {
   createPushDeliveryOrDisable,
   deviceTokensFor,
   fcmRequestBody,
+  announcementImageOrigin,
   isFcmFetchableImageUrl,
   isFcmTokenShaped,
   loadServiceAccount,
@@ -423,26 +424,39 @@ test("a public HTTPS picture rides the FCM notification, never the data map", ()
   assert.equal(JSON.stringify(body.message.data).includes("cdn.gridgo"), false);
 });
 
-test("LAN and hosted-path pictures stay in-app unless a public API origin can serve them", () => {
-  assert.equal(isFcmFetchableImageUrl("http://192.168.1.55:8787/public/announcement-images/file_aaaaaaaaaaaa"), false);
-  assert.equal(isFcmFetchableImageUrl("https://192.168.1.55/pic.png"), false);
+test("the phone can download a LAN picture; hosted paths need a phone-visible origin", () => {
+  const lan = "http://192.168.1.55:8787/public/announcement-images/file_aaaaaaaaaaaa";
+  assert.equal(isFcmFetchableImageUrl(lan), true);
   assert.equal(isFcmFetchableImageUrl("https://cdn.gridgo.example/pic.png"), true);
+  assert.equal(isFcmFetchableImageUrl("javascript:alert(1)"), false);
 
   const hosted = "/public/announcement-images/file_aaaaaaaaaaaa";
   assert.equal(resolveFcmImageUrl(hosted, {}), null);
+  assert.equal(
+    announcementImageOrigin({ MINIO_PUBLIC_URL: "http://192.168.1.55:9000" }),
+    "http://192.168.1.55:8787",
+  );
+  assert.equal(
+    announcementImageOrigin({ MINIO_PUBLIC_URL: "https://files.talasora.com" }),
+    "",
+  );
+  assert.equal(
+    resolveFcmImageUrl(hosted, { MINIO_PUBLIC_URL: "http://192.168.1.55:9000" }),
+    lan,
+  );
   assert.equal(
     resolveFcmImageUrl(hosted, { GRIDGO_PUBLIC_API_ORIGIN: "https://gridgo-api.talasora.com" }),
     "https://gridgo-api.talasora.com/public/announcement-images/file_aaaaaaaaaaaa",
   );
 
-  const lan = pushMessageFor({
+  const message = pushMessageFor({
     id: "ntf_img",
     title: "T",
     body: "B",
     at: AT,
-    imageUrl: "http://192.168.1.55:8787/public/announcement-images/file_aaaaaaaaaaaa",
-  });
-  assert.equal(lan.image, undefined);
+    imageUrl: hosted,
+  }, { MINIO_PUBLIC_URL: "http://192.168.1.55:9000" });
+  assert.equal(message.image, lan);
 });
 
 test("announcement image URLs accept hosted paths and http(s) links only", () => {

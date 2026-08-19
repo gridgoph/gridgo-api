@@ -363,36 +363,40 @@ export function announcementImagePublicPath(fileId) {
   return `${ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX}${fileId}`;
 }
 
-function isIpv4Private(host) {
-  const parts = host.split(".").map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return false;
-  }
-  const [a, b] = parts;
-  return a === 10 || a === 127 || a === 0 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
-}
-
-function isPrivateHostname(host) {
-  const hostname = String(host || "").replace(/^\[|\]$/g, "").toLowerCase();
-  if (!hostname) return true;
-  if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) return true;
-  if (hostname === "::1" || hostname === "0:0:0:0:0:0:0:1") return true;
-  if (hostname.startsWith("fc") || hostname.startsWith("fd") || hostname.startsWith("fe80:")) return true;
-  return isIpv4Private(hostname);
-}
-
 /**
- * Google fetches lock-screen pictures itself. That only works for a public
- * HTTPS URL — never localhost, never a LAN address, never http.
+ * The phone downloads the lock-screen picture itself from this URL, so a LAN
+ * `http://192.168.1.55:8787/...` path is valid in local development. Credentials
+ * in the URL are never allowed.
  */
 export function isFcmFetchableImageUrl(value) {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:") return false;
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
     if (url.username || url.password) return false;
-    return !isPrivateHostname(url.hostname);
+    return Boolean(url.hostname);
   } catch {
     return false;
+  }
+}
+
+/**
+ * Origin the phone uses to fetch a hosted broadcast picture.
+ *
+ * `GRIDGO_PUBLIC_API_ORIGIN` always wins. When it is unset and MinIO's public
+ * origin is plain http (local LAN), reuse that host with this process's port
+ * so an uploaded picture can ride the lock screen without another env var.
+ * An https MinIO origin is production storage, not the API — do not guess.
+ */
+export function announcementImageOrigin(env = process.env) {
+  const explicit = trimmedString(env.GRIDGO_PUBLIC_API_ORIGIN).replace(/\/+$/, "");
+  if (explicit) return explicit;
+  try {
+    const minio = new URL(trimmedString(env.MINIO_PUBLIC_URL));
+    if (minio.protocol !== "http:" || !minio.hostname) return "";
+    const port = trimmedString(env.PORT) || "8787";
+    return `${minio.protocol}//${minio.hostname}:${port}`;
+  } catch {
+    return "";
   }
 }
 
@@ -433,15 +437,15 @@ export function normalizeAnnouncementImageUrl(value) {
 }
 
 /**
- * The URL FCM should fetch for a lock-screen picture, or null when Google
- * cannot reach it. Hosted paths are joined to GRIDGO_PUBLIC_API_ORIGIN.
+ * Absolute URL to put on the FCM payload so the phone can download the picture.
+ * Hosted paths are joined to `announcementImageOrigin`.
  */
 export function resolveFcmImageUrl(imageUrl, env = process.env) {
   const value = trimmedString(imageUrl);
   if (!value) return null;
   let absolute = value;
   if (value.startsWith(ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX)) {
-    const origin = trimmedString(env.GRIDGO_PUBLIC_API_ORIGIN).replace(/\/+$/, "");
+    const origin = announcementImageOrigin(env);
     if (!origin) return null;
     try {
       absolute = new URL(value, `${origin}/`).toString();

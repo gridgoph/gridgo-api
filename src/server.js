@@ -414,13 +414,19 @@ async function serveAnnouncementImage(req, res, store, pathname) {
     return send(res, 404, { error: "announcement_image_not_found" });
   }
   try {
-    const stream = await objectStorage.getObject(file.objectKey);
-    res.writeHead(200, {
+    const headers = {
       "Content-Type": file.detectedContentType || "application/octet-stream",
       "Cache-Control": "public, max-age=86400",
       "Content-Length": String(file.size),
       ...(res.gridgoCorsHeaders || {}),
-    });
+    };
+    if (req.method === "HEAD") {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
+    const stream = await objectStorage.getObject(file.objectKey);
+    res.writeHead(200, headers);
     stream.on("error", () => {
       if (!res.writableEnded) res.destroy();
     });
@@ -1501,7 +1507,10 @@ async function handleRequest(req, res) {
     await expireElapsedIssueWindows();
     const store = await load();
 
-    if (req.method === "GET" && pathname.startsWith("/public/announcement-images/")) {
+    if (
+      (req.method === "GET" || req.method === "HEAD")
+      && pathname.startsWith("/public/announcement-images/")
+    ) {
       return serveAnnouncementImage(req, res, store, pathname);
     }
 
