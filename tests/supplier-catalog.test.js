@@ -459,6 +459,62 @@ test("GET item includes persisted photos after postgres round-trip", { skip: !DA
   await database.close();
 });
 
+test("creating from a GRIDGO starter persists its file types", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await database.query(`TRUNCATE
+    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    issues, claims, credit_ledger, credit_accounts, file_references, files,
+    payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
+    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
+    supplier_catalog_item_file_formats, supplier_catalog_options, supplier_catalog_option_groups,
+    supplier_catalog_items, supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
+    listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
+    zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
+    taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
+    platform_settings RESTART IDENTITY CASCADE`);
+  await seedReferenceData(database);
+  let itemId = "";
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({
+      id: "user_supplier", clerkUserId: "clerk_supplier_starter", email: "starter@gridgo.test",
+      name: "Supplier", role: "supplier", verificationStatus: "approved", createdAt: AT,
+    });
+    store.userRoleMemberships.push({ userId: "user_supplier", role: "supplier", createdAt: AT });
+    store.supplierServices.push({
+      id: "svc_starter", supplierId: "user_supplier", categoryCode: "marketing_collateral",
+      state: "live", pricingBasis: "per_unit", referenceRateMinor: 1000, turnaroundHours: 24,
+      version: 1, createdAt: AT, updatedAt: AT,
+    });
+    const response = await routeSupplierCatalog({
+      req: { method: "POST", headers: {} },
+      url: new URL("http://127.0.0.1/me/catalog-items"),
+      store,
+      user: store.users.find((candidate) => candidate.id === "user_supplier"),
+      readBody: async () => ({
+        supplierServiceId: "svc_starter",
+        subcategoryCode: "flyers",
+        name: "Test",
+        starterId: "lst_flyers",
+        active: false,
+      }),
+      id: (prefix) => `${prefix}_starter_save`,
+      now: () => AT,
+      audit: () => {},
+    });
+    assert.equal(response.status, 201);
+    itemId = response.body.item.id;
+    assert.ok(response.body.item.optionGroups.length >= 1);
+    await saveStore(database, store);
+  });
+  const reloaded = await loadStore(database);
+  const item = privateCatalogItem(reloaded, reloaded.catalogItems.find((candidate) => candidate.id === itemId));
+  assert.equal(item.name, "Test");
+  assert.equal(item.fileFormatMode, "override");
+  assert.deepEqual(item.acceptedFormats.map((format) => format.code).sort(), ["jpeg", "pdf", "png"]);
+  await database.close();
+});
+
 test("prep steps persist on private and public item projections", async () => {
   const store = fixture();
   const created = await routeSupplierCatalog({

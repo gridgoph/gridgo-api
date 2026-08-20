@@ -791,7 +791,18 @@ async function upsertChanged(database, table, before, current) {
       );
       continue;
     }
-    const updates = table.columns.filter((column) => !table.keys.includes(column)).map((column) => `${column} = EXCLUDED.${column}`).join(", ");
+    const updatable = table.columns.filter((column) => !table.keys.includes(column));
+    // Junction tables are all-key rows. `DO UPDATE SET` with an empty list is
+    // a syntax error, which is how creating a listing from a GRIDGO starter
+    // (it writes catalog item file-format rows) answered 500.
+    if (updatable.length === 0) {
+      await database.query(
+        `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) DO NOTHING`,
+        table.columns.map((column) => row[column]),
+      );
+      continue;
+    }
+    const updates = updatable.map((column) => `${column} = EXCLUDED.${column}`).join(", ");
     await database.query(
       `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) DO UPDATE SET ${updates}`,
       table.columns.map((column) => row[column]),
