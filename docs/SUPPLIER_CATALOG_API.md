@@ -43,6 +43,10 @@ POST /files            purpose=catalog_item_photo | supplier_shop_image
 POST /files/:fileId/attach
 ```
 
+`GET /me/supplier-profile` returns `{ profile }` with `userId`, `shopName`, `contactName`, `shop`, `pickupAvailable`, `phone`, `email`, `version`, `updatedAt`, and `media[]`. `phone` and `email` are the signed-in account's, not the shop record's; `phone` is `null` until a number is stored.
+
+`PATCH /me/supplier-profile` accepts `shopName`, `contactName`, `shop`, `pickupAvailable`, and `phone`, and answers with the same shape as the read. Saving `shopName` also writes `users.supplierName`, which is the field `GET /auth/me` → `publicUser` already exposes to Account. A shop-name-only or phone-only edit still bumps `version` and `updatedAt`. Phone accepts `09XXXXXXXXX`, `639XXXXXXXXX`, and `+639XXXXXXXXX`, tolerating spaces, dashes, and parentheses, and is stored canonically as `+639XXXXXXXXX`. Anything else, including a blank number, is `400 invalid_supplier_profile` with `field: "phone"` and persists nothing. Numbers captured at enrollment are left exactly as they were stored. Email belongs to the GRIDGO sign-in, so sending `email` is `400 email_not_editable`. Clerk identity copy may refresh the account email from Clerk's primary address and will not steal an address already on another GRIDGO user.
+
 `GET /me/catalog-items` accepts `?subcategoryCode=` and `?active=true|false`.
 
 `POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`. A starter is copied into catalog rows at create time and is never referenced after.

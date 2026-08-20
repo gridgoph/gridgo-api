@@ -32,7 +32,7 @@ const JWT_KEY = publicKey.export({ type: "spki", format: "pem" });
 function fixture({ approvalStatus = "approved", fileFormatMode = "inherit", subcategoryCode = "tarpaulins_outdoor_banners" } = {}) {
   return {
     taxonomy: defaultTaxonomy(),
-    users: [{ id: "supplier", role: "supplier" }],
+    users: [{ id: "supplier", role: "supplier", email: "shop@gridgo.test", phone: "+639171234567" }],
     userRoleMemberships: [{ userId: "supplier", role: "supplier" }],
     supplierProfiles: [{
       userId: "supplier", shopName: "Print Shop", contactName: "Supplier",
@@ -487,6 +487,148 @@ test("prep steps persist on private and public item projections", async () => {
   assert.equal(got.body.item.prepSteps[0].title, "Flatten PNG");
   const published = publicCatalogItem(store, store.catalogItems[0]);
   assert.equal(published.prepSteps[0].body, "Export art as a flattened PNG.");
+});
+
+function supplierProfileCall(store, { method, body = {}, headers = {}, audit = () => {} } = {}) {
+  return routeSupplierCatalog({
+    req: { method, headers },
+    url: new URL("http://127.0.0.1/me/supplier-profile"),
+    store,
+    user: store.users[0],
+    readBody: async () => body,
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit,
+  });
+}
+
+test("a shop changes its own phone number and reads it back with its email", async () => {
+  const store = fixture();
+  const actions = [];
+  const patched = await supplierProfileCall(store, {
+    method: "PATCH",
+    body: { expectedVersion: 1, phone: "0917 765 4321" },
+    audit: (_store, entry) => actions.push(entry.action),
+  });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.profile.phone, "+639177654321");
+  assert.equal(patched.body.profile.email, "shop@gridgo.test");
+  assert.equal(patched.body.profile.version, 2);
+  assert.equal(patched.body.profile.updatedAt, AT);
+  assert.deepEqual(actions, ["supplier_profile.update"]);
+  assert.equal(store.users[0].phone, "+639177654321");
+
+  const got = await supplierProfileCall(store, { method: "GET" });
+  assert.equal(got.status, 200);
+  assert.equal(got.body.profile.phone, "+639177654321");
+  assert.equal(got.body.profile.email, "shop@gridgo.test");
+  assert.equal(got.body.profile.shopName, "Print Shop");
+  assert.equal(got.body.profile.version, 2);
+});
+
+test("a shop that never gave a number reads back an empty phone", async () => {
+  const store = fixture();
+  delete store.users[0].phone;
+  const got = await supplierProfileCall(store, { method: "GET" });
+  assert.equal(got.body.profile.phone, null);
+  assert.equal(got.body.profile.email, "shop@gridgo.test");
+});
+
+test("a phone edit from a stale screen still loses to the current record", async () => {
+  const store = fixture();
+  await supplierProfileCall(store, { method: "PATCH", body: { expectedVersion: 1, phone: "09177654321" } });
+  await assert.rejects(
+    () => supplierProfileCall(store, { method: "PATCH", body: { expectedVersion: 1, phone: "09170001111" } }),
+    (error) => error.status === 409 && error.code === "supplier_profile_stale",
+  );
+  assert.equal(store.users[0].phone, "+639177654321");
+  assert.equal(store.supplierProfiles[0].version, 2);
+});
+
+test("saving shop name also writes the account supplierName Account already reads", async () => {
+  const store = fixture();
+  store.users[0].supplierName = "Lovis Printshop";
+  const patched = await supplierProfileCall(store, {
+    method: "PATCH",
+    body: { expectedVersion: 1, shopName: "Lovis Print Shop" },
+  });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.profile.shopName, "Lovis Print Shop");
+  assert.equal(patched.body.profile.version, 2);
+  assert.equal(store.supplierProfiles[0].shopName, "Lovis Print Shop");
+  assert.equal(store.users[0].supplierName, "Lovis Print Shop");
+});
+
+test("saved shop name persists as users.supplierName", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await database.query(`TRUNCATE
+    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    issues, claims, credit_ledger, credit_accounts, file_references, files,
+    payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
+    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
+    supplier_catalog_item_file_formats, supplier_catalog_options, supplier_catalog_option_groups,
+    supplier_catalog_items, supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
+    listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
+    zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
+    taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
+    platform_settings RESTART IDENTITY CASCADE`);
+  await seedReferenceData(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({
+      id: "user_lovis", clerkUserId: "clerk_lovis", email: "lovis@gridgo.test",
+      name: "Lovis", role: "supplier", supplierName: "Lovis Printshop",
+      verificationStatus: "pending", createdAt: AT,
+    });
+    store.userRoleMemberships.push({ userId: "user_lovis", role: "supplier", createdAt: AT });
+    store.supplierProfiles.push({
+      userId: "user_lovis", shopName: "Lovis Printshop", contactName: "Lovis",
+      shop: { lat: 7.064, lng: 125.6085, label: "Davao Shop" }, pickupAvailable: false, version: 1, updatedAt: AT,
+    });
+    await saveStore(database, store);
+  });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const patched = await supplierProfileCall(store, {
+      method: "PATCH",
+      body: { expectedVersion: 1, shopName: "Lovis Print Shop" },
+    });
+    assert.equal(patched.status, 200);
+    await saveStore(database, store);
+  });
+  const reloaded = await loadStore(database);
+  assert.equal(reloaded.users.find((user) => user.id === "user_lovis").supplierName, "Lovis Print Shop");
+  assert.equal(reloaded.supplierProfiles.find((profile) => profile.userId === "user_lovis").shopName, "Lovis Print Shop");
+  await database.close();
+});
+
+test("email is refused because the GRIDGO sign-in owns it", async () => {
+  const store = fixture();
+  await assert.rejects(
+    () => supplierProfileCall(store, {
+      method: "PATCH",
+      body: { expectedVersion: 1, email: "new@gridgo.test", contactName: "New Contact" },
+    }),
+    (error) => error.status === 400 && error.code === "email_not_editable",
+  );
+  assert.equal(store.users[0].email, "shop@gridgo.test");
+  assert.equal(store.supplierProfiles[0].contactName, "Supplier");
+  assert.equal(store.supplierProfiles[0].version, 1);
+});
+
+test("a mistyped phone saves nothing at all, not even the fields beside it", async () => {
+  const store = fixture();
+  await assert.rejects(
+    () => supplierProfileCall(store, {
+      method: "PATCH",
+      body: { expectedVersion: 1, shopName: "Renamed Shop", phone: "0917" },
+    }),
+    (error) => error.status === 400 && error.code === "invalid_supplier_profile" && error.details.field === "phone",
+  );
+  assert.equal(store.supplierProfiles[0].shopName, "Print Shop");
+  assert.equal(store.supplierProfiles[0].version, 1);
+  assert.equal(store.supplierProfiles[0].updatedAt, undefined);
+  assert.equal(store.users[0].phone, "+639171234567");
 });
 
 test("GET /listing-starters and public shop browse answer on the live API", { skip: !DATABASE_URL }, async (t) => {

@@ -265,6 +265,7 @@ test("Clerk identity copy will not steal another account's email", () => {
   assert.equal(result.mutated, true);
   assert.equal(store.users[0].name, "Quinn");
   assert.equal(store.users[0].email, "old@gridgo.test");
+  assert.equal(store.users[1].email, "taken@gridgo.test");
 });
 
 test("refreshMappedIdentityFromClerk ignores a Clerk Backend miss", async () => {

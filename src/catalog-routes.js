@@ -1,4 +1,5 @@
 import { identityHasMembership } from "./authorization-context.js";
+import { philippineMobileNumber } from "./phone.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import {
   CatalogError,
@@ -202,6 +203,17 @@ function itemReferenced(store, itemId) {
   return (store.orderLineItems || []).some((line) => line.sourceCatalogItemId === itemId);
 }
 
+// Phone and email live on the account, not the shop record, but the app shows
+// them on one details screen, so both reads answer with the joined view.
+function privateSupplierProfile(store, profile, owner) {
+  return {
+    ...profile,
+    phone: owner?.phone ?? null,
+    email: owner?.email ?? null,
+    media: (store.supplierShopMedia || []).filter((media) => media.supplierId === profile.userId),
+  };
+}
+
 function privateService(store, service) {
   return {
     id: service.id,
@@ -296,21 +308,31 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     requireSupplier(user);
     const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === user.id);
     if (!profile) fail(404, "supplier_profile_not_found", "Complete supplier enrollment first.");
+    const owner = (store.users || []).find((candidate) => candidate.id === user.id);
     if (req.method === "GET") {
-      return { status: 200, body: { profile: { ...profile, media: (store.supplierShopMedia || []).filter((media) => media.supplierId === user.id) } } };
+      return { status: 200, body: { profile: privateSupplierProfile(store, profile, owner) } };
     }
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "supplier_profile_stale", profile.version || 1);
-    if (body.shopName != null) profile.shopName = requiredText(body.shopName, "shopName", 120);
+    if (Object.hasOwn(body, "email")) {
+      fail(400, "email_not_editable", "Your email comes from your GRIDGO sign-in. Change it there and it will update here.", { field: "email" });
+    }
+    // Read the number before anything moves so a mistyped phone cannot leave a
+    // half-applied edit behind.
+    const phone = Object.hasOwn(body, "phone") ? philippineMobileNumber(body.phone) : null;
+    if (body.shopName != null) {
+      profile.shopName = requiredText(body.shopName, "shopName", 120);
+      if (owner) owner.supplierName = profile.shopName;
+    }
     if (body.contactName != null) profile.contactName = requiredText(body.contactName, "contactName", 120);
     if (body.shop != null) profile.shop = shopPoint(body.shop);
     if (body.pickupAvailable != null) profile.pickupAvailable = booleanValue(body.pickupAvailable, "pickupAvailable");
     const at = now();
     bumpVersion(profile, at);
-    const owner = (store.users || []).find((candidate) => candidate.id === user.id);
     if (owner) owner.shop = profile.shop;
+    if (owner && phone) owner.phone = phone;
     auditChange(audit, store, user, "supplier_profile.update", "supplier_profile", user.id);
-    return { status: 200, body: { profile }, mutated: true };
+    return { status: 200, body: { profile: privateSupplierProfile(store, profile, owner) }, mutated: true };
   }
 
   if (["GET", "PATCH"].includes(req.method) && pathname === "/me/supplier-payment-terms") {
