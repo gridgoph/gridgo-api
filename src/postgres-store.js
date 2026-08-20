@@ -35,7 +35,7 @@ const TABLES = [
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "version", "updated_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
-  { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "updated_at"] },
+  { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
   { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
   { name: "approval_case_events", keys: ["id"], columns: ["id", "approval_case_id", "application_revision", "from_status", "to_status", "actor_user_id", "actor_kind", "reason", "request_id", "snapshot", "created_at"], appendOnly: true },
   { name: "catalog_products", keys: ["id"], columns: ["id", "name", "family", "base_price_minor", "unit", "position", "data"] },
@@ -184,7 +184,7 @@ function rowsFromStore(store) {
     });
   }
   for (const profile of (store.riderProfiles || [])) {
-    rows.rider_profiles.push({ user_id: profile.userId, vehicle_type: profile.vehicleType, plate_number: profile.plateNumber, license_number: profile.licenseNumber ?? null, updated_at: profile.updatedAt });
+    rows.rider_profiles.push({ user_id: profile.userId, vehicle_type: profile.vehicleType, plate_number: profile.plateNumber, license_number: profile.licenseNumber ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
   }
   for (const approvalCase of (store.approvalCases || [])) {
     rows.approval_cases.push({
@@ -500,7 +500,7 @@ export async function loadStore(database) {
     updatedAt: row.updated_at,
   }));
   store.riderProfiles = orderedBy(loaded.rider_profiles, "user_id").map((row) => {
-    const item = { userId: row.user_id, vehicleType: row.vehicle_type, plateNumber: row.plate_number, updatedAt: row.updated_at };
+    const item = { userId: row.user_id, vehicleType: row.vehicle_type, plateNumber: row.plate_number, version: row.version || 1, updatedAt: row.updated_at };
     present(item, "licenseNumber", row.license_number);
     return item;
   });

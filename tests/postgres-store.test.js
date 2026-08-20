@@ -107,7 +107,7 @@ test("relational store maps memberships, approval records, profiles, and rider d
     { userId: "user_rider", role: "rider", createdAt: AT, createdBy: "user_supplier" },
   ];
   store.supplierProfiles = [{ userId: "user_supplier", shopName: "PrintRight", contactName: "Supplier", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, pickupAvailable: true, version: 1, updatedAt: AT }];
-  store.riderProfiles = [{ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC-123", licenseNumber: "LIC-123", updatedAt: AT }];
+  store.riderProfiles = [{ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC-123", licenseNumber: "LIC-123", version: 1, updatedAt: AT }];
   store.approvalCases = [{ id: "case_rider", userId: "user_rider", kind: "rider", status: "pending", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT }];
   store.approvalCaseEvents = [{ id: "event_rider", approvalCaseId: "case_rider", applicationRevision: 1, toStatus: "pending", actorUserId: "user_rider", actorKind: "applicant", requestId: "request-rider", snapshot: { vehicleType: "motorcycle" }, createdAt: AT }];
   store.files = [{ fileId: "file_license", ownerId: "user_rider", purpose: "rider_verification_document", originalFilename: "license.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: "riders/license.jpg", references: [{ type: "rider_document", id: "document_rider", field: "fileId" }], createdAt: AT }];

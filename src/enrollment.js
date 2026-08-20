@@ -414,6 +414,7 @@ export function enrollRider({ store, clerkUserId, clerkUser, body, idempotencyKe
     vehicleType: application.vehicleType,
     plateNumber: application.plateNumber,
     ...(application.licenseNumber ? { licenseNumber: application.licenseNumber } : {}),
+    version: currentProfile?.version || 1,
     updatedAt: at,
   };
   if (currentProfile) Object.assign(currentProfile, profile);

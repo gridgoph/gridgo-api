@@ -55,6 +55,10 @@ import {
   isPublicSupplierCatalogRoute,
   routeSupplierCatalog,
 } from "./catalog-routes.js";
+import {
+  isPrivateRiderProfileRoute,
+  routeRiderProfile,
+} from "./rider-profile-routes.js";
 import { privateCatalogItem } from "./supplier-catalog.js";
 import {
   applyForBusiness,
@@ -1565,8 +1569,15 @@ async function handleRequest(req, res) {
           return latestUser;
         });
       }
+      const projected = publicUser(user);
+      if ((store.userRoleMemberships || []).some(
+        (membership) => membership.userId === user.id && membership.role === "rider",
+      )) {
+        const profile = riderProfileProjection(store, user.id);
+        if (profile) projected.riderProfile = profile;
+      }
       return send(res, 200, {
-        user: publicUser(user),
+        user: projected,
         memberships: auth.authorization.memberships.map(membershipSummary),
         approvalCases: auth.authorization.approvalCases.map(approvalCaseSummary),
       });
@@ -1724,7 +1735,7 @@ async function handleRequest(req, res) {
       || pathname.startsWith("/me/supplier-services")
       || pathname.startsWith("/me/catalog-items")
       || pathname.startsWith("/me/catalog-option-groups");
-    if (!user && privateCatalogRoute) {
+    if (!user && (privateCatalogRoute || isPrivateRiderProfileRoute(pathname))) {
       return send(res, 401, {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
@@ -1747,6 +1758,20 @@ async function handleRequest(req, res) {
         await decorateCatalogPhotoUrls(store, catalogResponse.body);
       }
       return send(res, catalogResponse.status, catalogResponse.body);
+    }
+
+    const riderProfileResponse = await routeRiderProfile({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      now,
+      audit,
+    });
+    if (riderProfileResponse) {
+      if (riderProfileResponse.mutated) await save(store);
+      return send(res, riderProfileResponse.status, riderProfileResponse.body);
     }
 
     // public catalog for demo convenience

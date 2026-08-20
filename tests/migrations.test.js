@@ -68,6 +68,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786874400000_enrollment_legacy_supplier_shop",
         "1786878000000_supplier_catalog_listings",
         "1786881600000_catalog_prep_steps_and_link_formats",
+        "1786885200000_rider_profile_version",
       ],
     );
     await client.query(`
@@ -91,6 +92,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       (error) => error.code === "23514" && error.constraint === "users_org_name_check",
     );
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'rider_profiles' AND column_name = 'version'",
+      [schema],
+    )).rows.length, 0);
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('supplier_catalog_prep_steps') AS table_name")).rows[0].table_name, null);
     await runner(migrationOptions(schema, "down", 1, client));
