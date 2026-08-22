@@ -244,11 +244,14 @@ function ensureClientMembership(store, user, now) {
 }
 
 export async function authenticateBearerToken(token, store, config, preVerified = null) {
-  if (!token) return { user: null, status: 401, kind: null };
+  if (!token) return { user: null, status: 401, kind: null, error: "unauthorized" };
   const verified = preVerified || (await verifyClerkClaims(token, config));
-  if (!verified.claims?.sub) return { user: null, status: 401, kind: "clerk" };
+  if (!verified.claims?.sub) return { user: null, status: 401, kind: "clerk", error: "unauthorized" };
   const matches = (store.users || []).filter((candidate) => candidate.clerkUserId === verified.claims.sub);
-  if (matches.length !== 1) return { user: null, status: 401, kind: "clerk" };
+  if (matches.length === 0) {
+    return { user: null, status: 401, kind: "clerk", error: "unmapped_identity" };
+  }
+  if (matches.length !== 1) return { user: null, status: 401, kind: "clerk", error: "unauthorized" };
   const user = matches[0];
   return {
     user,
@@ -256,6 +259,18 @@ export async function authenticateBearerToken(token, store, config, preVerified 
     status: null,
     kind: "clerk",
   };
+}
+
+/** Body for a failed authenticateBearerToken result. */
+export function authFailureBody(auth) {
+  const error = auth?.error || (auth?.status === 403 ? "forbidden" : "unauthorized");
+  if (error === "unmapped_identity") {
+    return {
+      error,
+      message: "This sign-in is not linked to a GRIDGO account yet.",
+    };
+  }
+  return { error };
 }
 
 /** Explicit first-use entry for public SSO. It can only create a client. */

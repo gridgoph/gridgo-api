@@ -71,8 +71,12 @@ test("verified Clerk subject resolves to the database role without trusting a ro
   assert.deepEqual(authenticated.authorization.memberships, store.userRoleMemberships);
 
   assert.equal((await authenticateBearerToken(null, store, config)).status, 401);
+  assert.equal((await authenticateBearerToken(null, store, config)).error, "unauthorized");
   assert.equal((await authenticateBearerToken("tok_old_local_session", store, config)).status, 401);
-  assert.equal((await authenticateBearerToken(signToken({ sub: "unmapped" }), store, config)).status, 401);
+  assert.equal((await authenticateBearerToken("tok_old_local_session", store, config)).error, "unauthorized");
+  const unmapped = await authenticateBearerToken(signToken({ sub: "unmapped" }), store, config);
+  assert.equal(unmapped.status, 401);
+  assert.equal(unmapped.error, "unmapped_identity");
 });
 
 test("activation provisions an unmapped Clerk identity as a passwordless client only", async () => {

@@ -19,7 +19,7 @@ There is no `AUTH_MODE`, password login, local signup, local session table, demo
 
 Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Authorization: Bearer <Clerk session JWT>`. GRIDGO memberships and approval cases are authoritative in PostgreSQL, not in a client-settable Clerk claim or metadata value.
 
-- `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries, or `401 unauthorized` when the Clerk subject is unmapped.
+- `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries. A verified Clerk subject with no GRIDGO user is `401 unmapped_identity`; an invalid token is `401 unauthorized`.
 - Each app uses its fixed database projection: `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, or `/auth/me/admin`. The URL selects the required membership; request JSON cannot select or grant one.
 - `POST /auth/clerk/activate` is the explicit client-only Google/public SSO path. It creates a new personal client identity, or adds a personal client membership to an already-mapped identity, and returns `{ "user": ... }`; it never merges by email or grants another membership.
 - Fixed supplier/rider enrollment routes add only the membership named by the URL; `/me/business-application` submits a case for an existing client membership. All three require `Idempotency-Key`; supplier/business submit immediately, while rider sign-in resumes document intake followed by explicit submission after a current licence is attached.

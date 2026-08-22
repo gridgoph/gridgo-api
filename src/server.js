@@ -13,6 +13,7 @@ import {
   clientEmailAvailable,
   createClerkBackend,
   verifyClerkClaims,
+  authFailureBody,
 } from "./auth.js";
 import {
   approvalCaseFor,
@@ -1550,7 +1551,7 @@ async function handleRequest(req, res) {
     }
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
-      if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
+      if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
       let clerkUser = null;
       try {
         clerkUser = await clerkBackend.users.getUser(auth.user.clerkUserId);
@@ -1586,7 +1587,7 @@ async function handleRequest(req, res) {
     const fixedAuthRole = FIXED_AUTH_ROLES.get(pathname);
     if (req.method === "GET" && fixedAuthRole) {
       const auth = await authenticateRequest(req, store);
-      if (!auth.user) return send(res, auth.status || 401, { error: "unauthorized" });
+      if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
       if (!contextHasMembership(auth.authorization, fixedAuthRole)) {
         if (fixedAuthRole === "supplier") {
           return send(res, 403, {
