@@ -8,6 +8,7 @@ Effective unit price is `max(0, basePriceMinor + selected modifiers)`. Matching 
 
 Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `401`.
 
+- `GET /accepted-file-formats?q=` returns the platform registry a listing may tick (`code`, `displayName`, `inputKind`, `extensions`, `mimeTypes`, `aliases`, `uploadable`). `uploadable` is true only for file types `POST /files` purpose=artwork can sniff (JPEG, PNG, WebP, PDF, Photoshop). 3MF/STL stay in the registry with `uploadable: false`. Optional `q` (1–40 characters) adds `resolution`: `matched` ticks that code, `link_only` / `unknown` tell the shop to tick Any other https link. A shop cannot invent a code.
 - `GET /catalog/shops?categoryCode=&cursor=` lists approved shops that currently have at least one complete active item under a live service.
 - `GET /catalog/shops/:supplierId` returns the shop, live service lines, and complete active items.
 - `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
@@ -20,6 +21,7 @@ A listing is public only when the owner has a current `supplier` membership, the
 Requires a database `supplier` membership. Pending and rejected suppliers may edit. Nothing is public until approval + live service + complete active item.
 
 ```text
+GET                    /accepted-file-formats?q=
 GET                    /listing-starters?subcategoryCode=
 GET, PATCH             /me/supplier-profile
 GET, PATCH             /me/supplier-payment-terms
@@ -82,6 +84,6 @@ Existing-record mutations require `expectedVersion` or `If-Match`. DELETE may se
 
 ## Formats and snapshots
 
-Seeded file codes: `pdf`, `png`, `jpeg`, `psd`, `3mf`, `stl` (`inputKind: "file"`). Seeded URL codes: `canva_link`, `google_drive`, `dropbox`, `we_transfer`, `other_link` (`inputKind: "url"`). Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format.
+Seeded file codes: `pdf`, `png`, `jpeg`, `webp`, `psd`, `3mf`, `stl` (`inputKind: "file"`). Seeded URL codes: `canva_link`, `google_drive`, `dropbox`, `we_transfer`, `other_link` (`inputKind: "url"`). Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format. A plus-finder query resolves against this registry and its aliases; it never stores a shop-invented type.
 
 `src/supplier-catalog.js` exports `createOrderLineSnapshot` and `appendOrderLineSnapshot`. They write the immutable line/option snapshot shape, including pricing unit, package qty, ready-in hours, and group kind. Checkout is not wired in this slice.

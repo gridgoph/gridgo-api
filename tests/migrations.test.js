@@ -70,6 +70,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786881600000_catalog_prep_steps_and_link_formats",
         "1786885200000_rider_profile_version",
         "1786888800000_catalog_item_search",
+        "1786892400000_accepted_file_formats_webp",
       ],
     );
     await client.query(`
@@ -99,6 +100,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     )).rows.map((row) => row.column_name));
     assert.equal(searchColumns.has("search_text"), true);
     assert.equal(searchColumns.has("search_tsv"), true);
+    assert.equal((await client.query("SELECT code FROM accepted_file_formats WHERE code = 'webp'")).rows.length, 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT code FROM accepted_file_formats WHERE code = 'webp'")).rows.length, 0);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(

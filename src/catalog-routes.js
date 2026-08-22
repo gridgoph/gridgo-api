@@ -1,4 +1,9 @@
 import { identityHasMembership } from "./authorization-context.js";
+import {
+  FORMAT_QUERY_MAX,
+  publicAcceptedFormats,
+  resolveFormatQuery,
+} from "./file-formats.js";
 import { philippineMobileNumber } from "./phone.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import {
@@ -311,15 +316,36 @@ function privateService(store, service) {
 
 export function isPublicSupplierCatalogRoute(method, pathname) {
   return method === "GET" && (
-    pathname === "/catalog/shops"
+    pathname === "/accepted-file-formats"
+    || pathname === "/catalog/shops"
     || /^\/catalog\/shops\/[^/]+$/.test(pathname)
     || /^\/catalog\/items\/[^/]+$/.test(pathname)
     || /^\/catalog\/media\/[^/]+$/.test(pathname)
   );
 }
 
+function parseFormatFinderQuery(url) {
+  if (!url.searchParams.has("q")) return null;
+  const raw = String(url.searchParams.get("q") ?? "");
+  if (raw.includes("\0")) fail(400, "invalid_file_format", "q cannot contain a NUL character.", { field: "q" });
+  const query = raw.trim();
+  if (!query) return null;
+  if (query.length > FORMAT_QUERY_MAX) {
+    fail(400, "invalid_file_format", `q must be ${FORMAT_QUERY_MAX} characters or fewer.`, { field: "q" });
+  }
+  return query;
+}
+
 export async function routeSupplierCatalog({ req, url, store, user, readBody, id, now, audit }) {
   const { pathname } = url;
+
+  if (req.method === "GET" && pathname === "/accepted-file-formats") {
+    const formats = publicAcceptedFormats(store);
+    const query = parseFormatFinderQuery(url);
+    const body = { formats };
+    if (query) body.resolution = resolveFormatQuery(query, formats);
+    return { status: 200, body };
+  }
 
   if (req.method === "GET" && pathname === "/catalog/shops") {
     const rawCategory = url.searchParams.has("categoryCode") ? String(url.searchParams.get("categoryCode") || "").trim() : null;

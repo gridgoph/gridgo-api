@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { identityHasMembership } from "./authorization-context.js";
+import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
@@ -23,7 +24,7 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
-  artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
+  artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...ARTWORK_UPLOAD_CONTENT_TYPES] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
     roles: ["rider"],
@@ -70,6 +71,7 @@ const EXTENSION_CONTENT_TYPES = new Map([
   [".png", "image/png"],
   [".webp", "image/webp"],
   [".pdf", "application/pdf"],
+  [".psd", "image/vnd.adobe.photoshop"],
 ]);
 const HEIC_EXTENSIONS = new Set([".heic", ".heif"]);
 const DELIVERY_PHOTO_STATES = new Set([
@@ -362,12 +364,15 @@ export function validateUpload(file, purpose = "artwork") {
 
   let declaredContentType = String(file.declaredContentType || "").trim().toLowerCase();
   if (declaredContentType === "image/jpg") declaredContentType = "image/jpeg";
-  if (!GENERIC_CONTENT_TYPES.has(declaredContentType) && !CONTENT_TYPES.has(declaredContentType)) {
+  const declaredAllowed = purpose === "artwork" ? new Set(ARTWORK_UPLOAD_CONTENT_TYPES) : CONTENT_TYPES;
+  if (!GENERIC_CONTENT_TYPES.has(declaredContentType) && !declaredAllowed.has(declaredContentType)) {
     fail(
       415,
       "content_type_not_allowed",
-      "This file type is not supported. Choose a JPEG, PNG, WebP, or PDF file and try again.",
-      { allowedContentTypes: [...CONTENT_TYPES] },
+      purpose === "artwork"
+        ? "This file type is not supported. Choose a JPEG, PNG, WebP, PDF, or Photoshop file and try again."
+        : "This file type is not supported. Choose a JPEG, PNG, WebP, or PDF file and try again.",
+      { allowedContentTypes: [...declaredAllowed] },
     );
   }
 
@@ -378,7 +383,9 @@ export function validateUpload(file, purpose = "artwork") {
     fail(
       415,
       "file_type_mismatch",
-      "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, or PDF and try again.",
+      purpose === "artwork"
+        ? "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, PDF, or Photoshop and try again."
+        : "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, or PDF and try again.",
       {
         extension,
         declaredContentType: declaredContentType || null,
@@ -399,6 +406,7 @@ export function validateUpload(file, purpose = "artwork") {
 
 function sniffContentType(bytes) {
   if (bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-") return "application/pdf";
+  if (bytes.length >= 4 && bytes.subarray(0, 4).toString("ascii") === "8BPS") return "image/vnd.adobe.photoshop";
   if (
     bytes.length >= 8 &&
     bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))

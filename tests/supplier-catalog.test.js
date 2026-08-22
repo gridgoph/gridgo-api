@@ -21,6 +21,8 @@ import {
   selectedCatalogPrice,
 } from "../src/supplier-catalog.js";
 import { routeSupplierCatalog } from "../src/catalog-routes.js";
+import { UNOPENED_FILE_MESSAGE } from "../src/file-formats.js";
+import { defaultAcceptedFileFormats } from "../src/reference-data.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const AT = "2026-08-16T00:00:00.000Z";
@@ -227,6 +229,52 @@ test("public catalog requires a complete active item under a live service", () =
   const draft = fixture();
   draft.supplierServices[0].state = "draft";
   assert.equal(publicCatalogItem(draft, draft.catalogItems[0]), null);
+});
+
+test("the platform registry lists uploadable types and resolves a plus query", async () => {
+  const store = fixture();
+  store.acceptedFileFormats = defaultAcceptedFileFormats();
+  const listed = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/accepted-file-formats"),
+    store,
+    user: null,
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.formats.find((format) => format.code === "webp").uploadable, true);
+  assert.equal(listed.body.formats.find((format) => format.code === "3mf").uploadable, false);
+  assert.equal(listed.body.resolution, undefined);
+
+  const found = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/accepted-file-formats?q=AI"),
+    store,
+    user: null,
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(found.status, 200);
+  assert.equal(found.body.resolution.status, "unknown");
+  assert.equal(found.body.resolution.message, UNOPENED_FILE_MESSAGE);
+
+  const jpeg = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/accepted-file-formats?q=.jpg"),
+    store,
+    user: null,
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(jpeg.body.resolution.status, "matched");
+  assert.equal(jpeg.body.resolution.format.code, "jpeg");
 });
 
 test("listing starters for a subcategory are platform copies, not shop records", () => {
