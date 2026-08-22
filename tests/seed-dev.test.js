@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
 import { loadStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
-import { LOVIS_DEV_SHOP, PLACEHOLDER_JPEG, seedDevelopmentShop } from "../src/seed-dev.js";
+import { LOVIS_DEV_SHOP, PLACEHOLDER_JPEG, seedDevelopmentShop, starterSampleBytes } from "../src/seed-dev.js";
 import { catalogItemBlockers } from "../src/supplier-catalog.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -23,8 +23,12 @@ const clerkBackend = {
   },
 };
 
+const uploaded = [];
 const objectStorage = {
-  putObject: async () => ({ key: "dev/lovis/placeholder.jpg", etag: "seed" }),
+  putObject: async ({ key, body, size }) => {
+    uploaded.push({ key, size, bytes: body?.length });
+    return { key, etag: "seed" };
+  },
 };
 
 test("development shop seed is idempotent and names Lovis Printshop", { skip: !DATABASE_URL }, async () => {
@@ -44,6 +48,7 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
     platform_settings RESTART IDENTITY CASCADE`);
 
   await seedReferenceData(database);
+  uploaded.length = 0;
   await seedDevelopmentShop(database, { clerkBackend, objectStorage, now: () => "2026-08-23T00:00:00.000Z" });
   const first = await loadStore(database);
   await seedDevelopmentShop(database, { clerkBackend, objectStorage, now: () => "2026-08-23T00:00:00.000Z" });
@@ -56,9 +61,14 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
   assert.equal(shop.clerkUserId, "clerk_lovis_dev");
   assert.equal(first.supplierProfiles.find((row) => row.userId === shop.id).shopName, "Lovis Printshop");
   assert.equal(first.supplierServices.filter((row) => row.supplierId === shop.id && row.state === "live").length, 4);
-  assert.ok(first.catalogItems.filter((row) => row.supplierId === shop.id).length >= 5);
-  assert.equal(PLACEHOLDER_JPEG[0], 0xff);
-  assert.equal(PLACEHOLDER_JPEG[1], 0xd8);
+  assert.ok(first.catalogItems.filter((row) => row.supplierId === shop.id).length >= 14);
+  const tarpBytes = starterSampleBytes("lst_tarpaulins_outdoor_banners");
+  assert.ok(tarpBytes.length > PLACEHOLDER_JPEG.length);
+  assert.equal(tarpBytes[0], 0xff);
+  assert.equal(tarpBytes[1], 0xd8);
+  assert.ok(uploaded.some((row) => row.key.endsWith("lst_tarpaulins_outdoor_banners.jpg") && row.size === tarpBytes.length));
+  const tarpPhoto = first.catalogItemPhotos.find((row) => row.catalogItemId === "sci_lovis_tarpaulins_outdoor_banners");
+  assert.equal(first.files.find((file) => file.fileId === tarpPhoto.fileId).size, tarpBytes.length);
   const tarp = first.catalogItems.find((row) => row.id === "sci_lovis_tarpaulins_outdoor_banners");
   assert.equal(catalogItemBlockers(first, tarp).join(","), "");
   assert.equal(second.users.filter((user) => user.email === LOVIS_DEV_SHOP.email).length, 1);

@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { authConfiguration, clerkClientProfile, createClerkBackend } from "./auth.js";
@@ -20,13 +22,23 @@ const USER_ID = "user_lovis_printshop";
 const CASE_ID = "apc_lovis_printshop";
 const LOGO_ID = "file_lovis_logo";
 
-/** 1×1 JPEG so seeded samples sniff as artwork photos. */
+/** Tiny JPEG fallback if a starter photograph is missing from seed-assets. */
 export const PLACEHOLDER_JPEG = Buffer.from(
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBwgHBgkIBwgKCgkLDRYPDQwMDRsUFRAWIB0iIiAdHx8kKDQsJCYxJx8fLT0tMTU3Ojo6Iys/RD84QzQ5OjcBCgoKDQwNGg8PGjclHyU3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3N//AABEIAAEAAQMBIgACEQEDEQH/xAAXAAADAQAAAAAAAAAAAAAAAAABAgME/8QAFhABAQEAAAAAAAAAAAAAAAAAABEB/9oADAMBAAIQAxAAAAGf/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPwB//9k=",
   "base64",
 );
 
-const PRINT_FORMATS = ["pdf", "png", "jpeg", "canva_link", "other_link"];
+const STARTER_ASSETS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "seed-assets", "starters");
+
+export function starterSampleBytes(starterId) {
+  const filePath = path.join(STARTER_ASSETS_DIR, `${starterId}.jpg`);
+  try {
+    return fs.readFileSync(filePath);
+  } catch {
+    return PLACEHOLDER_JPEG;
+  }
+}
+
 const DESIGN_FORMATS = ["pdf", "png", "jpeg", "psd", "canva_link", "other_link"];
 const MODEL_FORMATS = ["pdf", "png", "jpeg", "3mf", "stl", "other_link"];
 
@@ -64,9 +76,17 @@ const CATEGORY_LINES = [
 const PLACEHOLDER_LISTINGS = [
   { starterId: "lst_tarpaulins_outdoor_banners", serviceId: "svc_lovis_marketing_collateral", priceMinor: 45000 },
   { starterId: "lst_flyers", serviceId: "svc_lovis_marketing_collateral", priceMinor: 2500 },
+  { starterId: "lst_brochures", serviceId: "svc_lovis_marketing_collateral", priceMinor: 8000 },
   { starterId: "lst_business_cards", serviceId: "svc_lovis_marketing_collateral", priceMinor: 35000 },
+  { starterId: "lst_posters_standees", serviceId: "svc_lovis_marketing_collateral", priceMinor: 12000 },
+  { starterId: "lst_stickers_packaging_labels", serviceId: "svc_lovis_marketing_collateral", priceMinor: 5000 },
   { starterId: "lst_custom_apparel", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 28000 },
+  { starterId: "lst_lanyards_id_accessories", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 1500 },
+  { starterId: "lst_drinkware", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 4500 },
+  { starterId: "lst_corporate_giveaways", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 2000 },
   { starterId: "lst_certificates_diplomas", serviceId: "svc_lovis_recognition_awards_signage", priceMinor: 15000 },
+  { starterId: "lst_plaques_trophies", serviceId: "svc_lovis_recognition_awards_signage", priceMinor: 25000 },
+  { starterId: "lst_medals_ribbons", serviceId: "svc_lovis_recognition_awards_signage", priceMinor: 8000 },
   { starterId: "lst_three_d_printing_scale_models", serviceId: "svc_lovis_specialized_prototyping", priceMinor: 150000 },
   { starterId: "lst_blueprint_cad_plotting", serviceId: "svc_lovis_specialized_prototyping", priceMinor: 8000 },
 ];
@@ -90,14 +110,14 @@ export async function resolveDevClerkUser(email, clerkBackend) {
   return clerkUser;
 }
 
-async function putPlaceholder(objectStorage, key) {
+async function putJpeg(objectStorage, key, body) {
   if (!objectStorage) return false;
   try {
     await objectStorage.putObject({
       key,
-      body: PLACEHOLDER_JPEG,
+      body,
       contentType: "image/jpeg",
-      size: PLACEHOLDER_JPEG.length,
+      size: body.length,
     });
     return true;
   } catch {
@@ -171,15 +191,20 @@ export async function seedDevelopmentShop(database, {
   const clerkUser = await resolveDevClerkUser(LOVIS_DEV_SHOP.email, clerkBackend);
   const person = clerkClientProfile(clerkUser);
   const at = now();
+  const listingPhotos = PLACEHOLDER_LISTINGS.map((listing) => {
+    const body = starterSampleBytes(listing.starterId);
+    return {
+      ...listing,
+      fileId: `file_lovis_${listing.starterId.replace(/^lst_/, "")}`,
+      objectKey: `dev/lovis/${listing.starterId}.jpg`,
+      body,
+    };
+  });
+  const logoBody = starterSampleBytes("lst_tarpaulins_outdoor_banners");
   const logoKey = "dev/lovis/logo.jpg";
-  const listingPhotos = PLACEHOLDER_LISTINGS.map((listing) => ({
-    ...listing,
-    fileId: `file_lovis_${listing.starterId.replace(/^lst_/, "")}`,
-    objectKey: `dev/lovis/${listing.starterId.replace(/^lst_/, "")}.jpg`,
-  }));
-  let storedPhoto = await putPlaceholder(objectStorage, logoKey);
+  let storedPhoto = await putJpeg(objectStorage, logoKey, logoBody);
   for (const listing of listingPhotos) {
-    if (!(await putPlaceholder(objectStorage, listing.objectKey))) storedPhoto = false;
+    if (!(await putJpeg(objectStorage, listing.objectKey, listing.body))) storedPhoto = false;
   }
 
   await database.transaction(async () => {
@@ -289,7 +314,7 @@ export async function seedDevelopmentShop(database, {
         originalFilename: "lovis-printshop.jpg",
         declaredContentType: "image/jpeg",
         detectedContentType: "image/jpeg",
-        size: PLACEHOLDER_JPEG.length,
+        size: logoBody.length,
         state: "ready",
         objectKey: logoKey,
         createdAt: at,
@@ -341,10 +366,10 @@ export async function seedDevelopmentShop(database, {
           fileId: listing.fileId,
           ownerId: user.id,
           purpose: "catalog_item_photo",
-          originalFilename: `${starter.subcategoryCode}.jpg`,
+          originalFilename: `${listing.starterId}.jpg`,
           declaredContentType: "image/jpeg",
           detectedContentType: "image/jpeg",
-          size: PLACEHOLDER_JPEG.length,
+          size: listing.body.length,
           state: "ready",
           objectKey: listing.objectKey,
           createdAt: at,
@@ -356,7 +381,7 @@ export async function seedDevelopmentShop(database, {
             catalogItemId: itemId,
             fileId: listing.fileId,
             sortOrder: 0,
-            altText: `${starter.name} placeholder`,
+            altText: starter.name,
             createdAt: at,
           });
         }
@@ -384,7 +409,7 @@ async function main() {
     const result = await seedDevelopmentShop(database, { objectStorage: storage });
     console.log(
       `Seeded development shop ${result.shopName} <${result.email}>`
-      + (result.photos ? " with placeholder samples.\n" : " (listings have no photos — MinIO was unreachable).\n"),
+      + (result.photos ? " with starter sample photographs.\n" : " (listings have no photos — MinIO was unreachable).\n"),
     );
   } finally {
     await database.close();
