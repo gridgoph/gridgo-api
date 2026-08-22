@@ -714,7 +714,13 @@ export async function loadStore(database) {
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.proofs = ordered(loaded.proofs).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, uploaderId: row.uploader_id, createdAt: row.created_at }));
   store.deviceTokens = ordered(loaded.device_tokens).map(deviceTokenItem);
-  return attachBaseline(store, rowsFromStore(store));
+  attachBaseline(store, rowsFromStore(store));
+  Object.defineProperty(store, "listOwnCatalogItems", {
+    value: (params) => listOwnCatalogItems(database, params),
+    enumerable: false,
+    writable: true,
+  });
+  return store;
 }
 
 /**
@@ -842,4 +848,224 @@ export async function saveStore(database, store) {
 
 export function originalNotificationIds(store) {
   return new Set((store[BASELINE]?.notifications || []).map((row) => row.id));
+}
+
+const CATALOG_LIST_SORTS = new Set(["board", "name", "price_low", "price_high", "fastest"]);
+const FASTEST_HOURS_SENTINEL = 2147483647;
+
+function catalogListError(status, code, message, details = {}) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  error.details = details;
+  return error;
+}
+
+function encodeCatalogCursor(payload) {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function nextSqlParam(values, value) {
+  values.push(value);
+  return `$${values.length}`;
+}
+
+function catalogOrderSql(sort, hasQuery) {
+  const rank = hasQuery ? "hits.rank DESC, " : "";
+  switch (sort) {
+    case "name":
+      return `${rank}lower(hits.name) ASC, hits.id ASC`;
+    case "price_low":
+      return `${rank}hits.base_price_minor ASC, hits.id ASC`;
+    case "price_high":
+      return `${rank}hits.base_price_minor DESC, hits.id ASC`;
+    case "fastest":
+      return `${rank}COALESCE(hits.effective_hours, ${FASTEST_HOURS_SENTINEL}) ASC, hits.id ASC`;
+    default:
+      return `${rank}hits.sort_order ASC, hits.id ASC`;
+  }
+}
+
+function catalogSecondaryCursorSql(sort, cursor, values) {
+  const key = Array.isArray(cursor.k) ? cursor.k[1] : cursor.k;
+  const idParam = nextSqlParam(values, String(cursor.id));
+  if (sort === "name") {
+    const keyParam = nextSqlParam(values, String(key ?? ""));
+    return `(lower(hits.name), hits.id) > (${keyParam}, ${idParam})`;
+  }
+  if (sort === "price_high") {
+    const keyParam = nextSqlParam(values, Number(key));
+    return `(hits.base_price_minor < ${keyParam} OR (hits.base_price_minor = ${keyParam} AND hits.id > ${idParam}))`;
+  }
+  if (sort === "price_low") {
+    const keyParam = nextSqlParam(values, Number(key));
+    return `(hits.base_price_minor, hits.id) > (${keyParam}, ${idParam})`;
+  }
+  if (sort === "fastest") {
+    const keyParam = nextSqlParam(values, Number(key ?? FASTEST_HOURS_SENTINEL));
+    return `(COALESCE(hits.effective_hours, ${FASTEST_HOURS_SENTINEL}), hits.id) > (${keyParam}, ${idParam})`;
+  }
+  const keyParam = nextSqlParam(values, Number(key ?? 0));
+  return `(hits.sort_order, hits.id) > (${keyParam}, ${idParam})`;
+}
+
+function catalogCursorSql(sort, hasQuery, cursor, values) {
+  if (!cursor?.id) return "";
+  const secondary = catalogSecondaryCursorSql(sort, cursor, values);
+  if (!hasQuery) return `AND ${secondary}`;
+  const rank = Array.isArray(cursor.k) ? cursor.k[0] : cursor.k;
+  if (rank == null || Number.isNaN(Number(rank))) {
+    throw catalogListError(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
+  }
+  const rankParam = nextSqlParam(values, Number(rank));
+  return `AND (hits.rank < ${rankParam} OR (hits.rank = ${rankParam} AND ${secondary}))`;
+}
+
+function catalogHitsCte() {
+  return `
+    WITH params AS (
+      SELECT $1::text AS supplier_id,
+             NULLIF($2::text, '') AS q,
+             CASE WHEN NULLIF($2::text, '') IS NULL THEN NULL
+                  ELSE websearch_to_tsquery('simple', $2)
+             END AS tsq
+    ),
+    filtered AS (
+      SELECT item.id, item.supplier_id, item.supplier_service_id, item.subcategory_code,
+             item.name, item.description, item.base_price_minor, item.pricing_unit,
+             item.package_qty, item.turnaround_mode, item.turnaround_hours,
+             item.file_format_mode, item.active, item.sort_order, item.version,
+             item.created_at, item.updated_at, item.search_text, item.search_tsv,
+             COALESCE(item.turnaround_hours, service.standard_turnaround_hours, service.turnaround_hours)
+               AS effective_hours
+        FROM supplier_catalog_items item
+        JOIN supplier_services service ON service.id = item.supplier_service_id
+        CROSS JOIN params
+       WHERE item.supplier_id = params.supplier_id
+         AND ($3::text IS NULL OR item.subcategory_code = $3)
+         AND ($4::boolean IS NULL OR item.active = $4)
+    ),
+    fts AS (
+      SELECT filtered.*, ts_rank_cd(filtered.search_tsv, params.tsq)::float8 AS rank
+        FROM filtered
+        CROSS JOIN params
+       WHERE params.tsq IS NOT NULL
+         AND params.tsq <> ''::tsquery
+         AND filtered.search_tsv @@ params.tsq
+    ),
+    trgm AS (
+      SELECT filtered.*, public.similarity(filtered.search_text, params.q)::float8 AS rank
+        FROM filtered
+        CROSS JOIN params
+       WHERE params.q IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM fts WHERE fts.id = filtered.id)
+         AND (
+           filtered.search_text OPERATOR(public.%) params.q
+           OR filtered.search_text ILIKE '%' || params.q || '%'
+         )
+    ),
+    hits AS (
+      SELECT * FROM fts
+      UNION ALL
+      SELECT * FROM trgm
+      UNION ALL
+      SELECT filtered.*, 0::float8 AS rank
+        FROM filtered
+        CROSS JOIN params
+       WHERE params.q IS NULL
+    )
+  `;
+}
+
+function catalogItemFromListRow(row) {
+  return {
+    id: row.id,
+    supplierId: row.supplier_id,
+    supplierServiceId: row.supplier_service_id,
+    subcategoryCode: row.subcategory_code,
+    name: row.name,
+    description: row.description,
+    basePriceMinor: row.base_price_minor,
+    pricingUnit: row.pricing_unit,
+    packageQty: row.package_qty,
+    turnaroundMode: row.turnaround_mode,
+    turnaroundHours: row.turnaround_hours,
+    fileFormatMode: row.file_format_mode,
+    active: row.active,
+    sortOrder: row.sort_order,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function catalogSecondaryFromRow(row, sort) {
+  switch (sort) {
+    case "name":
+      return String(row.name || "").toLowerCase();
+    case "price_low":
+    case "price_high":
+      return row.base_price_minor;
+    case "fastest":
+      return row.effective_hours ?? FASTEST_HOURS_SENTINEL;
+    default:
+      return row.sort_order ?? 0;
+  }
+}
+
+async function queryOwnCatalogItems(database, params) {
+  const {
+    supplierId,
+    q = null,
+    sort = "board",
+    limit = 20,
+    cursor = null,
+    subcategoryCode = null,
+    active = null,
+  } = params;
+  if (!CATALOG_LIST_SORTS.has(sort)) {
+    throw catalogListError(400, "invalid_catalog_query", "sort must be board, name, price_low, price_high, or fastest.", {
+      field: "sort",
+    });
+  }
+
+  const hasQuery = Boolean(q);
+  const cte = catalogHitsCte();
+  const filterValues = [supplierId, q, subcategoryCode, active];
+  const total = Number(
+    (await database.query(`${cte} SELECT count(*)::int AS total FROM hits`, filterValues)).rows[0]?.total || 0,
+  );
+
+  const pageValues = [...filterValues];
+  const cursorSql = catalogCursorSql(sort, hasQuery, cursor, pageValues);
+  const limitParam = nextSqlParam(pageValues, limit + 1);
+  const rows = (await database.query(
+    `${cte}
+     SELECT hits.*
+       FROM hits
+      WHERE TRUE ${cursorSql}
+      ORDER BY ${catalogOrderSql(sort, hasQuery)}
+      LIMIT ${limitParam}`,
+    pageValues,
+  )).rows;
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = hasMore ? page[page.length - 1] : null;
+  return {
+    items: page.map(catalogItemFromListRow),
+    nextCursor: last
+      ? encodeCatalogCursor({
+          k: hasQuery ? [last.rank, catalogSecondaryFromRow(last, sort)] : catalogSecondaryFromRow(last, sort),
+          id: last.id,
+        })
+      : null,
+    total,
+  };
+}
+
+export async function listOwnCatalogItems(database, params) {
+  const run = () => queryOwnCatalogItems(database, params);
+  if (!database.inTransaction()) return database.snapshot(run);
+  return run();
 }

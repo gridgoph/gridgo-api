@@ -69,6 +69,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786878000000_supplier_catalog_listings",
         "1786881600000_catalog_prep_steps_and_link_formats",
         "1786885200000_rider_profile_version",
+        "1786888800000_catalog_item_search",
       ],
     );
     await client.query(`
@@ -91,6 +92,19 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       `),
       (error) => error.code === "23514" && error.constraint === "users_org_name_check",
     );
+
+    const searchColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    assert.equal(searchColumns.has("search_text"), true);
+    assert.equal(searchColumns.has("search_tsv"), true);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'search_text'",
+      [schema],
+    )).rows.length, 0);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(

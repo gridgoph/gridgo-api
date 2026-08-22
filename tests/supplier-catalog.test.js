@@ -401,6 +401,72 @@ test("DELETE listing with If-Match removes a never-ordered item from the list", 
     audit: () => {},
   });
   assert.equal(listed.body.items.some((item) => item.id === "sci_remove"), false);
+  assert.equal(listed.body.total, listed.body.items.length);
+  assert.equal(listed.body.nextCursor, undefined);
+});
+
+test("GET /me/catalog-items is shop-scoped and answers total", async () => {
+  const store = fixture();
+  store.users.push({ id: "other", role: "supplier" });
+  store.catalogItems.push({
+    ...store.catalogItems[0],
+    id: "other_item",
+    supplierId: "other",
+    name: "Other tarp",
+    sortOrder: 1,
+  });
+  const listed = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.total, 1);
+  assert.equal(listed.body.items.length, 1);
+  assert.equal(listed.body.items[0].id, "item");
+  assert.equal(listed.body.nextCursor, undefined);
+});
+
+test("GET /me/catalog-items q hunts this shop's name and subcategory", async () => {
+  const store = fixture();
+  store.catalogItems.push({
+    id: "card",
+    supplierId: "supplier",
+    supplierServiceId: "service",
+    name: "Business card",
+    description: "Calling card",
+    basePriceMinor: 500,
+    subcategoryCode: "flyers",
+    pricingUnit: "per_unit",
+    packageQty: null,
+    turnaroundMode: "inherit",
+    turnaroundHours: null,
+    fileFormatMode: "inherit",
+    active: true,
+    sortOrder: 1,
+    version: 1,
+    createdAt: AT,
+    updatedAt: AT,
+  });
+  const listed = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/me/catalog-items?q=tarp"),
+    store,
+    user: store.users[0],
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.items.length, 1);
+  assert.equal(listed.body.items[0].id, "item");
+  assert.equal(listed.body.total, 1);
 });
 
 test("GET item includes persisted photos after postgres round-trip", { skip: !DATABASE_URL }, async () => {

@@ -681,6 +681,161 @@ export function appendOrderLineSnapshot(store, selection, createId) {
   return snapshot;
 }
 
+const CATALOG_LIST_SORTS = new Set(["board", "name", "price_low", "price_high", "fastest"]);
+const FASTEST_HOURS_SENTINEL = 2147483647;
+
+export function encodeCatalogListCursor(payload) {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+export function catalogItemSearchText(store, item) {
+  const subcategory = (store.taxonomy?.subcategories || []).find((candidate) => candidate.code === item.subcategoryCode);
+  const groupIds = new Set(
+    (store.catalogOptionGroups || []).filter((group) => group.catalogItemId === item.id).map((group) => group.id),
+  );
+  const labels = (store.catalogOptions || [])
+    .filter((option) => groupIds.has(option.optionGroupId))
+    .map((option) => option.label);
+  const titles = (store.catalogPrepSteps || [])
+    .filter((step) => step.catalogItemId === item.id)
+    .map((step) => step.title);
+  return [item.name, item.description, subcategory?.name, ...labels, ...titles]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function simpleTokens(text) {
+  return String(text || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function queryTerms(q) {
+  return String(q).trim().split(/\s+/).filter(Boolean);
+}
+
+function ftsMatch(searchText, q) {
+  const tokens = new Set(simpleTokens(searchText));
+  return queryTerms(q).every((term) => tokens.has(term.toLowerCase()));
+}
+
+function trigramMatch(searchText, q) {
+  return searchText.toLowerCase().includes(String(q).trim().toLowerCase());
+}
+
+function effectiveTurnaroundHours(store, item) {
+  if (item.turnaroundHours != null) return item.turnaroundHours;
+  const service = (store.supplierServices || []).find((candidate) => candidate.id === item.supplierServiceId);
+  return service?.standardTurnaroundHours ?? service?.turnaroundHours ?? null;
+}
+
+function secondarySortKey(store, item, sort) {
+  switch (sort) {
+    case "name":
+      return String(item.name || "").toLowerCase();
+    case "price_low":
+    case "price_high":
+      return item.basePriceMinor;
+    case "fastest":
+      return effectiveTurnaroundHours(store, item) ?? FASTEST_HOURS_SENTINEL;
+    default:
+      return item.sortOrder ?? 0;
+  }
+}
+
+function compareSecondary(left, right, sort) {
+  if (sort === "name") {
+    const comparison = String(left.secondary).localeCompare(String(right.secondary));
+    if (comparison) return comparison;
+  } else if (sort === "price_high") {
+    const comparison = right.secondary - left.secondary;
+    if (comparison) return comparison;
+  } else {
+    const comparison = left.secondary - right.secondary;
+    if (comparison) return comparison;
+  }
+  return String(left.id).localeCompare(String(right.id));
+}
+
+function afterCatalogCursor(row, cursor, sort, hasQuery) {
+  if (!cursor) return true;
+  if (hasQuery) {
+    const rank = Array.isArray(cursor.k) ? cursor.k[0] : cursor.k;
+    if (row.rank < rank) return true;
+    if (row.rank > rank) return false;
+  }
+  const key = hasQuery && Array.isArray(cursor.k) ? cursor.k[1] : cursor.k;
+  return compareSecondary(row, { id: cursor.id, secondary: key }, sort) > 0;
+}
+
+export function listOwnCatalogItemsFromGraph(store, params) {
+  const {
+    supplierId,
+    q = null,
+    sort = "board",
+    limit = 20,
+    cursor = null,
+    subcategoryCode = null,
+    active = null,
+  } = params;
+  if (!CATALOG_LIST_SORTS.has(sort)) {
+    throw new CatalogError(400, "invalid_catalog_query", "sort must be board, name, price_low, price_high, or fastest.", {
+      field: "sort",
+    });
+  }
+
+  let items = (store.catalogItems || []).filter((item) => item.supplierId === supplierId);
+  if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
+  if (active === true) items = items.filter((item) => item.active !== false);
+  if (active === false) items = items.filter((item) => item.active === false);
+
+  const hasQuery = Boolean(q);
+  let ranked;
+  if (hasQuery) {
+    const withText = items.map((item) => {
+      const searchText = catalogItemSearchText(store, item);
+      return { item, fts: ftsMatch(searchText, q), trgm: trigramMatch(searchText, q) };
+    });
+    const used = withText.filter((entry) => entry.fts || entry.trgm);
+    ranked = used.map((entry) => ({
+      ...entry.item,
+      rank: entry.fts ? 1 : 0.1,
+      secondary: secondarySortKey(store, entry.item, sort),
+    }));
+  } else {
+    ranked = items.map((item) => ({
+      ...item,
+      rank: 0,
+      secondary: secondarySortKey(store, item, sort),
+    }));
+  }
+
+  ranked.sort((left, right) => {
+    if (hasQuery) {
+      const rankDiff = right.rank - left.rank;
+      if (rankDiff) return rankDiff;
+    }
+    return compareSecondary(left, right, sort);
+  });
+
+  const total = ranked.length;
+  const remaining = ranked.filter((row) => afterCatalogCursor(row, cursor, sort, hasQuery));
+  const page = remaining.slice(0, limit);
+  const last = remaining.length > limit ? page[page.length - 1] : null;
+  return {
+    items: page.map((row) => {
+      const { rank: _rank, secondary: _secondary, ...item } = row;
+      return item;
+    }),
+    nextCursor: last
+      ? encodeCatalogListCursor({
+          k: hasQuery ? [last.rank, last.secondary] : last.secondary,
+          id: last.id,
+        })
+      : null,
+    total,
+  };
+}
+
 export function privateCatalogItem(store, item) {
   const groups = catalogGroupsForItem(store, item.id);
   return {

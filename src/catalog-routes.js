@@ -8,6 +8,7 @@ import {
   catalogGroupsForItem,
   copyStarterIntoItem,
   listingStartersFor,
+  listOwnCatalogItemsFromGraph,
   prepStepsForItem,
   privateCatalogItem,
   publicCatalogItem,
@@ -121,6 +122,74 @@ function parseCursor(value) {
   } catch {
     fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
   }
+}
+
+const CATALOG_LIST_SORTS = new Set(["board", "name", "price_low", "price_high", "fastest"]);
+
+function parseHuntCursor(value) {
+  if (value == null || value === "") return null;
+  try {
+    const decoded = Buffer.from(String(value), "base64url").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.id == null || !Object.hasOwn(parsed, "k")) {
+      fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
+    }
+    return { k: parsed.k, id: String(parsed.id) };
+  } catch (error) {
+    if (error instanceof CatalogError) throw error;
+    fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
+  }
+}
+
+function parseCatalogListQuery(url) {
+  let q = url.searchParams.has("q") ? String(url.searchParams.get("q") ?? "") : "";
+  if (q.includes("\0")) fail(400, "invalid_catalog_query", "q cannot contain a NUL character.", { field: "q" });
+  q = q.trim();
+  if (q.length > 80) fail(400, "invalid_catalog_query", "q must be 80 characters or fewer.", { field: "q" });
+  if (!q) q = null;
+
+  const sort = String(url.searchParams.get("sort") || "board");
+  if (!CATALOG_LIST_SORTS.has(sort)) {
+    fail(400, "invalid_catalog_query", "sort must be board, name, price_low, price_high, or fastest.", { field: "sort" });
+  }
+
+  let limit = 20;
+  if (url.searchParams.has("limit")) {
+    const raw = String(url.searchParams.get("limit") ?? "");
+    if (!/^[1-9][0-9]*$/.test(raw)) {
+      fail(400, "invalid_catalog_query", "limit must be an integer from 1 through 50.", { field: "limit" });
+    }
+    limit = Number(raw);
+    if (limit > 50) fail(400, "invalid_catalog_query", "limit must be an integer from 1 through 50.", { field: "limit" });
+  }
+
+  let subcategoryCode = url.searchParams.has("subcategoryCode")
+    ? String(url.searchParams.get("subcategoryCode") || "").trim()
+    : "";
+  if (!subcategoryCode) subcategoryCode = null;
+
+  let active = null;
+  if (url.searchParams.has("active")) {
+    const value = url.searchParams.get("active");
+    if (!["true", "false"].includes(value)) fail(400, "invalid_catalog_item", "active must be true or false.");
+    active = value === "true";
+  }
+
+  return {
+    q,
+    sort,
+    limit,
+    cursor: parseHuntCursor(url.searchParams.get("cursor")),
+    subcategoryCode,
+    active,
+  };
+}
+
+async function ownCatalogList(store, params) {
+  if (typeof store.listOwnCatalogItems === "function") {
+    return store.listOwnCatalogItems(params);
+  }
+  return listOwnCatalogItemsFromGraph(store, params);
 }
 
 function auditChange(audit, store, user, action, entityType, entityId, detail) {
@@ -487,15 +556,13 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (req.method === "GET" && pathname === "/me/catalog-items") {
     requireSupplier(user);
-    let items = (store.catalogItems || []).filter((item) => item.supplierId === user.id);
-    const subcategoryCode = url.searchParams.get("subcategoryCode");
-    if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
-    if (url.searchParams.has("active")) {
-      const active = url.searchParams.get("active");
-      if (!["true", "false"].includes(active)) fail(400, "invalid_catalog_item", "active must be true or false.");
-      items = items.filter((item) => (item.active !== false) === (active === "true"));
-    }
-    return { status: 200, body: { items: items.map((item) => privateCatalogItem(store, item)) } };
+    const listed = await ownCatalogList(store, { supplierId: user.id, ...parseCatalogListQuery(url) });
+    const body = {
+      items: listed.items.map((item) => privateCatalogItem(store, item)),
+      total: listed.total,
+    };
+    if (listed.nextCursor) body.nextCursor = listed.nextCursor;
+    return { status: 200, body };
   }
 
   if (req.method === "POST" && pathname === "/me/catalog-items") {

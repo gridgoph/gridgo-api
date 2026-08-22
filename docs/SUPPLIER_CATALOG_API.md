@@ -47,7 +47,32 @@ POST /files/:fileId/attach
 
 `PATCH /me/supplier-profile` accepts `shopName`, `contactName`, `shop`, `pickupAvailable`, and `phone`, and answers with the same shape as the read. Saving `shopName` also writes `users.supplierName`, which is the field `GET /auth/me` → `publicUser` already exposes to Account. A shop-name-only or phone-only edit still bumps `version` and `updatedAt`. Phone accepts `09XXXXXXXXX`, `639XXXXXXXXX`, and `+639XXXXXXXXX`, tolerating spaces, dashes, and parentheses, and is stored canonically as `+639XXXXXXXXX`. Anything else, including a blank number, is `400 invalid_supplier_profile` with `field: "phone"` and persists nothing. Numbers captured at enrollment are left exactly as they were stored. Email belongs to the GRIDGO sign-in, so sending `email` is `400 email_not_editable`. Clerk identity copy may refresh the account email from Clerk's primary address and will not steal an address already on another GRIDGO user.
 
-`GET /me/catalog-items` accepts `?subcategoryCode=` and `?active=true|false`.
+`GET /me/catalog-items` lists **this shop’s** listings only. Hunt does not make a listing matchable and does not change `GET /catalog` or `GET /catalog/shops`. Matching stays on the live service line.
+
+Query params:
+
+| Param | Meaning |
+|---|---|
+| `q` | Optional hunt string. Trimmed; blank/whitespace is the same as omitting it. 1–80 characters. Longer values or a NUL byte are `400 invalid_catalog_query`. |
+| `subcategoryCode` | Standing kind-of-work filter. Intersects `q`. |
+| `active` | `true` or `false`. On-the-board vs hidden. Intersects `q`. Other values are `400 invalid_catalog_item`. |
+| `sort` | `board` (default, `sort_order, id`), `name` (`lower(name), id`), `price_low`, `price_high`, `fastest` (override hours then inherited service hours). Invalid `sort` is `400 invalid_catalog_query`. With `q`, rank is applied first, then this sort, then `id`. |
+| `limit` | Page size. Default 20, max 50. |
+| `cursor` | Opaque `base64url(JSON.stringify({ k, id }))` from a previous `nextCursor`. Invalid cursors are `400 invalid_cursor`. |
+
+`q` is ranked in PostgreSQL (`websearch_to_tsquery('simple')` on `search_tsv`, then `pg_trgm` / `ILIKE` fallback for prefixes such as `tarp`). The search document is the listing name, description, subcategory label, option labels, and prep-step titles. It is shop-scoped: another shop’s listings never appear.
+
+Response (additive):
+
+```json
+{
+  "items": [ /* privateCatalogItem[] */ ],
+  "nextCursor": "… omitted when this is the last page",
+  "total": 12
+}
+```
+
+`total` is the filtered count (same predicates as the page, no rank). `GET /catalog/shops` does not accept `q` in this slice.
 
 `POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`. A starter is copied into catalog rows at create time and is never referenced after.
 
