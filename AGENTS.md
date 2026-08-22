@@ -9,12 +9,13 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 - Money is signed PostgreSQL `BIGINT` integer PHP minor units and must remain within JavaScript safe-integer range. Never use floats.
 - Every HTTP mutation runs in one transaction with a transaction-scoped advisory lock. Money/order/credit/claim/issue changes, audit rows, and notifications commit atomically.
 - MinIO owns file bytes. PostgreSQL stores metadata, private object keys, and opaque file references only.
-- Fresh seed is idempotent reference data only: catalog, taxonomy, zones, settings. It must never create users or operational records and has no destructive reset.
+- Fresh `npm run seed` is idempotent reference data only: catalog, taxonomy, zones, settings, formats, starters. It must never create users or operational records and has no destructive reset.
+- Local development only: `npm run seed:dev` (and local compose) additionally seeds Lovis Printshop for `felyciaaa0220@gmail.com` against the development Clerk user. Production compose must keep `npm run seed`.
 
 ## Clerk-only identity
 
 - `src/auth.js` verifies Clerk session JWTs. `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES` are mandatory; issuer must match exactly. Do not pass `authorizedParties` into `verifyToken` (Clerk rejects a missing `azp`). Present `azp` values must be on the allowlist; Expo session tokens that omit `azp` are accepted after signature/expiry/issuer checks.
-- There is no `AUTH_MODE`, password login, local signup/session, demo password, or demo-user fixture. `/auth/login` and `/auth/signup` remain `404`.
+- There is no `AUTH_MODE`, password login, local signup/session, or demo password. `/auth/login` and `/auth/signup` remain `404`. The Lovis Printshop row is local `seed:dev` only and still maps a real Clerk subject.
 - `POST /auth/clerk/activate` is the explicit first-use Google/public SSO path. It only creates an `individual` client or idempotently adds a personal client membership to an already-mapped identity; it never links by email or grants another role.
 - `users.clerk_user_id` maps the Clerk subject. PostgreSQL membership rows are the authorization source; ignore Clerk role/status claims and metadata for authorization.
 - Supplier/rider memberships come only from their fixed enrollment endpoints or an audited database role assignment; Operations and Super Admin remain assignment-only. Supplier/rider work also requires Operations approval.

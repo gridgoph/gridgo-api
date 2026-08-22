@@ -33,11 +33,21 @@ services:
 
   seed:
     build: .
-    command: ["npm", "run", "seed"]
+    command: ["npm", "run", "seed:dev"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-gridgo}:${POSTGRES_PASSWORD:-gridgo_dev}@postgres:5432/${POSTGRES_DB:-gridgo}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?set CLERK_SECRET_KEY in .env}
+      CLERK_ISSUER: ${CLERK_ISSUER:?set CLERK_ISSUER in .env}
+      CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:?set CLERK_AUTHORIZED_PARTIES in .env}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://127.0.0.1:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-gridgo_api_7f3a91c2}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ggo_api_m1n10_9f41b7c3e68a2d55}
+      MINIO_BUCKET: ${MINIO_BUCKET:-gridgo-uploads}
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
     restart: "no"
     networks:

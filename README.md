@@ -54,6 +54,7 @@ For host-run commands against local compose:
 export DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo
 npm run migrate
 npm run seed
+npm run seed:dev
 ```
 
 Create a separate test database once, then migrate and test only that database.
@@ -66,7 +67,9 @@ DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm run 
 DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm test
 ```
 
-The seed creates only catalog, taxonomy, zones, and global operational settings. It never creates users or operational records and has no destructive reset mode.
+`npm run seed` creates only catalog, taxonomy, zones, file-format registry, listing starters, and global operational settings. It never creates users or operational records and has no destructive reset mode.
+
+Local compose and `npm run seed:dev` then seed **Lovis Printshop** for `felyciaaa0220@gmail.com` (the development Clerk shop): approved membership, live service lines for every category, and placeholder listings. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
 
 ## Health
 
