@@ -1,6 +1,6 @@
 # GRIDGO Storage API contract
 
-This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
+This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, the platform payment QR, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
 
@@ -116,6 +116,8 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | Purpose | Upload role | Allowed detected types | Maximum |
 |---|---|---|---|
 | `artwork` | client | JPEG, PNG, WebP, PDF, Photoshop (`image/vnd.adobe.photoshop`, magic `8BPS`) | 200 MiB (`209715200`) |
+| `mockup` | client | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
+| `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
@@ -181,7 +183,12 @@ VERIFICATION_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer 
 
 RIDER_LICENSE_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $RIDER_TOKEN" \
   -F 'purpose=rider_verification_document' -F 'file=@./drivers-license.jpg;type=image/jpeg' | tee /tmp/rider-license-upload.json | jq -r .file.fileId)
+
+PAYMENT_QR_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $OPS_TOKEN" \
+  -F 'purpose=payment_qr' -F 'file=@./gcash-qr.jpg;type=image/jpeg' | tee /tmp/payment-qr-upload.json | jq -r .file.fileId)
 ```
+
+`payment_qr` is Operations / Super Admin only (JPEG/PNG/WebP, 5 MiB). It is not attachable to an order. Activate it with `POST /settings/payment-qr`; checkout reads the public `GET /public/payment-qr` path advertised as `settings.paymentQr.imageUrl`.
 
 ## POST /files/:fileId/attach — bind to a domain record
 

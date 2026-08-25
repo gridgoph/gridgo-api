@@ -69,7 +69,7 @@ DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm test
 
 `npm run seed` creates only catalog, taxonomy, zones, file-format registry, listing starters, and global operational settings. It never creates users or operational records and has no destructive reset mode.
 
-Local compose and `npm run seed:dev` then seed **Lovis Printshop** for `felyciaaa0220@gmail.com` (the development Clerk shop): approved membership, live service lines for every category, and placeholder listings. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
+Local compose and `npm run seed:dev` seed three approved Davao fixture shops from existing development Clerk users. **Lovis Printshop** remains fixed to `felyciaaa0220@gmail.com`; two other real Clerk email identities receive local-only Davao Quickprint and Matina Creative Hub fixtures. All three publish Flyers plus another listing for matching and same-shop bundling. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
 
 ## Health
 
@@ -99,6 +99,7 @@ All routes except `/health`, `/catalog`, and the documented anonymous device reg
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
+- Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`

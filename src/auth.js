@@ -144,7 +144,7 @@ export function applyClerkIdentityCopy(store, user, clerkUser) {
   const profile = clerkClientProfile(clerkUser);
   let mutated = false;
 
-  if (profile.name && profile.name !== user.name) {
+  if (!user.profileNameManaged && profile.name && profile.name !== user.name) {
     user.name = profile.name;
     mutated = true;
   }

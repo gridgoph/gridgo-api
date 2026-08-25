@@ -4,7 +4,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 ## Conventions
 
-- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, `POST /webhooks/clerk`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
+- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, `GET /public/payment-qr`, `GET /public/announcement-images/:fileId`, `POST /webhooks/clerk`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
 - Membership roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`. Clerk claims and metadata never grant them.
@@ -53,8 +53,10 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | PATCH | `/notifications/:id` | notification owner | set `{read:true|false}` |
 | PATCH | `/notifications/read-all` | notification owner | mark caller's list snapshot read |
 | DELETE | `/notifications/:id` | notification owner | persistent soft delete from caller's inbox |
-| GET | `/settings` | authenticated | versioned service-fee rate, global issue window, and delivery bands |
+| GET | `/settings` | authenticated | versioned service-fee rate, global issue window, delivery bands, and payment QR (`imageUrl` when one is uploaded) |
 | PATCH | `/settings` | ops/super | audited compare-and-swap update of any operational setting |
+| POST | `/settings/payment-qr` | ops/super | activate a ready `payment_qr` file as the platform receiving plate |
+| GET | `/public/payment-qr` | public | current ready payment-QR bytes; `404` if none uploaded |
 | GET | `/supplier-payment-terms[?supplierId=]` | supplier own; ops/super any | supplier delivery and pickup payment-plan preferences |
 | PATCH | `/supplier-payment-terms` | supplier | update the caller's payment-plan preferences |
 | GET | `/credits/balance` | client own; ops/super any `?clientId=` | pilot grant ledger only |
@@ -468,18 +470,28 @@ Notification IDs are opaque. Every notification route is owner-only: an authenti
 
 ### `GET /notifications`
 
-Returns the caller's non-deleted notifications, newest first, plus an append-order snapshot watermark:
+Returns the caller's non-deleted notifications, newest first, plus an append-order snapshot watermark. `limit` (default 40, max 100) bounds the window; the inbox is not the full history. A notification about a job the caller can see carries `orderTitle` and `orderState` so a client can draw the stage rail without `GET /orders` or hydrating the job.
 
 ```json
 {
   "notifications": [
-    { "id": "ntf_123", "userId": "user_client", "title": "Final price ready", "body": "Review your order.", "read": false, "at": "2026-08-11T02:00:00.000Z" }
+    {
+      "id": "ntf_123",
+      "userId": "user_client",
+      "orderId": "ord_1",
+      "orderTitle": "Grand opening tarpaulin",
+      "orderState": "production",
+      "title": "Final price ready",
+      "body": "Review your order.",
+      "read": false,
+      "at": "2026-08-11T02:00:00.000Z"
+    }
   ],
   "snapshot": "ntf_123"
 }
 ```
 
-`snapshot` is `null` when the caller has never had a notification. Clients must retain the non-null snapshot returned with the list and echo it to mark-all; it is not a notification timestamp.
+`snapshot` is `null` when the caller has never had a notification. Clients must retain the non-null snapshot returned with the list and echo it to mark-all; it is not a notification timestamp. The snapshot is still the caller's last append, including a soft-deleted watermark, even when `limit` hides older rows.
 
 ### `GET /notifications/stream`
 
@@ -534,10 +546,24 @@ Default `GET /settings` response:
       { "maxDistanceMeters": 4999, "feeMinor": 2500 },
       { "maxDistanceMeters": 10000, "feeMinor": 5000 },
       { "maxDistanceMeters": null, "feeMinor": 7500 }
-    ]
+    ],
+    "paymentQr": { "method": "qr_manual", "caption": "QR Ph" }
   }
 }
 ```
+
+`paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Operations has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
+
+Upload is two steps, both `ops_admin` / `super_admin`:
+
+1. `POST /files` with `purpose=payment_qr` and a JPEG, PNG, or WebP (up to 5 MiB). Not attachable to an order (`400 payment_qr_not_attachable`).
+2. `POST /settings/payment-qr` `{ "fileId": "file_…", "reason": "…" }` activates that ready file as the platform QR, retires the previous one, and is audited. Repeating the same `fileId` is a no-op.
+
+```http
+GET /public/payment-qr
+```
+
+Unauthenticated. Streams the current ready plate so checkout and the ops preview do not depend on a signed MinIO URL. `404 {"error":"payment_qr_not_found"}` when none is active. `GET /public/payment-qr.jpg` is the same resource.
 
 These band figures are provisional Firstmate values, not captain-specified prices. Operations/Super Admin can change them without a release:
 

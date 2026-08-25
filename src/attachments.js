@@ -17,6 +17,7 @@ const KINDS = new Set([
   "catalog_item_photo",
   "supplier_shop_image",
   "announcement_image",
+  "payment_qr",
   "verification_document",
   "rider_verification_document",
 ]);
@@ -25,6 +26,16 @@ export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "va
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
   artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...ARTWORK_UPLOAD_CONTENT_TYPES] },
+  mockup: {
+    roles: ["client"],
+    maxBytes: 20 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp", "application/pdf"],
+  },
+  payment_proof: {
+    roles: ["client"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
     roles: ["rider"],
@@ -49,6 +60,11 @@ export const PURPOSE_POLICIES = Object.freeze({
   announcement_image: {
     roles: ["ops_admin", "super_admin"],
     maxBytes: 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  payment_qr: {
+    roles: ["ops_admin", "super_admin"],
+    maxBytes: 5 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   verification_document: {
@@ -584,6 +600,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A broadcast picture is sent with the announcement. It is not attached to an order.",
     );
   }
+  if (purpose === "payment_qr") {
+    fail(
+      400,
+      "payment_qr_not_attachable",
+      "The payment QR is the platform wallet plate. It is not attached to an order.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1001,10 +1024,16 @@ function canReadReference(user, store, reference) {
   }
   const order = (store.orders || []).find((item) => item.id === reference.id);
   if (!order) return false;
+  const relatedJob = (store.orderJobs || []).some(
+    (job) => job.orderId === order.id
+      && ((user.role === "supplier" && job.supplierId === user.id)
+        || (user.role === "rider" && job.riderId === user.id)),
+  );
   return (
     (user.role === "client" && order.clientId === user.id) ||
     (user.role === "supplier" && order.supplierId === user.id) ||
-    (user.role === "rider" && order.riderId === user.id)
+    (user.role === "rider" && order.riderId === user.id) ||
+    relatedJob
   );
 }
 

@@ -60,6 +60,8 @@ import {
   isPrivateRiderProfileRoute,
   routeRiderProfile,
 } from "./rider-profile-routes.js";
+import { routeOrderMatch } from "./order-match-routes.js";
+import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
 import { privateCatalogItem } from "./supplier-catalog.js";
 import {
   applyForBusiness,
@@ -73,6 +75,7 @@ import {
 import {
   createNotificationEvents,
   formatNotificationEvent,
+  listInbox,
   notificationSnapshot,
 } from "./notifications.js";
 import { createObjectStorage } from "./object-storage.js";
@@ -98,6 +101,7 @@ import {
   buildCategoryTree,
   resolveCategoryCode,
 } from "./taxonomy.js";
+import { routeAccountProfile } from "./account-profile-routes.js";
 import {
   calculateOrderMoney,
   createPaymentSchedule,
@@ -274,7 +278,8 @@ async function compensatePendingFile(fileId, objectKey) {
   }
 }
 
-function send(res, status, body) {
+function writeJsonResponse(res, status, body) {
+  if (res.writableEnded || res.destroyed) return;
   if (status >= 400 && body && typeof body === "object") {
     res.gridgoError = typeof body.error === "string" ? body.error : "";
     res.gridgoErrorFields =
@@ -286,6 +291,14 @@ function send(res, status, body) {
     ...(res.gridgoCorsHeaders || {}),
   });
   res.end(payload);
+}
+
+function send(res, status, body, { afterCommit = true } = {}) {
+  if (afterCommit && database.inWriteTransaction()) {
+    database.afterCommit(() => writeJsonResponse(res, status, body));
+    return;
+  }
+  writeJsonResponse(res, status, body);
 }
 
 function clerkWebhookSigningSecret() {
@@ -399,31 +412,46 @@ function readBody(req) {
   });
 }
 
-function sendDomainError(res, error) {
+function sendDomainError(res, error, options) {
   return send(res, error.status || 500, {
     error: error.code || "server_error",
     message: error.message,
     ...(error.details || {}),
-  });
+  }, options);
 }
 
 async function decorateCatalogPhotoUrls(store, body) {
-  const items = [];
-  if (body?.item?.photos) items.push(body.item);
-  if (Array.isArray(body?.items)) items.push(...body.items.filter((item) => item?.photos));
-  for (const item of items) {
-    for (const photo of item.photos || []) {
-      const file = findFile(store, photo.fileId);
-      if (!file?.objectKey) continue;
-      try {
-        const signed = await objectStorage.presignGet(file.objectKey);
-        photo.downloadUrl = signed.url;
-        photo.downloadUrlExpiresAt = signed.expiresAt;
-      } catch {
-        // Keep fileId as the identity even if signing is unavailable.
-      }
-    }
+  await signCatalogPhotoUrls(store, body, {
+    findFile,
+    presignGet: (key) => objectStorage.presignGet(key),
+  });
+}
+
+const PAYMENT_QR_PUBLIC_PATH = "/public/payment-qr";
+
+function readyPaymentQrFile(store) {
+  const fileId = store?.settings?.paymentQrFileId;
+  if (!fileId) return null;
+  const file = findFile(store, fileId);
+  if (
+    !file
+    || file.purpose !== "payment_qr"
+    || file.state !== "ready"
+    || file.deletedAt
+    || file.deleteRequestedAt
+    || !file.objectKey
+  ) {
+    return null;
   }
+  return file;
+}
+
+function publicOperationalSettings(settings, store = null) {
+  const { paymentQrFileId: _paymentQrFileId, ...rest } = settings || {};
+  const paymentQr = { method: "qr_manual", caption: "QR Ph" };
+  const file = store ? readyPaymentQrFile(store) : null;
+  if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
+  return { ...rest, paymentQr };
 }
 
 /**
@@ -443,6 +471,46 @@ async function serveAnnouncementImage(req, res, store, pathname) {
     || !file.objectKey
   ) {
     return send(res, 404, { error: "announcement_image_not_found" });
+  }
+  try {
+    const headers = {
+      "Content-Type": file.detectedContentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Length": String(file.size),
+      ...(res.gridgoCorsHeaders || {}),
+    };
+    if (req.method === "HEAD") {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
+    const stream = await objectStorage.getObject(file.objectKey);
+    res.writeHead(200, headers);
+    stream.on("error", () => {
+      if (!res.writableEnded) res.destroy();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+      return sendDomainError(res, error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * GRIDGO's one receiving QR. Unauthenticated on purpose: checkout needs the
+ * plate even when totals are not ready, and a signed MinIO URL would expire
+ * while a client still has the sheet open. Only the current ready `payment_qr`.
+ */
+async function servePaymentQr(req, res, store) {
+  const file = readyPaymentQrFile(store);
+  if (!file) {
+    return send(res, 404, { error: "payment_qr_not_found" });
   }
   try {
     const headers = {
@@ -551,12 +619,15 @@ function publicUser(u) {
   // Identity-document references are exposed only through the dedicated, caller-aware
   // verification projection. publicUser is reused in catalogue and matching responses.
   delete rest.verificationDocumentFileIds;
+  delete rest.profileNameManaged;
   // Clients always expose an authoritative accountType (never undefined for consumers).
   // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
   if (u.role === "client") {
     rest.accountType = resolveClientAccountType(u);
+    rest.version = u.version || 1;
   } else {
     delete rest.accountType;
+    delete rest.version;
   }
   return rest;
 }
@@ -1411,7 +1482,7 @@ async function handleRequest(req, res) {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
         "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key",
-        "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
     }
@@ -1543,6 +1614,13 @@ async function handleRequest(req, res) {
       && pathname.startsWith("/public/announcement-images/")
     ) {
       return serveAnnouncementImage(req, res, store, pathname);
+    }
+
+    if (
+      (req.method === "GET" || req.method === "HEAD")
+      && (pathname === PAYMENT_QR_PUBLIC_PATH || pathname === `${PAYMENT_QR_PUBLIC_PATH}.jpg`)
+    ) {
+      return servePaymentQr(req, res, store);
     }
 
     // ---- auth ----
@@ -1775,6 +1853,22 @@ async function handleRequest(req, res) {
       return send(res, riderProfileResponse.status, riderProfileResponse.body);
     }
 
+    const accountProfileResponse = await routeAccountProfile({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      createId: id,
+      now,
+      audit,
+      publicUser,
+    });
+    if (accountProfileResponse) {
+      if (accountProfileResponse.mutated) await save(store);
+      return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
       return send(res, 200, { catalog: store.catalog });
@@ -1786,6 +1880,23 @@ async function handleRequest(req, res) {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
       });
+    }
+
+    const orderMatchResponse = await routeOrderMatch({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      id,
+      now,
+    });
+    if (orderMatchResponse) {
+      if (orderMatchResponse.mutated) await save(store);
+      if (orderMatchResponse.status < 400) {
+        await decorateCatalogPhotoUrls(store, orderMatchResponse.body);
+      }
+      return send(res, orderMatchResponse.status, orderMatchResponse.body);
     }
 
     // ---- shared Operations / Super Admin approval queue ----
@@ -2231,13 +2342,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/notifications") {
-      const items = store.notifications
-        .filter((n) => n.userId === user.id && n.deletedAt == null)
-        .sort((a, b) => (a.at < b.at ? 1 : -1));
-      return send(res, 200, {
-        notifications: items,
-        snapshot: notificationSnapshot(store.notifications, user.id),
-      });
+      return send(res, 200, listInbox(store, user.id, { limit: url.searchParams.get("limit") }));
     }
 
     if (req.method === "PATCH" && pathname === "/notifications/read-all") {
@@ -2386,7 +2491,10 @@ async function handleRequest(req, res) {
 
     // ---- global operational settings ----
     if (req.method === "GET" && pathname === "/settings") {
-      return send(res, 200, { version: store.version, settings: store.settings || defaultOperationalSettings() });
+      return send(res, 200, {
+        version: store.version,
+        settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store),
+      });
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
@@ -2420,7 +2528,56 @@ async function handleRequest(req, res) {
         reason,
       });
       await save(store);
-      return send(res, 200, { version: store.version, settings: store.settings });
+      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store) });
+    }
+
+    if (req.method === "POST" && pathname === "/settings/payment-qr") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      if (!reason) return send(res, 400, { error: "settings_reason_required" });
+      const fileId = String(body.fileId || "").trim();
+      const file = findFile(store, fileId);
+      if (
+        !file
+        || file.purpose !== "payment_qr"
+        || file.state !== "ready"
+        || file.deletedAt
+        || file.deleteRequestedAt
+        || !file.objectKey
+      ) {
+        return send(res, 400, {
+          error: "invalid_payment_qr",
+          message: "Upload a JPEG, PNG or WebP with purpose payment_qr, then activate that file as the platform QR.",
+        });
+      }
+      if (!store.settings) store.settings = defaultOperationalSettings();
+      const previousId = store.settings.paymentQrFileId || null;
+      if (previousId === file.fileId) {
+        return send(res, 200, {
+          version: store.version,
+          settings: publicOperationalSettings(store.settings, store),
+        });
+      }
+      const previous = previousId ? findFile(store, previousId) : null;
+      store.settings = { ...store.settings, paymentQrFileId: file.fileId };
+      store.version += 1;
+      if (previous && previous.state === "ready" && !previous.deletedAt && !previous.deleteRequestedAt) {
+        markFileDeletePending(previous, user, now());
+      }
+      audit(store, {
+        actor: user,
+        action: "settings.payment_qr_replace",
+        entityType: "settings",
+        entityId: "payment_qr",
+        detail: { previousFileId: previousId, fileId: file.fileId },
+        reason,
+      });
+      await save(store);
+      return send(res, 200, {
+        version: store.version,
+        settings: publicOperationalSettings(store.settings, store),
+      });
     }
 
     // ---- supplier payment timing terms ----
@@ -4717,13 +4874,13 @@ async function handleRequest(req, res) {
       return;
     }
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
-      return sendDomainError(res, err);
+      return sendDomainError(res, err, { afterCommit: false });
     }
     console.error(err);
     return send(res, 500, {
       error: "server_error",
       message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues.",
-    });
+    }, { afterCommit: false });
   }
 }
 
@@ -4756,7 +4913,7 @@ const server = http.createServer((req, res) => {
     // handleRequest fails the same parse and answers 500 itself.
   }
   logHttpRequest(req, res, pathname, Date.now());
-  const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // File transfers and MinIO calls stay outside database transactions. File routes
   // acquire one only for short load -> validate -> mutate -> commit sections.
   const isSelfQueuedFileMutation =

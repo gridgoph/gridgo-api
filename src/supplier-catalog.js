@@ -230,7 +230,7 @@ export function selectedCatalogPrice(store, item, selectedOptionIds = []) {
   return { effectiveUnitPriceMinor: checkedNumber(total, "effectiveUnitPriceMinor"), selectedOptions };
 }
 
-function minimumCatalogPrice(store, item) {
+export function minimumCatalogPrice(store, item) {
   const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false });
   let total = checkedMinor(item.basePriceMinor, "basePriceMinor");
   for (const group of groups) {

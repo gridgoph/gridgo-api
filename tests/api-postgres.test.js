@@ -471,6 +471,91 @@ test("fixed auth projections authorize every state from memberships and approval
   }
 });
 
+test("client account profile routes persist versioned edits and an idempotent business upgrade", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    assert.equal((await request(instance.api, "/me")).status, 401);
+    const initial = await request(instance.api, "/me", { subject: "clerk_client" });
+    assert.equal(initial.status, 200, JSON.stringify(initial.body));
+    assert.equal(initial.body.user.version, 1);
+    assert.equal(initial.body.user.accountType, "individual");
+
+    const patched = await request(instance.api, "/me", {
+      method: "PATCH",
+      subject: "clerk_client",
+      body: { expectedVersion: 1, name: "Ana Client", phone: "0918 765 4321" },
+    });
+    assert.equal(patched.status, 200, JSON.stringify(patched.body));
+    assert.equal(patched.body.user.name, "Ana Client");
+    assert.equal(patched.body.user.phone, "+639187654321");
+    assert.equal(patched.body.user.version, 2);
+
+    const stale = await request(instance.api, "/me", {
+      method: "PATCH",
+      subject: "clerk_client",
+      body: { expectedVersion: 1, name: "Stale Client" },
+    });
+    assert.equal(stale.status, 409, JSON.stringify(stale.body));
+    assert.equal(stale.body.error, "account_version_conflict");
+    assert.equal(stale.body.currentVersion, 2);
+
+    const missingBusinessName = await request(instance.api, "/me/business-apply", {
+      method: "POST",
+      subject: "clerk_client",
+      body: { accountType: "business" },
+    });
+    assert.equal(missingBusinessName.status, 400, JSON.stringify(missingBusinessName.body));
+    assert.equal(missingBusinessName.body.error, "invalid_account_profile");
+    assert.equal(missingBusinessName.body.field, "businessName");
+
+    const application = {
+      accountType: "business",
+      businessName: "GRIDGO Business Customer",
+      address: {
+        label: "Office",
+        addressLine: "123 Rizal Street",
+        point: { lat: 7.0731, lng: 125.6128 },
+        isDefault: true,
+      },
+    };
+    const business = await request(instance.api, "/me/business-apply", {
+      method: "POST", subject: "clerk_client", body: application,
+    });
+    const retry = await request(instance.api, "/me/business-apply", {
+      method: "POST", subject: "clerk_client", body: application,
+    });
+    assert.equal(business.status, 200, JSON.stringify(business.body));
+    assert.equal(business.body.user.accountType, "business");
+    assert.equal(business.body.user.orgName, "GRIDGO Business Customer");
+    assert.equal(business.body.user.version, 3);
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.equal(retry.body.user.version, 3);
+
+    const individual = await request(instance.api, "/me", {
+      method: "PATCH",
+      subject: "clerk_promote",
+      body: { expectedVersion: 1, name: "Personal Client" },
+    });
+    assert.equal(individual.status, 200, JSON.stringify(individual.body));
+    assert.equal(individual.body.user.accountType, "individual");
+    assert.equal(Object.hasOwn(individual.body.user, "orgName"), false);
+
+    const persisted = await loadStore(database);
+    const account = persisted.users.find(({ id }) => id === "user_client");
+    assert.equal(account.name, "Ana Client");
+    assert.equal(account.version, 3);
+    assert.equal(account.accountType, "business");
+    assert.equal(account.orgName, "GRIDGO Business Customer");
+    assert.equal(persisted.clientAddresses.filter(({ clientId }) => clientId === account.id).length, 1);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("legacy verification decisions keep approval cases and fixed projections consistent", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -1313,6 +1398,10 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     const current = await request(instance.api, "/settings", { subject: "clerk_ops" });
     assert.equal(current.status, 200);
     assert.equal(current.body.settings.serviceFeeRateBps, 1000);
+    assert.deepEqual(current.body.settings.paymentQr, {
+      method: "qr_manual",
+      caption: "QR Ph",
+    });
 
     const noReason = await request(instance.api, "/settings", {
       method: "PATCH",
@@ -1383,6 +1472,107 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     });
     assert.equal(invalid.status, 400);
     assert.equal(invalid.body.error, "invalid_pickup_downpayment_rate");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("ops can replace the public payment QR without changing method or caption", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9, 0x00, 0x01, 0x02, 0x03]);
+  const instance = await startApi();
+  try {
+    const missing = await fetch(`${instance.api}/public/payment-qr`);
+    assert.equal(missing.status, 404);
+    assert.equal((await missing.json()).error, "payment_qr_not_found");
+
+    const clientUpload = new FormData();
+    clientUpload.set("purpose", "payment_qr");
+    clientUpload.set("file", new Blob([jpeg], { type: "image/jpeg" }), "gcash-qr.jpg");
+    const clientDenied = await fetch(`${instance.api}/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token("clerk_client")}` },
+      body: clientUpload,
+    });
+    const clientDeniedBody = await clientDenied.json();
+    assert.equal(clientDenied.status, 403, JSON.stringify(clientDeniedBody));
+    assert.equal(clientDeniedBody.error, "forbidden");
+
+    const current = await request(instance.api, "/settings", { subject: "clerk_ops" });
+    assert.equal(current.status, 200);
+    assert.equal(Object.hasOwn(current.body.settings.paymentQr, "imageUrl"), false);
+    assert.deepEqual(current.body.settings.paymentQr, { method: "qr_manual", caption: "QR Ph" });
+
+    let health = await request(instance.api, "/health");
+    for (let attempt = 0; attempt < 50 && health.body.storage?.status === "checking"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      health = await request(instance.api, "/health");
+    }
+    if (health.body.storage?.status !== "available") {
+      const patched = await request(instance.api, "/settings", {
+        method: "PATCH",
+        subject: "clerk_ops",
+        body: { expectedVersion: current.body.version, reason: "Confirm paymentQr survives a band-free patch" },
+      });
+      assert.equal(patched.status, 200, JSON.stringify(patched.body));
+      assert.deepEqual(patched.body.settings.paymentQr, { method: "qr_manual", caption: "QR Ph" });
+      return;
+    }
+
+    const form = new FormData();
+    form.set("purpose", "payment_qr");
+    form.set("file", new Blob([jpeg], { type: "image/jpeg" }), "gcash-qr.jpg");
+    const uploaded = await fetch(`${instance.api}/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token("clerk_ops")}` },
+      body: form,
+    });
+    const uploadedBody = await uploaded.json();
+    assert.equal(uploaded.status, 201, JSON.stringify(uploadedBody));
+    assert.equal(uploadedBody.file.purpose, "payment_qr");
+    assert.equal(uploadedBody.file.state, "ready");
+
+    const activated = await request(instance.api, "/settings/payment-qr", {
+      method: "POST",
+      subject: "clerk_ops",
+      body: { fileId: uploadedBody.file.fileId, reason: "Set the GCash plate" },
+    });
+    assert.equal(activated.status, 200, JSON.stringify(activated.body));
+    assert.equal(activated.body.settings.paymentQr.method, "qr_manual");
+    assert.equal(activated.body.settings.paymentQr.caption, "QR Ph");
+    assert.match(activated.body.settings.paymentQr.imageUrl, /^\/public\/payment-qr\?v=/);
+    assert.equal(Object.hasOwn(activated.body.settings, "paymentQrFileId"), false);
+
+    const again = await request(instance.api, "/settings/payment-qr", {
+      method: "POST",
+      subject: "clerk_ops",
+      body: { fileId: uploadedBody.file.fileId, reason: "Same plate again" },
+    });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.version, activated.body.version);
+
+    const publicQr = await fetch(`${instance.api}/public/payment-qr`);
+    assert.equal(publicQr.status, 200);
+    assert.match(publicQr.headers.get("content-type") || "", /image\/jpeg/);
+    const bytes = Buffer.from(await publicQr.arrayBuffer());
+    assert.deepEqual(bytes, jpeg);
+
+    const patched = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: {
+        expectedVersion: activated.body.version,
+        serviceFeeRateBps: 1000,
+        reason: "Confirm paymentQr survives compare-and-swap",
+      },
+    });
+    assert.equal(patched.status, 200, JSON.stringify(patched.body));
+    assert.equal(patched.body.settings.paymentQr.method, "qr_manual");
+    assert.equal(patched.body.settings.paymentQr.caption, "QR Ph");
+    assert.equal(patched.body.settings.paymentQr.imageUrl, activated.body.settings.paymentQr.imageUrl);
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -2415,4 +2605,3 @@ test("legacy verification can approve a rider who enrolled with a typed licence 
     await database.close();
   }
 });
-
