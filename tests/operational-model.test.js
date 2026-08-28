@@ -117,6 +117,38 @@ test("uses the provisional configurable distance boundaries exactly", () => {
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
 });
 
+test("a client collects at GRIDGO's office and is never given the shop's address", () => {
+  const shop = { lat: 7.064, lng: 125.6085, label: "Lovis Printshop · Bajada, Davao City" };
+  const base = {
+    id: "ord-pickup",
+    clientId: "client-a",
+    supplierId: "supplier-a",
+    state: "production",
+    pickup: { ...shop },
+    dropoff: null,
+    payments: {},
+  };
+
+  // Collecting: one pin, and it is GRIDGO's counter. A rider brings the job
+  // there; the client never goes to the press.
+  const collected = publicOrderFor({ ...base, fulfillmentMode: "pickup" }, { id: "client-a", role: "client" });
+  assert.deepEqual(collected.pickup, { lat: 7.13267, lng: 125.611265, label: "GRIDGO Office" });
+
+  // Delivered: the client watches the rider and their own address. The shop's
+  // coordinates are not theirs to have, so no origin is projected at all.
+  const delivered = publicOrderFor(
+    { ...base, fulfillmentMode: "delivery", dropoff: { lat: 7.076, lng: 125.615, label: "Talomo" } },
+    { id: "client-a", role: "client" },
+  );
+  assert.equal("pickup" in delivered, false);
+
+  // Production is untouched: whoever actually drives there still gets the shop.
+  for (const reader of [{ id: "rider-a", role: "rider" }, { id: "supplier-a", role: "supplier" }, { id: "ops-a", role: "ops_admin" }]) {
+    const projected = publicOrderFor({ ...base, fulfillmentMode: "pickup" }, reader);
+    assert.deepEqual(projected.pickup, shop, `${reader.role} keeps the shop pickup`);
+  }
+});
+
 test("role-aware projections expose client fee lines and truthful supplier settlement", () => {
   const money = plan();
   const schedule = createPaymentSchedule(money);

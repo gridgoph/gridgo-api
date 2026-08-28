@@ -54,6 +54,17 @@ const ANONYMOUS_PUSH_DATA_FIELDS = ["type"];
 /** The one message type an anonymous handset may ever be sent. */
 export const ANNOUNCEMENT_PUSH_TYPE = "announcement";
 
+/** Longest operator-supplied picture URL the announcement route accepts. */
+export const ANNOUNCEMENT_IMAGE_URL_MAX = 2048;
+
+/**
+ * Hosted broadcast pictures are served from this unauthenticated path so FCM
+ * and the apps can fetch bytes without a signed MinIO URL. The id is a GRIDGO
+ * file id (`file_` + 12 hex chars).
+ */
+export const ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX = "/public/announcement-images/";
+const ANNOUNCEMENT_IMAGE_FILE_ID = /^file_[a-f0-9]{12}$/;
+
 export class PushConfigurationError extends Error {
   constructor(message) {
     super(message);
@@ -348,6 +359,103 @@ function trimmedString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+export function announcementImagePublicPath(fileId) {
+  return `${ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX}${fileId}`;
+}
+
+/**
+ * The phone downloads the lock-screen picture itself from this URL, so a LAN
+ * `http://192.168.1.55:8787/...` path is valid in local development. Credentials
+ * in the URL are never allowed.
+ */
+export function isFcmFetchableImageUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    if (url.username || url.password) return false;
+    return Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Origin the phone uses to fetch a hosted broadcast picture.
+ *
+ * `GRIDGO_PUBLIC_API_ORIGIN` always wins. When it is unset and MinIO's public
+ * origin is plain http (local LAN), reuse that host with this process's port
+ * so an uploaded picture can ride the lock screen without another env var.
+ * An https MinIO origin is production storage, not the API — do not guess.
+ */
+export function announcementImageOrigin(env = process.env) {
+  const explicit = trimmedString(env.GRIDGO_PUBLIC_API_ORIGIN).replace(/\/+$/, "");
+  if (explicit) return explicit;
+  try {
+    const minio = new URL(trimmedString(env.MINIO_PUBLIC_URL));
+    if (minio.protocol !== "http:" || !minio.hostname) return "";
+    const port = trimmedString(env.PORT) || "8787";
+    return `${minio.protocol}//${minio.hostname}:${port}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Optional announcement picture. Empty is fine. A hosted file is stored as the
+ * public path; anything else must be an http(s) URL without credentials.
+ */
+export function normalizeAnnouncementImageUrl(value) {
+  if (value == null) return { imageUrl: null };
+  if (typeof value !== "string") {
+    return { error: "invalid_announcement_image" };
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return { imageUrl: null };
+  if (trimmed.length > ANNOUNCEMENT_IMAGE_URL_MAX) {
+    return { error: "invalid_announcement_image" };
+  }
+  if (trimmed.startsWith(ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX)) {
+    const fileId = trimmed.slice(ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX.length);
+    if (!ANNOUNCEMENT_IMAGE_FILE_ID.test(fileId)) {
+      return { error: "invalid_announcement_image" };
+    }
+    return { imageUrl: announcementImagePublicPath(fileId) };
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { error: "invalid_announcement_image" };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { error: "invalid_announcement_image" };
+  }
+  if (parsed.username || parsed.password) {
+    return { error: "invalid_announcement_image" };
+  }
+  return { imageUrl: parsed.toString() };
+}
+
+/**
+ * Absolute URL to put on the FCM payload so the phone can download the picture.
+ * Hosted paths are joined to `announcementImageOrigin`.
+ */
+export function resolveFcmImageUrl(imageUrl, env = process.env) {
+  const value = trimmedString(imageUrl);
+  if (!value) return null;
+  let absolute = value;
+  if (value.startsWith(ANNOUNCEMENT_IMAGE_PUBLIC_PREFIX)) {
+    const origin = announcementImageOrigin(env);
+    if (!origin) return null;
+    try {
+      absolute = new URL(value, `${origin}/`).toString();
+    } catch {
+      return null;
+    }
+  }
+  return isFcmFetchableImageUrl(absolute) ? absolute : null;
+}
+
 /**
  * Build the user-facing half of a push from an already-persisted notification,
  * so every push corresponds to a record the same user can also read in-app.
@@ -355,7 +463,7 @@ function trimmedString(value) {
  * `data` is built from PUSH_DATA_FIELDS only — enough for the app to open the
  * right screen, and nothing else regardless of what the record carries.
  */
-export function pushMessageFor(notification) {
+export function pushMessageFor(notification, env = process.env) {
   const data = {
     notificationId: String(notification.id),
     type: trimmedString(notification.type),
@@ -365,10 +473,12 @@ export function pushMessageFor(notification) {
   for (const key of Object.keys(data)) {
     if (!PUSH_DATA_FIELDS.includes(key) || data[key] === "") delete data[key];
   }
+  const image = resolveFcmImageUrl(notification.imageUrl, env);
   return {
     title: trimmedString(notification.title) || "GRIDGO",
     body: trimmedString(notification.body) || "Open GRIDGO for the latest update.",
     data,
+    ...(image ? { image } : {}),
   };
 }
 
@@ -377,11 +487,13 @@ export function pushMessageFor(notification) {
  * title and body, plus `type: "announcement"` so the app can route it without
  * a notification record to open.
  */
-export function announcementPushMessage({ title, body }) {
+export function announcementPushMessage({ title, body, imageUrl }, env = process.env) {
+  const image = resolveFcmImageUrl(imageUrl, env);
   return {
     title: trimmedString(title) || "GRIDGO",
     body: trimmedString(body) || "Open GRIDGO for the latest update.",
     data: { type: ANNOUNCEMENT_PUSH_TYPE },
+    ...(image ? { image } : {}),
   };
 }
 
@@ -413,19 +525,29 @@ export function assertStrangerSafeMessage(message) {
 }
 
 export function fcmRequestBody(message, token) {
+  const notification = { title: message.title, body: message.body };
+  const androidNotification = { channel_id: ANDROID_NOTIFICATION_CHANNEL_ID };
+  const aps = { sound: "default" };
+  const apns = {
+    headers: { "apns-priority": "10" },
+    payload: { aps },
+  };
+  if (message.image) {
+    notification.image = message.image;
+    androidNotification.image = message.image;
+    aps["mutable-content"] = 1;
+    apns.fcm_options = { image: message.image };
+  }
   return {
     message: {
       token,
-      notification: { title: message.title, body: message.body },
+      notification,
       data: message.data,
       android: {
         priority: "high",
-        notification: { channel_id: ANDROID_NOTIFICATION_CHANNEL_ID },
+        notification: androidNotification,
       },
-      apns: {
-        headers: { "apns-priority": "10" },
-        payload: { aps: { sound: "default" } },
-      },
+      apns,
     },
   };
 }

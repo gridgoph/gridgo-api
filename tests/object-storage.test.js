@@ -53,6 +53,25 @@ test("normalizes connection or missing-bucket failures without leaking the SDK e
   });
 });
 
+test("streams a stored object for unauthenticated announcement picture fetches", async () => {
+  const stream = { pipe() {} };
+  const storage = createObjectStorage(
+    env,
+    clients({ internalClient: { getObject: async (bucket, key) => {
+      assert.equal(bucket, "gridgo-test");
+      assert.equal(key, "announcement_image/pic.jpg");
+      return stream;
+    } } }),
+  );
+  assert.equal(await storage.getObject("announcement_image/pic.jpg"), stream);
+
+  const missing = createObjectStorage(
+    env,
+    clients({ internalClient: { getObject: async () => { const error = new Error("missing"); error.code = "NoSuchKey"; throw error; } } }),
+  );
+  await assert.rejects(missing.getObject("missing"), StorageObjectMissingError);
+});
+
 test("streams puts, stats objects, and maps missing objects specifically", async () => {
   const storage = createObjectStorage(env, clients());
   assert.deepEqual(

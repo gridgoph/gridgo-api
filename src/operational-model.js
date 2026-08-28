@@ -1,3 +1,5 @@
+import { gridgoOfficePoint } from "./gridgo-office.js";
+
 const BPS_DENOMINATOR = 10_000n;
 const BPS_HALF = 5_000n;
 
@@ -631,6 +633,22 @@ export function publicOrderFor(order, user) {
       delete publicRecord.acceptedQuote.supplierDownpaymentRateBps;
     }
   }
+  /*
+    What "pickup" is, to the person reading it.
+
+    The stored point is the assigned shop, because that is where a rider
+    actually collects. A client is not going there: GRIDGO is the counter they
+    bought from, a rider brings the finished job to GRIDGO's office, and they
+    collect it there. So a collected order reads back with the office as its
+    pickup, and a delivered one carries no origin at all for the client —
+    they watch the rider and their own address, and the shop's coordinates are
+    not theirs to have. Ops, the assigned supplier and riders are untouched.
+  */
+  if (owningClient && !ops) {
+    if (order.fulfillmentMode === "pickup") publicRecord.pickup = gridgoOfficePoint();
+    else delete publicRecord.pickup;
+  }
+
   if (!ops && !owningClient && publicRecord.payments) {
     for (const installment of Object.values(publicRecord.payments)) {
       if (!installment || typeof installment !== "object") continue;

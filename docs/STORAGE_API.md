@@ -1,6 +1,6 @@
 # GRIDGO Storage API contract
 
-This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
+This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, the platform payment QR, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
 
@@ -100,6 +100,8 @@ Parents contain IDs only:
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
+| `catalog_item_photo` | listing photo rows on `supplier_catalog_item` (`sortOrder` 0–7, optional `altText`) |
+| `supplier_shop_image` | shop media slot `logo` or `cover` |
 | `verification_document` | `supplier.verificationDocumentFileIds: string[]` (private; never part of `PublicUser`) |
 | `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 
@@ -113,20 +115,24 @@ Validation uses the filename extension, the declared part MIME when it is specif
 
 | Purpose | Upload role | Allowed detected types | Maximum |
 |---|---|---|---|
-| `artwork` | client | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
+| `artwork` | client | JPEG, PNG, WebP, PDF, Photoshop (`image/vnd.adobe.photoshop`, magic `8BPS`) | 200 MiB (`209715200`) |
+| `mockup` | client | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
+| `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
+| `catalog_item_photo` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
+| `supplier_shop_image` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 
-Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload.
+Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
 
 The upload request timeout defaults to 15 minutes. Clients may show transfer progress, but progress reaching 100% is **not success**. Only a `201` response containing `file.fileId` means MinIO storage and `ready` metadata both completed. Retry after any lost connection or non-201 response; never invent or reuse a guessed ID.
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -177,7 +183,12 @@ VERIFICATION_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer 
 
 RIDER_LICENSE_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $RIDER_TOKEN" \
   -F 'purpose=rider_verification_document' -F 'file=@./drivers-license.jpg;type=image/jpeg' | tee /tmp/rider-license-upload.json | jq -r .file.fileId)
+
+PAYMENT_QR_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $OPS_TOKEN" \
+  -F 'purpose=payment_qr' -F 'file=@./gcash-qr.jpg;type=image/jpeg' | tee /tmp/payment-qr-upload.json | jq -r .file.fileId)
 ```
+
+`payment_qr` is Operations / Super Admin only (JPEG/PNG/WebP, 5 MiB). It is not attachable to an order. Activate it with `POST /settings/payment-qr`; checkout reads the public `GET /public/payment-qr` path advertised as `settings.paymentQr.imageUrl`.
 
 ## POST /files/:fileId/attach — bind to a domain record
 

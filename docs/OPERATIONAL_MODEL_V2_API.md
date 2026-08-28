@@ -4,7 +4,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 
 ## Conventions
 
-- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
+- Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, `GET /public/payment-qr`, `GET /public/announcement-images/:fileId`, `POST /webhooks/clerk`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
 - Membership roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`. Clerk claims and metadata never grant them.
@@ -25,7 +25,8 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/me/business-application` | client membership + `Idempotency-Key` | submit a pending business-client application without removing personal access |
 | POST | `/me/approval-cases/rider/submit` | rider membership + `Idempotency-Key` | idempotently confirm the current-licence gate and submit the pending case |
 | POST | `/me/approval-cases/:kind/reapply` | matching membership + `Idempotency-Key` | rejected applicant resubmission for `business-client`, `supplier`, or `rider` |
-| GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary |
+| GET | `/auth/me` | authenticated | identity plus every DB membership and approval-case summary; refreshes the person name and email copy from Clerk |
+| POST | `/webhooks/clerk` | Clerk Svix signature | refresh the person copy for a mapped account after a Clerk dashboard edit |
 | GET | `/auth/me/client` | client membership | client profile, business case, and capabilities |
 | GET | `/auth/me/supplier` | supplier membership | supplier profile, case, readiness, and capabilities |
 | GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
@@ -52,8 +53,10 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | PATCH | `/notifications/:id` | notification owner | set `{read:true|false}` |
 | PATCH | `/notifications/read-all` | notification owner | mark caller's list snapshot read |
 | DELETE | `/notifications/:id` | notification owner | persistent soft delete from caller's inbox |
-| GET | `/settings` | authenticated | versioned service-fee rate, global issue window, and delivery bands |
+| GET | `/settings` | authenticated | versioned service-fee rate, global issue window, delivery bands, and payment QR (`imageUrl` when one is uploaded) |
 | PATCH | `/settings` | ops/super | audited compare-and-swap update of any operational setting |
+| POST | `/settings/payment-qr` | ops/super | activate a ready `payment_qr` file as the platform receiving plate |
+| GET | `/public/payment-qr` | public | current ready payment-QR bytes; `404` if none uploaded |
 | GET | `/supplier-payment-terms[?supplierId=]` | supplier own; ops/super any | supplier delivery and pickup payment-plan preferences |
 | PATCH | `/supplier-payment-terms` | supplier | update the caller's payment-plan preferences |
 | GET | `/credits/balance` | client own; ops/super any `?clientId=` | pilot grant ledger only |
@@ -119,7 +122,13 @@ Clerk owns sign-up, sign-in, password recovery, Google SSO, sessions, and JWT re
 
 The first authenticated activation creates an `individual` client identity, membership, and profile. The same fixed endpoint may add a client membership to an already-mapped non-client identity. Supplier, rider, Operations, and Super Admin access comes only from database memberships. Clerk client-settable metadata is ignored, and supplier/rider approval remains a separate Postgres case. During the one-release compatibility window, a `POST /users/:id/verification` decision also updates the target's matching supplier or rider approval case in the same transaction (legacy `unverified` maps to case `pending`), so fixed projections and legacy work gates report the same approval state. Any `PATCH /users/:id/role` change into supplier or rider — a re-promotion or a direct supplier↔rider switch — re-initializes legacy verification to `unverified` and resets any stale decided approval case of the target kind to `pending`: a demoted then re-promoted supplier or rider re-earns approval, and supplier approval never grants rider approval or vice versa. Every legacy-surface status change on an existing case also increments the case `version`, so a decision holding a pre-change `expectedVersion` loses with `409 approval_case_stale`. Conversely, a canonical case decision requires the applicant to still hold the membership matching the case kind — deciding a case whose user was demoted or switched roles returns `409 approval_case_role_mismatch` and changes nothing — and legacy `verificationStatus` is synced only while the legacy role matches the case kind.
 
-`GET /auth/me` returns the identity plus every membership and approval-case summary. The fixed projections `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, and `/auth/me/admin` derive the required membership from the URL alone; request JSON can never select or grant one. A verified but unmapped Clerk subject stays `401 unauthorized`. A mapped identity missing the required membership receives `403 supplier_account_not_found` on `/auth/me/supplier` and `403 membership_required` (with `requiredRole`) on the other four projections.
+`GET /auth/me` returns the identity plus every membership and approval-case summary. After the JWT maps to a GRIDGO account, the handler loads the Clerk user and refreshes only the person copy: display name from first + last name (else username, else the email local part) and primary email. Shop name, pin, floor phone, and supplier floor contact are not overwritten. A Clerk email that already belongs to another GRIDGO account is left on the previous value rather than merged. A Clerk Backend read failure leaves the stored copy in place so the shop is not signed out. The fixed projections `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, and `/auth/me/admin` derive the required membership from the URL alone; request JSON can never select or grant one. A verified but unmapped Clerk subject stays `401 unmapped_identity` so a shop app can open apply. An invalid, expired, or unsigned token stays `401 unauthorized` and must not be treated as a new application. A mapped identity missing the required membership receives `403 supplier_account_not_found` on `/auth/me/supplier` and `403 membership_required` (with `requiredRole`) on the other four projections.
+
+### `POST /webhooks/clerk`
+
+Public. No Bearer token. Body is the raw Clerk webhook payload. Required headers: `svix-id`, `svix-timestamp`, `svix-signature`. Verified with `CLERK_WEBHOOK_SIGNING_SECRET` through `@clerk/backend/webhooks`. A missing secret is `503 webhook_unconfigured`. A bad signature is `400 invalid_webhook`.
+
+Handles `user.updated` and `user.created` with the same person-copy rule as `/auth/me`. An unmapped Clerk user is ignored (`200 { ok: true }`) — accounts are still created only by activate/enroll. `user.deleted` is ignored in this pass. Applying an already-current copy is a no-op.
 
 `PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
 
@@ -168,7 +177,9 @@ Each committed decision increments `version` and atomically writes the case, imm
 
 Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
 
-Rider approval and restore, including approval through the one-release legacy verification route, require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
+Rider approval and restore through the canonical `/approval-cases/:id/approve|restore` routes require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
+
+The one-release Operations queue still decides through `POST /users/:id/verification`. That compatibility path accepts the typed licence number from rider enroll when no licence file has ever been attached, and records `submittedAt` on the decision so the case matches the verification status. A licence file that was later removed still blocks approval.
 
 ## Supplier shop and verification profile
 
@@ -403,8 +414,12 @@ One general message to a whole audience, from Operations. `everyone` is the app-
 Authorization: `ops_admin` or `super_admin`.
 
 ```json
-{ "audience": "everyone", "title": "Update your app", "body": "GRIDGO 1.4 is available in the store." }
+{ "audience": "everyone", "title": "Update your app", "body": "GRIDGO 1.4 is available in the store.", "imageUrl": "https://cdn.example/update.png" }
 ```
+
+`imageUrl` is optional. It is either an `http(s)` picture link, or a hosted path `/public/announcement-images/<fileId>` returned after `POST /files` with `purpose=announcement_image` (JPEG/PNG/WebP, 1 MiB). The picture is stored on each notification record, shown in-app, and included in the FCM payload as an absolute URL the **handset** downloads. Hosted paths are joined to `GRIDGO_PUBLIC_API_ORIGIN`, or locally to the http `MINIO_PUBLIC_URL` host on this process's port.
+
+`GET /public/announcement-images/:fileId` is unauthenticated and streams a ready `announcement_image` so FCM and the apps can load it without a signed MinIO URL.
 
 `201`:
 
@@ -415,6 +430,7 @@ Authorization: `ops_admin` or `super_admin`.
     "audience": "everyone",
     "title": "Update your app",
     "body": "GRIDGO 1.4 is available in the store.",
+    "imageUrl": "https://cdn.example/update.png",
     "at": "2026-08-11T02:00:00.000Z",
     "notifiedUsers": 6,
     "unclaimedDevices": 3
@@ -443,6 +459,7 @@ Write `everyone` announcements accordingly: the same words land on handsets nobo
 | `400` | `invalid_announcement_audience` | `audience` is not one of the five above; the response repeats `allowed` |
 | `400` | `invalid_announcement_title` | `title` empty or longer than 120 characters |
 | `400` | `invalid_announcement_body` | `body` empty or longer than 500 characters |
+| `400` | `invalid_announcement_image` | `imageUrl` is not an http(s) link or a hosted `/public/announcement-images/<fileId>` path |
 | `403` | `forbidden` | the caller is not ops or super |
 
 Every announcement is written to the platform audit log (`announcement.broadcast`) with its audience, title, and both counts.
@@ -453,18 +470,28 @@ Notification IDs are opaque. Every notification route is owner-only: an authenti
 
 ### `GET /notifications`
 
-Returns the caller's non-deleted notifications, newest first, plus an append-order snapshot watermark:
+Returns the caller's non-deleted notifications, newest first, plus an append-order snapshot watermark. `limit` (default 40, max 100) bounds the window; the inbox is not the full history. A notification about a job the caller can see carries `orderTitle` and `orderState` so a client can draw the stage rail without `GET /orders` or hydrating the job.
 
 ```json
 {
   "notifications": [
-    { "id": "ntf_123", "userId": "user_client", "title": "Final price ready", "body": "Review your order.", "read": false, "at": "2026-08-11T02:00:00.000Z" }
+    {
+      "id": "ntf_123",
+      "userId": "user_client",
+      "orderId": "ord_1",
+      "orderTitle": "Grand opening tarpaulin",
+      "orderState": "production",
+      "title": "Final price ready",
+      "body": "Review your order.",
+      "read": false,
+      "at": "2026-08-11T02:00:00.000Z"
+    }
   ],
   "snapshot": "ntf_123"
 }
 ```
 
-`snapshot` is `null` when the caller has never had a notification. Clients must retain the non-null snapshot returned with the list and echo it to mark-all; it is not a notification timestamp.
+`snapshot` is `null` when the caller has never had a notification. Clients must retain the non-null snapshot returned with the list and echo it to mark-all; it is not a notification timestamp. The snapshot is still the caller's last append, including a soft-deleted watermark, even when `limit` hides older rows.
 
 ### `GET /notifications/stream`
 
@@ -519,10 +546,24 @@ Default `GET /settings` response:
       { "maxDistanceMeters": 4999, "feeMinor": 2500 },
       { "maxDistanceMeters": 10000, "feeMinor": 5000 },
       { "maxDistanceMeters": null, "feeMinor": 7500 }
-    ]
+    ],
+    "paymentQr": { "method": "qr_manual", "caption": "QR Ph" }
   }
 }
 ```
+
+`paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Operations has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
+
+Upload is two steps, both `ops_admin` / `super_admin`:
+
+1. `POST /files` with `purpose=payment_qr` and a JPEG, PNG, or WebP (up to 5 MiB). Not attachable to an order (`400 payment_qr_not_attachable`).
+2. `POST /settings/payment-qr` `{ "fileId": "file_…", "reason": "…" }` activates that ready file as the platform QR, retires the previous one, and is audited. Repeating the same `fileId` is a no-op.
+
+```http
+GET /public/payment-qr
+```
+
+Unauthenticated. Streams the current ready plate so checkout and the ops preview do not depend on a signed MinIO URL. `404 {"error":"payment_qr_not_found"}` when none is active. `GET /public/payment-qr.jpg` is the same resource.
 
 These band figures are provisional Firstmate values, not captain-specified prices. Operations/Super Admin can change them without a release:
 

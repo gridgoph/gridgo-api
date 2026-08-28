@@ -9,12 +9,13 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 - Money is signed PostgreSQL `BIGINT` integer PHP minor units and must remain within JavaScript safe-integer range. Never use floats.
 - Every HTTP mutation runs in one transaction with a transaction-scoped advisory lock. Money/order/credit/claim/issue changes, audit rows, and notifications commit atomically.
 - MinIO owns file bytes. PostgreSQL stores metadata, private object keys, and opaque file references only.
-- Fresh seed is idempotent reference data only: catalog, taxonomy, zones, settings. It must never create users or operational records and has no destructive reset.
+- Fresh `npm run seed` is idempotent reference data only: catalog, taxonomy, zones, settings, formats, starters. It must never create users or operational records and has no destructive reset.
+- Local development only: `npm run seed:dev` (and local compose) additionally seeds three Davao shops against real development Clerk users, including Lovis Printshop for `felyciaaa0220@gmail.com`. Production compose must keep `npm run seed`.
 
 ## Clerk-only identity
 
 - `src/auth.js` verifies Clerk session JWTs. `CLERK_SECRET_KEY`, `CLERK_ISSUER`, and `CLERK_AUTHORIZED_PARTIES` are mandatory; issuer must match exactly. Do not pass `authorizedParties` into `verifyToken` (Clerk rejects a missing `azp`). Present `azp` values must be on the allowlist; Expo session tokens that omit `azp` are accepted after signature/expiry/issuer checks.
-- There is no `AUTH_MODE`, password login, local signup/session, demo password, or demo-user fixture. `/auth/login` and `/auth/signup` remain `404`.
+- There is no `AUTH_MODE`, password login, local signup/session, or demo password. `/auth/login` and `/auth/signup` remain `404`. The Lovis Printshop row is local `seed:dev` only and still maps a real Clerk subject.
 - `POST /auth/clerk/activate` is the explicit first-use Google/public SSO path. It only creates an `individual` client or idempotently adds a personal client membership to an already-mapped identity; it never links by email or grants another role.
 - `users.clerk_user_id` maps the Clerk subject. PostgreSQL membership rows are the authorization source; ignore Clerk role/status claims and metadata for authorization.
 - Supplier/rider memberships come only from their fixed enrollment endpoints or an audited database role assignment; Operations and Super Admin remain assignment-only. Supplier/rider work also requires Operations approval.
@@ -26,6 +27,9 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
+Client preference ranking, shop matching, carts, multi-supplier jobs, QR 75/25 checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
+
+- Match and cart responses must run through `decorateCatalogPhotoUrls` (`src/catalog-photo-urls.js`) the same way catalog does. `publicPhotos` only sets metadata `url` (`/catalog/media/:fileId`); the client needs signed `downloadUrl` on `body.listings` and `body.cart.lines[].listing`. Skipping the decorator is the empty match thumbnail. `POST`/`PATCH`/`DELETE` `/me/carts/:id/lines` return compact listing stubs without photos so add/save does not wait on MinIO signing; `GET /me/carts/:id` stays the full projection.
 - The client service fee is seeded at 1,000 bps on the supplier subtotal; accepted quotes snapshot the rate, amount, fulfillment, and generalized online/direct allocation plan. COD and supplier-proof approval states are retired.
 - Clients receive the item subtotal, service fee, delivery pass-through, total, and their payment plan, but never supplier payout or milestone amounts. All order responses go through the role-aware projection in `src/operational-model.js`.
 - Claims/issue holds block payout. Confirmed supplier-principal collection caps automatic supplier payout. Rider pickup uses the six-check gate.
@@ -42,6 +46,8 @@ Coordinates use constrained latitude/longitude columns. Current database queries
 `docs/TAXONOMY_API.md` is authoritative. The store is flat: references hold category codes and `categoryTree` is derived per request. Retired input aliases still resolve, but supplier service records are not silently rewritten.
 
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
+
+Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
 ## Files and push
 

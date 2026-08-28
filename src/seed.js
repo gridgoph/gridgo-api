@@ -24,6 +24,14 @@ export async function seedReferenceData(database) {
       if (!Object.hasOwn(store.settings, key)) store.settings[key] = structuredClone(value);
     }
     appendMissing(store.zones, reference.zones, "code");
+    store.acceptedFileFormats ||= [];
+    store.listingStarters ||= [];
+    store.listingStarterGroups ||= [];
+    store.listingStarterOptions ||= [];
+    appendMissing(store.acceptedFileFormats, reference.acceptedFileFormats, "code");
+    appendMissing(store.listingStarters, reference.listingStarters, "id");
+    appendMissing(store.listingStarterGroups, reference.listingStarterGroups, "id");
+    appendMissing(store.listingStarterOptions, reference.listingStarterOptions, "id");
     await saveStore(database, store);
   });
 }

@@ -49,13 +49,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
+      "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
+      "order_jobs", "job_qa_checklist", "order_invoices",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users'",
       [schema],
     )).rows.map((row) => row.column_name));
-    for (const column of ["role", "account_type", "org_name", "verification_status", "shop_lat", "shop_lng", "shop_label"]) {
+    for (const column of ["role", "account_type", "org_name", "verification_status", "shop_lat", "shop_lng", "shop_label", "version"]) {
       assert.equal(legacyColumns.has(column), true, `${column} compatibility projection should remain`);
     }
 
@@ -66,6 +68,14 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786843800000_role_memberships_and_approvals",
         "1786870800000_service_fee_money_model",
         "1786874400000_enrollment_legacy_supplier_shop",
+        "1786878000000_supplier_catalog_listings",
+        "1786881600000_catalog_prep_steps_and_link_formats",
+        "1786885200000_rider_profile_version",
+        "1786888800000_catalog_item_search",
+        "1786892400000_accepted_file_formats_webp",
+        "1786896000000_client_order_match",
+        "1786899600000_order_match_payment_plan",
+        "1786903200000_client_account_profile_version",
       ],
     );
     await client.query(`
@@ -89,6 +99,89 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       (error) => error.code === "23514" && error.constraint === "users_org_name_check",
     );
 
+    const searchColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    assert.equal(searchColumns.has("search_text"), true);
+    assert.equal(searchColumns.has("search_tsv"), true);
+    assert.equal((await client.query("SELECT code FROM accepted_file_formats WHERE code = 'webp'")).rows.length, 1);
+
+    const supplierProfileColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_profiles'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    assert.equal(supplierProfileColumns.has("is_closed"), true);
+    const orderLineColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'order_line_items'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    for (const column of ["job_id", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label"]) {
+      assert.equal(orderLineColumns.has(column), true, `${column} should exist on order_line_items`);
+    }
+
+    await assert.rejects(
+      client.query(`
+        INSERT INTO client_match_preferences (client_id, ranking, version, updated_at)
+        VALUES ('multi_role_shop', ARRAY['quality','quality','distance'], 1, now())
+      `),
+      (error) => error.code === "23514" && error.constraint === "client_match_preferences_ranking_check",
+    );
+
+    await client.query(`
+      INSERT INTO orders
+        (id, client_id, state, payment_plan, supplier_downpayment_rate_bps,
+         money_model_version, payout_hold, created_at, updated_at, position, data)
+      VALUES
+        ('order_match_plan', 'multi_role_shop', 'needs_qa', 'order_match_qr_75_25', 7500,
+         3, false, now(), now(), 0, '{}')
+    `);
+    await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'version'",
+      [schema],
+    )).rows.length, 0);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    await assert.rejects(
+      client.query(`
+        INSERT INTO orders
+          (id, client_id, state, payment_plan, supplier_downpayment_rate_bps,
+           money_model_version, payout_hold, created_at, updated_at, position, data)
+        VALUES
+          ('order_match_plan_after_down', 'multi_role_shop', 'needs_qa', 'order_match_qr_75_25', 7500,
+           3, false, now(), now(), 1, '{}')
+      `),
+      (error) => error.code === "23514",
+    );
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('client_carts') AS table_name")).rows[0].table_name, null);
+    assert.equal((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_profiles' AND column_name = 'is_closed'",
+      [schema],
+    )).rows.length, 0);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT code FROM accepted_file_formats WHERE code = 'webp'")).rows.length, 0);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'search_text'",
+      [schema],
+    )).rows.length, 0);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'rider_profiles' AND column_name = 'version'",
+      [schema],
+    )).rows.length, 0);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_prep_steps') AS table_name")).rows[0].table_name, null);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('supplier_catalog_items') AS table_name")).rows[0].table_name, null);
     await runner(migrationOptions(schema, "down", 1, client));
     await assert.rejects(
       client.query("UPDATE users SET shop_label = 'Updated shop' WHERE id = 'multi_role_shop'"),

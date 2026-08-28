@@ -19,7 +19,7 @@ There is no `AUTH_MODE`, password login, local signup, local session table, demo
 
 Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Authorization: Bearer <Clerk session JWT>`. GRIDGO memberships and approval cases are authoritative in PostgreSQL, not in a client-settable Clerk claim or metadata value.
 
-- `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries, or `401 unauthorized` when the Clerk subject is unmapped.
+- `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries. A verified Clerk subject with no GRIDGO user is `401 unmapped_identity`; an invalid token is `401 unauthorized`.
 - Each app uses its fixed database projection: `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, or `/auth/me/admin`. The URL selects the required membership; request JSON cannot select or grant one.
 - `POST /auth/clerk/activate` is the explicit client-only Google/public SSO path. It creates a new personal client identity, or adds a personal client membership to an already-mapped identity, and returns `{ "user": ... }`; it never merges by email or grants another membership.
 - Fixed supplier/rider enrollment routes add only the membership named by the URL; `/me/business-application` submits a case for an existing client membership. All three require `Idempotency-Key`; supplier/business submit immediately, while rider sign-in resumes document intake followed by explicit submission after a current licence is attached.
@@ -54,6 +54,7 @@ For host-run commands against local compose:
 export DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo
 npm run migrate
 npm run seed
+npm run seed:dev
 ```
 
 Create a separate test database once, then migrate and test only that database.
@@ -66,7 +67,9 @@ DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm run 
 DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm test
 ```
 
-The seed creates only catalog, taxonomy, zones, and global operational settings. It never creates users or operational records and has no destructive reset mode.
+`npm run seed` creates only catalog, taxonomy, zones, file-format registry, listing starters, and global operational settings. It never creates users or operational records and has no destructive reset mode.
+
+Local compose and `npm run seed:dev` seed three approved Davao fixture shops from existing development Clerk users. **Lovis Printshop** remains fixed to `felyciaaa0220@gmail.com`; two other real Clerk email identities receive local-only Davao Quickprint and Matina Creative Hub fixtures. All three publish Flyers plus another listing for matching and same-shop bundling. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
 
 ## Health
 
@@ -96,6 +99,7 @@ All routes except `/health`, `/catalog`, and the documented anonymous device reg
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
+- Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`

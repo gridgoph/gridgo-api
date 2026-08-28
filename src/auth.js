@@ -93,20 +93,103 @@ export async function verifyClerkClaims(token, config) {
 }
 
 export function clerkClientProfile(clerkUser) {
+  const emails = Array.isArray(clerkUser?.email_addresses) ? clerkUser.email_addresses : [];
+  const webhookPrimary = emails.find((entry) => entry && entry.id === clerkUser?.primary_email_address_id) || emails[0];
   const email = String(
     clerkUser?.primaryEmailAddress?.emailAddress
       || clerkUser?.emailAddresses?.[0]?.emailAddress
+      || webhookPrimary?.email_address
       || "",
   ).trim().toLowerCase();
   const phone = String(
     clerkUser?.primaryPhoneNumber?.phoneNumber
       || clerkUser?.phoneNumbers?.[0]?.phoneNumber
+      || clerkUser?.phone_numbers?.[0]?.phone_number
       || "",
   ).trim();
-  const name = [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ").trim()
+  const name = [clerkUser?.firstName ?? clerkUser?.first_name, clerkUser?.lastName ?? clerkUser?.last_name]
+    .filter(Boolean).join(" ").trim()
     || String(clerkUser?.username || "").trim()
     || (email.includes("@") ? email.split("@")[0] : "");
   return { email, phone, name };
+}
+
+/**
+ * Clerk webhook payloads use snake_case UserJSON. Shape that into the Backend
+ * user the profile helper already understands so enroll, /auth/me, and the
+ * webhook share one copy rule.
+ */
+export function clerkUserFromWebhookData(data) {
+  if (!data || typeof data !== "object") return null;
+  const emails = Array.isArray(data.email_addresses) ? data.email_addresses : [];
+  const primary = emails.find((entry) => entry && entry.id === data.primary_email_address_id) || emails[0];
+  return {
+    firstName: data.first_name,
+    lastName: data.last_name,
+    username: data.username,
+    primaryEmailAddress: primary?.email_address ? { emailAddress: primary.email_address } : undefined,
+  };
+}
+
+/**
+ * Refresh the GRIDGO account's person copy from Clerk.
+ *
+ * Clerk owns first name, last name, and primary email. GRIDGO keeps a copy so
+ * greetings, Operations lists, and mail still work when Clerk is not in the
+ * request. Shop name, pin, floor phone, and floor contact are not touched.
+ * A Clerk email that already belongs to another GRIDGO account is left alone.
+ */
+export function applyClerkIdentityCopy(store, user, clerkUser) {
+  if (!user || !clerkUser) return { mutated: false };
+  const profile = clerkClientProfile(clerkUser);
+  let mutated = false;
+
+  if (!user.profileNameManaged && profile.name && profile.name !== user.name) {
+    user.name = profile.name;
+    mutated = true;
+  }
+
+  const currentEmail = String(user.email || "").trim().toLowerCase();
+  if (profile.email && profile.email.includes("@") && profile.email !== currentEmail) {
+    const taken = (store.users || []).some(
+      (candidate) => candidate.id !== user.id && String(candidate.email || "").trim().toLowerCase() === profile.email,
+    );
+    if (!taken) {
+      user.email = profile.email;
+      mutated = true;
+    }
+  }
+
+  return { mutated };
+}
+
+export async function refreshMappedIdentityFromClerk({ clerkBackend, store, user }) {
+  if (!user?.clerkUserId || typeof clerkBackend?.users?.getUser !== "function") {
+    return { mutated: false };
+  }
+  let clerkUser;
+  try {
+    clerkUser = await clerkBackend.users.getUser(user.clerkUserId);
+  } catch {
+    return { mutated: false };
+  }
+  return applyClerkIdentityCopy(store, user, clerkUser);
+}
+
+/**
+ * Apply a verified Clerk user event to an already-mapped account.
+ * Unmapped identities stay unmapped — GRIDGO still creates accounts only on
+ * activate/enroll. Ambiguous mappings are left untouched.
+ */
+export function applyClerkWebhookEvent(store, event) {
+  if (!event || (event.type !== "user.updated" && event.type !== "user.created")) {
+    return { mutated: false };
+  }
+  const clerkUserId = event.data?.id;
+  if (!clerkUserId) return { mutated: false };
+  const matches = (store.users || []).filter((candidate) => candidate.clerkUserId === clerkUserId);
+  if (matches.length !== 1) return { mutated: false };
+  return applyClerkIdentityCopy(store, matches[0], clerkUserFromWebhookData(event.data));
 }
 
 function unauthorized(message = "Sign in with Clerk, then retry this request with the new access token.") {
@@ -115,6 +198,23 @@ function unauthorized(message = "Sign in with Clerk, then retry this request wit
 
 function invitationRequired(message) {
   return { status: 403, error: "invitation_required", message, user: null, mutated: false };
+}
+
+/**
+ * Whether this email may continue as a GRIDGO client.
+ *
+ * Unknown emails are allowed (new clients). An existing non-client identity
+ * is not — the Client app must refuse before Clerk emails a device-trust code.
+ * The answer never names the other role.
+ */
+export function clientEmailAvailable(store, email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized.includes("@")) return false;
+  const matches = (store.users || []).filter(
+    (candidate) => String(candidate.email || "").toLowerCase() === normalized,
+  );
+  if (matches.length === 0) return true;
+  return matches.every((candidate) => candidate.role === "client");
 }
 
 function ensureClientMembership(store, user, now) {
@@ -144,11 +244,14 @@ function ensureClientMembership(store, user, now) {
 }
 
 export async function authenticateBearerToken(token, store, config, preVerified = null) {
-  if (!token) return { user: null, status: 401, kind: null };
+  if (!token) return { user: null, status: 401, kind: null, error: "unauthorized" };
   const verified = preVerified || (await verifyClerkClaims(token, config));
-  if (!verified.claims?.sub) return { user: null, status: 401, kind: "clerk" };
+  if (!verified.claims?.sub) return { user: null, status: 401, kind: "clerk", error: "unauthorized" };
   const matches = (store.users || []).filter((candidate) => candidate.clerkUserId === verified.claims.sub);
-  if (matches.length !== 1) return { user: null, status: 401, kind: "clerk" };
+  if (matches.length === 0) {
+    return { user: null, status: 401, kind: "clerk", error: "unmapped_identity" };
+  }
+  if (matches.length !== 1) return { user: null, status: 401, kind: "clerk", error: "unauthorized" };
   const user = matches[0];
   return {
     user,
@@ -156,6 +259,18 @@ export async function authenticateBearerToken(token, store, config, preVerified 
     status: null,
     kind: "clerk",
   };
+}
+
+/** Body for a failed authenticateBearerToken result. */
+export function authFailureBody(auth) {
+  const error = auth?.error || (auth?.status === 403 ? "forbidden" : "unauthorized");
+  if (error === "unmapped_identity") {
+    return {
+      error,
+      message: "This sign-in is not linked to a GRIDGO account yet.",
+    };
+  }
+  return { error };
 }
 
 /** Explicit first-use entry for public SSO. It can only create a client. */

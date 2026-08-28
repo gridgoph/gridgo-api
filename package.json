@@ -10,6 +10,7 @@
     "test": "DATABASE_URL=${DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node --test --test-concurrency=1 tests/*.test.js",
     "migrate": "node-pg-migrate up --migrations-dir migrations",
     "seed": "node src/seed.js",
+    "seed:dev": "node src/seed-dev.js",
     "bootstrap-admin": "node src/bootstrap-admin.js"
   },
   "engines": {

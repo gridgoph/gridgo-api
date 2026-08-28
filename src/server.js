@@ -3,12 +3,17 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyWebhook } from "@clerk/backend/webhooks";
 import {
   activateClerkClientProfile,
+  applyClerkIdentityCopy,
+  applyClerkWebhookEvent,
   authConfiguration,
   authenticateBearerToken,
+  clientEmailAvailable,
   createClerkBackend,
   verifyClerkClaims,
+  authFailureBody,
 } from "./auth.js";
 import {
   approvalCaseFor,
@@ -28,6 +33,8 @@ import {
 } from "./approval-cases.js";
 import {
   AttachmentError,
+  attachCatalogItemPhoto,
+  attachSupplierShopImage,
   attachRiderDocument,
   attachFileReference,
   authorizeFileAttach,
@@ -46,8 +53,19 @@ import {
   validateUpload,
 } from "./attachments.js";
 import {
+  isPublicSupplierCatalogRoute,
+  routeSupplierCatalog,
+} from "./catalog-routes.js";
+import {
+  isPrivateRiderProfileRoute,
+  routeRiderProfile,
+} from "./rider-profile-routes.js";
+import { routeOrderMatch } from "./order-match-routes.js";
+import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
+import { privateCatalogItem } from "./supplier-catalog.js";
+import {
   applyForBusiness,
-  assertRiderApprovalReady,
+  assertRiderLegacyVerificationReady,
   enrollRider,
   enrollSupplier,
   reapplyForApproval,
@@ -57,6 +75,7 @@ import {
 import {
   createNotificationEvents,
   formatNotificationEvent,
+  listInbox,
   notificationSnapshot,
 } from "./notifications.js";
 import { createObjectStorage } from "./object-storage.js";
@@ -66,6 +85,7 @@ import {
   createPushDeliveryOrDisable,
   deviceTokensFor,
   isFcmTokenShaped,
+  normalizeAnnouncementImageUrl,
   normalizeDeviceToken,
   publicDevice,
   pushMessageFor,
@@ -81,6 +101,7 @@ import {
   buildCategoryTree,
   resolveCategoryCode,
 } from "./taxonomy.js";
+import { routeAccountProfile } from "./account-profile-routes.js";
 import {
   calculateOrderMoney,
   createPaymentSchedule,
@@ -191,9 +212,9 @@ function deliverPush(store, notification) {
  * one call site (`POST /announcements`), and `pushDelivery.send` refuses
  * anything but a stranger-safe message for these devices regardless.
  */
-function deliverAnnouncementPush(devices, { title, body }) {
+function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   if (!pushDelivery.configured || devices.length === 0) return;
-  fanOutPush("announcement", announcementPushMessage({ title, body }), devices);
+  fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
 }
 
 /**
@@ -257,13 +278,92 @@ async function compensatePendingFile(fileId, objectKey) {
   }
 }
 
-function send(res, status, body) {
+function writeJsonResponse(res, status, body) {
+  if (res.writableEnded || res.destroyed) return;
+  if (status >= 400 && body && typeof body === "object") {
+    res.gridgoError = typeof body.error === "string" ? body.error : "";
+    res.gridgoErrorFields =
+      body.fields && typeof body.fields === "object" ? Object.keys(body.fields) : [];
+  }
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     ...(res.gridgoCorsHeaders || {}),
   });
   res.end(payload);
+}
+
+function send(res, status, body, { afterCommit = true } = {}) {
+  if (afterCommit && database.inWriteTransaction()) {
+    database.afterCommit(() => writeJsonResponse(res, status, body));
+    return;
+  }
+  writeJsonResponse(res, status, body);
+}
+
+function clerkWebhookSigningSecret() {
+  return String(process.env.CLERK_WEBHOOK_SIGNING_SECRET || "").trim();
+}
+
+function readRawBody(req) {
+  if (Object.hasOwn(req, "gridgoRawBody")) return Promise.resolve(req.gridgoRawBody);
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024 && !tooLarge) {
+        tooLarge = true;
+        chunks.length = 0;
+        reject(
+          new AttachmentError(
+            413,
+            "request_body_too_large",
+            "This request body is larger than 1 MiB. Remove extra data and try again.",
+            { maxBytes: 1024 * 1024 },
+          ),
+        );
+      } else if (!tooLarge) {
+        chunks.push(chunk);
+      }
+    });
+    req.on("end", () => {
+      if (tooLarge) return;
+      req.gridgoRawBody = Buffer.concat(chunks);
+      resolve(req.gridgoRawBody);
+    });
+    req.on("error", reject);
+  });
+}
+
+async function verifiedClerkWebhookEvent(req) {
+  const signingSecret = clerkWebhookSigningSecret();
+  if (!signingSecret) {
+    const error = new Error("Clerk webhook signing secret is not configured.");
+    error.status = 503;
+    error.code = "webhook_unconfigured";
+    throw error;
+  }
+  const raw = await readRawBody(req);
+  const request = new Request("https://gridgo.invalid/webhooks/clerk", {
+    method: "POST",
+    headers: {
+      "svix-id": String(req.headers["svix-id"] || ""),
+      "svix-timestamp": String(req.headers["svix-timestamp"] || ""),
+      "svix-signature": String(req.headers["svix-signature"] || ""),
+      "content-type": "application/json",
+    },
+    body: raw,
+  });
+  try {
+    return await verifyWebhook(request, { signingSecret });
+  } catch {
+    const error = new Error("This Clerk webhook could not be verified. Check the signing secret and retry.");
+    error.status = 400;
+    error.code = "invalid_webhook";
+    throw error;
+  }
 }
 
 function readBody(req) {
@@ -312,12 +412,134 @@ function readBody(req) {
   });
 }
 
-function sendDomainError(res, error) {
+function sendDomainError(res, error, options) {
   return send(res, error.status || 500, {
     error: error.code || "server_error",
     message: error.message,
     ...(error.details || {}),
+  }, options);
+}
+
+async function decorateCatalogPhotoUrls(store, body) {
+  await signCatalogPhotoUrls(store, body, {
+    findFile,
+    presignGet: (key) => objectStorage.presignGet(key),
   });
+}
+
+const PAYMENT_QR_PUBLIC_PATH = "/public/payment-qr";
+
+function readyPaymentQrFile(store) {
+  const fileId = store?.settings?.paymentQrFileId;
+  if (!fileId) return null;
+  const file = findFile(store, fileId);
+  if (
+    !file
+    || file.purpose !== "payment_qr"
+    || file.state !== "ready"
+    || file.deletedAt
+    || file.deleteRequestedAt
+    || !file.objectKey
+  ) {
+    return null;
+  }
+  return file;
+}
+
+function publicOperationalSettings(settings, store = null) {
+  const { paymentQrFileId: _paymentQrFileId, ...rest } = settings || {};
+  const paymentQr = { method: "qr_manual", caption: "QR Ph" };
+  const file = store ? readyPaymentQrFile(store) : null;
+  if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
+  return { ...rest, paymentQr };
+}
+
+/**
+ * Lock-screen and in-app broadcast pictures. Unauthenticated on purpose: FCM
+ * fetches this URL from Google, and a signed MinIO URL would expire before a
+ * shop opened the alert. Only `announcement_image` files that are ready.
+ */
+async function serveAnnouncementImage(req, res, store, pathname) {
+  const fileId = pathname.slice("/public/announcement-images/".length);
+  const file = findFile(store, fileId);
+  if (
+    !file
+    || file.purpose !== "announcement_image"
+    || file.state !== "ready"
+    || file.deletedAt
+    || file.deleteRequestedAt
+    || !file.objectKey
+  ) {
+    return send(res, 404, { error: "announcement_image_not_found" });
+  }
+  try {
+    const headers = {
+      "Content-Type": file.detectedContentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Length": String(file.size),
+      ...(res.gridgoCorsHeaders || {}),
+    };
+    if (req.method === "HEAD") {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
+    const stream = await objectStorage.getObject(file.objectKey);
+    res.writeHead(200, headers);
+    stream.on("error", () => {
+      if (!res.writableEnded) res.destroy();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+      return sendDomainError(res, error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * GRIDGO's one receiving QR. Unauthenticated on purpose: checkout needs the
+ * plate even when totals are not ready, and a signed MinIO URL would expire
+ * while a client still has the sheet open. Only the current ready `payment_qr`.
+ */
+async function servePaymentQr(req, res, store) {
+  const file = readyPaymentQrFile(store);
+  if (!file) {
+    return send(res, 404, { error: "payment_qr_not_found" });
+  }
+  try {
+    const headers = {
+      "Content-Type": file.detectedContentType || "application/octet-stream",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Length": String(file.size),
+      ...(res.gridgoCorsHeaders || {}),
+    };
+    if (req.method === "HEAD") {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
+    const stream = await objectStorage.getObject(file.objectKey);
+    res.writeHead(200, headers);
+    stream.on("error", () => {
+      if (!res.writableEnded) res.destroy();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+      return sendDomainError(res, error);
+    }
+    throw error;
+  }
 }
 
 /** Whether the caller presented a bearer token at all — valid or not. */
@@ -397,12 +619,15 @@ function publicUser(u) {
   // Identity-document references are exposed only through the dedicated, caller-aware
   // verification projection. publicUser is reused in catalogue and matching responses.
   delete rest.verificationDocumentFileIds;
+  delete rest.profileNameManaged;
   // Clients always expose an authoritative accountType (never undefined for consumers).
   // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
   if (u.role === "client") {
     rest.accountType = resolveClientAccountType(u);
+    rest.version = u.version || 1;
   } else {
     delete rest.accountType;
+    delete rest.version;
   }
   return rest;
 }
@@ -800,7 +1025,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
   } else {
     approvalCase.decidedAt = at;
     approvalCase.decidedBy = actor.id;
-    if (approvalCase.submittedAt == null && target.role !== "rider") approvalCase.submittedAt = at;
+    if (approvalCase.submittedAt == null) approvalCase.submittedAt = at;
     if (caseStatus === "rejected") {
       approvalCase.rejectionReason = decisionReason || "Verification rejected";
     }
@@ -1257,7 +1482,7 @@ async function handleRequest(req, res) {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
         "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key",
-        "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+        "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
     }
@@ -1365,8 +1590,38 @@ async function handleRequest(req, res) {
       return send(res, 200, { ok: true });
     }
 
+    if (req.method === "POST" && pathname === "/webhooks/clerk") {
+      let event;
+      try {
+        event = await verifiedClerkWebhookEvent(req);
+      } catch (error) {
+        if (error.status === 503 || error.status === 400 || error.status === 413) {
+          return send(res, error.status, { error: error.code, message: error.message });
+        }
+        throw error;
+      }
+      const store = await load();
+      const { mutated } = applyClerkWebhookEvent(store, event);
+      if (mutated) await save(store);
+      return send(res, 200, { ok: true });
+    }
+
     await expireElapsedIssueWindows();
     const store = await load();
+
+    if (
+      (req.method === "GET" || req.method === "HEAD")
+      && pathname.startsWith("/public/announcement-images/")
+    ) {
+      return serveAnnouncementImage(req, res, store, pathname);
+    }
+
+    if (
+      (req.method === "GET" || req.method === "HEAD")
+      && (pathname === PAYMENT_QR_PUBLIC_PATH || pathname === `${PAYMENT_QR_PUBLIC_PATH}.jpg`)
+    ) {
+      return servePaymentQr(req, res, store);
+    }
 
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
@@ -1374,9 +1629,34 @@ async function handleRequest(req, res) {
     }
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
-      if (!auth.user) return send(res, auth.status, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
+      if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      let clerkUser = null;
+      try {
+        clerkUser = await clerkBackend.users.getUser(auth.user.clerkUserId);
+      } catch {
+        clerkUser = null;
+      }
+      let user = auth.user;
+      if (clerkUser) {
+        user = await enqueueMutation(async () => {
+          const latest = await load();
+          const latestUser = (latest.users || []).find((candidate) => candidate.id === auth.user.id);
+          if (!latestUser) return auth.user;
+          if (applyClerkIdentityCopy(latest, latestUser, clerkUser).mutated) {
+            await save(latest);
+          }
+          return latestUser;
+        });
+      }
+      const projected = publicUser(user);
+      if ((store.userRoleMemberships || []).some(
+        (membership) => membership.userId === user.id && membership.role === "rider",
+      )) {
+        const profile = riderProfileProjection(store, user.id);
+        if (profile) projected.riderProfile = profile;
+      }
       return send(res, 200, {
-        user: publicUser(auth.user),
+        user: projected,
         memberships: auth.authorization.memberships.map(membershipSummary),
         approvalCases: auth.authorization.approvalCases.map(approvalCaseSummary),
       });
@@ -1385,7 +1665,7 @@ async function handleRequest(req, res) {
     const fixedAuthRole = FIXED_AUTH_ROLES.get(pathname);
     if (req.method === "GET" && fixedAuthRole) {
       const auth = await authenticateRequest(req, store);
-      if (!auth.user) return send(res, auth.status || 401, { error: "unauthorized" });
+      if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
       if (!contextHasMembership(auth.authorization, fixedAuthRole)) {
         if (fixedAuthRole === "supplier") {
           return send(res, 403, {
@@ -1400,6 +1680,11 @@ async function handleRequest(req, res) {
         });
       }
       return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
+    }
+
+    if (req.method === "POST" && pathname === "/auth/clerk/client-available") {
+      const body = await readBody(req);
+      return send(res, 200, { available: clientEmailAvailable(store, body?.email) });
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/activate") {
@@ -1513,6 +1798,77 @@ async function handleRequest(req, res) {
     const auth = await authenticateRequest(req, store);
     const user = auth.user;
 
+    if (!user
+        && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
+        && isPublicSupplierCatalogRoute(req.method, pathname)) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    const privateCatalogRoute = pathname === "/listing-starters"
+      || pathname === "/me/supplier-readiness"
+      || pathname === "/me/supplier-profile"
+      || pathname === "/me/supplier-payment-terms"
+      || pathname.startsWith("/me/supplier-services")
+      || pathname.startsWith("/me/catalog-items")
+      || pathname.startsWith("/me/catalog-option-groups");
+    if (!user && (privateCatalogRoute || isPrivateRiderProfileRoute(pathname))) {
+      return send(res, 401, {
+        error: "unauthorized",
+        message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    const catalogResponse = await routeSupplierCatalog({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      id,
+      now,
+      audit,
+    });
+    if (catalogResponse) {
+      if (catalogResponse.mutated) await save(store);
+      if (catalogResponse.status < 400) {
+        await decorateCatalogPhotoUrls(store, catalogResponse.body);
+      }
+      return send(res, catalogResponse.status, catalogResponse.body);
+    }
+
+    const riderProfileResponse = await routeRiderProfile({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      now,
+      audit,
+    });
+    if (riderProfileResponse) {
+      if (riderProfileResponse.mutated) await save(store);
+      return send(res, riderProfileResponse.status, riderProfileResponse.body);
+    }
+
+    const accountProfileResponse = await routeAccountProfile({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      createId: id,
+      now,
+      audit,
+      publicUser,
+    });
+    if (accountProfileResponse) {
+      if (accountProfileResponse.mutated) await save(store);
+      return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
       return send(res, 200, { catalog: store.catalog });
@@ -1524,6 +1880,23 @@ async function handleRequest(req, res) {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
       });
+    }
+
+    const orderMatchResponse = await routeOrderMatch({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      id,
+      now,
+    });
+    if (orderMatchResponse) {
+      if (orderMatchResponse.mutated) await save(store);
+      if (orderMatchResponse.status < 400) {
+        await decorateCatalogPhotoUrls(store, orderMatchResponse.body);
+      }
+      return send(res, orderMatchResponse.status, orderMatchResponse.body);
     }
 
     // ---- shared Operations / Super Admin approval queue ----
@@ -1754,6 +2127,22 @@ async function handleRequest(req, res) {
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
+        if (latestTarget.type === "supplier_catalog_item") {
+          const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
+          await save(latestStore);
+          const item = privateCatalogItem(latestStore, attached.item);
+          await decorateCatalogPhotoUrls(latestStore, { item });
+          return send(res, 200, { file: publicFile(latestFile), item });
+        }
+        if (latestTarget.type === "supplier_shop_media") {
+          const attached = attachSupplierShopImage(latestStore, latestFile, latestTarget, { at: now() });
+          await save(latestStore);
+          return send(res, 200, {
+            file: publicFile(latestFile),
+            profile: attached.profile,
+            media: attached.media,
+          });
+        }
         if (latestTarget.type === "rider_document") {
           const attachedAt = now();
           const attached = attachRiderDocument(latestStore, latestFile, latestTarget, {
@@ -1953,13 +2342,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/notifications") {
-      const items = store.notifications
-        .filter((n) => n.userId === user.id && n.deletedAt == null)
-        .sort((a, b) => (a.at < b.at ? 1 : -1));
-      return send(res, 200, {
-        notifications: items,
-        snapshot: notificationSnapshot(store.notifications, user.id),
-      });
+      return send(res, 200, listInbox(store, user.id, { limit: url.searchParams.get("limit") }));
     }
 
     if (req.method === "PATCH" && pathname === "/notifications/read-all") {
@@ -2045,6 +2428,14 @@ async function handleRequest(req, res) {
           message: `Enter announcement text of 1 to ${ANNOUNCEMENT_BODY_MAX} characters.`,
         });
       }
+      const image = normalizeAnnouncementImageUrl(body.imageUrl);
+      if (image.error) {
+        return send(res, 400, {
+          error: "invalid_announcement_image",
+          message: "Attach a JPEG, PNG or WebP, or paste an http(s) picture link. Nothing was sent.",
+        });
+      }
+      const imageUrl = image.imageUrl;
 
       const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
       const recipients = store.users.filter((candidate) => roles === null || roles.includes(candidate.role));
@@ -2059,6 +2450,7 @@ async function handleRequest(req, res) {
           announcementId,
           title,
           body: text,
+          ...(imageUrl ? { imageUrl } : {}),
           read: false,
           at,
         });
@@ -2077,17 +2469,19 @@ async function handleRequest(req, res) {
           title,
           notifiedUsers: recipients.length,
           unclaimedDevices: unclaimed.length,
+          hasImage: Boolean(imageUrl),
         },
         reason: body.reason || null,
       });
       await save(store);
-      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text }));
+      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text, imageUrl }));
       return send(res, 201, {
         announcement: {
           id: announcementId,
           audience,
           title,
           body: text,
+          imageUrl,
           at,
           notifiedUsers: recipients.length,
           unclaimedDevices: unclaimed.length,
@@ -2097,7 +2491,10 @@ async function handleRequest(req, res) {
 
     // ---- global operational settings ----
     if (req.method === "GET" && pathname === "/settings") {
-      return send(res, 200, { version: store.version, settings: store.settings || defaultOperationalSettings() });
+      return send(res, 200, {
+        version: store.version,
+        settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store),
+      });
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
@@ -2131,7 +2528,56 @@ async function handleRequest(req, res) {
         reason,
       });
       await save(store);
-      return send(res, 200, { version: store.version, settings: store.settings });
+      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store) });
+    }
+
+    if (req.method === "POST" && pathname === "/settings/payment-qr") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      if (!reason) return send(res, 400, { error: "settings_reason_required" });
+      const fileId = String(body.fileId || "").trim();
+      const file = findFile(store, fileId);
+      if (
+        !file
+        || file.purpose !== "payment_qr"
+        || file.state !== "ready"
+        || file.deletedAt
+        || file.deleteRequestedAt
+        || !file.objectKey
+      ) {
+        return send(res, 400, {
+          error: "invalid_payment_qr",
+          message: "Upload a JPEG, PNG or WebP with purpose payment_qr, then activate that file as the platform QR.",
+        });
+      }
+      if (!store.settings) store.settings = defaultOperationalSettings();
+      const previousId = store.settings.paymentQrFileId || null;
+      if (previousId === file.fileId) {
+        return send(res, 200, {
+          version: store.version,
+          settings: publicOperationalSettings(store.settings, store),
+        });
+      }
+      const previous = previousId ? findFile(store, previousId) : null;
+      store.settings = { ...store.settings, paymentQrFileId: file.fileId };
+      store.version += 1;
+      if (previous && previous.state === "ready" && !previous.deletedAt && !previous.deleteRequestedAt) {
+        markFileDeletePending(previous, user, now());
+      }
+      audit(store, {
+        actor: user,
+        action: "settings.payment_qr_replace",
+        entityType: "settings",
+        entityId: "payment_qr",
+        detail: { previousFileId: previousId, fileId: file.fileId },
+        reason,
+      });
+      await save(store);
+      return send(res, 200, {
+        version: store.version,
+        settings: publicOperationalSettings(store.settings, store),
+      });
     }
 
     // ---- supplier payment timing terms ----
@@ -2439,7 +2885,7 @@ async function handleRequest(req, res) {
       }
       const prev = target.verificationStatus || "unverified";
       if (target.role === "rider" && body.status === "approved") {
-        assertRiderApprovalReady(store, target.id, now());
+        assertRiderLegacyVerificationReady(store, target.id, now());
       }
       syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
       target.verificationStatus = body.status;
@@ -4428,14 +4874,32 @@ async function handleRequest(req, res) {
       return;
     }
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
-      return sendDomainError(res, err);
+      return sendDomainError(res, err, { afterCommit: false });
     }
     console.error(err);
     return send(res, 500, {
       error: "server_error",
       message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues.",
-    });
+    }, { afterCommit: false });
   }
+}
+
+function logHttpRequest(req, res, pathname, started) {
+  if (req.method === "GET" && pathname === "/health") return;
+  res.on("finish", () => {
+    const claims = req.gridgoVerifiedClaims?.claims;
+    let clerk = "clerk=none";
+    if (claims?.sub) clerk = `clerk=${String(claims.sub).slice(0, 10)}…`;
+    else if (hasBearerToken(req)) clerk = "clerk=unverified";
+    const error = res.gridgoError ? ` error=${res.gridgoError}` : "";
+    const fields =
+      Array.isArray(res.gridgoErrorFields) && res.gridgoErrorFields.length
+        ? ` fields=${res.gridgoErrorFields.join(",")}`
+        : "";
+    console.log(
+      `[gridgo-api] ${req.method} ${pathname} ${res.statusCode} ${Date.now() - started}ms auth=${hasBearerToken(req) ? "bearer" : "none"} ${clerk}${error}${fields}`,
+    );
+  });
 }
 
 const server = http.createServer((req, res) => {
@@ -4448,7 +4912,8 @@ const server = http.createServer((req, res) => {
   } catch {
     // handleRequest fails the same parse and answers 500 itself.
   }
-  const mutatesStore = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE";
+  logHttpRequest(req, res, pathname, Date.now());
+  const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // File transfers and MinIO calls stay outside database transactions. File routes
   // acquire one only for short load -> validate -> mutate -> commit sections.
   const isSelfQueuedFileMutation =
@@ -4457,6 +4922,25 @@ const server = http.createServer((req, res) => {
     (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
   if (isSelfQueuedFileMutation) {
     void handleRequest(req, res);
+    return;
+  }
+  if (req.method === "POST" && pathname === "/webhooks/clerk") {
+    // Raw body and Svix headers are the credential. The generic mutation
+    // path would parse JSON first and demand a Clerk session JWT.
+    void enqueueMutation(() => handleRequest(req, res)).catch((error) => {
+      if (res.headersSent) {
+        res.destroy(error);
+        return;
+      }
+      if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+        sendDomainError(res, error);
+        return;
+      }
+      send(res, 500, {
+        error: "server_error",
+        message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
+      });
+    });
     return;
   }
   if (mutatesStore) {

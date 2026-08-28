@@ -4,8 +4,14 @@ import crypto from "node:crypto";
 
 import {
   activateClerkClientProfile,
+  applyClerkIdentityCopy,
+  applyClerkWebhookEvent,
   authConfiguration,
   authenticateBearerToken,
+  clientEmailAvailable,
+  clerkClientProfile,
+  clerkUserFromWebhookData,
+  refreshMappedIdentityFromClerk,
 } from "../src/auth.js";
 
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
@@ -65,8 +71,12 @@ test("verified Clerk subject resolves to the database role without trusting a ro
   assert.deepEqual(authenticated.authorization.memberships, store.userRoleMemberships);
 
   assert.equal((await authenticateBearerToken(null, store, config)).status, 401);
+  assert.equal((await authenticateBearerToken(null, store, config)).error, "unauthorized");
   assert.equal((await authenticateBearerToken("tok_old_local_session", store, config)).status, 401);
-  assert.equal((await authenticateBearerToken(signToken({ sub: "unmapped" }), store, config)).status, 401);
+  assert.equal((await authenticateBearerToken("tok_old_local_session", store, config)).error, "unauthorized");
+  const unmapped = await authenticateBearerToken(signToken({ sub: "unmapped" }), store, config);
+  assert.equal(unmapped.status, 401);
+  assert.equal(unmapped.error, "unmapped_identity");
 });
 
 test("activation provisions an unmapped Clerk identity as a passwordless client only", async () => {
@@ -195,4 +205,123 @@ test("session token with a listed azp still authenticates and activates", async 
   });
   assert.equal(activated.status, 200);
   assert.equal(activated.user.id, "user_listed_azp");
+});
+
+test("client email availability never names the other role", () => {
+  const store = {
+    users: [
+      { id: "user_client", email: "client@gridgo.ph", role: "client" },
+      { id: "user_rider", email: "mddprado00290@usep.edu.ph", role: "rider" },
+      { id: "user_supplier", email: "shop@gridgo.ph", role: "supplier" },
+    ],
+  };
+  assert.equal(clientEmailAvailable(store, "client@gridgo.ph"), true);
+  assert.equal(clientEmailAvailable(store, "CLIENT@gridgo.ph"), true);
+  assert.equal(clientEmailAvailable(store, "new.client@gridgo.ph"), true);
+  assert.equal(clientEmailAvailable(store, "mddprado00290@usep.edu.ph"), false);
+  assert.equal(clientEmailAvailable(store, "shop@gridgo.ph"), false);
+  assert.equal(clientEmailAvailable(store, "not-an-email"), false);
+});
+
+test("Clerk identity copy refreshes name and email without touching shop facts", () => {
+  const store = {
+    users: [{
+      id: "user_shop",
+      clerkUserId: "clerk_shop",
+      email: "old@gridgo.test",
+      name: "Mark David",
+      phone: "+639171111111",
+      supplierName: "Lovis Printshop",
+      shop: { lat: 7.07, lng: 125.61, label: "Cervantes" },
+    }],
+    supplierProfiles: [{
+      userId: "user_shop",
+      shopName: "Lovis Printshop",
+      contactName: "Mark David",
+      shop: { lat: 7.07, lng: 125.61, label: "Cervantes" },
+    }],
+  };
+  const user = store.users[0];
+  const result = applyClerkIdentityCopy(store, user, {
+    firstName: "Quinn",
+    lastName: "",
+    primaryEmailAddress: { emailAddress: "Fely@gridgo.test" },
+  });
+  assert.equal(result.mutated, true);
+  assert.equal(user.name, "Quinn");
+  assert.equal(user.email, "fely@gridgo.test");
+  assert.equal(user.phone, "+639171111111");
+  assert.equal(user.supplierName, "Lovis Printshop");
+  assert.equal(store.supplierProfiles[0].contactName, "Mark David");
+});
+
+test("Clerk identity copy will not steal another account's email", () => {
+  const store = {
+    users: [
+      { id: "user_shop", clerkUserId: "clerk_shop", email: "old@gridgo.test", name: "Mark David" },
+      { id: "user_other", clerkUserId: "clerk_other", email: "taken@gridgo.test", name: "Other" },
+    ],
+  };
+  const result = applyClerkIdentityCopy(store, store.users[0], {
+    firstName: "Quinn",
+    primaryEmailAddress: { emailAddress: "taken@gridgo.test" },
+  });
+  assert.equal(result.mutated, true);
+  assert.equal(store.users[0].name, "Quinn");
+  assert.equal(store.users[0].email, "old@gridgo.test");
+  assert.equal(store.users[1].email, "taken@gridgo.test");
+});
+
+test("refreshMappedIdentityFromClerk ignores a Clerk Backend miss", async () => {
+  const store = { users: [{ id: "user_shop", clerkUserId: "clerk_shop", email: "old@gridgo.test", name: "Mark David" }] };
+  const missed = await refreshMappedIdentityFromClerk({
+    clerkBackend: { users: { getUser: async () => { throw new Error("clerk down"); } } },
+    store,
+    user: store.users[0],
+  });
+  assert.equal(missed.mutated, false);
+  assert.equal(store.users[0].name, "Mark David");
+
+  const updated = await refreshMappedIdentityFromClerk({
+    clerkBackend: { users: { getUser: async () => ({ firstName: "Quinn" }) } },
+    store,
+    user: store.users[0],
+  });
+  assert.equal(updated.mutated, true);
+  assert.equal(store.users[0].name, "Quinn");
+});
+
+test("Clerk user.updated webhook refreshes a mapped person and ignores strangers", () => {
+  const store = {
+    users: [{ id: "user_shop", clerkUserId: "user_3I4p", email: "old@gridgo.test", name: "Mark David" }],
+  };
+  const updated = applyClerkWebhookEvent(store, {
+    type: "user.updated",
+    data: {
+      id: "user_3I4p",
+      first_name: "Quinn",
+      last_name: null,
+      primary_email_address_id: "idn_1",
+      email_addresses: [{ id: "idn_1", email_address: "fely@gridgo.test" }],
+    },
+  });
+  assert.equal(updated.mutated, true);
+  assert.equal(store.users[0].name, "Quinn");
+  assert.equal(store.users[0].email, "fely@gridgo.test");
+
+  const stranger = applyClerkWebhookEvent(store, {
+    type: "user.updated",
+    data: { id: "user_unknown", first_name: "Nope", email_addresses: [{ email_address: "nope@gridgo.test" }] },
+  });
+  assert.equal(stranger.mutated, false);
+
+  const deleted = applyClerkWebhookEvent(store, { type: "user.deleted", data: { id: "user_3I4p" } });
+  assert.equal(deleted.mutated, false);
+  assert.equal(store.users[0].name, "Quinn");
+
+  assert.equal(clerkClientProfile(clerkUserFromWebhookData({
+    first_name: "Quinn",
+    email_addresses: [{ id: "idn_1", email_address: "Fely@gridgo.test" }],
+    primary_email_address_id: "idn_1",
+  })).name, "Quinn");
 });

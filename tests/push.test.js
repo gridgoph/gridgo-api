@@ -15,8 +15,12 @@ import {
   createPushDeliveryOrDisable,
   deviceTokensFor,
   fcmRequestBody,
+  announcementImageOrigin,
+  isFcmFetchableImageUrl,
   isFcmTokenShaped,
   loadServiceAccount,
+  normalizeAnnouncementImageUrl,
+  resolveFcmImageUrl,
   publicDevice,
   pushMessageFor,
   registerDeviceToken,
@@ -393,11 +397,77 @@ test("an announcement message carries a routing type and nothing else", () => {
   });
   assert.equal(message.title, "Update your app");
   assert.deepEqual(message.data, { type: "announcement" });
+  assert.equal(message.image, undefined);
   assertStrangerSafeMessage(message);
 
   const empty = announcementPushMessage({ title: "", body: "" });
   assert.equal(empty.title, "GRIDGO");
   assert.equal(empty.body, "Open GRIDGO for the latest update.");
+});
+
+test("a public HTTPS picture rides the FCM notification, never the data map", () => {
+  const publicImage = "https://cdn.gridgo.example/update.png";
+  const message = announcementPushMessage({
+    title: "Update your app",
+    body: "1.6 is out.",
+    imageUrl: publicImage,
+  });
+  assert.equal(message.image, publicImage);
+  assert.deepEqual(message.data, { type: "announcement" });
+  assertStrangerSafeMessage(message);
+
+  const body = fcmRequestBody(message, "device-token");
+  assert.equal(body.message.notification.image, publicImage);
+  assert.equal(body.message.android.notification.image, publicImage);
+  assert.equal(body.message.apns.fcm_options.image, publicImage);
+  assert.equal(body.message.apns.payload.aps["mutable-content"], 1);
+  assert.equal(JSON.stringify(body.message.data).includes("cdn.gridgo"), false);
+});
+
+test("the phone can download a LAN picture; hosted paths need a phone-visible origin", () => {
+  const lan = "http://192.168.1.55:8787/public/announcement-images/file_aaaaaaaaaaaa";
+  assert.equal(isFcmFetchableImageUrl(lan), true);
+  assert.equal(isFcmFetchableImageUrl("https://cdn.gridgo.example/pic.png"), true);
+  assert.equal(isFcmFetchableImageUrl("javascript:alert(1)"), false);
+
+  const hosted = "/public/announcement-images/file_aaaaaaaaaaaa";
+  assert.equal(resolveFcmImageUrl(hosted, {}), null);
+  assert.equal(
+    announcementImageOrigin({ MINIO_PUBLIC_URL: "http://192.168.1.55:9000" }),
+    "http://192.168.1.55:8787",
+  );
+  assert.equal(
+    announcementImageOrigin({ MINIO_PUBLIC_URL: "https://files.talasora.com" }),
+    "",
+  );
+  assert.equal(
+    resolveFcmImageUrl(hosted, { MINIO_PUBLIC_URL: "http://192.168.1.55:9000" }),
+    lan,
+  );
+  assert.equal(
+    resolveFcmImageUrl(hosted, { GRIDGO_PUBLIC_API_ORIGIN: "https://gridgo-api.talasora.com" }),
+    "https://gridgo-api.talasora.com/public/announcement-images/file_aaaaaaaaaaaa",
+  );
+
+  const message = pushMessageFor({
+    id: "ntf_img",
+    title: "T",
+    body: "B",
+    at: AT,
+    imageUrl: hosted,
+  }, { MINIO_PUBLIC_URL: "http://192.168.1.55:9000" });
+  assert.equal(message.image, lan);
+});
+
+test("announcement image URLs accept hosted paths and http(s) links only", () => {
+  assert.deepEqual(normalizeAnnouncementImageUrl("  "), { imageUrl: null });
+  assert.deepEqual(
+    normalizeAnnouncementImageUrl("/public/announcement-images/file_aaaaaaaaaaaa"),
+    { imageUrl: "/public/announcement-images/file_aaaaaaaaaaaa" },
+  );
+  assert.equal(normalizeAnnouncementImageUrl("javascript:alert(1)").error, "invalid_announcement_image");
+  assert.equal(normalizeAnnouncementImageUrl("/public/announcement-images/nope").error, "invalid_announcement_image");
+  assert.equal(normalizeAnnouncementImageUrl("https://user:pass@cdn.example/x.png").error, "invalid_announcement_image");
 });
 
 test("a personal notification is refused before it can reach a stranger's handset", () => {

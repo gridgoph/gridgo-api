@@ -12,20 +12,105 @@ async function clear(database) {
   await database.query(`TRUNCATE
     administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
-    payout_milestones, order_payments, orders, supplier_services, zones,
-    taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
+    job_qa_checklist, order_invoices, client_cart_lines, client_carts, client_saved_addresses,
+    client_match_preferences, payout_milestones, order_payments, order_line_item_options, order_line_items,
+    order_jobs, orders,
+    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
+    supplier_catalog_options, supplier_catalog_option_groups, supplier_catalog_items,
+    supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
+    listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
+    zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
     taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
     platform_settings RESTART IDENTITY CASCADE`);
 }
+
+test("relational store round-trips client matching, cart, job, line, and invoice records", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clear(database);
+  const store = emptyStore();
+  store.users = [
+    { id: "user_client", clerkUserId: "clerk_match_client", email: "match-client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
+    { id: "user_supplier", clerkUserId: "clerk_match_supplier", email: "match-supplier@gridgo.test", name: "Supplier", role: "supplier", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Shop" }, createdAt: AT },
+  ];
+  store.supplierProfiles = [{
+    userId: "user_supplier", shopName: "Match Shop", contactName: "Supplier",
+    shop: { lat: 7.064, lng: 125.6085, label: "Shop" }, pickupAvailable: true,
+    isClosed: true, version: 1, updatedAt: AT,
+  }];
+  store.clientPreferences = [{ userId: "user_client", ranking: ["quality", "speed", "distance"], version: 1, updatedAt: AT }];
+  store.clientAddresses = [{
+    id: "addr_one", clientId: "user_client", label: "Home", addressLine: "Bajada, Davao City",
+    point: { lat: 7.0731, lng: 125.6128 }, isDefault: true, version: 1, createdAt: AT, updatedAt: AT,
+  }];
+  store.orders = [{
+    id: "ord_match", clientId: "user_client", supplierId: null, riderId: null, state: "needs_qa",
+    supplierSubtotalMinor: 10000, subtotalMinor: 10000, serviceFeeRateBps: 1000,
+    serviceFeeMinor: 1000, deliveryFeeMinor: 2500, totalMinor: 13500,
+    moneyModelVersion: 2, payoutHold: false,
+    dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
+    payments: { initial: { amountMinor: 10125, method: "qr_manual", status: "pending_confirmation", reference: "QR-123", proofFileId: "file_qr" } },
+    paymentAllocations: [], revenueAdjustments: [], payoutMilestones: [],
+    createdAt: AT, updatedAt: AT,
+  }];
+  store.carts = [{
+    id: "cart_one", clientId: "user_client", state: "checked_out", version: 3,
+    serviceLevel: "scheduled", scheduledFor: "2026-08-25T02:00:00.000Z", fulfillmentMode: "delivery",
+    defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
+    checkedOutOrderId: "ord_match", checkedOutAt: AT, createdAt: AT, updatedAt: AT,
+  }];
+  store.orderJobs = [{
+    id: "job_one", orderId: "ord_match", supplierId: "user_supplier", riderId: null,
+    state: "needs_qa", fulfillmentMode: "delivery",
+    pickup: { lat: 7.064, lng: 125.6085, label: "Shop" },
+    dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
+    supplierSubtotalMinor: 10000, deliveryDistanceMeters: 1111, deliveryFeeMinor: 2500,
+    estimatedHours: 24, scheduledFor: "2026-08-25T02:00:00.000Z", createdAt: AT, updatedAt: AT,
+  }];
+  store.files = [
+    { fileId: "file_qr", ownerId: "user_client", purpose: "payment_proof", originalFilename: "qr.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/qr.jpg", createdAt: AT },
+    { fileId: "file_art", ownerId: "user_client", purpose: "artwork", originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 20, state: "ready", objectKey: "client/art.pdf", createdAt: AT },
+    { fileId: "file_mock", ownerId: "user_client", purpose: "mockup", originalFilename: "mock.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 20, state: "ready", objectKey: "client/mock.jpg", createdAt: AT },
+  ];
+  store.orderLineItems = [{
+    id: "line_one", orderId: "ord_match", jobId: "job_one", sourceCatalogItemId: null,
+    sourceSupplierServiceId: null, itemNameSnapshot: "Flyers", descriptionSnapshot: "A5",
+    pricingBasisSnapshot: "per_unit", pricingUnitSnapshot: "per_unit", packageQtySnapshot: null,
+    turnaroundHoursSnapshot: 24, baseUnitPriceMinor: 100, effectiveUnitPriceMinor: 100,
+    quantity: 100, lineSubtotalMinor: 10000, acceptedFormatCodesSnapshot: ["pdf"],
+    structuredSpecSnapshot: { size: "A5" }, artworkFileId: "file_art", mockupFileId: "file_mock",
+    dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" }, sortOrder: 0,
+    snapshotFinalized: true, createdAt: AT,
+  }];
+  store.jobQaChecklist = [{
+    id: "qa_one", jobId: "job_one", code: "artwork", label: "Artwork matches mockup",
+    status: "pending", sortOrder: 0, createdAt: AT, updatedAt: AT,
+  }];
+  store.orderInvoices = [{ orderId: "ord_match", invoiceNumber: "GG-20260824-0001", issuedAt: AT, snapshot: { totalMinor: 13500 } }];
+
+  await database.transaction(() => saveStore(database, store));
+  const reloaded = await loadStore(database);
+
+  assert.deepEqual(reloaded.clientPreferences, store.clientPreferences);
+  assert.deepEqual(reloaded.clientAddresses, store.clientAddresses);
+  assert.deepEqual(reloaded.carts, store.carts);
+  assert.deepEqual(reloaded.orderJobs, store.orderJobs);
+  assert.deepEqual(reloaded.orderLineItems, store.orderLineItems);
+  assert.deepEqual(reloaded.jobQaChecklist, store.jobQaChecklist);
+  assert.deepEqual(reloaded.orderInvoices, store.orderInvoices);
+  assert.equal(reloaded.supplierProfiles[0].isClosed, true);
+
+  await clear(database);
+});
 
 test("relational store round-trips typed money, relationships, and composite route data", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clear(database);
   const store = emptyStore();
   store.users = [
-    { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", phone: "+63900", role: "client", accountType: "individual", createdAt: AT },
-    { id: "user_supplier", clerkUserId: "clerk_supplier", email: "supplier@gridgo.test", name: "Supplier", role: "supplier", supplierName: "Print Shop", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, createdAt: AT },
-    { id: "user_rider", clerkUserId: "clerk_rider", email: "rider@gridgo.test", name: "Rider", role: "rider", verificationStatus: "approved", createdAt: AT },
+    { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", phone: "+63900", role: "client", accountType: "individual", version: 1, createdAt: AT },
+    { id: "user_supplier", clerkUserId: "clerk_supplier", email: "supplier@gridgo.test", name: "Supplier", role: "supplier", supplierName: "Print Shop", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, version: 1, createdAt: AT },
+    { id: "user_rider", clerkUserId: "clerk_rider", email: "rider@gridgo.test", name: "Rider", role: "rider", verificationStatus: "approved", version: 1, createdAt: AT },
   ];
   store.catalog = [{ id: "prod_banner", name: "Banner", family: "banner", basePriceMinor: 45000, unit: "sqm" }];
   store.taxonomy = {
@@ -37,7 +122,7 @@ test("relational store round-trips typed money, relationships, and composite rou
   };
   store.settings = { serviceFeeRateBps: 1000, issueWindowHours: 24, deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 5000 }] };
   store.zones = [{ id: "zone_central", code: "davao_central", name: "Davao Central", active: true }];
-  store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], createdAt: AT, updatedAt: AT }];
+  store.supplierServices = [{ id: "svc_banner", supplierId: "user_supplier", categoryCode: "marketing", state: "live", referenceRateMinor: 100000, turnaroundHours: 24, materialCodes: ["vinyl"], finishCodes: ["none"], version: 1, createdAt: AT, updatedAt: AT }];
   store.orders = [{
     id: "ord_one", clientId: "user_client", supplierId: "user_supplier", riderId: "user_rider",
     productId: "prod_banner", state: "issue_window_open", zone: "davao_central",
@@ -102,8 +187,8 @@ test("relational store maps memberships, approval records, profiles, and rider d
     { userId: "user_supplier", role: "supplier", createdAt: AT },
     { userId: "user_rider", role: "rider", createdAt: AT, createdBy: "user_supplier" },
   ];
-  store.supplierProfiles = [{ userId: "user_supplier", shopName: "PrintRight", contactName: "Supplier", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, pickupAvailable: true, updatedAt: AT }];
-  store.riderProfiles = [{ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC-123", licenseNumber: "LIC-123", updatedAt: AT }];
+  store.supplierProfiles = [{ userId: "user_supplier", shopName: "PrintRight", contactName: "Supplier", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, pickupAvailable: true, version: 1, updatedAt: AT }];
+  store.riderProfiles = [{ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC-123", licenseNumber: "LIC-123", version: 1, updatedAt: AT }];
   store.approvalCases = [{ id: "case_rider", userId: "user_rider", kind: "rider", status: "pending", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT }];
   store.approvalCaseEvents = [{ id: "event_rider", approvalCaseId: "case_rider", applicationRevision: 1, toStatus: "pending", actorUserId: "user_rider", actorKind: "applicant", requestId: "request-rider", snapshot: { vehicleType: "motorcycle" }, createdAt: AT }];
   store.files = [{ fileId: "file_license", ownerId: "user_rider", purpose: "rider_verification_document", originalFilename: "license.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: "riders/license.jpg", references: [{ type: "rider_document", id: "document_rider", field: "fileId" }], createdAt: AT }];

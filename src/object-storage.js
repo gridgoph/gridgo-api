@@ -123,6 +123,21 @@ export function createObjectStorage(env = process.env, options = {}) {
     }
   }
 
+  async function getObject(key) {
+    try {
+      const stream = await internalClient.getObject(bucket, key);
+      mark("available");
+      return stream;
+    } catch (error) {
+      if (missingObject(error)) {
+        mark("available");
+        throw new StorageObjectMissingError();
+      }
+      mark("unavailable");
+      throw new StorageUnavailableError();
+    }
+  }
+
   async function presignGet(key) {
     try {
       // Signing must happen against the device-visible origin. Rewriting this URL later invalidates SigV4.
@@ -135,5 +150,5 @@ export function createObjectStorage(env = process.env, options = {}) {
     }
   }
 
-  return { ensureBucket, putObject, statObject, deleteObject, presignGet, health };
+  return { ensureBucket, putObject, statObject, deleteObject, getObject, presignGet, health };
 }
