@@ -24,6 +24,40 @@ export const MARK_DEV_CLIENT = Object.freeze({
   name: "Mark David",
 });
 
+/**
+ * Local development rider. Production `npm run seed` never creates this.
+ * Email matches the official Clerk rider the rider app prefills in `__DEV__`.
+ */
+export const MARK_DEV_RIDER = Object.freeze({
+  email: "mddprado00290@usep.edu.ph",
+  name: "Mark David Prado",
+  phone: "+639171234567",
+  vehicleType: "motorcycle",
+  plateNumber: "ABC 1234",
+  licenseNumber: "N01-23-456789",
+});
+
+/**
+ * Local portal testers. Production `npm run seed` never creates these.
+ * One person, one portal: Mark is Super Admin only, Giorno is Operations only.
+ */
+export const PRIVILEGED_DEV_ACCOUNTS = Object.freeze([
+  {
+    id: "user_markshopease",
+    email: "markshopease123@gmail.com",
+    name: "Mark",
+    primaryRole: "super_admin",
+    roles: Object.freeze(["super_admin"]),
+  },
+  {
+    id: "user_giorno_ops",
+    email: "giornogiovanna0990@gmail.com",
+    name: "Giorno",
+    primaryRole: "ops_admin",
+    roles: Object.freeze(["ops_admin"]),
+  },
+]);
+
 const USER_ID = "user_lovis_printshop";
 const CASE_ID = "apc_lovis_printshop";
 const LOGO_ID = "file_lovis_logo";
@@ -630,7 +664,190 @@ async function seedDevelopmentClient(database, clerkBackend, now) {
   return { email: person.email, clerkUserId: clerkUser.id };
 }
 
-/** Local-only shops plus the development client. Extra shops are fixtures, not real Clerk people. */
+/**
+ * Idempotent local rider for the live Clerk email so Sign in works after a
+ * fresh migrate, without sending the rider through apply.
+ */
+export async function seedDevelopmentRider(database, clerkBackend, now = () => new Date().toISOString()) {
+  const clerkUser = await resolveDevClerkUser(MARK_DEV_RIDER.email, clerkBackend);
+  const person = clerkClientProfile(clerkUser);
+  const at = typeof now === "function" ? now() : now;
+  const email = MARK_DEV_RIDER.email.toLowerCase();
+  return database.transaction(async () => {
+    const existing = await database.query(
+      `SELECT id, phone, created_at, version, position, data
+         FROM users
+        WHERE clerk_user_id = $1 OR lower(email) = $2
+        ORDER BY CASE WHEN clerk_user_id = $1 THEN 0 ELSE 1 END
+        LIMIT 1`,
+      [clerkUser.id, email],
+    );
+    const row = existing.rows[0];
+    const userId = row?.id || "user_markdavid_rider";
+    const createdAt = row?.created_at || at;
+    const version = row?.version || 1;
+    const position = row?.position ?? Number((await database.query("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM users")).rows[0].next);
+    const data = row?.data && typeof row.data === "object" ? row.data : {};
+    await database.query(
+      `INSERT INTO users (
+         id, clerk_user_id, email, name, phone, role, account_type, org_name,
+         verification_status, shop_lat, shop_lng, shop_label, version, created_at, position, data
+       ) VALUES (
+         $1, $2, $3, $4, $5, 'rider', NULL, NULL,
+         'approved', NULL, NULL, NULL, $6, $7, $8, $9::jsonb
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         clerk_user_id = EXCLUDED.clerk_user_id,
+         email = EXCLUDED.email,
+         name = EXCLUDED.name,
+         phone = EXCLUDED.phone,
+         role = 'rider',
+         account_type = NULL,
+         org_name = NULL,
+         verification_status = 'approved'`,
+      [
+        userId,
+        clerkUser.id,
+        email,
+        person.name || MARK_DEV_RIDER.name,
+        person.phone || row?.phone || MARK_DEV_RIDER.phone,
+        version,
+        createdAt,
+        position,
+        JSON.stringify(data),
+      ],
+    );
+    await database.query(
+      `INSERT INTO user_role_memberships (user_id, role, created_at, created_by)
+       VALUES ($1, 'rider', $2, $1)
+       ON CONFLICT (user_id, role) DO NOTHING`,
+      [userId, at],
+    );
+    await database.query(
+      `INSERT INTO rider_profiles (user_id, vehicle_type, plate_number, license_number, version, updated_at)
+       VALUES ($1, $2, $3, $4, 1, $5)
+       ON CONFLICT (user_id) DO UPDATE SET
+         vehicle_type = EXCLUDED.vehicle_type,
+         plate_number = EXCLUDED.plate_number,
+         license_number = EXCLUDED.license_number,
+         updated_at = EXCLUDED.updated_at`,
+      [userId, MARK_DEV_RIDER.vehicleType, MARK_DEV_RIDER.plateNumber, MARK_DEV_RIDER.licenseNumber, at],
+    );
+    const existingCase = await database.query(
+      `SELECT id FROM approval_cases WHERE user_id = $1 AND kind = 'rider' LIMIT 1`,
+      [userId],
+    );
+    if (existingCase.rows[0]) {
+      await database.query(
+        `UPDATE approval_cases
+            SET status = 'approved',
+                submitted_at = COALESCE(submitted_at, $2),
+                decided_at = COALESCE(decided_at, $2),
+                updated_at = $2
+          WHERE id = $1`,
+        [existingCase.rows[0].id, at],
+      );
+    } else {
+      await database.query(
+        `INSERT INTO approval_cases (
+           id, user_id, kind, status, version, application_revision,
+           submitted_at, decided_at, created_at, updated_at
+         ) VALUES (
+           'apc_markdavid_rider', $1, 'rider', 'approved', 1, 1,
+           $2, $2, $2, $2
+         )`,
+        [userId, at],
+      );
+    }
+    return { email: MARK_DEV_RIDER.email, clerkUserId: clerkUser.id };
+  });
+}
+
+/**
+ * Idempotent local Operations / Super Admin identities for the live Clerk emails.
+ * Looks up each Clerk subject so dashboard sign-in works after a fresh migrate.
+ */
+export async function seedDevelopmentPrivilegedAccounts(database, {
+  clerkBackend,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const backend = clerkBackend || createClerkBackend(authConfiguration(process.env));
+  const accounts = [];
+  for (const account of PRIVILEGED_DEV_ACCOUNTS) {
+    accounts.push(await seedDevelopmentPrivilegedAccount(database, account, backend, now));
+  }
+  return accounts;
+}
+
+async function seedDevelopmentPrivilegedAccount(database, account, clerkBackend, now) {
+  const clerkUser = await resolveDevClerkUser(account.email, clerkBackend);
+  const person = clerkClientProfile(clerkUser);
+  const at = typeof now === "function" ? now() : now;
+  const email = account.email.toLowerCase();
+  return database.transaction(async () => {
+    const existing = await database.query(
+      `SELECT id, phone, created_at, version, position, data
+         FROM users
+        WHERE clerk_user_id = $1 OR lower(email) = $2
+        ORDER BY CASE WHEN clerk_user_id = $1 THEN 0 ELSE 1 END
+        LIMIT 1`,
+      [clerkUser.id, email],
+    );
+    const row = existing.rows[0];
+    const userId = row?.id || account.id;
+    const createdAt = row?.created_at || at;
+    const version = row?.version || 1;
+    const position = row?.position ?? Number((await database.query("SELECT COALESCE(MAX(position), -1) + 1 AS next FROM users")).rows[0].next);
+    const data = row?.data && typeof row.data === "object" ? row.data : {};
+    await database.query(
+      `INSERT INTO users (
+         id, clerk_user_id, email, name, phone, role, account_type, org_name,
+         verification_status, shop_lat, shop_lng, shop_label, version, created_at, position, data
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, NULL, NULL,
+         NULL, NULL, NULL, NULL, $7, $8, $9, $10::jsonb
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         clerk_user_id = EXCLUDED.clerk_user_id,
+         email = EXCLUDED.email,
+         name = EXCLUDED.name,
+         phone = EXCLUDED.phone,
+         role = EXCLUDED.role,
+         account_type = NULL,
+         org_name = NULL,
+         verification_status = NULL`,
+      [
+        userId,
+        clerkUser.id,
+        email,
+        person.name || account.name,
+        person.phone || row?.phone || null,
+        account.primaryRole,
+        version,
+        createdAt,
+        position,
+        JSON.stringify(data),
+      ],
+    );
+    await database.query(
+      `DELETE FROM user_role_memberships
+        WHERE user_id = $1
+          AND NOT (role = ANY($2::text[]))`,
+      [userId, [...account.roles]],
+    );
+    for (const role of account.roles) {
+      await database.query(
+        `INSERT INTO user_role_memberships (user_id, role, created_at, created_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, role) DO NOTHING`,
+        [userId, role, at, userId],
+      );
+    }
+    return { email: account.email, clerkUserId: clerkUser.id, roles: [...account.roles] };
+  });
+}
+
+/** Local-only shops plus the development client and rider. Extra shops are fixtures, not real Clerk people. */
 export async function seedDevelopmentShops(database, {
   clerkBackend,
   objectStorage,
@@ -643,7 +860,9 @@ export async function seedDevelopmentShops(database, {
     shops.push(await seedAdditionalDevelopmentShop(database, fixture, { objectStorage, now }));
   }
   const client = await seedDevelopmentClient(database, backend, now);
-  return { shops, client, photos: shops.every((shop) => shop.photos) };
+  const rider = await seedDevelopmentRider(database, backend, now);
+  const privileged = await seedDevelopmentPrivilegedAccounts(database, { clerkBackend: backend, now });
+  return { shops, client, rider, privileged, photos: shops.every((shop) => shop.photos) };
 }
 
 async function main() {
@@ -662,6 +881,10 @@ async function main() {
     console.log(
       `Seeded development shops ${result.shops.map((shop) => `${shop.shopName} <${shop.email}>`).join(", ")}`
       + (result.client ? ` and client <${result.client.email}>` : "")
+      + (result.rider ? ` and rider <${result.rider.email}>` : "")
+      + (result.privileged?.length
+        ? ` and portal testers ${result.privileged.map((account) => `<${account.email}>`).join(", ")}`
+        : "")
       + (result.photos ? " with starter sample photographs.\n" : " (listings have no photos — MinIO was unreachable).\n"),
     );
   } finally {

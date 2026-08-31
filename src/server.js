@@ -1225,8 +1225,8 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
   return referenced ? file : null;
 }
 
-function publicOrder(order, user) {
-  return publicOrderFor(order, user);
+function publicOrder(order, user, orderStore) {
+  return publicOrderFor(order, user, orderStore);
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -2178,7 +2178,7 @@ async function handleRequest(req, res) {
             });
           }
           await save(latestStore);
-          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
+          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser, latestStore) });
         }
         if (latestTarget.type === "user") {
           await save(latestStore);
@@ -3820,7 +3820,7 @@ async function handleRequest(req, res) {
         reason: resolution,
       });
       await save(store);
-      return send(res, 200, { escalation, order: publicOrder(order, user) });
+      return send(res, 200, { escalation, order: publicOrder(order, user, store) });
     }
 
     // ---- audit trail ----
@@ -3871,7 +3871,7 @@ async function handleRequest(req, res) {
         reason: body.note || null,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user), milestone });
+      return send(res, 200, { order: publicOrder(order, user, store), milestone });
     }
 
     // ---- manual QR installment payments ----
@@ -3964,7 +3964,7 @@ async function handleRequest(req, res) {
         detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/reject$/.test(pathname)) {
@@ -4032,7 +4032,7 @@ async function handleRequest(req, res) {
         reason,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/confirm$/.test(pathname)) {
@@ -4080,12 +4080,12 @@ async function handleRequest(req, res) {
         reason: body.note || null,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     // ---- orders list / create ----
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user)) });
+      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user, store)) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -4097,7 +4097,7 @@ async function handleRequest(req, res) {
         if (!order) return send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
-        return send(res, 200, { order: publicOrder(order, user) });
+        return send(res, 200, { order: publicOrder(order, user, store) });
       }
     }
 
@@ -4193,7 +4193,7 @@ async function handleRequest(req, res) {
       };
       store.orders.unshift(order);
       await save(store);
-      return send(res, 201, { order: publicOrder(order, user) });
+      return send(res, 201, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -4409,7 +4409,7 @@ async function handleRequest(req, res) {
           note: "Client notified that the final quote is ready for checkout",
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user) });
+        return send(res, 200, { order: publicOrder(order, user, store) });
       }
       if (next === "awaiting_initial_payment") {
         if (user.role !== "client" || order.clientId !== user.id) {
@@ -4512,7 +4512,7 @@ async function handleRequest(req, res) {
           },
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user) });
+        return send(res, 200, { order: publicOrder(order, user, store) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
         order.supplierId = body.supplierId;
@@ -4549,7 +4549,7 @@ async function handleRequest(req, res) {
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       if (next === "production") recordAutomaticSupplierPayouts(store, order, order.updatedAt);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     // ---- dispatch (rider) ----
@@ -4567,7 +4567,7 @@ async function handleRequest(req, res) {
         (o) => o.fulfillmentMode !== "pickup"
           && (o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
-      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user)) });
+      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
@@ -4589,7 +4589,7 @@ async function handleRequest(req, res) {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
@@ -4713,7 +4713,7 @@ async function handleRequest(req, res) {
           reason: failureNote,
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user), escalation });
+        return send(res, 200, { order: publicOrder(order, user, store), escalation });
       }
 
       order.pickupChecklist = {
@@ -4736,7 +4736,7 @@ async function handleRequest(req, res) {
       });
       await save(store);
       return send(res, 200, {
-        order: publicOrder(order, user),
+        order: publicOrder(order, user, store),
         signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
       });
     }
@@ -4846,7 +4846,7 @@ async function handleRequest(req, res) {
         note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/proof$/.test(pathname)) {
@@ -4862,7 +4862,7 @@ async function handleRequest(req, res) {
       return send(res, 200, {
         jobs: store.orders
           .filter((o) => o.supplierId === user.id)
-          .map((order) => publicOrder(order, user)),
+          .map((order) => publicOrder(order, user, store)),
       });
     }
 

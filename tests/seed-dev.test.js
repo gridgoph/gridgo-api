@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
 import { loadStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
-import { LOVIS_DEV_SHOP, MARK_DEV_CLIENT, PLACEHOLDER_JPEG, seedDevelopmentShops, starterSampleBytes } from "../src/seed-dev.js";
+import { LOVIS_DEV_SHOP, MARK_DEV_CLIENT, MARK_DEV_RIDER, PLACEHOLDER_JPEG, PRIVILEGED_DEV_ACCOUNTS, seedDevelopmentShops, starterSampleBytes } from "../src/seed-dev.js";
 import { catalogItemBlockers } from "../src/supplier-catalog.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -33,6 +33,22 @@ const clerkBackend = {
         firstName: "Mark",
         lastName: "David",
         primaryEmailAddress: { emailAddress: MARK_DEV_CLIENT.email },
+      }, {
+        id: "clerk_markdavid_rider_dev",
+        firstName: "Mark",
+        lastName: "Prado",
+        primaryEmailAddress: { emailAddress: MARK_DEV_RIDER.email },
+        primaryPhoneNumber: { phoneNumber: MARK_DEV_RIDER.phone },
+      }, {
+        id: "clerk_markshopease_dev",
+        firstName: "Mark",
+        lastName: "Admin",
+        primaryEmailAddress: { emailAddress: PRIVILEGED_DEV_ACCOUNTS[0].email },
+      }, {
+        id: "clerk_giorno_dev",
+        firstName: "Giorno",
+        lastName: "Ops",
+        primaryEmailAddress: { emailAddress: PRIVILEGED_DEV_ACCOUNTS[1].email },
       }];
       const requested = emailAddress?.[0]?.toLowerCase();
       return { data: requested ? data.filter((row) => row.primaryEmailAddress.emailAddress.toLowerCase() === requested) : data };
@@ -110,5 +126,29 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
     first.users.find((user) => user.id === "user_matina_creative_hub")?.email,
     "dev+matina_creative_hub@gridgo.local",
   );
+  const rider = first.users.find((user) => user.email === MARK_DEV_RIDER.email);
+  assert.equal(rider.role, "rider");
+  assert.equal(rider.verificationStatus, "approved");
+  assert.equal(rider.clerkUserId, "clerk_markdavid_rider_dev");
+  assert.ok(first.userRoleMemberships.some((row) => row.userId === rider.id && row.role === "rider"));
+  assert.equal(first.riderProfiles.find((row) => row.userId === rider.id)?.plateNumber, MARK_DEV_RIDER.plateNumber);
+  assert.equal(first.approvalCases.find((row) => row.userId === rider.id && row.kind === "rider")?.status, "approved");
+  assert.equal(second.users.filter((user) => user.email === MARK_DEV_RIDER.email).length, 1);
+  const markAdmin = first.users.find((user) => user.email === PRIVILEGED_DEV_ACCOUNTS[0].email);
+  const giornoOps = first.users.find((user) => user.email === PRIVILEGED_DEV_ACCOUNTS[1].email);
+  assert.equal(markAdmin.role, "super_admin");
+  assert.equal(markAdmin.clerkUserId, "clerk_markshopease_dev");
+  assert.equal(giornoOps.role, "ops_admin");
+  assert.equal(giornoOps.clerkUserId, "clerk_giorno_dev");
+  assert.deepEqual(
+    first.userRoleMemberships.filter((row) => row.userId === markAdmin.id).map((row) => row.role),
+    ["super_admin"],
+  );
+  assert.deepEqual(
+    first.userRoleMemberships.filter((row) => row.userId === giornoOps.id).map((row) => row.role),
+    ["ops_admin"],
+  );
+  assert.equal(second.users.filter((user) => user.email === PRIVILEGED_DEV_ACCOUNTS[0].email).length, 1);
+  assert.equal(second.users.filter((user) => user.email === PRIVILEGED_DEV_ACCOUNTS[1].email).length, 1);
   await database.close();
 });

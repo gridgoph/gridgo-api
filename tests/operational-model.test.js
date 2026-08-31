@@ -351,3 +351,46 @@ test("elapsed global issue window completes an already settled order", () => {
   assert.equal(store.orders[0].payoutMilestones.every((milestone) => milestone.status === "released"), true);
   assert.equal(expireIssueWindows(store, AT), false);
 });
+
+test("publicOrderFor fills specification from checkout line items", () => {
+  const order = {
+    id: "ord_line",
+    clientId: "client-a",
+    supplierId: null,
+    state: "needs_qa",
+    dropoff: { lat: 7.19, lng: 125.46, label: "12 Bara, Barangay, Davao City" },
+    timeline: [],
+  };
+  const store = {
+    orderLineItems: [
+      {
+        id: "cline_1",
+        orderId: "ord_line",
+        itemNameSnapshot: "Flyers",
+        quantity: 2,
+        pricingUnitSnapshot: "per_package",
+        packageQtySnapshot: 100,
+        structuredSpecSnapshot: { size: "A4", material: "matte_150gsm", finish: "lamination" },
+        artworkFileId: "file_art",
+        mockupFileId: "file_mock",
+        sortOrder: 0,
+      },
+    ],
+    files: [
+      { fileId: "file_art", originalFilename: "flyer.jpeg", purpose: "artwork", state: "ready" },
+      { fileId: "file_mock", originalFilename: "mockup.png", purpose: "mockup", state: "ready" },
+    ],
+  };
+  const projected = publicOrderFor(order, { id: "client-a", role: "client" }, store);
+  assert.equal(projected.title, "Flyers");
+  assert.equal(projected.quantity, 2);
+  assert.equal(projected.unit, "pack100");
+  assert.equal(projected.size, "A4");
+  assert.equal(projected.material, "matte_150gsm");
+  assert.equal(projected.finish, "lamination");
+  assert.equal(projected.address, "12 Bara, Barangay, Davao City");
+  assert.deepEqual(projected.artworkFileIds, ["file_art"]);
+  assert.deepEqual(projected.mockupFileIds, ["file_mock"]);
+  assert.equal(projected.artworkName, "flyer.jpeg");
+  assert.equal("quantity" in order, false);
+});

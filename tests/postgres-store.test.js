@@ -100,6 +100,10 @@ test("relational store round-trips client matching, cart, job, line, and invoice
   assert.deepEqual(reloaded.orderInvoices, store.orderInvoices);
   assert.equal(reloaded.supplierProfiles[0].isClosed, true);
 
+  // Create listing (and any other save) must not rewrite locked order snapshots.
+  await database.transaction(() => saveStore(database, reloaded));
+  assert.deepEqual((await loadStore(database)).orderLineItems, store.orderLineItems);
+
   await clear(database);
 });
 

@@ -1020,8 +1020,18 @@ export async function saveStore(database, store) {
   for (const table of TABLES) {
     const { before, current } = maps.get(table.name);
     if (table.name === "order_line_items") {
-      const unfinalized = new Map([...current].map(([key, row]) => [key, { ...row, snapshot_finalized: false }]));
-      await upsertChanged(database, table, before, unfinalized);
+      // New (or still-open) lines must land with snapshot_finalized=false, then
+      // the follow-up UPDATE sets it true. Already-finalized rows are immutable:
+      // flipping them false on an unrelated save (Create listing, seed, …) raises
+      // `order line snapshots are immutable` and 500s the request.
+      const toWrite = new Map();
+      for (const [key, row] of current) {
+        const prev = before.get(key);
+        if (prev && stable(prev) === stable(row)) continue;
+        if (prev?.snapshot_finalized) continue;
+        toWrite.set(key, { ...row, snapshot_finalized: false });
+      }
+      await upsertChanged(database, table, before, toWrite);
       continue;
     }
     await upsertChanged(database, table, before, current);

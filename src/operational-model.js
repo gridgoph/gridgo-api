@@ -586,9 +586,67 @@ export function releaseEligibleSupplierPayouts(order, actor, at, store = null) {
     .map((milestone) => releaseMilestone(order, milestone.code, actor, at, store));
 }
 
-export function publicOrderFor(order, user) {
+function catalogUnitFromLine(line) {
+  if (line?.pricingUnitSnapshot === "per_package" && Number(line.packageQtySnapshot) === 100) {
+    return "pack100";
+  }
+  if (line?.pricingUnitSnapshot === "per_unit") return "piece";
+  return "";
+}
+
+function emptySpec(value) {
+  return value == null || value === "";
+}
+
+/**
+ * Checkout writes quantity, size, material, finish and artwork onto
+ * `orderLineItems`, not the order row. The client specification card still
+ * reads the older order-level fields. Fill those from the line snapshot when
+ * they are missing so a placed job does not render "undefined items".
+ */
+function fillOrderSpecFromLineItems(store, order) {
+  const lines = (store?.orderLineItems || [])
+    .filter((line) => line.orderId === order.id)
+    .sort((left, right) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0) || String(left.id).localeCompare(String(right.id)));
+  if (lines.length === 0) return;
+
+  const first = lines[0];
+  const spec = first.structuredSpecSnapshot && typeof first.structuredSpecSnapshot === "object"
+    ? first.structuredSpecSnapshot
+    : {};
+  const artworkIds = lines.map((line) => line.artworkFileId).filter(Boolean);
+  const mockupIds = lines.map((line) => line.mockupFileId).filter(Boolean);
+  const lastArtworkId = artworkIds[artworkIds.length - 1] || null;
+  const artworkFile = lastArtworkId
+    ? (store.files || []).find((file) => file.fileId === lastArtworkId)
+    : null;
+
+  if (emptySpec(order.title)) order.title = first.itemNameSnapshot || order.title;
+  if (!Number.isFinite(Number(order.quantity))) {
+    order.quantity = lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+  }
+  if (emptySpec(order.unit)) order.unit = catalogUnitFromLine(first);
+  if (emptySpec(order.size)) order.size = spec.size || "";
+  if (emptySpec(order.material)) order.material = spec.material || "";
+  if (order.finish == null || order.finish === "") order.finish = spec.finish || null;
+  if (emptySpec(order.address)) {
+    order.address = order.dropoff?.label || first.dropoff?.label || "";
+  }
+  if (!Array.isArray(order.artworkFileIds) || order.artworkFileIds.length === 0) {
+    if (artworkIds.length) order.artworkFileIds = artworkIds;
+  }
+  if (!Array.isArray(order.mockupFileIds) || order.mockupFileIds.length === 0) {
+    if (mockupIds.length) order.mockupFileIds = mockupIds;
+  }
+  if (emptySpec(order.artworkName) && artworkFile?.originalFilename) {
+    order.artworkName = artworkFile.originalFilename;
+  }
+}
+
+export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (store) fillOrderSpecFromLineItems(store, publicRecord);
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
