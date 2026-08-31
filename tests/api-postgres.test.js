@@ -143,7 +143,7 @@ function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
 
 async function clearAndFixture(database) {
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,

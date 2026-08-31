@@ -94,8 +94,8 @@ async function requestEventually(api, pathname, options, predicate) {
 
 async function fixture(database) {
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
-    issues, claims, credit_ledger, credit_accounts, file_references, job_qa_checklist, order_invoices,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
+    issues, claims, credit_ledger, credit_accounts, file_references, order_invoices,
     client_cart_lines, client_carts, client_saved_addresses, client_match_preferences,
     payout_milestones, order_payments, order_line_item_options, order_line_items, order_jobs, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,

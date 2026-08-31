@@ -50,7 +50,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "job_qa_checklist", "order_invoices",
+      "order_jobs", "order_invoices",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -85,6 +85,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786928400000_starters_speak_every_pricing_unit",
     "1786932000000_a_starter_can_offer_a_multiplier",
     "1786935600000_starter_ordering_can_be_reshuffled",
+    "1786939200000_retire_the_supplier_proof_loop",
       ],
     );
     await client.query(`
@@ -164,6 +165,17 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   for (const column of ["measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli"]) {
     assert.equal(cartLineColumns.has(column), true, `${column} should exist on client_cart_lines`);
   }
+  // The supplier print-proof loop and the per-job QA checklist belong to the
+  // retired order model. Nothing reads or writes either, and carrying them
+  // cost every mutation two collections nothing consumed.
+  for (const table of ["proofs", "job_qa_checklist"]) {
+    assert.equal(
+      (await client.query("SELECT to_regclass($1) AS t", [`${schema}.${table}`])).rows[0].t,
+      null,
+      `${table} should be gone`,
+    );
+  }
+
   // A listing priced by the square foot has no package quantity and is not
   // per_unit, which the original two-unit rule refused outright.
   const packageChecks = (await client.query(
@@ -199,6 +211,16 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // The retired order model's two tables come back, empty.
+  for (const table of ["proofs", "job_qa_checklist"]) {
+    assert.notEqual(
+      (await client.query("SELECT to_regclass($1) AS t", [`${schema}.${table}`])).rows[0].t,
+      null,
+      `${table} should be restored`,
+    );
+  }
+
+  await runner(migrationOptions(schema, "down", 1, client));
   // Template orderings stop being deferrable, so a reshuffle collides again.
   const deferrable = (await client.query(
     `SELECT c.condeferrable FROM pg_constraint c

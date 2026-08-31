@@ -521,7 +521,7 @@ test("GET /me/catalog-items q hunts this shop's name and subcategory", async () 
 test("GET item includes persisted photos after postgres round-trip", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -577,7 +577,7 @@ test("GET item includes persisted photos after postgres round-trip", { skip: !DA
 test("creating from a GRIDGO starter persists its file types", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -733,7 +733,7 @@ test("saving shop name also writes the account supplierName Account already read
 test("saved shop name persists as users.supplierName", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -806,7 +806,7 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,

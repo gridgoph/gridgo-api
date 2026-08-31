@@ -12,7 +12,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 test("fresh seed is idempotent platform reference data with no accounts", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
@@ -33,7 +33,7 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
   assert.ok(first.taxonomy.categories.length > 0);
   assert.ok(first.zones.length > 0);
   assert.ok(first.settings.deliveryFeeBands.length > 0);
-  for (const key of ["users", "supplierServices", "orders", "files", "claims", "issues", "auditLog", "notifications", "locationPings", "escalations", "proofs", "deviceTokens"]) {
+  for (const key of ["users", "supplierServices", "orders", "files", "claims", "issues", "auditLog", "notifications", "locationPings", "escalations", "deviceTokens"]) {
     assert.deepEqual(first[key], [], key);
   }
   assert.deepEqual(first.credits, {});

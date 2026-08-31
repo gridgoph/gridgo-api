@@ -69,7 +69,6 @@ const TABLES = [
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
   { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
-  { name: "job_qa_checklist", keys: ["id"], columns: ["id", "job_id", "code", "label", "status", "note", "sort_order", "checked_at", "checked_by", "created_at", "updated_at"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
@@ -87,7 +86,6 @@ const TABLES = [
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
-  { name: "proofs", keys: ["id"], columns: ["id", "order_id", "uploader_id", "created_at", "position", "data"] },
   { name: "device_tokens", keys: ["id"], columns: ["id", "user_id", "token", "platform", "created_at", "updated_at", "position", "data"] },
 ];
 
@@ -131,7 +129,6 @@ export function emptyStore() {
     catalogSpeedTiers: [],
     orderLineItems: [],
     orderLineItemOptions: [],
-    jobQaChecklist: [],
     orderInvoices: [],
     files: [],
     riderDocuments: [],
@@ -142,7 +139,6 @@ export function emptyStore() {
     notifications: [],
     locationPings: [],
     escalations: [],
-    proofs: [],
     deviceTokens: [],
   };
 }
@@ -513,21 +509,6 @@ function rowsFromStore(store) {
       updated_at: job.updatedAt,
     });
   }
-  for (const row of (store.jobQaChecklist || [])) {
-    rows.job_qa_checklist.push({
-      id: row.id,
-      job_id: row.jobId,
-      code: row.code,
-      label: row.label,
-      status: row.status || "pending",
-      note: row.note ?? null,
-      sort_order: row.sortOrder,
-      checked_at: row.checkedAt ?? null,
-      checked_by: row.checkedBy ?? null,
-      created_at: row.createdAt,
-      updated_at: row.updatedAt,
-    });
-  }
   for (const invoice of (store.orderInvoices || [])) {
     rows.order_invoices.push({
       order_id: invoice.orderId,
@@ -604,7 +585,6 @@ function rowsFromStore(store) {
   for (const [position, item] of (store.notifications || []).entries()) rows.notifications.push({ id: item.id, user_id: item.userId, type: item.type || "general", order_id: item.orderId ?? null, created_at: item.at || item.createdAt, read_at: item.readAt ?? (item.read ? (item.at || item.createdAt) : null), deleted_at: item.deletedAt ?? null, position, data: without(item, ["id", "userId", "type", "orderId", "at", "createdAt", "read", "readAt", "deletedAt"]) });
   for (const [position, ping] of (store.locationPings || []).entries()) rows.location_pings.push({ id: ping.id, order_id: ping.orderId, rider_id: ping.riderId, lat: ping.lat, lng: ping.lng, accuracy_meters: ping.accuracy ?? null, at: ping.at, position, data: without(ping, ["id", "orderId", "riderId", "lat", "lng", "accuracy", "at"]) });
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
-  for (const [position, item] of (store.proofs || []).entries()) rows.proofs.push({ id: item.id, order_id: item.orderId, uploader_id: item.uploaderId ?? null, created_at: item.createdAt || item.at, position, data: without(item, ["id", "orderId", "uploaderId", "createdAt", "at"]) });
   for (const [position, item] of (store.deviceTokens || []).entries()) rows.device_tokens.push(deviceTokenRow(item, position));
   return rows;
 }
@@ -894,16 +874,6 @@ export async function loadStore(database) {
     groupKindSnapshot: row.group_kind_snapshot, optionLabelSnapshot: row.option_label_snapshot,
     priceModifierMinor: row.price_modifier_minor, sortOrder: row.sort_order,
   }));
-  store.jobQaChecklist = orderedBy(loaded.job_qa_checklist, "job_id", "sort_order", "id").map((row) => {
-    const item = {
-      id: row.id, jobId: row.job_id, code: row.code, label: row.label, status: row.status,
-      sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
-    };
-    present(item, "note", row.note);
-    present(item, "checkedAt", row.checked_at);
-    present(item, "checkedBy", row.checked_by);
-    return item;
-  });
   store.orderInvoices = orderedBy(loaded.order_invoices, "issued_at", "order_id").map((row) => ({
     orderId: row.order_id, invoiceNumber: row.invoice_number, issuedAt: row.issued_at, snapshot: row.snapshot,
   }));
@@ -1017,7 +987,6 @@ export async function loadStore(database) {
   store.notifications = ordered(loaded.notifications).map((row) => { const item = { ...row.data, id: row.id, userId: row.user_id, type: row.type, read: row.read_at != null, at: row.created_at }; if (row.order_id != null) item.orderId = row.order_id; if (row.deleted_at != null) item.deletedAt = row.deleted_at; return item; });
   store.locationPings = ordered(loaded.location_pings).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, lat: row.lat, lng: row.lng, accuracy: row.accuracy_meters, at: row.at }));
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
-  store.proofs = ordered(loaded.proofs).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, uploaderId: row.uploader_id, createdAt: row.created_at }));
   store.deviceTokens = ordered(loaded.device_tokens).map(deviceTokenItem);
   attachBaseline(store, rowsFromStore(store));
   Object.defineProperty(store, "listOwnCatalogItems", {
