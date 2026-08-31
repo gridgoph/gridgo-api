@@ -1208,6 +1208,22 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
   return entry;
 }
 
+/**
+ * Whether this is the pickup shape that was never finished.
+ *
+ * The contained one is a commercial plan: the client pays the shop directly,
+ * or pays in full for a counter collection, and nothing was ever built to hand
+ * the job over. An order on the order-match plan is collected at GRIDGO Office
+ * instead, which a rider delivers to — the same journey as any other order,
+ * ending at a different pin.
+ */
+function isContainedPickup(order) {
+  return (
+    order.fulfillmentMode === "pickup" &&
+    ["pickup_full_online", "pickup_downpayment_store"].includes(order.paymentPlan)
+  );
+}
+
 function recordAutomaticSupplierPayouts(store, order, at) {
   const actor = { id: "system", role: "system" };
   const released = releaseEligibleSupplierPayouts(order, actor, at, store);
@@ -4488,8 +4504,24 @@ async function handleRequest(req, res) {
           });
         }
       }
-      if (order.fulfillmentMode === "pickup" && ["production", "rider_assigned"].includes(next)) {
-        return send(res, 409, { error: "pickup_fulfillment_not_available" });
+      /*
+       Two different things have been called pickup, and only one is contained.
+
+       The old one was the client collecting from the shop's own counter, whose
+       handover lifecycle was never built — that is what this guard was written
+       to hold back, and it still does, by the payment plan that shape uses.
+
+       The one that shipped is different: a client collects at GRIDGO Office,
+       and a rider carries the finished run there. It needs production and a
+       rider exactly as a delivery does. Held by fulfilment mode alone, this
+       refused every collected order the moment its shop pressed start, and the
+       shop was told GRIDGO was unreachable.
+      */
+      if (isContainedPickup(order) && ["production", "rider_assigned"].includes(next)) {
+        return send(res, 409, {
+          error: "pickup_fulfillment_not_available",
+          message: "Collecting from the shop counter is not available yet. Operations can switch this order to delivery.",
+        });
       }
       if (next === "rider_assigned") {
         const riderId = user.role === "rider" ? user.id : body.riderId;
@@ -4855,7 +4887,10 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
       if (!order || order.state !== "ready_for_dispatch") return send(res, 409, { error: "not_offerable" });
-      if (order.fulfillmentMode === "pickup") {
+      // A collected order needs a rider too — it is carried to GRIDGO Office
+      // rather than to the client's door. Only the unfinished counter-pickup
+      // shape has no journey to offer.
+      if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
       order.riderId = user.id;

@@ -676,7 +676,39 @@ export function publicOrderFor(order, user, store = null) {
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
   if (!ops) delete publicRecord.revenueAdjustments;
+
+  /*
+   What the shop is paid, under the name its own app asks for.
+
+   The order stores this as `supplierSubtotalMinor`, which is the right name
+   inside a total made of several parts. To a shop it is simply its price, and
+   both the supplier app and the portal have been reading `supplierPriceMinor`
+   — a field the platform never sent, so a shop opening a job it had been
+   assigned was shown no price at all and asked to name one.
+
+   Same number, named for who is reading it. Withheld from everyone who may not
+   see the shop's side, exactly as the field it comes from is.
+  */
+  if (publicRecord.supplierSubtotalMinor != null) {
+    publicRecord.supplierPriceMinor = publicRecord.supplierSubtotalMinor;
+  }
+
+  /*
+   The padded date is not the shop's to see.
+
+   `promiseBy` is what the client was told; `readyBy` is what the shop is held
+   to, and the gap between them is the allowance that absorbs a bad afternoon.
+   A shop shown the padded date works to the padded date, and the allowance is
+   spent before the job even starts.
+  */
+  if (!ops && !owningClient && !rider) delete publicRecord.promiseBy;
+  // And the shop's own date is not the client's to see. Told it, a client
+  // expects the job two days before the date they agreed to, and every
+  // on-time order arrives late.
+  if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
+
   if (!ops && !assignedSupplier) {
+    delete publicRecord.supplierPriceMinor;
     delete publicRecord.supplierSubtotalMinor;
     delete publicRecord.supplierPlatformPayoutMinor;
     delete publicRecord.supplierEarningsMinor;

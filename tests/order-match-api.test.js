@@ -245,7 +245,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a" } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -262,7 +262,10 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a" } = {}) {
     method: "POST", subject: "clerk_client",
     body: { label: "Home", addressLine: "Bajada, Davao City", point: { lat: 7.0731, lng: 125.6128 }, isDefault: true },
   });
-  const cart = await call("/me/carts", { method: "POST", subject: "clerk_client", body: {} });
+  const cart = await call("/me/carts", {
+    method: "POST", subject: "clerk_client",
+    body: fulfillmentMode ? { fulfillmentMode } : {},
+  });
   const cartId = cart.body.cart.id;
   await call(`/me/carts/${cartId}/dropoffs`, {
     method: "PUT", subject: "clerk_client",
@@ -547,4 +550,61 @@ test("a client rates a finished order once, and only quality reaches matching", 
   // And somebody else's order is not theirs to rate.
   const stranger = await rate({ qualityStars: 5, speedStars: 5, valueStars: 5 }, "clerk_supplier_b");
   assert.equal(stranger.status, 403, JSON.stringify(stranger.body));
+});
+
+test("each side of an order sees its own price and its own date, and neither sees the other's", async (t) => {
+  // Two figures the platform keeps apart on purpose, and a shop opening an
+  // assigned job was seeing neither its price nor a date it could work to.
+  const { call, orderId } = await placedOrder(t);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+
+  const shop = (await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" })).body.order;
+  const client = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+
+  // The shop is told what it earns, under the name its own app asks for, and
+  // the date it is actually held to.
+  assert.ok(shop.supplierPriceMinor > 0, "the shop is told its price");
+  assert.equal(shop.supplierPriceMinor, shop.supplierSubtotalMinor);
+  assert.ok(shop.readyBy, "the shop is given its own finish date");
+
+  // It is not told the padded date. A shop shown that works to it, and the
+  // allowance is spent before the job starts.
+  assert.equal(Object.hasOwn(shop, "promiseBy"), false);
+
+  // The client is told the date it agreed to and never the shop's price.
+  assert.ok(client.promiseBy, "the client keeps the date it was promised");
+  assert.equal(Object.hasOwn(client, "supplierPriceMinor"), false);
+  assert.equal(Object.hasOwn(client, "supplierSubtotalMinor"), false);
+  // Nor the shop's earlier internal date, which would have it expecting the
+  // job days before the one it agreed to.
+  assert.equal(Object.hasOwn(client, "readyBy"), false);
+});
+
+test("a collected order runs the whole journey, because a rider takes it to the office", async (t) => {
+  // Two different things have been called pickup. The one that was never
+  // finished is the client collecting from the shop's own counter; the one
+  // that shipped is collecting at GRIDGO Office, which a rider delivers to.
+  // Held apart by fulfilment mode alone, the second was refused the moment its
+  // shop pressed start — and the shop was told GRIDGO was unreachable.
+  const { call, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+
+  const collected = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  assert.equal(collected.fulfillmentMode, "pickup");
+  assert.equal(collected.paymentPlan, "order_match_qr_75_25");
+
+  // Accepting is a confirmation; there is nothing to quote.
+  const accepted = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_supplier_a", body: { state: "payment_authorized" },
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+  // And it starts, which is the whole of the captain's report.
+  const started = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_supplier_a", body: { state: "production" },
+  });
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  assert.equal(started.body.order.state, "production");
 });
