@@ -1,3 +1,10 @@
+import {
+  MEASURE_UNITS,
+  PRICING_UNITS,
+  isMeasureUnit,
+  isPricingUnit,
+  measurementKindFor,
+} from "./pricing.js";
 import { identityHasMembership } from "./authorization-context.js";
 import {
   FORMAT_QUERY_MAX,
@@ -216,15 +223,54 @@ function subcategoryForService(store, service, subcategoryCode) {
 
 function pricingFields(body, current = {}) {
   const pricingUnit = body.pricingUnit == null ? (current.pricingUnit || "per_unit") : requiredText(body.pricingUnit, "pricingUnit", 20);
-  if (!["per_unit", "per_package"].includes(pricingUnit)) {
-    fail(400, "invalid_catalog_item", "pricingUnit must be per_unit or per_package.", { field: "pricingUnit" });
+  if (!isPricingUnit(pricingUnit)) {
+    fail(400, "invalid_catalog_item", `pricingUnit must be one of ${PRICING_UNITS.join(", ")}.`, { field: "pricingUnit" });
   }
   let packageQty = current.packageQty ?? null;
   if (Object.hasOwn(body, "packageQty")) packageQty = body.packageQty == null ? null : integer(body.packageQty, "packageQty", { min: 2 });
-  if (pricingUnit === "per_unit") packageQty = null;
+  if (pricingUnit !== "per_package") packageQty = null;
   else if (!Number.isSafeInteger(packageQty) || packageQty < 2) {
     fail(400, "invalid_catalog_item", "packageQty must be at least 2 for per_package pricing.", { field: "packageQty" });
   }
+
+  // A measured unit cannot be priced without knowing what it is measured in,
+  // and an unmeasured one has nothing to measure.
+  const measured = measurementKindFor(pricingUnit);
+  let measureUnit = current.measureUnit ?? null;
+  if (Object.hasOwn(body, "measureUnit")) {
+    measureUnit = body.measureUnit == null ? null : requiredText(body.measureUnit, "measureUnit", 4);
+  }
+  if (measured === "area" || measured === "length") {
+    if (!isMeasureUnit(measureUnit)) {
+      fail(400, "invalid_catalog_item", `measureUnit must be one of ${MEASURE_UNITS.join(", ")} for this pricing unit.`, {
+        field: "measureUnit",
+      });
+    }
+  } else {
+    measureUnit = null;
+  }
+
+  // The smallest size the shop bills for, and the least it will run. Both
+  // optional; a listing that needs neither never sees them.
+  const milli = (field) => {
+    if (!Object.hasOwn(body, field)) return current[field] ?? null;
+    return body[field] == null ? null : integer(body[field], field, { min: 1 });
+  };
+  let minimumWidthMilli = measured === "area" ? milli("minimumWidthMilli") : null;
+  let minimumHeightMilli = measured === "area" ? milli("minimumHeightMilli") : null;
+  const minimumLengthMilli = measured === "length" ? milli("minimumLengthMilli") : null;
+  if ((minimumWidthMilli == null) !== (minimumHeightMilli == null)) {
+    fail(400, "invalid_catalog_item", "A smallest billable size needs both a width and a height.", {
+      field: "minimumWidthMilli",
+    });
+  }
+  let minimumOrderQuantity = current.minimumOrderQuantity ?? null;
+  if (Object.hasOwn(body, "minimumOrderQuantity")) {
+    minimumOrderQuantity = body.minimumOrderQuantity == null
+      ? null
+      : integer(body.minimumOrderQuantity, "minimumOrderQuantity", { min: 1 });
+  }
+  if (pricingUnit === "whole_job") minimumOrderQuantity = null;
   const turnaroundMode = body.turnaroundMode == null
     ? (current.turnaroundMode || "inherit")
     : requiredText(body.turnaroundMode, "turnaroundMode", 20);
@@ -239,7 +285,11 @@ function pricingFields(body, current = {}) {
   else if (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
     fail(400, "invalid_catalog_item", "turnaroundHours is required when overriding ready-in time.", { field: "turnaroundHours" });
   }
-  return { pricingUnit, packageQty, turnaroundMode, turnaroundHours };
+  return {
+    pricingUnit, packageQty, measureUnit,
+    minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
+    turnaroundMode, turnaroundHours,
+  };
 }
 
 function shopPoint(value) {

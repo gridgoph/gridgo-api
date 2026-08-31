@@ -1,4 +1,26 @@
 import { resolveCategoryCode } from "./taxonomy.js";
+import { measurementKindFor, priceLine } from "./pricing.js";
+
+/** Volume breaks and speeds a listing sells, ordered as the client reads them. */
+function priceTiersFor(store, itemId) {
+  return (store.catalogPriceTiers || [])
+    .filter((row) => row.catalogItemId === itemId)
+    .sort((left, right) => left.minQuantity - right.minQuantity)
+    .map((row) => ({ minQuantity: row.minQuantity, unitPriceMinor: row.unitPriceMinor }));
+}
+
+function speedTiersFor(store, itemId) {
+  return (store.catalogSpeedTiers || [])
+    .filter((row) => row.catalogItemId === itemId)
+    .sort((left, right) => left.turnaroundHours - right.turnaroundHours)
+    .map((row) => ({
+      id: row.id,
+      label: row.label,
+      turnaroundHours: row.turnaroundHours,
+      priceMinor: row.priceMinor ?? null,
+      surchargeMinor: row.surchargeMinor ?? null,
+    }));
+}
 
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_MINOR = -MAX_SAFE_MINOR;
@@ -309,6 +331,15 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     effectivePriceMinor,
     pricingUnit: item.pricingUnit || "per_unit",
     packageQty: item.packageQty ?? null,
+    // What the client has to be asked before this listing can be priced.
+    measurementKind: measurementKindFor(item.pricingUnit || "per_unit"),
+    measureUnit: item.measureUnit ?? null,
+    minimumWidthMilli: item.minimumWidthMilli ?? null,
+    minimumHeightMilli: item.minimumHeightMilli ?? null,
+    minimumLengthMilli: item.minimumLengthMilli ?? null,
+    minimumOrderQuantity: item.minimumOrderQuantity ?? null,
+    priceTiers: priceTiersFor(store, item.id),
+    speedTiers: speedTiersFor(store, item.id),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
     turnaroundHours: itemTurnaroundHours(item, service),
@@ -611,10 +642,35 @@ export function createOrderLineSnapshot(store, selection, createId) {
     ? structuredClone(selection.structuredSpec)
     : {};
   const groups = new Map(catalogGroupsForItem(store, item.id).map((group) => [group.id, group]));
-  const subtotal = checkedNumber(
-    checkedMinor(effectiveUnitPriceMinor, "effectiveUnitPriceMinor") * BigInt(quantity),
-    "lineSubtotalMinor",
-  );
+  /*
+   The line's own price, through the pricing engine rather than a multiplication.
+
+   A unit price times a quantity is only correct for the two shapes the
+   catalogue used to have. An area line has to multiply by measured size and
+   respect a minimum billable one, a volume break replaces the rate outright at
+   a quantity, and a speed tier replaces it at a date -- none of which a single
+   effectiveUnitPriceMinor can carry.
+  */
+  const priced = priceLine({
+    basePriceMinor: item.basePriceMinor,
+    unit: item.pricingUnit || "per_unit",
+    packageQty: item.packageQty ?? null,
+    options: selectedOptions.map((option) => ({
+      priceModifierMinor: option.priceModifierMinor,
+      priceMultiplierBps: option.priceMultiplierBps ?? null,
+    })),
+    volumeTiers: priceTiersFor(store, item.id),
+    minimumOrderQuantity: item.minimumOrderQuantity ?? null,
+    minimumMeasurement: {
+      width: item.minimumWidthMilli ?? null,
+      height: item.minimumHeightMilli ?? null,
+      length: item.minimumLengthMilli ?? null,
+    },
+    speedTier: selection.speedTier ?? null,
+    quantity,
+    measurement: selection.measurement ?? null,
+  });
+  const subtotal = priced.lineSubtotalMinor;
   const lineItemId = selection.lineItemId || createId?.("oli");
   const createdAt = selection.createdAt || new Date().toISOString();
   const sortOrder = Number.isSafeInteger(selection.sortOrder) ? selection.sortOrder : 0;

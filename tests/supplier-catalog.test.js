@@ -845,3 +845,89 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
   assert.ok(starters.body.starters.some((starter) => starter.subcategoryCode === "tarpaulins_outdoor_banners"));
   assert.ok(starters.body.starters[0].groups.length > 0);
 });
+
+/** The fixture's groups are required; these tests are about price, not choices. */
+function withoutRequiredChoices(store) {
+  for (const group of store.catalogOptionGroups) group.required = false;
+  return store;
+}
+
+/**
+ * The pricing engine, reached the way an order actually reaches it.
+ *
+ * `pricing.js` has computed these shapes since it landed, but the catalogue had
+ * nowhere to store them and the order line multiplied a unit price by a
+ * quantity -- which is only correct for the two shapes the catalogue used to
+ * have. These prove the wiring, not the arithmetic.
+ */
+test("an area listing is billed on measured size, with the shop's minimum applied", () => {
+  const store = withoutRequiredChoices(fixture());
+  const item = store.catalogItems.find((row) => row.id === "item");
+  item.pricingUnit = "per_area";
+  item.packageQty = null;
+  item.measureUnit = "ft";
+  item.basePriceMinor = 4_000; // PHP 40.00 a square foot
+  item.minimumWidthMilli = 2_000;
+  item.minimumHeightMilli = 4_000; // billed at no less than 2x4
+
+  const ordinary = createOrderLineSnapshot(store, {
+    orderId: "order", catalogItemId: "item", optionIds: [], quantity: 1,
+    expectedVersion: 3, expectedServiceVersion: 1, acceptedFormatCode: "pdf",
+    structuredSpec: {}, createdAt: AT,
+    measurement: { width: 3_000, height: 4_000 }, // 3 x 4 ft
+  }, (prefix) => `${prefix}_area`);
+  assert.equal(ordinary.lineItem.lineSubtotalMinor, 48_000); // PHP 480.00
+
+  const small = createOrderLineSnapshot(store, {
+    orderId: "order", catalogItemId: "item", optionIds: [], quantity: 1,
+    expectedVersion: 3, expectedServiceVersion: 1, acceptedFormatCode: "pdf",
+    structuredSpec: {}, createdAt: AT,
+    measurement: { width: 1_000, height: 4_000 }, // 1 x 4 ft, billed as 2 x 4
+  }, (prefix) => `${prefix}_small`);
+  assert.equal(small.lineItem.lineSubtotalMinor, 32_000); // PHP 320.00, not 160.00
+});
+
+test("a volume break replaces the rate, and a shop's minimum run is refused", () => {
+  const store = withoutRequiredChoices(fixture());
+  const item = store.catalogItems.find((row) => row.id === "item");
+  item.pricingUnit = "per_unit";
+  item.basePriceMinor = 10_000; // PHP 100.00 a piece
+  item.minimumOrderQuantity = 20;
+  store.catalogPriceTiers = [
+    { id: "tier_bulk", catalogItemId: "item", minQuantity: 250, unitPriceMinor: 6_000 },
+  ];
+
+  const line = (quantity) => createOrderLineSnapshot(store, {
+    orderId: "order", catalogItemId: "item", optionIds: [], quantity,
+    expectedVersion: 3, expectedServiceVersion: 1, acceptedFormatCode: "pdf",
+    structuredSpec: {}, createdAt: AT,
+  }, (prefix) => `${prefix}_${quantity}`);
+
+  assert.equal(line(100).lineItem.lineSubtotalMinor, 1_000_000); // PHP 10,000.00
+  assert.equal(line(300).lineItem.lineSubtotalMinor, 1_800_000); // PHP 18,000.00, not 30,000
+
+  assert.throws(
+    () => line(5),
+    (error) => error.code === "below_minimum_quantity",
+  );
+});
+
+test("the public listing tells a client which questions this pricing needs", () => {
+  const store = fixture();
+  const item = store.catalogItems.find((row) => row.id === "item");
+  item.pricingUnit = "per_area";
+  item.packageQty = null;
+  item.measureUnit = "ft";
+  store.catalogSpeedTiers = [
+    { id: "spd_5d", catalogItemId: "item", label: "5 days", turnaroundHours: 120, priceMinor: 25_000, surchargeMinor: null, sortOrder: 0 },
+    { id: "spd_1d", catalogItemId: "item", label: "1 day", turnaroundHours: 24, priceMinor: 50_000, surchargeMinor: null, sortOrder: 1 },
+  ];
+
+  const listing = publicCatalogItem(store, item);
+  assert.equal(listing.measurementKind, "area");
+  assert.equal(listing.measureUnit, "ft");
+  // Fastest first is the wrong order for a price ladder: a client reads the
+  // cheapest and decides what speed is worth paying for.
+  assert.deepEqual(listing.speedTiers.map((tier) => tier.turnaroundHours), [24, 120]);
+  assert.equal(listing.speedTiers[0].priceMinor, 50_000);
+});

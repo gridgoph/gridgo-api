@@ -79,6 +79,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   "1786906800000_match_deadline_schedule_reviews",
   "1786910400000_order_lifecycle_one_shop",
   "1786914000000_pickup_is_not_part_of_the_commitment",
+  "1786917600000_catalogue_pricing_shapes",
       ],
     );
     await client.query(`
@@ -160,6 +161,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  assert.equal((await client.query("SELECT to_regclass('supplier_catalog_price_tiers') AS t")).rows[0].t, null);
+  assert.equal((await client.query("SELECT to_regclass('supplier_catalog_speed_tiers') AS t")).rows[0].t, null);
+
+  await runner(migrationOptions(schema, "down", 1, client));
 
   await runner(migrationOptions(schema, "down", 1, client));
   await assert.rejects(
