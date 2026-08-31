@@ -386,7 +386,9 @@ export async function seedDevelopmentShop(database, {
         supplierServiceId: listing.serviceId,
         subcategoryCode: starter.subcategoryCode,
         name: starter.name,
-        description: "Placeholder sample for Lovis Printshop. Replace this with your own art when you are ready.",
+        // No shop name here. A client reads this under a GRIDGO label, so a
+      // description signed by the press is the one place the anonymity leaks.
+      description: "Sample listing. Replace this with your own art and wording when you are ready.",
         basePriceMinor: listing.priceMinor,
         pricingUnit: starter.defaultPricingUnit || "per_unit",
         packageQty: starter.defaultPackageQty ?? null,
@@ -434,25 +436,122 @@ export async function seedDevelopmentShop(database, {
   return { email: LOVIS_DEV_SHOP.email, shopName: LOVIS_DEV_SHOP.shopName, clerkUserId: clerkUser.id, photos: storedPhoto };
 }
 
-const ADDITIONAL_DEV_SHOPS = Object.freeze([
+/**
+ * The four other pilot shops, from the Davao master price list.
+ *
+ * Each is a real Clerk sign-in so the captain can log in as any of them and
+ * work the supplier app for that trade. They are deliberately spread across
+ * three categories and four corners of the city: with every shop selling the
+ * same thing from the same street, matching has nothing to rank and the
+ * quality, speed, cost and distance factors cannot be told apart.
+ *
+ * Prices are the shop's own figures where the master list states one. Two do
+ * not, and are marked. None of them can express what the shop really charges
+ * yet -- Polymedia sells tarpaulin by the square foot and plaques by the inch
+ * of height, which needs the pricing columns this seed does not have. These
+ * stand in until then, so matching and the order flow have real shops to work
+ * with; they are not what those shops charge.
+ */
+export const ADDITIONAL_DEV_SHOPS = Object.freeze([
   {
-    slug: "davao_quickprint",
-    shopName: "Davao Quickprint",
-    shop: { lat: 7.0514, lng: 125.5948, label: "Matina Crossing, Davao City" },
-    turnaroundHours: 12,
-    listings: [
-      { starterId: "lst_flyers", priceMinor: 2200 },
-      { starterId: "lst_business_cards", priceMinor: 32000 },
+    slug: "dara_blueprint",
+    email: "felycia123@proton.me",
+    shopName: "Dara Blueprint",
+    shop: { lat: 7.0785, lng: 125.6135, label: "Bajada, Davao City" },
+    services: [
+      {
+        categoryCode: "specialized_prototyping",
+        turnaroundHours: 24,
+        listings: [{
+          starterId: "lst_blueprint_cad_plotting",
+          priceMinor: 6_500, // PHP 65.00, CAD plotting at 20x30 / A2
+          description: "High-precision CAD plotting for architectural and engineering plans. PDF files only.",
+        }],
+      },
     ],
   },
   {
-    slug: "matina_creative_hub",
-    shopName: "Matina Creative Hub",
-    shop: { lat: 7.0635, lng: 125.5901, label: "Matina, Davao City" },
-    turnaroundHours: 18,
-    listings: [
-      { starterId: "lst_flyers", priceMinor: 2800 },
-      { starterId: "lst_business_cards", priceMinor: 30000 },
+    slug: "jopal_davao",
+    email: "felycia123@polynomial-princess.com",
+    shopName: "Jopal Davao",
+    shop: { lat: 7.0655, lng: 125.6065, label: "J. Luna Street, Davao City" },
+    services: [
+      {
+        categoryCode: "corporate_event_merch",
+        turnaroundHours: 120, // "5 days for 100-200 pcs"
+        listings: [
+          {
+            starterId: "lst_custom_apparel",
+            priceMinor: 18_000, // PHP 180.00, print and press t-shirt with cloth
+            description: "Direct-to-film and full dye-sublimation on tees, polos and jerseys. Ready-to-print files only.",
+          },
+          {
+            starterId: "lst_drinkware",
+            priceMinor: 10_000, // PHP 100.00 a piece under 250; the bulk break needs volume tiers
+            description: "Sublimated mugs for events, giveaways and corporate gifts.",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    slug: "pins_on",
+    email: "felycia123@lumeya-ai.com",
+    shopName: "Pins On",
+    shop: { lat: 7.0512, lng: 125.5985, label: "Matina, Davao City" },
+    services: [
+      {
+        categoryCode: "corporate_event_merch",
+        turnaroundHours: 72, // "normal turnaround: 3 days, no rush fee"
+        listings: [{
+          starterId: "lst_corporate_giveaways",
+          // The master list gives this shop's finishes, minimum and rush fees
+          // but never a price per pin. Confirm with the shop before anything
+          // of theirs goes on a real board.
+          priceMinor: 2_500,
+          description: "Custom button pins in glossy or glitter finish. Minimum 20 pieces.",
+        }],
+      },
+    ],
+  },
+  {
+    slug: "polymedia",
+    email: "felycia123@talasoraprime.com",
+    shopName: "Polymedia Printing Services",
+    shop: { lat: 7.0891, lng: 125.6122, label: "Lanang, Davao City" },
+    services: [
+      {
+        categoryCode: "marketing_collateral",
+        turnaroundHours: 24,
+        listings: [
+          {
+            starterId: "lst_tarpaulins_outdoor_banners",
+            priceMinor: 24_000, // a 2x3 ft eco-solvent banner at PHP 40 per sq.ft
+            description: "Heavy-duty eco-solvent tarpaulin for events, campaigns and roadside signs.",
+          },
+          {
+            starterId: "lst_stickers_packaging_labels",
+            priceMinor: 25_400, // 2x2 ft eco-solvent vinyl at PHP 63.50 per sq.ft
+            description: "Vinyl sticker printing in matte, frosted, clear or glossy.",
+          },
+        ],
+      },
+      {
+        categoryCode: "recognition_awards_signage",
+        turnaroundHours: 48,
+        listings: [
+          {
+            starterId: "lst_plaques_trophies",
+            priceMinor: 50_000, // a 5-inch acrylic plaque at PHP 100 per inch of height
+            description: "Acrylic plaques, 3mm face on a 5mm base, priced by height.",
+          },
+          {
+            starterId: "lst_certificates_diplomas",
+            priceMinor: 18_000, // PHP 180.00 a piece, C2S
+            description: "Coated two-sides award certificates, A5 through A1.",
+          },
+        ],
+      },
     ],
   },
 ]);
@@ -462,21 +561,29 @@ function clerkRows(result) {
   return Array.isArray(rows) ? rows : [];
 }
 
-async function seedAdditionalDevelopmentShop(database, fixture, { objectStorage, now }) {
-  const clerkUserId = `clerk_dev_${fixture.slug}`;
-  const email = `dev+${fixture.slug}@gridgo.local`;
-  const person = { email, name: fixture.shopName, phone: null };
+async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, objectStorage, now }) {
+  // A real sign-in, not a fabricated id. These shops exist so the captain can
+  // log into the supplier app as each trade and work its board, which a
+  // synthetic clerk_dev_* row cannot do.
+  const clerkUser = await resolveDevClerkUser(fixture.email, clerkBackend);
+  const clerkUserId = clerkUser.id;
+  const email = fixture.email;
+  const person = clerkClientProfile(clerkUser);
   const at = now();
   const uploaded = [];
-  for (const listing of fixture.listings) {
-    const body = starterSampleBytes(listing.starterId);
-    const objectKey = `dev/${fixture.slug}/${listing.starterId}.jpg`;
-    uploaded.push({
-      ...listing,
-      body,
-      objectKey,
-      stored: await putJpeg(objectStorage, objectKey, body),
-    });
+  for (const service of fixture.services) {
+    for (const listing of service.listings) {
+      const body = starterSampleBytes(listing.starterId);
+      const objectKey = `dev/${fixture.slug}/${listing.starterId}.jpg`;
+      uploaded.push({
+        ...listing,
+        categoryCode: service.categoryCode,
+        turnaroundHours: service.turnaroundHours,
+        body,
+        objectKey,
+        stored: await putJpeg(objectStorage, objectKey, body),
+      });
+    }
   }
 
   await database.transaction(async () => {
@@ -539,29 +646,34 @@ async function seedAdditionalDevelopmentShop(database, fixture, { objectStorage,
       });
     }
 
-    const serviceId = `svc_${fixture.slug}_marketing_collateral`;
-    upsert(store.supplierServices, "id", {
-      id: serviceId,
-      supplierId: user.id,
-      categoryCode: "marketing_collateral",
-      state: "live",
-      pricingBasis: "per_unit",
-      referenceRateMinor: fixture.listings[0].priceMinor,
-      turnaroundHours: fixture.turnaroundHours,
-      standardTurnaroundHours: fixture.turnaroundHours,
-      rushEnabled: false,
-      materialCodes: [],
-      finishCodes: [],
-      productFamilyIds: [],
-      zones: ["davao_central"],
-      equipmentNotes: "Local order-match fixture shop.",
-      imageFileIds: [],
-      version: 1,
-      createdAt: at,
-      updatedAt: at,
-    });
-    store.supplierServiceFileFormats = store.supplierServiceFileFormats.filter((row) => row.supplierServiceId !== serviceId);
-    store.supplierServiceFileFormats.push(...DESIGN_FORMATS.map((formatCode) => ({ supplierServiceId: serviceId, formatCode })));
+    // A service line carries one category, so a shop working across two of them
+    // -- Polymedia sells banners and it sells awards -- declares one line each.
+    const serviceIdFor = (categoryCode) => `svc_${fixture.slug}_${categoryCode}`;
+    for (const service of fixture.services) {
+      const serviceId = serviceIdFor(service.categoryCode);
+      upsert(store.supplierServices, "id", {
+        id: serviceId,
+        supplierId: user.id,
+        categoryCode: service.categoryCode,
+        state: "live",
+        pricingBasis: "per_unit",
+        referenceRateMinor: service.listings[0].priceMinor,
+        turnaroundHours: service.turnaroundHours,
+        standardTurnaroundHours: service.turnaroundHours,
+        rushEnabled: false,
+        materialCodes: [],
+        finishCodes: [],
+        productFamilyIds: [],
+        zones: ["davao_central"],
+        equipmentNotes: `${service.categoryCode} work, seeded from the Davao master price list.`,
+        imageFileIds: [],
+        version: 1,
+        createdAt: at,
+        updatedAt: at,
+      });
+      store.supplierServiceFileFormats = store.supplierServiceFileFormats.filter((row) => row.supplierServiceId !== serviceId);
+      store.supplierServiceFileFormats.push(...DESIGN_FORMATS.map((formatCode) => ({ supplierServiceId: serviceId, formatCode })));
+    }
 
     for (const listing of uploaded) {
       const starter = store.listingStarters.find((candidate) => candidate.id === listing.starterId);
@@ -570,15 +682,18 @@ async function seedAdditionalDevelopmentShop(database, fixture, { objectStorage,
       upsert(store.catalogItems, "id", {
         id: itemId,
         supplierId: user.id,
-        supplierServiceId: serviceId,
+        supplierServiceId: serviceIdFor(listing.categoryCode),
         subcategoryCode: starter.subcategoryCode,
         name: starter.name,
-        description: `${starter.name} from ${fixture.shopName}. Local order-match fixture.`,
+        // Never the shop's name. The client reads this under a GRIDGO label,
+        // and a description signed by the press undoes the whole point of
+        // GRIDGO being the counter.
+        description: listing.description,
         basePriceMinor: listing.priceMinor,
         pricingUnit: starter.defaultPricingUnit || "per_unit",
         packageQty: starter.defaultPackageQty ?? null,
         turnaroundMode: "override",
-        turnaroundHours: fixture.turnaroundHours,
+        turnaroundHours: listing.turnaroundHours,
         fileFormatMode: starter.defaultFormatCodes?.length ? "override" : "inherit",
         active: true,
         sortOrder: uploaded.indexOf(listing),
@@ -857,7 +972,7 @@ export async function seedDevelopmentShops(database, {
   const lovis = await seedDevelopmentShop(database, { clerkBackend: backend, objectStorage, now });
   const shops = [lovis];
   for (const fixture of ADDITIONAL_DEV_SHOPS) {
-    shops.push(await seedAdditionalDevelopmentShop(database, fixture, { objectStorage, now }));
+    shops.push(await seedAdditionalDevelopmentShop(database, fixture, { clerkBackend: backend, objectStorage, now }));
   }
   const client = await seedDevelopmentClient(database, backend, now);
   const rider = await seedDevelopmentRider(database, backend, now);
