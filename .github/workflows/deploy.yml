@@ -39,6 +39,9 @@ jobs:
           --health-timeout 3s
           --health-retries 30
     env:
+      # The suite reads TEST_DATABASE_URL, so an ambient DATABASE_URL can never
+      # aim it at a database somebody still wants.
+      TEST_DATABASE_URL: postgresql://gridgo:ci-postgres-only@127.0.0.1:5432/gridgo_test
       DATABASE_URL: postgresql://gridgo:ci-postgres-only@127.0.0.1:5432/gridgo_test
     steps:
       - uses: actions/checkout@v4
