@@ -61,7 +61,7 @@ const TABLES = [
   { name: "supplier_catalog_prep_steps", keys: ["id"], columns: ["id", "catalog_item_id", "sort_order", "title", "body", "created_at", "updated_at"] },
   { name: "listing_starters", keys: ["id"], columns: ["id", "subcategory_code", "name", "default_pricing_unit", "default_package_qty", "default_turnaround_hours", "default_format_codes"] },
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
-  { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "spec_binding", "sort_order"] },
+  { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
@@ -393,6 +393,7 @@ function rowsFromStore(store) {
     rows.listing_starter_options.push({
       id: option.id, starter_group_id: option.starterGroupId, label: option.label,
       price_modifier_minor: money(option.priceModifierMinor ?? 0, "listingStarterOption.priceModifierMinor"),
+      price_multiplier_bps: option.priceMultiplierBps ?? null,
       spec_binding: option.specBinding ?? null, sort_order: option.sortOrder,
     });
   }
@@ -829,7 +830,9 @@ export async function loadStore(database) {
   }));
   store.listingStarterOptions = orderedBy(loaded.listing_starter_options, "starter_group_id", "sort_order", "id").map((row) => ({
     id: row.id, starterGroupId: row.starter_group_id, label: row.label,
-    priceModifierMinor: row.price_modifier_minor, specBinding: row.spec_binding, sortOrder: row.sort_order,
+    priceModifierMinor: row.price_modifier_minor,
+    priceMultiplierBps: row.price_multiplier_bps ?? null,
+    specBinding: row.spec_binding, sortOrder: row.sort_order,
   }));
   store.carts = orderedBy(loaded.client_carts, "client_id", "created_at", "id").map((row) => {
     const item = {

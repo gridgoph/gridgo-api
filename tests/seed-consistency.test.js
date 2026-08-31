@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
+import { flattenListingStarters } from "../src/reference-data.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -57,4 +58,21 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
   assert.equal(preserved.settings.issueWindowHours, 48);
   assert.ok(preserved.taxonomy.categories.some((item) => item.code === "ops_special"));
   await database.close();
+});
+
+test("a starter's multiplying add-on survives the whole way to a board", () => {
+  // Lovis prices back-to-back as "x2 the price", which as a flat amount has to
+  // be re-entered by hand every time the base price moves. The multiplier was
+  // dropped twice on the way -- once flattening a starter into reference rows,
+  // once copying a starter onto a shop's listing -- and each time the add-on
+  // arrived silently free rather than visibly wrong.
+  const { listingStarterOptions } = flattenListingStarters();
+  const duplex = listingStarterOptions.find((option) => option.id === "lsto_doc_duplex");
+  assert.equal(duplex.priceMultiplierBps, 20_000);
+  // An option multiplies or it adds, never both. The database enforces it too.
+  assert.equal(duplex.priceModifierMinor, 0);
+
+  for (const option of listingStarterOptions) {
+    if (option.priceMultiplierBps != null) assert.equal(option.priceModifierMinor, 0, option.id);
+  }
 });

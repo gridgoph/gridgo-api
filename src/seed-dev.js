@@ -228,8 +228,15 @@ function ensureFile(store, file) {
 }
 
 function copyStarter(store, starter, item, at, prefix = "lovis") {
-  const already = (store.catalogOptionGroups || []).some((group) => group.catalogItemId === item.id);
-  if (already) return;
+  // Replaced, not skipped. Skipping made the seed idempotent but also inert:
+  // a corrected starter never reached a board that had already been seeded,
+  // so a wrong price stayed wrong until the database was dropped.
+  const stale = (store.catalogOptionGroups || []).filter((group) => group.catalogItemId === item.id);
+  if (stale.length) {
+    const staleIds = new Set(stale.map((group) => group.id));
+    store.catalogOptions = (store.catalogOptions || []).filter((option) => !staleIds.has(option.optionGroupId));
+    store.catalogOptionGroups = (store.catalogOptionGroups || []).filter((group) => !staleIds.has(group.id));
+  }
   for (const group of (store.listingStarterGroups || []).filter((candidate) => candidate.starterId === starter.id)) {
     const groupId = `cog_${prefix}_${group.id}`;
     store.catalogOptionGroups.push({
@@ -251,6 +258,9 @@ function copyStarter(store, starter, item, at, prefix = "lovis") {
         optionGroupId: groupId,
         label: option.label,
         priceModifierMinor: option.priceModifierMinor,
+        // An option that multiplies rather than adds. Dropped here, Lovis's
+        // "back-to-back, x2 the price" copied across as a free add-on.
+        priceMultiplierBps: option.priceMultiplierBps ?? null,
         specBinding: option.specBinding ?? null,
         active: true,
         sortOrder: option.sortOrder,

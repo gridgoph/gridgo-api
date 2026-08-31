@@ -11,6 +11,30 @@ function appendMissing(target, definitions, key) {
   }
 }
 
+/**
+ * Bring a reference row back into line with what this build ships.
+ *
+ * Appending only was making the seed inert as well as idempotent: a starter
+ * template seeded once kept whatever it had, so a corrected price or a field
+ * added by a later migration never reached it. Lovis's "back-to-back, x2 the
+ * price" was seeded before the column that could hold a multiplier existed,
+ * and re-running the seed left it silently free.
+ *
+ * Reference data is the platform's own to restate -- a starter is a template
+ * this build defines, not something a shop wrote. Nothing a supplier or client
+ * owns goes through here, which is why this is safe to run on every boot and
+ * why the taxonomy, whose codes shops have already stored against, keeps the
+ * append-only rule instead.
+ */
+function reconcile(target, definitions, key) {
+  const byKey = new Map(target.map((record) => [record[key], record]));
+  for (const definition of definitions) {
+    const held = byKey.get(definition[key]);
+    if (held) Object.assign(held, structuredClone(definition));
+    else target.push(structuredClone(definition));
+  }
+}
+
 export async function seedReferenceData(database) {
   await database.transaction(async () => {
     const store = await loadStore(database);
@@ -29,9 +53,9 @@ export async function seedReferenceData(database) {
     store.listingStarterGroups ||= [];
     store.listingStarterOptions ||= [];
     appendMissing(store.acceptedFileFormats, reference.acceptedFileFormats, "code");
-    appendMissing(store.listingStarters, reference.listingStarters, "id");
-    appendMissing(store.listingStarterGroups, reference.listingStarterGroups, "id");
-    appendMissing(store.listingStarterOptions, reference.listingStarterOptions, "id");
+    reconcile(store.listingStarters, reference.listingStarters, "id");
+    reconcile(store.listingStarterGroups, reference.listingStarterGroups, "id");
+    reconcile(store.listingStarterOptions, reference.listingStarterOptions, "id");
     await saveStore(database, store);
   });
 }

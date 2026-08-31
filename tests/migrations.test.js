@@ -83,6 +83,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786921200000_a_client_can_state_a_measurement",
     "1786924800000_package_qty_belongs_to_one_unit",
     "1786928400000_starters_speak_every_pricing_unit",
+    "1786932000000_a_starter_can_offer_a_multiplier",
       ],
     );
     await client.query(`
@@ -197,6 +198,14 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // A starter can no longer carry a multiplying add-on.
+  const starterCols = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'listing_starter_options'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  assert.equal(starterCols.has("price_multiplier_bps"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
   // Starters go back to offering only the two original units.
   const starterUnits = (await client.query(
     `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
