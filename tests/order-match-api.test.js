@@ -435,3 +435,40 @@ test("a declined job moves to a shop that can still make the date, at no more co
   assert.equal((await call("/jobs", { subject: "clerk_supplier_a" })).body.jobs.length, 1);
   assert.equal((await call("/jobs", { subject: "clerk_supplier_b" })).body.jobs.length, 0);
 });
+
+test("the shop is paid in two stages, and never ahead of the money the client sent", async (t) => {
+  const { call, orderId, output } = await placedOrder(t);
+  const ops = (path, body) => call(path, { method: "POST", subject: "clerk_ops", body: body || {} });
+  const transition = (state, subject, body = {}) => call(
+    `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
+  );
+  const orderNow = async () => (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+
+  // Two milestones of the shop's own price, both pending, nothing released.
+  const placed = await orderNow();
+  assert.deepEqual(placed.payoutMilestones.map((row) => row.code), ["initial", "completion"]);
+  assert.equal(placed.payoutMilestones.every((row) => row.status === "pending"), true);
+  assert.equal(
+    placed.payoutMilestones.reduce((total, row) => total + row.amountMinor, 0),
+    placed.supplierSubtotalMinor,
+    "the two stages have to add up to the shop's price, not the client's total",
+  );
+
+  await ops(`/orders/${orderId}/payments/initial/confirm`);
+  await transition("supplier_assigned", "clerk_ops");
+  await transition("payment_authorized", "clerk_supplier_a");
+
+  // Starting production releases the first stage. It is capped by the supplier
+  // principal actually collected, so the platform never pays out money it has
+  // not received.
+  await transition("production", "clerk_supplier_a");
+  const producing = await orderNow();
+  const released = producing.payoutMilestones.filter((row) => row.status === "released");
+  assert.equal(released.length, 1, `${JSON.stringify(producing.payoutMilestones)}\n${output()}`);
+  assert.equal(released[0].code, "initial");
+  assert.equal(
+    producing.payoutMilestones.find((row) => row.code === "completion").status,
+    "pending",
+    "the rest waits for delivery, and for the balance",
+  );
+});

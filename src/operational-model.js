@@ -328,10 +328,15 @@ export function estimatePriceRange({ supplierSubtotalCandidatesMinor }) {
 export function createPayoutMilestones(money) {
   const payoutBase = finiteMinor(money?.supplierPlatformPayoutMinor, "supplierPlatformPayoutMinor");
   const supplierSubtotal = finiteMinor(money?.supplierSubtotalMinor, "supplierSubtotalMinor");
+  // 7,500 is the cart-checkout shape: the client pays 75 percent up front, so
+  // the shop can be released 75 percent when it starts and the rest on delivery
+  // -- fully covered by money already collected. The database has permitted the
+  // rate since the checkout plan landed; this was the only place still refusing
+  // it, which left every checkout order with no payout milestones at all.
   const downpaymentRate = finiteBps(
     money?.supplierDownpaymentRateBps,
     "supplierDownpaymentRateBps",
-    [0, 2_500, 5_000, 10_000],
+    [0, 2_500, 5_000, 7_500, 10_000],
   );
   const initialPrincipal = Math.min(roundBps(supplierSubtotal, downpaymentRate), payoutBase);
   const completionPrincipal = payoutBase - initialPrincipal;

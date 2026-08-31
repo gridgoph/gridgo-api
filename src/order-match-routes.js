@@ -10,6 +10,7 @@ import {
   selectedCatalogPrice,
 } from "./supplier-catalog.js";
 import {
+  createPayoutMilestones,
   deliveryFeeForDistance,
   distanceMetersBetween,
   roundBps,
@@ -356,7 +357,10 @@ function checkout(store, user, cart, body, createId, at) {
     fulfillmentMode: cart.fulfillmentMode,
     paymentPlan: "order_match_qr_75_25",
     quoteVersion: 1,
-    supplierDownpaymentRateBps: 7500,
+    // Two payout stages of the shop's own price: 75 percent when it starts, the
+    // rest on delivery proof. Both are capped against supplier principal the
+    // client has actually paid, so the platform never releases its own money.
+    supplierDownpaymentRateBps: 7_500,
     onlineDueMinor: 0,
     directStoreDueMinor: 0,
     supplierPlatformPayoutMinor: 0,
@@ -493,6 +497,38 @@ function checkout(store, user, cart, body, createId, at) {
       },
     },
   });
+
+  /*
+   Splitting the two payments across what they are actually paying for.
+
+   Each instalment settles the same proportion of every component, rather than
+   clearing the fee and delivery out of the downpayment first. Both are honest
+   allocations, but only this one leaves the downpayment covering 75 percent of
+   the shop's own price -- settling the fee first leaves it short, and the first
+   payout stage is then refused as uncollected on every single order.
+
+   The principal takes the rounding remainder because it is the figure payout
+   releases are capped against; giving it the odd centavo can only ever be in
+   the shop's favour.
+  */
+  const initialFeeMinor = roundBps(serviceFeeMinor, 7_500);
+  const initialDeliveryMinor = roundBps(deliveryTotalMinor, 7_500);
+  const initialPrincipalMinor = downpaymentMinor - initialFeeMinor - initialDeliveryMinor;
+  order.paymentAllocations = [
+    { paymentCode: "initial", component: "supplier_principal", amountMinor: initialPrincipalMinor },
+    { paymentCode: "initial", component: "service_fee", amountMinor: initialFeeMinor },
+    { paymentCode: "initial", component: "delivery_pass_through", amountMinor: initialDeliveryMinor },
+    { paymentCode: "final_online", component: "supplier_principal", amountMinor: itemSubtotalMinor - initialPrincipalMinor },
+    { paymentCode: "final_online", component: "service_fee", amountMinor: serviceFeeMinor - initialFeeMinor },
+    { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: deliveryTotalMinor - initialDeliveryMinor },
+  ].filter((allocation) => allocation.amountMinor > 0);
+
+  order.payoutMilestones = createPayoutMilestones({
+    supplierPlatformPayoutMinor: itemSubtotalMinor,
+    supplierSubtotalMinor: itemSubtotalMinor,
+    supplierDownpaymentRateBps: order.supplierDownpaymentRateBps,
+  });
+
   order.invoiceNumber = invoiceNumber(orderId, at);
 
   store.orderJobs ||= [];
