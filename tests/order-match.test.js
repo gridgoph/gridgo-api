@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  deadlineDays,
   MATCH_FACTORS,
   MatchError,
   matchShop,
@@ -422,4 +423,54 @@ test("quality comes from stars once a shop has enough of them, and from the list
     ranking: ["quality", "speed", "cost", "distance"], dropoff: DROPOFF,
   });
   assert.equal(unrated.shop.supplierId, "shop_complete");
+});
+
+test("the deadline calendar says which days GRIDGO could make, and never how many shops", () => {
+  // The client's half of the shop schedule. A shop's calendar asks how full it
+  // is; this asks whether anybody can finish by then, which is the only form
+  // of the question a client may see.
+  const store = fixture();
+  const now = "2026-03-09T08:00:00.000Z";
+  // Two shops at different speeds, so there is a day only the quick one can
+  // make and a later day both can.
+  addShop(store, { id: "shop_quick", lat: 7.07, lng: 125.61, turnaroundHours: 24 });
+  addShop(store, { id: "shop_slow", lat: 7.09, lng: 125.62, turnaroundHours: 240 });
+
+  const answer = deadlineDays(store, { subcategoryCode: "flyers", now, days: 21 });
+  assert.equal(answer.days.length, 21);
+  assert.ok(answer.earliest, "somebody can print flyers");
+
+  // Days are local calendar days, because that is what a client picks.
+  assert.match(answer.days[0].day, /^\d{4}-\d{2}-\d{2}$/);
+
+  // Nothing can be finished before the first shop could finish it, and every
+  // day from there on can be.
+  const earliestKey = answer.earliest.slice(0, 10);
+  for (const day of answer.days) {
+    if (day.day < earliestKey) assert.equal(day.state, "cannot", day.day);
+    else assert.notEqual(day.state, "cannot", day.day);
+  }
+
+  // A count of shops is the one thing this must not leak: a client is never
+  // told how many print something, here or anywhere.
+  const body = JSON.stringify(answer);
+  assert.equal(body.includes("shopsConsidered"), false);
+  assert.equal(body.includes("count"), false);
+  for (const day of answer.days) {
+    assert.deepEqual(Object.keys(day).sort(), ["day", "state"]);
+    assert.ok(["cannot", "tight", "open"].includes(day.state), day.state);
+  }
+});
+
+test("a kind of work nobody prints has no possible day at all", () => {
+  // Honest emptiness rather than a month of days that all fail at match time.
+  const store = fixture();
+  addShop(store, { id: "shop_flyers", lat: 7.07, lng: 125.61, turnaroundHours: 24 });
+  const answer = deadlineDays(store, {
+    subcategoryCode: "medals_ribbons",
+    now: "2026-03-09T08:00:00.000Z",
+    days: 14,
+  });
+  assert.equal(answer.earliest, null);
+  assert.equal(answer.days.every((day) => day.state === "cannot"), true);
 });

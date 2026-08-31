@@ -20,6 +20,7 @@ import {
 import { defaultShopSchedule, projectFinish } from "./availability.js";
 import {
   MatchError,
+  deadlineDays,
   matchShop,
   multiplyMinor,
   validatePreferenceRanking,
@@ -660,7 +661,7 @@ function checkout(store, user, cart, body, createId, at) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts"].includes(pathname)) return true;
+  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days"].includes(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
@@ -716,6 +717,19 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (address.isDefault) for (const row of store.clientAddresses) if (row.clientId === user.id) row.isDefault = false;
     store.clientAddresses.push(address);
     return { status: 201, body: { address: publicAddress(address) }, mutated: true };
+  }
+
+  if (req.method === "GET" && pathname === "/me/deadline-days") {
+    // Which days GRIDGO could make, for one kind of work. Read-only, and it
+    // returns dates rather than shops: the queues and capacities behind the
+    // answer are the shops' own, and a client is never told how many print
+    // something.
+    const subcategoryCode = text(url.searchParams.get("subcategoryCode"), "subcategoryCode", 120);
+    const days = Math.min(63, Math.max(7, Number(url.searchParams.get("days")) || 42));
+    return {
+      status: 200,
+      body: deadlineDays(store, { subcategoryCode, now: now(), days }),
+    };
   }
   if (req.method === "POST" && ["/me/matches", "/me/matches/next"].includes(pathname)) {
     const body = record(await readBody(req));

@@ -361,6 +361,78 @@ function reasonsFor(row, ranking, preferred, alternativesCount) {
   return reasons;
 }
 
+/**
+ * Which days GRIDGO could actually make, for one kind of work.
+ *
+ * The client's version of the shop's schedule. A shop's calendar asks "how
+ * full am I"; this asks "can anybody finish by then", which is the only form
+ * of the question a client is allowed to see — the queues and capacities that
+ * decide it belong to the shops.
+ *
+ * One candidate pass answers the whole month. Every shop that could take this
+ * work already carries the date it would be ready, so a day is simply a
+ * threshold: how many of those dates fall on or before the end of it.
+ *
+ * Deliberately returns no count. A client is never told how many shops print
+ * something, here or anywhere -- `tight` says choice is narrow without saying
+ * how narrow, which is the honest half of the same fact.
+ */
+export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days = 42 } = {}) {
+  const at = now || new Date().toISOString();
+  const { rows, missedDeadline } = candidateRows(store, {
+    subcategoryCode,
+    dropoff,
+    excludedSupplierIds: [],
+    // No deadline: every candidate is wanted, along with the date it could
+    // actually finish. Filtering here would answer one day instead of all.
+    deadline: null,
+    now: at,
+    units: null,
+  });
+
+  const promises = [...rows, ...missedDeadline]
+    // A candidate that passed carries its date on its projection; one that was
+    // filtered out carries it directly. Reading only one of the two shapes is
+    // how this quietly answered "nobody can" for every day.
+    .map((row) => Date.parse(row.promiseBy ?? row.projection?.promiseBy))
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => left - right);
+
+  const start = new Date(at);
+  start.setHours(0, 0, 0, 0);
+
+  const out = [];
+  for (let index = 0; index < days; index += 1) {
+    const day = new Date(start);
+    day.setDate(day.getDate() + index);
+    const endOfDay = new Date(day);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const reachable = promises.filter((value) => value <= endOfDay.getTime()).length;
+    out.push({
+      day: localDayKey(day),
+      // Fewer than half the shops that could do this work at all. A first
+      // possible day usually has exactly one shop behind it, and saying so
+      // lets a client spend a day to get a choice back.
+      state: reachable === 0 ? "cannot" : reachable * 2 < promises.length ? "tight" : "open",
+    });
+  }
+
+  return {
+    days: out,
+    /** The first moment anybody could finish, or null when nobody prints this. */
+    earliest: promises.length ? new Date(promises[0]).toISOString() : null,
+  };
+}
+
+/** A local calendar day, which is what a client picks. */
+function localDayKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export function matchShop(store, input = {}) {
   const subcategoryCode = String(input.subcategoryCode || "").trim();
   const subcategory = (store.taxonomy?.subcategories || []).find(
