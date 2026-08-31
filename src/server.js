@@ -61,6 +61,8 @@ import {
   routeRiderProfile,
 } from "./rider-profile-routes.js";
 import { routeOrderMatch } from "./order-match-routes.js";
+import { MatchError, matchShop } from "./order-match.js";
+import { defaultShopSchedule, projectFinish } from "./availability.js";
 import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
 import { privateCatalogItem } from "./supplier-catalog.js";
 import {
@@ -1098,6 +1100,71 @@ function pickupFromSupplier(supplier) {
     lng: supplier.shop.lng,
     label: supplier.shop.label || supplier.supplierName || supplier.name,
   };
+}
+
+/**
+ * The shop that takes over when one declines.
+ *
+ * Chosen by the same ranking the client set, filtered to shops that can still
+ * make the date the client was promised, and never one that would cost more
+ * than the job was sold for. Shops that already declined are excluded so a job
+ * cannot be handed back and forth.
+ *
+ * The committed price does not move. A checkout order's money is immutable once
+ * placed -- the database enforces it -- and rewriting what a client agreed to
+ * because a shop dropped out is the wrong direction to fix this from. So the
+ * replacement is paid the price the job was sold at, and the client pays what
+ * they were told. A shop that cannot do it for that is simply not a candidate.
+ */
+function findReplacementShop(store, order, at) {
+  const lines = (store.orderLineItems || []).filter((row) => row.orderId === order.id);
+  if (lines.length === 0) return null;
+  const sourceItem = (store.catalogItems || []).find((row) => row.id === lines[0].sourceCatalogItemId);
+  const subcategoryCode = sourceItem?.subcategoryCode;
+  if (!subcategoryCode) return null;
+
+  const quantity = lines.reduce((total, row) => total + Number(row.quantity || 0), 0);
+  const committedMinor = Number(order.supplierSubtotalMinor || 0);
+  const preference = (store.clientPreferences || []).find((row) => row.userId === order.clientId);
+  const ranking = preference?.ranking?.length === 4
+    ? preference.ranking
+    : ["quality", "speed", "cost", "distance"];
+
+  const excluded = [...(order.declinedBy || [])];
+  // Bounded: each pass rules out exactly one shop, and a shop is only ruled out
+  // once, so this cannot run longer than the number of shops on the platform.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    let match;
+    try {
+      match = matchShop(store, {
+        subcategoryCode,
+        ranking,
+        dropoff: order.dropoff || null,
+        excludedSupplierIds: excluded,
+        deadline: order.promiseBy || null,
+        units: quantity > 0 ? quantity : null,
+        now: at,
+      });
+    } catch (error) {
+      if (error instanceof MatchError) return null;
+      throw error;
+    }
+    const cheapest = match.listings
+      .map((item) => (Number.isSafeInteger(item.fromPriceMinor) ? item.fromPriceMinor : item.basePriceMinor))
+      .filter((value) => Number.isSafeInteger(value));
+    const floorMinor = cheapest.length ? Math.min(...cheapest) * Math.max(1, quantity) : null;
+    if (floorMinor != null && floorMinor <= committedMinor) {
+      const profile = (store.supplierProfiles || []).find((row) => row.userId === match.shop.supplierId);
+      return {
+        supplierId: match.shop.supplierId,
+        pickup: profile?.shop || null,
+        readyBy: match.shopReadyBy,
+        promiseBy: match.promiseBy,
+      };
+    }
+    excluded.push(match.shop.supplierId);
+  }
+  return null;
 }
 
 function setOrderPickup(order, store) {
@@ -4211,6 +4278,81 @@ async function handleRequest(req, res) {
       store.orders.unshift(order);
       await save(store);
       return send(res, 201, { order: publicOrder(order, user, store) });
+    }
+
+    /**
+     * A shop that cannot take the work.
+     *
+     * Declining is not stepping aside: the client has already paid and been
+     * given a date, so the job has to find another shop rather than stop. The
+     * replacement is chosen by the same ranking, filtered to shops that can
+     * still make the promised date and cannot cost the client more than they
+     * already committed to. If one is cheaper the difference comes off their
+     * balance; if none qualifies the order lands on Operations rather than
+     * silently asking the client to pay more or wait longer.
+     */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/decline$/.test(pathname)) {
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (user.role !== "supplier" || order.supplierId !== user.id) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "Only the shop this job was handed to can decline it.",
+        });
+      }
+      if (order.state !== "supplier_assigned") {
+        return send(res, 409, {
+          error: "decline_not_available",
+          message: "This job can no longer be declined. Refresh it and use an available action.",
+          state: order.state,
+        });
+      }
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      const at = now();
+
+      order.declinedBy = [...new Set([...(order.declinedBy || []), user.id])];
+      audit(store, {
+        actor: user,
+        action: "order.shop_declined",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { supplierId: user.id },
+        reason: reason || null,
+      });
+
+      const replacement = findReplacementShop(store, order, at);
+      if (!replacement) {
+        // Nobody else can make the date at the price the client paid. That is
+        // an Operations decision -- extend, refund, or ask the client -- not
+        // something to resolve by quietly changing what they agreed to.
+        order.supplierId = null;
+        order.pickup = null;
+        order.state = "approved_for_matching";
+        order.updatedAt = at;
+        order.timeline.push({ at, state: order.state, by: user.id, note: reason ? `Declined: ${reason}` : "Declined" });
+        await save(store);
+        return send(res, 200, { order: publicOrder(order, user, store), replaced: false });
+      }
+
+      order.supplierId = replacement.supplierId;
+      order.pickup = structuredClone(replacement.pickup);
+      order.readyBy = replacement.readyBy;
+      order.promiseBy = replacement.promiseBy;
+      order.updatedAt = at;
+      order.timeline.push({ at, state: order.state, by: user.id, note: reason ? `Declined: ${reason}` : "Declined" });
+      audit(store, {
+        actor: user,
+        action: "order.shop_replaced",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { supplierId: replacement.supplierId, readyBy: replacement.readyBy },
+      });
+      await save(store);
+      return send(res, 200, { order: publicOrder(order, user, store), replaced: true });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {

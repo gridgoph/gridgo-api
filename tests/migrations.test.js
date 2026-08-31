@@ -78,6 +78,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786903200000_client_account_profile_version",
   "1786906800000_match_deadline_schedule_reviews",
   "1786910400000_order_lifecycle_one_shop",
+  "1786914000000_pickup_is_not_part_of_the_commitment",
       ],
     );
     await client.query(`
@@ -159,6 +160,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+
+  await runner(migrationOptions(schema, "down", 1, client));
   await assert.rejects(
     client.query("UPDATE orders SET state = 'cancelled' WHERE id = 'order_match_plan'"),
     (error) => error.code === "23514",
