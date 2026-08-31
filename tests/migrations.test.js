@@ -84,6 +84,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786924800000_package_qty_belongs_to_one_unit",
     "1786928400000_starters_speak_every_pricing_unit",
     "1786932000000_a_starter_can_offer_a_multiplier",
+    "1786935600000_starter_ordering_can_be_reshuffled",
       ],
     );
     await client.query(`
@@ -198,6 +199,17 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // Template orderings stop being deferrable, so a reshuffle collides again.
+  const deferrable = (await client.query(
+    `SELECT c.condeferrable FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'listing_starter_groups_starter_id_sort_order_key'`,
+    [schema],
+  )).rows[0]?.condeferrable;
+  assert.equal(deferrable, false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
   // A starter can no longer carry a multiplying add-on.
   const starterCols = new Set((await client.query(
     "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'listing_starter_options'",

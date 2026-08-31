@@ -29,19 +29,29 @@ export function defaultListingStarters() {
       defaultPackageQty: null,
       defaultTurnaroundHours: 24,
       defaultFormatCodes: DESIGN_FILES,
+      // No size group. A tarpaulin is billed by the square foot, so the client
+      // states the size as a measurement and picking it twice -- once as an
+      // option and once as a number -- is two answers that can disagree.
       groups: orderedGroups([
-        spec("lstg_tarp_size", "Size", "Finished size", [
-          option("lsto_tarp_2x3", "2x3 ft", 0, { fieldCode: "size", value: "2x3" }),
-          option("lsto_tarp_3x5", "3x5 ft", 15000, { fieldCode: "size", value: "3x5" }),
-          option("lsto_tarp_4x8", "4x8 ft", 35000, { fieldCode: "size", value: "4x8" }),
+        spec("lstg_tarp_printer", "Printer", "What it is printed on", [
+          option("lsto_tarp_eco", "Eco solvent", 0),
+          // PHP 90.00 against PHP 40.00 a square foot. Options are added to
+          // the rate before it multiplies by size, so this is per square foot
+          // like the base price it sits on.
+          option("lsto_tarp_uv", "UV, premium", 5_000),
         ]),
         spec("lstg_tarp_material", "Material", "Vinyl weight", [
           option("lsto_tarp_10oz", "10oz tarpaulin", 0),
-          option("lsto_tarp_13oz", "13oz tarpaulin", 2500, { fieldCode: "material", valueCode: "tarpaulin_13oz" }),
+          option("lsto_tarp_13oz", "13oz tarpaulin", 0, { fieldCode: "material", valueCode: "tarpaulin_13oz" }),
+          option("lsto_tarp_18oz", "18oz tarpaulin", 0),
+          // 8oz is deliberately absent: the master list says it cannot be run
+          // on either printer, and a size nobody can print is not an option.
+          option("lsto_tarp_panaflex", "Panaflex, for signage", 0),
+          option("lsto_tarp_blackout", "Blackout, for signage", 0),
         ]),
         spec("lstg_tarp_finish", "Finish", "Surface", [
           option("lsto_tarp_matte", "Matte", 0),
-          option("lsto_tarp_gloss", "Gloss", 500),
+          option("lsto_tarp_gloss", "Gloss", 0),
         ]),
         {
           id: "lstg_tarp_addons", name: "Add-ons", kind: "addon", required: false,
@@ -160,8 +170,29 @@ export function defaultListingStarters() {
       defaultTurnaroundHours: 48,
       defaultFormatCodes: PRINT_FILES,
       groups: orderedGroups([
+        spec("lstg_sticker_printer", "Printer", "What it is printed on", [
+          option("lsto_sticker_eco", "Eco solvent", 0),
+          // PHP 162.00 against PHP 63.50 a square foot, on the shops that
+          // sell by area. Priced on the same scale as the base rate.
+          option("lsto_sticker_uv", "UV", 9_850),
+        ]),
         spec("lstg_sticker_material", "Material", "Face stock", [
           option("lsto_sticker_vinyl", "Vinyl sticker", 0, { fieldCode: "material", valueCode: "vinyl_sticker" }),
+          // Mounted on board, which is a different product at a different
+          // rate: PHP 280 and PHP 320 a square foot against PHP 63.50.
+          option("lsto_sticker_sintra3", "Mounted on 3mm Sintra", 21_650),
+          option("lsto_sticker_sintra5", "Mounted on 5mm Sintra", 25_650),
+        ]),
+        spec("lstg_sticker_texture", "Texture", "Surface", [
+          option("lsto_sticker_matte", "Matte", 0),
+          option("lsto_sticker_frosted", "Frosted", 0),
+          option("lsto_sticker_clear", "Clear", 0),
+          option("lsto_sticker_glossy", "Glossy", 0),
+          // UV only, per the master list. A shop that cannot run these takes
+          // them off its own copy of the template.
+          option("lsto_sticker_white", "White", 0),
+          option("lsto_sticker_embossed", "Embossed", 0),
+          option("lsto_sticker_debossed", "Debossed", 0),
         ]),
         spec("lstg_sticker_cut", "Cut", null, [
           option("lsto_sticker_kiss", "Kiss cut", 0, { fieldCode: "finish", valueCode: "kiss_cut" }),
@@ -169,7 +200,11 @@ export function defaultListingStarters() {
         ]),
         {
           id: "lstg_sticker_addons", name: "Add-ons", kind: "addon", required: false,
-          helpText: null, options: [option("lsto_sticker_lamination", "Lamination", 800, { fieldCode: "finish", valueCode: "lamination" })],
+          helpText: null,
+          options: [
+            option("lsto_sticker_lamination", "Lamination", 2_500, { fieldCode: "finish", valueCode: "lamination" }),
+            option("lsto_sticker_contour", "Contour cutting", 1_500),
+          ],
         },
       ]),
     },
@@ -191,10 +226,26 @@ export function defaultListingStarters() {
         ]),
         spec("lstg_apparel_garment", "Garment", null, [
           option("lsto_apparel_shirt", "T-shirt", 0, { fieldCode: "material", valueCode: "cotton_tee" }),
-          option("lsto_apparel_hoodie", "Hoodie", 18000),
+          option("lsto_apparel_sando", "Sando", -2_500),
+          option("lsto_apparel_polo", "Polo shirt", 1_000),
+          option("lsto_apparel_longsleeve", "Longsleeve", 3_000),
+          option("lsto_apparel_hoodie", "Hoodie", 7_000),
+          option("lsto_apparel_pants", "Pants", 8_500),
         ]),
+        // The master list quotes two jobs, not one: printing onto a garment
+        // the client brings, and printing onto one the shop supplies. A
+        // t-shirt is PHP 180 pressed with cloth and PHP 75 print-only, and a
+        // board that offers only the first turns away half the trade.
+        spec("lstg_apparel_supply", "Garment supply", "Who provides the shirt", [
+          option("lsto_apparel_with_cloth", "GRIDGO supplies it, 180gsm", 0),
+          option("lsto_apparel_print_only", "You supply it, printing only", -10_500),
+        ]),
+        // One method group. The master list names direct-to-film and full dye
+        // sublimation as the two the shop runs, and screen printing as the
+        // traditional third.
         spec("lstg_apparel_method", "Print method", "How the art is applied", [
-          option("lsto_apparel_dtf", "DTF", 0),
+          option("lsto_apparel_dtf", "Direct-to-film", 0),
+          option("lsto_apparel_sublimation", "Full dye sublimation", 0),
           option("lsto_apparel_screen", "Screen print", 1500),
         ]),
         {
@@ -345,9 +396,18 @@ export function defaultListingStarters() {
       defaultTurnaroundHours: 24,
       defaultFormatCodes: ["pdf"],
       groups: orderedGroups([
+        // The four sheet sizes the master list quotes, at their real CAD
+        // plotting prices: PHP 65, 80, 150 and 180 from a PHP 65 base.
         spec("lstg_plot_size", "Size", "Sheet size", [
-          option("lsto_plot_a1", "A1", 0, { fieldCode: "size", value: "A1" }),
-          option("lsto_plot_a0", "A0", 2500, { fieldCode: "size", value: "A0" }),
+          option("lsto_plot_a2", "20x30 / A2", 0, { fieldCode: "size", value: "A2" }),
+          option("lsto_plot_a1", "24x36 / A1", 1_500, { fieldCode: "size", value: "A1" }),
+          option("lsto_plot_30x40", "30x40", 8_500, { fieldCode: "size", value: "30x40" }),
+          option("lsto_plot_a0", "A0", 11_500, { fieldCode: "size", value: "A0" }),
+        ]),
+        spec("lstg_plot_paper", "Paper", "What it prints on", [
+          option("lsto_plot_white", "White paper", 0, { fieldCode: "material", value: "White paper" }),
+          option("lsto_plot_blue", "Blue paper", 0, { fieldCode: "material", value: "Blue paper" }),
+          option("lsto_plot_whiteprint", "Whiteprint", 0, { fieldCode: "material", value: "Whiteprint" }),
         ]),
         {
           id: "lstg_plot_addons", name: "Add-ons", kind: "addon", required: false,

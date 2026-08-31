@@ -21,18 +21,18 @@ function appendMissing(target, definitions, key) {
  * and re-running the seed left it silently free.
  *
  * Reference data is the platform's own to restate -- a starter is a template
- * this build defines, not something a shop wrote. Nothing a supplier or client
- * owns goes through here, which is why this is safe to run on every boot and
- * why the taxonomy, whose codes shops have already stored against, keeps the
- * append-only rule instead.
+ * this build defines, not something a shop wrote. A shop's own board is a
+ * separate copy taken at the moment it added a listing, so nothing a supplier
+ * or client owns is touched here. The taxonomy keeps the append-only rule
+ * instead, because shops have already stored codes against it.
  */
-function reconcile(target, definitions, key) {
-  const byKey = new Map(target.map((record) => [record[key], record]));
-  for (const definition of definitions) {
-    const held = byKey.get(definition[key]);
-    if (held) Object.assign(held, structuredClone(definition));
-    else target.push(structuredClone(definition));
-  }
+function replaceAll(target, definitions) {
+  // Wholesale rather than field-by-field. These rows carry unique orderings
+  // among themselves, so patching them one at a time collides with the rows
+  // not yet patched -- and a template the build has dropped should leave
+  // rather than linger with a stale ordering around it.
+  target.length = 0;
+  for (const definition of definitions) target.push(structuredClone(definition));
 }
 
 export async function seedReferenceData(database) {
@@ -53,9 +53,13 @@ export async function seedReferenceData(database) {
     store.listingStarterGroups ||= [];
     store.listingStarterOptions ||= [];
     appendMissing(store.acceptedFileFormats, reference.acceptedFileFormats, "code");
-    reconcile(store.listingStarters, reference.listingStarters, "id");
-    reconcile(store.listingStarterGroups, reference.listingStarterGroups, "id");
-    reconcile(store.listingStarterOptions, reference.listingStarterOptions, "id");
+    // The template orderings are unique among themselves, so a reshuffle has
+    // to pass through itself before it settles. The constraints are deferrable
+    // for exactly this; nothing else in the seed needs it.
+    await database.query("SET CONSTRAINTS listing_starter_groups_starter_id_sort_order_key, listing_starter_options_starter_group_id_sort_order_key DEFERRED");
+    replaceAll(store.listingStarters, reference.listingStarters);
+    replaceAll(store.listingStarterGroups, reference.listingStarterGroups);
+    replaceAll(store.listingStarterOptions, reference.listingStarterOptions);
     await saveStore(database, store);
   });
 }
