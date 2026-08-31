@@ -104,6 +104,15 @@ export const LOVIS_CATEGORY_LINES = [
     referenceRateMinor: 40000,
     turnaroundHours: 12,
   },
+  {
+    // The document board, which is most of what this shop actually does and
+    // had no category to sit under until Documents & Publications existed.
+    id: "svc_lovis_document_publication",
+    categoryCode: "document_publication",
+    formats: DESIGN_FORMATS,
+    referenceRateMinor: 200,
+    turnaroundHours: 4,
+  },
 ];
 
 export const LOVIS_LISTINGS = [
@@ -124,6 +133,53 @@ export const LOVIS_LISTINGS = [
     serviceId: "svc_lovis_marketing_collateral",
     priceMinor: 50_000, // PHP 5.00 base, a pack of 100
     description: "Calling card stock at 240gsm or 300gsm, sharp or round edge.",
+  },
+
+  // The document board. Everything here is priced the way the shop quotes it
+  // rather than flattened to a per-piece figure.
+  {
+    starterId: "lst_document_printing",
+    serviceId: "svc_lovis_document_publication",
+    // PHP 2.00 a page, short, black and white. Size and colour are options on
+    // top, and back-to-back doubles it.
+    priceMinor: 200,
+    description:
+      "Everyday printing on 70gsm or 80gsm bond, black and white or colour. Short, A4 and long.",
+  },
+  {
+    starterId: "lst_booklets",
+    serviceId: "svc_lovis_document_publication",
+    priceMinor: 125, // PHP 1.25 a page, A5, two pages to a sheet
+    description: "A5 booklets, two pages to a sheet, bifold or trifold on bond paper.",
+  },
+  {
+    starterId: "lst_risograph",
+    serviceId: "svc_lovis_document_publication",
+    priceMinor: 40_000, // PHP 400.00 a ream of 500, short, front only
+    description: "High-volume black and white by the ream of 500, front only. Short, A4 and long.",
+  },
+  {
+    starterId: "lst_binding_hardbound",
+    // Priced entirely by how fast it is wanted: PHP 250 at five days through
+    // PHP 700 in two hours. Four prices for the same book, not a base price
+    // and three surcharges.
+    priceMinor: 25_000,
+    serviceId: "svc_lovis_document_publication",
+    speedTiers: [
+      { label: "5 days", turnaroundHours: 120, priceMinor: 25_000 },
+      { label: "3 days", turnaroundHours: 72, priceMinor: 35_000 },
+      { label: "Next day", turnaroundHours: 24, priceMinor: 50_000 },
+      { label: "Same day, 2 to 3 hours", turnaroundHours: 3, priceMinor: 70_000 },
+    ],
+    description:
+      "Thesis and report hardbound with gold or silver lettering, digital or embossed. A4, short and long.",
+  },
+  {
+    starterId: "lst_id_photos",
+    priceMinor: 5_000, // PHP 50.00 for the 3pcs 2x2 & 4pcs 1x1 set
+    serviceId: "svc_lovis_document_publication",
+    description:
+      "ID photographs on photo paper or PVC, in the usual sets and single sizes. Collar and name tag available.",
   },
 ];
 
@@ -386,8 +442,15 @@ export async function seedDevelopmentShop(database, {
         // a description signed by the press is where the anonymity leaks.
         description: listing.description,
         basePriceMinor: listing.priceMinor,
-        pricingUnit: starter.defaultPricingUnit || "per_unit",
-        packageQty: starter.defaultPackageQty ?? null,
+        // The starter's unit is the template's guess; a listing that states
+        // its own overrules it, the same rule the other shops follow.
+        pricingUnit: listing.pricingUnit || starter.defaultPricingUnit || "per_unit",
+        packageQty: listing.pricingUnit ? null : (starter.defaultPackageQty ?? null),
+        measureUnit: listing.measureUnit ?? null,
+        minimumWidthMilli: listing.minimumWidthMilli ?? null,
+        minimumHeightMilli: listing.minimumHeightMilli ?? null,
+        minimumLengthMilli: listing.minimumLengthMilli ?? null,
+        minimumOrderQuantity: listing.minimumOrderQuantity ?? null,
         turnaroundMode: starter.defaultTurnaroundHours ? "override" : "inherit",
         turnaroundHours: starter.defaultTurnaroundHours ?? null,
         fileFormatMode: starter.defaultFormatCodes?.length ? "override" : "inherit",
@@ -399,6 +462,7 @@ export async function seedDevelopmentShop(database, {
       };
       upsert(store.catalogItems, "id", item);
       copyStarter(store, starter, store.catalogItems.find((row) => row.id === itemId), at);
+      seedListingTiers(store, itemId, listing, at);
       if (storedPhoto) {
         ensureFile(store, {
           fileId: listing.fileId,
@@ -540,6 +604,12 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
           // The description said "minimum 20 pieces" while the listing would
           // take an order of one, which is a promise the board could not keep.
           minimumOrderQuantity: 20,
+          // A flat fee added to the order, not a different price per pin --
+          // the other shape a speed can take, and the one this shop quotes.
+          speedTiers: [
+            { label: "1 to 3 days", turnaroundHours: 72, surchargeMinor: 5_000 },
+            { label: "Under 24 hours", turnaroundHours: 24, surchargeMinor: 10_000 },
+          ],
           description: "Custom button pins in glossy or glitter finish. Minimum 20 pieces.",
         }],
       },
@@ -599,6 +669,15 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
             starterId: "lst_certificates_diplomas",
             priceMinor: 18_000, // PHP 180.00 a piece, C2S
             description: "Coated two-sides award certificates, A5 through A1.",
+          },
+          {
+            // "Fixed Price PHP 5,400 All-in Package". Not per piece and not
+            // per foot: one price for the whole job, whatever it involves.
+            starterId: "lst_business_store_signages",
+            pricingUnit: "whole_job",
+            priceMinor: 540_000,
+            description:
+              "Acrylic and Panaflex store signage as one all-in package, surveyed and installed.",
           },
         ],
       },

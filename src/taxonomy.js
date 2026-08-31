@@ -2,7 +2,7 @@
  * Platform product-category taxonomy.
  *
  * Source of truth for the *content* is the captain's "Product Category Mapping &
- * Chart": four categories, seventeen subcategories, one "best for" audience line
+ * Chart": five categories, twenty-two subcategories, one "best for" audience line
  * per category and one examples line per subcategory.
  *
  * Model rule (one way to express one relationship):
@@ -57,6 +57,20 @@ const CATEGORIES = [
     name: "Specialized & Prototyping Services",
     bestFor: "Architecture students, engineers, industrial designers, and specialized builds.",
     sortOrder: 4,
+    productFamilyIds: [],
+    active: true,
+  },
+  {
+    // The everyday work the first four categories had no home for. A student
+    // printing a thesis, a teacher running a hundred handouts and an applicant
+    // who needs ID photographs are not doing marketing, merchandise, awards or
+    // prototyping, and Lovis's whole document board -- the largest single price
+    // list in the master catalogue -- had nowhere to sit.
+    id: "taxc_document_publication",
+    code: "document_publication",
+    name: "Documents & Publications",
+    bestFor: "Students, teachers, offices, and anyone with paperwork to print, bind, or copy.",
+    sortOrder: 5,
     productFamilyIds: [],
     active: true,
   },
@@ -221,6 +235,53 @@ const SUBCATEGORIES = [
     categoryCode: "specialized_prototyping",
     examples: ["Custom product boxes", "Mailer boxes", "Food-grade packaging"],
     sortOrder: 3,
+    active: true,
+  },
+
+  // 5. Documents & Publications
+  {
+    id: "taxs_document_printing",
+    code: "document_printing",
+    name: "Document printing",
+    categoryCode: "document_publication",
+    examples: ["Black and white or colour", "Short, A4 and long", "Back-to-back"],
+    sortOrder: 1,
+    active: true,
+  },
+  {
+    id: "taxs_booklets",
+    code: "booklets",
+    name: "Booklets",
+    categoryCode: "document_publication",
+    examples: ["Bifold and trifold", "Programmes", "Handouts"],
+    sortOrder: 2,
+    active: true,
+  },
+  {
+    id: "taxs_risograph",
+    code: "risograph",
+    name: "Risograph printing",
+    categoryCode: "document_publication",
+    examples: ["High-volume handouts", "Exam papers", "Reviewers by the ream"],
+    sortOrder: 3,
+    active: true,
+  },
+  {
+    id: "taxs_binding_hardbound",
+    code: "binding_hardbound",
+    name: "Binding & hardbound",
+    categoryCode: "document_publication",
+    examples: ["Thesis hardbound", "Ring and softcover binding", "Gold or silver spine"],
+    sortOrder: 4,
+    active: true,
+  },
+  {
+    id: "taxs_id_photos",
+    code: "id_photos",
+    name: "ID photos",
+    categoryCode: "document_publication",
+    examples: ["1x1, 2x2 and passport", "Wallet and family size", "Photo paper or PVC"],
+    sortOrder: 5,
     active: true,
   },
 ];

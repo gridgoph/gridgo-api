@@ -82,6 +82,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   "1786917600000_catalogue_pricing_shapes",
     "1786921200000_a_client_can_state_a_measurement",
     "1786924800000_package_qty_belongs_to_one_unit",
+    "1786928400000_starters_speak_every_pricing_unit",
       ],
     );
     await client.query(`
@@ -196,6 +197,17 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // Starters go back to offering only the two original units.
+  const starterUnits = (await client.query(
+    `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'listing_starters_default_pricing_unit_check'`,
+    [schema],
+  )).rows[0]?.def ?? "";
+  assert.equal(starterUnits.includes("per_page"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
   // The package-quantity rule was written when there were two pricing units
   // and still spelled both out, so it refused every unit added since.
   const packageRule = (await client.query(

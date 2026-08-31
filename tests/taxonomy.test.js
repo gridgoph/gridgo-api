@@ -8,10 +8,26 @@ import {
   resolveCategoryCode,
 } from "../src/taxonomy.js";
 
-test("platform taxonomy is the flat four-category, seventeen-subcategory contract", () => {
+test("platform taxonomy is the flat five-category, twenty-two-subcategory contract", () => {
   const taxonomy = defaultTaxonomy();
-  assert.equal(taxonomy.categories.length, 4);
-  assert.equal(taxonomy.subcategories.length, 17);
+  assert.equal(taxonomy.categories.length, 5);
+  assert.equal(taxonomy.subcategories.length, 22);
+
+  // The fifth category is the everyday paperwork the first four had no home
+  // for. Lovis's document board is the largest price list in the catalogue and
+  // sat entirely outside marketing, merchandise, awards and prototyping.
+  const documents = taxonomy.categories.find((item) => item.code === "document_publication");
+  assert.ok(documents, "documents and publications is a category");
+  const under = taxonomy.subcategories
+    .filter((item) => item.categoryCode === "document_publication")
+    .map((item) => item.code);
+  assert.deepEqual(under, [
+    "document_printing",
+    "booklets",
+    "risograph",
+    "binding_hardbound",
+    "id_photos",
+  ]);
   assert.deepEqual(taxonomy.categoryAliases.map((item) => item.code), LEGACY_CATEGORY_CODES);
 
   const codes = new Set(taxonomy.categories.map((item) => item.code));
@@ -42,8 +58,8 @@ test("categoryTree is derived, sorted, and does not mutate flat taxonomy", () =>
   const taxonomy = defaultTaxonomy();
   const before = structuredClone(taxonomy);
   const tree = buildCategoryTree(taxonomy);
-  assert.equal(tree.length, 4);
-  assert.equal(tree.reduce((count, item) => count + item.subcategories.length, 0), 17);
+  assert.equal(tree.length, 5);
+  assert.equal(tree.reduce((count, item) => count + item.subcategories.length, 0), 22);
   assert.deepEqual(taxonomy, before);
   assert.equal(Object.hasOwn(taxonomy.categories[0], "subcategories"), false);
 });

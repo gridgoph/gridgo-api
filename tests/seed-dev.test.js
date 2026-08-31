@@ -6,6 +6,7 @@ import { loadStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
 import { ADDITIONAL_DEV_SHOPS, LOVIS_CATEGORY_LINES, LOVIS_DEV_SHOP, LOVIS_LISTINGS, MARK_DEV_CLIENT, MARK_DEV_RIDER, PLACEHOLDER_JPEG, PRIVILEGED_DEV_ACCOUNTS, seedDevelopmentShops, starterSampleBytes } from "../src/seed-dev.js";
 import { catalogItemBlockers } from "../src/supplier-catalog.js";
+import { defaultListingStarters } from "../src/listing-starters.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -98,9 +99,20 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
     LOVIS_CATEGORY_LINES.length,
   );
   assert.equal(first.catalogItems.filter((row) => row.supplierId === shop.id).length, LOVIS_LISTINGS.length);
+  // Three marketing listings, and the whole document board that gave the
+  // fifth category its reason to exist.
   assert.deepEqual(
     first.catalogItems.filter((row) => row.supplierId === shop.id).map((row) => row.subcategoryCode).sort(),
-    ["brochures", "business_cards", "flyers"],
+    [
+      "binding_hardbound",
+      "booklets",
+      "brochures",
+      "business_cards",
+      "document_printing",
+      "flyers",
+      "id_photos",
+      "risograph",
+    ],
   );
 
   // A real starter photograph reaches storage at its real size, and the listing
@@ -276,4 +288,76 @@ test("a measured listing states the unit it is measured in", () => {
       }
     }
   }
+});
+
+
+test("the pilot board exercises every pricing shape the catalogue can hold", () => {
+  // Six units, two shapes of speed, volume breaks, and both kinds of minimum.
+  // A shape nothing seeds is a shape nothing exercises, and the measured path
+  // was unreachable in development for exactly that reason until the master
+  // list went on the board.
+  const listings = [
+    ...LOVIS_LISTINGS,
+    ...ADDITIONAL_DEV_SHOPS.flatMap((shop) => shop.services.flatMap((service) => service.listings)),
+  ];
+
+  // The unit a listing actually ships with: its own if it states one, and the
+  // starter's template otherwise. Asserting only the overrides would miss
+  // document printing, which is per-page because its starter says so.
+  const starters = new Map(defaultListingStarters().map((starter) => [starter.id, starter]));
+  const units = new Set(
+    listings.map(
+      (listing) => listing.pricingUnit || starters.get(listing.starterId)?.defaultPricingUnit || "per_unit",
+    ),
+  );
+  for (const unit of ["per_unit", "per_package", "per_page", "per_area", "per_length", "whole_job"]) {
+    assert.equal(units.has(unit), true, `a listing priced ${unit}`);
+  }
+
+  // Lovis prices hardbound entirely by speed: four prices for the same book,
+  // not a base price and three surcharges.
+  const hardbound = listings.find((listing) => listing.starterId === "lst_binding_hardbound");
+  assert.equal(hardbound.speedTiers.length, 4);
+  assert.ok(hardbound.speedTiers.every((tier) => tier.priceMinor != null));
+
+  // Pins On quotes the other shape: a flat fee on the order, whatever its size.
+  const pins = listings.find((listing) => listing.starterId === "lst_corporate_giveaways");
+  assert.ok(pins.speedTiers.every((tier) => tier.surchargeMinor != null && tier.priceMinor == null));
+
+  // Polymedia's signage is the one job with no per-piece figure at all.
+  const signage = listings.find((listing) => listing.starterId === "lst_business_store_signages");
+  assert.equal(signage.pricingUnit, "whole_job");
+  assert.equal(signage.priceMinor, 540_000);
+});
+
+test("Lovis's document board is the master list's document services, whole", () => {
+  // The largest single price list in the catalogue, and the reason Documents
+  // & Publications exists. Losing one of these silently would take a whole
+  // trade off the board.
+  const starters = LOVIS_LISTINGS.map((listing) => listing.starterId);
+  for (const starter of [
+    "lst_document_printing",
+    "lst_booklets",
+    "lst_risograph",
+    "lst_binding_hardbound",
+    "lst_id_photos",
+    // Brochures and business cards are on Lovis's document price list too,
+    // but they are marketing collateral and stay in that category.
+    "lst_brochures",
+    "lst_business_cards",
+  ]) {
+    assert.ok(starters.includes(starter), `Lovis lists ${starter}`);
+  }
+
+  const document = LOVIS_LISTINGS.filter(
+    (listing) => listing.serviceId === "svc_lovis_document_publication",
+  );
+  assert.equal(document.length, 5);
+
+  // Priced the way the shop quotes it: PHP 2.00 a page, PHP 1.25 a booklet
+  // page, PHP 400 a ream of 500.
+  const byStarter = Object.fromEntries(LOVIS_LISTINGS.map((listing) => [listing.starterId, listing]));
+  assert.equal(byStarter.lst_document_printing.priceMinor, 200);
+  assert.equal(byStarter.lst_booklets.priceMinor, 125);
+  assert.equal(byStarter.lst_risograph.priceMinor, 40_000);
 });
