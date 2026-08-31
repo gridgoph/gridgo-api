@@ -414,7 +414,10 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
       // Fewer than half the shops that could do this work at all. A first
       // possible day usually has exactly one shop behind it, and saying so
       // lets a client spend a day to get a choice back.
-      state: reachable === 0 ? "cannot" : reachable * 2 < promises.length ? "tight" : "open",
+      // Half or fewer, not strictly fewer than half: with two shops, one
+      // available is exactly the narrow day this is for, and a strict test
+      // never called it.
+      state: reachable === 0 ? "cannot" : reachable * 2 <= promises.length ? "tight" : "open",
     });
   }
 

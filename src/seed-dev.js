@@ -1365,25 +1365,28 @@ export async function seedDevelopmentShops(database, {
  */
 const DEV_QUEUE = [
   // Lovis runs 2,000 pages a day. A full Thursday, a busy Friday.
-  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies" },
-  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts" },
-  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets" },
-  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 600, title: "Exam papers" },
+  // `estimatedHours` is press time, not the promise. Without it every queued
+  // job is charged the listing's whole turnaround, and four document runs
+  // became a month of queue that made flyers unorderable.
+  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies", estimatedHours: 4 },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts", estimatedHours: 5 },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets", estimatedHours: 2 },
+  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 600, title: "Exam papers", estimatedHours: 3 },
 
   // Polymedia bills 120 square feet a day.
-  { supplierId: "user_polymedia", inDays: 1, quantity: 45, title: "Storefront tarpaulin" },
-  { supplierId: "user_polymedia", inDays: 4, quantity: 120, title: "Campaign banners, set of six" },
-  { supplierId: "user_polymedia", inDays: 9, quantity: 30, title: "Window decals" },
+  { supplierId: "user_polymedia", inDays: 1, quantity: 45, title: "Storefront tarpaulin", estimatedHours: 6 },
+  { supplierId: "user_polymedia", inDays: 4, quantity: 120, title: "Campaign banners, set of six", estimatedHours: 12 },
+  { supplierId: "user_polymedia", inDays: 9, quantity: 30, title: "Window decals", estimatedHours: 4 },
 
   // Jopal presses 40 garments a day.
-  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys" },
-  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos" },
+  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys", estimatedHours: 24 },
+  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos", estimatedHours: 10 },
 
   // Pins On makes 70 pins a day.
-  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins" },
+  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins", estimatedHours: 8 },
 
   // Dara plots 40 sheets a day.
-  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set" },
+  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set", estimatedHours: 6 },
 ];
 
 /** The local day `offset` days from now, as an ISO instant at noon. */
@@ -1413,6 +1416,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
         quantity: entry.quantity,
         promisedDate,
         deadline: promisedDate,
+        estimatedHours: entry.estimatedHours,
         payoutHold: false,
         moneyModelVersion: 3,
         createdAt: at,
