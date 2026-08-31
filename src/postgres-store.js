@@ -35,7 +35,8 @@ const TABLES = [
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at"] },
-  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "version", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "schedule", "version", "updated_at"] },
+  { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
   { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
@@ -123,6 +124,7 @@ export function emptyStore() {
     cartLines: [],
     orders: [],
     orderJobs: [],
+    shopReviews: [],
     orderLineItems: [],
     orderLineItemOptions: [],
     jobQaChecklist: [],
@@ -194,7 +196,20 @@ function rowsFromStore(store) {
     });
   }
   for (const profile of (store.supplierProfiles || [])) {
-    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), version: profile.version || 1, updated_at: profile.updatedAt });
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
+  }
+  for (const review of (store.shopReviews || [])) {
+    rows.shop_reviews.push({
+      id: review.id,
+      order_id: review.orderId,
+      supplier_id: review.supplierId,
+      client_id: review.clientId,
+      quality_stars: review.qualityStars,
+      speed_stars: review.speedStars,
+      value_stars: review.valueStars,
+      comment: review.comment ?? null,
+      created_at: review.createdAt,
+    });
   }
   for (const terms of (store.supplierPaymentTerms || [])) {
     rows.supplier_payment_terms.push({
@@ -625,8 +640,22 @@ export async function loadStore(database) {
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
     const item = { userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, version: row.version || 1, updatedAt: row.updated_at };
     if (row.is_closed) item.isClosed = true;
+    // Absent means the shop has not set its own hours and is scheduled against
+    // the platform default -- never "open at all times".
+    if (row.schedule) item.schedule = row.schedule;
     return item;
   });
+  store.shopReviews = orderedBy(loaded.shop_reviews, "supplier_id", "created_at", "id").map((row) => ({
+    id: row.id,
+    orderId: row.order_id,
+    supplierId: row.supplier_id,
+    clientId: row.client_id,
+    qualityStars: row.quality_stars,
+    speedStars: row.speed_stars,
+    valueStars: row.value_stars,
+    comment: row.comment,
+    createdAt: row.created_at,
+  }));
   store.supplierPaymentTerms = orderedBy(loaded.supplier_payment_terms, "supplier_id").map((row) => ({
     supplierId: row.supplier_id,
     deliveryDownpaymentRateBps: row.delivery_downpayment_rate_bps,

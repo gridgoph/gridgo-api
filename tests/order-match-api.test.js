@@ -156,7 +156,7 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
 
   assert.equal((await request(instance.api, "/me/preferences")).status, 401);
   const preferences = await request(instance.api, "/me/preferences", {
-    method: "PUT", subject: "clerk_client", body: { ranking: ["quality", "speed", "distance"] },
+    method: "PUT", subject: "clerk_client", body: { ranking: ["quality", "speed", "cost", "distance"] },
   });
   assert.equal(preferences.status, 200, JSON.stringify(preferences.body));
 

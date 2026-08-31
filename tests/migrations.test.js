@@ -76,6 +76,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786896000000_client_order_match",
         "1786899600000_order_match_payment_plan",
         "1786903200000_client_account_profile_version",
+  "1786906800000_match_deadline_schedule_reviews",
       ],
     );
     await client.query(`
@@ -127,6 +128,24 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       `),
       (error) => error.code === "23514" && error.constraint === "client_match_preferences_ranking_check",
     );
+  // Cost is the fourth factor now, so the old three-factor ranking is no
+  // longer a valid one to save.
+  await assert.rejects(
+    client.query(`
+      INSERT INTO client_match_preferences (client_id, ranking, version, updated_at)
+      VALUES ('multi_role_shop', ARRAY['quality','speed','distance'], 1, now())
+    `),
+    (error) => error.code === "23514" && error.constraint === "client_match_preferences_ranking_check",
+  );
+  assert.equal(supplierProfileColumns.has("schedule"), true);
+  assert.notEqual((await client.query("SELECT to_regclass('shop_reviews') AS t")).rows[0].t, null);
+  const orderDateColumns = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'orders'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  for (const column of ["ready_by", "ready_at"]) {
+    assert.equal(orderDateColumns.has(column), true, `${column} should exist on orders`);
+  }
 
     await client.query(`
       INSERT INTO orders
@@ -139,6 +158,13 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  assert.equal((await client.query("SELECT to_regclass('shop_reviews') AS t")).rows[0].t, null);
+  assert.equal((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_profiles' AND column_name = 'schedule'",
+    [schema],
+  )).rows.length, 0);
+
+  await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'version'",
       [schema],

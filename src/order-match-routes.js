@@ -21,7 +21,21 @@ import {
   validatePreferenceRanking,
 } from "./order-match.js";
 
-const DEFAULT_RANKING = Object.freeze(["quality", "speed", "distance"]);
+const DEFAULT_RANKING = Object.freeze(["quality", "speed", "cost", "distance"]);
+
+/**
+ * A ranking saved before cost existed is three factors long and can no longer
+ * be matched on. Carry the order the client chose and append whatever is
+ * missing, rather than throwing away a choice they made deliberately.
+ */
+function completeRanking(stored) {
+  const kept = Array.isArray(stored) ? stored.filter((factor) => DEFAULT_RANKING.includes(factor)) : [];
+  const ordered = [...new Set(kept)];
+  for (const factor of DEFAULT_RANKING) {
+    if (!ordered.includes(factor)) ordered.push(factor);
+  }
+  return ordered;
+}
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
 
 function fail(status, code, message, details = {}) {
@@ -82,10 +96,22 @@ function preferenceFor(store, userId) {
   return (store.clientPreferences || []).find((row) => row.userId === userId) || null;
 }
 
+/**
+ * What the client is allowed to see of a match.
+ *
+ * The shop's own date never crosses this line. A client who can see both dates
+ * can see the allowance, and an allowance that is visible is an allowance that
+ * gets argued about -- so the padded promise is the only date they are given.
+ */
+function clientFacingMatch(match) {
+  const { shopReadyBy: _shopReadyBy, ...clientFacing } = match;
+  return clientFacing;
+}
+
 function publicPreference(store, userId) {
   const stored = preferenceFor(store, userId);
   return {
-    ranking: [...(stored?.ranking || DEFAULT_RANKING)],
+    ranking: completeRanking(stored?.ranking),
     version: stored?.version || 0,
     updatedAt: stored?.updatedAt || null,
   };
@@ -550,13 +576,18 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     }
     return {
       status: 200,
-      body: matchShop(store, {
+      body: clientFacingMatch(matchShop(store, {
         subcategoryCode: body.subcategoryCode,
         ranking: body.ranking || publicPreference(store, user.id).ranking,
         dropoff: addressPoint(store, user.id, body),
         excludedSupplierIds: body.excludedSupplierIds || [],
         preferredSupplierId: preferredSupplierForCart(store, user, body.cartId),
-      }),
+        // The date the client gave before any shop was chosen. Without it the
+        // match cannot filter, and a shop that misses it is only found at
+        // checkout.
+        deadline: body.deadline ?? null,
+        now: now(),
+      })),
       mutated: false,
     };
   }

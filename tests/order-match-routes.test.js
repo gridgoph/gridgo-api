@@ -81,12 +81,12 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   const call = caller(store, client);
 
   const defaults = await call("GET", "/me/preferences");
-  assert.deepEqual(defaults.body.preferences.ranking, ["quality", "speed", "distance"]);
-  const saved = await call("PUT", "/me/preferences", { ranking: ["distance", "quality", "speed"] });
+  assert.deepEqual(defaults.body.preferences.ranking, ["quality", "speed", "cost", "distance"]);
+  const saved = await call("PUT", "/me/preferences", { ranking: ["distance", "quality", "cost", "speed"] });
   assert.equal(saved.status, 200);
-  assert.deepEqual(saved.body.preferences.ranking, ["distance", "quality", "speed"]);
+  assert.deepEqual(saved.body.preferences.ranking, ["distance", "quality", "cost", "speed"]);
   await assert.rejects(
-    call("PUT", "/me/preferences", { ranking: ["quality", "quality", "speed"] }),
+    call("PUT", "/me/preferences", { ranking: ["quality", "quality", "cost", "speed"] }),
     (error) => error.code === "invalid_preference_ranking",
   );
 

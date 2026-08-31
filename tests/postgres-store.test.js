@@ -38,7 +38,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     shop: { lat: 7.064, lng: 125.6085, label: "Shop" }, pickupAvailable: true,
     isClosed: true, version: 1, updatedAt: AT,
   }];
-  store.clientPreferences = [{ userId: "user_client", ranking: ["quality", "speed", "distance"], version: 1, updatedAt: AT }];
+  store.clientPreferences = [{ userId: "user_client", ranking: ["quality", "speed", "cost", "distance"], version: 1, updatedAt: AT }];
   store.clientAddresses = [{
     id: "addr_one", clientId: "user_client", label: "Home", addressLine: "Bajada, Davao City",
     point: { lat: 7.0731, lng: 125.6128 }, isDefault: true, version: 1, createdAt: AT, updatedAt: AT,
