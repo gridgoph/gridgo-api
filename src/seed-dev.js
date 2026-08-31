@@ -15,7 +15,11 @@ export const LOVIS_DEV_SHOP = Object.freeze({
   shopName: "Lovis Printshop",
   contactName: "Felycia",
   phone: "+639171234567",
-  shop: { lat: 7.0731, lng: 125.6128, label: "Bajada, Davao City" },
+  shop: {
+    lat: 7.086767242919336,
+    lng: 125.61613995306057,
+    label: "Iñigo, Corner Cervantes St, Poblacion, Davao City",
+  },
 });
 
 /** Local development client. Must not be consumed as an extra shop. */
@@ -80,55 +84,47 @@ export function starterSampleBytes(starterId) {
 }
 
 const DESIGN_FORMATS = ["pdf", "png", "jpeg", "psd", "canva_link", "other_link"];
-const MODEL_FORMATS = ["pdf", "png", "jpeg", "3mf", "stl", "other_link"];
 
-const CATEGORY_LINES = [
+/**
+ * Lovis is a document shop: everyday printing, booklets, brochures, cards,
+ * binding and ID photos. It was seeded selling tarpaulins, jerseys, plaques and
+ * 3D prints, which made one shop the competitor in every subcategory on the
+ * platform and matching a formality.
+ *
+ * Only part of its real board can be sold yet. Document printing, booklets,
+ * hardbound binding, risograph and ID pictures -- most of its price list, and
+ * its highest-frequency work -- have no subcategory in the taxonomy to sit
+ * under. That gap is a product decision, not a seeding one.
+ */
+export const LOVIS_CATEGORY_LINES = [
   {
     id: "svc_lovis_marketing_collateral",
     categoryCode: "marketing_collateral",
     formats: DESIGN_FORMATS,
-    referenceRateMinor: 45000,
-    turnaroundHours: 24,
-  },
-  {
-    id: "svc_lovis_corporate_event_merch",
-    categoryCode: "corporate_event_merch",
-    formats: DESIGN_FORMATS,
-    referenceRateMinor: 28000,
-    turnaroundHours: 72,
-  },
-  {
-    id: "svc_lovis_recognition_awards_signage",
-    categoryCode: "recognition_awards_signage",
-    formats: DESIGN_FORMATS,
-    referenceRateMinor: 35000,
-    turnaroundHours: 48,
-  },
-  {
-    id: "svc_lovis_specialized_prototyping",
-    categoryCode: "specialized_prototyping",
-    formats: MODEL_FORMATS,
-    referenceRateMinor: 80000,
-    turnaroundHours: 72,
+    referenceRateMinor: 40000,
+    turnaroundHours: 12,
   },
 ];
 
-const PLACEHOLDER_LISTINGS = [
-  { starterId: "lst_tarpaulins_outdoor_banners", serviceId: "svc_lovis_marketing_collateral", priceMinor: 45000 },
-  { starterId: "lst_flyers", serviceId: "svc_lovis_marketing_collateral", priceMinor: 2500 },
-  { starterId: "lst_brochures", serviceId: "svc_lovis_marketing_collateral", priceMinor: 8000 },
-  { starterId: "lst_business_cards", serviceId: "svc_lovis_marketing_collateral", priceMinor: 35000 },
-  { starterId: "lst_posters_standees", serviceId: "svc_lovis_marketing_collateral", priceMinor: 12000 },
-  { starterId: "lst_stickers_packaging_labels", serviceId: "svc_lovis_marketing_collateral", priceMinor: 5000 },
-  { starterId: "lst_custom_apparel", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 28000 },
-  { starterId: "lst_lanyards_id_accessories", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 1500 },
-  { starterId: "lst_drinkware", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 4500 },
-  { starterId: "lst_corporate_giveaways", serviceId: "svc_lovis_corporate_event_merch", priceMinor: 2000 },
-  { starterId: "lst_certificates_diplomas", serviceId: "svc_lovis_recognition_awards_signage", priceMinor: 15000 },
-  { starterId: "lst_plaques_trophies", serviceId: "svc_lovis_recognition_awards_signage", priceMinor: 25000 },
-  { starterId: "lst_medals_ribbons", serviceId: "svc_lovis_recognition_awards_signage", priceMinor: 8000 },
-  { starterId: "lst_three_d_printing_scale_models", serviceId: "svc_lovis_specialized_prototyping", priceMinor: 150000 },
-  { starterId: "lst_blueprint_cad_plotting", serviceId: "svc_lovis_specialized_prototyping", priceMinor: 8000 },
+export const LOVIS_LISTINGS = [
+  {
+    starterId: "lst_flyers",
+    serviceId: "svc_lovis_marketing_collateral",
+    priceMinor: 40_000, // PHP 4.00 a sheet in colour, a pack of 100
+    description: "Single-sheet colour printing on 70gsm or 80gsm bond. Short, A4 and long.",
+  },
+  {
+    starterId: "lst_brochures",
+    serviceId: "svc_lovis_marketing_collateral",
+    priceMinor: 50_000, // PHP 5.00 front only, a pack of 100
+    description: "Bond or C2S brochures from 120 to 160gsm, matte as standard. Bi-fold and tri-fold.",
+  },
+  {
+    starterId: "lst_business_cards",
+    serviceId: "svc_lovis_marketing_collateral",
+    priceMinor: 50_000, // PHP 5.00 base, a pack of 100
+    description: "Calling card stock at 240gsm or 300gsm, sharp or round edge.",
+  },
 ];
 
 function upsert(list, key, record) {
@@ -231,7 +227,7 @@ export async function seedDevelopmentShop(database, {
   const clerkUser = await resolveDevClerkUser(LOVIS_DEV_SHOP.email, clerkBackend);
   const person = clerkClientProfile(clerkUser);
   const at = now();
-  const listingPhotos = PLACEHOLDER_LISTINGS.map((listing) => {
+  const listingPhotos = LOVIS_LISTINGS.map((listing) => {
     const body = starterSampleBytes(listing.starterId);
     return {
       ...listing,
@@ -318,7 +314,7 @@ export async function seedDevelopmentShop(database, {
       });
     }
 
-    for (const line of CATEGORY_LINES) {
+    for (const line of LOVIS_CATEGORY_LINES) {
       upsert(store.supplierServices, "id", {
         id: line.id,
         supplierId: user.id,
@@ -386,9 +382,9 @@ export async function seedDevelopmentShop(database, {
         supplierServiceId: listing.serviceId,
         subcategoryCode: starter.subcategoryCode,
         name: starter.name,
-        // No shop name here. A client reads this under a GRIDGO label, so a
-      // description signed by the press is the one place the anonymity leaks.
-      description: "Sample listing. Replace this with your own art and wording when you are ready.",
+        // Never the shop's name. A client reads this under a GRIDGO label, so
+        // a description signed by the press is where the anonymity leaks.
+        description: listing.description,
         basePriceMinor: listing.priceMinor,
         pricingUnit: starter.defaultPricingUnit || "per_unit",
         packageQty: starter.defaultPackageQty ?? null,
@@ -457,11 +453,16 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
     slug: "dara_blueprint",
     email: "felycia123@proton.me",
     shopName: "Dara Blueprint",
-    shop: { lat: 7.0785, lng: 125.6135, label: "Bajada, Davao City" },
+    shop: {
+      lat: 7.061391404845615,
+      lng: 125.59319894381005,
+      label: "Camia St, Talomo, Davao City",
+    },
     services: [
       {
         categoryCode: "specialized_prototyping",
         turnaroundHours: 24,
+        formats: ["pdf"], // "1. FILE & FORMAT REQUIREMENTS -- PDF only"
         listings: [{
           starterId: "lst_blueprint_cad_plotting",
           priceMinor: 6_500, // PHP 65.00, CAD plotting at 20x30 / A2
@@ -474,7 +475,11 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
     slug: "jopal_davao",
     email: "felycia123@polynomial-princess.com",
     shopName: "Jopal Davao",
-    shop: { lat: 7.0655, lng: 125.6065, label: "J. Luna Street, Davao City" },
+    shop: {
+      lat: 7.0729598559850615,
+      lng: 125.62065833216744,
+      label: "Door 2 Calderon Bldg., J. Luna St, Poblacion, Davao City",
+    },
     services: [
       {
         categoryCode: "corporate_event_merch",
@@ -492,13 +497,29 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
           },
         ],
       },
+      {
+        // Stickers are marketing collateral, not merchandise, so they need
+        // their own line -- a listing can only sit under a service line
+        // declaring the category its subcategory belongs to.
+        categoryCode: "marketing_collateral",
+        turnaroundHours: 120,
+        listings: [{
+          starterId: "lst_stickers_packaging_labels",
+          priceMinor: 75_000, // PHP 750.00 a metre of 11x39in UV sticker
+          description: "UV stickers by the metre. Ready-to-print PNG or JPG, RGB or CMYK.",
+        }],
+      },
     ],
   },
   {
     slug: "pins_on",
     email: "felycia123@lumeya-ai.com",
     shopName: "Pins On",
-    shop: { lat: 7.0512, lng: 125.5985, label: "Matina, Davao City" },
+    shop: {
+      lat: 7.0862901948541035,
+      lng: 125.61505126462532,
+      label: "Manuel Bldg., Iñigo St, Poblacion, Davao City",
+    },
     services: [
       {
         categoryCode: "corporate_event_merch",
@@ -518,7 +539,11 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
     slug: "polymedia",
     email: "felycia123@talasoraprime.com",
     shopName: "Polymedia Printing Services",
-    shop: { lat: 7.0891, lng: 125.6122, label: "Lanang, Davao City" },
+    shop: {
+      lat: 7.088551681322852,
+      lng: 125.61598902558961,
+      label: "Corner New Burgos, Nicasio Torres St, Barrio Obrero, Davao City",
+    },
     services: [
       {
         categoryCode: "marketing_collateral",
@@ -672,7 +697,9 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
         updatedAt: at,
       });
       store.supplierServiceFileFormats = store.supplierServiceFileFormats.filter((row) => row.supplierServiceId !== serviceId);
-      store.supplierServiceFileFormats.push(...DESIGN_FORMATS.map((formatCode) => ({ supplierServiceId: serviceId, formatCode })));
+      store.supplierServiceFileFormats.push(
+        ...(service.formats || DESIGN_FORMATS).map((formatCode) => ({ supplierServiceId: serviceId, formatCode })),
+      );
     }
 
     for (const listing of uploaded) {

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
 import { loadStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
-import { ADDITIONAL_DEV_SHOPS, LOVIS_DEV_SHOP, MARK_DEV_CLIENT, MARK_DEV_RIDER, PLACEHOLDER_JPEG, PRIVILEGED_DEV_ACCOUNTS, seedDevelopmentShops, starterSampleBytes } from "../src/seed-dev.js";
+import { ADDITIONAL_DEV_SHOPS, LOVIS_CATEGORY_LINES, LOVIS_DEV_SHOP, LOVIS_LISTINGS, MARK_DEV_CLIENT, MARK_DEV_RIDER, PLACEHOLDER_JPEG, PRIVILEGED_DEV_ACCOUNTS, seedDevelopmentShops, starterSampleBytes } from "../src/seed-dev.js";
 import { catalogItemBlockers } from "../src/supplier-catalog.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -91,17 +91,29 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
   assert.equal(shop.verificationStatus, "approved");
   assert.equal(shop.clerkUserId, "clerk_lovis_dev");
   assert.equal(first.supplierProfiles.find((row) => row.userId === shop.id).shopName, "Lovis Printshop");
-  assert.equal(first.supplierServices.filter((row) => row.supplierId === shop.id && row.state === "live").length, 4);
-  assert.ok(first.catalogItems.filter((row) => row.supplierId === shop.id).length >= 14);
-  const tarpBytes = starterSampleBytes("lst_tarpaulins_outdoor_banners");
-  assert.ok(tarpBytes.length > PLACEHOLDER_JPEG.length);
-  assert.equal(tarpBytes[0], 0xff);
-  assert.equal(tarpBytes[1], 0xd8);
-  assert.ok(uploaded.some((row) => row.key.endsWith("lst_tarpaulins_outdoor_banners.jpg") && row.size === tarpBytes.length));
-  const tarpPhoto = first.catalogItemPhotos.find((row) => row.catalogItemId === "sci_lovis_tarpaulins_outdoor_banners");
-  assert.equal(first.files.find((file) => file.fileId === tarpPhoto.fileId).size, tarpBytes.length);
-  const tarp = first.catalogItems.find((row) => row.id === "sci_lovis_tarpaulins_outdoor_banners");
-  assert.equal(catalogItemBlockers(first, tarp).join(","), "");
+  // Lovis is a document shop. Seeding it across every category made one shop
+  // the competitor in every subcategory, and matching a formality.
+  assert.equal(
+    first.supplierServices.filter((row) => row.supplierId === shop.id && row.state === "live").length,
+    LOVIS_CATEGORY_LINES.length,
+  );
+  assert.equal(first.catalogItems.filter((row) => row.supplierId === shop.id).length, LOVIS_LISTINGS.length);
+  assert.deepEqual(
+    first.catalogItems.filter((row) => row.supplierId === shop.id).map((row) => row.subcategoryCode).sort(),
+    ["brochures", "business_cards", "flyers"],
+  );
+
+  // A real starter photograph reaches storage at its real size, and the listing
+  // it lands on is board-ready.
+  const sampleBytes = starterSampleBytes("lst_flyers");
+  assert.ok(sampleBytes.length > PLACEHOLDER_JPEG.length);
+  assert.equal(sampleBytes[0], 0xff);
+  assert.equal(sampleBytes[1], 0xd8);
+  assert.ok(uploaded.some((row) => row.key.endsWith("lst_flyers.jpg") && row.size === sampleBytes.length));
+  const samplePhoto = first.catalogItemPhotos.find((row) => row.catalogItemId === "sci_lovis_flyers");
+  assert.equal(first.files.find((file) => file.fileId === samplePhoto.fileId).size, sampleBytes.length);
+  const flyers = first.catalogItems.find((row) => row.id === "sci_lovis_flyers");
+  assert.equal(catalogItemBlockers(first, flyers).join(","), "");
   assert.equal(second.users.filter((user) => user.email === LOVIS_DEV_SHOP.email).length, 1);
   assert.equal(second.supplierServices.filter((row) => row.supplierId === shop.id).length, first.supplierServices.filter((row) => row.supplierId === shop.id).length);
   assert.equal(second.catalogItems.filter((row) => row.supplierId === shop.id).length, first.catalogItems.filter((row) => row.supplierId === shop.id).length);
@@ -137,6 +149,17 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
     2,
   );
   assert.equal(second.supplierProfiles.filter((profile) => shopNames.includes(profile.shopName)).length, shopNames.length);
+
+  // Two shops have to want the same work somewhere, or every match has one
+  // candidate and the ranking never runs. Stickers is that place.
+  const bySubcategory = new Map();
+  for (const item of first.catalogItems.filter((row) => row.active !== false)) {
+    bySubcategory.set(item.subcategoryCode, (bySubcategory.get(item.subcategoryCode) || new Set()).add(item.supplierId));
+  }
+  assert.ok(
+    [...bySubcategory.values()].some((suppliers) => suppliers.size > 1),
+    "at least one subcategory needs two shops or matching is a formality",
+  );
 
   // The client reads a listing under a GRIDGO label, so a description signed by
   // the press is where the anonymity leaks. It has leaked twice.
