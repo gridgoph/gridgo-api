@@ -978,3 +978,55 @@ test("bulk breaks and speeds are replaced as a set, and refuse a rule that canno
     );
   }
 });
+
+test("a shop can price an extra as a multiple rather than a flat amount", async () => {
+  // "Back-to-back, x2 the price" is how Lovis quotes it, and as a flat amount
+  // it has to be re-entered by hand every time the base price moves -- which
+  // in practice means it stops being right. The catalogue and the pricer have
+  // been able to hold a multiplier for a while; a shop could not set one.
+  const store = fixture();
+  const group = store.catalogOptionGroups[0];
+  const call = (method, path, body) => routeSupplierCatalog({
+    req: { method, headers: {} },
+    url: new URL(`http://127.0.0.1${path}`),
+    store,
+    user: { id: "supplier", role: "supplier", verificationStatus: "approved" },
+    readBody: async () => body,
+    id: (prefix) => `${prefix}_new`,
+    now: () => AT,
+    audit: () => {},
+  });
+
+  const created = await call("POST", `/me/catalog-option-groups/${group.id}/options`, {
+    label: "Back-to-back",
+    priceMultiplierBps: 20_000,
+    expectedVersion: group.version,
+    sortOrder: 9,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const stored = store.catalogOptions.find((option) => option.label === "Back-to-back");
+  assert.equal(stored.priceMultiplierBps, 20_000);
+  assert.equal(stored.priceModifierMinor, 0);
+
+  // An extra multiplies or it adds. Both at once is a contradiction, and
+  // saying so is better than a constraint violation the shop cannot read.
+  await assert.rejects(
+    call("POST", `/me/catalog-option-groups/${group.id}/options`, {
+      label: "Confused",
+      priceMultiplierBps: 20_000,
+      priceModifierMinor: 500,
+      expectedVersion: store.catalogOptionGroups[0].version,
+      sortOrder: 10,
+    }),
+    (error) => error.status === 400 && /multiplies the price or adds to it/.test(error.message),
+  );
+
+  // And a shop can take the multiplier off again, back to a flat amount.
+  const cleared = await call(
+    "PATCH",
+    `/me/catalog-option-groups/${group.id}/options/${stored.id}`,
+    { priceMultiplierBps: null, priceModifierMinor: 500, expectedVersion: store.catalogOptionGroups[0].version },
+  );
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  assert.equal(store.catalogOptions.find((option) => option.id === stored.id).priceMultiplierBps, null);
+});

@@ -303,14 +303,38 @@ function shopPoint(value) {
   return { lat, lng, label };
 }
 
+/**
+ * An add-on that multiplies the price rather than adding to it.
+ *
+ * Basis points, so a shop's "x2 the price" is 20000 and no float reaches the
+ * money. A listing's back-to-back doubles whatever the base is now, which a
+ * flat amount cannot do -- it has to be re-entered by hand every time the
+ * price moves, and in practice is not.
+ *
+ * An option multiplies or it adds, never both, and the database enforces the
+ * same rule. Refusing here is what turns a contradiction into a sentence the
+ * shop can act on rather than a constraint violation.
+ */
+function multiplierInput(option) {
+  if (option.priceMultiplierBps == null) return null;
+  const bps = integer(option.priceMultiplierBps, "priceMultiplierBps", { min: 1, max: 1_000_000 });
+  if (option.priceModifierMinor) {
+    fail(400, "invalid_catalog_options", "An extra either multiplies the price or adds to it, not both. Clear one of them.", {
+      field: "priceMultiplierBps",
+    });
+  }
+  return bps;
+}
+
 function optionInput(value, service, store) {
   const option = catalogRecord(value, { code: "invalid_catalog_options", field: "option" });
   const label = requiredText(option.label, "label", 100);
   const priceModifierMinor = option.priceModifierMinor == null ? 0 : integer(option.priceModifierMinor, "priceModifierMinor");
+  const priceMultiplierBps = multiplierInput(option);
   const sortOrder = integer(option.sortOrder ?? 0, "sortOrder", { min: 0, max: 19 });
   const active = option.active == null ? true : booleanValue(option.active, "active");
   const specBinding = option.specBinding === undefined ? undefined : validateSpecBinding(store, service, option.specBinding);
-  return { label, priceModifierMinor, sortOrder, active, specBinding };
+  return { label, priceModifierMinor, priceMultiplierBps, sortOrder, active, specBinding };
 }
 
 /**
@@ -1064,6 +1088,16 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         option.label = label;
       }
       if (body.priceModifierMinor != null) option.priceModifierMinor = integer(body.priceModifierMinor, "priceModifierMinor");
+      if (body.priceMultiplierBps !== undefined) {
+        // Judged against what the option will hold after this request, not
+        // what it held before: a shop switching an add-on from a flat amount
+        // to a multiplier sends both fields in one save.
+        option.priceMultiplierBps = multiplierInput({
+          priceMultiplierBps: body.priceMultiplierBps,
+          priceModifierMinor: option.priceModifierMinor,
+        });
+        if (option.priceMultiplierBps != null) option.priceModifierMinor = 0;
+      }
       if (body.specBinding !== undefined) option.specBinding = validateSpecBinding(store, service, body.specBinding);
       if (body.active != null) option.active = booleanValue(body.active, "active");
       if (body.sortOrder != null) {
