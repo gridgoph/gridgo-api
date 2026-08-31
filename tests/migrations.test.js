@@ -86,6 +86,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786932000000_a_starter_can_offer_a_multiplier",
     "1786935600000_starter_ordering_can_be_reshuffled",
     "1786939200000_retire_the_supplier_proof_loop",
+    "1786942800000_an_order_line_remembers_any_unit",
+    "1786946400000_line_math_understands_measured_units",
       ],
     );
     await client.query(`
@@ -211,6 +213,26 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // The line-math check goes back to insisting a subtotal is always a rate
+  // times a quantity, which no measured line ever is.
+  const lineMath = (await client.query(
+    "SELECT prosrc FROM pg_proc WHERE proname = 'check_order_line_item_math'",
+  )).rows[0]?.prosrc ?? "";
+  assert.equal(lineMath.includes("per_area"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // An order line goes back to recording only the two original units, which
+  // is what made every measured listing unbuyable at the last step.
+  const lineUnits = (await client.query(
+    `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'order_line_items_pricing_unit_snapshot_check'`,
+    [schema],
+  )).rows[0]?.def ?? "";
+  assert.equal(lineUnits.includes("per_area"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
   // The retired order model's two tables come back, empty.
   for (const table of ["proofs", "job_qa_checklist"]) {
     assert.notEqual(

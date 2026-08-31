@@ -117,6 +117,14 @@ test("uses the provisional configurable distance boundaries exactly", () => {
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
 });
 
+test("publicOrderFor always sends a timeline array, even when the row never stored one", () => {
+  const projected = publicOrderFor(
+    { id: "ord-bare", clientId: "client-a", state: "production" },
+    { id: "client-a", role: "client" },
+  );
+  assert.deepEqual(projected.timeline, []);
+});
+
 test("a client collects at GRIDGO's office and is never given the shop's address", () => {
   const shop = { lat: 7.064, lng: 125.6085, label: "Lovis Printshop · Bajada, Davao City" };
   const base = {

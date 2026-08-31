@@ -7,6 +7,8 @@ import { createDatabase } from "./database.js";
 import { createObjectStorage } from "./object-storage.js";
 import { loadStore, saveStore } from "./postgres-store.js";
 import { seedReferenceData } from "./seed.js";
+import { measurementKindFor } from "./pricing.js";
+import { priceCatalogSelection, selectedCatalogPrice } from "./supplier-catalog.js";
 import { defaultTaxonomy } from "./taxonomy.js";
 
 /** Local development shop. Production `npm run seed` never creates this. */
@@ -749,7 +751,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
       {
         categoryCode: "marketing_collateral",
         turnaroundHours: 24,
-        capacityDaily: 120, // square feet a day across both printers
+        capacityDaily: 8, // large-format jobs a day across both printers
         listings: [
           {
             starterId: "lst_tarpaulins_outdoor_banners",
@@ -1374,25 +1376,30 @@ const DEV_QUEUE = [
   // work through -- something waiting on a quality check, something in
   // correction with the client, something already with a rider -- and every
   // screen that reads a state has a case to draw.
-  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies", estimatedHours: 4, state: "supplier_self_qc" },
-  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts", estimatedHours: 5, state: "production" },
-  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets", estimatedHours: 2, state: "needs_qa" },
-  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 600, title: "Exam papers", estimatedHours: 3, state: "needs_qa" },
+  // Quantities are what a client would really ask for, which is not the same
+  // number in every trade: pages for a document, banners for a banner, reams
+  // for a risograph run. A figure that reads as load on a shop's day and as an
+  // order at the same time is one of them wrong -- six hundred reams of exam
+  // paper is a year of work, not a Tuesday.
+  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies", subcategoryCode: "document_printing", estimatedHours: 4, state: "supplier_self_qc" },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts", subcategoryCode: "document_printing", estimatedHours: 5, state: "production" },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets", subcategoryCode: "booklets", estimatedHours: 2, state: "needs_qa" },
+  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 2, title: "Exam papers", subcategoryCode: "risograph", estimatedHours: 3, state: "needs_qa" },
 
   // Polymedia bills 120 square feet a day.
-  { supplierId: "user_polymedia", inDays: 1, quantity: 45, title: "Storefront tarpaulin", estimatedHours: 6, state: "ready_for_dispatch" },
-  { supplierId: "user_polymedia", inDays: 4, quantity: 120, title: "Campaign banners, set of six", estimatedHours: 12, state: "production" },
-  { supplierId: "user_polymedia", inDays: 9, quantity: 30, title: "Window decals", estimatedHours: 4, state: "needs_qa" },
+  { supplierId: "user_polymedia", inDays: 1, quantity: 1, title: "Storefront tarpaulin", subcategoryCode: "tarpaulins_outdoor_banners", estimatedHours: 6, state: "ready_for_dispatch" },
+  { supplierId: "user_polymedia", inDays: 4, quantity: 6, title: "Campaign banners, set of six", subcategoryCode: "tarpaulins_outdoor_banners", estimatedHours: 12, state: "production" },
+  { supplierId: "user_polymedia", inDays: 9, quantity: 8, title: "Window decals", subcategoryCode: "stickers_packaging_labels", estimatedHours: 4, state: "needs_qa" },
 
   // Jopal presses 40 garments a day.
-  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys", estimatedHours: 24, state: "production" },
-  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos", estimatedHours: 10, state: "client_correction" },
+  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys", subcategoryCode: "custom_apparel", estimatedHours: 24, state: "production" },
+  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos", subcategoryCode: "custom_apparel", estimatedHours: 10, state: "client_correction" },
 
   // Pins On makes 70 pins a day.
-  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins", estimatedHours: 8, state: "out_for_delivery" },
+  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins", subcategoryCode: "corporate_giveaways", estimatedHours: 8, state: "out_for_delivery" },
 
   // Dara plots 40 sheets a day.
-  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set", estimatedHours: 6, state: "production" },
+  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set", subcategoryCode: "blueprint_cad_plotting", estimatedHours: 6, state: "production" },
 ];
 
 /** The local day `offset` days from now, as an ISO instant at noon. */
@@ -1403,18 +1410,94 @@ function devQueueDate(offset) {
   return date.toISOString();
 }
 
+/**
+ * How far through paying an order at each state is.
+ *
+ * A shop does not start until the downpayment has cleared, and nothing is
+ * fully paid until it is with a rider. Anything else is a board that reads
+ * plausibly and is wrong about the one thing a client checks.
+ */
+function paymentStageFor(state) {
+  if (state === "needs_qa" || state === "client_correction") return "submitted";
+  if (state === "out_for_delivery" || state === "ready_for_dispatch") return "settled";
+  return "downpayment_cleared";
+}
+
+/** The cheapest choice in every group a listing insists on. */
+function defaultOptionIds(store, item) {
+  return (store.catalogOptionGroups || [])
+    .filter((group) => group.catalogItemId === item.id && group.required)
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+    .map((group) => {
+      const options = (store.catalogOptions || [])
+        .filter((option) => option.optionGroupId === group.id && option.active !== false)
+        .sort((left, right) => left.priceModifierMinor - right.priceModifierMinor);
+      return options[0]?.id;
+    })
+    .filter(Boolean);
+}
+
+/** A measurement, for a listing that cannot be priced without one. */
+function measurementForSeed(item, quantity) {
+  const kind = measurementKindFor(item.pricingUnit || "per_unit");
+  if (kind === "area") return { width: 3_000, height: 4_000 };
+  if (kind === "length") return { length: 3_000 };
+  // Pages times copies, so the quantity a client asked for is the page count.
+  if (kind === "pages") return { pages: Math.max(1, quantity) };
+  return null;
+}
+
 async function seedDevelopmentQueue(database, clientId, now) {
   const at = now();
   await database.transaction(async () => {
     const store = await loadStore(database);
     store.orders ||= [];
+    store.orderLineItems ||= [];
+    store.auditLog ||= [];
+
     for (const [index, entry] of DEV_QUEUE.entries()) {
       // Skipped rather than invented: a shop the seed did not create is not
       // one to hang orders on.
       if (!store.users.some((user) => user.id === entry.supplierId)) continue;
+      const item = (store.catalogItems || []).find(
+        (row) => row.supplierId === entry.supplierId && row.subcategoryCode === entry.subcategoryCode,
+      );
+      if (!item) continue;
+
+      const orderId = `order_dev_queue_${index}`;
       const promisedDate = devQueueDate(entry.inDays);
+      const measurement = measurementForSeed(item, entry.quantity);
+      const optionIds = defaultOptionIds(store, item);
+      // For a listing priced by the page the client's number is the pages, so
+      // one copy; everywhere else it is how many of the thing they wanted.
+      const quantity = measurement?.pages ? 1 : entry.quantity;
+
+      /*
+       Priced through the same engine an order placed in the app goes through.
+
+       A figure typed into the seed would drift from the catalogue the first
+       time a shop changed a price, and the board would quietly be quoting
+       something no listing sells. This asks the listing.
+      */
+      const { selectedOptions } = selectedCatalogPrice(store, item, optionIds);
+      const priced = priceCatalogSelection(store, item, {
+        selectedOptions,
+        quantity,
+        measurement,
+      });
+
+      const itemSubtotalMinor = priced.lineSubtotalMinor;
+      const serviceFeeMinor = Math.round(
+        (itemSubtotalMinor * (store.settings?.serviceFeeRateBps ?? 1_000)) / 10_000,
+      );
+      const deliveryFeeMinor = 5_000;
+      const totalMinor = itemSubtotalMinor + serviceFeeMinor + deliveryFeeMinor;
+      const downpaymentMinor = Math.round((totalMinor * 7_500) / 10_000);
+      const balanceMinor = totalMinor - downpaymentMinor;
+      const stage = paymentStageFor(entry.state);
+
       upsert(store.orders, "id", {
-        id: `order_dev_queue_${index}`,
+        id: orderId,
         clientId,
         supplierId: entry.supplierId,
         state: entry.state,
@@ -1422,16 +1505,132 @@ async function seedDevelopmentQueue(database, clientId, now) {
         quantity: entry.quantity,
         promisedDate,
         deadline: promisedDate,
+        readyBy: promisedDate,
         estimatedHours: entry.estimatedHours,
         payoutHold: false,
         moneyModelVersion: 3,
-        timeline: [{ at, state: "production", by: "system", note: "On the shop's board" }],
+        paymentPlan: "order_match_qr_75_25",
+        supplierSubtotalMinor: itemSubtotalMinor,
+        subtotalMinor: itemSubtotalMinor,
+        serviceFeeMinor,
+        deliveryFeeMinor,
+        totalMinor,
+        onlineDueMinor: totalMinor,
+        supplierPlatformPayoutMinor: itemSubtotalMinor,
+        payments: {
+          initial: {
+            amountMinor: downpaymentMinor,
+            method: "qr_manual",
+            status: stage === "submitted" ? "pending_confirmation" : "confirmed",
+            label: "75% downpayment",
+            reference: `DEV-${index}-INIT`,
+            submittedAt: at,
+            confirmedAt: stage === "submitted" ? null : at,
+          },
+          final_online: {
+            amountMinor: balanceMinor,
+            method: "qr_manual",
+            status: stage === "settled" ? "confirmed" : "not_submitted",
+            label: "25% balance",
+            reference: stage === "settled" ? `DEV-${index}-FINAL` : null,
+            submittedAt: stage === "settled" ? at : null,
+            confirmedAt: stage === "settled" ? at : null,
+          },
+        },
         createdAt: at,
         updatedAt: at,
       });
+
+      // The line the money came from, so an order can say what was ordered
+      // rather than only what it cost.
+      upsert(store.orderLineItems, "id", {
+        id: `oli_dev_queue_${index}`,
+        orderId,
+        sourceCatalogItemId: item.id,
+        sourceSupplierServiceId: item.supplierServiceId,
+        itemNameSnapshot: item.name,
+        descriptionSnapshot: item.description || "",
+        pricingBasisSnapshot: item.pricingUnit || "per_unit",
+        pricingUnitSnapshot: item.pricingUnit || "per_unit",
+        packageQtySnapshot: item.packageQty ?? null,
+        turnaroundHoursSnapshot: item.turnaroundHours ?? null,
+        baseUnitPriceMinor: item.basePriceMinor,
+        // The rate the line was actually charged at, options and any volume
+        // break included. The base price alone leaves the subtotal unable to
+        // be a rate times a count, which is the one thing the database still
+        // checks for a line sold by the piece.
+        effectiveUnitPriceMinor: priced.unitRateMinor,
+        quantity,
+        measurement,
+        lineSubtotalMinor: itemSubtotalMinor,
+        // What the shop takes, snapshotted at the moment of the order — the
+        // platform insists a line records it, because the formats a listing
+        // accepts can change after a job is placed against it.
+        acceptedFormatCodesSnapshot: (store.catalogItemFileFormats || [])
+          .filter((row) => row.catalogItemId === item.id)
+          .map((row) => row.formatCode),
+        structuredSpecSnapshot: {},
+        sortOrder: 0,
+        snapshotFinalized: true,
+        createdAt: at,
+      });
+
+      seedQueueAudit(store, { orderId, clientId, entry, stage, at, index });
     }
     await saveStore(database, store);
   });
+}
+
+/**
+ * The trail an order of this age would really have left.
+ *
+ * Written back from the state it is in rather than forward from nothing: an
+ * order in production has been checked, paid for and started, and each of those
+ * left a line. A board whose orders have no history is one where every screen
+ * that reads a trail has nothing to draw.
+ */
+function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
+  store.auditLog = (store.auditLog || []).filter((row) => row.orderId !== orderId);
+
+  // Looked up rather than named: an audit row points at a real person, and a
+  // guessed id fails at the foreign key rather than quietly.
+  const holder = (role) => (store.userRoleMemberships || []).find((row) => row.role === role)?.userId;
+  const ops = holder("ops_admin");
+  const rider = holder("rider");
+
+  const trail = [["order.placed", clientId, "client"]];
+  if (stage !== "submitted") {
+    if (ops) trail.push(["payment.confirmed", ops, "ops_admin"]);
+    if (ops) trail.push(["order.qa_passed", ops, "ops_admin"]);
+  }
+  if (["production", "supplier_self_qc", "ready_for_dispatch", "out_for_delivery"].includes(entry.state)) {
+    trail.push(["order.production_started", entry.supplierId, "supplier"]);
+  }
+  if (["supplier_self_qc", "ready_for_dispatch", "out_for_delivery"].includes(entry.state)) {
+    trail.push(["order.self_qc", entry.supplierId, "supplier"]);
+  }
+  if (["ready_for_dispatch", "out_for_delivery"].includes(entry.state)) {
+    trail.push(["order.ready_for_dispatch", entry.supplierId, "supplier"]);
+  }
+  if (entry.state === "out_for_delivery" && rider) trail.push(["order.picked_up", rider, "rider"]);
+  if (entry.state === "client_correction" && ops) trail.push(["order.correction_requested", ops, "ops_admin"]);
+
+  for (const [step, [action, actorId, actorRole]] of trail.entries()) {
+    // Spaced backwards from now, so the trail reads in the order it happened
+    // rather than arriving in one instant.
+    const when = new Date(Date.parse(at) - (trail.length - step) * 3_600_000).toISOString();
+    store.auditLog.push({
+      id: `aud_dev_queue_${index}_${step}`,
+      at: when,
+      actorId,
+      actorRole,
+      action,
+      entityType: "order",
+      entityId: orderId,
+      orderId,
+      detail: { to: entry.state },
+    });
+  }
 }
 
 async function main() {

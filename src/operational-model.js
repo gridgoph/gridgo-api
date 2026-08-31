@@ -666,6 +666,9 @@ export function publicOrderFor(order, user, store = null) {
   publicRecord.rated = Boolean(
     store && (store.shopReviews || []).some((review) => review.orderId === order.id),
   );
+  // Every client order screen reads this as an array. Seeded queue jobs and
+  // older rows never stored one; omitting it crashes the order page.
+  if (!Array.isArray(publicRecord.timeline)) publicRecord.timeline = [];
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);

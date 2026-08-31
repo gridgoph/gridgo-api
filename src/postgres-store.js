@@ -953,6 +953,7 @@ export async function loadStore(database) {
     };
     present(item, "issueWindowOpenedAt", row.issue_window_opened_at);
     present(item, "issueWindowExpiresAt", row.issue_window_expires_at);
+    if (!Array.isArray(item.timeline)) item.timeline = [];
     return item;
   });
 
