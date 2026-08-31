@@ -49,6 +49,7 @@ import {
   markFileReady,
   parseMultipartStream,
   publicFile,
+  readArtworkMeasurements,
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
@@ -2099,6 +2100,10 @@ async function handleRequest(req, res) {
         const datePath = createdAt.slice(0, 10).replaceAll("-", "/");
         const extension = path.extname(file.originalFilename).toLowerCase();
         const objectKey = `${purpose}/${datePath}/${fileId}${extension}`;
+        // Read before the bytes leave for storage: this is the one moment the
+        // file is on local disk, and re-downloading it later to measure it
+        // would cost a round trip per upload.
+        const detected = await readArtworkMeasurements(file, detectedContentType, purpose);
         const pending = createPendingFile({
           fileId,
           objectKey,
@@ -2106,6 +2111,7 @@ async function handleRequest(req, res) {
           purpose,
           file,
           detectedContentType,
+          detected,
           at: createdAt,
         });
 

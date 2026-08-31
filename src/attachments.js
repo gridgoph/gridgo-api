@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { identityHasMembership } from "./authorization-context.js";
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
+import { inspectArtwork } from "./artwork-inspection.js";
 import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
@@ -475,7 +476,42 @@ export function authorizeFileUpload(user, purpose) {
   if (!user || !policy.roles.some((role) => hasRole(user, role))) forbidden();
 }
 
-export function createPendingFile({ fileId, objectKey, user, purpose, file, detectedContentType, at }) {
+/**
+ * How much of an upload to read back when looking for its measurements.
+ *
+ * Sixteen mebibytes from the front. A document states its page tree and its
+ * page box near the beginning; the rest of the file is ink. Reading a 200 MiB
+ * banner in full to learn it is 3x6 feet would spend the upload's whole budget
+ * on a field the client can type in four keystrokes.
+ */
+const INSPECT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Read an artwork upload for the size and page count it already carries.
+ *
+ * Artwork only. A payment screenshot has a pixel size and no meaning, and a
+ * verification document's dimensions are nobody's business.
+ *
+ * Never throws. Detection is a convenience that fills a field in for the
+ * client, so a file it cannot read, or a temporary file that has already gone,
+ * costs them one measurement rather than the upload.
+ */
+export async function readArtworkMeasurements(file, detectedContentType, purpose) {
+  if (purpose !== "artwork" || !file?.tempPath) return null;
+  let handle;
+  try {
+    handle = await fs.open(file.tempPath, "r");
+    const bytes = Buffer.alloc(Math.min(file.size ?? INSPECT_BYTES, INSPECT_BYTES));
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    return inspectArtwork(bytes.subarray(0, bytesRead), detectedContentType);
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+export function createPendingFile({ fileId, objectKey, user, purpose, file, detectedContentType, detected = null, at }) {
   authorizeFileUpload(user, purpose);
   return {
     fileId,
@@ -487,6 +523,9 @@ export function createPendingFile({ fileId, objectKey, user, purpose, file, dete
     detectedContentType,
     size: file.size,
     state: "pending_upload",
+    // What the bytes said about themselves, when they said anything. Advisory:
+    // the client may overrule every field of it.
+    detected,
     createdAt: at,
     readyAt: null,
     deleteRequestedAt: null,
@@ -584,6 +623,9 @@ export function publicFile(file) {
     deleteRequestedAt: file.deleteRequestedAt,
     deletedAt: file.deletedAt,
     references: (file.references || []).map((reference) => ({ ...reference })),
+    // Only present when the file said something about itself, so a client can
+    // tell "we read 210 x 297 mm" from "we could not tell".
+    ...(file.detected ? { detected: { ...file.detected } } : {}),
     ...(file.verificationDocumentType ? { verificationDocumentType: file.verificationDocumentType } : {}),
   };
 }
