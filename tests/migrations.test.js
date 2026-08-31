@@ -81,6 +81,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   "1786914000000_pickup_is_not_part_of_the_commitment",
   "1786917600000_catalogue_pricing_shapes",
     "1786921200000_a_client_can_state_a_measurement",
+    "1786924800000_package_qty_belongs_to_one_unit",
       ],
     );
     await client.query(`
@@ -160,6 +161,17 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   for (const column of ["measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli"]) {
     assert.equal(cartLineColumns.has(column), true, `${column} should exist on client_cart_lines`);
   }
+  // A listing priced by the square foot has no package quantity and is not
+  // per_unit, which the original two-unit rule refused outright.
+  const packageChecks = (await client.query(
+    `SELECT c.conname FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname IN ('supplier_catalog_items_check', 'supplier_catalog_items_package_qty_check')
+      ORDER BY c.conname`, [schema],
+  )).rows.map((row) => row.conname);
+  assert.deepEqual(packageChecks, ["supplier_catalog_items_package_qty_check"]);
+
   // Width and height are one measurement. A line with a width and no height
   // has no area and would be priced as though it did.
   await assert.rejects(
@@ -184,6 +196,18 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // The package-quantity rule was written when there were two pricing units
+  // and still spelled both out, so it refused every unit added since.
+  const packageRule = (await client.query(
+    `SELECT c.conname FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname IN ('supplier_catalog_items_check', 'supplier_catalog_items_package_qty_check')
+      ORDER BY c.conname`, [schema],
+  )).rows.map((row) => row.conname);
+  assert.deepEqual(packageRule, ["supplier_catalog_items_check"], "the two-unit package rule should come back");
+
+  await runner(migrationOptions(schema, "down", 1, client));
   const afterMeasurementDown = new Set((await client.query(
     "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'client_cart_lines'",
     [schema],

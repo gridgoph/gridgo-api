@@ -207,3 +207,73 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
   assert.equal(second.users.filter((user) => user.email === PRIVILEGED_DEV_ACCOUNTS[1].email).length, 1);
   await database.close();
 });
+
+test("the pilot board carries the pricing shapes the master list actually quotes", () => {
+  // These five shops price real work in real units, and for a long time the
+  // catalogue could only say "per piece" and "per pack". A board that quotes
+  // a tarpaulin as one flat price is a board nobody in Davao recognises.
+  const listings = ADDITIONAL_DEV_SHOPS.flatMap((shop) =>
+    shop.services.flatMap((service) => service.listings.map((listing) => ({ shop: shop.slug, ...listing }))),
+  );
+  const find = (shop, starterId) =>
+    listings.find((listing) => listing.shop === shop && listing.starterId === starterId);
+
+  // Polymedia quotes tarpaulin by the square foot at PHP 40, and bills a small
+  // banner at its 2x4 minimum because the sheet is wasted either way.
+  const tarpaulin = find("polymedia", "lst_tarpaulins_outdoor_banners");
+  assert.equal(tarpaulin.pricingUnit, "per_area");
+  assert.equal(tarpaulin.measureUnit, "ft");
+  assert.equal(tarpaulin.priceMinor, 4_000);
+  assert.equal(tarpaulin.minimumWidthMilli, 2_000);
+  assert.equal(tarpaulin.minimumHeightMilli, 4_000);
+
+  // Plaques are priced by height, which is a length and not an area.
+  const plaques = find("polymedia", "lst_plaques_trophies");
+  assert.equal(plaques.pricingUnit, "per_length");
+  assert.equal(plaques.measureUnit, "in");
+
+  // Jopal sells UV stickers off a roll by the running metre.
+  const stickers = find("jopal_davao", "lst_stickers_packaging_labels");
+  assert.equal(stickers.pricingUnit, "per_length");
+  assert.equal(stickers.measureUnit, "m");
+  assert.equal(stickers.priceMinor, 75_000);
+
+  // And drops mugs from PHP 100 to PHP 60 at 250. The break replaces the rate
+  // rather than discounting it, which is how the shop quotes it.
+  const mugs = find("jopal_davao", "lst_drinkware");
+  assert.deepEqual(mugs.priceTiers, [{ minQuantity: 250, unitPriceMinor: 6_000 }]);
+
+  // Pins On's description promised a minimum of 20 while the listing would
+  // have taken an order of one.
+  const pins = find("pins_on", "lst_corporate_giveaways");
+  assert.equal(pins.minimumOrderQuantity, 20);
+  assert.match(pins.description, /Minimum 20/);
+
+  // At least one listing of each measured kind, so a client can be walked
+  // through every shape of the flow against seeded data.
+  const units = new Set(listings.map((listing) => listing.pricingUnit).filter(Boolean));
+  assert.equal(units.has("per_area"), true, "a listing priced by area");
+  assert.equal(units.has("per_length"), true, "a listing priced by length");
+});
+
+test("a measured listing states the unit it is measured in", () => {
+  // A width with no unit is not a size. The platform refuses the pair at the
+  // database, and a seed that could produce one would fail on write rather
+  // than in a review.
+  for (const shop of ADDITIONAL_DEV_SHOPS) {
+    for (const service of shop.services) {
+      for (const listing of service.listings) {
+        const measured = listing.pricingUnit === "per_area" || listing.pricingUnit === "per_length";
+        assert.equal(
+          Boolean(listing.measureUnit),
+          measured,
+          `${shop.slug}/${listing.starterId} must state a measure unit exactly when it is measured`,
+        );
+        if (!measured) {
+          assert.equal(listing.minimumWidthMilli ?? null, null);
+          assert.equal(listing.minimumLengthMilli ?? null, null);
+        }
+      }
+    }
+  }
+});

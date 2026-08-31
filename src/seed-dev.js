@@ -492,7 +492,10 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
           },
           {
             starterId: "lst_drinkware",
-            priceMinor: 10_000, // PHP 100.00 a piece under 250; the bulk break needs volume tiers
+            priceMinor: 10_000, // PHP 100.00 a piece under 250
+            // The break replaces the rate from 250 up rather than discounting
+            // it, which is how the shop quotes it and how the pricer bills it.
+            priceTiers: [{ minQuantity: 250, unitPriceMinor: 6_000 }],
             description: "Sublimated mugs for events, giveaways and corporate gifts.",
           },
         ],
@@ -505,7 +508,11 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
         turnaroundHours: 120,
         listings: [{
           starterId: "lst_stickers_packaging_labels",
-          priceMinor: 75_000, // PHP 750.00 a metre of 11x39in UV sticker
+          // Sold by the running metre off an 11-inch roll, so the client says
+          // how long they want rather than how many.
+          pricingUnit: "per_length",
+          measureUnit: "m",
+          priceMinor: 75_000, // PHP 750.00 a metre of 11in UV sticker
           description: "UV stickers by the metre. Ready-to-print PNG or JPG, RGB or CMYK.",
         }],
       },
@@ -530,6 +537,9 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
           // but never a price per pin. Confirm with the shop before anything
           // of theirs goes on a real board.
           priceMinor: 2_500,
+          // The description said "minimum 20 pieces" while the listing would
+          // take an order of one, which is a promise the board could not keep.
+          minimumOrderQuantity: 20,
           description: "Custom button pins in glossy or glitter finish. Minimum 20 pieces.",
         }],
       },
@@ -551,12 +561,21 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
         listings: [
           {
             starterId: "lst_tarpaulins_outdoor_banners",
-            priceMinor: 24_000, // a 2x3 ft eco-solvent banner at PHP 40 per sq.ft
+            // The master list quotes this by the square foot, not by the
+            // banner, and the shop bills a small one at its 2x4 minimum
+            // because the sheet is wasted either way.
+            pricingUnit: "per_area",
+            measureUnit: "ft",
+            priceMinor: 4_000, // PHP 40.00 per square foot, eco-solvent
+            minimumWidthMilli: 2_000,
+            minimumHeightMilli: 4_000,
             description: "Heavy-duty eco-solvent tarpaulin for events, campaigns and roadside signs.",
           },
           {
             starterId: "lst_stickers_packaging_labels",
-            priceMinor: 25_400, // 2x2 ft eco-solvent vinyl at PHP 63.50 per sq.ft
+            pricingUnit: "per_area",
+            measureUnit: "ft",
+            priceMinor: 6_350, // PHP 63.50 per square foot, eco-solvent vinyl
             description: "Vinyl sticker printing in matte, frosted, clear or glossy.",
           },
         ],
@@ -567,7 +586,13 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
         listings: [
           {
             starterId: "lst_plaques_trophies",
-            priceMinor: 50_000, // a 5-inch acrylic plaque at PHP 100 per inch of height
+            // Priced by height, which is a length rather than an area: the
+            // face is a fixed proportion, so the shop quotes the one number
+            // that varies.
+            pricingUnit: "per_length",
+            measureUnit: "in",
+            priceMinor: 10_000, // PHP 100.00 per inch of height
+            minimumLengthMilli: 5_000, // the smallest they cut is five inches
             description: "Acrylic plaques, 3mm face on a 5mm base, priced by height.",
           },
           {
@@ -580,6 +605,46 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
     ],
   },
 ]);
+
+/**
+ * The volume breaks and speeds a listing sells at.
+ *
+ * Both are how these shops actually quote and neither fits in a single price:
+ * Jopal drops mugs from PHP 100 to PHP 60 at 250, which is a different rate
+ * rather than a discount, and a shop selling the same book at four speeds is
+ * selling four prices rather than a price and three surcharges.
+ *
+ * Replaced rather than appended, so re-running the seed does not stack a
+ * second copy of every break onto a board that already has them.
+ */
+function seedListingTiers(store, itemId, listing, at) {
+  store.catalogPriceTiers = (store.catalogPriceTiers || []).filter((row) => row.catalogItemId !== itemId);
+  store.catalogSpeedTiers = (store.catalogSpeedTiers || []).filter((row) => row.catalogItemId !== itemId);
+
+  for (const tier of listing.priceTiers || []) {
+    store.catalogPriceTiers.push({
+      id: `pt_${itemId}_${tier.minQuantity}`,
+      catalogItemId: itemId,
+      minQuantity: tier.minQuantity,
+      unitPriceMinor: tier.unitPriceMinor,
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+  for (const [order, tier] of (listing.speedTiers || []).entries()) {
+    store.catalogSpeedTiers.push({
+      id: `st_${itemId}_${tier.turnaroundHours}`,
+      catalogItemId: itemId,
+      label: tier.label,
+      turnaroundHours: tier.turnaroundHours,
+      priceMinor: tier.priceMinor ?? null,
+      surchargeMinor: tier.surchargeMinor ?? null,
+      sortOrder: order,
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+}
 
 function clerkRows(result) {
   const rows = result?.data || result || [];
@@ -717,8 +782,17 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
         // GRIDGO being the counter.
         description: listing.description,
         basePriceMinor: listing.priceMinor,
-        pricingUnit: starter.defaultPricingUnit || "per_unit",
-        packageQty: starter.defaultPackageQty ?? null,
+        // The starter's default unit is a sensible guess for a new shop; the
+        // master list says what these five actually charge, and where the two
+        // disagree the real one wins. A listing that states no unit of its own
+        // keeps the starter's.
+        pricingUnit: listing.pricingUnit || starter.defaultPricingUnit || "per_unit",
+        packageQty: listing.pricingUnit ? null : (starter.defaultPackageQty ?? null),
+        measureUnit: listing.measureUnit ?? null,
+        minimumWidthMilli: listing.minimumWidthMilli ?? null,
+        minimumHeightMilli: listing.minimumHeightMilli ?? null,
+        minimumLengthMilli: listing.minimumLengthMilli ?? null,
+        minimumOrderQuantity: listing.minimumOrderQuantity ?? null,
         turnaroundMode: "override",
         turnaroundHours: listing.turnaroundHours,
         fileFormatMode: starter.defaultFormatCodes?.length ? "override" : "inherit",
@@ -730,6 +804,7 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
       });
       const item = store.catalogItems.find((row) => row.id === itemId);
       copyStarter(store, starter, item, at, fixture.slug);
+      seedListingTiers(store, itemId, listing, at);
       if (!listing.stored) continue;
       const fileId = `file_${fixture.slug}_${starter.subcategoryCode}`;
       ensureFile(store, {
