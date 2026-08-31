@@ -4869,8 +4869,12 @@ async function handleRequest(req, res) {
           message: "Operations must approve this rider profile before dispatch offers become available.",
         });
       }
+      // A collected order is offered too. It is carried from the shop to
+      // GRIDGO Office rather than to the client's door, which is a different
+      // destination and not a different job. Only the unfinished
+      // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => o.fulfillmentMode !== "pickup"
+        (o) => !isContainedPickup(o)
           && (o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
       return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });

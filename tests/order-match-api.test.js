@@ -607,4 +607,31 @@ test("a collected order runs the whole journey, because a rider takes it to the 
   });
   assert.equal(started.status, 200, JSON.stringify(started.body));
   assert.equal(started.body.order.state, "production");
+
+  // Through to staged for a rider.
+  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+    const moved = await call(`/orders/${orderId}/transition`, {
+      method: "POST", subject: "clerk_supplier_a", body: { state },
+    });
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+
+  // A rider is offered it. Collecting does not mean the job stays at the shop:
+  // somebody carries it to the counter the client will collect from, and
+  // without the offer it was packed, staged, and left sitting there.
+  // Read as Operations, who see the same board a rider does. This fixture has
+  // no rider account, and the question here is whether the order is offerable
+  // at all rather than who is looking.
+  const offers = (await call("/dispatch/offers", { subject: "clerk_ops" })).body.offers;
+  const offered = offers.find((entry) => entry.id === orderId);
+  assert.ok(offered, "a collected order is offered to a rider");
+
+  // From the shop, to GRIDGO Office. Both ends, or the rider is driving to
+  // somewhere nobody named.
+  assert.ok(offered.pickup?.label, "the rider is told which shop to collect from");
+  assert.equal(offered.dropoff?.label, "GRIDGO Office");
+
+  // The client collects there, and is never given the shop's address.
+  const clientView = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(clientView.pickup?.label, "GRIDGO Office");
 });

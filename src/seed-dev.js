@@ -1510,6 +1510,11 @@ async function seedDevelopmentQueue(database, clientId, now) {
         payoutHold: false,
         moneyModelVersion: 3,
         paymentPlan: "order_match_qr_75_25",
+        // Both journeys, so a rider's board shows each. A collected order goes
+        // from the shop to GRIDGO Office, where the client picks it up; a
+        // delivered one goes to the client's own address. Every third is
+        // collected, which is roughly the mix the pilot expects.
+        fulfillmentMode: index % 3 === 0 ? "pickup" : "delivery",
         supplierSubtotalMinor: itemSubtotalMinor,
         subtotalMinor: itemSubtotalMinor,
         serviceFeeMinor,

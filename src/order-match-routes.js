@@ -1,7 +1,7 @@
+import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
 import {
   identityHasMembership } from "./authorization-context.js";
-import { gridgoOfficePoint } from "./gridgo-office.js";
 import {
   catalogItemBlockers,
   createOrderLineSnapshot,

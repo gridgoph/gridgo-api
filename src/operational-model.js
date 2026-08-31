@@ -761,6 +761,28 @@ export function publicOrderFor(order, user, store = null) {
     else delete publicRecord.pickup;
   }
 
+  /*
+   Where a collected order is carried to.
+
+   The client collects at GRIDGO Office, and a rider brings the finished run
+   from the shop to that counter — so the job has a destination even though
+   nobody is delivering to a home. It is not stored: a pickup job is required
+   to have no drop-off, which is the older meaning of the word, where
+   collecting meant the job never travelled.
+
+   Supplied here instead, to the people who move it. Without it dispatch had
+   no destination to draw and a rider's offer read as going nowhere.
+
+   It replaces rather than fills. A collected order can still be carrying the
+   address the client shopped with, and that address is not where this job is
+   going — a rider sent to it would deliver work the client is on their way to
+   the office to collect.
+  */
+  if (order.fulfillmentMode === "pickup") {
+    if (ops || assignedSupplier || rider) publicRecord.dropoff = gridgoOfficePoint();
+    else delete publicRecord.dropoff;
+  }
+
   if (!ops && !owningClient && publicRecord.payments) {
     for (const installment of Object.values(publicRecord.payments)) {
       if (!installment || typeof installment !== "object") continue;
