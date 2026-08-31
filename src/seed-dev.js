@@ -1368,25 +1368,31 @@ const DEV_QUEUE = [
   // `estimatedHours` is press time, not the promise. Without it every queued
   // job is charged the listing's whole turnaround, and four document runs
   // became a month of queue that made flyers unorderable.
-  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies", estimatedHours: 4 },
-  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts", estimatedHours: 5 },
-  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets", estimatedHours: 2 },
-  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 600, title: "Exam papers", estimatedHours: 3 },
+  //
+  // Each sits at a different real point in the lifecycle rather than all at
+  // production, so a shop opening its board sees the states it will actually
+  // work through -- something waiting on a quality check, something in
+  // correction with the client, something already with a rider -- and every
+  // screen that reads a state has a case to draw.
+  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies", estimatedHours: 4, state: "supplier_self_qc" },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts", estimatedHours: 5, state: "production" },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets", estimatedHours: 2, state: "needs_qa" },
+  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 600, title: "Exam papers", estimatedHours: 3, state: "needs_qa" },
 
   // Polymedia bills 120 square feet a day.
-  { supplierId: "user_polymedia", inDays: 1, quantity: 45, title: "Storefront tarpaulin", estimatedHours: 6 },
-  { supplierId: "user_polymedia", inDays: 4, quantity: 120, title: "Campaign banners, set of six", estimatedHours: 12 },
-  { supplierId: "user_polymedia", inDays: 9, quantity: 30, title: "Window decals", estimatedHours: 4 },
+  { supplierId: "user_polymedia", inDays: 1, quantity: 45, title: "Storefront tarpaulin", estimatedHours: 6, state: "ready_for_dispatch" },
+  { supplierId: "user_polymedia", inDays: 4, quantity: 120, title: "Campaign banners, set of six", estimatedHours: 12, state: "production" },
+  { supplierId: "user_polymedia", inDays: 9, quantity: 30, title: "Window decals", estimatedHours: 4, state: "needs_qa" },
 
   // Jopal presses 40 garments a day.
-  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys", estimatedHours: 24 },
-  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos", estimatedHours: 10 },
+  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys", estimatedHours: 24, state: "production" },
+  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos", estimatedHours: 10, state: "client_correction" },
 
   // Pins On makes 70 pins a day.
-  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins", estimatedHours: 8 },
+  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins", estimatedHours: 8, state: "out_for_delivery" },
 
   // Dara plots 40 sheets a day.
-  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set", estimatedHours: 6 },
+  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set", estimatedHours: 6, state: "production" },
 ];
 
 /** The local day `offset` days from now, as an ISO instant at noon. */
@@ -1411,7 +1417,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
         id: `order_dev_queue_${index}`,
         clientId,
         supplierId: entry.supplierId,
-        state: "production",
+        state: entry.state,
         title: entry.title,
         quantity: entry.quantity,
         promisedDate,
@@ -1419,6 +1425,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
         estimatedHours: entry.estimatedHours,
         payoutHold: false,
         moneyModelVersion: 3,
+        timeline: [{ at, state: "production", by: "system", note: "On the shop's board" }],
         createdAt: at,
         updatedAt: at,
       });

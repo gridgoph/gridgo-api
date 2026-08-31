@@ -451,6 +451,23 @@ test("the deadline calendar says which days GRIDGO could make, and never how man
     else assert.notEqual(day.state, "cannot", day.day);
   }
 
+  // The first days anything is possible are narrow, and say so. On the day a
+  // job first becomes makeable the shop goes straight from the order in front
+  // to this one; there is no slack in it, whoever is behind it.
+  const possible = answer.days.filter((day) => day.state !== "cannot");
+  assert.equal(possible[0].state, "tight");
+  assert.equal(possible[1].state, "tight");
+  // It does not stay narrow forever. Judged on a shop of its own, because
+  // with a slow second shop in the fixture every day in the window is narrow
+  // by choice as well -- which is itself correct, and would hide this.
+  const alone = fixture();
+  addShop(alone, { id: "shop_only", lat: 7.07, lng: 125.61, turnaroundHours: 24 });
+  const solo = deadlineDays(alone, { subcategoryCode: "flyers", now, days: 21 })
+    .days.filter((day) => day.state !== "cannot");
+  assert.equal(solo[0].state, "tight");
+  assert.equal(solo[1].state, "tight");
+  assert.equal(solo[2].state, "open");
+
   // A count of shops is the one thing this must not leak: a client is never
   // told how many print something, here or anywhere.
   const body = JSON.stringify(answer);

@@ -402,6 +402,8 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
   start.setHours(0, 0, 0, 0);
 
   const out = [];
+  /** Where the run of possible days starts, so its first two can be called tight. */
+  let firstPossible = null;
   for (let index = 0; index < days; index += 1) {
     const day = new Date(start);
     day.setDate(day.getDate() + index);
@@ -409,15 +411,28 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     endOfDay.setHours(23, 59, 59, 999);
 
     const reachable = promises.filter((value) => value <= endOfDay.getTime()).length;
+
+    /*
+      Two ways a day is narrow, and a client feels both.
+
+      Half the shops or fewer can make it -- with two shops, one available is
+      exactly the day this is for, so the test is half or fewer rather than
+      strictly fewer than half.
+
+      Or it is among the first days anything is possible at all. On the day a
+      job first becomes makeable there is no slack in it: the shop goes
+      straight from the order in front to this one, and a client choosing it is
+      choosing the tightest date on offer. Work only one shop prints would
+      otherwise jump from impossible to comfortable overnight, which is not
+      what it is like to order that way.
+    */
+    if (firstPossible === null && reachable > 0) firstPossible = index;
+    const narrowByChoice = reachable > 0 && reachable * 2 <= promises.length;
+    const narrowByDate = firstPossible !== null && index - firstPossible < 2;
+
     out.push({
       day: localDayKey(day),
-      // Fewer than half the shops that could do this work at all. A first
-      // possible day usually has exactly one shop behind it, and saying so
-      // lets a client spend a day to get a choice back.
-      // Half or fewer, not strictly fewer than half: with two shops, one
-      // available is exactly the narrow day this is for, and a strict test
-      // never called it.
-      state: reachable === 0 ? "cannot" : reachable * 2 <= promises.length ? "tight" : "open",
+      state: reachable === 0 ? "cannot" : narrowByChoice || narrowByDate ? "tight" : "open",
     });
   }
 
