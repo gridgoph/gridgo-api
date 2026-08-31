@@ -14,6 +14,7 @@ import {
   distanceMetersBetween,
   roundBps,
 } from "./operational-model.js";
+import { defaultShopSchedule, projectFinish } from "./availability.js";
 import {
   MatchError,
   matchShop,
@@ -303,6 +304,9 @@ function publicMatchedOrder(store, order) {
     fulfillmentMode: order.fulfillmentMode,
     serviceLevel: order.serviceLevel,
     scheduledFor: order.scheduledFor ?? null,
+    // The promised date, never the shop's own. A client who can see both can
+    // see the allowance.
+    readyBy: order.promiseBy ?? null,
     paymentPlan: {
       method: "qr_manual",
       downpaymentMinor: order.payments.initial.amountMinor,
@@ -335,9 +339,14 @@ function checkout(store, user, cart, body, createId, at) {
   const order = {
     id: orderId,
     clientId: user.id,
+    // One shop per order, known since the match. It was null here, with the
+    // shop recorded per job instead -- which is why no supplier surface ever
+    // showed a checkout order: every one of them reads order.supplierId.
     supplierId: null,
     riderId: null,
-    state: "needs_qa",
+    // Money first. Operations confirms the transfer, then checks the artwork,
+    // and only then does the shop see the job.
+    state: "initial_payment_review",
     supplierSubtotalMinor: 0,
     subtotalMinor: 0,
     serviceFeeRateBps: store.settings.serviceFeeRateBps,
@@ -362,7 +371,7 @@ function checkout(store, user, cart, body, createId, at) {
     payoutMilestones: [],
     serviceLevel: cart.serviceLevel,
     scheduledFor: cart.scheduledFor ?? null,
-    timeline: [{ at, state: "needs_qa", by: user.id, note: "Placed for Operations QA" }],
+    timeline: [{ at, state: "initial_payment_review", by: user.id, note: "Placed; payment sent for confirmation" }],
     createdAt: at,
     updatedAt: at,
   };
@@ -432,6 +441,32 @@ function checkout(store, user, cart, body, createId, at) {
     jobs.push(job);
     snapshots.push(...jobSnapshots);
   }
+
+  // The shop, and the two dates. Both are fixed here rather than at the match:
+  // the match was priced on a listing nobody had configured yet, and the real
+  // quantity is only known now.
+  const [job] = jobs;
+  const shopProfile = (store.supplierProfiles || []).find((row) => row.userId === job.supplierId);
+  const orderedUnits = snapshots.reduce((total, row) => total + Number(row.lineItem.quantity || 0), 0);
+  const capacityDaily = (store.supplierServices || [])
+    .filter((row) => row.supplierId === job.supplierId && row.state === "live")
+    .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
+  const projection = projectFinish({
+    schedule: shopProfile?.schedule || defaultShopSchedule(),
+    now: at,
+    turnaroundMinutes: Math.max(1, job.estimatedHours) * 60,
+    units: orderedUnits > 0 ? orderedUnits : null,
+    capacityDaily: capacityDaily > 0 ? capacityDaily : null,
+    allowanceMinutes: Number.isSafeInteger(store.settings?.promiseAllowanceMinutes)
+      ? store.settings.promiseAllowanceMinutes
+      : 600,
+  });
+  order.supplierId = job.supplierId;
+  order.pickup = { ...job.pickup };
+  // The shop's own date, which it is held to. Never shown to the client.
+  order.readyBy = projection.readyBy;
+  // The padded date the client was promised. Never shown to the shop.
+  order.promiseBy = projection.promiseBy;
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
   const deliveryTotalMinor = addMinor(jobs.map((job) => job.deliveryFeeMinor), "order.deliveryFeeMinor");
@@ -657,6 +692,16 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     selectedCatalogPrice(store, item, body.optionIds);
     const at = now();
     const lines = (store.cartLines || []).filter((row) => row.cartId === cart.id);
+    // One shop per order. A basket spanning two shops needs two of everything
+    // downstream -- two quality checks, two accept decisions, two pickups, two
+    // payouts -- and none of that was ever wired, so the second shop's half
+    // simply stopped. Wanting a second shop starts a second order.
+    const otherShop = lines.find((row) => row.supplierId !== item.supplierId);
+    if (otherShop) {
+      fail(409, "cart_belongs_to_another_shop", "This basket is already with another shop. Check it out, or start a new order for this.", {
+        field: "catalogItemId",
+      });
+    }
     const line = {
       id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id,
       optionIds: [...body.optionIds], quantity: positiveInteger(body.quantity, "quantity"),

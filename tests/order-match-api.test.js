@@ -114,11 +114,13 @@ async function fixture(database) {
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
       { id: "supplier_a", clerkUserId: "clerk_supplier_a", email: "a@gridgo.test", name: "A", role: "supplier", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, createdAt: AT },
       { id: "supplier_b", clerkUserId: "clerk_supplier_b", email: "b@gridgo.test", name: "B", role: "supplier", verificationStatus: "approved", shop: { lat: 7.09, lng: 125.63, label: "Shop B" }, createdAt: AT },
+    { id: "user_ops", clerkUserId: "clerk_ops", email: "ops@gridgo.test", name: "Ops", role: "ops_admin", createdAt: AT },
     );
     store.userRoleMemberships.push(
       { userId: "user_client", role: "client", createdAt: AT },
       { userId: "supplier_a", role: "supplier", createdAt: AT },
       { userId: "supplier_b", role: "supplier", createdAt: AT },
+    { userId: "user_ops", role: "ops_admin", createdAt: AT },
     );
     for (const [index, supplierId] of ["supplier_a", "supplier_b"].entries()) {
       const shop = index === 0
@@ -134,6 +136,12 @@ async function fixture(database) {
       store.catalogItems.push({ id: itemId, supplierId, supplierServiceId: serviceId, subcategoryCode: "flyers", name: `${supplierId} Flyers`, description: "Full-color flyers", basePriceMinor: (index + 1) * 10_000, pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit", active: true, sortOrder: 0, version: 1, createdAt: AT, updatedAt: AT });
       store.files.push({ fileId: photoId, ownerId: supplierId, purpose: "catalog_item_photo", originalFilename: "flyers.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: `${supplierId}/flyers.jpg`, createdAt: AT });
       store.catalogItemPhotos.push({ catalogItemId: itemId, fileId: photoId, sortOrder: 0, createdAt: AT });
+    // A second listing at the same shop, so a basket can hold two lines without
+    // spanning two shops. Its own photo file: a file attaches to exactly one
+    // listing, so sharing one leaves the second without a sample and off the board.
+    store.catalogItems.push({ id: `${itemId}_brochures`, supplierId, supplierServiceId: serviceId, subcategoryCode: "brochures", name: `${supplierId} Brochures`, description: "Tri-fold brochures", basePriceMinor: (index + 1) * 20_000, pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit", active: true, sortOrder: 1, version: 1, createdAt: AT, updatedAt: AT });
+    store.files.push({ fileId: `${photoId}_brochures`, ownerId: supplierId, purpose: "catalog_item_photo", originalFilename: "brochures.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: `${supplierId}/brochures.jpg`, createdAt: AT });
+    store.catalogItemPhotos.push({ catalogItemId: `${itemId}_brochures`, fileId: `${photoId}_brochures`, sortOrder: 0, createdAt: AT });
     }
     store.files.push(
       { fileId: "file_art", ownerId: "user_client", purpose: "artwork", originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
@@ -144,7 +152,7 @@ async function fixture(database) {
   });
 }
 
-test("client order-match routes persist a two-job QR checkout and invoice", { skip: !DATABASE_URL }, async (t) => {
+test("client order-match routes persist a single-shop QR checkout and invoice", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -188,9 +196,18 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
   assert.equal(mockup.status, 200, JSON.stringify(mockup.body));
   const second = await request(instance.api, `/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_b", optionIds: [], quantity: 1 },
+    body: { catalogItemId: "item_supplier_a_brochures", optionIds: [], quantity: 1 },
   });
   assert.equal(second.status, 201, JSON.stringify(second.body));
+
+  // A basket belongs to one shop. Adding another shop's listing is refused
+  // rather than quietly splitting the order in two.
+  const otherShop = await request(instance.api, `/me/carts/${cartId}/lines`, {
+    method: "POST", subject: "clerk_client",
+    body: { catalogItemId: "item_supplier_b", optionIds: [], quantity: 1 },
+  });
+  assert.equal(otherShop.status, 409, JSON.stringify(otherShop.body));
+  assert.equal(otherShop.body.error, "cart_belongs_to_another_shop");
 
   const rejected = await request(instance.api, `/me/carts/${cartId}/checkout`, {
     method: "POST", subject: "clerk_client",
@@ -203,9 +220,10 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
     body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" } },
   });
   assert.equal(checkout.status, 201, `${JSON.stringify(checkout.body)}\n${instance.output()}`);
-  assert.equal(checkout.body.order.state, "needs_qa");
-  assert.equal(checkout.body.order.totalMinor, 38_000);
-  assert.equal(checkout.body.order.jobs.length, 2);
+  assert.equal(checkout.body.order.state, "initial_payment_review");
+  assert.equal(checkout.body.order.totalMinor, 35_500);
+  assert.equal(checkout.body.order.jobs.length, 1);
+  assert.ok(checkout.body.order.readyBy, "the client is given a promised date");
 
   const invoice = await requestEventually(
     instance.api,
@@ -214,9 +232,134 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
     (response) => response.status === 200,
   );
   assert.equal(invoice.status, 200, JSON.stringify(invoice.body));
-  assert.equal(invoice.body.invoice.deliveryLines.length, 2);
+  assert.equal(invoice.body.invoice.deliveryLines.length, 1);
   const persisted = await loadStore(database);
-  assert.equal(persisted.orders.find((row) => row.id === checkout.body.order.id).state, "needs_qa");
-  assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 2);
+  const placed = persisted.orders.find((row) => row.id === checkout.body.order.id);
+  assert.equal(placed.state, "initial_payment_review");
+  // The order names its shop and carries both dates through the database.
+  assert.equal(placed.supplierId, "supplier_a");
+  assert.ok(placed.readyBy && placed.promiseBy);
+  assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   assert.equal(persisted.notifications.length, 0);
+});
+
+
+/** Boots the API on a seeded database and returns a placed, paid-pending order. */
+async function placedOrder(t) {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const instance = await startApi();
+  t.after(async () => {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+  });
+  const api = instance.api;
+  const call = (path, options = {}) => request(api, path, options);
+
+  await call("/me/preferences", { method: "PUT", subject: "clerk_client", body: { ranking: ["quality", "speed", "cost", "distance"] } });
+  const address = await call("/me/addresses", {
+    method: "POST", subject: "clerk_client",
+    body: { label: "Home", addressLine: "Bajada, Davao City", point: { lat: 7.0731, lng: 125.6128 }, isDefault: true },
+  });
+  const cart = await call("/me/carts", { method: "POST", subject: "clerk_client", body: {} });
+  const cartId = cart.body.cart.id;
+  await call(`/me/carts/${cartId}/dropoffs`, {
+    method: "PUT", subject: "clerk_client",
+    body: { defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" } },
+  });
+  await call(`/me/carts/${cartId}/lines`, {
+    method: "POST", subject: "clerk_client",
+    body: { catalogItemId: "item_supplier_a", optionIds: [], quantity: 1, artworkFileId: "file_art" },
+  });
+  const checkout = await call(`/me/carts/${cartId}/checkout`, {
+    method: "POST", subject: "clerk_client",
+    body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-900" } },
+  });
+  assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+  return { api, call, orderId: checkout.body.order.id, address };
+}
+
+/**
+ * The order lifecycle, end to end and in order: money, then artwork, then the
+ * shop. Every step here used to be unreachable -- a checkout order landed at
+ * needs_qa with no shop on it, and no supplier surface reads anything but
+ * order.supplierId.
+ */
+test("a paid order clears money, then quality, and only then reaches the shop", { skip: !DATABASE_URL }, async (t) => {
+  {
+    const { call, orderId } = await placedOrder(t);
+    const transition = (state, subject, body = {}) => call(
+      `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
+    );
+    const stateOf = async () => (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.state;
+
+    // The shop cannot see it, let alone act on it, before Operations has.
+    const early = await transition("payment_authorized", "clerk_supplier_a");
+    assert.equal(early.status, 409, JSON.stringify(early.body));
+
+    // Step one: the transfer. Confirming it hands the order to quality control,
+    // not to the shop -- the artwork has not been looked at yet.
+    const confirmed = await call(`/orders/${orderId}/payments/initial/confirm`, {
+      method: "POST", subject: "clerk_ops", body: { note: "QR received" },
+    });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(await stateOf(), "needs_qa");
+
+    // Step two: the artwork. A failed check goes back to the client and the
+    // money stays where it is.
+    const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi" });
+    assert.equal(failed.status, 200, JSON.stringify(failed.body));
+    assert.equal(await stateOf(), "client_correction");
+    const held = await call(`/orders/${orderId}`, { subject: "clerk_ops" });
+    assert.equal(held.body.order.payments.initial.status, "confirmed", "a correction must not undo a confirmed payment");
+
+    // The client fixes it and it returns to the same check, rather than starting
+    // the order again.
+    const resubmitted = await transition("needs_qa", "clerk_client");
+    assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
+
+    // Passing quality control hands it to the shop that was matched before the
+    // client paid. No supplier id is sent: there is nothing left to assign.
+    const approved = await transition("supplier_assigned", "clerk_ops", { note: "Artwork approved" });
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(approved.body.order.supplierId, "supplier_a");
+
+    // The shop sees it for the first time here, already priced and already dated.
+    const jobs = await call("/jobs", { subject: "clerk_supplier_a" });
+    assert.equal(jobs.status, 200, JSON.stringify(jobs.body));
+    assert.equal(jobs.body.jobs.length, 1);
+    assert.equal(jobs.body.jobs[0].id, orderId);
+
+    // Another shop's job is still not its business.
+    const nosy = await call("/jobs", { subject: "clerk_supplier_b" });
+    assert.equal(nosy.body.jobs.length, 0);
+
+    // Accepting is only confirming it can run the work: no price, no date.
+    const accepted = await transition("payment_authorized", "clerk_supplier_a");
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    const started = await transition("production", "clerk_supplier_a");
+    assert.equal(started.status, 200, JSON.stringify(started.body));
+    assert.equal(await stateOf(), "production");
+  }
+});
+
+test("cancelling an order records who ended it and why, and refuses to do so silently", { skip: !DATABASE_URL }, async (t) => {
+  {
+    const { call, orderId } = await placedOrder(t);
+    const cancel = (body) => call(
+      `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "cancelled", ...body } },
+    );
+
+    const bare = await cancel({});
+    assert.equal(bare.status, 400, JSON.stringify(bare.body));
+    assert.equal(bare.body.error, "cancellation_reason_required");
+
+    const done = await cancel({ reason: "Client cannot supply print-ready artwork" });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal(done.body.order.state, "cancelled");
+    assert.equal(done.body.order.cancellationReason, "Client cannot supply print-ready artwork");
+    assert.equal(done.body.order.cancelledBy, "user_ops");
+    assert.ok(done.body.order.cancelledAt);
+  }
 });

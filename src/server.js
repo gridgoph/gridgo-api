@@ -1439,20 +1439,31 @@ const TRANSITIONS = {
     client_correction: ["ops_admin", "super_admin"],
     proof_approval: ["ops_admin", "super_admin"],
     approved_for_matching: ["ops_admin", "super_admin"],
+    // A checkout order already knows its shop, so passing quality control hands
+    // it straight to that shop. There is nothing left to match.
+    supplier_assigned: ["ops_admin", "super_admin"],
+    cancelled: ["ops_admin", "super_admin"],
   },
-  client_correction: { submitted: ["client"] },
+  // A correction keeps the money. The client fixes the artwork and it goes back
+  // to the same quality check, rather than starting the order again.
+  client_correction: { submitted: ["client"], needs_qa: ["client"], cancelled: ["ops_admin", "super_admin"] },
+  initial_payment_review: { cancelled: ["ops_admin", "super_admin"] },
   proof_approval: {
     approved_for_matching: ["client"],
     client_correction: ["client"],
   },
   approved_for_matching: { supplier_assigned: ["ops_admin", "super_admin"] },
   supplier_assigned: {
-    supplier_accepted: ["supplier"],
-    approved_for_matching: ["supplier"], // decline -> rematch
+    supplier_accepted: ["supplier"], // legacy quote path
+    approved_for_matching: ["supplier"], // legacy decline -> rematch
+    // The shop has nothing to price and nothing to promise: accepting is only
+    // confirming it can run the work. Declining is its own route, because it
+    // has to find a replacement rather than just step aside.
+    payment_authorized: ["supplier"],
+    cancelled: ["ops_admin", "super_admin"],
   },
   awaiting_checkout: { awaiting_initial_payment: ["client"], supplier_accepted: ["supplier"] },
   awaiting_initial_payment: { supplier_accepted: ["supplier"] },
-  initial_payment_review: {},
   awaiting_downpayment: {},
   downpayment_review: {},
   payment_authorized: { production: ["supplier"] },
@@ -4010,7 +4021,9 @@ async function handleRequest(req, res) {
       installment.rejectedBy = user.id;
       installment.rejectionReason = reason;
       if (installmentCode === "initial") {
-        order.state = order.moneyModelVersion === 1 ? "awaiting_downpayment" : "awaiting_initial_payment";
+        order.state = order.moneyModelVersion === 3
+          ? "awaiting_initial_payment"
+          : (order.moneyModelVersion === 1 ? "awaiting_downpayment" : "awaiting_initial_payment");
         order.paymentStatus = "unpaid";
       } else {
         order.paymentStatus = "initial_payment_confirmed";
@@ -4058,7 +4071,11 @@ async function handleRequest(req, res) {
       installment.confirmedBy = user.id;
       installment.confirmationSource = "manual_ops";
       if (installmentCode === "initial") {
-        order.state = "payment_authorized";
+        // A cart checkout is paid before anything is checked, so confirming the
+        // transfer hands the order to quality control rather than to the shop.
+        // Older orders were quoted and approved long before payment, so for
+        // them a confirmed payment really is the last gate.
+        order.state = order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
         order.paymentStatus = "initial_payment_confirmed";
       } else {
         order.paymentStatus = "paid";
@@ -4209,7 +4226,12 @@ async function handleRequest(req, res) {
           allowed: ["qr_manual"],
         });
       }
-      if (next === "supplier_assigned") {
+      // A checkout order was matched to its shop before the client paid, against
+      // live listings, real opening hours and the client's own deadline. Handing
+      // it to that shop is not an assignment decision, so the legacy eligibility
+      // check -- which reads the retired product catalogue -- has nothing to say.
+      const handingToMatchedShop = next === "supplier_assigned" && !body.supplierId && Boolean(order.supplierId);
+      if (next === "supplier_assigned" && !handingToMatchedShop) {
         const supplier = store.users.find(
           (candidate) => candidate.id === body.supplierId && candidate.role === "supplier",
         );
@@ -4257,6 +4279,22 @@ async function handleRequest(req, res) {
           });
         }
       }
+      if (next === "cancelled") {
+        const reason = String(body.reason || "").trim();
+        if (!reason) {
+          return send(res, 400, {
+            error: "cancellation_reason_required",
+            message: "Say why this order is being cancelled. The client is told, and the record has to explain itself later.",
+          });
+        }
+        // Refunding is still a manual transfer. This records the decision, who
+        // made it and why -- it does not move money, and must not read as if it
+        // has.
+        order.cancelledAt = now();
+        order.cancelledBy = user.id;
+        order.cancellationReason = reason;
+      }
+
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
         return send(res, 409, {
