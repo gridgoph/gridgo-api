@@ -65,9 +65,9 @@ const TABLES = [
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "job_qa_checklist", keys: ["id"], columns: ["id", "job_id", "code", "label", "status", "note", "sort_order", "checked_at", "checked_by", "created_at", "updated_at"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
@@ -483,6 +483,7 @@ function rowsFromStore(store) {
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
       dropoff_label: line.dropoff?.label ?? null,
+      ...measurementColumns(line.measurement),
       sort_order: line.sortOrder,
       created_at: line.createdAt,
       updated_at: line.updatedAt,
@@ -554,6 +555,7 @@ function rowsFromStore(store) {
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
       dropoff_label: line.dropoff?.label ?? null,
+      ...measurementColumns(line.measurement),
       sort_order: line.sortOrder, snapshot_finalized: line.snapshotFinalized !== false, created_at: line.createdAt,
     });
   }
@@ -623,6 +625,31 @@ function attachBaseline(store, rows) {
 
 function ordered(rows) {
   return [...rows].sort((a, b) => a.position - b.position);
+}
+
+/**
+ * A measurement as four columns.
+ *
+ * Split rather than stored as JSON so the check constraints hold: a width with
+ * no height is not an area, and the database is where that stays true.
+ */
+function measurementColumns(measurement) {
+  return {
+    measure_pages: measurement?.pages ?? null,
+    measure_width_milli: measurement?.width ?? null,
+    measure_height_milli: measurement?.height ?? null,
+    measure_length_milli: measurement?.length ?? null,
+  };
+}
+
+/** The same four columns as the shape `src/pricing.js` bills from, or null. */
+function readMeasurement(row) {
+  const measurement = {};
+  if (row.measure_pages != null) measurement.pages = row.measure_pages;
+  if (row.measure_width_milli != null) measurement.width = row.measure_width_milli;
+  if (row.measure_height_milli != null) measurement.height = row.measure_height_milli;
+  if (row.measure_length_milli != null) measurement.length = row.measure_length_milli;
+  return Object.keys(measurement).length ? measurement : null;
 }
 
 function orderedBy(rows, ...columns) {
@@ -824,6 +851,7 @@ export async function loadStore(database) {
     };
     present(item, "artworkFileId", row.artwork_file_id);
     present(item, "mockupFileId", row.mockup_file_id);
+    present(item, "measurement", readMeasurement(row));
     if (row.dropoff_lat != null) item.dropoff = { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label };
     return item;
   });

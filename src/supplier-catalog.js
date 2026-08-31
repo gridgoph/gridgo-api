@@ -654,25 +654,11 @@ export function createOrderLineSnapshot(store, selection, createId) {
    a quantity, and a speed tier replaces it at a date -- none of which a single
    effectiveUnitPriceMinor can carry.
   */
-  const priced = priceLine({
-    basePriceMinor: item.basePriceMinor,
-    unit: item.pricingUnit || "per_unit",
-    packageQty: item.packageQty ?? null,
-    options: selectedOptions.map((option) => ({
-      priceModifierMinor: option.priceModifierMinor,
-      priceMultiplierBps: option.priceMultiplierBps ?? null,
-      priceMultiplierBps: option.priceMultiplierBps ?? null,
-    })),
-    volumeTiers: priceTiersFor(store, item.id),
-    minimumOrderQuantity: item.minimumOrderQuantity ?? null,
-    minimumMeasurement: {
-      width: item.minimumWidthMilli ?? null,
-      height: item.minimumHeightMilli ?? null,
-      length: item.minimumLengthMilli ?? null,
-    },
-    speedTier: selection.speedTier ?? null,
+  const priced = priceCatalogSelection(store, item, {
+    selectedOptions,
     quantity,
     measurement: selection.measurement ?? null,
+    speedTier: selection.speedTier ?? null,
   });
   const subtotal = priced.lineSubtotalMinor;
   const lineItemId = selection.lineItemId || createId?.("oli");
@@ -710,6 +696,10 @@ export function createOrderLineSnapshot(store, selection, createId) {
       baseUnitPriceMinor: item.basePriceMinor,
       effectiveUnitPriceMinor,
       quantity,
+      // The size the client agreed to, kept with the price it produced. An
+      // order that cannot say what was measured cannot be re-priced, disputed,
+      // or reprinted to the same size a year later.
+      measurement: selection.measurement ?? null,
       lineSubtotalMinor: subtotal,
       acceptedFormatCodesSnapshot: formats,
       structuredSpecSnapshot: structuredSpec,
@@ -719,6 +709,39 @@ export function createOrderLineSnapshot(store, selection, createId) {
     },
     options,
   };
+}
+
+/**
+ * What one line of a basket costs, through the pricing engine.
+ *
+ * Exported because the basket and the order must never disagree. The basket
+ * used to multiply a unit price by a quantity, which is correct only for the
+ * two shapes the catalogue started with: an area line has to multiply by
+ * measured size and respect a minimum billable one, a volume break replaces
+ * the rate outright at a quantity, and a speed tier replaces it at a date.
+ * None of that fits in a single effective unit price, so a client adding a
+ * 3x5 tarpaulin saw one number in the basket and paid another at checkout.
+ */
+export function priceCatalogSelection(store, item, { selectedOptions, quantity, measurement = null, speedTier = null }) {
+  return priceLine({
+    basePriceMinor: item.basePriceMinor,
+    unit: item.pricingUnit || "per_unit",
+    packageQty: item.packageQty ?? null,
+    options: selectedOptions.map((option) => ({
+      priceModifierMinor: option.priceModifierMinor,
+      priceMultiplierBps: option.priceMultiplierBps ?? null,
+    })),
+    volumeTiers: priceTiersFor(store, item.id),
+    minimumOrderQuantity: item.minimumOrderQuantity ?? null,
+    minimumMeasurement: {
+      width: item.minimumWidthMilli ?? null,
+      height: item.minimumHeightMilli ?? null,
+      length: item.minimumLengthMilli ?? null,
+    },
+    speedTier,
+    quantity,
+    measurement,
+  });
 }
 
 export function appendOrderLineSnapshot(store, selection, createId) {

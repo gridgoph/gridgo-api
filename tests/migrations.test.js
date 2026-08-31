@@ -80,6 +80,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   "1786910400000_order_lifecycle_one_shop",
   "1786914000000_pickup_is_not_part_of_the_commitment",
   "1786917600000_catalogue_pricing_shapes",
+    "1786921200000_a_client_can_state_a_measurement",
       ],
     );
     await client.query(`
@@ -150,6 +151,28 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     assert.equal(orderDateColumns.has(column), true, `${column} should exist on orders`);
   }
 
+  // A client can state how big the thing is. Without these a listing priced by
+  // the square foot reaches the pricer with no area and refuses the basket.
+  const cartLineColumns = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'client_cart_lines'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  for (const column of ["measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli"]) {
+    assert.equal(cartLineColumns.has(column), true, `${column} should exist on client_cart_lines`);
+  }
+  // Width and height are one measurement. A line with a width and no height
+  // has no area and would be priced as though it did.
+  await assert.rejects(
+    client.query(`
+      INSERT INTO client_cart_lines
+        (id, cart_id, supplier_id, catalog_item_id, option_ids, quantity, structured_spec,
+         measure_width_milli, sort_order, created_at, updated_at)
+      VALUES ('cline_half', 'cart_x', 'shop_x', 'item_x', ARRAY[]::text[], 1, '{}', 1000, 0, now(), now())
+    `),
+    (error) => error.code === "23514" || error.code === "23503",
+    "a width with no height should be refused",
+  );
+
     await client.query(`
       INSERT INTO orders
         (id, client_id, state, payment_plan, supplier_downpayment_rate_bps,
@@ -161,6 +184,14 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  const afterMeasurementDown = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'client_cart_lines'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  assert.equal(afterMeasurementDown.has("measure_width_milli"), false);
+  assert.equal(afterMeasurementDown.has("measure_pages"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
   assert.equal((await client.query("SELECT to_regclass('supplier_catalog_price_tiers') AS t")).rows[0].t, null);
   assert.equal((await client.query("SELECT to_regclass('supplier_catalog_speed_tiers') AS t")).rows[0].t, null);
 

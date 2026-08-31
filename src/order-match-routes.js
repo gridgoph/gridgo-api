@@ -1,3 +1,4 @@
+import { measurementKindFor } from "./pricing.js";
 import {
   identityHasMembership } from "./authorization-context.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
@@ -7,6 +8,7 @@ import {
   minimumCatalogPrice,
   publicCatalogItem,
   publicSupplierShop,
+  priceCatalogSelection,
   selectedCatalogPrice,
 } from "./supplier-catalog.js";
 import {
@@ -70,6 +72,52 @@ function positiveInteger(value, field) {
   }
   return value;
 }
+
+/**
+ * The measurement a listing needs, read from what the client sent.
+ *
+ * Which numbers are required is the listing's decision, not the request's: a
+ * tarpaulin priced by the square foot needs a width and a height, a banner
+ * priced by the running foot needs a length, and a document priced by the page
+ * needs a page count. Anything else needs none, and sending one is a mistake
+ * worth naming rather than ignoring -- a client whose measurement is silently
+ * dropped is billed for something other than what they filled in.
+ *
+ * Stored in thousandths of the listing's own `measureUnit`, so 3.5 feet is
+ * 3500 and nothing fractional reaches a price.
+ */
+function measurementFor(item, body, { required = true } = {}) {
+  const kind = measurementKindFor(item.pricingUnit || "per_unit");
+  const sent = body.measurement == null ? null : record(body.measurement, "measurement");
+
+  if (kind === "none") {
+    if (sent && Object.keys(sent).length) {
+      fail(400, "measurement_not_accepted", "This listing is not priced by size, so it takes no measurement.", {
+        field: "measurement",
+      });
+    }
+    return null;
+  }
+
+  if (!sent) {
+    if (!required) return undefined;
+    fail(400, "measurement_required", MEASUREMENT_PROMPTS[kind], { field: "measurement", measurementKind: kind });
+  }
+
+  if (kind === "pages") return { pages: positiveInteger(sent.pages, "measurement.pages") };
+  if (kind === "length") return { length: positiveInteger(sent.length, "measurement.length") };
+  return {
+    width: positiveInteger(sent.width, "measurement.width"),
+    height: positiveInteger(sent.height, "measurement.height"),
+  };
+}
+
+/** What to ask for, in the client's terms, when a measurement is missing. */
+const MEASUREMENT_PROMPTS = Object.freeze({
+  pages: "Tell us how many pages this document has.",
+  area: "Tell us how wide and how tall this needs to be.",
+  length: "Tell us how long this needs to be.",
+});
 
 function point(value, field, { required = true, requireLabel = true } = {}) {
   if (value == null && !required) return null;
@@ -148,6 +196,30 @@ function fileFor(store, user, fileId, purpose, field) {
   return file;
 }
 
+/**
+ * What a basket line costs right now, priced the way checkout will price it.
+ *
+ * Null when the listing has gone: a line whose listing was withdrawn has no
+ * price, and showing the last one it had is showing a price nobody will honour.
+ */
+function cartLineSubtotal(store, line) {
+  const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+  if (!item) return null;
+  try {
+    const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
+    return priceCatalogSelection(store, item, {
+      selectedOptions,
+      quantity: line.quantity,
+      measurement: line.measurement || null,
+    }).lineSubtotalMinor;
+  } catch {
+    // A line the pricer refuses -- a measurement the listing stopped taking,
+    // an option that was retired -- has no honest price to show. Checkout says
+    // so properly; a basket must not invent one to fill the column.
+    return null;
+  }
+}
+
 function publicCartListingStub(store, item, optionIds) {
   const selected = selectedCatalogPrice(store, item, optionIds);
   return {
@@ -194,13 +266,17 @@ function publicCart(store, cart, { compactListings = false } = {}) {
       catalogItemId: line.catalogItemId,
       quantity: line.quantity,
       optionIds: [...(line.optionIds || [])],
+      measurement: line.measurement ? { ...line.measurement } : null,
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
       listing,
-      lineSubtotalMinor: listing ? multiplyMinor(listing.effectivePriceMinor, line.quantity, "lineSubtotalMinor") : null,
+      // Through the pricing engine, not a multiplication: the basket and the
+      // invoice have to agree, and a measured or tiered line does not fit in a
+      // unit price times a quantity.
+      lineSubtotalMinor: cartLineSubtotal(store, line),
     };
   });
   return {
@@ -421,6 +497,7 @@ function checkout(store, user, cart, body, createId, at) {
         expectedVersion: item.version,
         expectedServiceVersion: listing.serviceVersion,
         optionIds: line.optionIds || [],
+        measurement: line.measurement || null,
         quantity: line.quantity,
         structuredSpec: line.structuredSpec || {},
         createdAt: at,
@@ -741,6 +818,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     const line = {
       id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id,
       optionIds: [...body.optionIds], quantity: positiveInteger(body.quantity, "quantity"),
+      measurement: measurementFor(item, body),
       structuredSpec: body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec")),
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
@@ -772,6 +850,14 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
       selectedCatalogPrice(store, item, body.optionIds);
       line.optionIds = [...body.optionIds];
+    }
+    if (Object.hasOwn(body, "measurement")) {
+      const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+      // A measurement already on the line stands if this request does not
+      // replace it, so `undefined` here means "leave it alone" and null means
+      // the listing takes none at all.
+      const measured = measurementFor(item, body, { required: false });
+      if (measured !== undefined) line.measurement = measured;
     }
     if (Object.hasOwn(body, "structuredSpec")) line.structuredSpec = structuredClone(record(body.structuredSpec, "structuredSpec"));
     if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;

@@ -294,3 +294,79 @@ test("cart payloads include one shop counter per selected supplier", async () =>
     (error) => error.code === "cart_belongs_to_another_shop",
   );
 });
+
+test("a tarpaulin priced by the square foot can actually be ordered", async () => {
+  // The whole chain this exists to close. `src/pricing.js` could bill by area
+  // from the day it landed and the catalogue could store the shape; a cart
+  // line had nowhere to put a width, so every one of these listings refused
+  // the basket it was added to.
+  const { store, client } = fixture();
+  const tarpaulin = store.catalogItems.find((row) => row.id === "item_a");
+  tarpaulin.name = "supplier_a Tarpaulin";
+  tarpaulin.pricingUnit = "per_area";
+  tarpaulin.measureUnit = "ft";
+  tarpaulin.basePriceMinor = 2_500;
+  // Polymedia bills a small banner at the 2x4 rate: the sheet is wasted either
+  // way, and a shop that cannot say so is underpaid on every small order.
+  tarpaulin.minimumWidthMilli = 2_000;
+  tarpaulin.minimumHeightMilli = 4_000;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  // Sent with no measurement, the client is told which numbers to give rather
+  // than seeing a pricing error they cannot act on.
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 }),
+    (error) => error.code === "measurement_required" && error.details.measurementKind === "area",
+  );
+
+  // 3ft x 5ft, in thousandths, is 15 square feet at PHP 25.
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    measurement: { width: 3_000, height: 5_000 },
+  });
+  assert.equal(added.status, 201);
+  assert.deepEqual(added.body.cart.lines[0].measurement, { width: 3_000, height: 5_000 });
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 37_500);
+
+  // Under the shop's minimum, the minimum is what is billed: 8 square feet.
+  const lineId = added.body.cart.lines[0].id;
+  const small = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
+    measurement: { width: 1_000, height: 4_000 },
+  });
+  assert.equal(small.status, 200);
+  assert.equal(small.body.cart.lines[0].lineSubtotalMinor, 20_000);
+
+  // A listing not priced by size is not quietly given one: a measurement that
+  // is silently dropped bills the client for something they did not fill in.
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId}/lines`, {
+      catalogItemId: "item_a2", optionIds: [], quantity: 1,
+      measurement: { width: 3_000, height: 5_000 },
+    }),
+    (error) => error.code === "measurement_not_accepted",
+  );
+});
+
+test("a document priced by the page bills pages times copies", async () => {
+  const { store, client } = fixture();
+  const booklet = store.catalogItems.find((row) => row.id === "item_a");
+  booklet.name = "supplier_a Booklet";
+  booklet.pricingUnit = "per_page";
+  booklet.basePriceMinor = 300;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  // Pages and copies are two different numbers, and conflating them is how a
+  // client orders a tenth of their own document. Ten pages, three copies.
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 3,
+    measurement: { pages: 10 },
+  });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.cart.lines[0].quantity, 3);
+  assert.deepEqual(added.body.cart.lines[0].measurement, { pages: 10 });
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 9_000);
+});
