@@ -725,7 +725,11 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     // answer are the shops' own, and a client is never told how many print
     // something.
     const subcategoryCode = text(url.searchParams.get("subcategoryCode"), "subcategoryCode", 120);
-    const days = Math.min(63, Math.max(7, Number(url.searchParams.get("days")) || 42));
+    // Four months. A print deadline is regularly further out than a fortnight
+    // -- a graduation, a launch, a fiesta -- and a window that stops at six
+    // weeks reads to a client as "GRIDGO does not go that far", which is a
+    // limit of the calendar rather than of the shops.
+    const days = Math.min(126, Math.max(7, Number(url.searchParams.get("days")) || 120));
     return {
       status: 200,
       body: deadlineDays(store, { subcategoryCode, now: now(), days }),

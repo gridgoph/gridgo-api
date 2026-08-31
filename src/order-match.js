@@ -377,7 +377,7 @@ function reasonsFor(row, ranking, preferred, alternativesCount) {
  * something, here or anywhere -- `tight` says choice is narrow without saying
  * how narrow, which is the honest half of the same fact.
  */
-export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days = 42 } = {}) {
+export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days = 120 } = {}) {
   const at = now || new Date().toISOString();
   const { rows, missedDeadline } = candidateRows(store, {
     subcategoryCode,
