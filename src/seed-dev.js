@@ -103,6 +103,7 @@ export const LOVIS_CATEGORY_LINES = [
     formats: DESIGN_FORMATS,
     referenceRateMinor: 40000,
     turnaroundHours: 12,
+    capacityDaily: 60,
   },
   {
     // The document board, which is most of what this shop actually does and
@@ -112,6 +113,8 @@ export const LOVIS_CATEGORY_LINES = [
     formats: DESIGN_FORMATS,
     referenceRateMinor: 200,
     turnaroundHours: 4,
+    // A document shop runs volume: thousands of pages a day, not dozens.
+    capacityDaily: 2_000,
   },
 ];
 
@@ -398,6 +401,8 @@ export async function seedDevelopmentShop(database, {
         pricingBasis: "per_unit",
         referenceRateMinor: line.referenceRateMinor,
         turnaroundHours: line.turnaroundHours,
+        capacityDaily: line.capacityDaily ?? null,
+        capacityWeekly: null,
         standardTurnaroundHours: line.turnaroundHours,
         rushEnabled: false,
         materialCodes: codesFor(taxonomy, "materials", line.categoryCode),
@@ -546,6 +551,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
         categoryCode: "specialized_prototyping",
         turnaroundHours: 24,
         formats: ["pdf"], // "1. FILE & FORMAT REQUIREMENTS -- PDF only"
+        capacityDaily: 40, // large-format sheets, not a volume trade
         listings: [
           {
             starterId: "lst_blueprint_cad_plotting",
@@ -660,6 +666,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
       {
         categoryCode: "corporate_event_merch",
         turnaroundHours: 120, // "5 days for 100-200 pcs"
+        capacityDaily: 40,
         listings: [
           {
             starterId: "lst_custom_apparel",
@@ -682,6 +689,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
         // declaring the category its subcategory belongs to.
         categoryCode: "marketing_collateral",
         turnaroundHours: 120,
+        capacityDaily: 30,
         listings: [{
           starterId: "lst_stickers_packaging_labels",
           // Sold by the running metre off an 11-inch roll, so the client says
@@ -707,6 +715,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
       {
         categoryCode: "corporate_event_merch",
         turnaroundHours: 72, // "normal turnaround: 3 days, no rush fee"
+        capacityDaily: 70,
         listings: [{
           starterId: "lst_corporate_giveaways",
           // The master list gives this shop's finishes, minimum and rush fees
@@ -740,6 +749,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
       {
         categoryCode: "marketing_collateral",
         turnaroundHours: 24,
+        capacityDaily: 120, // square feet a day across both printers
         listings: [
           {
             starterId: "lst_tarpaulins_outdoor_banners",
@@ -765,6 +775,7 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
       {
         categoryCode: "recognition_awards_signage",
         turnaroundHours: 48,
+        capacityDaily: 25,
         listings: [
           {
             starterId: "lst_plaques_trophies",
@@ -980,6 +991,12 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
         referenceRateMinor: service.listings[0].priceMinor,
         turnaroundHours: service.turnaroundHours,
         standardTurnaroundHours: service.turnaroundHours,
+        // What the shop can actually run in a day, from its own catalogue:
+        // Jopal quotes "5 days for 100-200 pcs" and Pins On "200 pcs within
+        // 2-3 days". Without this the schedule has no idea what full means and
+        // every day reads as merely having work on it.
+        capacityDaily: service.capacityDaily ?? null,
+        capacityWeekly: null,
         rushEnabled: false,
         materialCodes: [],
         finishCodes: [],
@@ -1078,6 +1095,7 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
 }
 
 async function seedDevelopmentClient(database, clerkBackend, now) {
+  let clientUserId = null;
   const clerkUser = await resolveDevClerkUser(MARK_DEV_CLIENT.email, clerkBackend);
   const person = clerkClientProfile(clerkUser);
   const at = now();
@@ -1105,6 +1123,7 @@ async function seedDevelopmentClient(database, clerkBackend, now) {
     user.accountType = "individual";
     user.orgName = null;
     delete user.verificationStatus;
+    clientUserId = user.id;
     if (!store.users.some((candidate) => candidate.id === user.id)) store.users.push(user);
     store.userRoleMemberships = store.userRoleMemberships.filter(
       (row) => !(row.userId === user.id && row.role !== "client"),
@@ -1123,7 +1142,7 @@ async function seedDevelopmentClient(database, clerkBackend, now) {
     }
     await saveStore(database, store);
   });
-  return { email: person.email, clerkUserId: clerkUser.id };
+  return { email: person.email, clerkUserId: clerkUser.id, userId: clientUserId };
 }
 
 /**
@@ -1323,8 +1342,85 @@ export async function seedDevelopmentShops(database, {
   }
   const client = await seedDevelopmentClient(database, backend, now);
   const rider = await seedDevelopmentRider(database, backend, now);
+  if (client.userId) await seedDevelopmentQueue(database, client.userId, now);
   const privileged = await seedDevelopmentPrivilegedAccounts(database, { clerkBackend: backend, now });
   return { shops, client, rider, privileged, photos: shops.every((shop) => shop.photos) };
+}
+
+/**
+ * A believable fortnight of work in front of each shop.
+ *
+ * The schedule calendar is a view of a queue, and a queue nobody has placed is
+ * a grid of empty circles that proves nothing. These are the smallest orders
+ * that make it say something true: a day under capacity, a day at it, and days
+ * with nothing on them, so a shop can see the difference between the three.
+ *
+ * Development only, and deliberately thin. Each is an order at a shop with a
+ * date and a size -- enough for a board to load against -- and none of the
+ * money, payment or payout machinery a real order carries, because none of
+ * that is what this screen reads.
+ *
+ * Dated relative to the day the seed runs, so the fortnight is always the one
+ * in front of you rather than a fixed month that scrolls into the past.
+ */
+const DEV_QUEUE = [
+  // Lovis runs 2,000 pages a day. A full Thursday, a busy Friday.
+  { supplierId: "user_lovis_printshop", inDays: 2, quantity: 1_400, title: "Thesis reprint, 7 copies" },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 2_000, title: "Department handouts" },
+  { supplierId: "user_lovis_printshop", inDays: 3, quantity: 250, title: "Programme booklets" },
+  { supplierId: "user_lovis_printshop", inDays: 8, quantity: 600, title: "Exam papers" },
+
+  // Polymedia bills 120 square feet a day.
+  { supplierId: "user_polymedia", inDays: 1, quantity: 45, title: "Storefront tarpaulin" },
+  { supplierId: "user_polymedia", inDays: 4, quantity: 120, title: "Campaign banners, set of six" },
+  { supplierId: "user_polymedia", inDays: 9, quantity: 30, title: "Window decals" },
+
+  // Jopal presses 40 garments a day.
+  { supplierId: "user_jopal_davao", inDays: 5, quantity: 40, title: "Team jerseys" },
+  { supplierId: "user_jopal_davao", inDays: 6, quantity: 18, title: "Staff polos" },
+
+  // Pins On makes 70 pins a day.
+  { supplierId: "user_pins_on", inDays: 2, quantity: 55, title: "Org giveaway pins" },
+
+  // Dara plots 40 sheets a day.
+  { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set" },
+];
+
+/** The local day `offset` days from now, as an ISO instant at noon. */
+function devQueueDate(offset) {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  date.setHours(12, 0, 0, 0);
+  return date.toISOString();
+}
+
+async function seedDevelopmentQueue(database, clientId, now) {
+  const at = now();
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders ||= [];
+    for (const [index, entry] of DEV_QUEUE.entries()) {
+      // Skipped rather than invented: a shop the seed did not create is not
+      // one to hang orders on.
+      if (!store.users.some((user) => user.id === entry.supplierId)) continue;
+      const promisedDate = devQueueDate(entry.inDays);
+      upsert(store.orders, "id", {
+        id: `order_dev_queue_${index}`,
+        clientId,
+        supplierId: entry.supplierId,
+        state: "production",
+        title: entry.title,
+        quantity: entry.quantity,
+        promisedDate,
+        deadline: promisedDate,
+        payoutHold: false,
+        moneyModelVersion: 3,
+        createdAt: at,
+        updatedAt: at,
+      });
+    }
+    await saveStore(database, store);
+  });
 }
 
 async function main() {
