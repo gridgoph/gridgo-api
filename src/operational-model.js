@@ -652,6 +652,20 @@ export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
+  /*
+    Whether this order has been rated, so a client is asked once.
+
+    Without it the app cannot tell a finished order from a rated one, so it
+    either asks forever or finds out by being refused — and "you have already
+    rated this" is a poor way to learn that the screen was wrong to ask.
+
+    A flag rather than the review itself: what somebody said about a shop is
+    not something to hand back through an order that any of several roles can
+    read.
+  */
+  publicRecord.rated = Boolean(
+    store && (store.shopReviews || []).some((review) => review.orderId === order.id),
+  );
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);

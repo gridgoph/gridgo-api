@@ -522,10 +522,22 @@ test("a client rates a finished order once, and only quality reaches matching", 
   assert.equal(bad.status, 400, JSON.stringify(bad.body));
   assert.equal(bad.body.field, "qualityStars");
 
+  // The order says whether it has been rated, so the app asks once. Without
+  // it a client learns the screen was wrong to ask by being refused.
+  const unrated = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(unrated.rated, false);
+
   const rated = await rate({ qualityStars: 5, speedStars: 3, valueStars: 4, comment: "Beautiful print, a day late." });
   assert.equal(rated.status, 201, JSON.stringify(rated.body));
   assert.equal(rated.body.review.supplierId, "supplier_a");
   assert.equal(rated.body.review.speedStars, 3);
+
+  const afterwards = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(afterwards.rated, true);
+
+  // What was said about the shop is not handed back through the order: any of
+  // several roles can read one, and a rating is not theirs to read.
+  assert.equal(Object.hasOwn(afterwards, "review"), false);
 
   // Once.
   const twice = await rate({ qualityStars: 1, speedStars: 1, valueStars: 1 });
