@@ -472,3 +472,67 @@ test("the shop is paid in two stages, and never ahead of the money the client se
     "the rest waits for delivery, and for the balance",
   );
 });
+
+test("a client rates a finished order once, and only quality reaches matching", async (t) => {
+  const { call, orderId } = await placedOrder(t);
+  const rate = (body, subject = "clerk_client") => call(
+    `/orders/${orderId}/review`, { method: "POST", subject, body },
+  );
+
+  // Not while the order is still running: a rating must never be a bargaining
+  // chip in an open job.
+  const early = await rate({ qualityStars: 5, speedStars: 5, valueStars: 5 });
+  assert.equal(early.status, 409, JSON.stringify(early.body));
+  assert.equal(early.body.error, "order_not_complete");
+
+  // Walk it to finished.
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  for (const [state, subject] of [
+    ["supplier_assigned", "clerk_ops"],
+    ["payment_authorized", "clerk_supplier_a"],
+    ["production", "clerk_supplier_a"],
+    ["supplier_self_qc", "clerk_supplier_a"],
+    ["ready_for_dispatch", "clerk_supplier_a"],
+  ]) {
+    const moved = await call(`/orders/${orderId}/transition`, { method: "POST", subject, body: { state } });
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+
+  // Finishing the work stamps when the shop was actually done, so its on-time
+  // record can be measured against the date its own board promised.
+  const ready = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  assert.ok(ready.readyAt, "the shop's finish time is recorded");
+  assert.ok(ready.readyBy, "and the date it was held to");
+
+  const store = await (async () => {
+    const { createDatabase } = await import("../src/database.js");
+    const db = createDatabase({ DATABASE_URL });
+    t.after(() => db.close());
+    return db.transaction(async () => {
+      const loaded = await loadStore(db);
+      const row = loaded.orders.find((order) => order.id === orderId);
+      row.state = "completed";
+      await saveStore(db, loaded);
+      return loaded;
+    });
+  })();
+  assert.equal(store.orders.find((order) => order.id === orderId).state, "completed");
+
+  const bad = await rate({ qualityStars: 6, speedStars: 5, valueStars: 5 });
+  assert.equal(bad.status, 400, JSON.stringify(bad.body));
+  assert.equal(bad.body.field, "qualityStars");
+
+  const rated = await rate({ qualityStars: 5, speedStars: 3, valueStars: 4, comment: "Beautiful print, a day late." });
+  assert.equal(rated.status, 201, JSON.stringify(rated.body));
+  assert.equal(rated.body.review.supplierId, "supplier_a");
+  assert.equal(rated.body.review.speedStars, 3);
+
+  // Once.
+  const twice = await rate({ qualityStars: 1, speedStars: 1, valueStars: 1 });
+  assert.equal(twice.status, 409, JSON.stringify(twice.body));
+  assert.equal(twice.body.error, "already_rated");
+
+  // And somebody else's order is not theirs to rate.
+  const stranger = await rate({ qualityStars: 5, speedStars: 5, valueStars: 5 }, "clerk_supplier_b");
+  assert.equal(stranger.status, 403, JSON.stringify(stranger.body));
+});

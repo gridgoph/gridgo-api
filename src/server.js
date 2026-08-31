@@ -3675,6 +3675,87 @@ async function handleRequest(req, res) {
       return send(res, 200, { issues: list });
     }
 
+    /**
+     * What the client thought of the work.
+     *
+     * Three scores, because they are three different experiences and an order
+     * that came out beautifully a day late should be able to say so. Only the
+     * quality star reaches matching: speed is measured from whether the shop hit
+     * its own date, and marking a shop down for a price printed on its listing
+     * would count the same thing twice.
+     *
+     * Asked once the order is finished and the issue window has closed, so a
+     * rating is never a bargaining chip in an open dispute.
+     */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/review$/.test(pathname)) {
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (user.role !== "client" || order.clientId !== user.id) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "Only the client who placed this order can rate it.",
+        });
+      }
+      if (order.state !== "completed" && order.state !== "payout_released") {
+        return send(res, 409, {
+          error: "order_not_complete",
+          message: "You can rate this once the order is finished and the issue window has closed.",
+          state: order.state,
+        });
+      }
+      if (!order.supplierId) {
+        return send(res, 409, { error: "order_has_no_shop", message: "This order was never run by a shop." });
+      }
+      store.shopReviews ||= [];
+      if (store.shopReviews.some((row) => row.orderId === order.id)) {
+        return send(res, 409, {
+          error: "already_rated",
+          message: "You have already rated this order.",
+        });
+      }
+      const body = await readBody(req);
+      const scores = {};
+      for (const field of ["qualityStars", "speedStars", "valueStars"]) {
+        const value = body[field];
+        if (!Number.isInteger(value) || value < 1 || value > 5) {
+          return send(res, 400, {
+            error: "invalid_rating",
+            message: "Give each of quality, speed and value a whole number of stars from 1 to 5.",
+            field,
+          });
+        }
+        scores[field] = value;
+      }
+      const comment = body.comment == null ? null : String(body.comment).trim();
+      if (comment && comment.length > 2_000) {
+        return send(res, 400, { error: "invalid_rating", message: "Keep a comment under 2,000 characters.", field: "comment" });
+      }
+      const at = now();
+      const review = {
+        id: id("rev"),
+        orderId: order.id,
+        supplierId: order.supplierId,
+        clientId: user.id,
+        qualityStars: scores.qualityStars,
+        speedStars: scores.speedStars,
+        valueStars: scores.valueStars,
+        comment: comment || null,
+        createdAt: at,
+      };
+      store.shopReviews.push(review);
+      audit(store, {
+        actor: user,
+        action: "order.rated",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { supplierId: order.supplierId, qualityStars: review.qualityStars },
+      });
+      await save(store);
+      return send(res, 201, { review });
+    }
+
     if (req.method === "POST" && /^\/orders\/[^/]+\/issues$/.test(pathname)) {
       if (user.role !== "client") return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
@@ -4723,6 +4804,13 @@ async function handleRequest(req, res) {
       }
       if (next === "rider_assigned") {
         order.riderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
+      }
+      // The moment the shop's own work is done. Its on-time record is measured
+      // from this against readyBy -- the date its board promised -- and never
+      // against the padded date the client was given, or against a delivery a
+      // rider was late for.
+      if (next === "ready_for_dispatch" && !order.readyAt) {
+        order.readyAt = now();
       }
       order.state = next;
       order.updatedAt = now();
