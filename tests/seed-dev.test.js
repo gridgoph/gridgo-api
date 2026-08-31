@@ -361,3 +361,41 @@ test("Lovis's document board is the master list's document services, whole", () 
   assert.equal(byStarter.lst_booklets.priceMinor, 125);
   assert.equal(byStarter.lst_risograph.priceMinor, 40_000);
 });
+
+test("Dara's six blueprint services are six listings, each with its own ladder", () => {
+  // One listing with a "service" option cannot hold these: the master list
+  // quotes a different price at every one of four sheet sizes for each of six
+  // services, and an additive option model can only be right at the base size.
+  const dara = ADDITIONAL_DEV_SHOPS.find((shop) => shop.slug === "dara_blueprint");
+  const listings = dara.services.flatMap((service) => service.listings);
+  assert.equal(listings.length, 6);
+
+  // Every one is its own listing under the same subcategory, told apart by a
+  // variant — which is also what keeps their ids, photos and copied options
+  // from colliding.
+  assert.equal(new Set(listings.map((listing) => listing.variant)).size, 6);
+  assert.equal(listings.every((listing) => listing.starterId === "lst_blueprint_cad_plotting"), true);
+
+  // A listing that copies a shared template has to name itself, or a board
+  // shows the same title six times and a client cannot choose.
+  assert.equal(new Set(listings.map((listing) => listing.name)).size, 6);
+
+  // The master list's own matrix: base is 20x30/A2 and the ladder is the step
+  // up to 24x36/A1, 30x40 and A0.
+  const expected = {
+    cad: [6_500, 8_000, 15_000, 18_000],
+    ammonia: [1_500, 2_800, 4_500, 5_500],
+    whiteprint: [3_000, 4_000, 8_500, 10_000],
+    digital_white: [2_500, 3_500, 8_000, 8_500],
+    digital_blue: [3_000, 4_000, 9_000, 9_000],
+    colour: [20_000, 25_000, 35_000, 45_000],
+  };
+  for (const listing of listings) {
+    const [a2, a1, wide, a0] = expected[listing.variant];
+    assert.equal(listing.priceMinor, a2, `${listing.variant} base`);
+    assert.equal(listing.optionPrices.lsto_plot_a2, 0, `${listing.variant} A2`);
+    assert.equal(listing.priceMinor + listing.optionPrices.lsto_plot_a1, a1, `${listing.variant} A1`);
+    assert.equal(listing.priceMinor + listing.optionPrices.lsto_plot_30x40, wide, `${listing.variant} 30x40`);
+    assert.equal(listing.priceMinor + listing.optionPrices.lsto_plot_a0, a0, `${listing.variant} A0`);
+  }
+});

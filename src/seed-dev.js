@@ -227,7 +227,16 @@ function ensureFile(store, file) {
   upsert(store.files, "fileId", file);
 }
 
-function copyStarter(store, starter, item, at, prefix = "lovis") {
+/**
+ * Copy a starter template onto one shop's listing.
+ *
+ * `optionPrices` reprices individual copied options by their starter id. Six
+ * blueprint services share one template and one shape -- four sheet sizes and
+ * three papers -- but each charges its own ladder, so what differs is the
+ * numbers rather than the structure. Restating the whole template six times to
+ * change twelve figures would bury the difference rather than show it.
+ */
+function copyStarter(store, starter, item, at, prefix = "lovis", optionPrices = null) {
   // Replaced, not skipped. Skipping made the seed idempotent but also inert:
   // a corrected starter never reached a board that had already been seeded,
   // so a wrong price stayed wrong until the database was dropped.
@@ -257,7 +266,7 @@ function copyStarter(store, starter, item, at, prefix = "lovis") {
         id: `cop_${prefix}_${option.id}`,
         optionGroupId: groupId,
         label: option.label,
-        priceModifierMinor: option.priceModifierMinor,
+        priceModifierMinor: optionPrices?.[option.id] ?? option.priceModifierMinor,
         // An option that multiplies rather than adds. Dropped here, Lovis's
         // "back-to-back, x2 the price" copied across as a free add-on.
         priceMultiplierBps: option.priceMultiplierBps ?? null,
@@ -537,11 +546,104 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
         categoryCode: "specialized_prototyping",
         turnaroundHours: 24,
         formats: ["pdf"], // "1. FILE & FORMAT REQUIREMENTS -- PDF only"
-        listings: [{
-          starterId: "lst_blueprint_cad_plotting",
-          priceMinor: 6_500, // PHP 65.00, CAD plotting at 20x30 / A2
-          description: "High-precision CAD plotting for architectural and engineering plans. PDF files only.",
-        }],
+        listings: [
+          {
+            starterId: "lst_blueprint_cad_plotting",
+            variant: "cad",
+            name: "CAD plotting",
+            priceMinor: 6_500, // PHP 65.00 at 20x30 / A2
+            // The size ladder is this service's own. Six services share one
+            // shape and none of them share a price, which is exactly why they
+            // are six listings rather than one with a service option.
+            optionPrices: {
+              lsto_plot_a2: 0,
+              lsto_plot_a1: 1_500,
+              lsto_plot_30x40: 8_500,
+              lsto_plot_a0: 11_500,
+            },
+            description: "High-precision CAD plotting for architectural and engineering plans. PDF files only.",
+          },
+          {
+            starterId: "lst_blueprint_cad_plotting",
+            variant: "ammonia",
+            name: "Ammonia blueprint",
+            priceMinor: 1_500, // PHP 15.00 at 20x30 / A2
+            // The size ladder is this service's own. Six services share one
+            // shape and none of them share a price, which is exactly why they
+            // are six listings rather than one with a service option.
+            optionPrices: {
+              lsto_plot_a2: 0,
+              lsto_plot_a1: 1_300,
+              lsto_plot_30x40: 3_000,
+              lsto_plot_a0: 4_000,
+            },
+            description: "Traditional ammonia-process blueprint copies for plan sets and permit submissions.",
+          },
+          {
+            starterId: "lst_blueprint_cad_plotting",
+            variant: "whiteprint",
+            name: "Whiteprint",
+            priceMinor: 3_000, // PHP 30.00 at 20x30 / A2
+            // The size ladder is this service's own. Six services share one
+            // shape and none of them share a price, which is exactly why they
+            // are six listings rather than one with a service option.
+            optionPrices: {
+              lsto_plot_a2: 0,
+              lsto_plot_a1: 1_000,
+              lsto_plot_30x40: 5_500,
+              lsto_plot_a0: 7_000,
+            },
+            description: "Whiteprint copies for site sets and shop drawings, on whiteprint stock.",
+          },
+          {
+            starterId: "lst_blueprint_cad_plotting",
+            variant: "digital_white",
+            name: "Digital blueprint, white paper",
+            priceMinor: 2_500, // PHP 25.00 at 20x30 / A2
+            // The size ladder is this service's own. Six services share one
+            // shape and none of them share a price, which is exactly why they
+            // are six listings rather than one with a service option.
+            optionPrices: {
+              lsto_plot_a2: 0,
+              lsto_plot_a1: 1_000,
+              lsto_plot_30x40: 5_500,
+              lsto_plot_a0: 6_000,
+            },
+            description: "Digital plan copies on white paper, for revisions and working sets.",
+          },
+          {
+            starterId: "lst_blueprint_cad_plotting",
+            variant: "digital_blue",
+            name: "Digital blueprint, blue paper",
+            priceMinor: 3_000, // PHP 30.00 at 20x30 / A2
+            // The size ladder is this service's own. Six services share one
+            // shape and none of them share a price, which is exactly why they
+            // are six listings rather than one with a service option.
+            optionPrices: {
+              lsto_plot_a2: 0,
+              lsto_plot_a1: 1_000,
+              lsto_plot_30x40: 6_000,
+              lsto_plot_a0: 6_000,
+            },
+            description: "Digital plan copies on blue paper, the traditional look without the ammonia process.",
+          },
+          {
+            starterId: "lst_blueprint_cad_plotting",
+            variant: "colour",
+            name: "Full-page colour plan",
+            priceMinor: 20_000, // PHP 200.00 at 20x30 / A2
+            // The size ladder is this service's own. Six services share one
+            // shape and none of them share a price, which is exactly why they
+            // are six listings rather than one with a service option.
+            optionPrices: {
+              lsto_plot_a2: 0,
+              lsto_plot_a1: 5_000,
+              lsto_plot_30x40: 15_000,
+              lsto_plot_a0: 25_000,
+            },
+            description: "Full-colour large-format plans for presentation sets and client submissions.",
+          },
+        ],
       },
     ],
   },
@@ -706,6 +808,43 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
  * Replaced rather than appended, so re-running the seed does not stack a
  * second copy of every break onto a board that already has them.
  */
+/**
+ * Take down a seeded listing this fixture no longer describes.
+ *
+ * The seed upserts, so a listing that is renamed or split into several leaves
+ * its old self behind -- Dara's six blueprint services arrived beside the one
+ * listing they replaced, and a client browsing saw the same plotting service
+ * twice at the same price.
+ *
+ * Only listings the seed itself owns, and only while nothing has ordered from
+ * one. A listing a real order references is history rather than fixture data,
+ * which is why the platform archives one instead of deleting it.
+ */
+function retireUnseededListings(store, slug, keep) {
+  const prefix = `sci_${slug}_`;
+  const ordered = new Set((store.orderLineItems || []).map((line) => line.sourceCatalogItemId));
+  const staleIds = new Set(
+    (store.catalogItems || [])
+      .filter((item) => item.id.startsWith(prefix) && !keep.has(item.id) && !ordered.has(item.id))
+      .map((item) => item.id),
+  );
+  if (!staleIds.size) return;
+
+  const groupIds = new Set(
+    (store.catalogOptionGroups || [])
+      .filter((group) => staleIds.has(group.catalogItemId))
+      .map((group) => group.id),
+  );
+  store.catalogOptions = (store.catalogOptions || []).filter((option) => !groupIds.has(option.optionGroupId));
+  store.catalogOptionGroups = (store.catalogOptionGroups || []).filter((group) => !staleIds.has(group.catalogItemId));
+  store.catalogItemPhotos = (store.catalogItemPhotos || []).filter((photo) => !staleIds.has(photo.catalogItemId));
+  store.catalogItemFileFormats = (store.catalogItemFileFormats || []).filter((row) => !staleIds.has(row.catalogItemId));
+  store.catalogPrepSteps = (store.catalogPrepSteps || []).filter((row) => !staleIds.has(row.catalogItemId));
+  store.catalogPriceTiers = (store.catalogPriceTiers || []).filter((row) => !staleIds.has(row.catalogItemId));
+  store.catalogSpeedTiers = (store.catalogSpeedTiers || []).filter((row) => !staleIds.has(row.catalogItemId));
+  store.catalogItems = (store.catalogItems || []).filter((item) => !staleIds.has(item.id));
+}
+
 function seedListingTiers(store, itemId, listing, at) {
   store.catalogPriceTiers = (store.catalogPriceTiers || []).filter((row) => row.catalogItemId !== itemId);
   store.catalogSpeedTiers = (store.catalogSpeedTiers || []).filter((row) => row.catalogItemId !== itemId);
@@ -753,7 +892,9 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
   for (const service of fixture.services) {
     for (const listing of service.listings) {
       const body = starterSampleBytes(listing.starterId);
-      const objectKey = `dev/${fixture.slug}/${listing.starterId}.jpg`;
+      // Per listing, not per starter: six blueprint services copy one template
+      // and would otherwise all claim the same object, which storage refuses.
+      const objectKey = `dev/${fixture.slug}/${listing.starterId}${listing.variant ? `_${listing.variant}` : ""}.jpg`;
       uploaded.push({
         ...listing,
         categoryCode: service.categoryCode,
@@ -856,16 +997,27 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
       );
     }
 
+    const seededItemIds = new Set();
     for (const listing of uploaded) {
       const starter = store.listingStarters.find((candidate) => candidate.id === listing.starterId);
       if (!starter) continue;
-      const itemId = `sci_${fixture.slug}_${starter.subcategoryCode}`;
+      // A shop may sell several distinct things under one subcategory: Dara
+      // runs six blueprint services, each with its own size ladder, and they
+      // are not one listing with options because the ladders differ. `variant`
+      // is what keeps their ids, photos and copied options apart.
+      const key = listing.variant
+        ? `${starter.subcategoryCode}_${listing.variant}`
+        : starter.subcategoryCode;
+      const itemId = `sci_${fixture.slug}_${key}`;
       upsert(store.catalogItems, "id", {
         id: itemId,
         supplierId: user.id,
         supplierServiceId: serviceIdFor(listing.categoryCode),
         subcategoryCode: starter.subcategoryCode,
-        name: starter.name,
+        // A listing may name itself. Six blueprint services copied from one
+        // template are all called "Blueprint plotting" otherwise, which is a
+        // board a client cannot choose from.
+        name: listing.name || starter.name,
         // Never the shop's name. The client reads this under a GRIDGO label,
         // and a description signed by the press undoes the whole point of
         // GRIDGO being the counter.
@@ -891,11 +1043,14 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
         createdAt: at,
         updatedAt: at,
       });
+      seededItemIds.add(itemId);
       const item = store.catalogItems.find((row) => row.id === itemId);
-      copyStarter(store, starter, item, at, fixture.slug);
+      // Prefixed per listing, not per shop: six listings copying one starter
+      // would otherwise claim the same option ids.
+      copyStarter(store, starter, item, at, `${fixture.slug}_${key}`, listing.optionPrices);
       seedListingTiers(store, itemId, listing, at);
       if (!listing.stored) continue;
-      const fileId = `file_${fixture.slug}_${starter.subcategoryCode}`;
+      const fileId = `file_${fixture.slug}_${key}`;
       ensureFile(store, {
         fileId,
         ownerId: user.id,
@@ -913,9 +1068,10 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
       if (photo) {
         photo.fileId = fileId;
       } else {
-        store.catalogItemPhotos.push({ catalogItemId: itemId, fileId, sortOrder: 0, altText: starter.name, createdAt: at });
+        store.catalogItemPhotos.push({ catalogItemId: itemId, fileId, sortOrder: 0, altText: listing.name || starter.name, createdAt: at });
       }
     }
+    retireUnseededListings(store, fixture.slug, seededItemIds);
     await saveStore(database, store);
   });
   return { email, shopName: fixture.shopName, clerkUserId, photos: uploaded.every((row) => row.stored) };
