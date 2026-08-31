@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
+import { replacePriceTiers, replaceSpeedTiers } from "../src/catalog-routes.js";
 import { seedReferenceData } from "../src/seed.js";
 import { defaultTaxonomy } from "../src/taxonomy.js";
 import {
@@ -930,4 +931,50 @@ test("the public listing tells a client which questions this pricing needs", () 
   // cheapest and decides what speed is worth paying for.
   assert.deepEqual(listing.speedTiers.map((tier) => tier.turnaroundHours), [24, 120]);
   assert.equal(listing.speedTiers[0].priceMinor, 50_000);
+});
+
+test("bulk breaks and speeds are replaced as a set, and refuse a rule that cannot be read", () => {
+  const store = withoutRequiredChoices(fixture());
+  const item = store.catalogItems.find((row) => row.id === "item");
+  const at = () => AT;
+
+  replacePriceTiers(store, item, [
+    { minQuantity: 250, unitPriceMinor: 6_000 },
+    { minQuantity: 1, unitPriceMinor: 10_000 },
+  ], at);
+  assert.deepEqual(
+    store.catalogPriceTiers.map((tier) => tier.minQuantity).sort((a, b) => a - b),
+    [1, 250],
+  );
+
+  // Replacing, not appending: a shop that removes a break has removed it.
+  replacePriceTiers(store, item, [{ minQuantity: 500, unitPriceMinor: 4_500 }], at);
+  assert.deepEqual(store.catalogPriceTiers.map((tier) => tier.minQuantity), [500]);
+
+  // Two rules starting at the same quantity is a coin toss, not a price.
+  assert.throws(
+    () => replacePriceTiers(store, item, [
+      { minQuantity: 100, unitPriceMinor: 900 },
+      { minQuantity: 100, unitPriceMinor: 800 },
+    ], at),
+    (error) => error.code === "invalid_catalog_item",
+  );
+
+  replaceSpeedTiers(store, item, [
+    { label: "5 days", turnaroundHours: 120, priceMinor: 25_000 },
+    { label: "2-3 hours", turnaroundHours: 3, priceMinor: 70_000 },
+  ], at);
+  assert.deepEqual(store.catalogSpeedTiers.map((tier) => tier.turnaroundHours).sort((a, b) => a - b), [3, 120]);
+
+  // A speed either names its own price or adds a fee. Both, or neither, means
+  // nothing, so it is refused rather than guessed at.
+  for (const broken of [
+    { label: "Bad", turnaroundHours: 12, priceMinor: 100, surchargeMinor: 100 },
+    { label: "Bad", turnaroundHours: 12 },
+  ]) {
+    assert.throws(
+      () => replaceSpeedTiers(store, item, [broken], at),
+      (error) => error.code === "invalid_catalog_item",
+    );
+  }
 });

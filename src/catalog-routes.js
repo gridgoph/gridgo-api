@@ -313,6 +313,84 @@ function optionInput(value, service, store) {
   return { label, priceModifierMinor, sortOrder, active, specBinding };
 }
 
+/**
+ * Volume breaks, replaced as a set.
+ *
+ * Quantities must be distinct: two rules starting at the same number is not a
+ * price, it is a coin toss, and the shop cannot see which one won.
+ */
+export function replacePriceTiers(store, item, value, now) {
+  if (!Array.isArray(value)) fail(400, "invalid_catalog_item", "priceTiers must be a list.", { field: "priceTiers" });
+  if (value.length > 8) fail(400, "invalid_catalog_item", "A listing can have at most eight bulk breaks.", { field: "priceTiers" });
+  const at = now();
+  const seen = new Set();
+  const next = value.map((row, index) => {
+    const tier = catalogRecord(row, { code: "invalid_catalog_item", field: `priceTiers[${index}]` });
+    const minQuantity = integer(tier.minQuantity, `priceTiers[${index}].minQuantity`, { min: 1 });
+    if (seen.has(minQuantity)) {
+      fail(400, "invalid_catalog_item", "Two bulk breaks cannot start at the same quantity.", {
+        field: `priceTiers[${index}].minQuantity`,
+      });
+    }
+    seen.add(minQuantity);
+    return {
+      id: `${item.id}_tier_${minQuantity}`,
+      catalogItemId: item.id,
+      minQuantity,
+      unitPriceMinor: moneyMinor(tier.unitPriceMinor, `priceTiers[${index}].unitPriceMinor`),
+      createdAt: at,
+      updatedAt: at,
+    };
+  });
+  store.catalogPriceTiers = (store.catalogPriceTiers || []).filter((row) => row.catalogItemId !== item.id);
+  store.catalogPriceTiers.push(...next);
+}
+
+/**
+ * Speeds, replaced as a set.
+ *
+ * A speed either states its own price -- hardbound is PHP 250 at five days and
+ * PHP 700 at two hours, two prices for the same book -- or adds a flat fee,
+ * which is how a rush charge works. Both at once means nothing, so it is
+ * refused rather than guessed at.
+ */
+export function replaceSpeedTiers(store, item, value, now) {
+  if (!Array.isArray(value)) fail(400, "invalid_catalog_item", "speedTiers must be a list.", { field: "speedTiers" });
+  if (value.length > 6) fail(400, "invalid_catalog_item", "A listing can offer at most six speeds.", { field: "speedTiers" });
+  const at = now();
+  const seen = new Set();
+  const next = value.map((row, index) => {
+    const tier = catalogRecord(row, { code: "invalid_catalog_item", field: `speedTiers[${index}]` });
+    const turnaroundHours = integer(tier.turnaroundHours, `speedTiers[${index}].turnaroundHours`, { min: 1, max: 8_760 });
+    if (seen.has(turnaroundHours)) {
+      fail(400, "invalid_catalog_item", "Two speeds cannot take the same time.", {
+        field: `speedTiers[${index}].turnaroundHours`,
+      });
+    }
+    seen.add(turnaroundHours);
+    const priceMinor = tier.priceMinor == null ? null : moneyMinor(tier.priceMinor, `speedTiers[${index}].priceMinor`);
+    const surchargeMinor = tier.surchargeMinor == null ? null : moneyMinor(tier.surchargeMinor, `speedTiers[${index}].surchargeMinor`);
+    if ((priceMinor == null) === (surchargeMinor == null)) {
+      fail(400, "invalid_catalog_item", "A speed either has its own price or adds a fee, not both and not neither.", {
+        field: `speedTiers[${index}].priceMinor`,
+      });
+    }
+    return {
+      id: `${item.id}_speed_${turnaroundHours}`,
+      catalogItemId: item.id,
+      label: requiredText(tier.label, `speedTiers[${index}].label`, 80),
+      turnaroundHours,
+      priceMinor,
+      surchargeMinor,
+      sortOrder: index,
+      createdAt: at,
+      updatedAt: at,
+    };
+  });
+  store.catalogSpeedTiers = (store.catalogSpeedTiers || []).filter((row) => row.catalogItemId !== item.id);
+  store.catalogSpeedTiers.push(...next);
+}
+
 function ensureGroupBounds(store, itemId, extra = 0) {
   const count = (store.catalogOptionGroups || []).filter((group) => group.catalogItemId === itemId).length + extra;
   if (count > 6) fail(400, "invalid_catalog_options", "A listing can have at most six option groups.");
@@ -727,6 +805,11 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (body.basePriceMinor != null) item.basePriceMinor = moneyMinor(body.basePriceMinor, "basePriceMinor");
     if (body.subcategoryCode != null) item.subcategoryCode = subcategoryForService(store, service, body.subcategoryCode);
     Object.assign(item, pricingFields(body, item));
+    // Tiers are small ordered sets a shop edits as a whole -- add a break,
+    // change a price, drop a speed -- so they are replaced wholesale rather
+    // than through six more routes each with its own version check.
+    if (Object.hasOwn(body, "priceTiers")) replacePriceTiers(store, item, body.priceTiers, now);
+    if (Object.hasOwn(body, "speedTiers")) replaceSpeedTiers(store, item, body.speedTiers, now);
     if (body.active != null) item.active = booleanValue(body.active, "active");
     if (body.sortOrder != null) item.sortOrder = integer(body.sortOrder, "sortOrder", { min: 0 });
     bumpVersion(item, now());
