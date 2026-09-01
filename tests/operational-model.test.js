@@ -10,7 +10,8 @@ import {
   expireIssueWindows,
   moneyReportingForOrder,
   publicOrderFor,
-  releaseEligibleSupplierPayouts,
+  PAYOUT_STAGES,
+  releaseMilestone,
   roundBps,
   validateOperationalSettings,
 } from "../src/operational-model.js";
@@ -140,7 +141,11 @@ test("a client collects at GRIDGO's office and is never given the shop's address
   // Collecting: one pin, and it is GRIDGO's counter. A rider brings the job
   // there; the client never goes to the press.
   const collected = publicOrderFor({ ...base, fulfillmentMode: "pickup" }, { id: "client-a", role: "client" });
-  assert.deepEqual(collected.pickup, { lat: 7.13267, lng: 125.611265, label: "GRIDGO Office" });
+  assert.deepEqual(collected.pickup, {
+    lat: 7.092287234449552,
+    lng: 125.61651084538697,
+    label: "GRIDGO Office",
+  });
 
   // Delivered: the client watches the rider and their own address. The shop's
   // coordinates are not theirs to have, so no origin is projected at all.
@@ -196,7 +201,10 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(supplierOrder.supplierSubtotalMinor, 100_000);
   assert.equal(supplierOrder.supplierSettlement.gridgoDeductionsMinor, 0);
   assert.equal(supplierOrder.supplierSettlement.totalSupplierEarningsMinor, 100_000);
-  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 25_000);
+  // The first stage is printing at half the shop's own price, whatever share of
+  // it the client happened to pay up front.
+  assert.equal(supplierOrder.payoutMilestones[0].code, "printing");
+  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 50_000);
   assert.equal(supplierOrder.supplierSettlement.collectedSupplierPrincipalMinor, 25_000);
   assert.equal(supplierOrder.supplierSettlement.protectedPaymentMinor, 25_000);
   assert.equal("reference" in supplierOrder.payments.initial, false);
@@ -264,75 +272,98 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   });
 });
 
-test("uses 0, 25, and 50 percent supplier payout shapes", () => {
-  assert.deepEqual(
-    [0, 2_500, 5_000].map((supplierDownpaymentRateBps) => {
-      const money = plan({ supplierDownpaymentRateBps });
-      return createPayoutMilestones(money).map(({ code, sharePercent, amountMinor }) => ({
-        code,
-        sharePercent,
-        amountMinor,
-      }));
-    }),
-    [
-      [{ code: "completion", sharePercent: 100, amountMinor: 100_000 }],
-      [
-        { code: "initial", sharePercent: 25, amountMinor: 25_000 },
-        { code: "completion", sharePercent: 75, amountMinor: 75_000 },
-      ],
-      [
-        { code: "initial", sharePercent: 50, amountMinor: 50_000 },
-        { code: "completion", sharePercent: 50, amountMinor: 50_000 },
-      ],
-    ],
-  );
+test("four stages, summing to exactly what the shop is owed", () => {
+  // A stray centavo in the shares would either shortchange the shop or have
+  // GRIDGO pay out more than it holds, and both are silent.
+  for (const supplierSubtotalMinor of [100_000, 99_999, 1, 7, 123_457]) {
+    const money = plan({ supplierSubtotalMinor });
+    const milestones = createPayoutMilestones(money);
+    assert.deepEqual(milestones.map((m) => m.code), PAYOUT_STAGES.map((s) => s.code));
+    assert.deepEqual(milestones.map((m) => m.sharePercent), [50, 15, 25, 10]);
+    assert.equal(
+      milestones.reduce((sum, m) => sum + m.amountMinor, 0),
+      money.supplierPlatformPayoutMinor,
+    );
+    for (const milestone of milestones) assert.ok(milestone.amountMinor >= 0);
+  }
 });
 
-test("caps automatic supplier payouts at confirmed collected principal", () => {
-  for (const supplierDownpaymentRateBps of [0, 2_500, 5_000]) {
-    const money = plan({ supplierDownpaymentRateBps });
-    const schedule = createPaymentSchedule(money);
-    schedule.payments.initial.status = "confirmed";
-    const order = {
-      id: `ord-${supplierDownpaymentRateBps}`,
-      fulfillmentMode: "delivery",
-      state: "production",
-      payoutHold: false,
-      ...money,
-      ...schedule,
-      payoutMilestones: createPayoutMilestones(money),
-    };
-    const initialReleases = releaseEligibleSupplierPayouts(
-      order,
-      { id: "system", role: "system" },
-      AT,
-      { claims: [] },
-    );
-    assert.deepEqual(initialReleases.map((milestone) => milestone.amountMinor),
-      supplierDownpaymentRateBps === 0 ? [] : [money.initialSupplierPrincipalMinor]);
+test("nothing releases itself, and nothing releases without a photograph", () => {
+  const money = plan({ supplierDownpaymentRateBps: 5_000 });
+  const schedule = createPaymentSchedule(money);
+  schedule.payments.initial.status = "confirmed";
+  const order = {
+    id: "ord-stages",
+    fulfillmentMode: "delivery",
+    state: "production",
+    payoutHold: false,
+    ...money,
+    ...schedule,
+    payoutMilestones: createPayoutMilestones(money),
+  };
+  const ops = { id: "user_ops", role: "ops_admin" };
 
-    order.state = "delivered";
-    expectDomainError(
-      () => releaseEligibleSupplierPayouts(order, { id: "system", role: "system" }, AT, { claims: [] }),
-      409,
-      "supplier_principal_not_collected",
-    );
-    order.payments.final_online.status = "confirmed";
-    const completionReleases = releaseEligibleSupplierPayouts(
-      order,
-      { id: "system", role: "system" },
-      AT,
-      { claims: [] },
-    );
-    assert.deepEqual(completionReleases.map((milestone) => milestone.amountMinor), [money.supplierRemainderMinor]);
-    assert.equal(
-      order.payoutMilestones.reduce(
-        (sum, milestone) => sum + (milestone.status === "released" ? milestone.amountMinor : 0),
-        0,
-      ),
-      money.supplierSubtotalMinor,
-    );
+  // The proof is the whole point of the release: a stage with nothing to look
+  // at is refused rather than granted quietly.
+  expectDomainError(() => releaseMilestone(order, "printing", ops, AT, { claims: [] }), 409, "pof_required");
+
+  const attach = (code) => {
+    order.payoutMilestones.find((m) => m.code === code).pofFileIds = [`file_${code}`];
+  };
+  for (const code of ["printing", "packaging_qc", "delivered", "retention"]) attach(code);
+
+  // Each stage names work that has to have happened first.
+  expectDomainError(() => releaseMilestone(order, "packaging_qc", ops, AT, { claims: [] }), 409, "milestone_not_reached");
+  expectDomainError(() => releaseMilestone(order, "delivered", ops, AT, { claims: [] }), 409, "delivery_required");
+  expectDomainError(() => releaseMilestone(order, "retention", ops, AT, { claims: [] }), 409, "issue_window_open");
+
+  assert.equal(releaseMilestone(order, "printing", ops, AT, { claims: [] }).status, "released");
+
+  order.state = "supplier_self_qc";
+  order.payments.final_online.status = "confirmed";
+  assert.equal(releaseMilestone(order, "packaging_qc", ops, AT, { claims: [] }).status, "released");
+});
+
+test("a stage is never released ahead of the money the client actually sent", () => {
+  // The older four-stage code never checked this, which is how it could have
+  // GRIDGO funding the gap out of its own pocket.
+  const money = plan({ supplierDownpaymentRateBps: 5_000 });
+  const schedule = createPaymentSchedule(money);
+  schedule.payments.initial.status = "confirmed";
+  const order = {
+    id: "ord-collected",
+    fulfillmentMode: "delivery",
+    state: "issue_window_open",
+    payoutHold: false,
+    ...money,
+    ...schedule,
+    payoutMilestones: createPayoutMilestones(money),
+  };
+  const ops = { id: "user_ops", role: "ops_admin" };
+  for (const milestone of order.payoutMilestones) milestone.pofFileIds = ["file_proof"];
+
+  // 50 percent collected covers printing, and stops at packing.
+  assert.equal(releaseMilestone(order, "printing", ops, AT, { claims: [] }).status, "released");
+  expectDomainError(
+    () => releaseMilestone(order, "packaging_qc", ops, AT, { claims: [] }),
+    409,
+    "supplier_principal_not_collected",
+  );
+
+  order.payments.final_online.status = "confirmed";
+  for (const code of ["packaging_qc", "delivered"]) {
+    assert.equal(releaseMilestone(order, code, ops, AT, { claims: [] }).status, "released");
   }
+
+  // Retention still waits out the window, whatever has been collected.
+  expectDomainError(() => releaseMilestone(order, "retention", ops, AT, { claims: [] }), 409, "issue_window_open");
+  order.state = "completed";
+  assert.equal(releaseMilestone(order, "retention", ops, AT, { claims: [] }).status, "released");
+
+  assert.equal(
+    order.payoutMilestones.reduce((sum, m) => sum + m.amountMinor, 0),
+    money.supplierPlatformPayoutMinor,
+  );
 });
 
 test("elapsed global issue window completes an already settled order", () => {

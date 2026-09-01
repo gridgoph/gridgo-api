@@ -119,7 +119,6 @@ import {
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
   publicOrderFor,
-  releaseEligibleSupplierPayouts,
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
@@ -1185,6 +1184,24 @@ function supplierTermsFor(store, supplierId) {
   return (store.supplierPaymentTerms || []).find((terms) => terms.supplierId === supplierId) || null;
 }
 
+/** Peso, as a person writes it. Minor units in, one figure out. */
+function formatMinorPhp(amountMinor) {
+  const pesos = Math.trunc(Math.abs(amountMinor) / 100);
+  const centavos = String(Math.abs(amountMinor) % 100).padStart(2, "0");
+  const sign = amountMinor < 0 ? "-" : "";
+  return `${sign}\u20b1${pesos.toLocaleString("en-PH")}.${centavos}`;
+}
+
+/** What the shop calls each stage. Never the platform's own code. */
+function payoutStageLabel(code) {
+  return ({
+    printing: "Printing",
+    packaging_qc: "Packing and quality check",
+    delivered: "Delivered",
+    retention: "Retention",
+  })[code] || "Payout";
+}
+
 function paymentCodeForRoute(code) {
   return ({ downpayment: "initial", balance: "final_online" })[code] || code;
 }
@@ -1220,28 +1237,6 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
  * instead, which a rider delivers to — the same journey as any other order,
  * ending at a different pin.
  */
-function recordAutomaticSupplierPayouts(store, order, at) {
-  const actor = { id: "system", role: "system" };
-  const released = releaseEligibleSupplierPayouts(order, actor, at, store);
-  for (const milestone of released) {
-    order.timeline.push({
-      at,
-      state: order.state,
-      by: actor.id,
-      note: `${milestone.code} supplier payout released automatically`,
-      milestoneCode: milestone.code,
-    });
-    audit(store, {
-      actor,
-      action: "payout_milestone.release",
-      entityType: "order",
-      entityId: order.id,
-      orderId: order.id,
-      detail: { milestoneCode: milestone.code, amountMinor: milestone.amountMinor, source: "automatic" },
-    });
-  }
-  return released;
-}
 
 async function load() {
   return loadStore(database);
@@ -4071,6 +4066,26 @@ async function handleRequest(req, res) {
         detail: { milestoneCode, amountMinor: milestone.amountMinor },
         reason: body.note || null,
       });
+      /*
+       Tell the shop its money moved.
+
+       A shop is told about its jobs at every step and never about its money,
+       which is the half it is actually waiting on. The amount is in the
+       notification rather than behind it, because "a payout was released" sends
+       somebody looking for a figure they already had a right to.
+      */
+      if (order.supplierId) {
+        store.notifications.push({
+          id: id("ntf"),
+          userId: order.supplierId,
+          type: "shop_payout_released",
+          orderId: order.id,
+          title: `${formatMinorPhp(milestone.amountMinor)} released`,
+          body: `${payoutStageLabel(milestoneCode)} on ${order.title || "your job"}. It is on its way to your account.`,
+          read: false,
+          at: releasedAt,
+        });
+      }
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store), milestone });
     }
@@ -4875,7 +4890,6 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
-      if (next === "production") recordAutomaticSupplierPayouts(store, order, order.updatedAt);
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
@@ -5202,7 +5216,6 @@ async function handleRequest(req, res) {
         note: body.evidenceType === "photo" ? "Delivery completed with photo evidence" : "Delivery completed with signature evidence",
         fileId: evidenceFileId,
       });
-      recordAutomaticSupplierPayouts(store, order, deliveredAt);
       order.issueWindowOpenedAt = deliveredAt;
       order.issueWindowExpiresAt = issueWindowExpiresAt(deliveredAt, store.settings.issueWindowHours);
       order.state = "issue_window_open";
@@ -5261,7 +5274,6 @@ async function handleRequest(req, res) {
         by: user.id,
         note: `Collected at GRIDGO Office by ${receivedBy}`,
       });
-      recordAutomaticSupplierPayouts(store, order, collectedAt);
       order.issueWindowOpenedAt = collectedAt;
       order.issueWindowExpiresAt = issueWindowExpiresAt(collectedAt, store.settings.issueWindowHours);
       order.state = "issue_window_open";

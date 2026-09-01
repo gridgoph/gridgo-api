@@ -89,6 +89,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786942800000_an_order_line_remembers_any_unit",
     "1786946400000_line_math_understands_measured_units",
     "1786950000000_a_collected_order_waits_on_our_shelf",
+    "1786953600000_a_shop_is_paid_across_four_stages",
       ],
     );
     await client.query(`
@@ -212,6 +213,20 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
          3, false, now(), now(), 0, '{}')
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+
+    await runner(migrationOptions(schema, "down", 1, client));
+  // The four-stage payout has no honest reverse -- two stages cannot say which
+  // of four a shop had reached -- so its down leaves the rows alone. What it
+  // must not do is leave the database still insisting on the four.
+  // Scoped to this run's own schema: the development database carries a
+  // function of the same name, and an unfiltered read can answer with either.
+  const payoutShape = (await client.query(
+    `SELECT prosrc FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = $1 AND p.proname = 'validate_order_financial_children'`,
+    [schema],
+  )).rows[0]?.prosrc ?? "";
+  assert.equal(payoutShape.includes("packaging_qc"), true);
 
     await runner(migrationOptions(schema, "down", 1, client));
   // The counter step goes away, and with it the only place a collected order
