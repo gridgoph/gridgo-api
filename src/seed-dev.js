@@ -6,6 +6,7 @@ import { authConfiguration, clerkClientProfile, createClerkBackend } from "./aut
 import { createDatabase } from "./database.js";
 import { createObjectStorage } from "./object-storage.js";
 import { loadStore, saveStore } from "./postgres-store.js";
+import { notifyOrderParties } from "./client-order-notifications.js";
 import { seedReferenceData } from "./seed.js";
 import { measurementKindFor } from "./pricing.js";
 import { priceCatalogSelection, selectedCatalogPrice } from "./supplier-catalog.js";
@@ -1400,6 +1401,13 @@ const DEV_QUEUE = [
 
   // Dara plots 40 sheets a day.
   { supplierId: "user_dara_blueprint", inDays: 7, quantity: 40, title: "Permit plan set", subcategoryCode: "blueprint_cad_plotting", estimatedHours: 6, state: "production" },
+
+  // Both halves of a collected order's ending, because the two look nothing
+  // alike and each has a screen of its own. One is on the counter, settled and
+  // waiting for whoever placed it; the other reached the counter with the
+  // balance still owed, and Operations must refuse to release it.
+  { supplierId: "user_lovis_printshop", inDays: -1, quantity: 500, title: "Seminar handouts", subcategoryCode: "document_printing", estimatedHours: 2, state: "awaiting_collection", fulfillmentMode: "pickup", paymentStage: "settled" },
+  { supplierId: "user_polymedia", inDays: -1, quantity: 3, title: "Booth backdrops", subcategoryCode: "tarpaulins_outdoor_banners", estimatedHours: 5, state: "awaiting_collection", fulfillmentMode: "pickup", paymentStage: "downpayment_cleared" },
 ];
 
 /** The local day `offset` days from now, as an ISO instant at noon. */
@@ -1421,6 +1429,16 @@ function paymentStageFor(state) {
   if (state === "needs_qa" || state === "client_correction") return "submitted";
   if (state === "out_for_delivery" || state === "ready_for_dispatch") return "settled";
   return "downpayment_cleared";
+}
+
+/*
+ A collected order settles at the counter, not at a door, so both halves of
+ that moment have to be seedable: one paid and ready to hand over, one still
+ owed and rightly refused. An entry may say which rather than have it inferred
+ from a state that no longer implies one.
+*/
+function seedPaymentStage(entry) {
+  return entry.paymentStage ?? paymentStageFor(entry.state);
 }
 
 /** The cheapest choice in every group a listing insists on. */
@@ -1454,6 +1472,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
     store.orders ||= [];
     store.orderLineItems ||= [];
     store.auditLog ||= [];
+    store.notifications ||= [];
 
     for (const [index, entry] of DEV_QUEUE.entries()) {
       // Skipped rather than invented: a shop the seed did not create is not
@@ -1494,7 +1513,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
       const totalMinor = itemSubtotalMinor + serviceFeeMinor + deliveryFeeMinor;
       const downpaymentMinor = Math.round((totalMinor * 7_500) / 10_000);
       const balanceMinor = totalMinor - downpaymentMinor;
-      const stage = paymentStageFor(entry.state);
+      const stage = seedPaymentStage(entry);
 
       upsert(store.orders, "id", {
         id: orderId,
@@ -1514,7 +1533,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
         // from the shop to GRIDGO Office, where the client picks it up; a
         // delivered one goes to the client's own address. Every third is
         // collected, which is roughly the mix the pilot expects.
-        fulfillmentMode: index % 3 === 0 ? "pickup" : "delivery",
+        fulfillmentMode: entry.fulfillmentMode ?? (index % 3 === 0 ? "pickup" : "delivery"),
         supplierSubtotalMinor: itemSubtotalMinor,
         subtotalMinor: itemSubtotalMinor,
         serviceFeeMinor,
@@ -1581,6 +1600,11 @@ async function seedDevelopmentQueue(database, clientId, now) {
       });
 
       seedQueueAudit(store, { orderId, clientId, entry, stage, at, index });
+      let ntf = 0;
+      notifyOrderParties(store, store.orders.find((row) => row.id === orderId), {
+        createId: () => `ntf_dev_queue_${index}_${ntf++}`,
+        at,
+      });
     }
     await saveStore(database, store);
   });
@@ -1608,16 +1632,26 @@ function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
     if (ops) trail.push(["payment.confirmed", ops, "ops_admin"]);
     if (ops) trail.push(["order.qa_passed", ops, "ops_admin"]);
   }
-  if (["production", "supplier_self_qc", "ready_for_dispatch", "out_for_delivery"].includes(entry.state)) {
+  const printed = ["production", "supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
+  const checked = ["supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
+  const staged = ["ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
+  if (printed.includes(entry.state)) {
     trail.push(["order.production_started", entry.supplierId, "supplier"]);
   }
-  if (["supplier_self_qc", "ready_for_dispatch", "out_for_delivery"].includes(entry.state)) {
+  if (checked.includes(entry.state)) {
     trail.push(["order.self_qc", entry.supplierId, "supplier"]);
   }
-  if (["ready_for_dispatch", "out_for_delivery"].includes(entry.state)) {
+  if (staged.includes(entry.state)) {
     trail.push(["order.ready_for_dispatch", entry.supplierId, "supplier"]);
   }
-  if (entry.state === "out_for_delivery" && rider) trail.push(["order.picked_up", rider, "rider"]);
+  if (["out_for_delivery", "awaiting_collection"].includes(entry.state) && rider) {
+    trail.push(["order.picked_up", rider, "rider"]);
+  }
+  // The rider's leg is over: it is on GRIDGO's own shelf, and the next step
+  // belongs to whoever comes to the counter for it.
+  if (entry.state === "awaiting_collection" && rider) {
+    trail.push(["order.left_at_office", rider, "rider"]);
+  }
   if (entry.state === "client_correction" && ops) trail.push(["order.correction_requested", ops, "ops_admin"]);
 
   for (const [step, [action, actorId, actorRole]] of trail.entries()) {

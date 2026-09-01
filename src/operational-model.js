@@ -14,6 +14,29 @@ export const PICKUP_CHECK_CODES = Object.freeze([
 
 export const PICKUP_SIGN_OFF_PROMPT = "GRIDGO partner! Quality check, done! Salamat po!";
 
+/*
+ The two shapes the word "pickup" has carried.
+
+ The older one meant the job never travelled: the client walked to the shop
+ counter that printed it. That route was never finished, and the payment plans
+ written for it are the only place it survives.
+
+ The one the platform runs on now means the client collects at GRIDGO Office,
+ so the job still travels -- a rider carries it from the shop to that counter.
+ It ends on our own shelf rather than in anybody's hands, which is why it needs
+ an ending of its own.
+*/
+const CONTAINED_PICKUP_PLANS = Object.freeze(["pickup_full_online", "pickup_downpayment_store"]);
+
+export function isContainedPickup(order) {
+  return order?.fulfillmentMode === "pickup" && CONTAINED_PICKUP_PLANS.includes(order?.paymentPlan);
+}
+
+/** A collected order: it travels to the office, and waits there to be claimed. */
+export function carriedToOffice(order) {
+  return order?.fulfillmentMode === "pickup" && !isContainedPickup(order);
+}
+
 export class OperationalError extends Error {
   constructor(status, code, message, details = {}) {
     super(message);
@@ -438,7 +461,11 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
   }
   if (milestone.status === "released") return milestone;
-  if (order.fulfillmentMode === "pickup") {
+  // The fourth site written for the older meaning of "pickup", where the job
+  // never left the shop and nothing about its handover was ever finished. A
+  // collected job now travels to the office and is released at the counter, so
+  // its fulfilment is recorded like any other and the shop is owed for it.
+  if (isContainedPickup(order)) {
     fail(
       409,
       "pickup_payout_not_available",
@@ -521,6 +548,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     "rider_assigned",
     "picked_up",
     "out_for_delivery",
+    "awaiting_collection",
     "delivered",
     "issue_window_open",
     "completed",
@@ -532,6 +560,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     "rider_assigned",
     "picked_up",
     "out_for_delivery",
+    "awaiting_collection",
     "delivered",
     "issue_window_open",
     "completed",
@@ -567,7 +596,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
 }
 
 export function releaseEligibleSupplierPayouts(order, actor, at, store = null) {
-  if (order?.fulfillmentMode === "pickup" || activePayoutHold(store, order)) return [];
+  if (isContainedPickup(order) || activePayoutHold(store, order)) return [];
   const productionReached = new Set([
     "production",
     "supplier_self_qc",
@@ -575,6 +604,7 @@ export function releaseEligibleSupplierPayouts(order, actor, at, store = null) {
     "rider_assigned",
     "picked_up",
     "out_for_delivery",
+    "awaiting_collection",
     "delivered",
     "issue_window_open",
     "completed",
@@ -760,6 +790,17 @@ export function publicOrderFor(order, user, store = null) {
     if (order.fulfillmentMode === "pickup") publicRecord.pickup = gridgoOfficePoint();
     else delete publicRecord.pickup;
   }
+
+  /*
+   Nobody is delivering to a client who is collecting.
+
+   A rider does carry a collected job, but only between two places that are
+   GRIDGO's own -- the shop and the office counter. Handing the client a rider
+   to watch invites them to set out while the job is still on the road, and
+   dresses an errand of ours up as their delivery. What they are owed is the
+   moment it is on the shelf, which the state already says.
+  */
+  if (owningClient && !ops && carriedToOffice(order)) delete publicRecord.riderId;
 
   /*
    Where a collected order is carried to.

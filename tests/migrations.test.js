@@ -88,6 +88,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786939200000_retire_the_supplier_proof_loop",
     "1786942800000_an_order_line_remembers_any_unit",
     "1786946400000_line_math_understands_measured_units",
+    "1786950000000_a_collected_order_waits_on_our_shelf",
       ],
     );
     await client.query(`
@@ -211,6 +212,18 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
          3, false, now(), now(), 0, '{}')
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+
+    await runner(migrationOptions(schema, "down", 1, client));
+  // The counter step goes away, and with it the only place a collected order
+  // could wait between the rider leaving and the client arriving.
+  const shelfStates = (await client.query(
+    `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'orders_state_check'`,
+    [schema],
+  )).rows[0]?.def ?? "";
+  assert.equal(shelfStates.includes("awaiting_collection"), false);
 
     await runner(migrationOptions(schema, "down", 1, client));
   // The line-math check goes back to insisting a subtotal is always a rate

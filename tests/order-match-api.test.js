@@ -115,13 +115,17 @@ async function fixture(database) {
       { id: "supplier_a", clerkUserId: "clerk_supplier_a", email: "a@gridgo.test", name: "A", role: "supplier", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, createdAt: AT },
       { id: "supplier_b", clerkUserId: "clerk_supplier_b", email: "b@gridgo.test", name: "B", role: "supplier", verificationStatus: "approved", shop: { lat: 7.09, lng: 125.63, label: "Shop B" }, createdAt: AT },
     { id: "user_ops", clerkUserId: "clerk_ops", email: "ops@gridgo.test", name: "Ops", role: "ops_admin", createdAt: AT },
+      { id: "user_rider", clerkUserId: "clerk_rider", email: "rider@gridgo.test", name: "Rider", role: "rider", verificationStatus: "approved", createdAt: AT },
     );
     store.userRoleMemberships.push(
       { userId: "user_client", role: "client", createdAt: AT },
       { userId: "supplier_a", role: "supplier", createdAt: AT },
       { userId: "supplier_b", role: "supplier", createdAt: AT },
     { userId: "user_ops", role: "ops_admin", createdAt: AT },
+      { userId: "user_rider", role: "rider", createdAt: AT },
     );
+    store.riderProfiles.push({ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC 1234", version: 1, updatedAt: AT });
+    store.approvalCases.push({ id: "case_rider", userId: "user_rider", kind: "rider", status: "approved", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
     for (const [index, supplierId] of ["supplier_a", "supplier_b"].entries()) {
       const shop = index === 0
         ? { lat: 7.064, lng: 125.6085, label: "Shop A" }
@@ -147,6 +151,7 @@ async function fixture(database) {
       { fileId: "file_art", ownerId: "user_client", purpose: "artwork", originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
       { fileId: "file_mock", ownerId: "user_client", purpose: "mockup", originalFilename: "mock.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/mock.jpg", references: [], createdAt: AT },
       { fileId: "file_qr", ownerId: "user_client", purpose: "payment_proof", originalFilename: "qr.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/qr.jpg", references: [], createdAt: AT },
+      { fileId: "file_drop", ownerId: "user_rider", purpose: "delivery_photo", originalFilename: "drop.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "rider/drop.jpg", references: [], createdAt: AT },
     );
     await saveStore(database, store);
   });
@@ -280,7 +285,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
     body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-900" } },
   });
   assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
-  return { api, call, orderId: checkout.body.order.id, address, output: () => instance.output() };
+  return { api, call, database, orderId: checkout.body.order.id, address, output: () => instance.output() };
 }
 
 /**
@@ -634,4 +639,126 @@ test("a collected order runs the whole journey, because a rider takes it to the 
   // The client collects there, and is never given the shop's address.
   const clientView = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
   assert.equal(clientView.pickup?.label, "GRIDGO Office");
+});
+
+/**
+ * A collected order has two endings, and only the second one is the client's.
+ *
+ * The rider reaching GRIDGO Office is not the client receiving the job. Treated
+ * as one ending, the rider was held at our own counter against a balance nobody
+ * present could pay, and the order could never move again; recorded as a
+ * delivery, it would have closed the job and started the complaint window while
+ * the package was still on our shelf.
+ */
+test("a collected order stops on the counter, and only the counter hands it over", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+  for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
+    const moved = await call(`/orders/${orderId}/transition`, {
+      method: "POST", subject: "clerk_supplier_a", body: { state },
+    });
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+
+  // The balance is not settled, and it does not stop the carrying. Nothing is
+  // being handed to anybody: the job is going onto GRIDGO's own shelf.
+  const accepted = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  const checked = await call(`/dispatch/${orderId}/pickup-checklist`, {
+    method: "POST", subject: "clerk_rider",
+    body: {
+      checks: [
+        "quantity_match", "specification_match", "visible_defects",
+        "packaging_integrity", "documentation", "supplier_sign_off",
+      ].map((code) => ({ code, passed: true })),
+    },
+  });
+  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  const started = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" },
+  });
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  // The rider's evidence, bound to this order. Written straight into the store
+  // rather than uploaded, because what is under test is the ending, not the
+  // camera.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const file = store.files.find((candidate) => candidate.fileId === "file_drop");
+    file.references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+
+  const dropped = await call(`/dispatch/${orderId}/delivery`, {
+    method: "POST", subject: "clerk_rider",
+    body: { evidenceType: "photo", evidenceFileId: "file_drop" },
+  });
+  assert.equal(dropped.status, 200, JSON.stringify(dropped.body));
+  assert.equal(dropped.body.order.state, "awaiting_collection");
+
+  // Nothing has been given to the client yet, so nothing about the job is over.
+  assert.equal(dropped.body.order.issueWindowOpenedAt ?? null, null);
+
+  // The counter is where the money is owed, and it refuses without it.
+  const early = await call(`/orders/${orderId}/collection`, {
+    method: "POST", subject: "clerk_ops", body: { receivedBy: "Ana Cruz" },
+  });
+  assert.equal(early.status, 409, JSON.stringify(early.body));
+  assert.equal(early.body.error, "final_payment_not_confirmed");
+
+  await call(`/orders/${orderId}/payments/final_online/submit`, {
+    method: "POST", subject: "clerk_client",
+    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-901" },
+  });
+  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+
+  // A hand-over with no name is a hand-over nobody can check afterwards.
+  const nameless = await call(`/orders/${orderId}/collection`, {
+    method: "POST", subject: "clerk_ops", body: {},
+  });
+  assert.equal(nameless.status, 400, JSON.stringify(nameless.body));
+
+  const released = await call(`/orders/${orderId}/collection`, {
+    method: "POST", subject: "clerk_ops", body: { receivedBy: "Ana Cruz" },
+  });
+  assert.equal(released.status, 200, JSON.stringify(released.body));
+  assert.equal(released.body.order.state, "issue_window_open");
+  assert.ok(released.body.order.issueWindowOpenedAt, "the complaint window starts when the client has it");
+  assert.ok(
+    released.body.order.timeline.some((entry) => entry.note?.includes("Ana Cruz")),
+    "who collected it is written into the record",
+  );
+});
+
+/**
+ * A rider is never sent to a door that has not paid.
+ *
+ * The balance used to be asked for at the doorstep, which meant a rider could
+ * ride across the city to find the client had not settled and nothing either of
+ * them could do about it. It is asked for while the job is still on the press,
+ * and a delivery that has not settled is simply not offered.
+ */
+test("an unpaid delivery is not offered to a rider", { skip: !DATABASE_URL }, async (t) => {
+  const { call, orderId } = await placedOrder(t);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+  for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
+    await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier_a", body: { state } });
+  }
+
+  const held = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
+  assert.equal(held.some((entry) => entry.id === orderId), false, "an unpaid delivery is withheld");
+
+  const refused = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "final_payment_not_confirmed");
+
+  await call(`/orders/${orderId}/payments/final_online/submit`, {
+    method: "POST", subject: "clerk_client",
+    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-902" },
+  });
+  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+
+  const offered = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
+  assert.ok(offered.some((entry) => entry.id === orderId), "it is offered once the balance clears");
 });

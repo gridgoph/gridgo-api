@@ -75,6 +75,7 @@ import {
   requireIdempotencyKey,
   submitRiderApplication,
 } from "./enrollment.js";
+import { notifyOrderParties } from "./client-order-notifications.js";
 import {
   createNotificationEvents,
   formatNotificationEvent,
@@ -107,11 +108,13 @@ import {
 import { routeAccountProfile } from "./account-profile-routes.js";
 import {
   calculateOrderMoney,
+  carriedToOffice,
   createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
   estimatePriceRange,
   expireIssueWindows,
+  isContainedPickup,
   issueWindowExpiresAt,
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
@@ -1217,13 +1220,6 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
  * instead, which a rider delivers to — the same journey as any other order,
  * ending at a different pin.
  */
-function isContainedPickup(order) {
-  return (
-    order.fulfillmentMode === "pickup" &&
-    ["pickup_full_online", "pickup_downpayment_store"].includes(order.paymentPlan)
-  );
-}
-
 function recordAutomaticSupplierPayouts(store, order, at) {
   const actor = { id: "system", role: "system" };
   const released = releaseEligibleSupplierPayouts(order, actor, at, store);
@@ -1272,11 +1268,32 @@ async function expireElapsedIssueWindows() {
   });
 }
 
+/*
+ Whether a job may be handed to a rider yet.
+
+ The balance used to be collected at the client's door, which meant a rider
+ could ride an hour to find nobody had paid and nothing they could do about it.
+ It is asked for while the job is still on the press instead, and a delivery
+ that has not settled it is simply not offered.
+
+ A collected job is exempt: it is carried to our own counter, and its balance
+ is settled there.
+*/
+function deliveryBalanceSettled(order) {
+  if (carriedToOffice(order)) return true;
+  const balance = order?.payments?.final_online;
+  if (!balance) return true;
+  return balance.status === "confirmed";
+}
+
 function canViewOrderLocation(user, order) {
   if (!user || !order) return false;
   if (user.role === "ops_admin" || user.role === "super_admin") return true;
   if (user.role === "rider" && order.riderId === user.id) return true;
-  if (user.role === "client" && order.clientId === user.id) return true;
+  // A collecting client is not being delivered to. The rider is moving the job
+  // between two of GRIDGO's own places, and watching that only tempts them to
+  // set out before it is on the shelf.
+  if (user.role === "client" && order.clientId === user.id) return !carriedToOffice(order);
   if (user.role === "supplier" && order.supplierId === user.id) return true;
   return false;
 }
@@ -1557,6 +1574,9 @@ const TRANSITIONS = {
   rider_assigned: {},
   picked_up: { out_for_delivery: ["rider"] },
   out_for_delivery: {},
+  // A collected job waits on our shelf. Only the counter can end it, and only
+  // once the client has settled what is left.
+  awaiting_collection: { delivered: ["ops_admin", "super_admin"] },
   delivered: { issue_window_open: ["system", "ops_admin", "super_admin", "client", "rider"] },
   issue_window_open: {}, // request-driven expiry completes; no actor may close it early
   completed: { payout_released: ["ops_admin", "super_admin"] },
@@ -4251,6 +4271,7 @@ async function handleRequest(req, res) {
         order.paymentStatus = "paid";
       }
       order.updatedAt = confirmedAt;
+      notifyOrderParties(store, order, { createId: id, at: confirmedAt });
       order.timeline.push({
         at: confirmedAt,
         state: order.state,
@@ -4539,6 +4560,12 @@ async function handleRequest(req, res) {
             verificationStatus: rider.verificationStatus || "unverified",
           });
         }
+        if (!deliveryBalanceSettled(order)) {
+          return send(res, 409, {
+            error: "final_payment_not_confirmed",
+            message: "This delivery is waiting on the client's remaining balance. Confirm it before assigning a rider.",
+          });
+        }
       }
       if (next === "cancelled") {
         const reason = String(body.reason || "").trim();
@@ -4686,21 +4713,16 @@ async function handleRequest(req, res) {
           by: user.id,
           note: `Supplier issued final quote version ${quoteVersion}`,
         });
-        const notification = {
-          id: id("ntf"),
-          userId: order.clientId,
-          type: "supplier_assignment_final_price",
-          orderId: order.id,
-          title: "Final quote ready",
-          body: "Review the final quote, fulfillment choice, and payment plan.",
-          read: false,
-          at: acceptedAt,
-        };
-        store.notifications.push(notification);
-        order.assignmentNotificationId = notification.id;
-        order.assignmentNotifiedAt = notification.at;
         order.state = "awaiting_checkout";
         order.updatedAt = acceptedAt;
+        const { client: notification } = notifyOrderParties(store, order, {
+          createId: id,
+          at: acceptedAt,
+        });
+        if (notification) {
+          order.assignmentNotificationId = notification.id;
+          order.assignmentNotifiedAt = notification.at;
+        }
         order.timeline.push({
           at: acceptedAt,
           state: "awaiting_checkout",
@@ -4854,6 +4876,7 @@ async function handleRequest(req, res) {
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       if (next === "production") recordAutomaticSupplierPayouts(store, order, order.updatedAt);
+      notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
@@ -4875,7 +4898,8 @@ async function handleRequest(req, res) {
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
         (o) => !isContainedPickup(o)
-          && (o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id)),
+          && ((o.state === "ready_for_dispatch" && deliveryBalanceSettled(o))
+            || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
       return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });
     }
@@ -4896,6 +4920,12 @@ async function handleRequest(req, res) {
       // shape has no journey to offer.
       if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
+      }
+      if (!deliveryBalanceSettled(order)) {
+        return send(res, 409, {
+          error: "final_payment_not_confirmed",
+          message: "This delivery is waiting on the client's remaining balance. It is offered again once Operations confirms it.",
+        });
       }
       order.riderId = user.id;
       order.state = "rider_assigned";
@@ -5047,6 +5077,7 @@ async function handleRequest(req, res) {
         by: user.id,
         note: "All six pickup checks passed; rider prompted to give the trained verbal sign-off",
       });
+      notifyOrderParties(store, order, { createId: id, at: checkedAt });
       await save(store);
       return send(res, 200, {
         order: publicOrder(order, user, store),
@@ -5101,7 +5132,16 @@ async function handleRequest(req, res) {
           state: order.state,
         });
       }
-      if (order.payments?.final_online?.status !== "confirmed") {
+      /*
+       Money is owed by whoever is being handed the job.
+
+       On a delivery that is the client at their own door, so the rider holds
+       the package until the balance clears. A collected job is only being put
+       on GRIDGO's own shelf; blocking that strands a rider at our office
+       waiting on something no one present can do, and the job can never move
+       again. The gate moves to the counter, where the client actually is.
+      */
+      if (!carriedToOffice(order) && order.payments?.final_online?.status !== "confirmed") {
         return send(res, 409, {
           error: "final_payment_not_confirmed",
           message: "Operations must confirm the client's final online payment before the rider completes delivery.",
@@ -5139,6 +5179,21 @@ async function handleRequest(req, res) {
         riderId: user.id,
         recordedAt: deliveredAt,
       };
+      if (carriedToOffice(order)) {
+        order.state = "awaiting_collection";
+        order.awaitingCollectionAt = deliveredAt;
+        order.updatedAt = deliveredAt;
+        order.timeline.push({
+          at: deliveredAt,
+          state: "awaiting_collection",
+          by: user.id,
+          note: "Left at GRIDGO Office for the client to collect",
+          fileId: evidenceFileId,
+        });
+        notifyOrderParties(store, order, { createId: id, at: deliveredAt });
+        await save(store);
+        return send(res, 200, { order: publicOrder(order, user, store) });
+      }
       order.state = "delivered";
       order.timeline.push({
         at: deliveredAt,
@@ -5157,6 +5212,74 @@ async function handleRequest(req, res) {
         state: "issue_window_open",
         by: "system",
         note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
+      });
+      notifyOrderParties(store, order, { createId: id, at: deliveredAt });
+      await save(store);
+      return send(res, 200, { order: publicOrder(order, user, store) });
+    }
+
+    /*
+     The counter hand-over: the second ending a collected job has.
+
+     A rider's proof says the job reached our shelf, which is not the same as
+     the client having it. This is the moment it leaves GRIDGO -- so it is the
+     moment the balance has to be settled, and the moment the complaint window
+     starts running.
+    */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/collection$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.state !== "awaiting_collection") {
+        return send(res, 409, {
+          error: "collection_not_available",
+          message: "This order is not waiting at the counter. Refresh it to see where it actually is.",
+          state: order.state,
+        });
+      }
+      if (order.payments?.final_online?.status !== "confirmed") {
+        return send(res, 409, {
+          error: "final_payment_not_confirmed",
+          message: "Confirm the client's remaining balance before releasing this order at the counter.",
+        });
+      }
+      const body = await readBody(req);
+      const receivedBy = String(body.receivedBy || "").trim();
+      if (!receivedBy) {
+        return send(res, 400, {
+          error: "collector_name_required",
+          message: "Record who collected this order. A counter hand-over with no name cannot be checked later.",
+        });
+      }
+      const collectedAt = now();
+      order.collection = { receivedBy, recordedBy: user.id, at: collectedAt };
+      order.state = "delivered";
+      order.timeline.push({
+        at: collectedAt,
+        state: "delivered",
+        by: user.id,
+        note: `Collected at GRIDGO Office by ${receivedBy}`,
+      });
+      recordAutomaticSupplierPayouts(store, order, collectedAt);
+      order.issueWindowOpenedAt = collectedAt;
+      order.issueWindowExpiresAt = issueWindowExpiresAt(collectedAt, store.settings.issueWindowHours);
+      order.state = "issue_window_open";
+      order.updatedAt = collectedAt;
+      order.timeline.push({
+        at: collectedAt,
+        state: "issue_window_open",
+        by: "system",
+        note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
+      });
+      notifyOrderParties(store, order, { createId: id, at: collectedAt });
+      audit(store, {
+        actor: user,
+        action: "order_collected",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { receivedBy },
       });
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });

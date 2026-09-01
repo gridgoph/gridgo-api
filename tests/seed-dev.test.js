@@ -187,13 +187,28 @@ test("development shop seed is idempotent and names Lovis Printshop", { skip: !D
   assert.equal(client.role, "client");
   assert.equal(client.accountType, "individual");
   assert.equal(client.clerkUserId, "clerk_markdavid_dev");
+  // The queue is jobs the client already has. The inbox is a separate table,
+  // so the seed has to write those rows too or Notifications stays empty.
+  const inbox = (first.notifications || []).filter((row) => row.userId === client.id);
+  assert.ok(inbox.some((row) => row.type === "order_needs_qa"));
+  assert.ok(inbox.some((row) => row.type === "order_out_for_delivery"));
+  assert.ok(inbox.some((row) => row.type === "order_client_correction"));
+  assert.equal(
+    (second.notifications || []).filter((row) => row.userId === client.id).length,
+    inbox.length,
+  );
+  const lovis = first.users.find((user) => user.email === LOVIS_DEV_SHOP.email);
+  const shopInbox = (first.notifications || []).filter((row) => row.userId === lovis.id);
+  assert.ok(shopInbox.some((row) => row.type === "shop_job_self_qc"));
+  const rider = first.users.find((user) => user.email === MARK_DEV_RIDER.email);
+  const riderInbox = (first.notifications || []).filter((row) => row.userId === rider.id);
+  assert.ok(riderInbox.some((row) => row.type === "dispatch_available" || row.type === "order_out_for_delivery"));
   assert.ok(first.userRoleMemberships.some((row) => row.userId === client.id && row.role === "client"));
   assert.equal(first.clientProfiles.find((row) => row.userId === client.id)?.clientKind, "personal");
   assert.equal(
     first.users.find((user) => user.id === "user_polymedia")?.email,
     "felycia123@talasoraprime.com",
   );
-  const rider = first.users.find((user) => user.email === MARK_DEV_RIDER.email);
   assert.equal(rider.role, "rider");
   assert.equal(rider.verificationStatus, "approved");
   assert.equal(rider.clerkUserId, "clerk_markdavid_rider_dev");
