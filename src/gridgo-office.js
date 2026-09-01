@@ -17,8 +17,8 @@
  * same pin for the surfaces that draw it before an order exists.
  */
 export const GRIDGO_OFFICE = Object.freeze({
-  lat: 7.13267,
-  lng: 125.611265,
+  lat: 7.092287234449552,
+  lng: 125.61651084538697,
   label: "GRIDGO Office",
 });
 
