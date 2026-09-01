@@ -6,23 +6,26 @@ import { defaultTaxonomy } from "../src/taxonomy.js";
 
 const AT = "2026-08-24T01:00:00.000Z";
 
-function addPublicListing(store, { supplierId, itemId, priceMinor, shop, turnaroundHours = 24 }) {
-  store.users.push({ id: supplierId, role: "supplier", email: `${supplierId}@gridgo.test` });
-  store.userRoleMemberships.push({ userId: supplierId, role: "supplier" });
-  store.supplierProfiles.push({ userId: supplierId, shopName: `${supplierId} Shop`, contactName: supplierId, shop, pickupAvailable: true });
-  store.approvalCases.push({ id: `case_${supplierId}`, userId: supplierId, kind: "supplier", status: "approved" });
+function addPublicListing(store, { supplierId, itemId, priceMinor, shop, turnaroundHours = 24, subcategoryCode = "flyers" }) {
+  const known = store.users.some((row) => row.id === supplierId);
+  if (!known) {
+    store.users.push({ id: supplierId, role: "supplier", email: `${supplierId}@gridgo.test` });
+    store.userRoleMemberships.push({ userId: supplierId, role: "supplier" });
+    store.supplierProfiles.push({ userId: supplierId, shopName: `${supplierId} Shop`, contactName: supplierId, shop, pickupAvailable: true });
+    store.approvalCases.push({ id: `case_${supplierId}`, userId: supplierId, kind: "supplier", status: "approved" });
+  }
   const serviceId = `service_${supplierId}`;
-  store.supplierServices.push({
+  if (!known) store.supplierServices.push({
     id: serviceId, supplierId, categoryCode: "marketing_collateral", state: "live",
     pricingBasis: "per_unit", referenceRateMinor: priceMinor, turnaroundHours,
     standardTurnaroundHours: turnaroundHours, version: 1,
   });
-  store.supplierServiceFileFormats.push({ supplierServiceId: serviceId, formatCode: "pdf" });
+  if (!known) store.supplierServiceFileFormats.push({ supplierServiceId: serviceId, formatCode: "pdf" });
   store.catalogItems.push({
-    id: itemId, supplierId, supplierServiceId: serviceId, subcategoryCode: "flyers",
+    id: itemId, supplierId, supplierServiceId: serviceId, subcategoryCode,
     name: `${supplierId} Flyers`, description: "Full-color flyers", basePriceMinor: priceMinor,
     pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit",
-    active: true, sortOrder: 0, version: 1,
+    active: true, sortOrder: store.catalogItems.filter((row) => row.supplierId === supplierId).length, version: 1,
   });
   const fileId = `photo_${itemId}`;
   store.files.push({ fileId, ownerId: supplierId, purpose: "catalog_item_photo", state: "ready", objectKey: `${supplierId}/flyers.jpg` });
@@ -50,6 +53,13 @@ function fixture() {
   addPublicListing(store, {
     supplierId: "supplier_a", itemId: "item_a", priceMinor: 10_000,
     shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, turnaroundHours: 12,
+  });
+  // A second listing at the same shop: a basket can hold two lines without
+  // spanning two shops, which is now refused.
+  addPublicListing(store, {
+    supplierId: "supplier_a", itemId: "item_a2", priceMinor: 20_000,
+    shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, turnaroundHours: 12,
+    subcategoryCode: "brochures",
   });
   addPublicListing(store, {
     supplierId: "supplier_b", itemId: "item_b", priceMinor: 20_000,
@@ -81,12 +91,12 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   const call = caller(store, client);
 
   const defaults = await call("GET", "/me/preferences");
-  assert.deepEqual(defaults.body.preferences.ranking, ["quality", "speed", "distance"]);
-  const saved = await call("PUT", "/me/preferences", { ranking: ["distance", "quality", "speed"] });
+  assert.deepEqual(defaults.body.preferences.ranking, ["quality", "speed", "cost", "distance"]);
+  const saved = await call("PUT", "/me/preferences", { ranking: ["distance", "quality", "cost", "speed"] });
   assert.equal(saved.status, 200);
-  assert.deepEqual(saved.body.preferences.ranking, ["distance", "quality", "speed"]);
+  assert.deepEqual(saved.body.preferences.ranking, ["distance", "quality", "cost", "speed"]);
   await assert.rejects(
-    call("PUT", "/me/preferences", { ranking: ["quality", "quality", "speed"] }),
+    call("PUT", "/me/preferences", { ranking: ["quality", "quality", "cost", "speed"] }),
     (error) => error.code === "invalid_preference_ranking",
   );
 
@@ -119,7 +129,7 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   const lineId = firstLine.body.cart.lines[0].id;
   await call("PUT", `/me/carts/${cartId}/lines/${lineId}/mockup`, { fileId: "file_mock" });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_b", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1,
   });
   const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
   assert.equal(cart.lines.length, 2);
@@ -136,35 +146,42 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   });
 
   assert.equal(checkedOut.status, 201);
-  assert.equal(checkedOut.body.order.state, "needs_qa");
+  // Money first: Operations confirms the transfer before anything is checked.
+  assert.equal(checkedOut.body.order.state, "initial_payment_review");
+  assert.ok(checkedOut.body.order.readyBy, "the client is given a promised date at checkout");
   assert.equal(checkedOut.body.order.itemSubtotalMinor, 30_000);
   assert.equal(checkedOut.body.order.serviceFeeMinor, 3_000);
-  assert.equal(checkedOut.body.order.deliveryFeeMinor, 5_000);
-  assert.equal(checkedOut.body.order.totalMinor, 38_000);
+  assert.equal(checkedOut.body.order.deliveryFeeMinor, 2_500); // one shop, one delivery
+  assert.equal(checkedOut.body.order.totalMinor, 35_500);
   assert.deepEqual(checkedOut.body.order.paymentPlan, {
     method: "qr_manual",
-    downpaymentMinor: 28_500,
-    balanceMinor: 9_500,
+    downpaymentMinor: 26_625,
+    balanceMinor: 8_875,
     downpaymentStatus: "pending_confirmation",
   });
-  assert.equal(checkedOut.body.order.jobs.length, 2);
-  assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.deliveryFeeMinor), [2_500, 2_500]);
+  assert.equal(checkedOut.body.order.jobs.length, 1);
+  assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.deliveryFeeMinor), [2_500]);
   // A delivered job gives the client no origin pin: the shop's coordinates are
   // GRIDGO's business, and the client watches the rider and their own address.
-  assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.pickup), [null, null]);
+  assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.pickup), [null]);
   // The jobs themselves still hold the real shop, because that is where the
   // rider collects.
-  assert.deepEqual(
-    store.orderJobs.map((job) => job.pickup.label).sort(),
-    ["Shop A", "Shop B"],
+  assert.deepEqual(store.orderJobs.map((job) => job.pickup.label), ["Shop A"]);
+  // And the order itself now names the shop. It was null here, which is why no
+  // supplier surface ever showed a checkout order: they all read supplierId.
+  assert.equal(store.orders[0].supplierId, "supplier_a");
+  assert.ok(store.orders[0].readyBy, "the shop's own date is recorded");
+  assert.ok(
+    Date.parse(store.orders[0].promiseBy) >= Date.parse(store.orders[0].readyBy),
+    "the client's promise cannot fall before the shop's own date",
   );
   assert.deepEqual(store.jobQaChecklist, []);
   assert.deepEqual(store.notifications, []);
 
   const invoice = await call("GET", `/orders/${checkedOut.body.order.id}/invoice`);
   assert.equal(invoice.status, 200);
-  assert.equal(invoice.body.invoice.totalMinor, 38_000);
-  assert.equal(invoice.body.invoice.deliveryLines.length, 2);
+  assert.equal(invoice.body.invoice.totalMinor, 35_500);
+  assert.equal(invoice.body.invoice.deliveryLines.length, 1);
   assert.equal(invoice.body.invoice.lines.find((line) => line.id === lineId).mockupFileId, "file_mock");
 });
 
@@ -179,19 +196,23 @@ test("a collected order is collected at GRIDGO's office, whoever printed it", as
     catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_b", optionIds: [], quantity: 1, artworkFileId: "file_art",
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
 
   const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
     payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" },
   });
 
-  assert.equal(checkedOut.body.order.jobs.length, 2);
+  assert.equal(checkedOut.body.order.jobs.length, 1);
   for (const job of checkedOut.body.order.jobs) {
-    assert.deepEqual(job.pickup, { lat: 7.13267, lng: 125.611265, label: "GRIDGO Office" });
+    assert.deepEqual(job.pickup, {
+      lat: 7.092287234449552,
+      lng: 125.61651084538697,
+      label: "GRIDGO Office",
+    });
   }
   // Production is untouched — the rider still goes to the press.
-  assert.deepEqual(store.orderJobs.map((job) => job.pickup.label).sort(), ["Shop A", "Shop B"]);
+  assert.deepEqual(store.orderJobs.map((job) => job.pickup.label), ["Shop A"]);
 });
 
 test("adding a cart line returns cheap listing stubs without photos", async () => {
@@ -212,7 +233,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     catalogItemId: "item_a", optionIds: ["option_item_a_matte"], quantity: 2,
   });
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_b", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1,
   });
 
   assert.equal(added.status, 201);
@@ -251,26 +272,105 @@ test("cart payloads include one shop counter per selected supplier", async () =>
   const cartId = created.body.cart.id;
 
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_b", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1,
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
     catalogItemId: "item_a", optionIds: [], quantity: 1,
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_b", optionIds: [], quantity: 2,
+    catalogItemId: "item_a2", optionIds: [], quantity: 2,
   });
 
   const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
+  // One shop per basket, so one counter.
   assert.deepEqual(cart.shops, [
-    {
-      supplierId: "supplier_b",
-      shopName: "supplier_b Shop",
-      shop: { lat: 7.09, lng: 125.63, label: "Shop B" },
-    },
     {
       supplierId: "supplier_a",
       shopName: "supplier_a Shop",
       shop: { lat: 7.064, lng: 125.6085, label: "Shop A" },
     },
   ]);
+
+  // And a listing from a second shop is refused rather than quietly splitting
+  // the order in two.
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_b", optionIds: [], quantity: 1 }),
+    (error) => error.code === "cart_belongs_to_another_shop",
+  );
+});
+
+test("a tarpaulin priced by the square foot can actually be ordered", async () => {
+  // The whole chain this exists to close. `src/pricing.js` could bill by area
+  // from the day it landed and the catalogue could store the shape; a cart
+  // line had nowhere to put a width, so every one of these listings refused
+  // the basket it was added to.
+  const { store, client } = fixture();
+  const tarpaulin = store.catalogItems.find((row) => row.id === "item_a");
+  tarpaulin.name = "supplier_a Tarpaulin";
+  tarpaulin.pricingUnit = "per_area";
+  tarpaulin.measureUnit = "ft";
+  tarpaulin.basePriceMinor = 2_500;
+  // Polymedia bills a small banner at the 2x4 rate: the sheet is wasted either
+  // way, and a shop that cannot say so is underpaid on every small order.
+  tarpaulin.minimumWidthMilli = 2_000;
+  tarpaulin.minimumHeightMilli = 4_000;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  // Sent with no measurement, the client is told which numbers to give rather
+  // than seeing a pricing error they cannot act on.
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 }),
+    (error) => error.code === "measurement_required" && error.details.measurementKind === "area",
+  );
+
+  // 3ft x 5ft, in thousandths, is 15 square feet at PHP 25.
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    measurement: { width: 3_000, height: 5_000 },
+  });
+  assert.equal(added.status, 201);
+  assert.deepEqual(added.body.cart.lines[0].measurement, { width: 3_000, height: 5_000 });
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 37_500);
+
+  // Under the shop's minimum, the minimum is what is billed: 8 square feet.
+  const lineId = added.body.cart.lines[0].id;
+  const small = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
+    measurement: { width: 1_000, height: 4_000 },
+  });
+  assert.equal(small.status, 200);
+  assert.equal(small.body.cart.lines[0].lineSubtotalMinor, 20_000);
+
+  // A listing not priced by size is not quietly given one: a measurement that
+  // is silently dropped bills the client for something they did not fill in.
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId}/lines`, {
+      catalogItemId: "item_a2", optionIds: [], quantity: 1,
+      measurement: { width: 3_000, height: 5_000 },
+    }),
+    (error) => error.code === "measurement_not_accepted",
+  );
+});
+
+test("a document priced by the page bills pages times copies", async () => {
+  const { store, client } = fixture();
+  const booklet = store.catalogItems.find((row) => row.id === "item_a");
+  booklet.name = "supplier_a Booklet";
+  booklet.pricingUnit = "per_page";
+  booklet.basePriceMinor = 300;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  // Pages and copies are two different numbers, and conflating them is how a
+  // client orders a tenth of their own document. Ten pages, three copies.
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 3,
+    measurement: { pages: 10 },
+  });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.cart.lines[0].quantity, 3);
+  assert.deepEqual(added.body.cart.lines[0].measurement, { pages: 10 });
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 9_000);
 });

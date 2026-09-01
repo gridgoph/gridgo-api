@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "DATABASE_URL=${DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node --test --test-concurrency=1 tests/*.test.js",
+    "test": "DATABASE_URL=${TEST_DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node scripts/assert-test-database.mjs && DATABASE_URL=${TEST_DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node --test --test-concurrency=1 tests/*.test.js",
     "migrate": "node-pg-migrate up --migrations-dir migrations",
     "seed": "node src/seed.js",
     "seed:dev": "node src/seed-dev.js",

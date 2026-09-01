@@ -50,7 +50,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "job_qa_checklist", "order_invoices",
+      "order_jobs", "order_invoices",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -76,6 +76,20 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786896000000_client_order_match",
         "1786899600000_order_match_payment_plan",
         "1786903200000_client_account_profile_version",
+  "1786906800000_match_deadline_schedule_reviews",
+  "1786910400000_order_lifecycle_one_shop",
+  "1786914000000_pickup_is_not_part_of_the_commitment",
+  "1786917600000_catalogue_pricing_shapes",
+    "1786921200000_a_client_can_state_a_measurement",
+    "1786924800000_package_qty_belongs_to_one_unit",
+    "1786928400000_starters_speak_every_pricing_unit",
+    "1786932000000_a_starter_can_offer_a_multiplier",
+    "1786935600000_starter_ordering_can_be_reshuffled",
+    "1786939200000_retire_the_supplier_proof_loop",
+    "1786942800000_an_order_line_remembers_any_unit",
+    "1786946400000_line_math_understands_measured_units",
+    "1786950000000_a_collected_order_waits_on_our_shelf",
+    "1786953600000_a_shop_is_paid_across_four_stages",
       ],
     );
     await client.query(`
@@ -127,6 +141,68 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       `),
       (error) => error.code === "23514" && error.constraint === "client_match_preferences_ranking_check",
     );
+  // Cost is the fourth factor now, so the old three-factor ranking is no
+  // longer a valid one to save.
+  await assert.rejects(
+    client.query(`
+      INSERT INTO client_match_preferences (client_id, ranking, version, updated_at)
+      VALUES ('multi_role_shop', ARRAY['quality','speed','distance'], 1, now())
+    `),
+    (error) => error.code === "23514" && error.constraint === "client_match_preferences_ranking_check",
+  );
+  assert.equal(supplierProfileColumns.has("schedule"), true);
+  assert.notEqual((await client.query("SELECT to_regclass('shop_reviews') AS t")).rows[0].t, null);
+  const orderDateColumns = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'orders'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  for (const column of ["ready_by", "ready_at"]) {
+    assert.equal(orderDateColumns.has(column), true, `${column} should exist on orders`);
+  }
+
+  // A client can state how big the thing is. Without these a listing priced by
+  // the square foot reaches the pricer with no area and refuses the basket.
+  const cartLineColumns = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'client_cart_lines'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  for (const column of ["measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli"]) {
+    assert.equal(cartLineColumns.has(column), true, `${column} should exist on client_cart_lines`);
+  }
+  // The supplier print-proof loop and the per-job QA checklist belong to the
+  // retired order model. Nothing reads or writes either, and carrying them
+  // cost every mutation two collections nothing consumed.
+  for (const table of ["proofs", "job_qa_checklist"]) {
+    assert.equal(
+      (await client.query("SELECT to_regclass($1) AS t", [`${schema}.${table}`])).rows[0].t,
+      null,
+      `${table} should be gone`,
+    );
+  }
+
+  // A listing priced by the square foot has no package quantity and is not
+  // per_unit, which the original two-unit rule refused outright.
+  const packageChecks = (await client.query(
+    `SELECT c.conname FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname IN ('supplier_catalog_items_check', 'supplier_catalog_items_package_qty_check')
+      ORDER BY c.conname`, [schema],
+  )).rows.map((row) => row.conname);
+  assert.deepEqual(packageChecks, ["supplier_catalog_items_package_qty_check"]);
+
+  // Width and height are one measurement. A line with a width and no height
+  // has no area and would be priced as though it did.
+  await assert.rejects(
+    client.query(`
+      INSERT INTO client_cart_lines
+        (id, cart_id, supplier_id, catalog_item_id, option_ids, quantity, structured_spec,
+         measure_width_milli, sort_order, created_at, updated_at)
+      VALUES ('cline_half', 'cart_x', 'shop_x', 'item_x', ARRAY[]::text[], 1, '{}', 1000, 0, now(), now())
+    `),
+    (error) => error.code === "23514" || error.code === "23503",
+    "a width with no height should be refused",
+  );
 
     await client.query(`
       INSERT INTO orders
@@ -139,6 +215,132 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+  // The four-stage payout has no honest reverse -- two stages cannot say which
+  // of four a shop had reached -- so its down leaves the rows alone. What it
+  // must not do is leave the database still insisting on the four.
+  // Scoped to this run's own schema: the development database carries a
+  // function of the same name, and an unfiltered read can answer with either.
+  const payoutShape = (await client.query(
+    `SELECT prosrc FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = $1 AND p.proname = 'validate_order_financial_children'`,
+    [schema],
+  )).rows[0]?.prosrc ?? "";
+  assert.equal(payoutShape.includes("packaging_qc"), true);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+  // The counter step goes away, and with it the only place a collected order
+  // could wait between the rider leaving and the client arriving.
+  const shelfStates = (await client.query(
+    `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'orders_state_check'`,
+    [schema],
+  )).rows[0]?.def ?? "";
+  assert.equal(shelfStates.includes("awaiting_collection"), false);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+  // The line-math check goes back to insisting a subtotal is always a rate
+  // times a quantity, which no measured line ever is.
+  const lineMath = (await client.query(
+    "SELECT prosrc FROM pg_proc WHERE proname = 'check_order_line_item_math'",
+  )).rows[0]?.prosrc ?? "";
+  assert.equal(lineMath.includes("per_area"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // An order line goes back to recording only the two original units, which
+  // is what made every measured listing unbuyable at the last step.
+  const lineUnits = (await client.query(
+    `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'order_line_items_pricing_unit_snapshot_check'`,
+    [schema],
+  )).rows[0]?.def ?? "";
+  assert.equal(lineUnits.includes("per_area"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // The retired order model's two tables come back, empty.
+  for (const table of ["proofs", "job_qa_checklist"]) {
+    assert.notEqual(
+      (await client.query("SELECT to_regclass($1) AS t", [`${schema}.${table}`])).rows[0].t,
+      null,
+      `${table} should be restored`,
+    );
+  }
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // Template orderings stop being deferrable, so a reshuffle collides again.
+  const deferrable = (await client.query(
+    `SELECT c.condeferrable FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'listing_starter_groups_starter_id_sort_order_key'`,
+    [schema],
+  )).rows[0]?.condeferrable;
+  assert.equal(deferrable, false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // A starter can no longer carry a multiplying add-on.
+  const starterCols = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'listing_starter_options'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  assert.equal(starterCols.has("price_multiplier_bps"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // Starters go back to offering only the two original units.
+  const starterUnits = (await client.query(
+    `SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname = 'listing_starters_default_pricing_unit_check'`,
+    [schema],
+  )).rows[0]?.def ?? "";
+  assert.equal(starterUnits.includes("per_page"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  // The package-quantity rule was written when there were two pricing units
+  // and still spelled both out, so it refused every unit added since.
+  const packageRule = (await client.query(
+    `SELECT c.conname FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.conname IN ('supplier_catalog_items_check', 'supplier_catalog_items_package_qty_check')
+      ORDER BY c.conname`, [schema],
+  )).rows.map((row) => row.conname);
+  assert.deepEqual(packageRule, ["supplier_catalog_items_check"], "the two-unit package rule should come back");
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  const afterMeasurementDown = new Set((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'client_cart_lines'",
+    [schema],
+  )).rows.map((row) => row.column_name));
+  assert.equal(afterMeasurementDown.has("measure_width_milli"), false);
+  assert.equal(afterMeasurementDown.has("measure_pages"), false);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  assert.equal((await client.query("SELECT to_regclass('supplier_catalog_price_tiers') AS t")).rows[0].t, null);
+  assert.equal((await client.query("SELECT to_regclass('supplier_catalog_speed_tiers') AS t")).rows[0].t, null);
+
+  await runner(migrationOptions(schema, "down", 1, client));
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  await assert.rejects(
+    client.query("UPDATE orders SET state = 'cancelled' WHERE id = 'order_match_plan'"),
+    (error) => error.code === "23514",
+    "cancelled should stop being an order state once this migration is reversed",
+  );
+
+  await runner(migrationOptions(schema, "down", 1, client));
+  assert.equal((await client.query("SELECT to_regclass('shop_reviews') AS t")).rows[0].t, null);
+  assert.equal((await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_profiles' AND column_name = 'schedule'",
+    [schema],
+  )).rows.length, 0);
+
+  await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'version'",
       [schema],

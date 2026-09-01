@@ -35,7 +35,8 @@ const TABLES = [
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at"] },
-  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "version", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "schedule", "version", "updated_at"] },
+  { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
   { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
@@ -51,22 +52,23 @@ const TABLES = [
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "turnaround_mode", "turnaround_hours", "file_format_mode", "active", "sort_order", "version", "created_at", "updated_at"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "turnaround_mode", "turnaround_hours", "file_format_mode", "active", "sort_order", "version", "created_at", "updated_at"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
-  { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
+  { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
+  { name: "supplier_catalog_price_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "min_quantity", "unit_price_minor", "created_at", "updated_at"] },
+  { name: "supplier_catalog_speed_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "label", "turnaround_hours", "price_minor", "surcharge_minor", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_item_file_formats", keys: ["catalog_item_id", "format_code"], columns: ["catalog_item_id", "format_code"] },
   { name: "supplier_catalog_prep_steps", keys: ["id"], columns: ["id", "catalog_item_id", "sort_order", "title", "body", "created_at", "updated_at"] },
   { name: "listing_starters", keys: ["id"], columns: ["id", "subcategory_code", "name", "default_pricing_unit", "default_package_qty", "default_turnaround_hours", "default_format_codes"] },
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
-  { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "spec_binding", "sort_order"] },
+  { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
-  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "created_at", "updated_at", "position", "data"] },
+  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
-  { name: "job_qa_checklist", keys: ["id"], columns: ["id", "job_id", "code", "label", "status", "note", "sort_order", "checked_at", "checked_by", "created_at", "updated_at"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
@@ -84,7 +86,6 @@ const TABLES = [
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
-  { name: "proofs", keys: ["id"], columns: ["id", "order_id", "uploader_id", "created_at", "position", "data"] },
   { name: "device_tokens", keys: ["id"], columns: ["id", "user_id", "token", "platform", "created_at", "updated_at", "position", "data"] },
 ];
 
@@ -123,9 +124,11 @@ export function emptyStore() {
     cartLines: [],
     orders: [],
     orderJobs: [],
+    shopReviews: [],
+    catalogPriceTiers: [],
+    catalogSpeedTiers: [],
     orderLineItems: [],
     orderLineItemOptions: [],
-    jobQaChecklist: [],
     orderInvoices: [],
     files: [],
     riderDocuments: [],
@@ -136,7 +139,6 @@ export function emptyStore() {
     notifications: [],
     locationPings: [],
     escalations: [],
-    proofs: [],
     deviceTokens: [],
   };
 }
@@ -194,7 +196,20 @@ function rowsFromStore(store) {
     });
   }
   for (const profile of (store.supplierProfiles || [])) {
-    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), version: profile.version || 1, updated_at: profile.updatedAt });
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
+  }
+  for (const review of (store.shopReviews || [])) {
+    rows.shop_reviews.push({
+      id: review.id,
+      order_id: review.orderId,
+      supplier_id: review.supplierId,
+      client_id: review.clientId,
+      quality_stars: review.qualityStars,
+      speed_stars: review.speedStars,
+      value_stars: review.valueStars,
+      comment: review.comment ?? null,
+      created_at: review.createdAt,
+    });
   }
   for (const terms of (store.supplierPaymentTerms || [])) {
     rows.supplier_payment_terms.push({
@@ -302,6 +317,11 @@ function rowsFromStore(store) {
       subcategory_code: item.subcategoryCode, name: item.name, description: item.description || "",
       base_price_minor: money(item.basePriceMinor, "catalogItem.basePriceMinor"),
       pricing_unit: item.pricingUnit || "per_unit", package_qty: item.packageQty ?? null,
+      measure_unit: item.measureUnit ?? null,
+      minimum_width_milli: item.minimumWidthMilli ?? null,
+      minimum_height_milli: item.minimumHeightMilli ?? null,
+      minimum_length_milli: item.minimumLengthMilli ?? null,
+      minimum_order_quantity: item.minimumOrderQuantity ?? null,
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       file_format_mode: item.fileFormatMode || "inherit", active: item.active !== false,
       sort_order: item.sortOrder, version: item.version || 1,
@@ -320,8 +340,25 @@ function rowsFromStore(store) {
     rows.supplier_catalog_options.push({
       id: option.id, option_group_id: option.optionGroupId, label: option.label,
       price_modifier_minor: money(option.priceModifierMinor ?? 0, "catalogOption.priceModifierMinor"),
+      price_multiplier_bps: option.priceMultiplierBps ?? null,
       spec_binding: option.specBinding ?? null, active: option.active !== false,
       sort_order: option.sortOrder, created_at: option.createdAt, updated_at: option.updatedAt,
+    });
+  }
+  for (const tier of (store.catalogPriceTiers || [])) {
+    rows.supplier_catalog_price_tiers.push({
+      id: tier.id, catalog_item_id: tier.catalogItemId, min_quantity: tier.minQuantity,
+      unit_price_minor: money(tier.unitPriceMinor, "catalogPriceTier.unitPriceMinor"),
+      created_at: tier.createdAt, updated_at: tier.updatedAt,
+    });
+  }
+  for (const tier of (store.catalogSpeedTiers || [])) {
+    rows.supplier_catalog_speed_tiers.push({
+      id: tier.id, catalog_item_id: tier.catalogItemId, label: tier.label,
+      turnaround_hours: tier.turnaroundHours,
+      price_minor: tier.priceMinor == null ? null : money(tier.priceMinor, "catalogSpeedTier.priceMinor"),
+      surcharge_minor: tier.surchargeMinor == null ? null : money(tier.surchargeMinor, "catalogSpeedTier.surchargeMinor"),
+      sort_order: tier.sortOrder, created_at: tier.createdAt, updated_at: tier.updatedAt,
     });
   }
   for (const format of (store.catalogItemFileFormats || [])) {
@@ -352,6 +389,7 @@ function rowsFromStore(store) {
     rows.listing_starter_options.push({
       id: option.id, starter_group_id: option.starterGroupId, label: option.label,
       price_modifier_minor: money(option.priceModifierMinor ?? 0, "listingStarterOption.priceModifierMinor"),
+      price_multiplier_bps: option.priceMultiplierBps ?? null,
       spec_binding: option.specBinding ?? null, sort_order: option.sortOrder,
     });
   }
@@ -372,8 +410,15 @@ function rowsFromStore(store) {
       payout_hold: Boolean(order.payoutHold), pickup_lat: order.pickup?.lat ?? null, pickup_lng: order.pickup?.lng ?? null,
       pickup_label: order.pickup?.label ?? null, dropoff_lat: order.dropoff?.lat ?? null, dropoff_lng: order.dropoff?.lng ?? null,
       dropoff_label: order.dropoff?.label ?? null, issue_window_opened_at: order.issueWindowOpenedAt ?? null,
-      issue_window_expires_at: order.issueWindowExpiresAt ?? null, created_at: order.createdAt, updated_at: order.updatedAt, position,
-      data: without(order, ["id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
+      issue_window_expires_at: order.issueWindowExpiresAt ?? null,
+      // The shop's own promised date and when it actually finished: the pair an
+      // on-time record is computed from, and what the Operations schedule sorts
+      // on. The client's padded date stays in `data` -- nothing queries it.
+      ready_by: order.readyBy ?? null, ready_at: order.readyAt ?? null,
+      cancelled_at: order.cancelledAt ?? null, cancelled_by: order.cancelledBy ?? null,
+      cancellation_reason: order.cancellationReason ?? null,
+      created_at: order.createdAt, updated_at: order.updatedAt, position,
+      data: without(order, ["readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
     });
     for (const [paymentPosition, code] of ["initial", "final_online"].entries()) {
       const payment = order.payments?.[code];
@@ -435,6 +480,7 @@ function rowsFromStore(store) {
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
       dropoff_label: line.dropoff?.label ?? null,
+      ...measurementColumns(line.measurement),
       sort_order: line.sortOrder,
       created_at: line.createdAt,
       updated_at: line.updatedAt,
@@ -461,21 +507,6 @@ function rowsFromStore(store) {
       scheduled_for: job.scheduledFor ?? null,
       created_at: job.createdAt,
       updated_at: job.updatedAt,
-    });
-  }
-  for (const row of (store.jobQaChecklist || [])) {
-    rows.job_qa_checklist.push({
-      id: row.id,
-      job_id: row.jobId,
-      code: row.code,
-      label: row.label,
-      status: row.status || "pending",
-      note: row.note ?? null,
-      sort_order: row.sortOrder,
-      checked_at: row.checkedAt ?? null,
-      checked_by: row.checkedBy ?? null,
-      created_at: row.createdAt,
-      updated_at: row.updatedAt,
     });
   }
   for (const invoice of (store.orderInvoices || [])) {
@@ -506,6 +537,7 @@ function rowsFromStore(store) {
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
       dropoff_label: line.dropoff?.label ?? null,
+      ...measurementColumns(line.measurement),
       sort_order: line.sortOrder, snapshot_finalized: line.snapshotFinalized !== false, created_at: line.createdAt,
     });
   }
@@ -553,7 +585,6 @@ function rowsFromStore(store) {
   for (const [position, item] of (store.notifications || []).entries()) rows.notifications.push({ id: item.id, user_id: item.userId, type: item.type || "general", order_id: item.orderId ?? null, created_at: item.at || item.createdAt, read_at: item.readAt ?? (item.read ? (item.at || item.createdAt) : null), deleted_at: item.deletedAt ?? null, position, data: without(item, ["id", "userId", "type", "orderId", "at", "createdAt", "read", "readAt", "deletedAt"]) });
   for (const [position, ping] of (store.locationPings || []).entries()) rows.location_pings.push({ id: ping.id, order_id: ping.orderId, rider_id: ping.riderId, lat: ping.lat, lng: ping.lng, accuracy_meters: ping.accuracy ?? null, at: ping.at, position, data: without(ping, ["id", "orderId", "riderId", "lat", "lng", "accuracy", "at"]) });
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
-  for (const [position, item] of (store.proofs || []).entries()) rows.proofs.push({ id: item.id, order_id: item.orderId, uploader_id: item.uploaderId ?? null, created_at: item.createdAt || item.at, position, data: without(item, ["id", "orderId", "uploaderId", "createdAt", "at"]) });
   for (const [position, item] of (store.deviceTokens || []).entries()) rows.device_tokens.push(deviceTokenRow(item, position));
   return rows;
 }
@@ -575,6 +606,31 @@ function attachBaseline(store, rows) {
 
 function ordered(rows) {
   return [...rows].sort((a, b) => a.position - b.position);
+}
+
+/**
+ * A measurement as four columns.
+ *
+ * Split rather than stored as JSON so the check constraints hold: a width with
+ * no height is not an area, and the database is where that stays true.
+ */
+function measurementColumns(measurement) {
+  return {
+    measure_pages: measurement?.pages ?? null,
+    measure_width_milli: measurement?.width ?? null,
+    measure_height_milli: measurement?.height ?? null,
+    measure_length_milli: measurement?.length ?? null,
+  };
+}
+
+/** The same four columns as the shape `src/pricing.js` bills from, or null. */
+function readMeasurement(row) {
+  const measurement = {};
+  if (row.measure_pages != null) measurement.pages = row.measure_pages;
+  if (row.measure_width_milli != null) measurement.width = row.measure_width_milli;
+  if (row.measure_height_milli != null) measurement.height = row.measure_height_milli;
+  if (row.measure_length_milli != null) measurement.length = row.measure_length_milli;
+  return Object.keys(measurement).length ? measurement : null;
 }
 
 function orderedBy(rows, ...columns) {
@@ -625,8 +681,22 @@ export async function loadStore(database) {
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
     const item = { userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, version: row.version || 1, updatedAt: row.updated_at };
     if (row.is_closed) item.isClosed = true;
+    // Absent means the shop has not set its own hours and is scheduled against
+    // the platform default -- never "open at all times".
+    if (row.schedule) item.schedule = row.schedule;
     return item;
   });
+  store.shopReviews = orderedBy(loaded.shop_reviews, "supplier_id", "created_at", "id").map((row) => ({
+    id: row.id,
+    orderId: row.order_id,
+    supplierId: row.supplier_id,
+    clientId: row.client_id,
+    qualityStars: row.quality_stars,
+    speedStars: row.speed_stars,
+    valueStars: row.value_stars,
+    comment: row.comment,
+    createdAt: row.created_at,
+  }));
   store.supplierPaymentTerms = orderedBy(loaded.supplier_payment_terms, "supplier_id").map((row) => ({
     supplierId: row.supplier_id,
     deliveryDownpaymentRateBps: row.delivery_downpayment_rate_bps,
@@ -695,6 +765,9 @@ export async function loadStore(database) {
     id: row.id, supplierId: row.supplier_id, supplierServiceId: row.supplier_service_id,
     subcategoryCode: row.subcategory_code, name: row.name, description: row.description,
     basePriceMinor: row.base_price_minor, pricingUnit: row.pricing_unit, packageQty: row.package_qty,
+    measureUnit: row.measure_unit,
+    minimumWidthMilli: row.minimum_width_milli, minimumHeightMilli: row.minimum_height_milli,
+    minimumLengthMilli: row.minimum_length_milli, minimumOrderQuantity: row.minimum_order_quantity,
     turnaroundMode: row.turnaround_mode, turnaroundHours: row.turnaround_hours,
     fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
     version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
@@ -706,8 +779,18 @@ export async function loadStore(database) {
   }));
   store.catalogOptions = orderedBy(loaded.supplier_catalog_options, "option_group_id", "sort_order", "id").map((row) => ({
     id: row.id, optionGroupId: row.option_group_id, label: row.label,
-    priceModifierMinor: row.price_modifier_minor, specBinding: row.spec_binding,
+    priceModifierMinor: row.price_modifier_minor, priceMultiplierBps: row.price_multiplier_bps,
+    specBinding: row.spec_binding,
     active: row.active, sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogPriceTiers = orderedBy(loaded.supplier_catalog_price_tiers, "catalog_item_id", "min_quantity", "id").map((row) => ({
+    id: row.id, catalogItemId: row.catalog_item_id, minQuantity: row.min_quantity,
+    unitPriceMinor: row.unit_price_minor, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
+  store.catalogSpeedTiers = orderedBy(loaded.supplier_catalog_speed_tiers, "catalog_item_id", "turnaround_hours", "id").map((row) => ({
+    id: row.id, catalogItemId: row.catalog_item_id, label: row.label,
+    turnaroundHours: row.turnaround_hours, priceMinor: row.price_minor, surchargeMinor: row.surcharge_minor,
+    sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.catalogItemFileFormats = orderedBy(loaded.supplier_catalog_item_file_formats, "catalog_item_id", "format_code").map((row) => ({
     catalogItemId: row.catalog_item_id, formatCode: row.format_code,
@@ -727,7 +810,9 @@ export async function loadStore(database) {
   }));
   store.listingStarterOptions = orderedBy(loaded.listing_starter_options, "starter_group_id", "sort_order", "id").map((row) => ({
     id: row.id, starterGroupId: row.starter_group_id, label: row.label,
-    priceModifierMinor: row.price_modifier_minor, specBinding: row.spec_binding, sortOrder: row.sort_order,
+    priceModifierMinor: row.price_modifier_minor,
+    priceMultiplierBps: row.price_multiplier_bps ?? null,
+    specBinding: row.spec_binding, sortOrder: row.sort_order,
   }));
   store.carts = orderedBy(loaded.client_carts, "client_id", "created_at", "id").map((row) => {
     const item = {
@@ -749,6 +834,7 @@ export async function loadStore(database) {
     };
     present(item, "artworkFileId", row.artwork_file_id);
     present(item, "mockupFileId", row.mockup_file_id);
+    present(item, "measurement", readMeasurement(row));
     if (row.dropoff_lat != null) item.dropoff = { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label };
     return item;
   });
@@ -788,16 +874,6 @@ export async function loadStore(database) {
     groupKindSnapshot: row.group_kind_snapshot, optionLabelSnapshot: row.option_label_snapshot,
     priceModifierMinor: row.price_modifier_minor, sortOrder: row.sort_order,
   }));
-  store.jobQaChecklist = orderedBy(loaded.job_qa_checklist, "job_id", "sort_order", "id").map((row) => {
-    const item = {
-      id: row.id, jobId: row.job_id, code: row.code, label: row.label, status: row.status,
-      sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
-    };
-    present(item, "note", row.note);
-    present(item, "checkedAt", row.checked_at);
-    present(item, "checkedBy", row.checked_by);
-    return item;
-  });
   store.orderInvoices = orderedBy(loaded.order_invoices, "issued_at", "order_id").map((row) => ({
     orderId: row.order_id, invoiceNumber: row.invoice_number, issuedAt: row.issued_at, snapshot: row.snapshot,
   }));
@@ -842,6 +918,13 @@ export async function loadStore(database) {
       riderId: row.rider_id,
       productId: row.product_id,
       state: row.state,
+      ...(row.ready_by ? { readyBy: row.ready_by } : {}),
+      ...(row.ready_at ? { readyAt: row.ready_at } : {}),
+      ...(row.cancelled_at ? {
+        cancelledAt: row.cancelled_at,
+        cancelledBy: row.cancelled_by,
+        cancellationReason: row.cancellation_reason,
+      } : {}),
       zone: row.zone_code,
       supplierSubtotalMinor: row.supplier_subtotal_minor,
       subtotalMinor: row.subtotal_minor,
@@ -870,6 +953,7 @@ export async function loadStore(database) {
     };
     present(item, "issueWindowOpenedAt", row.issue_window_opened_at);
     present(item, "issueWindowExpiresAt", row.issue_window_expires_at);
+    if (!Array.isArray(item.timeline)) item.timeline = [];
     return item;
   });
 
@@ -904,7 +988,6 @@ export async function loadStore(database) {
   store.notifications = ordered(loaded.notifications).map((row) => { const item = { ...row.data, id: row.id, userId: row.user_id, type: row.type, read: row.read_at != null, at: row.created_at }; if (row.order_id != null) item.orderId = row.order_id; if (row.deleted_at != null) item.deletedAt = row.deleted_at; return item; });
   store.locationPings = ordered(loaded.location_pings).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, lat: row.lat, lng: row.lng, accuracy: row.accuracy_meters, at: row.at }));
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
-  store.proofs = ordered(loaded.proofs).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, uploaderId: row.uploader_id, createdAt: row.created_at }));
   store.deviceTokens = ordered(loaded.device_tokens).map(deviceTokenItem);
   attachBaseline(store, rowsFromStore(store));
   Object.defineProperty(store, "listOwnCatalogItems", {
@@ -1020,8 +1103,18 @@ export async function saveStore(database, store) {
   for (const table of TABLES) {
     const { before, current } = maps.get(table.name);
     if (table.name === "order_line_items") {
-      const unfinalized = new Map([...current].map(([key, row]) => [key, { ...row, snapshot_finalized: false }]));
-      await upsertChanged(database, table, before, unfinalized);
+      // New (or still-open) lines must land with snapshot_finalized=false, then
+      // the follow-up UPDATE sets it true. Already-finalized rows are immutable:
+      // flipping them false on an unrelated save (Create listing, seed, …) raises
+      // `order line snapshots are immutable` and 500s the request.
+      const toWrite = new Map();
+      for (const [key, row] of current) {
+        const prev = before.get(key);
+        if (prev && stable(prev) === stable(row)) continue;
+        if (prev?.snapshot_finalized) continue;
+        toWrite.set(key, { ...row, snapshot_finalized: false });
+      }
+      await upsertChanged(database, table, before, toWrite);
       continue;
     }
     await upsertChanged(database, table, before, current);

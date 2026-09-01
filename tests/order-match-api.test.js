@@ -94,8 +94,8 @@ async function requestEventually(api, pathname, options, predicate) {
 
 async function fixture(database) {
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
-    issues, claims, credit_ledger, credit_accounts, file_references, job_qa_checklist, order_invoices,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
+    issues, claims, credit_ledger, credit_accounts, file_references, order_invoices,
     client_cart_lines, client_carts, client_saved_addresses, client_match_preferences,
     payout_milestones, order_payments, order_line_item_options, order_line_items, order_jobs, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
@@ -114,12 +114,18 @@ async function fixture(database) {
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
       { id: "supplier_a", clerkUserId: "clerk_supplier_a", email: "a@gridgo.test", name: "A", role: "supplier", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, createdAt: AT },
       { id: "supplier_b", clerkUserId: "clerk_supplier_b", email: "b@gridgo.test", name: "B", role: "supplier", verificationStatus: "approved", shop: { lat: 7.09, lng: 125.63, label: "Shop B" }, createdAt: AT },
+    { id: "user_ops", clerkUserId: "clerk_ops", email: "ops@gridgo.test", name: "Ops", role: "ops_admin", createdAt: AT },
+      { id: "user_rider", clerkUserId: "clerk_rider", email: "rider@gridgo.test", name: "Rider", role: "rider", verificationStatus: "approved", createdAt: AT },
     );
     store.userRoleMemberships.push(
       { userId: "user_client", role: "client", createdAt: AT },
       { userId: "supplier_a", role: "supplier", createdAt: AT },
       { userId: "supplier_b", role: "supplier", createdAt: AT },
+    { userId: "user_ops", role: "ops_admin", createdAt: AT },
+      { userId: "user_rider", role: "rider", createdAt: AT },
     );
+    store.riderProfiles.push({ userId: "user_rider", vehicleType: "motorcycle", plateNumber: "ABC 1234", version: 1, updatedAt: AT });
+    store.approvalCases.push({ id: "case_rider", userId: "user_rider", kind: "rider", status: "approved", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
     for (const [index, supplierId] of ["supplier_a", "supplier_b"].entries()) {
       const shop = index === 0
         ? { lat: 7.064, lng: 125.6085, label: "Shop A" }
@@ -134,17 +140,24 @@ async function fixture(database) {
       store.catalogItems.push({ id: itemId, supplierId, supplierServiceId: serviceId, subcategoryCode: "flyers", name: `${supplierId} Flyers`, description: "Full-color flyers", basePriceMinor: (index + 1) * 10_000, pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit", active: true, sortOrder: 0, version: 1, createdAt: AT, updatedAt: AT });
       store.files.push({ fileId: photoId, ownerId: supplierId, purpose: "catalog_item_photo", originalFilename: "flyers.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: `${supplierId}/flyers.jpg`, createdAt: AT });
       store.catalogItemPhotos.push({ catalogItemId: itemId, fileId: photoId, sortOrder: 0, createdAt: AT });
+    // A second listing at the same shop, so a basket can hold two lines without
+    // spanning two shops. Its own photo file: a file attaches to exactly one
+    // listing, so sharing one leaves the second without a sample and off the board.
+    store.catalogItems.push({ id: `${itemId}_brochures`, supplierId, supplierServiceId: serviceId, subcategoryCode: "brochures", name: `${supplierId} Brochures`, description: "Tri-fold brochures", basePriceMinor: (index + 1) * 20_000, pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit", active: true, sortOrder: 1, version: 1, createdAt: AT, updatedAt: AT });
+    store.files.push({ fileId: `${photoId}_brochures`, ownerId: supplierId, purpose: "catalog_item_photo", originalFilename: "brochures.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: `${supplierId}/brochures.jpg`, createdAt: AT });
+    store.catalogItemPhotos.push({ catalogItemId: `${itemId}_brochures`, fileId: `${photoId}_brochures`, sortOrder: 0, createdAt: AT });
     }
     store.files.push(
       { fileId: "file_art", ownerId: "user_client", purpose: "artwork", originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
       { fileId: "file_mock", ownerId: "user_client", purpose: "mockup", originalFilename: "mock.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/mock.jpg", references: [], createdAt: AT },
       { fileId: "file_qr", ownerId: "user_client", purpose: "payment_proof", originalFilename: "qr.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/qr.jpg", references: [], createdAt: AT },
+      { fileId: "file_drop", ownerId: "user_rider", purpose: "delivery_photo", originalFilename: "drop.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "rider/drop.jpg", references: [], createdAt: AT },
     );
     await saveStore(database, store);
   });
 }
 
-test("client order-match routes persist a two-job QR checkout and invoice", { skip: !DATABASE_URL }, async (t) => {
+test("client order-match routes persist a single-shop QR checkout and invoice", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -156,7 +169,7 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
 
   assert.equal((await request(instance.api, "/me/preferences")).status, 401);
   const preferences = await request(instance.api, "/me/preferences", {
-    method: "PUT", subject: "clerk_client", body: { ranking: ["quality", "speed", "distance"] },
+    method: "PUT", subject: "clerk_client", body: { ranking: ["quality", "speed", "cost", "distance"] },
   });
   assert.equal(preferences.status, 200, JSON.stringify(preferences.body));
 
@@ -178,7 +191,7 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
   const cartId = created.body.cart.id;
   const first = await request(instance.api, `/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_a", optionIds: [], quantity: 1, artworkFileId: "file_art" },
+      body: { catalogItemId: "item_supplier_a", optionIds: [], quantity: 1, artworkFileId: "file_art" },
   });
   assert.equal(first.status, 201, JSON.stringify(first.body));
   const lineId = first.body.cart.lines[0].id;
@@ -188,9 +201,18 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
   assert.equal(mockup.status, 200, JSON.stringify(mockup.body));
   const second = await request(instance.api, `/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_b", optionIds: [], quantity: 1 },
+    body: { catalogItemId: "item_supplier_a_brochures", optionIds: [], quantity: 1 },
   });
   assert.equal(second.status, 201, JSON.stringify(second.body));
+
+  // A basket belongs to one shop. Adding another shop's listing is refused
+  // rather than quietly splitting the order in two.
+  const otherShop = await request(instance.api, `/me/carts/${cartId}/lines`, {
+    method: "POST", subject: "clerk_client",
+    body: { catalogItemId: "item_supplier_b", optionIds: [], quantity: 1 },
+  });
+  assert.equal(otherShop.status, 409, JSON.stringify(otherShop.body));
+  assert.equal(otherShop.body.error, "cart_belongs_to_another_shop");
 
   const rejected = await request(instance.api, `/me/carts/${cartId}/checkout`, {
     method: "POST", subject: "clerk_client",
@@ -203,9 +225,10 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
     body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" } },
   });
   assert.equal(checkout.status, 201, `${JSON.stringify(checkout.body)}\n${instance.output()}`);
-  assert.equal(checkout.body.order.state, "needs_qa");
-  assert.equal(checkout.body.order.totalMinor, 38_000);
-  assert.equal(checkout.body.order.jobs.length, 2);
+  assert.equal(checkout.body.order.state, "initial_payment_review");
+  assert.equal(checkout.body.order.totalMinor, 35_500);
+  assert.equal(checkout.body.order.jobs.length, 1);
+  assert.ok(checkout.body.order.readyBy, "the client is given a promised date");
 
   const invoice = await requestEventually(
     instance.api,
@@ -214,9 +237,619 @@ test("client order-match routes persist a two-job QR checkout and invoice", { sk
     (response) => response.status === 200,
   );
   assert.equal(invoice.status, 200, JSON.stringify(invoice.body));
-  assert.equal(invoice.body.invoice.deliveryLines.length, 2);
+  assert.equal(invoice.body.invoice.deliveryLines.length, 1);
   const persisted = await loadStore(database);
-  assert.equal(persisted.orders.find((row) => row.id === checkout.body.order.id).state, "needs_qa");
-  assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 2);
+  const placed = persisted.orders.find((row) => row.id === checkout.body.order.id);
+  assert.equal(placed.state, "initial_payment_review");
+  // The order names its shop and carries both dates through the database.
+  assert.equal(placed.supplierId, "supplier_a");
+  assert.ok(placed.readyBy && placed.promiseBy);
+  assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   assert.equal(persisted.notifications.length, 0);
+});
+
+
+/** Boots the API on a seeded database and returns a placed, paid-pending order. */
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null } = {}) {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const instance = await startApi();
+  t.after(async () => {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+  });
+  const api = instance.api;
+  const call = (path, options = {}) => request(api, path, options);
+
+  await call("/me/preferences", { method: "PUT", subject: "clerk_client", body: { ranking: ["quality", "speed", "cost", "distance"] } });
+  const address = await call("/me/addresses", {
+    method: "POST", subject: "clerk_client",
+    body: { label: "Home", addressLine: "Bajada, Davao City", point: { lat: 7.0731, lng: 125.6128 }, isDefault: true },
+  });
+  const cart = await call("/me/carts", {
+    method: "POST", subject: "clerk_client",
+    body: fulfillmentMode ? { fulfillmentMode } : {},
+  });
+  const cartId = cart.body.cart.id;
+  await call(`/me/carts/${cartId}/dropoffs`, {
+    method: "PUT", subject: "clerk_client",
+    body: { defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" } },
+  });
+  await call(`/me/carts/${cartId}/lines`, {
+    method: "POST", subject: "clerk_client",
+    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art" },
+  });
+  const checkout = await call(`/me/carts/${cartId}/checkout`, {
+    method: "POST", subject: "clerk_client",
+    body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-900" } },
+  });
+  assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+  return { api, call, database, orderId: checkout.body.order.id, address, output: () => instance.output() };
+}
+
+/**
+ * The order lifecycle, end to end and in order: money, then artwork, then the
+ * shop. Every step here used to be unreachable -- a checkout order landed at
+ * needs_qa with no shop on it, and no supplier surface reads anything but
+ * order.supplierId.
+ */
+test("a paid order clears money, then quality, and only then reaches the shop", { skip: !DATABASE_URL }, async (t) => {
+  {
+    const { call, orderId } = await placedOrder(t);
+    const transition = (state, subject, body = {}) => call(
+      `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
+    );
+    const stateOf = async () => (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.state;
+
+    // The shop cannot see it, let alone act on it, before Operations has.
+    const early = await transition("payment_authorized", "clerk_supplier_a");
+    assert.equal(early.status, 409, JSON.stringify(early.body));
+
+    // Step one: the transfer. Confirming it hands the order to quality control,
+    // not to the shop -- the artwork has not been looked at yet.
+    const confirmed = await call(`/orders/${orderId}/payments/initial/confirm`, {
+      method: "POST", subject: "clerk_ops", body: { note: "QR received" },
+    });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(await stateOf(), "needs_qa");
+
+    // Step two: the artwork. A failed check goes back to the client and the
+    // money stays where it is.
+    const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi" });
+    assert.equal(failed.status, 200, JSON.stringify(failed.body));
+    assert.equal(await stateOf(), "client_correction");
+    const held = await call(`/orders/${orderId}`, { subject: "clerk_ops" });
+    assert.equal(held.body.order.payments.initial.status, "confirmed", "a correction must not undo a confirmed payment");
+
+    // The client fixes it and it returns to the same check, rather than starting
+    // the order again.
+    const resubmitted = await transition("needs_qa", "clerk_client");
+    assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
+
+    // Passing quality control hands it to the shop that was matched before the
+    // client paid. No supplier id is sent: there is nothing left to assign.
+    const approved = await transition("supplier_assigned", "clerk_ops", { note: "Artwork approved" });
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(approved.body.order.supplierId, "supplier_a");
+
+    // The shop sees it for the first time here, already priced and already dated.
+    const jobs = await call("/jobs", { subject: "clerk_supplier_a" });
+    assert.equal(jobs.status, 200, JSON.stringify(jobs.body));
+    assert.equal(jobs.body.jobs.length, 1);
+    assert.equal(jobs.body.jobs[0].id, orderId);
+
+    // Another shop's job is still not its business.
+    const nosy = await call("/jobs", { subject: "clerk_supplier_b" });
+    assert.equal(nosy.body.jobs.length, 0);
+
+    // Accepting is only confirming it can run the work: no price, no date.
+    const accepted = await transition("payment_authorized", "clerk_supplier_a");
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    const started = await transition("production", "clerk_supplier_a");
+    assert.equal(started.status, 200, JSON.stringify(started.body));
+    assert.equal(await stateOf(), "production");
+  }
+});
+
+test("cancelling an order records who ended it and why, and refuses to do so silently", { skip: !DATABASE_URL }, async (t) => {
+  {
+    const { call, orderId } = await placedOrder(t);
+    const cancel = (body) => call(
+      `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "cancelled", ...body } },
+    );
+
+    const bare = await cancel({});
+    assert.equal(bare.status, 400, JSON.stringify(bare.body));
+    assert.equal(bare.body.error, "cancellation_reason_required");
+
+    const done = await cancel({ reason: "Client cannot supply print-ready artwork" });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal(done.body.order.state, "cancelled");
+    assert.equal(done.body.order.cancellationReason, "Client cannot supply print-ready artwork");
+    assert.equal(done.body.order.cancelledBy, "user_ops");
+    assert.ok(done.body.order.cancelledAt);
+  }
+});
+
+test("a shop that cannot take the work hands it on rather than stopping it", async (t) => {
+  const { call, orderId, output } = await placedOrder(t);
+  const transition = (state, subject, body = {}) => call(
+    `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
+  );
+
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await transition("supplier_assigned", "clerk_ops");
+
+  // Only the shop holding the job can decline it.
+  const wrongShop = await call(`/orders/${orderId}/decline`, {
+    method: "POST", subject: "clerk_supplier_b", body: { reason: "not mine" },
+  });
+  assert.equal(wrongShop.status, 403, JSON.stringify(wrongShop.body));
+
+  const declined = await call(`/orders/${orderId}/decline`, {
+    method: "POST", subject: "clerk_supplier_a", body: { reason: "Press is down until Thursday" },
+  });
+  assert.equal(declined.status, 200, `${JSON.stringify(declined.body)}\n${output()}`);
+
+  // Supplier B is dearer than the job was sold for, so it is not a candidate.
+  // The order lands on Operations rather than costing the client more.
+  assert.equal(declined.body.replaced, false);
+  assert.equal(declined.body.order.state, "approved_for_matching");
+  assert.equal(declined.body.order.supplierId, null);
+
+  // And the shop that declined no longer sees it.
+  const inbox = await call("/jobs", { subject: "clerk_supplier_a" });
+  assert.equal(inbox.body.jobs.length, 0);
+
+  // Declining twice is not a way to loop.
+  const again = await call(`/orders/${orderId}/decline`, {
+    method: "POST", subject: "clerk_supplier_a", body: { reason: "still down" },
+  });
+  assert.equal(again.status, 403, JSON.stringify(again.body));
+});
+
+test("a declined job moves to a shop that can still make the date, at no more cost", async (t) => {
+  // Placed with the dearer, slower shop, so a cheaper and faster one exists to
+  // take it on.
+  const { call, orderId, output } = await placedOrder(t, { catalogItemId: "item_supplier_b" });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
+  });
+
+  const before = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  assert.equal(before.supplierId, "supplier_b");
+
+  const declined = await call(`/orders/${orderId}/decline`, {
+    method: "POST", subject: "clerk_supplier_b", body: { reason: "Fully booked" },
+  });
+  assert.equal(declined.status, 200, `${JSON.stringify(declined.body)}\n${output()}`);
+  assert.equal(declined.body.replaced, true);
+
+  const after = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  assert.equal(after.supplierId, "supplier_a", "the job moved to the shop that can take it");
+  assert.equal(after.state, "supplier_assigned", "and it is waiting on that shop, not on Operations");
+
+  // The client pays exactly what they agreed to. A shop dropping out is not a
+  // reason to reprice an order somebody already paid for.
+  assert.equal(after.totalMinor, before.totalMinor);
+  assert.equal(after.supplierSubtotalMinor, before.supplierSubtotalMinor);
+
+  // And the new shop is not promised later than the client already was.
+  assert.ok(Date.parse(after.promiseBy) <= Date.parse(before.promiseBy));
+
+  // The new shop sees it; the one that declined does not.
+  assert.equal((await call("/jobs", { subject: "clerk_supplier_a" })).body.jobs.length, 1);
+  assert.equal((await call("/jobs", { subject: "clerk_supplier_b" })).body.jobs.length, 0);
+});
+
+/**
+ * The shop is paid across the work, and never ahead of the money.
+ *
+ * Four stages, none of which fires on its own: a shop is paid when somebody at
+ * GRIDGO has looked at what it produced. A photograph nobody opens is a file,
+ * not a check, so the release refuses without one.
+ */
+test("the shop is paid across four stages, each on a photograph somebody looked at", async (t) => {
+  const { call, database, orderId } = await placedOrder(t);
+  const ops = (path, body) => call(path, { method: "POST", subject: "clerk_ops", body: body || {} });
+  const transition = (state, subject, body = {}) => call(
+    `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
+  );
+  const orderNow = async () => (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  const release = (code) => ops(`/orders/${orderId}/milestones/${code}/release`);
+
+  // The proof, written straight into the record rather than photographed: what
+  // is under test is the release policy, not the camera.
+  const attachProof = async (code) => {
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const order = store.orders.find((row) => row.id === orderId);
+      const milestone = order.payoutMilestones.find((row) => row.code === code);
+      milestone.pofFileIds = [`file_pof_${code}`];
+      milestone.status = "pof_attached";
+      await saveStore(database, store);
+    });
+  };
+
+  const placed = await orderNow();
+  assert.deepEqual(
+    placed.payoutMilestones.map((row) => row.code),
+    ["printing", "packaging_qc", "delivered", "retention"],
+  );
+  assert.deepEqual(placed.payoutMilestones.map((row) => row.sharePercent), [50, 15, 25, 10]);
+  assert.equal(
+    placed.payoutMilestones.reduce((total, row) => total + row.amountMinor, 0),
+    placed.supplierSubtotalMinor,
+    "the four stages have to add up to the shop's price, not the client's total",
+  );
+
+  await ops(`/orders/${orderId}/payments/initial/confirm`);
+  await transition("supplier_assigned", "clerk_ops");
+  await transition("payment_authorized", "clerk_supplier_a");
+  await transition("production", "clerk_supplier_a");
+
+  // Starting production does not pay anybody. It only makes the first stage
+  // releasable, which is a different thing.
+  const producing = await orderNow();
+  assert.equal(
+    producing.payoutMilestones.every((row) => row.status !== "released"),
+    true,
+    "nothing releases itself",
+  );
+
+  const unproven = await release("printing");
+  assert.equal(unproven.status, 409, JSON.stringify(unproven.body));
+  assert.equal(unproven.body.error, "pof_required");
+
+  await attachProof("printing");
+  const printing = await release("printing");
+  assert.equal(printing.status, 200, JSON.stringify(printing.body));
+  assert.equal(printing.body.milestone.status, "released");
+
+  // The shop is told, in pesos, the moment its money moves.
+  const inbox = (await call("/notifications", { subject: "clerk_supplier_a" })).body.notifications;
+  const told = inbox.find((row) => row.type === "shop_payout_released");
+  assert.ok(told, `${JSON.stringify(inbox.map((row) => row.type))}`);
+  assert.match(told.title, /released$/);
+
+  // Packing names work the shop has not finished, so it is refused on the step
+  // rather than on the proof.
+  await attachProof("packaging_qc");
+  const early = await release("packaging_qc");
+  assert.equal(early.status, 409, JSON.stringify(early.body));
+  assert.equal(early.body.error, "milestone_not_reached");
+
+  await transition("supplier_self_qc", "clerk_supplier_a");
+  assert.equal((await release("packaging_qc")).status, 200);
+
+  // Delivered is 25 percent more than the client has paid, so it is refused on
+  // the money until the balance clears -- and on the step until the client
+  // actually has the job.
+  await attachProof("delivered");
+  const undelivered = await release("delivered");
+  assert.equal(undelivered.status, 409, JSON.stringify(undelivered.body));
+  assert.equal(undelivered.body.error, "delivery_required");
+
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === orderId);
+    order.state = "issue_window_open";
+    await saveStore(database, store);
+  });
+  const unpaid = await release("delivered");
+  assert.equal(unpaid.status, 409, JSON.stringify(unpaid.body));
+  assert.equal(unpaid.body.error, "supplier_principal_not_collected");
+
+  await call(`/orders/${orderId}/payments/final_online/submit`, {
+    method: "POST", subject: "clerk_client",
+    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-910" },
+  });
+  await ops(`/orders/${orderId}/payments/final_online/confirm`);
+  assert.equal((await release("delivered")).status, 200);
+
+  // Retention waits out the window, whatever has been collected.
+  await attachProof("retention");
+  const held = await release("retention");
+  assert.equal(held.status, 409, JSON.stringify(held.body));
+  assert.equal(held.body.error, "issue_window_open");
+
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find((row) => row.id === orderId).state = "completed";
+    await saveStore(database, store);
+  });
+  assert.equal((await release("retention")).status, 200);
+
+  const settled = await orderNow();
+  assert.equal(
+    settled.payoutMilestones
+      .filter((row) => row.status === "released")
+      .reduce((total, row) => total + row.amountMinor, 0),
+    settled.supplierSubtotalMinor,
+    "the shop ends up with exactly its own price",
+  );
+});
+
+test("a client rates a finished order once, and only quality reaches matching", async (t) => {
+  const { call, orderId } = await placedOrder(t);
+  const rate = (body, subject = "clerk_client") => call(
+    `/orders/${orderId}/review`, { method: "POST", subject, body },
+  );
+
+  // Not while the order is still running: a rating must never be a bargaining
+  // chip in an open job.
+  const early = await rate({ qualityStars: 5, speedStars: 5, valueStars: 5 });
+  assert.equal(early.status, 409, JSON.stringify(early.body));
+  assert.equal(early.body.error, "order_not_complete");
+
+  // Walk it to finished.
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  for (const [state, subject] of [
+    ["supplier_assigned", "clerk_ops"],
+    ["payment_authorized", "clerk_supplier_a"],
+    ["production", "clerk_supplier_a"],
+    ["supplier_self_qc", "clerk_supplier_a"],
+    ["ready_for_dispatch", "clerk_supplier_a"],
+  ]) {
+    const moved = await call(`/orders/${orderId}/transition`, { method: "POST", subject, body: { state } });
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+
+  // Finishing the work stamps when the shop was actually done, so its on-time
+  // record can be measured against the date its own board promised.
+  const ready = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  assert.ok(ready.readyAt, "the shop's finish time is recorded");
+  assert.ok(ready.readyBy, "and the date it was held to");
+
+  const store = await (async () => {
+    const { createDatabase } = await import("../src/database.js");
+    const db = createDatabase({ DATABASE_URL });
+    t.after(() => db.close());
+    return db.transaction(async () => {
+      const loaded = await loadStore(db);
+      const row = loaded.orders.find((order) => order.id === orderId);
+      row.state = "completed";
+      await saveStore(db, loaded);
+      return loaded;
+    });
+  })();
+  assert.equal(store.orders.find((order) => order.id === orderId).state, "completed");
+
+  const bad = await rate({ qualityStars: 6, speedStars: 5, valueStars: 5 });
+  assert.equal(bad.status, 400, JSON.stringify(bad.body));
+  assert.equal(bad.body.field, "qualityStars");
+
+  // The order says whether it has been rated, so the app asks once. Without
+  // it a client learns the screen was wrong to ask by being refused.
+  const unrated = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(unrated.rated, false);
+
+  const rated = await rate({ qualityStars: 5, speedStars: 3, valueStars: 4, comment: "Beautiful print, a day late." });
+  assert.equal(rated.status, 201, JSON.stringify(rated.body));
+  assert.equal(rated.body.review.supplierId, "supplier_a");
+  assert.equal(rated.body.review.speedStars, 3);
+
+  const afterwards = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(afterwards.rated, true);
+
+  // What was said about the shop is not handed back through the order: any of
+  // several roles can read one, and a rating is not theirs to read.
+  assert.equal(Object.hasOwn(afterwards, "review"), false);
+
+  // Once.
+  const twice = await rate({ qualityStars: 1, speedStars: 1, valueStars: 1 });
+  assert.equal(twice.status, 409, JSON.stringify(twice.body));
+  assert.equal(twice.body.error, "already_rated");
+
+  // And somebody else's order is not theirs to rate.
+  const stranger = await rate({ qualityStars: 5, speedStars: 5, valueStars: 5 }, "clerk_supplier_b");
+  assert.equal(stranger.status, 403, JSON.stringify(stranger.body));
+});
+
+test("each side of an order sees its own price and its own date, and neither sees the other's", async (t) => {
+  // Two figures the platform keeps apart on purpose, and a shop opening an
+  // assigned job was seeing neither its price nor a date it could work to.
+  const { call, orderId } = await placedOrder(t);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+
+  const shop = (await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" })).body.order;
+  const client = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+
+  // The shop is told what it earns, under the name its own app asks for, and
+  // the date it is actually held to.
+  assert.ok(shop.supplierPriceMinor > 0, "the shop is told its price");
+  assert.equal(shop.supplierPriceMinor, shop.supplierSubtotalMinor);
+  assert.ok(shop.readyBy, "the shop is given its own finish date");
+
+  // It is not told the padded date. A shop shown that works to it, and the
+  // allowance is spent before the job starts.
+  assert.equal(Object.hasOwn(shop, "promiseBy"), false);
+
+  // The client is told the date it agreed to and never the shop's price.
+  assert.ok(client.promiseBy, "the client keeps the date it was promised");
+  assert.equal(Object.hasOwn(client, "supplierPriceMinor"), false);
+  assert.equal(Object.hasOwn(client, "supplierSubtotalMinor"), false);
+  // Nor the shop's earlier internal date, which would have it expecting the
+  // job days before the one it agreed to.
+  assert.equal(Object.hasOwn(client, "readyBy"), false);
+});
+
+test("a collected order runs the whole journey, because a rider takes it to the office", async (t) => {
+  // Two different things have been called pickup. The one that was never
+  // finished is the client collecting from the shop's own counter; the one
+  // that shipped is collecting at GRIDGO Office, which a rider delivers to.
+  // Held apart by fulfilment mode alone, the second was refused the moment its
+  // shop pressed start — and the shop was told GRIDGO was unreachable.
+  const { call, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+
+  const collected = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  assert.equal(collected.fulfillmentMode, "pickup");
+  assert.equal(collected.paymentPlan, "order_match_qr_75_25");
+
+  // Accepting is a confirmation; there is nothing to quote.
+  const accepted = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_supplier_a", body: { state: "payment_authorized" },
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+
+  // And it starts, which is the whole of the captain's report.
+  const started = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_supplier_a", body: { state: "production" },
+  });
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  assert.equal(started.body.order.state, "production");
+
+  // Through to staged for a rider.
+  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+    const moved = await call(`/orders/${orderId}/transition`, {
+      method: "POST", subject: "clerk_supplier_a", body: { state },
+    });
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+
+  // A rider is offered it. Collecting does not mean the job stays at the shop:
+  // somebody carries it to the counter the client will collect from, and
+  // without the offer it was packed, staged, and left sitting there.
+  // Read as Operations, who see the same board a rider does. This fixture has
+  // no rider account, and the question here is whether the order is offerable
+  // at all rather than who is looking.
+  const offers = (await call("/dispatch/offers", { subject: "clerk_ops" })).body.offers;
+  const offered = offers.find((entry) => entry.id === orderId);
+  assert.ok(offered, "a collected order is offered to a rider");
+
+  // From the shop, to GRIDGO Office. Both ends, or the rider is driving to
+  // somewhere nobody named.
+  assert.ok(offered.pickup?.label, "the rider is told which shop to collect from");
+  assert.equal(offered.dropoff?.label, "GRIDGO Office");
+
+  // The client collects there, and is never given the shop's address.
+  const clientView = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(clientView.pickup?.label, "GRIDGO Office");
+});
+
+/**
+ * A collected order has two endings, and only the second one is the client's.
+ *
+ * The rider reaching GRIDGO Office is not the client receiving the job. Treated
+ * as one ending, the rider was held at our own counter against a balance nobody
+ * present could pay, and the order could never move again; recorded as a
+ * delivery, it would have closed the job and started the complaint window while
+ * the package was still on our shelf.
+ */
+test("a collected order stops on the counter, and only the counter hands it over", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+  for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
+    const moved = await call(`/orders/${orderId}/transition`, {
+      method: "POST", subject: "clerk_supplier_a", body: { state },
+    });
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+
+  // The balance is not settled, and it does not stop the carrying. Nothing is
+  // being handed to anybody: the job is going onto GRIDGO's own shelf.
+  const accepted = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  const checked = await call(`/dispatch/${orderId}/pickup-checklist`, {
+    method: "POST", subject: "clerk_rider",
+    body: {
+      checks: [
+        "quantity_match", "specification_match", "visible_defects",
+        "packaging_integrity", "documentation", "supplier_sign_off",
+      ].map((code) => ({ code, passed: true })),
+    },
+  });
+  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  const started = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" },
+  });
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  // The rider's evidence, bound to this order. Written straight into the store
+  // rather than uploaded, because what is under test is the ending, not the
+  // camera.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const file = store.files.find((candidate) => candidate.fileId === "file_drop");
+    file.references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+
+  const dropped = await call(`/dispatch/${orderId}/delivery`, {
+    method: "POST", subject: "clerk_rider",
+    body: { evidenceType: "photo", evidenceFileId: "file_drop" },
+  });
+  assert.equal(dropped.status, 200, JSON.stringify(dropped.body));
+  assert.equal(dropped.body.order.state, "awaiting_collection");
+
+  // Nothing has been given to the client yet, so nothing about the job is over.
+  assert.equal(dropped.body.order.issueWindowOpenedAt ?? null, null);
+
+  // The counter is where the money is owed, and it refuses without it.
+  const early = await call(`/orders/${orderId}/collection`, {
+    method: "POST", subject: "clerk_ops", body: { receivedBy: "Ana Cruz" },
+  });
+  assert.equal(early.status, 409, JSON.stringify(early.body));
+  assert.equal(early.body.error, "final_payment_not_confirmed");
+
+  await call(`/orders/${orderId}/payments/final_online/submit`, {
+    method: "POST", subject: "clerk_client",
+    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-901" },
+  });
+  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+
+  // A hand-over with no name is a hand-over nobody can check afterwards.
+  const nameless = await call(`/orders/${orderId}/collection`, {
+    method: "POST", subject: "clerk_ops", body: {},
+  });
+  assert.equal(nameless.status, 400, JSON.stringify(nameless.body));
+
+  const released = await call(`/orders/${orderId}/collection`, {
+    method: "POST", subject: "clerk_ops", body: { receivedBy: "Ana Cruz" },
+  });
+  assert.equal(released.status, 200, JSON.stringify(released.body));
+  assert.equal(released.body.order.state, "issue_window_open");
+  assert.ok(released.body.order.issueWindowOpenedAt, "the complaint window starts when the client has it");
+  assert.ok(
+    released.body.order.timeline.some((entry) => entry.note?.includes("Ana Cruz")),
+    "who collected it is written into the record",
+  );
+});
+
+/**
+ * A rider is never sent to a door that has not paid.
+ *
+ * The balance used to be asked for at the doorstep, which meant a rider could
+ * ride across the city to find the client had not settled and nothing either of
+ * them could do about it. It is asked for while the job is still on the press,
+ * and a delivery that has not settled is simply not offered.
+ */
+test("an unpaid delivery is not offered to a rider", { skip: !DATABASE_URL }, async (t) => {
+  const { call, orderId } = await placedOrder(t);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
+  for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
+    await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier_a", body: { state } });
+  }
+
+  const held = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
+  assert.equal(held.some((entry) => entry.id === orderId), false, "an unpaid delivery is withheld");
+
+  const refused = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "final_payment_not_confirmed");
+
+  await call(`/orders/${orderId}/payments/final_online/submit`, {
+    method: "POST", subject: "clerk_client",
+    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-902" },
+  });
+  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+
+  const offered = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
+  assert.ok(offered.some((entry) => entry.id === orderId), "it is offered once the balance clears");
 });

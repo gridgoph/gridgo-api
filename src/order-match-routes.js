@@ -1,27 +1,46 @@
+import { gridgoOfficePoint } from "./gridgo-office.js";
+import { measurementKindFor } from "./pricing.js";
 import {
   identityHasMembership } from "./authorization-context.js";
-import { gridgoOfficePoint } from "./gridgo-office.js";
 import {
   catalogItemBlockers,
   createOrderLineSnapshot,
   minimumCatalogPrice,
   publicCatalogItem,
   publicSupplierShop,
+  priceCatalogSelection,
   selectedCatalogPrice,
 } from "./supplier-catalog.js";
 import {
+  createPayoutMilestones,
   deliveryFeeForDistance,
   distanceMetersBetween,
   roundBps,
 } from "./operational-model.js";
+import { defaultShopSchedule, projectFinish } from "./availability.js";
 import {
   MatchError,
+  deadlineDays,
   matchShop,
   multiplyMinor,
   validatePreferenceRanking,
 } from "./order-match.js";
 
-const DEFAULT_RANKING = Object.freeze(["quality", "speed", "distance"]);
+const DEFAULT_RANKING = Object.freeze(["quality", "speed", "cost", "distance"]);
+
+/**
+ * A ranking saved before cost existed is three factors long and can no longer
+ * be matched on. Carry the order the client chose and append whatever is
+ * missing, rather than throwing away a choice they made deliberately.
+ */
+function completeRanking(stored) {
+  const kept = Array.isArray(stored) ? stored.filter((factor) => DEFAULT_RANKING.includes(factor)) : [];
+  const ordered = [...new Set(kept)];
+  for (const factor of DEFAULT_RANKING) {
+    if (!ordered.includes(factor)) ordered.push(factor);
+  }
+  return ordered;
+}
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
 
 function fail(status, code, message, details = {}) {
@@ -55,6 +74,52 @@ function positiveInteger(value, field) {
   return value;
 }
 
+/**
+ * The measurement a listing needs, read from what the client sent.
+ *
+ * Which numbers are required is the listing's decision, not the request's: a
+ * tarpaulin priced by the square foot needs a width and a height, a banner
+ * priced by the running foot needs a length, and a document priced by the page
+ * needs a page count. Anything else needs none, and sending one is a mistake
+ * worth naming rather than ignoring -- a client whose measurement is silently
+ * dropped is billed for something other than what they filled in.
+ *
+ * Stored in thousandths of the listing's own `measureUnit`, so 3.5 feet is
+ * 3500 and nothing fractional reaches a price.
+ */
+function measurementFor(item, body, { required = true } = {}) {
+  const kind = measurementKindFor(item.pricingUnit || "per_unit");
+  const sent = body.measurement == null ? null : record(body.measurement, "measurement");
+
+  if (kind === "none") {
+    if (sent && Object.keys(sent).length) {
+      fail(400, "measurement_not_accepted", "This listing is not priced by size, so it takes no measurement.", {
+        field: "measurement",
+      });
+    }
+    return null;
+  }
+
+  if (!sent) {
+    if (!required) return undefined;
+    fail(400, "measurement_required", MEASUREMENT_PROMPTS[kind], { field: "measurement", measurementKind: kind });
+  }
+
+  if (kind === "pages") return { pages: positiveInteger(sent.pages, "measurement.pages") };
+  if (kind === "length") return { length: positiveInteger(sent.length, "measurement.length") };
+  return {
+    width: positiveInteger(sent.width, "measurement.width"),
+    height: positiveInteger(sent.height, "measurement.height"),
+  };
+}
+
+/** What to ask for, in the client's terms, when a measurement is missing. */
+const MEASUREMENT_PROMPTS = Object.freeze({
+  pages: "Tell us how many pages this document has.",
+  area: "Tell us how wide and how tall this needs to be.",
+  length: "Tell us how long this needs to be.",
+});
+
 function point(value, field, { required = true, requireLabel = true } = {}) {
   if (value == null && !required) return null;
   record(value, field);
@@ -82,10 +147,22 @@ function preferenceFor(store, userId) {
   return (store.clientPreferences || []).find((row) => row.userId === userId) || null;
 }
 
+/**
+ * What the client is allowed to see of a match.
+ *
+ * The shop's own date never crosses this line. A client who can see both dates
+ * can see the allowance, and an allowance that is visible is an allowance that
+ * gets argued about -- so the padded promise is the only date they are given.
+ */
+function clientFacingMatch(match) {
+  const { shopReadyBy: _shopReadyBy, ...clientFacing } = match;
+  return clientFacing;
+}
+
 function publicPreference(store, userId) {
   const stored = preferenceFor(store, userId);
   return {
-    ranking: [...(stored?.ranking || DEFAULT_RANKING)],
+    ranking: completeRanking(stored?.ranking),
     version: stored?.version || 0,
     updatedAt: stored?.updatedAt || null,
   };
@@ -118,6 +195,30 @@ function fileFor(store, user, fileId, purpose, field) {
     fail(409, "file_not_ready", `Choose your own ready ${purpose} file.`, { field });
   }
   return file;
+}
+
+/**
+ * What a basket line costs right now, priced the way checkout will price it.
+ *
+ * Null when the listing has gone: a line whose listing was withdrawn has no
+ * price, and showing the last one it had is showing a price nobody will honour.
+ */
+function cartLineSubtotal(store, line) {
+  const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+  if (!item) return null;
+  try {
+    const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
+    return priceCatalogSelection(store, item, {
+      selectedOptions,
+      quantity: line.quantity,
+      measurement: line.measurement || null,
+    }).lineSubtotalMinor;
+  } catch {
+    // A line the pricer refuses -- a measurement the listing stopped taking,
+    // an option that was retired -- has no honest price to show. Checkout says
+    // so properly; a basket must not invent one to fill the column.
+    return null;
+  }
 }
 
 function publicCartListingStub(store, item, optionIds) {
@@ -166,13 +267,17 @@ function publicCart(store, cart, { compactListings = false } = {}) {
       catalogItemId: line.catalogItemId,
       quantity: line.quantity,
       optionIds: [...(line.optionIds || [])],
+      measurement: line.measurement ? { ...line.measurement } : null,
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
       listing,
-      lineSubtotalMinor: listing ? multiplyMinor(listing.effectivePriceMinor, line.quantity, "lineSubtotalMinor") : null,
+      // Through the pricing engine, not a multiplication: the basket and the
+      // invoice have to agree, and a measured or tiered line does not fit in a
+      // unit price times a quantity.
+      lineSubtotalMinor: cartLineSubtotal(store, line),
     };
   });
   return {
@@ -277,6 +382,9 @@ function publicMatchedOrder(store, order) {
     fulfillmentMode: order.fulfillmentMode,
     serviceLevel: order.serviceLevel,
     scheduledFor: order.scheduledFor ?? null,
+    // The promised date, never the shop's own. A client who can see both can
+    // see the allowance.
+    readyBy: order.promiseBy ?? null,
     paymentPlan: {
       method: "qr_manual",
       downpaymentMinor: order.payments.initial.amountMinor,
@@ -309,9 +417,14 @@ function checkout(store, user, cart, body, createId, at) {
   const order = {
     id: orderId,
     clientId: user.id,
+    // One shop per order, known since the match. It was null here, with the
+    // shop recorded per job instead -- which is why no supplier surface ever
+    // showed a checkout order: every one of them reads order.supplierId.
     supplierId: null,
     riderId: null,
-    state: "needs_qa",
+    // Money first. Operations confirms the transfer, then checks the artwork,
+    // and only then does the shop see the job.
+    state: "initial_payment_review",
     supplierSubtotalMinor: 0,
     subtotalMinor: 0,
     serviceFeeRateBps: store.settings.serviceFeeRateBps,
@@ -321,7 +434,10 @@ function checkout(store, user, cart, body, createId, at) {
     fulfillmentMode: cart.fulfillmentMode,
     paymentPlan: "order_match_qr_75_25",
     quoteVersion: 1,
-    supplierDownpaymentRateBps: 7500,
+    // Two payout stages of the shop's own price: 75 percent when it starts, the
+    // rest on delivery proof. Both are capped against supplier principal the
+    // client has actually paid, so the platform never releases its own money.
+    supplierDownpaymentRateBps: 7_500,
     onlineDueMinor: 0,
     directStoreDueMinor: 0,
     supplierPlatformPayoutMinor: 0,
@@ -336,7 +452,7 @@ function checkout(store, user, cart, body, createId, at) {
     payoutMilestones: [],
     serviceLevel: cart.serviceLevel,
     scheduledFor: cart.scheduledFor ?? null,
-    timeline: [{ at, state: "needs_qa", by: user.id, note: "Placed for Operations QA" }],
+    timeline: [{ at, state: "initial_payment_review", by: user.id, note: "Placed; payment sent for confirmation" }],
     createdAt: at,
     updatedAt: at,
   };
@@ -382,6 +498,7 @@ function checkout(store, user, cart, body, createId, at) {
         expectedVersion: item.version,
         expectedServiceVersion: listing.serviceVersion,
         optionIds: line.optionIds || [],
+        measurement: line.measurement || null,
         quantity: line.quantity,
         structuredSpec: line.structuredSpec || {},
         createdAt: at,
@@ -406,6 +523,32 @@ function checkout(store, user, cart, body, createId, at) {
     jobs.push(job);
     snapshots.push(...jobSnapshots);
   }
+
+  // The shop, and the two dates. Both are fixed here rather than at the match:
+  // the match was priced on a listing nobody had configured yet, and the real
+  // quantity is only known now.
+  const [job] = jobs;
+  const shopProfile = (store.supplierProfiles || []).find((row) => row.userId === job.supplierId);
+  const orderedUnits = snapshots.reduce((total, row) => total + Number(row.lineItem.quantity || 0), 0);
+  const capacityDaily = (store.supplierServices || [])
+    .filter((row) => row.supplierId === job.supplierId && row.state === "live")
+    .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
+  const projection = projectFinish({
+    schedule: shopProfile?.schedule || defaultShopSchedule(),
+    now: at,
+    turnaroundMinutes: Math.max(1, job.estimatedHours) * 60,
+    units: orderedUnits > 0 ? orderedUnits : null,
+    capacityDaily: capacityDaily > 0 ? capacityDaily : null,
+    allowanceMinutes: Number.isSafeInteger(store.settings?.promiseAllowanceMinutes)
+      ? store.settings.promiseAllowanceMinutes
+      : 600,
+  });
+  order.supplierId = job.supplierId;
+  order.pickup = { ...job.pickup };
+  // The shop's own date, which it is held to. Never shown to the client.
+  order.readyBy = projection.readyBy;
+  // The padded date the client was promised. Never shown to the shop.
+  order.promiseBy = projection.promiseBy;
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
   const deliveryTotalMinor = addMinor(jobs.map((job) => job.deliveryFeeMinor), "order.deliveryFeeMinor");
@@ -432,6 +575,38 @@ function checkout(store, user, cart, body, createId, at) {
       },
     },
   });
+
+  /*
+   Splitting the two payments across what they are actually paying for.
+
+   Each instalment settles the same proportion of every component, rather than
+   clearing the fee and delivery out of the downpayment first. Both are honest
+   allocations, but only this one leaves the downpayment covering 75 percent of
+   the shop's own price -- settling the fee first leaves it short, and the first
+   payout stage is then refused as uncollected on every single order.
+
+   The principal takes the rounding remainder because it is the figure payout
+   releases are capped against; giving it the odd centavo can only ever be in
+   the shop's favour.
+  */
+  const initialFeeMinor = roundBps(serviceFeeMinor, 7_500);
+  const initialDeliveryMinor = roundBps(deliveryTotalMinor, 7_500);
+  const initialPrincipalMinor = downpaymentMinor - initialFeeMinor - initialDeliveryMinor;
+  order.paymentAllocations = [
+    { paymentCode: "initial", component: "supplier_principal", amountMinor: initialPrincipalMinor },
+    { paymentCode: "initial", component: "service_fee", amountMinor: initialFeeMinor },
+    { paymentCode: "initial", component: "delivery_pass_through", amountMinor: initialDeliveryMinor },
+    { paymentCode: "final_online", component: "supplier_principal", amountMinor: itemSubtotalMinor - initialPrincipalMinor },
+    { paymentCode: "final_online", component: "service_fee", amountMinor: serviceFeeMinor - initialFeeMinor },
+    { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: deliveryTotalMinor - initialDeliveryMinor },
+  ].filter((allocation) => allocation.amountMinor > 0);
+
+  order.payoutMilestones = createPayoutMilestones({
+    supplierPlatformPayoutMinor: itemSubtotalMinor,
+    supplierSubtotalMinor: itemSubtotalMinor,
+    supplierDownpaymentRateBps: order.supplierDownpaymentRateBps,
+  });
+
   order.invoiceNumber = invoiceNumber(orderId, at);
 
   store.orderJobs ||= [];
@@ -486,7 +661,7 @@ function checkout(store, user, cart, body, createId, at) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts"].includes(pathname)) return true;
+  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days"].includes(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
@@ -543,6 +718,23 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     store.clientAddresses.push(address);
     return { status: 201, body: { address: publicAddress(address) }, mutated: true };
   }
+
+  if (req.method === "GET" && pathname === "/me/deadline-days") {
+    // Which days GRIDGO could make, for one kind of work. Read-only, and it
+    // returns dates rather than shops: the queues and capacities behind the
+    // answer are the shops' own, and a client is never told how many print
+    // something.
+    const subcategoryCode = text(url.searchParams.get("subcategoryCode"), "subcategoryCode", 120);
+    // Four months. A print deadline is regularly further out than a fortnight
+    // -- a graduation, a launch, a fiesta -- and a window that stops at six
+    // weeks reads to a client as "GRIDGO does not go that far", which is a
+    // limit of the calendar rather than of the shops.
+    const days = Math.min(126, Math.max(7, Number(url.searchParams.get("days")) || 120));
+    return {
+      status: 200,
+      body: deadlineDays(store, { subcategoryCode, now: now(), days }),
+    };
+  }
   if (req.method === "POST" && ["/me/matches", "/me/matches/next"].includes(pathname)) {
     const body = record(await readBody(req));
     if (pathname.endsWith("/next") && (!Array.isArray(body.excludedSupplierIds) || body.excludedSupplierIds.length === 0)) {
@@ -550,13 +742,18 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     }
     return {
       status: 200,
-      body: matchShop(store, {
+      body: clientFacingMatch(matchShop(store, {
         subcategoryCode: body.subcategoryCode,
         ranking: body.ranking || publicPreference(store, user.id).ranking,
         dropoff: addressPoint(store, user.id, body),
         excludedSupplierIds: body.excludedSupplierIds || [],
         preferredSupplierId: preferredSupplierForCart(store, user, body.cartId),
-      }),
+        // The date the client gave before any shop was chosen. Without it the
+        // match cannot filter, and a shop that misses it is only found at
+        // checkout.
+        deadline: body.deadline ?? null,
+        now: now(),
+      })),
       mutated: false,
     };
   }
@@ -626,9 +823,20 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     selectedCatalogPrice(store, item, body.optionIds);
     const at = now();
     const lines = (store.cartLines || []).filter((row) => row.cartId === cart.id);
+    // One shop per order. A basket spanning two shops needs two of everything
+    // downstream -- two quality checks, two accept decisions, two pickups, two
+    // payouts -- and none of that was ever wired, so the second shop's half
+    // simply stopped. Wanting a second shop starts a second order.
+    const otherShop = lines.find((row) => row.supplierId !== item.supplierId);
+    if (otherShop) {
+      fail(409, "cart_belongs_to_another_shop", "This basket is already with another shop. Check it out, or start a new order for this.", {
+        field: "catalogItemId",
+      });
+    }
     const line = {
       id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id,
       optionIds: [...body.optionIds], quantity: positiveInteger(body.quantity, "quantity"),
+      measurement: measurementFor(item, body),
       structuredSpec: body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec")),
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
@@ -660,6 +868,14 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
       selectedCatalogPrice(store, item, body.optionIds);
       line.optionIds = [...body.optionIds];
+    }
+    if (Object.hasOwn(body, "measurement")) {
+      const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+      // A measurement already on the line stands if this request does not
+      // replace it, so `undefined` here means "leave it alone" and null means
+      // the listing takes none at all.
+      const measured = measurementFor(item, body, { required: false });
+      if (measured !== undefined) line.measurement = measured;
     }
     if (Object.hasOwn(body, "structuredSpec")) line.structuredSpec = structuredClone(record(body.structuredSpec, "structuredSpec"));
     if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;

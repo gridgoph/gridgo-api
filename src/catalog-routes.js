@@ -1,3 +1,10 @@
+import {
+  MEASURE_UNITS,
+  PRICING_UNITS,
+  isMeasureUnit,
+  isPricingUnit,
+  measurementKindFor,
+} from "./pricing.js";
 import { identityHasMembership } from "./authorization-context.js";
 import {
   FORMAT_QUERY_MAX,
@@ -216,15 +223,54 @@ function subcategoryForService(store, service, subcategoryCode) {
 
 function pricingFields(body, current = {}) {
   const pricingUnit = body.pricingUnit == null ? (current.pricingUnit || "per_unit") : requiredText(body.pricingUnit, "pricingUnit", 20);
-  if (!["per_unit", "per_package"].includes(pricingUnit)) {
-    fail(400, "invalid_catalog_item", "pricingUnit must be per_unit or per_package.", { field: "pricingUnit" });
+  if (!isPricingUnit(pricingUnit)) {
+    fail(400, "invalid_catalog_item", `pricingUnit must be one of ${PRICING_UNITS.join(", ")}.`, { field: "pricingUnit" });
   }
   let packageQty = current.packageQty ?? null;
   if (Object.hasOwn(body, "packageQty")) packageQty = body.packageQty == null ? null : integer(body.packageQty, "packageQty", { min: 2 });
-  if (pricingUnit === "per_unit") packageQty = null;
+  if (pricingUnit !== "per_package") packageQty = null;
   else if (!Number.isSafeInteger(packageQty) || packageQty < 2) {
     fail(400, "invalid_catalog_item", "packageQty must be at least 2 for per_package pricing.", { field: "packageQty" });
   }
+
+  // A measured unit cannot be priced without knowing what it is measured in,
+  // and an unmeasured one has nothing to measure.
+  const measured = measurementKindFor(pricingUnit);
+  let measureUnit = current.measureUnit ?? null;
+  if (Object.hasOwn(body, "measureUnit")) {
+    measureUnit = body.measureUnit == null ? null : requiredText(body.measureUnit, "measureUnit", 4);
+  }
+  if (measured === "area" || measured === "length") {
+    if (!isMeasureUnit(measureUnit)) {
+      fail(400, "invalid_catalog_item", `measureUnit must be one of ${MEASURE_UNITS.join(", ")} for this pricing unit.`, {
+        field: "measureUnit",
+      });
+    }
+  } else {
+    measureUnit = null;
+  }
+
+  // The smallest size the shop bills for, and the least it will run. Both
+  // optional; a listing that needs neither never sees them.
+  const milli = (field) => {
+    if (!Object.hasOwn(body, field)) return current[field] ?? null;
+    return body[field] == null ? null : integer(body[field], field, { min: 1 });
+  };
+  let minimumWidthMilli = measured === "area" ? milli("minimumWidthMilli") : null;
+  let minimumHeightMilli = measured === "area" ? milli("minimumHeightMilli") : null;
+  const minimumLengthMilli = measured === "length" ? milli("minimumLengthMilli") : null;
+  if ((minimumWidthMilli == null) !== (minimumHeightMilli == null)) {
+    fail(400, "invalid_catalog_item", "A smallest billable size needs both a width and a height.", {
+      field: "minimumWidthMilli",
+    });
+  }
+  let minimumOrderQuantity = current.minimumOrderQuantity ?? null;
+  if (Object.hasOwn(body, "minimumOrderQuantity")) {
+    minimumOrderQuantity = body.minimumOrderQuantity == null
+      ? null
+      : integer(body.minimumOrderQuantity, "minimumOrderQuantity", { min: 1 });
+  }
+  if (pricingUnit === "whole_job") minimumOrderQuantity = null;
   const turnaroundMode = body.turnaroundMode == null
     ? (current.turnaroundMode || "inherit")
     : requiredText(body.turnaroundMode, "turnaroundMode", 20);
@@ -239,7 +285,11 @@ function pricingFields(body, current = {}) {
   else if (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
     fail(400, "invalid_catalog_item", "turnaroundHours is required when overriding ready-in time.", { field: "turnaroundHours" });
   }
-  return { pricingUnit, packageQty, turnaroundMode, turnaroundHours };
+  return {
+    pricingUnit, packageQty, measureUnit,
+    minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
+    turnaroundMode, turnaroundHours,
+  };
 }
 
 function shopPoint(value) {
@@ -253,14 +303,116 @@ function shopPoint(value) {
   return { lat, lng, label };
 }
 
+/**
+ * An add-on that multiplies the price rather than adding to it.
+ *
+ * Basis points, so a shop's "x2 the price" is 20000 and no float reaches the
+ * money. A listing's back-to-back doubles whatever the base is now, which a
+ * flat amount cannot do -- it has to be re-entered by hand every time the
+ * price moves, and in practice is not.
+ *
+ * An option multiplies or it adds, never both, and the database enforces the
+ * same rule. Refusing here is what turns a contradiction into a sentence the
+ * shop can act on rather than a constraint violation.
+ */
+function multiplierInput(option) {
+  if (option.priceMultiplierBps == null) return null;
+  const bps = integer(option.priceMultiplierBps, "priceMultiplierBps", { min: 1, max: 1_000_000 });
+  if (option.priceModifierMinor) {
+    fail(400, "invalid_catalog_options", "An extra either multiplies the price or adds to it, not both. Clear one of them.", {
+      field: "priceMultiplierBps",
+    });
+  }
+  return bps;
+}
+
 function optionInput(value, service, store) {
   const option = catalogRecord(value, { code: "invalid_catalog_options", field: "option" });
   const label = requiredText(option.label, "label", 100);
   const priceModifierMinor = option.priceModifierMinor == null ? 0 : integer(option.priceModifierMinor, "priceModifierMinor");
+  const priceMultiplierBps = multiplierInput(option);
   const sortOrder = integer(option.sortOrder ?? 0, "sortOrder", { min: 0, max: 19 });
   const active = option.active == null ? true : booleanValue(option.active, "active");
   const specBinding = option.specBinding === undefined ? undefined : validateSpecBinding(store, service, option.specBinding);
-  return { label, priceModifierMinor, sortOrder, active, specBinding };
+  return { label, priceModifierMinor, priceMultiplierBps, sortOrder, active, specBinding };
+}
+
+/**
+ * Volume breaks, replaced as a set.
+ *
+ * Quantities must be distinct: two rules starting at the same number is not a
+ * price, it is a coin toss, and the shop cannot see which one won.
+ */
+export function replacePriceTiers(store, item, value, now) {
+  if (!Array.isArray(value)) fail(400, "invalid_catalog_item", "priceTiers must be a list.", { field: "priceTiers" });
+  if (value.length > 8) fail(400, "invalid_catalog_item", "A listing can have at most eight bulk breaks.", { field: "priceTiers" });
+  const at = now();
+  const seen = new Set();
+  const next = value.map((row, index) => {
+    const tier = catalogRecord(row, { code: "invalid_catalog_item", field: `priceTiers[${index}]` });
+    const minQuantity = integer(tier.minQuantity, `priceTiers[${index}].minQuantity`, { min: 1 });
+    if (seen.has(minQuantity)) {
+      fail(400, "invalid_catalog_item", "Two bulk breaks cannot start at the same quantity.", {
+        field: `priceTiers[${index}].minQuantity`,
+      });
+    }
+    seen.add(minQuantity);
+    return {
+      id: `${item.id}_tier_${minQuantity}`,
+      catalogItemId: item.id,
+      minQuantity,
+      unitPriceMinor: moneyMinor(tier.unitPriceMinor, `priceTiers[${index}].unitPriceMinor`),
+      createdAt: at,
+      updatedAt: at,
+    };
+  });
+  store.catalogPriceTiers = (store.catalogPriceTiers || []).filter((row) => row.catalogItemId !== item.id);
+  store.catalogPriceTiers.push(...next);
+}
+
+/**
+ * Speeds, replaced as a set.
+ *
+ * A speed either states its own price -- hardbound is PHP 250 at five days and
+ * PHP 700 at two hours, two prices for the same book -- or adds a flat fee,
+ * which is how a rush charge works. Both at once means nothing, so it is
+ * refused rather than guessed at.
+ */
+export function replaceSpeedTiers(store, item, value, now) {
+  if (!Array.isArray(value)) fail(400, "invalid_catalog_item", "speedTiers must be a list.", { field: "speedTiers" });
+  if (value.length > 6) fail(400, "invalid_catalog_item", "A listing can offer at most six speeds.", { field: "speedTiers" });
+  const at = now();
+  const seen = new Set();
+  const next = value.map((row, index) => {
+    const tier = catalogRecord(row, { code: "invalid_catalog_item", field: `speedTiers[${index}]` });
+    const turnaroundHours = integer(tier.turnaroundHours, `speedTiers[${index}].turnaroundHours`, { min: 1, max: 8_760 });
+    if (seen.has(turnaroundHours)) {
+      fail(400, "invalid_catalog_item", "Two speeds cannot take the same time.", {
+        field: `speedTiers[${index}].turnaroundHours`,
+      });
+    }
+    seen.add(turnaroundHours);
+    const priceMinor = tier.priceMinor == null ? null : moneyMinor(tier.priceMinor, `speedTiers[${index}].priceMinor`);
+    const surchargeMinor = tier.surchargeMinor == null ? null : moneyMinor(tier.surchargeMinor, `speedTiers[${index}].surchargeMinor`);
+    if ((priceMinor == null) === (surchargeMinor == null)) {
+      fail(400, "invalid_catalog_item", "A speed either has its own price or adds a fee, not both and not neither.", {
+        field: `speedTiers[${index}].priceMinor`,
+      });
+    }
+    return {
+      id: `${item.id}_speed_${turnaroundHours}`,
+      catalogItemId: item.id,
+      label: requiredText(tier.label, `speedTiers[${index}].label`, 80),
+      turnaroundHours,
+      priceMinor,
+      surchargeMinor,
+      sortOrder: index,
+      createdAt: at,
+      updatedAt: at,
+    };
+  });
+  store.catalogSpeedTiers = (store.catalogSpeedTiers || []).filter((row) => row.catalogItemId !== item.id);
+  store.catalogSpeedTiers.push(...next);
 }
 
 function ensureGroupBounds(store, itemId, extra = 0) {
@@ -677,6 +829,11 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (body.basePriceMinor != null) item.basePriceMinor = moneyMinor(body.basePriceMinor, "basePriceMinor");
     if (body.subcategoryCode != null) item.subcategoryCode = subcategoryForService(store, service, body.subcategoryCode);
     Object.assign(item, pricingFields(body, item));
+    // Tiers are small ordered sets a shop edits as a whole -- add a break,
+    // change a price, drop a speed -- so they are replaced wholesale rather
+    // than through six more routes each with its own version check.
+    if (Object.hasOwn(body, "priceTiers")) replacePriceTiers(store, item, body.priceTiers, now);
+    if (Object.hasOwn(body, "speedTiers")) replaceSpeedTiers(store, item, body.speedTiers, now);
     if (body.active != null) item.active = booleanValue(body.active, "active");
     if (body.sortOrder != null) item.sortOrder = integer(body.sortOrder, "sortOrder", { min: 0 });
     bumpVersion(item, now());
@@ -931,6 +1088,16 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
         option.label = label;
       }
       if (body.priceModifierMinor != null) option.priceModifierMinor = integer(body.priceModifierMinor, "priceModifierMinor");
+      if (body.priceMultiplierBps !== undefined) {
+        // Judged against what the option will hold after this request, not
+        // what it held before: a shop switching an add-on from a flat amount
+        // to a multiplier sends both fields in one save.
+        option.priceMultiplierBps = multiplierInput({
+          priceMultiplierBps: body.priceMultiplierBps,
+          priceModifierMinor: option.priceModifierMinor,
+        });
+        if (option.priceMultiplierBps != null) option.priceModifierMinor = 0;
+      }
       if (body.specBinding !== undefined) option.specBinding = validateSpecBinding(store, service, body.specBinding);
       if (body.active != null) option.active = booleanValue(body.active, "active");
       if (body.sortOrder != null) {

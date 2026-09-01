@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
+import { replacePriceTiers, replaceSpeedTiers } from "../src/catalog-routes.js";
 import { seedReferenceData } from "../src/seed.js";
 import { defaultTaxonomy } from "../src/taxonomy.js";
 import {
@@ -520,7 +521,7 @@ test("GET /me/catalog-items q hunts this shop's name and subcategory", async () 
 test("GET item includes persisted photos after postgres round-trip", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -576,7 +577,7 @@ test("GET item includes persisted photos after postgres round-trip", { skip: !DA
 test("creating from a GRIDGO starter persists its file types", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -732,7 +733,7 @@ test("saving shop name also writes the account supplierName Account already read
 test("saved shop name persists as users.supplierName", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -805,7 +806,7 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media,
@@ -844,4 +845,188 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
   assert.equal(starters.status, 200);
   assert.ok(starters.body.starters.some((starter) => starter.subcategoryCode === "tarpaulins_outdoor_banners"));
   assert.ok(starters.body.starters[0].groups.length > 0);
+});
+
+/** The fixture's groups are required; these tests are about price, not choices. */
+function withoutRequiredChoices(store) {
+  for (const group of store.catalogOptionGroups) group.required = false;
+  return store;
+}
+
+/**
+ * The pricing engine, reached the way an order actually reaches it.
+ *
+ * `pricing.js` has computed these shapes since it landed, but the catalogue had
+ * nowhere to store them and the order line multiplied a unit price by a
+ * quantity -- which is only correct for the two shapes the catalogue used to
+ * have. These prove the wiring, not the arithmetic.
+ */
+test("an area listing is billed on measured size, with the shop's minimum applied", () => {
+  const store = withoutRequiredChoices(fixture());
+  const item = store.catalogItems.find((row) => row.id === "item");
+  item.pricingUnit = "per_area";
+  item.packageQty = null;
+  item.measureUnit = "ft";
+  item.basePriceMinor = 4_000; // PHP 40.00 a square foot
+  item.minimumWidthMilli = 2_000;
+  item.minimumHeightMilli = 4_000; // billed at no less than 2x4
+
+  const ordinary = createOrderLineSnapshot(store, {
+    orderId: "order", catalogItemId: "item", optionIds: [], quantity: 1,
+    expectedVersion: 3, expectedServiceVersion: 1, acceptedFormatCode: "pdf",
+    structuredSpec: {}, createdAt: AT,
+    measurement: { width: 3_000, height: 4_000 }, // 3 x 4 ft
+  }, (prefix) => `${prefix}_area`);
+  assert.equal(ordinary.lineItem.lineSubtotalMinor, 48_000); // PHP 480.00
+
+  const small = createOrderLineSnapshot(store, {
+    orderId: "order", catalogItemId: "item", optionIds: [], quantity: 1,
+    expectedVersion: 3, expectedServiceVersion: 1, acceptedFormatCode: "pdf",
+    structuredSpec: {}, createdAt: AT,
+    measurement: { width: 1_000, height: 4_000 }, // 1 x 4 ft, billed as 2 x 4
+  }, (prefix) => `${prefix}_small`);
+  assert.equal(small.lineItem.lineSubtotalMinor, 32_000); // PHP 320.00, not 160.00
+});
+
+test("a volume break replaces the rate, and a shop's minimum run is refused", () => {
+  const store = withoutRequiredChoices(fixture());
+  const item = store.catalogItems.find((row) => row.id === "item");
+  item.pricingUnit = "per_unit";
+  item.basePriceMinor = 10_000; // PHP 100.00 a piece
+  item.minimumOrderQuantity = 20;
+  store.catalogPriceTiers = [
+    { id: "tier_bulk", catalogItemId: "item", minQuantity: 250, unitPriceMinor: 6_000 },
+  ];
+
+  const line = (quantity) => createOrderLineSnapshot(store, {
+    orderId: "order", catalogItemId: "item", optionIds: [], quantity,
+    expectedVersion: 3, expectedServiceVersion: 1, acceptedFormatCode: "pdf",
+    structuredSpec: {}, createdAt: AT,
+  }, (prefix) => `${prefix}_${quantity}`);
+
+  assert.equal(line(100).lineItem.lineSubtotalMinor, 1_000_000); // PHP 10,000.00
+  assert.equal(line(300).lineItem.lineSubtotalMinor, 1_800_000); // PHP 18,000.00, not 30,000
+
+  assert.throws(
+    () => line(5),
+    (error) => error.code === "below_minimum_quantity",
+  );
+});
+
+test("the public listing tells a client which questions this pricing needs", () => {
+  const store = fixture();
+  const item = store.catalogItems.find((row) => row.id === "item");
+  item.pricingUnit = "per_area";
+  item.packageQty = null;
+  item.measureUnit = "ft";
+  store.catalogSpeedTiers = [
+    { id: "spd_5d", catalogItemId: "item", label: "5 days", turnaroundHours: 120, priceMinor: 25_000, surchargeMinor: null, sortOrder: 0 },
+    { id: "spd_1d", catalogItemId: "item", label: "1 day", turnaroundHours: 24, priceMinor: 50_000, surchargeMinor: null, sortOrder: 1 },
+  ];
+
+  const listing = publicCatalogItem(store, item);
+  assert.equal(listing.measurementKind, "area");
+  assert.equal(listing.measureUnit, "ft");
+  // Fastest first is the wrong order for a price ladder: a client reads the
+  // cheapest and decides what speed is worth paying for.
+  assert.deepEqual(listing.speedTiers.map((tier) => tier.turnaroundHours), [24, 120]);
+  assert.equal(listing.speedTiers[0].priceMinor, 50_000);
+});
+
+test("bulk breaks and speeds are replaced as a set, and refuse a rule that cannot be read", () => {
+  const store = withoutRequiredChoices(fixture());
+  const item = store.catalogItems.find((row) => row.id === "item");
+  const at = () => AT;
+
+  replacePriceTiers(store, item, [
+    { minQuantity: 250, unitPriceMinor: 6_000 },
+    { minQuantity: 1, unitPriceMinor: 10_000 },
+  ], at);
+  assert.deepEqual(
+    store.catalogPriceTiers.map((tier) => tier.minQuantity).sort((a, b) => a - b),
+    [1, 250],
+  );
+
+  // Replacing, not appending: a shop that removes a break has removed it.
+  replacePriceTiers(store, item, [{ minQuantity: 500, unitPriceMinor: 4_500 }], at);
+  assert.deepEqual(store.catalogPriceTiers.map((tier) => tier.minQuantity), [500]);
+
+  // Two rules starting at the same quantity is a coin toss, not a price.
+  assert.throws(
+    () => replacePriceTiers(store, item, [
+      { minQuantity: 100, unitPriceMinor: 900 },
+      { minQuantity: 100, unitPriceMinor: 800 },
+    ], at),
+    (error) => error.code === "invalid_catalog_item",
+  );
+
+  replaceSpeedTiers(store, item, [
+    { label: "5 days", turnaroundHours: 120, priceMinor: 25_000 },
+    { label: "2-3 hours", turnaroundHours: 3, priceMinor: 70_000 },
+  ], at);
+  assert.deepEqual(store.catalogSpeedTiers.map((tier) => tier.turnaroundHours).sort((a, b) => a - b), [3, 120]);
+
+  // A speed either names its own price or adds a fee. Both, or neither, means
+  // nothing, so it is refused rather than guessed at.
+  for (const broken of [
+    { label: "Bad", turnaroundHours: 12, priceMinor: 100, surchargeMinor: 100 },
+    { label: "Bad", turnaroundHours: 12 },
+  ]) {
+    assert.throws(
+      () => replaceSpeedTiers(store, item, [broken], at),
+      (error) => error.code === "invalid_catalog_item",
+    );
+  }
+});
+
+test("a shop can price an extra as a multiple rather than a flat amount", async () => {
+  // "Back-to-back, x2 the price" is how Lovis quotes it, and as a flat amount
+  // it has to be re-entered by hand every time the base price moves -- which
+  // in practice means it stops being right. The catalogue and the pricer have
+  // been able to hold a multiplier for a while; a shop could not set one.
+  const store = fixture();
+  const group = store.catalogOptionGroups[0];
+  const call = (method, path, body) => routeSupplierCatalog({
+    req: { method, headers: {} },
+    url: new URL(`http://127.0.0.1${path}`),
+    store,
+    user: { id: "supplier", role: "supplier", verificationStatus: "approved" },
+    readBody: async () => body,
+    id: (prefix) => `${prefix}_new`,
+    now: () => AT,
+    audit: () => {},
+  });
+
+  const created = await call("POST", `/me/catalog-option-groups/${group.id}/options`, {
+    label: "Back-to-back",
+    priceMultiplierBps: 20_000,
+    expectedVersion: group.version,
+    sortOrder: 9,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const stored = store.catalogOptions.find((option) => option.label === "Back-to-back");
+  assert.equal(stored.priceMultiplierBps, 20_000);
+  assert.equal(stored.priceModifierMinor, 0);
+
+  // An extra multiplies or it adds. Both at once is a contradiction, and
+  // saying so is better than a constraint violation the shop cannot read.
+  await assert.rejects(
+    call("POST", `/me/catalog-option-groups/${group.id}/options`, {
+      label: "Confused",
+      priceMultiplierBps: 20_000,
+      priceModifierMinor: 500,
+      expectedVersion: store.catalogOptionGroups[0].version,
+      sortOrder: 10,
+    }),
+    (error) => error.status === 400 && /multiplies the price or adds to it/.test(error.message),
+  );
+
+  // And a shop can take the multiplier off again, back to a flat amount.
+  const cleared = await call(
+    "PATCH",
+    `/me/catalog-option-groups/${group.id}/options/${stored.id}`,
+    { priceMultiplierBps: null, priceModifierMinor: 500, expectedVersion: store.catalogOptionGroups[0].version },
+  );
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  assert.equal(store.catalogOptions.find((option) => option.id === stored.id).priceMultiplierBps, null);
 });

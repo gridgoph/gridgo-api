@@ -1,9 +1,40 @@
 import { distanceMetersBetween } from "./operational-model.js";
 import { publicCatalogItem } from "./supplier-catalog.js";
+import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
 
-export const MATCH_FACTORS = Object.freeze(["quality", "speed", "distance"]);
-const RANK_WEIGHTS = Object.freeze([0.5, 0.3, 0.2]);
+/**
+ * Which press runs a job.
+ *
+ * Two steps, and the order of them is the whole design. First a filter: a shop
+ * that cannot do the work, or cannot do it by the date the client gave, is not
+ * offered -- it is not ranked lower, it is absent. Only then does the client's
+ * own ordering of quality, speed, cost and distance choose between whoever is
+ * left.
+ *
+ * That order matters because "can you make Friday?" is not a preference. A
+ * marketplace that scores it as one will cheerfully hand a client the best shop
+ * that happens to miss their deadline, and only admit it at checkout.
+ *
+ * The ranking stays a strict ordering rather than weights, for the reason the
+ * client app states: nobody can honestly say "quality 0.6", and a strict order
+ * always produces one winner and always produces a sentence -- which is what
+ * the card prints under its WHY band.
+ */
+
+export const MATCH_FACTORS = Object.freeze(["quality", "speed", "cost", "distance"]);
+const RANK_WEIGHTS = Object.freeze([0.4, 0.3, 0.2, 0.1]);
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
+
+/**
+ * Below this, a shop is scored on how complete its listing is; at or above it,
+ * on what clients actually said. Star ratings are savage in small numbers, and
+ * a shop's first unlucky review should not bury it.
+ */
+export const MIN_REVIEWS_FOR_RATING = 5;
+
+/** One working day, until Operations sets its own. See `projectFinish`. */
+const DEFAULT_ALLOWANCE_MINUTES = 600;
+
 const ACTIVE_JOB_STATES = new Set([
   "needs_qa",
   "client_correction",
@@ -32,14 +63,14 @@ function fail(status, code, message, details = {}) {
 
 export function validatePreferenceRanking(value) {
   if (!Array.isArray(value) || value.length !== MATCH_FACTORS.length) {
-    fail(400, "invalid_preference_ranking", "ranking must contain quality, speed, and distance exactly once.", {
+    fail(400, "invalid_preference_ranking", "ranking must contain quality, speed, cost, and distance exactly once.", {
       field: "ranking",
       allowed: MATCH_FACTORS,
     });
   }
   const ranking = value.map((factor) => String(factor));
   if (new Set(ranking).size !== MATCH_FACTORS.length || MATCH_FACTORS.some((factor) => !ranking.includes(factor))) {
-    fail(400, "invalid_preference_ranking", "ranking must contain quality, speed, and distance exactly once.", {
+    fail(400, "invalid_preference_ranking", "ranking must contain quality, speed, cost, and distance exactly once.", {
       field: "ranking",
       allowed: MATCH_FACTORS,
     });
@@ -69,8 +100,9 @@ function point(value, { required = false, field = "dropoff" } = {}) {
   return { lat: value.lat, lng: value.lng, ...(String(value.label || "").trim() ? { label: String(value.label).trim() } : {}) };
 }
 
-function listingQuality(item) {
-  let score = 50; // approved supplier standing; reviews can replace part of this later
+/** How completely a shop has described what it sells. The stand-in for a rating. */
+function listingCompleteness(item) {
+  let score = 50; // approved supplier standing
   if (String(item.name || "").trim()) score += 8;
   if (String(item.description || "").trim()) score += 10;
   if (Number.isSafeInteger(item.fromPriceMinor) && item.fromPriceMinor >= 0) score += 7;
@@ -82,16 +114,72 @@ function listingQuality(item) {
   return Math.min(100, score);
 }
 
-function queueFor(store, supplierId, listings) {
-  const active = (store.orderJobs || [])
-    .filter((job) => job.supplierId === supplierId && ACTIVE_JOB_STATES.has(job.state));
-  const ownHours = Math.min(...listings.map((item) => item.turnaroundHours).filter((hours) => Number.isSafeInteger(hours) && hours > 0));
-  const baseHours = Number.isFinite(ownHours) ? ownHours : 24;
-  const queuedHours = active.reduce((total, job) => {
-    const estimate = Number.isSafeInteger(job.estimatedHours) && job.estimatedHours > 0 ? job.estimatedHours : baseHours;
+/**
+ * What clients said about this shop's work.
+ *
+ * Only the quality star feeds matching. Speed is measured from whether the shop
+ * hit its own date, and cost is the price on the listing -- taking those from a
+ * remembered rating would override a timestamp with a recollection, and would
+ * mark a shop down twice for being expensive.
+ */
+export function shopRating(store, supplierId) {
+  const reviews = (store.shopReviews || []).filter((row) => row.supplierId === supplierId);
+  if (reviews.length === 0) return null;
+  const stars = reviews.map((row) => Number(row.qualityStars)).filter((value) => Number.isFinite(value) && value > 0);
+  if (stars.length === 0) return null;
+  return {
+    count: stars.length,
+    average: stars.reduce((total, value) => total + value, 0) / stars.length,
+  };
+}
+
+/** Whether the shop hit the date its own board promised, across finished work. */
+export function onTimeRate(store, supplierId) {
+  const finished = (store.orders || []).filter(
+    (order) => order.supplierId === supplierId && order.readyBy && order.readyAt,
+  );
+  if (finished.length === 0) return null;
+  const onTime = finished.filter((order) => Date.parse(order.readyAt) <= Date.parse(order.readyBy));
+  return { count: finished.length, rate: onTime.length / finished.length };
+}
+
+function capabilityScore(store, supplierId, listings) {
+  const rating = shopRating(store, supplierId);
+  if (rating && rating.count >= MIN_REVIEWS_FOR_RATING) return Math.min(100, rating.average * 20);
+  return Math.max(...listings.map(listingCompleteness));
+}
+
+/** The cheapest this shop could do the job for, before options and quantity. */
+function fromPrice(listings) {
+  const prices = listings
+    .map((item) => (Number.isSafeInteger(item.fromPriceMinor) ? item.fromPriceMinor : item.basePriceMinor))
+    .filter((value) => Number.isSafeInteger(value) && value >= 0);
+  return prices.length ? Math.min(...prices) : null;
+}
+
+/**
+ * Work already committed to this shop, in minutes.
+ *
+ * Read from both places a job can be recorded: the per-shop jobs a cart
+ * checkout writes, and orders assigned to the shop directly. One of those is on
+ * its way out, and counting only one of them would understate a real queue.
+ */
+function queueMinutesFor(store, supplierId, fallbackHours) {
+  const jobs = (store.orderJobs || []).filter(
+    (job) => job.supplierId === supplierId && ACTIVE_JOB_STATES.has(job.state),
+  );
+  const orders = (store.orders || []).filter(
+    (order) => order.supplierId === supplierId
+      && ACTIVE_JOB_STATES.has(order.state)
+      && !jobs.some((job) => job.orderId === order.id),
+  );
+  const hours = [...jobs, ...orders].reduce((total, row) => {
+    const estimate = Number.isSafeInteger(row.estimatedHours) && row.estimatedHours > 0
+      ? row.estimatedHours
+      : fallbackHours;
     return total + estimate;
   }, 0);
-  return { jobsAhead: active.length, estimatedHours: baseHours + queuedHours };
+  return { jobsAhead: jobs.length + orders.length, minutes: hours * 60 };
 }
 
 function normalizedInverse(value, best) {
@@ -131,9 +219,20 @@ function matchShopCard(profile, listings) {
   };
 }
 
-function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds }) {
+/** A shop's opening hours, or the platform default until it sets its own. */
+function scheduleFor(profile) {
+  return profile?.schedule || defaultShopSchedule();
+}
+
+function allowanceMinutesFrom(settings) {
+  const declared = settings?.promiseAllowanceMinutes;
+  return Number.isSafeInteger(declared) && declared >= 0 ? declared : DEFAULT_ALLOWANCE_MINUTES;
+}
+
+function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units }) {
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
+  const allowanceMinutes = allowanceMinutesFrom(store.settings);
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {
     if (item.subcategoryCode !== subcategoryCode) continue;
@@ -144,6 +243,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds })
   }
 
   const rows = [];
+  const missedDeadline = [];
   for (const [supplierId, items] of itemsBySupplier) {
     const listings = items
       .map((item) => publicCatalogItem(store, item))
@@ -151,29 +251,78 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds })
       .sort((left, right) => left.id.localeCompare(right.id));
     if (listings.length === 0) continue;
     const profile = shops.get(supplierId);
-    const queue = queueFor(store, supplierId, listings);
-    rows.push({
+
+    // The fastest thing this shop offers for the work, because that is what it
+    // would put the job on.
+    const turnarounds = listings
+      .map((item) => item.turnaroundHours)
+      .filter((hours) => Number.isSafeInteger(hours) && hours > 0);
+    const turnaroundHours = turnarounds.length ? Math.min(...turnarounds) : 24;
+    const queue = queueMinutesFor(store, supplierId, turnaroundHours);
+    const capacityDaily = (store.supplierServices || [])
+      .filter((row) => row.supplierId === supplierId && row.state === "live")
+      .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
+
+    const projection = projectFinish({
+      schedule: scheduleFor(profile),
+      now,
+      queueMinutes: queue.minutes,
+      turnaroundMinutes: turnaroundHours * 60,
+      // Quantity is not known until a listing is configured, so capacity cannot
+      // bite here. The exact check runs again once the client sets it.
+      units: Number.isSafeInteger(units) && units > 0 ? units : null,
+      capacityDaily: capacityDaily > 0 ? capacityDaily : null,
+      allowanceMinutes,
+    });
+
+    const row = {
       supplierId,
       shop: matchShopCard(profile, listings),
       listings,
-      queue,
-      quality: Math.max(...listings.map(listingQuality)),
-      speed: queue.estimatedHours,
+      projection,
+      queue: {
+        jobsAhead: queue.jobsAhead,
+        // Hours the client actually waits, counted against the date they are
+        // given -- not the shop's working hours, which run out overnight and at
+        // weekends while the client keeps waiting.
+        estimatedHours: Math.max(
+          0,
+          Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000),
+        ),
+      },
+      quality: capabilityScore(store, supplierId, listings),
+      speed: Math.max(1, Date.parse(projection.promiseBy) - Date.parse(now)),
+      cost: fromPrice(listings),
       distance: dropoff ? distanceMetersBetween(profile.shop, dropoff) : null,
-    });
+    };
+
+    // The filter. A shop that cannot make the date is absent, not last.
+    if (!fitsDeadline(projection, deadline)) {
+      missedDeadline.push({ supplierId, promiseBy: projection.promiseBy });
+      continue;
+    }
+    rows.push(row);
   }
-  return rows;
+  return { rows, missedDeadline };
 }
 
 function scoreRows(rows, ranking) {
   const weights = Object.fromEntries(ranking.map((factor, index) => [factor, RANK_WEIGHTS[index]]));
   const bestSpeed = Math.min(...rows.map((row) => row.speed));
+  const costs = rows.map((row) => row.cost).filter(Number.isFinite);
+  const bestCost = costs.length ? Math.min(...costs) : null;
   const distances = rows.map((row) => row.distance).filter(Number.isFinite);
   const bestDistance = distances.length ? Math.min(...distances) : null;
+  // Every factor is scored against the best candidate in the running, quality
+  // included. Scored absolutely it sat between 50 and 100 while the others
+  // spanned the full range, so the weight a client put on quality was quietly
+  // worth about half of what they asked for.
+  const bestQuality = Math.max(...rows.map((row) => row.quality));
   for (const row of rows) {
     row.factorScores = {
-      quality: row.quality,
+      quality: bestQuality > 0 ? Math.min(100, (row.quality / bestQuality) * 100) : 0,
       speed: normalizedInverse(row.speed, bestSpeed),
+      cost: bestCost == null || !Number.isFinite(row.cost) ? 0 : normalizedInverse(row.cost, bestCost),
       distance: bestDistance == null ? 0 : normalizedInverse(row.distance, bestDistance),
     };
     row.totalScore = MATCH_FACTORS.reduce(
@@ -185,15 +334,19 @@ function scoreRows(rows, ranking) {
   return weights;
 }
 
-function reasonsFor(row, ranking, preferred) {
+function reasonsFor(row, ranking, preferred, alternativesCount) {
   const reasons = ranking.map((factor, index) => {
     const detail = factor === "quality"
       ? `${Math.round(row.quality)}% listing completeness and approved standing`
       : factor === "speed"
-        ? `${row.queue.jobsAhead} jobs ahead; about ${row.queue.estimatedHours} hours`
-        : row.distance == null
-          ? "Distance was not scored because no delivery pin was supplied"
-          : `${row.distance} metres from the delivery pin`;
+        ? `${row.queue.jobsAhead} jobs ahead; ready by ${row.projection.promiseBy}`
+        : factor === "cost"
+          ? row.cost == null
+            ? "This shop has not published a starting price"
+            : `Cheapest of the ${alternativesCount + 1} that can make your date`
+          : row.distance == null
+            ? "Distance was not scored because no delivery pin was supplied"
+            : `${row.distance} metres from the delivery pin`;
     return { code: `ranked_${factor}`, factor, rank: index + 1, weight: RANK_WEIGHTS[index], detail };
   });
   if (preferred) {
@@ -208,6 +361,96 @@ function reasonsFor(row, ranking, preferred) {
   return reasons;
 }
 
+/**
+ * Which days GRIDGO could actually make, for one kind of work.
+ *
+ * The client's version of the shop's schedule. A shop's calendar asks "how
+ * full am I"; this asks "can anybody finish by then", which is the only form
+ * of the question a client is allowed to see — the queues and capacities that
+ * decide it belong to the shops.
+ *
+ * One candidate pass answers the whole month. Every shop that could take this
+ * work already carries the date it would be ready, so a day is simply a
+ * threshold: how many of those dates fall on or before the end of it.
+ *
+ * Deliberately returns no count. A client is never told how many shops print
+ * something, here or anywhere -- `tight` says choice is narrow without saying
+ * how narrow, which is the honest half of the same fact.
+ */
+export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days = 120 } = {}) {
+  const at = now || new Date().toISOString();
+  const { rows, missedDeadline } = candidateRows(store, {
+    subcategoryCode,
+    dropoff,
+    excludedSupplierIds: [],
+    // No deadline: every candidate is wanted, along with the date it could
+    // actually finish. Filtering here would answer one day instead of all.
+    deadline: null,
+    now: at,
+    units: null,
+  });
+
+  const promises = [...rows, ...missedDeadline]
+    // A candidate that passed carries its date on its projection; one that was
+    // filtered out carries it directly. Reading only one of the two shapes is
+    // how this quietly answered "nobody can" for every day.
+    .map((row) => Date.parse(row.promiseBy ?? row.projection?.promiseBy))
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => left - right);
+
+  const start = new Date(at);
+  start.setHours(0, 0, 0, 0);
+
+  const out = [];
+  /** Where the run of possible days starts, so its first two can be called tight. */
+  let firstPossible = null;
+  for (let index = 0; index < days; index += 1) {
+    const day = new Date(start);
+    day.setDate(day.getDate() + index);
+    const endOfDay = new Date(day);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const reachable = promises.filter((value) => value <= endOfDay.getTime()).length;
+
+    /*
+      Two ways a day is narrow, and a client feels both.
+
+      Half the shops or fewer can make it -- with two shops, one available is
+      exactly the day this is for, so the test is half or fewer rather than
+      strictly fewer than half.
+
+      Or it is among the first days anything is possible at all. On the day a
+      job first becomes makeable there is no slack in it: the shop goes
+      straight from the order in front to this one, and a client choosing it is
+      choosing the tightest date on offer. Work only one shop prints would
+      otherwise jump from impossible to comfortable overnight, which is not
+      what it is like to order that way.
+    */
+    if (firstPossible === null && reachable > 0) firstPossible = index;
+    const narrowByChoice = reachable > 0 && reachable * 2 <= promises.length;
+    const narrowByDate = firstPossible !== null && index - firstPossible < 2;
+
+    out.push({
+      day: localDayKey(day),
+      state: reachable === 0 ? "cannot" : narrowByChoice || narrowByDate ? "tight" : "open",
+    });
+  }
+
+  return {
+    days: out,
+    /** The first moment anybody could finish, or null when nobody prints this. */
+    earliest: promises.length ? new Date(promises[0]).toISOString() : null,
+  };
+}
+
+/** A local calendar day, which is what a client picks. */
+function localDayKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export function matchShop(store, input = {}) {
   const subcategoryCode = String(input.subcategoryCode || "").trim();
   const subcategory = (store.taxonomy?.subcategories || []).find(
@@ -218,24 +461,57 @@ export function matchShop(store, input = {}) {
   }
   const ranking = validatePreferenceRanking(input.ranking);
   const dropoff = point(input.dropoff, { required: ranking[0] === "distance" });
-  const rows = candidateRows(store, {
+  const now = input.now || new Date().toISOString();
+  const deadline = input.deadline ?? null;
+  if (deadline != null && !Number.isFinite(Date.parse(deadline))) {
+    fail(400, "invalid_deadline", "Send the date this is needed by as a valid date and time.", { field: "deadline" });
+  }
+
+  const { rows, missedDeadline } = candidateRows(store, {
     subcategoryCode,
     dropoff,
     excludedSupplierIds: input.excludedSupplierIds,
+    deadline,
+    now,
+    units: input.units,
   });
+
   if (rows.length === 0) {
+    // Being able to say "everybody is too slow" separately from "nobody prints
+    // this" is the difference between offering a later date and a dead end.
+    if (missedDeadline.length > 0) {
+      const soonest = missedDeadline
+        .map((row) => row.promiseBy)
+        .sort()[0];
+      fail(409, "deadline_not_met", "No open shop can finish this by the date you gave.", {
+        field: "deadline",
+        earliestAvailable: soonest,
+        shopsConsidered: missedDeadline.length,
+      });
+    }
     fail(404, "match_not_found", "No approved open shop currently has a public listing for this subcategory.");
   }
+
   const weights = scoreRows(rows, ranking);
   const preferredSupplierId = input.preferredSupplierId == null ? null : String(input.preferredSupplierId);
   const preferred = preferredSupplierId ? rows.find((row) => row.supplierId === preferredSupplierId) : null;
   const winner = preferred || rows[0];
+  const alternativesCount = rows.length - 1;
+
   return {
     shop: winner.shop,
     queue: winner.queue,
-    reasons: reasonsFor(winner, ranking, Boolean(preferred)),
+    reasons: reasonsFor(winner, ranking, Boolean(preferred), alternativesCount),
     listings: winner.listings,
-    alternativesCount: rows.length - 1,
+    alternativesCount,
+    /**
+     * What the client is told. The shop's own date is deliberately absent: a
+     * shop shown the padded date works to the padded date, and the allowance is
+     * spent before the job starts.
+     */
+    promiseBy: winner.projection.promiseBy,
+    /** Not for the client. Persisted when the order is placed, and what the shop is held to. */
+    shopReadyBy: winner.projection.readyBy,
     score: {
       total: Number(winner.totalScore.toFixed(4)),
       weights,

@@ -14,6 +14,29 @@ export const PICKUP_CHECK_CODES = Object.freeze([
 
 export const PICKUP_SIGN_OFF_PROMPT = "GRIDGO partner! Quality check, done! Salamat po!";
 
+/*
+ The two shapes the word "pickup" has carried.
+
+ The older one meant the job never travelled: the client walked to the shop
+ counter that printed it. That route was never finished, and the payment plans
+ written for it are the only place it survives.
+
+ The one the platform runs on now means the client collects at GRIDGO Office,
+ so the job still travels -- a rider carries it from the shop to that counter.
+ It ends on our own shelf rather than in anybody's hands, which is why it needs
+ an ending of its own.
+*/
+const CONTAINED_PICKUP_PLANS = Object.freeze(["pickup_full_online", "pickup_downpayment_store"]);
+
+export function isContainedPickup(order) {
+  return order?.fulfillmentMode === "pickup" && CONTAINED_PICKUP_PLANS.includes(order?.paymentPlan);
+}
+
+/** A collected order: it travels to the office, and waits there to be claimed. */
+export function carriedToOffice(order) {
+  return order?.fulfillmentMode === "pickup" && !isContainedPickup(order);
+}
+
 export class OperationalError extends Error {
   constructor(status, code, message, details = {}) {
     super(message);
@@ -325,33 +348,42 @@ export function estimatePriceRange({ supplierSubtotalCandidatesMinor }) {
   };
 }
 
+/*
+ The four stages a shop is paid across.
+
+ Not one payment at the end: a shop that has printed the run and packed it has
+ done most of the work, and waiting for a rider to finish before any of it
+ arrives is what makes a small press fund GRIDGO's float. The shares are the
+ captain's, against the shop's own price.
+
+ The last stage takes the rounding remainder so the four always sum to exactly
+ what the shop is owed. It is the smallest of them and the last to move, so a
+ stray centavo there can never overpay an earlier release.
+*/
+export const PAYOUT_STAGES = Object.freeze([
+  Object.freeze({ code: "printing", shareBps: 5_000 }),
+  Object.freeze({ code: "packaging_qc", shareBps: 1_500 }),
+  Object.freeze({ code: "delivered", shareBps: 2_500 }),
+  Object.freeze({ code: "retention", shareBps: 1_000 }),
+]);
+
 export function createPayoutMilestones(money) {
   const payoutBase = finiteMinor(money?.supplierPlatformPayoutMinor, "supplierPlatformPayoutMinor");
-  const supplierSubtotal = finiteMinor(money?.supplierSubtotalMinor, "supplierSubtotalMinor");
-  const downpaymentRate = finiteBps(
-    money?.supplierDownpaymentRateBps,
-    "supplierDownpaymentRateBps",
-    [0, 2_500, 5_000, 10_000],
-  );
-  const initialPrincipal = Math.min(roundBps(supplierSubtotal, downpaymentRate), payoutBase);
-  const completionPrincipal = payoutBase - initialPrincipal;
-  const rows = [];
-  if (downpaymentRate > 0) {
-    rows.push(["initial", downpaymentRate / 100, initialPrincipal]);
-  }
-  if (completionPrincipal > 0 || rows.length === 0) {
-    const sharePercent = supplierSubtotal === 0 ? 0 : (10_000 - downpaymentRate) / 100;
-    rows.push(["completion", sharePercent, completionPrincipal]);
-  }
-  return rows.map(([code, sharePercent, amountMinor]) => ({
-    code,
-    sharePercent,
-    amountMinor,
-    status: "pending",
-    pofFileIds: [],
-    releasedAt: null,
-    releasedBy: null,
-  }));
+  let allocated = 0;
+  return PAYOUT_STAGES.map((stage, index) => {
+    const last = index === PAYOUT_STAGES.length - 1;
+    const amountMinor = last ? payoutBase - allocated : roundBps(payoutBase, stage.shareBps);
+    allocated += amountMinor;
+    return {
+      code: stage.code,
+      sharePercent: stage.shareBps / 100,
+      amountMinor,
+      status: "pending_pof",
+      pofFileIds: [],
+      releasedAt: null,
+      releasedBy: null,
+    };
+  });
 }
 
 export function collectedSupplierPrincipalMinor(order) {
@@ -424,6 +456,50 @@ function activePayoutHold(store, order) {
   );
 }
 
+/*
+ One policy for every stage, and a person behind every release.
+
+ Nothing here fires on a state change. A shop is paid when somebody at GRIDGO
+ has looked at what it produced, which is the only reading of "proof of
+ fulfilment" that means anything -- a photograph nobody opens is a file, not a
+ check.
+
+ The order of the refusals is the order of the questions worth asking: is this
+ job even ours to pay on, is a claim holding it, is there anything to look at,
+ has the work this stage names actually happened, and has the client's money
+ arrived to cover it.
+*/
+const STAGE_GATES = Object.freeze({
+  printing: Object.freeze({
+    states: Object.freeze([
+      "production", "supplier_self_qc", "ready_for_dispatch", "rider_assigned",
+      "picked_up", "out_for_delivery", "awaiting_collection", "delivered",
+      "issue_window_open", "completed", "payout_released",
+    ]),
+    code: "milestone_not_reached",
+    message: "The shop has not started this job yet. Printing is released once production is under way.",
+  }),
+  packaging_qc: Object.freeze({
+    states: Object.freeze([
+      "supplier_self_qc", "ready_for_dispatch", "rider_assigned", "picked_up",
+      "out_for_delivery", "awaiting_collection", "delivered", "issue_window_open",
+      "completed", "payout_released",
+    ]),
+    code: "milestone_not_reached",
+    message: "The shop has not finished its own quality check. Packing is released once it has.",
+  }),
+  delivered: Object.freeze({
+    states: Object.freeze(["delivered", "issue_window_open", "completed", "payout_released"]),
+    code: "delivery_required",
+    message: "The client does not have this job yet. Record delivery or the counter hand-over first.",
+  }),
+  retention: Object.freeze({
+    states: Object.freeze(["completed", "payout_released"]),
+    code: "issue_window_open",
+    message: "The client can still report a problem with this order. Retention is released once that window closes.",
+  }),
+});
+
 export function releaseMilestone(order, code, actor, at, store = null) {
   if (!actor || !["ops_admin", "super_admin", "system"].includes(actor.role)) {
     fail(403, "forbidden", "Only Operations or Super Admin can release a supplier payout milestone.");
@@ -433,71 +509,15 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
   }
   if (milestone.status === "released") return milestone;
-  if (order.fulfillmentMode === "pickup") {
+
+  // The older meaning of "pickup", where the job never left the shop and its
+  // handover was never finished. A collected job travels to the office and is
+  // released at the counter, so its fulfilment is recorded like any other.
+  if (isContainedPickup(order)) {
     fail(
       409,
       "pickup_payout_not_available",
       "Pickup payout release remains unavailable until the pickup handover lifecycle records fulfilment.",
-      { milestoneCode: code },
-    );
-  }
-  const currentPolicy = code === "initial" || code === "completion";
-  if (currentPolicy) {
-    if (activePayoutHold(store, order)) {
-      fail(
-        409,
-        "payout_held",
-        "A claim is holding this payout. Resolve or release the claim before releasing the milestone.",
-        { milestoneCode: code },
-      );
-    }
-    const productionStates = new Set([
-      "production",
-      "supplier_self_qc",
-      "ready_for_dispatch",
-      "rider_assigned",
-      "picked_up",
-      "out_for_delivery",
-      "delivered",
-      "issue_window_open",
-      "completed",
-      "payout_released",
-    ]);
-    const completionStates = new Set(["delivered", "issue_window_open", "completed", "payout_released"]);
-    if (code === "initial" && !productionStates.has(order.state)) {
-      fail(409, "milestone_not_reached", "Start production before releasing the supplier downpayment.", {
-        milestoneCode: code,
-        state: order.state,
-      });
-    }
-    if (code === "completion" && !completionStates.has(order.state)) {
-      fail(409, "fulfilment_required", "Record fulfilment before releasing the remaining supplier principal.", {
-        milestoneCode: code,
-        state: order.state,
-      });
-    }
-    const releasedPrincipalMinor = (order.payoutMilestones || [])
-      .filter((item) => item.status === "released")
-      .reduce((sum, item) => sum + finiteMinor(item.amountMinor, "milestone.amountMinor"), 0);
-    const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
-    if (releasedPrincipalMinor + finiteMinor(milestone.amountMinor, "milestone.amountMinor") > collectedPrincipalMinor) {
-      fail(
-        409,
-        "supplier_principal_not_collected",
-        "Confirmed client payments do not yet cover this supplier payout.",
-        { milestoneCode: code, collectedPrincipalMinor, releasedPrincipalMinor },
-      );
-    }
-    milestone.status = "released";
-    milestone.releasedAt = at;
-    milestone.releasedBy = actor.id || "system";
-    return milestone;
-  }
-  if (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0) {
-    fail(
-      409,
-      "pof_required",
-      "Attach a Proof of Fulfilment to this milestone before releasing the supplier payout.",
       { milestoneCode: code },
     );
   }
@@ -509,86 +529,127 @@ export function releaseMilestone(order, code, actor, at, store = null) {
       { milestoneCode: code },
     );
   }
-  const printingStates = new Set([
-    "production",
-    "supplier_self_qc",
-    "ready_for_dispatch",
-    "rider_assigned",
-    "picked_up",
-    "out_for_delivery",
-    "delivered",
-    "issue_window_open",
-    "completed",
-    "payout_released",
-  ]);
-  const packagingStates = new Set([
-    "supplier_self_qc",
-    "ready_for_dispatch",
-    "rider_assigned",
-    "picked_up",
-    "out_for_delivery",
-    "delivered",
-    "issue_window_open",
-    "completed",
-    "payout_released",
-  ]);
-  if ((code === "printing" && !printingStates.has(order.state)) || (code === "packaging_qc" && !packagingStates.has(order.state))) {
+  if (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0) {
     fail(
       409,
-      "milestone_not_reached",
-      "Move the order to this production milestone before releasing its supplier payout.",
-      { milestoneCode: code, state: order.state },
+      "pof_required",
+      "Attach a Proof of Fulfilment to this milestone before releasing the supplier payout.",
+      { milestoneCode: code },
     );
   }
-  if (code === "delivered") {
-    if (!["issue_window_open", "completed", "payout_released"].includes(order.state)) {
-      fail(409, "delivery_required", "Record delivery before releasing the delivered milestone.");
-    }
-    if (order.payments?.final_online?.status !== "confirmed") {
-      fail(409, "final_payment_not_confirmed", "Operations must confirm the final online payment before releasing delivery payout.");
-    }
+  const gate = STAGE_GATES[code];
+  if (!gate) {
+    fail(409, "unknown_milestone", "That payout stage is not one this platform releases.", { milestoneCode: code });
   }
-  if (code === "retention" && order.state !== "completed" && order.state !== "payout_released") {
+  if (!gate.states.includes(order.state)) {
+    fail(409, gate.code, gate.message, { milestoneCode: code, state: order.state });
+  }
+
+  /*
+   GRIDGO never pays out money it has not collected.
+
+   The shop's price arrives in two instalments, so releasing every stage the
+   moment the work is done would have GRIDGO funding the gap out of its own
+   pocket. This is the one rule the older four-stage code never carried, and
+   the reason it could quietly overpay.
+  */
+  const releasedPrincipalMinor = (order.payoutMilestones || [])
+    .filter((item) => item.status === "released")
+    .reduce((sum, item) => sum + finiteMinor(item.amountMinor, "milestone.amountMinor"), 0);
+  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+  if (releasedPrincipalMinor + finiteMinor(milestone.amountMinor, "milestone.amountMinor") > collectedPrincipalMinor) {
     fail(
       409,
-      "issue_window_open",
-      "Wait for the issue window to expire before releasing retained supplier earnings.",
+      "supplier_principal_not_collected",
+      "Confirmed client payments do not yet cover this supplier payout.",
+      { milestoneCode: code, collectedPrincipalMinor, releasedPrincipalMinor },
     );
   }
+
   milestone.status = "released";
   milestone.releasedAt = at;
   milestone.releasedBy = actor.id || "system";
   return milestone;
 }
 
-export function releaseEligibleSupplierPayouts(order, actor, at, store = null) {
-  if (order?.fulfillmentMode === "pickup" || activePayoutHold(store, order)) return [];
-  const productionReached = new Set([
-    "production",
-    "supplier_self_qc",
-    "ready_for_dispatch",
-    "rider_assigned",
-    "picked_up",
-    "out_for_delivery",
-    "delivered",
-    "issue_window_open",
-    "completed",
-    "payout_released",
-  ]).has(order?.state);
-  const fulfilmentReached = new Set(["delivered", "issue_window_open", "completed", "payout_released"]).has(order?.state);
-  const eligibleCodes = [
-    ...(productionReached ? ["initial"] : []),
-    ...(fulfilmentReached ? ["completion"] : []),
-  ];
-  return eligibleCodes
-    .map((code) => (order.payoutMilestones || []).find((milestone) => milestone.code === code))
-    .filter((milestone) => milestone && milestone.status !== "released")
-    .map((milestone) => releaseMilestone(order, milestone.code, actor, at, store));
+function catalogUnitFromLine(line) {
+  if (line?.pricingUnitSnapshot === "per_package" && Number(line.packageQtySnapshot) === 100) {
+    return "pack100";
+  }
+  if (line?.pricingUnitSnapshot === "per_unit") return "piece";
+  return "";
 }
 
-export function publicOrderFor(order, user) {
+function emptySpec(value) {
+  return value == null || value === "";
+}
+
+/**
+ * Checkout writes quantity, size, material, finish and artwork onto
+ * `orderLineItems`, not the order row. The client specification card still
+ * reads the older order-level fields. Fill those from the line snapshot when
+ * they are missing so a placed job does not render "undefined items".
+ */
+function fillOrderSpecFromLineItems(store, order) {
+  const lines = (store?.orderLineItems || [])
+    .filter((line) => line.orderId === order.id)
+    .sort((left, right) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0) || String(left.id).localeCompare(String(right.id)));
+  if (lines.length === 0) return;
+
+  const first = lines[0];
+  const spec = first.structuredSpecSnapshot && typeof first.structuredSpecSnapshot === "object"
+    ? first.structuredSpecSnapshot
+    : {};
+  const artworkIds = lines.map((line) => line.artworkFileId).filter(Boolean);
+  const mockupIds = lines.map((line) => line.mockupFileId).filter(Boolean);
+  const lastArtworkId = artworkIds[artworkIds.length - 1] || null;
+  const artworkFile = lastArtworkId
+    ? (store.files || []).find((file) => file.fileId === lastArtworkId)
+    : null;
+
+  if (emptySpec(order.title)) order.title = first.itemNameSnapshot || order.title;
+  if (!Number.isFinite(Number(order.quantity))) {
+    order.quantity = lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+  }
+  if (emptySpec(order.unit)) order.unit = catalogUnitFromLine(first);
+  if (emptySpec(order.size)) order.size = spec.size || "";
+  if (emptySpec(order.material)) order.material = spec.material || "";
+  if (order.finish == null || order.finish === "") order.finish = spec.finish || null;
+  if (emptySpec(order.address)) {
+    order.address = order.dropoff?.label || first.dropoff?.label || "";
+  }
+  if (!Array.isArray(order.artworkFileIds) || order.artworkFileIds.length === 0) {
+    if (artworkIds.length) order.artworkFileIds = artworkIds;
+  }
+  if (!Array.isArray(order.mockupFileIds) || order.mockupFileIds.length === 0) {
+    if (mockupIds.length) order.mockupFileIds = mockupIds;
+  }
+  if (emptySpec(order.artworkName) && artworkFile?.originalFilename) {
+    order.artworkName = artworkFile.originalFilename;
+  }
+}
+
+export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (store) fillOrderSpecFromLineItems(store, publicRecord);
+  /*
+    Whether this order has been rated, so a client is asked once.
+
+    Without it the app cannot tell a finished order from a rated one, so it
+    either asks forever or finds out by being refused — and "you have already
+    rated this" is a poor way to learn that the screen was wrong to ask.
+
+    A flag rather than the review itself: what somebody said about a shop is
+    not something to hand back through an order that any of several roles can
+    read.
+  */
+  publicRecord.rated = Boolean(
+    store && (store.shopReviews || []).some((review) => review.orderId === order.id),
+  );
+  // Every client order screen reads this as an array. Seeded queue jobs and
+  // older rows never stored one; omitting it crashes the order page.
+  if (!Array.isArray(publicRecord.timeline)) publicRecord.timeline = [];
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
@@ -596,7 +657,39 @@ export function publicOrderFor(order, user) {
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
   if (!ops) delete publicRecord.revenueAdjustments;
+
+  /*
+   What the shop is paid, under the name its own app asks for.
+
+   The order stores this as `supplierSubtotalMinor`, which is the right name
+   inside a total made of several parts. To a shop it is simply its price, and
+   both the supplier app and the portal have been reading `supplierPriceMinor`
+   — a field the platform never sent, so a shop opening a job it had been
+   assigned was shown no price at all and asked to name one.
+
+   Same number, named for who is reading it. Withheld from everyone who may not
+   see the shop's side, exactly as the field it comes from is.
+  */
+  if (publicRecord.supplierSubtotalMinor != null) {
+    publicRecord.supplierPriceMinor = publicRecord.supplierSubtotalMinor;
+  }
+
+  /*
+   The padded date is not the shop's to see.
+
+   `promiseBy` is what the client was told; `readyBy` is what the shop is held
+   to, and the gap between them is the allowance that absorbs a bad afternoon.
+   A shop shown the padded date works to the padded date, and the allowance is
+   spent before the job even starts.
+  */
+  if (!ops && !owningClient && !rider) delete publicRecord.promiseBy;
+  // And the shop's own date is not the client's to see. Told it, a client
+  // expects the job two days before the date they agreed to, and every
+  // on-time order arrives late.
+  if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
+
   if (!ops && !assignedSupplier) {
+    delete publicRecord.supplierPriceMinor;
     delete publicRecord.supplierSubtotalMinor;
     delete publicRecord.supplierPlatformPayoutMinor;
     delete publicRecord.supplierEarningsMinor;
@@ -647,6 +740,39 @@ export function publicOrderFor(order, user) {
   if (owningClient && !ops) {
     if (order.fulfillmentMode === "pickup") publicRecord.pickup = gridgoOfficePoint();
     else delete publicRecord.pickup;
+  }
+
+  /*
+   Nobody is delivering to a client who is collecting.
+
+   A rider does carry a collected job, but only between two places that are
+   GRIDGO's own -- the shop and the office counter. Handing the client a rider
+   to watch invites them to set out while the job is still on the road, and
+   dresses an errand of ours up as their delivery. What they are owed is the
+   moment it is on the shelf, which the state already says.
+  */
+  if (owningClient && !ops && carriedToOffice(order)) delete publicRecord.riderId;
+
+  /*
+   Where a collected order is carried to.
+
+   The client collects at GRIDGO Office, and a rider brings the finished run
+   from the shop to that counter — so the job has a destination even though
+   nobody is delivering to a home. It is not stored: a pickup job is required
+   to have no drop-off, which is the older meaning of the word, where
+   collecting meant the job never travelled.
+
+   Supplied here instead, to the people who move it. Without it dispatch had
+   no destination to draw and a rider's offer read as going nowhere.
+
+   It replaces rather than fills. A collected order can still be carrying the
+   address the client shopped with, and that address is not where this job is
+   going — a rider sent to it would deliver work the client is on their way to
+   the office to collect.
+  */
+  if (order.fulfillmentMode === "pickup") {
+    if (ops || assignedSupplier || rider) publicRecord.dropoff = gridgoOfficePoint();
+    else delete publicRecord.dropoff;
   }
 
   if (!ops && !owningClient && publicRecord.payments) {

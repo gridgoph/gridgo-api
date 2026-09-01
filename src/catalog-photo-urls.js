@@ -7,6 +7,14 @@
  * stubs are already on the response; do not re-hydrate shops.
  */
 
+function collectShopItems(shop, items) {
+  for (const service of shop?.services || []) {
+    for (const item of service.items || []) {
+      if (item?.photos) items.push(item);
+    }
+  }
+}
+
 /** Catalog items that already carry a photos array on this response body. */
 export function catalogItemsWithPhotos(body) {
   const items = [];
@@ -25,6 +33,13 @@ export function catalogItemsWithPhotos(body) {
     for (const line of body.cart.lines) {
       if (line?.listing?.photos) items.push(line.listing);
     }
+  }
+  // GET /catalog/shops/:id is `{ shop: { services: [ { items } ] } }`.
+  // Without this walk the client category wall gets fileId but no downloadUrl,
+  // so every tile reads "No sample".
+  if (body?.shop) collectShopItems(body.shop, items);
+  if (Array.isArray(body?.shops)) {
+    for (const shop of body.shops) collectShopItems(shop, items);
   }
   return items;
 }

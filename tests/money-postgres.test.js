@@ -185,7 +185,7 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       UPDATE payout_milestones
          SET status = 'released'
        WHERE order_id = 'delivery_rounding'
-         AND code = 'initial'
+         AND code = 'delivered'
     `),
     (error) => error.code === "23514" && error.constraint === "payout_milestones_collected_principal_check",
   );
@@ -194,7 +194,7 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       UPDATE payout_milestones
          SET order_id = 'uncommitted_target'
        WHERE order_id = 'delivery_rounding'
-         AND code = 'initial'
+         AND code = 'printing'
     `),
     (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
   );

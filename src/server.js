@@ -49,6 +49,7 @@ import {
   markFileReady,
   parseMultipartStream,
   publicFile,
+  readArtworkMeasurements,
   resolveFileTarget,
   validateUpload,
 } from "./attachments.js";
@@ -61,6 +62,8 @@ import {
   routeRiderProfile,
 } from "./rider-profile-routes.js";
 import { routeOrderMatch } from "./order-match-routes.js";
+import { MatchError, matchShop } from "./order-match.js";
+import { defaultShopSchedule, projectFinish } from "./availability.js";
 import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
 import { privateCatalogItem } from "./supplier-catalog.js";
 import {
@@ -72,6 +75,7 @@ import {
   requireIdempotencyKey,
   submitRiderApplication,
 } from "./enrollment.js";
+import { notifyOrderParties } from "./client-order-notifications.js";
 import {
   createNotificationEvents,
   formatNotificationEvent,
@@ -104,16 +108,17 @@ import {
 import { routeAccountProfile } from "./account-profile-routes.js";
 import {
   calculateOrderMoney,
+  carriedToOffice,
   createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
   estimatePriceRange,
   expireIssueWindows,
+  isContainedPickup,
   issueWindowExpiresAt,
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
   publicOrderFor,
-  releaseEligibleSupplierPayouts,
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
@@ -1100,6 +1105,71 @@ function pickupFromSupplier(supplier) {
   };
 }
 
+/**
+ * The shop that takes over when one declines.
+ *
+ * Chosen by the same ranking the client set, filtered to shops that can still
+ * make the date the client was promised, and never one that would cost more
+ * than the job was sold for. Shops that already declined are excluded so a job
+ * cannot be handed back and forth.
+ *
+ * The committed price does not move. A checkout order's money is immutable once
+ * placed -- the database enforces it -- and rewriting what a client agreed to
+ * because a shop dropped out is the wrong direction to fix this from. So the
+ * replacement is paid the price the job was sold at, and the client pays what
+ * they were told. A shop that cannot do it for that is simply not a candidate.
+ */
+function findReplacementShop(store, order, at) {
+  const lines = (store.orderLineItems || []).filter((row) => row.orderId === order.id);
+  if (lines.length === 0) return null;
+  const sourceItem = (store.catalogItems || []).find((row) => row.id === lines[0].sourceCatalogItemId);
+  const subcategoryCode = sourceItem?.subcategoryCode;
+  if (!subcategoryCode) return null;
+
+  const quantity = lines.reduce((total, row) => total + Number(row.quantity || 0), 0);
+  const committedMinor = Number(order.supplierSubtotalMinor || 0);
+  const preference = (store.clientPreferences || []).find((row) => row.userId === order.clientId);
+  const ranking = preference?.ranking?.length === 4
+    ? preference.ranking
+    : ["quality", "speed", "cost", "distance"];
+
+  const excluded = [...(order.declinedBy || [])];
+  // Bounded: each pass rules out exactly one shop, and a shop is only ruled out
+  // once, so this cannot run longer than the number of shops on the platform.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    let match;
+    try {
+      match = matchShop(store, {
+        subcategoryCode,
+        ranking,
+        dropoff: order.dropoff || null,
+        excludedSupplierIds: excluded,
+        deadline: order.promiseBy || null,
+        units: quantity > 0 ? quantity : null,
+        now: at,
+      });
+    } catch (error) {
+      if (error instanceof MatchError) return null;
+      throw error;
+    }
+    const cheapest = match.listings
+      .map((item) => (Number.isSafeInteger(item.fromPriceMinor) ? item.fromPriceMinor : item.basePriceMinor))
+      .filter((value) => Number.isSafeInteger(value));
+    const floorMinor = cheapest.length ? Math.min(...cheapest) * Math.max(1, quantity) : null;
+    if (floorMinor != null && floorMinor <= committedMinor) {
+      const profile = (store.supplierProfiles || []).find((row) => row.userId === match.shop.supplierId);
+      return {
+        supplierId: match.shop.supplierId,
+        pickup: profile?.shop || null,
+        readyBy: match.shopReadyBy,
+        promiseBy: match.promiseBy,
+      };
+    }
+    excluded.push(match.shop.supplierId);
+  }
+  return null;
+}
+
 function setOrderPickup(order, store) {
   if (!order.supplierId) {
     order.pickup = null;
@@ -1112,6 +1182,24 @@ function setOrderPickup(order, store) {
 
 function supplierTermsFor(store, supplierId) {
   return (store.supplierPaymentTerms || []).find((terms) => terms.supplierId === supplierId) || null;
+}
+
+/** Peso, as a person writes it. Minor units in, one figure out. */
+function formatMinorPhp(amountMinor) {
+  const pesos = Math.trunc(Math.abs(amountMinor) / 100);
+  const centavos = String(Math.abs(amountMinor) % 100).padStart(2, "0");
+  const sign = amountMinor < 0 ? "-" : "";
+  return `${sign}\u20b1${pesos.toLocaleString("en-PH")}.${centavos}`;
+}
+
+/** What the shop calls each stage. Never the platform's own code. */
+function payoutStageLabel(code) {
+  return ({
+    printing: "Printing",
+    packaging_qc: "Packing and quality check",
+    delivered: "Delivered",
+    retention: "Retention",
+  })[code] || "Payout";
 }
 
 function paymentCodeForRoute(code) {
@@ -1140,28 +1228,15 @@ function audit(store, { actor, action, entityType, entityId, detail, reason, ord
   return entry;
 }
 
-function recordAutomaticSupplierPayouts(store, order, at) {
-  const actor = { id: "system", role: "system" };
-  const released = releaseEligibleSupplierPayouts(order, actor, at, store);
-  for (const milestone of released) {
-    order.timeline.push({
-      at,
-      state: order.state,
-      by: actor.id,
-      note: `${milestone.code} supplier payout released automatically`,
-      milestoneCode: milestone.code,
-    });
-    audit(store, {
-      actor,
-      action: "payout_milestone.release",
-      entityType: "order",
-      entityId: order.id,
-      orderId: order.id,
-      detail: { milestoneCode: milestone.code, amountMinor: milestone.amountMinor, source: "automatic" },
-    });
-  }
-  return released;
-}
+/**
+ * Whether this is the pickup shape that was never finished.
+ *
+ * The contained one is a commercial plan: the client pays the shop directly,
+ * or pays in full for a counter collection, and nothing was ever built to hand
+ * the job over. An order on the order-match plan is collected at GRIDGO Office
+ * instead, which a rider delivers to — the same journey as any other order,
+ * ending at a different pin.
+ */
 
 async function load() {
   return loadStore(database);
@@ -1188,11 +1263,32 @@ async function expireElapsedIssueWindows() {
   });
 }
 
+/*
+ Whether a job may be handed to a rider yet.
+
+ The balance used to be collected at the client's door, which meant a rider
+ could ride an hour to find nobody had paid and nothing they could do about it.
+ It is asked for while the job is still on the press instead, and a delivery
+ that has not settled it is simply not offered.
+
+ A collected job is exempt: it is carried to our own counter, and its balance
+ is settled there.
+*/
+function deliveryBalanceSettled(order) {
+  if (carriedToOffice(order)) return true;
+  const balance = order?.payments?.final_online;
+  if (!balance) return true;
+  return balance.status === "confirmed";
+}
+
 function canViewOrderLocation(user, order) {
   if (!user || !order) return false;
   if (user.role === "ops_admin" || user.role === "super_admin") return true;
   if (user.role === "rider" && order.riderId === user.id) return true;
-  if (user.role === "client" && order.clientId === user.id) return true;
+  // A collecting client is not being delivered to. The rider is moving the job
+  // between two of GRIDGO's own places, and watching that only tempts them to
+  // set out before it is on the shelf.
+  if (user.role === "client" && order.clientId === user.id) return !carriedToOffice(order);
   if (user.role === "supplier" && order.supplierId === user.id) return true;
   return false;
 }
@@ -1225,8 +1321,8 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
   return referenced ? file : null;
 }
 
-function publicOrder(order, user) {
-  return publicOrderFor(order, user);
+function publicOrder(order, user, orderStore) {
+  return publicOrderFor(order, user, orderStore);
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -1439,20 +1535,31 @@ const TRANSITIONS = {
     client_correction: ["ops_admin", "super_admin"],
     proof_approval: ["ops_admin", "super_admin"],
     approved_for_matching: ["ops_admin", "super_admin"],
+    // A checkout order already knows its shop, so passing quality control hands
+    // it straight to that shop. There is nothing left to match.
+    supplier_assigned: ["ops_admin", "super_admin"],
+    cancelled: ["ops_admin", "super_admin"],
   },
-  client_correction: { submitted: ["client"] },
+  // A correction keeps the money. The client fixes the artwork and it goes back
+  // to the same quality check, rather than starting the order again.
+  client_correction: { submitted: ["client"], needs_qa: ["client"], cancelled: ["ops_admin", "super_admin"] },
+  initial_payment_review: { cancelled: ["ops_admin", "super_admin"] },
   proof_approval: {
     approved_for_matching: ["client"],
     client_correction: ["client"],
   },
   approved_for_matching: { supplier_assigned: ["ops_admin", "super_admin"] },
   supplier_assigned: {
-    supplier_accepted: ["supplier"],
-    approved_for_matching: ["supplier"], // decline -> rematch
+    supplier_accepted: ["supplier"], // legacy quote path
+    approved_for_matching: ["supplier"], // legacy decline -> rematch
+    // The shop has nothing to price and nothing to promise: accepting is only
+    // confirming it can run the work. Declining is its own route, because it
+    // has to find a replacement rather than just step aside.
+    payment_authorized: ["supplier"],
+    cancelled: ["ops_admin", "super_admin"],
   },
   awaiting_checkout: { awaiting_initial_payment: ["client"], supplier_accepted: ["supplier"] },
   awaiting_initial_payment: { supplier_accepted: ["supplier"] },
-  initial_payment_review: {},
   awaiting_downpayment: {},
   downpayment_review: {},
   payment_authorized: { production: ["supplier"] },
@@ -1462,6 +1569,9 @@ const TRANSITIONS = {
   rider_assigned: {},
   picked_up: { out_for_delivery: ["rider"] },
   out_for_delivery: {},
+  // A collected job waits on our shelf. Only the counter can end it, and only
+  // once the client has settled what is left.
+  awaiting_collection: { delivered: ["ops_admin", "super_admin"] },
   delivered: { issue_window_open: ["system", "ops_admin", "super_admin", "client", "rider"] },
   issue_window_open: {}, // request-driven expiry completes; no actor may close it early
   completed: { payout_released: ["ops_admin", "super_admin"] },
@@ -2021,6 +2131,10 @@ async function handleRequest(req, res) {
         const datePath = createdAt.slice(0, 10).replaceAll("-", "/");
         const extension = path.extname(file.originalFilename).toLowerCase();
         const objectKey = `${purpose}/${datePath}/${fileId}${extension}`;
+        // Read before the bytes leave for storage: this is the one moment the
+        // file is on local disk, and re-downloading it later to measure it
+        // would cost a round trip per upload.
+        const detected = await readArtworkMeasurements(file, detectedContentType, purpose);
         const pending = createPendingFile({
           fileId,
           objectKey,
@@ -2028,6 +2142,7 @@ async function handleRequest(req, res) {
           purpose,
           file,
           detectedContentType,
+          detected,
           at: createdAt,
         });
 
@@ -2178,7 +2293,7 @@ async function handleRequest(req, res) {
             });
           }
           await save(latestStore);
-          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser) });
+          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser, latestStore) });
         }
         if (latestTarget.type === "user") {
           await save(latestStore);
@@ -3597,6 +3712,87 @@ async function handleRequest(req, res) {
       return send(res, 200, { issues: list });
     }
 
+    /**
+     * What the client thought of the work.
+     *
+     * Three scores, because they are three different experiences and an order
+     * that came out beautifully a day late should be able to say so. Only the
+     * quality star reaches matching: speed is measured from whether the shop hit
+     * its own date, and marking a shop down for a price printed on its listing
+     * would count the same thing twice.
+     *
+     * Asked once the order is finished and the issue window has closed, so a
+     * rating is never a bargaining chip in an open dispute.
+     */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/review$/.test(pathname)) {
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (user.role !== "client" || order.clientId !== user.id) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "Only the client who placed this order can rate it.",
+        });
+      }
+      if (order.state !== "completed" && order.state !== "payout_released") {
+        return send(res, 409, {
+          error: "order_not_complete",
+          message: "You can rate this once the order is finished and the issue window has closed.",
+          state: order.state,
+        });
+      }
+      if (!order.supplierId) {
+        return send(res, 409, { error: "order_has_no_shop", message: "This order was never run by a shop." });
+      }
+      store.shopReviews ||= [];
+      if (store.shopReviews.some((row) => row.orderId === order.id)) {
+        return send(res, 409, {
+          error: "already_rated",
+          message: "You have already rated this order.",
+        });
+      }
+      const body = await readBody(req);
+      const scores = {};
+      for (const field of ["qualityStars", "speedStars", "valueStars"]) {
+        const value = body[field];
+        if (!Number.isInteger(value) || value < 1 || value > 5) {
+          return send(res, 400, {
+            error: "invalid_rating",
+            message: "Give each of quality, speed and value a whole number of stars from 1 to 5.",
+            field,
+          });
+        }
+        scores[field] = value;
+      }
+      const comment = body.comment == null ? null : String(body.comment).trim();
+      if (comment && comment.length > 2_000) {
+        return send(res, 400, { error: "invalid_rating", message: "Keep a comment under 2,000 characters.", field: "comment" });
+      }
+      const at = now();
+      const review = {
+        id: id("rev"),
+        orderId: order.id,
+        supplierId: order.supplierId,
+        clientId: user.id,
+        qualityStars: scores.qualityStars,
+        speedStars: scores.speedStars,
+        valueStars: scores.valueStars,
+        comment: comment || null,
+        createdAt: at,
+      };
+      store.shopReviews.push(review);
+      audit(store, {
+        actor: user,
+        action: "order.rated",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { supplierId: order.supplierId, qualityStars: review.qualityStars },
+      });
+      await save(store);
+      return send(res, 201, { review });
+    }
+
     if (req.method === "POST" && /^\/orders\/[^/]+\/issues$/.test(pathname)) {
       if (user.role !== "client") return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
@@ -3820,7 +4016,7 @@ async function handleRequest(req, res) {
         reason: resolution,
       });
       await save(store);
-      return send(res, 200, { escalation, order: publicOrder(order, user) });
+      return send(res, 200, { escalation, order: publicOrder(order, user, store) });
     }
 
     // ---- audit trail ----
@@ -3870,8 +4066,28 @@ async function handleRequest(req, res) {
         detail: { milestoneCode, amountMinor: milestone.amountMinor },
         reason: body.note || null,
       });
+      /*
+       Tell the shop its money moved.
+
+       A shop is told about its jobs at every step and never about its money,
+       which is the half it is actually waiting on. The amount is in the
+       notification rather than behind it, because "a payout was released" sends
+       somebody looking for a figure they already had a right to.
+      */
+      if (order.supplierId) {
+        store.notifications.push({
+          id: id("ntf"),
+          userId: order.supplierId,
+          type: "shop_payout_released",
+          orderId: order.id,
+          title: `${formatMinorPhp(milestone.amountMinor)} released`,
+          body: `${payoutStageLabel(milestoneCode)} on ${order.title || "your job"}. It is on its way to your account.`,
+          read: false,
+          at: releasedAt,
+        });
+      }
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user), milestone });
+      return send(res, 200, { order: publicOrder(order, user, store), milestone });
     }
 
     // ---- manual QR installment payments ----
@@ -3964,7 +4180,7 @@ async function handleRequest(req, res) {
         detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/reject$/.test(pathname)) {
@@ -4010,7 +4226,9 @@ async function handleRequest(req, res) {
       installment.rejectedBy = user.id;
       installment.rejectionReason = reason;
       if (installmentCode === "initial") {
-        order.state = order.moneyModelVersion === 1 ? "awaiting_downpayment" : "awaiting_initial_payment";
+        order.state = order.moneyModelVersion === 3
+          ? "awaiting_initial_payment"
+          : (order.moneyModelVersion === 1 ? "awaiting_downpayment" : "awaiting_initial_payment");
         order.paymentStatus = "unpaid";
       } else {
         order.paymentStatus = "initial_payment_confirmed";
@@ -4032,7 +4250,7 @@ async function handleRequest(req, res) {
         reason,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/confirm$/.test(pathname)) {
@@ -4058,12 +4276,17 @@ async function handleRequest(req, res) {
       installment.confirmedBy = user.id;
       installment.confirmationSource = "manual_ops";
       if (installmentCode === "initial") {
-        order.state = "payment_authorized";
+        // A cart checkout is paid before anything is checked, so confirming the
+        // transfer hands the order to quality control rather than to the shop.
+        // Older orders were quoted and approved long before payment, so for
+        // them a confirmed payment really is the last gate.
+        order.state = order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
         order.paymentStatus = "initial_payment_confirmed";
       } else {
         order.paymentStatus = "paid";
       }
       order.updatedAt = confirmedAt;
+      notifyOrderParties(store, order, { createId: id, at: confirmedAt });
       order.timeline.push({
         at: confirmedAt,
         state: order.state,
@@ -4080,12 +4303,12 @@ async function handleRequest(req, res) {
         reason: body.note || null,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     // ---- orders list / create ----
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user)) });
+      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user, store)) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -4097,7 +4320,7 @@ async function handleRequest(req, res) {
         if (!order) return send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
-        return send(res, 200, { order: publicOrder(order, user) });
+        return send(res, 200, { order: publicOrder(order, user, store) });
       }
     }
 
@@ -4193,7 +4416,82 @@ async function handleRequest(req, res) {
       };
       store.orders.unshift(order);
       await save(store);
-      return send(res, 201, { order: publicOrder(order, user) });
+      return send(res, 201, { order: publicOrder(order, user, store) });
+    }
+
+    /**
+     * A shop that cannot take the work.
+     *
+     * Declining is not stepping aside: the client has already paid and been
+     * given a date, so the job has to find another shop rather than stop. The
+     * replacement is chosen by the same ranking, filtered to shops that can
+     * still make the promised date and cannot cost the client more than they
+     * already committed to. If one is cheaper the difference comes off their
+     * balance; if none qualifies the order lands on Operations rather than
+     * silently asking the client to pay more or wait longer.
+     */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/decline$/.test(pathname)) {
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (user.role !== "supplier" || order.supplierId !== user.id) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "Only the shop this job was handed to can decline it.",
+        });
+      }
+      if (order.state !== "supplier_assigned") {
+        return send(res, 409, {
+          error: "decline_not_available",
+          message: "This job can no longer be declined. Refresh it and use an available action.",
+          state: order.state,
+        });
+      }
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      const at = now();
+
+      order.declinedBy = [...new Set([...(order.declinedBy || []), user.id])];
+      audit(store, {
+        actor: user,
+        action: "order.shop_declined",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { supplierId: user.id },
+        reason: reason || null,
+      });
+
+      const replacement = findReplacementShop(store, order, at);
+      if (!replacement) {
+        // Nobody else can make the date at the price the client paid. That is
+        // an Operations decision -- extend, refund, or ask the client -- not
+        // something to resolve by quietly changing what they agreed to.
+        order.supplierId = null;
+        order.pickup = null;
+        order.state = "approved_for_matching";
+        order.updatedAt = at;
+        order.timeline.push({ at, state: order.state, by: user.id, note: reason ? `Declined: ${reason}` : "Declined" });
+        await save(store);
+        return send(res, 200, { order: publicOrder(order, user, store), replaced: false });
+      }
+
+      order.supplierId = replacement.supplierId;
+      order.pickup = structuredClone(replacement.pickup);
+      order.readyBy = replacement.readyBy;
+      order.promiseBy = replacement.promiseBy;
+      order.updatedAt = at;
+      order.timeline.push({ at, state: order.state, by: user.id, note: reason ? `Declined: ${reason}` : "Declined" });
+      audit(store, {
+        actor: user,
+        action: "order.shop_replaced",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { supplierId: replacement.supplierId, readyBy: replacement.readyBy },
+      });
+      await save(store);
+      return send(res, 200, { order: publicOrder(order, user, store), replaced: true });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -4209,7 +4507,12 @@ async function handleRequest(req, res) {
           allowed: ["qr_manual"],
         });
       }
-      if (next === "supplier_assigned") {
+      // A checkout order was matched to its shop before the client paid, against
+      // live listings, real opening hours and the client's own deadline. Handing
+      // it to that shop is not an assignment decision, so the legacy eligibility
+      // check -- which reads the retired product catalogue -- has nothing to say.
+      const handingToMatchedShop = next === "supplier_assigned" && !body.supplierId && Boolean(order.supplierId);
+      if (next === "supplier_assigned" && !handingToMatchedShop) {
         const supplier = store.users.find(
           (candidate) => candidate.id === body.supplierId && candidate.role === "supplier",
         );
@@ -4237,8 +4540,24 @@ async function handleRequest(req, res) {
           });
         }
       }
-      if (order.fulfillmentMode === "pickup" && ["production", "rider_assigned"].includes(next)) {
-        return send(res, 409, { error: "pickup_fulfillment_not_available" });
+      /*
+       Two different things have been called pickup, and only one is contained.
+
+       The old one was the client collecting from the shop's own counter, whose
+       handover lifecycle was never built — that is what this guard was written
+       to hold back, and it still does, by the payment plan that shape uses.
+
+       The one that shipped is different: a client collects at GRIDGO Office,
+       and a rider carries the finished run there. It needs production and a
+       rider exactly as a delivery does. Held by fulfilment mode alone, this
+       refused every collected order the moment its shop pressed start, and the
+       shop was told GRIDGO was unreachable.
+      */
+      if (isContainedPickup(order) && ["production", "rider_assigned"].includes(next)) {
+        return send(res, 409, {
+          error: "pickup_fulfillment_not_available",
+          message: "Collecting from the shop counter is not available yet. Operations can switch this order to delivery.",
+        });
       }
       if (next === "rider_assigned") {
         const riderId = user.role === "rider" ? user.id : body.riderId;
@@ -4256,7 +4575,29 @@ async function handleRequest(req, res) {
             verificationStatus: rider.verificationStatus || "unverified",
           });
         }
+        if (!deliveryBalanceSettled(order)) {
+          return send(res, 409, {
+            error: "final_payment_not_confirmed",
+            message: "This delivery is waiting on the client's remaining balance. Confirm it before assigning a rider.",
+          });
+        }
       }
+      if (next === "cancelled") {
+        const reason = String(body.reason || "").trim();
+        if (!reason) {
+          return send(res, 400, {
+            error: "cancellation_reason_required",
+            message: "Say why this order is being cancelled. The client is told, and the record has to explain itself later.",
+          });
+        }
+        // Refunding is still a manual transfer. This records the decision, who
+        // made it and why -- it does not move money, and must not read as if it
+        // has.
+        order.cancelledAt = now();
+        order.cancelledBy = user.id;
+        order.cancellationReason = reason;
+      }
+
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
         return send(res, 409, {
@@ -4387,21 +4728,16 @@ async function handleRequest(req, res) {
           by: user.id,
           note: `Supplier issued final quote version ${quoteVersion}`,
         });
-        const notification = {
-          id: id("ntf"),
-          userId: order.clientId,
-          type: "supplier_assignment_final_price",
-          orderId: order.id,
-          title: "Final quote ready",
-          body: "Review the final quote, fulfillment choice, and payment plan.",
-          read: false,
-          at: acceptedAt,
-        };
-        store.notifications.push(notification);
-        order.assignmentNotificationId = notification.id;
-        order.assignmentNotifiedAt = notification.at;
         order.state = "awaiting_checkout";
         order.updatedAt = acceptedAt;
+        const { client: notification } = notifyOrderParties(store, order, {
+          createId: id,
+          at: acceptedAt,
+        });
+        if (notification) {
+          order.assignmentNotificationId = notification.id;
+          order.assignmentNotifiedAt = notification.at;
+        }
         order.timeline.push({
           at: acceptedAt,
           state: "awaiting_checkout",
@@ -4409,7 +4745,7 @@ async function handleRequest(req, res) {
           note: "Client notified that the final quote is ready for checkout",
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user) });
+        return send(res, 200, { order: publicOrder(order, user, store) });
       }
       if (next === "awaiting_initial_payment") {
         if (user.role !== "client" || order.clientId !== user.id) {
@@ -4512,7 +4848,7 @@ async function handleRequest(req, res) {
           },
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user) });
+        return send(res, 200, { order: publicOrder(order, user, store) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
         order.supplierId = body.supplierId;
@@ -4544,12 +4880,19 @@ async function handleRequest(req, res) {
       if (next === "rider_assigned") {
         order.riderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
       }
+      // The moment the shop's own work is done. Its on-time record is measured
+      // from this against readyBy -- the date its board promised -- and never
+      // against the padded date the client was given, or against a delivery a
+      // rider was late for.
+      if (next === "ready_for_dispatch" && !order.readyAt) {
+        order.readyAt = now();
+      }
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
-      if (next === "production") recordAutomaticSupplierPayouts(store, order, order.updatedAt);
+      notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     // ---- dispatch (rider) ----
@@ -4563,11 +4906,16 @@ async function handleRequest(req, res) {
           message: "Operations must approve this rider profile before dispatch offers become available.",
         });
       }
+      // A collected order is offered too. It is carried from the shop to
+      // GRIDGO Office rather than to the client's door, which is a different
+      // destination and not a different job. Only the unfinished
+      // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => o.fulfillmentMode !== "pickup"
-          && (o.state === "ready_for_dispatch" || (o.state === "rider_assigned" && o.riderId === user.id)),
+        (o) => !isContainedPickup(o)
+          && ((o.state === "ready_for_dispatch" && deliveryBalanceSettled(o))
+            || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
-      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user)) });
+      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
@@ -4581,15 +4929,24 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
       if (!order || order.state !== "ready_for_dispatch") return send(res, 409, { error: "not_offerable" });
-      if (order.fulfillmentMode === "pickup") {
+      // A collected order needs a rider too — it is carried to GRIDGO Office
+      // rather than to the client's door. Only the unfinished counter-pickup
+      // shape has no journey to offer.
+      if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
+      }
+      if (!deliveryBalanceSettled(order)) {
+        return send(res, 409, {
+          error: "final_payment_not_confirmed",
+          message: "This delivery is waiting on the client's remaining balance. It is offered again once Operations confirms it.",
+        });
       }
       order.riderId = user.id;
       order.state = "rider_assigned";
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
@@ -4713,7 +5070,7 @@ async function handleRequest(req, res) {
           reason: failureNote,
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user), escalation });
+        return send(res, 200, { order: publicOrder(order, user, store), escalation });
       }
 
       order.pickupChecklist = {
@@ -4734,9 +5091,10 @@ async function handleRequest(req, res) {
         by: user.id,
         note: "All six pickup checks passed; rider prompted to give the trained verbal sign-off",
       });
+      notifyOrderParties(store, order, { createId: id, at: checkedAt });
       await save(store);
       return send(res, 200, {
-        order: publicOrder(order, user),
+        order: publicOrder(order, user, store),
         signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
       });
     }
@@ -4788,7 +5146,16 @@ async function handleRequest(req, res) {
           state: order.state,
         });
       }
-      if (order.payments?.final_online?.status !== "confirmed") {
+      /*
+       Money is owed by whoever is being handed the job.
+
+       On a delivery that is the client at their own door, so the rider holds
+       the package until the balance clears. A collected job is only being put
+       on GRIDGO's own shelf; blocking that strands a rider at our office
+       waiting on something no one present can do, and the job can never move
+       again. The gate moves to the counter, where the client actually is.
+      */
+      if (!carriedToOffice(order) && order.payments?.final_online?.status !== "confirmed") {
         return send(res, 409, {
           error: "final_payment_not_confirmed",
           message: "Operations must confirm the client's final online payment before the rider completes delivery.",
@@ -4826,6 +5193,21 @@ async function handleRequest(req, res) {
         riderId: user.id,
         recordedAt: deliveredAt,
       };
+      if (carriedToOffice(order)) {
+        order.state = "awaiting_collection";
+        order.awaitingCollectionAt = deliveredAt;
+        order.updatedAt = deliveredAt;
+        order.timeline.push({
+          at: deliveredAt,
+          state: "awaiting_collection",
+          by: user.id,
+          note: "Left at GRIDGO Office for the client to collect",
+          fileId: evidenceFileId,
+        });
+        notifyOrderParties(store, order, { createId: id, at: deliveredAt });
+        await save(store);
+        return send(res, 200, { order: publicOrder(order, user, store) });
+      }
       order.state = "delivered";
       order.timeline.push({
         at: deliveredAt,
@@ -4834,7 +5216,6 @@ async function handleRequest(req, res) {
         note: body.evidenceType === "photo" ? "Delivery completed with photo evidence" : "Delivery completed with signature evidence",
         fileId: evidenceFileId,
       });
-      recordAutomaticSupplierPayouts(store, order, deliveredAt);
       order.issueWindowOpenedAt = deliveredAt;
       order.issueWindowExpiresAt = issueWindowExpiresAt(deliveredAt, store.settings.issueWindowHours);
       order.state = "issue_window_open";
@@ -4845,8 +5226,75 @@ async function handleRequest(req, res) {
         by: "system",
         note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
       });
+      notifyOrderParties(store, order, { createId: id, at: deliveredAt });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user) });
+      return send(res, 200, { order: publicOrder(order, user, store) });
+    }
+
+    /*
+     The counter hand-over: the second ending a collected job has.
+
+     A rider's proof says the job reached our shelf, which is not the same as
+     the client having it. This is the moment it leaves GRIDGO -- so it is the
+     moment the balance has to be settled, and the moment the complaint window
+     starts running.
+    */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/collection$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((candidate) => candidate.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.state !== "awaiting_collection") {
+        return send(res, 409, {
+          error: "collection_not_available",
+          message: "This order is not waiting at the counter. Refresh it to see where it actually is.",
+          state: order.state,
+        });
+      }
+      if (order.payments?.final_online?.status !== "confirmed") {
+        return send(res, 409, {
+          error: "final_payment_not_confirmed",
+          message: "Confirm the client's remaining balance before releasing this order at the counter.",
+        });
+      }
+      const body = await readBody(req);
+      const receivedBy = String(body.receivedBy || "").trim();
+      if (!receivedBy) {
+        return send(res, 400, {
+          error: "collector_name_required",
+          message: "Record who collected this order. A counter hand-over with no name cannot be checked later.",
+        });
+      }
+      const collectedAt = now();
+      order.collection = { receivedBy, recordedBy: user.id, at: collectedAt };
+      order.state = "delivered";
+      order.timeline.push({
+        at: collectedAt,
+        state: "delivered",
+        by: user.id,
+        note: `Collected at GRIDGO Office by ${receivedBy}`,
+      });
+      order.issueWindowOpenedAt = collectedAt;
+      order.issueWindowExpiresAt = issueWindowExpiresAt(collectedAt, store.settings.issueWindowHours);
+      order.state = "issue_window_open";
+      order.updatedAt = collectedAt;
+      order.timeline.push({
+        at: collectedAt,
+        state: "issue_window_open",
+        by: "system",
+        note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
+      });
+      notifyOrderParties(store, order, { createId: id, at: collectedAt });
+      audit(store, {
+        actor: user,
+        action: "order_collected",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { receivedBy },
+      });
+      await save(store);
+      return send(res, 200, { order: publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/proof$/.test(pathname)) {
@@ -4862,7 +5310,7 @@ async function handleRequest(req, res) {
       return send(res, 200, {
         jobs: store.orders
           .filter((o) => o.supplierId === user.id)
-          .map((order) => publicOrder(order, user)),
+          .map((order) => publicOrder(order, user, store)),
       });
     }
 

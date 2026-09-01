@@ -10,9 +10,9 @@ const AT = "2026-08-16T00:00:00.000Z";
 
 async function clear(database) {
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
-    job_qa_checklist, order_invoices, client_cart_lines, client_carts, client_saved_addresses,
+    order_invoices, client_cart_lines, client_carts, client_saved_addresses,
     client_match_preferences, payout_milestones, order_payments, order_line_item_options, order_line_items,
     order_jobs, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
@@ -38,7 +38,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     shop: { lat: 7.064, lng: 125.6085, label: "Shop" }, pickupAvailable: true,
     isClosed: true, version: 1, updatedAt: AT,
   }];
-  store.clientPreferences = [{ userId: "user_client", ranking: ["quality", "speed", "distance"], version: 1, updatedAt: AT }];
+  store.clientPreferences = [{ userId: "user_client", ranking: ["quality", "speed", "cost", "distance"], version: 1, updatedAt: AT }];
   store.clientAddresses = [{
     id: "addr_one", clientId: "user_client", label: "Home", addressLine: "Bajada, Davao City",
     point: { lat: 7.0731, lng: 125.6128 }, isDefault: true, version: 1, createdAt: AT, updatedAt: AT,
@@ -82,10 +82,6 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" }, sortOrder: 0,
     snapshotFinalized: true, createdAt: AT,
   }];
-  store.jobQaChecklist = [{
-    id: "qa_one", jobId: "job_one", code: "artwork", label: "Artwork matches mockup",
-    status: "pending", sortOrder: 0, createdAt: AT, updatedAt: AT,
-  }];
   store.orderInvoices = [{ orderId: "ord_match", invoiceNumber: "GG-20260824-0001", issuedAt: AT, snapshot: { totalMinor: 13500 } }];
 
   await database.transaction(() => saveStore(database, store));
@@ -96,9 +92,12 @@ test("relational store round-trips client matching, cart, job, line, and invoice
   assert.deepEqual(reloaded.carts, store.carts);
   assert.deepEqual(reloaded.orderJobs, store.orderJobs);
   assert.deepEqual(reloaded.orderLineItems, store.orderLineItems);
-  assert.deepEqual(reloaded.jobQaChecklist, store.jobQaChecklist);
   assert.deepEqual(reloaded.orderInvoices, store.orderInvoices);
   assert.equal(reloaded.supplierProfiles[0].isClosed, true);
+
+  // Create listing (and any other save) must not rewrite locked order snapshots.
+  await database.transaction(() => saveStore(database, reloaded));
+  assert.deepEqual((await loadStore(database)).orderLineItems, store.orderLineItems);
 
   await clear(database);
 });

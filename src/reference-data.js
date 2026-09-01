@@ -69,6 +69,9 @@ export function flattenListingStarters(starters = defaultListingStarters()) {
           starterGroupId: group.id,
           label: option.label,
           priceModifierMinor: option.priceModifierMinor ?? 0,
+          // An add-on that multiplies rather than adds. Dropped here, a
+          // starter's "x2 the price" arrives on a board worth nothing.
+          priceMultiplierBps: option.priceMultiplierBps ?? null,
           specBinding: option.specBinding ?? null,
           sortOrder: option.sortOrder,
         });

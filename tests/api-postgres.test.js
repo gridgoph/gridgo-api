@@ -143,7 +143,7 @@ function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
 
 async function clearAndFixture(database) {
   await database.query(`TRUNCATE
-    administrator_bootstrap, device_tokens, proofs, escalations, location_pings, notifications, audit_log,
+    administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
     supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
@@ -1349,11 +1349,15 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
       assert.equal(transitioned.status, 200, `${JSON.stringify(transitioned.body)}\n${instance.output()}`);
       if (state === "production") {
+        // Four stages of the shop's own price, and starting the press pays
+        // nobody: every one of them waits for a photograph and a person.
         assert.deepEqual(
           transitioned.body.order.payoutMilestones.map(({ code, amountMinor, status }) => ({ code, amountMinor, status })),
           [
-            { code: "initial", amountMinor: 30000, status: "released" },
-            { code: "completion", amountMinor: 90000, status: "pending" },
+            { code: "printing", amountMinor: 60000, status: "pending_pof" },
+            { code: "packaging_qc", amountMinor: 18000, status: "pending_pof" },
+            { code: "delivered", amountMinor: 30000, status: "pending_pof" },
+            { code: "retention", amountMinor: 12000, status: "pending_pof" },
           ],
         );
       }
