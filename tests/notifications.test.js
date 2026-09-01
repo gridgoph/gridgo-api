@@ -84,4 +84,38 @@ test("list inbox is bounded and carries the job title and state, not the whole o
   assert.equal(listed.notifications[0].orderState, "production");
   assert.equal(listed.notifications[0].timeline, undefined);
   assert.equal(listed.notifications[0].payments, undefined);
+  assert.equal(listed.notifications[0].fulfillmentMode, undefined);
+  assert.equal(listed.notifications[0].collectHold, undefined);
+});
+
+test("list inbox stamps collect jobs so the phone can tell pickup from a door delivery", () => {
+  const store = {
+    notifications: [
+      {
+        id: "ntf_hold",
+        userId: "client",
+        title: "Ready for pickup",
+        body: "x",
+        read: false,
+        at: "2026-09-01T05:16:00.000Z",
+        orderId: "ord_pick",
+        type: "order_ready_for_pickup",
+      },
+    ],
+    orders: [
+      {
+        id: "ord_pick",
+        title: "Booth backdrops",
+        state: "awaiting_collection",
+        fulfillmentMode: "pickup",
+        payments: { final_online: { status: "not_submitted" } },
+      },
+    ],
+  };
+
+  const listed = listInbox(store, "client");
+  assert.equal(listed.notifications[0].fulfillmentMode, "pickup");
+  assert.equal(listed.notifications[0].collectHold, true);
+  assert.equal(listed.notifications[0].orderTitle, "Booth backdrops");
+  assert.equal(listed.notifications[0].payments, undefined);
 });
