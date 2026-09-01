@@ -60,10 +60,11 @@ const COPY = {
   },
   awaiting_collection: {
     type: "order_ready_for_pickup",
-    title: "Ready for pickup",
+    title(order) {
+      return collectionOwed(order) ? "Settle, then collect" : "Waiting at the counter";
+    },
     body(order) {
-      const owes = order.payments?.final_online?.status !== "confirmed";
-      return owes
+      return collectionOwed(order)
         ? "Your order is waiting at GRIDGO Office. Settle the remaining balance in the app, then collect it at the counter."
         : "Your order is waiting for you at the GRIDGO Office counter.";
     },
@@ -80,16 +81,77 @@ const COPY = {
   },
 };
 
+/**
+ * A collecting client is not being delivered to. The rider only moves the job
+ * from the shop to GRIDGO's own counter — telling them it is "out for delivery"
+ * sends them looking out a window for something sitting on our shelf.
+ */
+const COLLECT_COPY = {
+  supplier_self_qc: {
+    type: "order_shop_qc",
+    title: "The shop is checking the finished job",
+    body: "Printing is done. The shop is checking the work before it comes to the office.",
+  },
+  ready_for_dispatch: {
+    type: "order_ready_for_dispatch",
+    title: "Packed for the office",
+    body: "This job is packed. A GRIDGO rider will bring it to the GRIDGO Office counter.",
+  },
+  rider_assigned: {
+    type: "order_rider_assigned",
+    title: "A rider is collecting it",
+    body: "A GRIDGO rider is picking this up from the shop to bring it to the office.",
+  },
+  picked_up: {
+    type: "order_picked_up",
+    title: "On the way to GRIDGO Office",
+    body: "The rider has your order and is bringing it to the counter.",
+  },
+  out_for_delivery: {
+    type: "order_out_for_delivery",
+    title: "On the way to GRIDGO Office",
+    body: "Your order is heading to the GRIDGO Office counter. We'll tell you when you can collect it.",
+  },
+  delivered: {
+    type: "order_delivered",
+    title: "Collected",
+    body: "This order was collected at the GRIDGO Office counter.",
+  },
+  issue_window_open: {
+    type: "order_delivered",
+    title: "Collected",
+    body: "This order was collected at the GRIDGO Office counter. You have a short window to raise an issue if something is wrong.",
+  },
+};
+
+function collectionOwed(order) {
+  const status = order?.payments?.final_online?.status;
+  return Boolean(status) && status !== "confirmed" && status !== "legacy_confirmed";
+}
+
+function resolveCopy(entry, order) {
+  if (!entry) return null;
+  return {
+    type: entry.type,
+    title: typeof entry.title === "function" ? entry.title(order) : entry.title,
+    body: typeof entry.body === "function" ? entry.body(order) : entry.body,
+  };
+}
+
 export function clientNotificationDraft(order) {
   if (!order?.clientId || !order.id || !order.state) return null;
-  const copy = COPY[order.state];
+  const collecting = order.fulfillmentMode === "pickup";
+  const copy = resolveCopy(
+    (collecting && COLLECT_COPY[order.state]) || COPY[order.state],
+    order,
+  );
   if (!copy) return null;
   return {
     userId: order.clientId,
     type: copy.type,
     orderId: order.id,
     title: copy.title,
-    body: typeof copy.body === "function" ? copy.body(order) : copy.body,
+    body: copy.body,
     read: false,
   };
 }

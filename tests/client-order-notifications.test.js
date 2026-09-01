@@ -27,6 +27,40 @@ test("artwork check, correction, and out-for-delivery are the updates the empty 
   assert.match(out.title, /out for delivery/i);
 });
 
+test("a collected job never tells the client it is out for delivery", () => {
+  const out = clientNotificationDraft({
+    id: "ord_1",
+    clientId: "user_c",
+    state: "out_for_delivery",
+    fulfillmentMode: "pickup",
+  });
+  assert.equal(out.type, "order_out_for_delivery");
+  assert.match(out.title, /GRIDGO Office/i);
+  assert.doesNotMatch(out.title, /out for delivery/i);
+  assert.doesNotMatch(out.body, /on the way(?! to)/i);
+
+  const ready = clientNotificationDraft({
+    id: "ord_1",
+    clientId: "user_c",
+    state: "awaiting_collection",
+    fulfillmentMode: "pickup",
+    payments: { final_online: { status: "confirmed" } },
+  });
+  assert.equal(ready.type, "order_ready_for_pickup");
+  assert.match(ready.title, /counter/i);
+  assert.doesNotMatch(ready.title, /settle/i);
+
+  const hold = clientNotificationDraft({
+    id: "ord_1",
+    clientId: "user_c",
+    state: "awaiting_collection",
+    fulfillmentMode: "pickup",
+    payments: { final_online: { status: "not_submitted" } },
+  });
+  assert.match(hold.title, /settle/i);
+  assert.match(hold.body, /remaining balance/i);
+});
+
 test("ensure writes once per order and type", () => {
   const store = { notifications: [] };
   const order = { id: "ord_1", clientId: "user_c", state: "production", updatedAt: "2026-09-01T00:00:00.000Z" };

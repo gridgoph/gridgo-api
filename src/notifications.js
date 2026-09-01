@@ -30,6 +30,13 @@ export function publicNotification(notification, order) {
   if (notification.announcementId) item.announcementId = notification.announcementId;
   if (order?.title) item.orderTitle = order.title;
   if (order?.state) item.orderState = order.state;
+  if (order?.fulfillmentMode === "pickup" || order?.fulfillmentMode === "delivery") {
+    item.fulfillmentMode = order.fulfillmentMode;
+  }
+  if (order?.fulfillmentMode === "pickup" && order.state === "awaiting_collection") {
+    const status = order.payments?.final_online?.status;
+    item.collectHold = Boolean(status) && status !== "confirmed" && status !== "legacy_confirmed";
+  }
   return item;
 }
 
