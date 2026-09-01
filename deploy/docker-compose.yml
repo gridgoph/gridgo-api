@@ -79,6 +79,36 @@ services:
       - gridgo-storage
 
   # ---------------------------------------------------------------------------
+  # The pilot's own shops, listings and catalogue.
+  #
+  # Never part of a deploy. `seed` above is the platform reference data every
+  # environment needs; this one writes the five Davao shops, their boards and
+  # the sample jobs behind them, and it is run by hand when somebody means to:
+  #
+  #   docker compose run --rm seed-dev
+  #
+  # It reads the same environment as the API, so it reaches the same database
+  # and the same Clerk instance. It looks each account up by email and refuses
+  # if one is missing, rather than inventing a sign-in nobody can use.
+  # ---------------------------------------------------------------------------
+  seed-dev:
+    image: ghcr.io/gridgoph/gridgo-api:${GRIDGO_API_TAG:-latest}
+    container_name: gridgo-api-seed-dev
+    command: ["npm", "run", "seed:dev"]
+    env_file:
+      - ./gridgo-api.env
+    # Never started by `docker compose up`. Only `run` reaches it.
+    profiles: ["manual"]
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - gridgo-storage
+
+  # ---------------------------------------------------------------------------
   # The API itself.
   # ---------------------------------------------------------------------------
   api:
