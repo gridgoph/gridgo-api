@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { authConfiguration, clerkClientProfile, createClerkBackend } from "./auth.js";
 import { createDatabase } from "./database.js";
 import { createObjectStorage } from "./object-storage.js";
+import { createPayoutMilestones } from "./operational-model.js";
 import { loadStore, saveStore } from "./postgres-store.js";
 import { notifyOrderParties } from "./client-order-notifications.js";
 import { seedReferenceData } from "./seed.js";
@@ -1410,6 +1411,45 @@ const DEV_QUEUE = [
   { supplierId: "user_polymedia", inDays: -1, quantity: 3, title: "Booth backdrops", subcategoryCode: "tarpaulins_outdoor_banners", estimatedHours: 5, state: "awaiting_collection", fulfillmentMode: "pickup", paymentStage: "downpayment_cleared" },
 ];
 
+/*
+ Where each stage of a seeded job has got to.
+
+ Written back from the state rather than forward from nothing: a job on the
+ press has its printing photo filed and released, a packed one has both, and a
+ collected one is waiting on the counter with its delivered share still owed.
+ Retention is never released here, because no seeded job has sat out a full
+ issue window.
+*/
+function seedPayoutStages(subtotalMinor, state, paymentStage, at) {
+  const released = new Set();
+  const proven = new Set();
+  const printed = ["production", "supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
+  const packed = ["supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
+  if (printed.includes(state)) proven.add("printing");
+  if (packed.includes(state)) proven.add("packaging_qc");
+  // Only what the client's money actually covers. The first stage is half the
+  // shop's price and the downpayment is three quarters of the whole order, so
+  // printing clears on the downpayment and packing waits for the balance.
+  if (paymentStage !== "submitted" && proven.has("printing")) released.add("printing");
+  if (paymentStage === "settled" && proven.has("packaging_qc")) released.add("packaging_qc");
+
+  return createPayoutMilestones({ supplierPlatformPayoutMinor: subtotalMinor }).map((milestone) => {
+    if (released.has(milestone.code)) {
+      return {
+        ...milestone,
+        status: "released",
+        pofFileIds: [`file_pof_${milestone.code}`],
+        releasedAt: at,
+        releasedBy: "user_ops",
+      };
+    }
+    if (proven.has(milestone.code)) {
+      return { ...milestone, status: "pof_attached", pofFileIds: [`file_pof_${milestone.code}`] };
+    }
+    return milestone;
+  });
+}
+
 /** The local day `offset` days from now, as an ISO instant at noon. */
 function devQueueDate(offset) {
   const date = new Date();
@@ -1561,6 +1601,15 @@ async function seedDevelopmentQueue(database, clientId, now) {
             confirmedAt: stage === "settled" ? at : null,
           },
         },
+        /*
+         The four stages a shop is paid across, at the point this job has
+         actually reached.
+
+         Without them the shop's money screen opens empty on every seeded job,
+         which is the one screen a shop checks daily -- and a demo that shows a
+         shop nothing about its own earnings teaches it the app has none.
+        */
+        payoutMilestones: seedPayoutStages(itemSubtotalMinor, entry.state, stage, at),
         createdAt: at,
         updatedAt: at,
       });
