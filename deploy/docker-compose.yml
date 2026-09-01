@@ -97,6 +97,11 @@ services:
     command: ["npm", "run", "seed:dev"]
     env_file:
       - ./gridgo-api.env
+    environment:
+      # No invented orders here. A local machine wants a board with work on it;
+      # a real environment being stood up for real shops does not, and a demo
+      # job is indistinguishable from a real one to the shop reading it.
+      GRIDGO_SEED_ORDERS: "0"
     # Never started by `docker compose up`. Only `run` reaches it.
     profiles: ["manual"]
     restart: "no"

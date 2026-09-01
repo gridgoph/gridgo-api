@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
 import { loadStore } from "../src/postgres-store.js";
 import { seedReferenceData } from "../src/seed.js";
-import { ADDITIONAL_DEV_SHOPS, LOVIS_CATEGORY_LINES, LOVIS_DEV_SHOP, LOVIS_LISTINGS, MARK_DEV_CLIENT, MARK_DEV_RIDER, PLACEHOLDER_JPEG, PRIVILEGED_DEV_ACCOUNTS, seedDevelopmentShops, starterSampleBytes } from "../src/seed-dev.js";
+import { ADDITIONAL_DEV_SHOPS, LOVIS_CATEGORY_LINES, LOVIS_DEV_SHOP, LOVIS_LISTINGS, MARK_DEV_CLIENT, MARK_DEV_RIDER, PLACEHOLDER_JPEG, PRIVILEGED_DEV_ACCOUNTS, seedDevelopmentShops, seedQueueRequested, starterSampleBytes } from "../src/seed-dev.js";
 import { catalogItemBlockers } from "../src/supplier-catalog.js";
 import { defaultListingStarters } from "../src/listing-starters.js";
 
@@ -412,5 +412,17 @@ test("Dara's six blueprint services are six listings, each with its own ladder",
     assert.equal(listing.priceMinor + listing.optionPrices.lsto_plot_a1, a1, `${listing.variant} A1`);
     assert.equal(listing.priceMinor + listing.optionPrices.lsto_plot_30x40, wide, `${listing.variant} 30x40`);
     assert.equal(listing.priceMinor + listing.optionPrices.lsto_plot_a0, a0, `${listing.variant} A0`);
+  }
+});
+
+test("the sample jobs are opt-out, and the opt-out has to be said", () => {
+  // A seed that silently does less because of an ambient variable is worse than
+  // one that asks, so anything but an explicit refusal still seeds the queue.
+  assert.equal(seedQueueRequested({}), true);
+  assert.equal(seedQueueRequested({ GRIDGO_SEED_ORDERS: "" }), true);
+  assert.equal(seedQueueRequested({ GRIDGO_SEED_ORDERS: "1" }), true);
+  assert.equal(seedQueueRequested({ NODE_ENV: "production" }), true);
+  for (const said of ["0", "false", "no", "off", "OFF", " No "]) {
+    assert.equal(seedQueueRequested({ GRIDGO_SEED_ORDERS: said }), false, said);
   }
 });

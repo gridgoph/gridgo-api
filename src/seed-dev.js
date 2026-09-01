@@ -1346,9 +1346,30 @@ export async function seedDevelopmentShops(database, {
   }
   const client = await seedDevelopmentClient(database, backend, now);
   const rider = await seedDevelopmentRider(database, backend, now);
-  if (client.userId) await seedDevelopmentQueue(database, client.userId, now);
+  /*
+   The sample jobs are a development convenience, not part of the shops.
+
+   A local machine wants a board with work on it. A real environment being
+   stood up for real shops does not: thirteen invented orders on the day a shop
+   first signs in are indistinguishable from real ones to the person reading
+   them, and there is no undo short of deleting rows by hand.
+
+   So they are opt-out, and the opt-out is explicit rather than inferred from
+   NODE_ENV -- a seed that silently does less because of an ambient variable is
+   worse than one that asks.
+  */
+  if (client.userId && seedQueueRequested()) {
+    await seedDevelopmentQueue(database, client.userId, now);
+  }
   const privileged = await seedDevelopmentPrivilegedAccounts(database, { clerkBackend: backend, now });
   return { shops, client, rider, privileged, photos: shops.every((shop) => shop.photos) };
+}
+
+/** Whether this run should invent a fortnight of work. Set `GRIDGO_SEED_ORDERS=0` to skip it. */
+export function seedQueueRequested(env = process.env) {
+  const declared = String(env.GRIDGO_SEED_ORDERS ?? "").trim().toLowerCase();
+  if (declared === "") return true;
+  return !["0", "false", "no", "off"].includes(declared);
 }
 
 /**
