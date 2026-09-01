@@ -205,7 +205,11 @@ test("a collected order is collected at GRIDGO's office, whoever printed it", as
 
   assert.equal(checkedOut.body.order.jobs.length, 1);
   for (const job of checkedOut.body.order.jobs) {
-    assert.deepEqual(job.pickup, { lat: 7.13267, lng: 125.611265, label: "GRIDGO Office" });
+    assert.deepEqual(job.pickup, {
+      lat: 7.092287234449552,
+      lng: 125.61651084538697,
+      label: "GRIDGO Office",
+    });
   }
   // Production is untouched — the rider still goes to the press.
   assert.deepEqual(store.orderJobs.map((job) => job.pickup.label), ["Shop A"]);
