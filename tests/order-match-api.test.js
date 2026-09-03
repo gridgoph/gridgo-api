@@ -827,14 +827,12 @@ test("a collected order stops on the counter, and only the counter hands it over
 });
 
 /**
- * A rider is never sent to a door that has not paid.
- *
- * The balance used to be asked for at the doorstep, which meant a rider could
- * ride across the city to find the client had not settled and nothing either of
- * them could do about it. It is asked for while the job is still on the press,
- * and a delivery that has not settled is simply not offered.
+ * A shop-ready delivery is a rider offer even when the remaining QR balance
+ * is still unpaid. That money is owed at the door, not as a condition of
+ * leaving the printer — withholding it left packed Business Cards sitting at
+ * the shop while Rider showed an empty board.
  */
-test("an unpaid delivery is not offered to a rider", { skip: !DATABASE_URL }, async (t) => {
+test("a shop-ready delivery is offered even when the remaining balance is unpaid", { skip: !DATABASE_URL }, async (t) => {
   const { call, orderId } = await placedOrder(t);
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
@@ -842,19 +840,10 @@ test("an unpaid delivery is not offered to a rider", { skip: !DATABASE_URL }, as
     await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier_a", body: { state } });
   }
 
-  const held = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
-  assert.equal(held.some((entry) => entry.id === orderId), false, "an unpaid delivery is withheld");
-
-  const refused = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
-  assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.equal(refused.body.error, "final_payment_not_confirmed");
-
-  await call(`/orders/${orderId}/payments/final_online/submit`, {
-    method: "POST", subject: "clerk_client",
-    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-902" },
-  });
-  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
-
   const offered = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
-  assert.ok(offered.some((entry) => entry.id === orderId), "it is offered once the balance clears");
+  assert.ok(offered.some((entry) => entry.id === orderId), "a ready delivery is offered before the remaining balance clears");
+
+  const accepted = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.order.state, "rider_assigned");
 });

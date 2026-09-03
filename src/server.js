@@ -1281,21 +1281,30 @@ async function expireElapsedIssueWindows() {
 }
 
 /*
- Whether a job may be handed to a rider yet.
+ Remaining QR balance vs handing the job to a rider.
 
- The balance used to be collected at the client's door, which meant a rider
- could ride an hour to find nobody had paid and nothing they could do about it.
- It is asked for while the job is still on the press instead, and a delivery
- that has not settled it is simply not offered.
+ A shop-marked ready delivery is a rider offer even when the client's remaining
+ installment is still unpaid — that money is owed at the door (or at the office
+ counter), not as a condition of leaving the shop. Withholding the offer left a
+ packed Business Card job sitting at the printer while Rider showed nothing.
 
- A collected job is exempt: it is carried to our own counter, and its balance
- is settled there.
+ The remaining balance still gates completing a door delivery and releasing a
+ collected job at the counter.
 */
 function deliveryBalanceSettled(order) {
   if (carriedToOffice(order)) return true;
   const balance = order?.payments?.final_online;
   if (!balance) return true;
   return balance.status === "confirmed";
+}
+
+function syncJobsWithOrder(store, order, at) {
+  for (const job of store.orderJobs || []) {
+    if (job.orderId !== order.id || job.state === "cancelled") continue;
+    job.state = order.state;
+    job.riderId = order.riderId ?? null;
+    job.updatedAt = at;
+  }
 }
 
 function canViewOrderLocation(user, order) {
@@ -4631,12 +4640,6 @@ async function handleRequest(req, res) {
             verificationStatus: rider.verificationStatus || "unverified",
           });
         }
-        if (!deliveryBalanceSettled(order)) {
-          return send(res, 409, {
-            error: "final_payment_not_confirmed",
-            message: "This delivery is waiting on the client's remaining balance. Confirm it before assigning a rider.",
-          });
-        }
       }
       if (next === "cancelled") {
         const reason = String(body.reason || "").trim();
@@ -4947,6 +4950,9 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
+      if (next === "ready_for_dispatch" || next === "rider_assigned") {
+        syncJobsWithOrder(store, order, order.updatedAt);
+      }
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       if (next === "needs_qa") {
         notifyOpsJobNeedsQa(store, order, { createId: id, at: order.updatedAt });
@@ -4977,7 +4983,7 @@ async function handleRequest(req, res) {
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
         (o) => !isContainedPickup(o)
-          && ((o.state === "ready_for_dispatch" && deliveryBalanceSettled(o))
+          && (o.state === "ready_for_dispatch"
             || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
       return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });
@@ -5000,16 +5006,11 @@ async function handleRequest(req, res) {
       if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
-      if (!deliveryBalanceSettled(order)) {
-        return send(res, 409, {
-          error: "final_payment_not_confirmed",
-          message: "This delivery is waiting on the client's remaining balance. It is offered again once Operations confirms it.",
-        });
-      }
       order.riderId = user.id;
       order.state = "rider_assigned";
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
+      syncJobsWithOrder(store, order, order.updatedAt);
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       queueOrderInvalidate(store, order, ["dispatch", "orders", "jobs"]);
       await save(store);
