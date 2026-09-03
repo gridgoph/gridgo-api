@@ -245,7 +245,12 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(placed.supplierId, "supplier_a");
   assert.ok(placed.readyBy && placed.promiseBy);
   assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
-  assert.equal(persisted.notifications.length, 0);
+  const inbox = persisted.notifications.map((row) => `${row.userId}:${row.type}`).sort();
+  assert.deepEqual(inbox, [
+    "user_ops:ops_job_needs_qa",
+    "user_ops:ops_payment_submitted",
+  ]);
+  assert.ok(inbox.every((row) => !row.startsWith("user_client:") && !row.startsWith("supplier_")));
 });
 
 

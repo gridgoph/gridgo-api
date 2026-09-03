@@ -1,3 +1,5 @@
+import { opsAdminRecipientIds } from "./notifications.js";
+
 /**
  * Client inbox rows for a job moving without the client doing the moving.
  *
@@ -79,6 +81,11 @@ const COPY = {
     title: "Delivered",
     body: "The rider has handed over this order. You have a short window to raise an issue if something is wrong.",
   },
+  cancelled: {
+    type: "order_cancelled",
+    title: "Your job was cancelled",
+    body: "This order is no longer going ahead.",
+  },
 };
 
 /**
@@ -122,6 +129,11 @@ const COLLECT_COPY = {
     title: "Collected",
     body: "This order was collected at the GRIDGO Office counter. You have a short window to raise an issue if something is wrong.",
   },
+  cancelled: {
+    type: "order_cancelled",
+    title: "Your job was cancelled",
+    body: "This order is no longer going ahead.",
+  },
 };
 
 function collectionOwed(order) {
@@ -157,6 +169,16 @@ export function clientNotificationDraft(order) {
 }
 
 const SHOP_COPY = {
+  supplier_assigned: {
+    type: "shop_job_assigned",
+    title: "A job was assigned to you",
+    body: "Open Jobs to review the assignment.",
+  },
+  payment_authorized: {
+    type: "shop_job_may_start",
+    title: "You can start this job",
+    body: "Payment is clear. Open Jobs to begin production.",
+  },
   production: {
     type: "shop_job_in_production",
     title: "A job is on your board",
@@ -192,6 +214,11 @@ const SHOP_COPY = {
     title: "A rider has this job",
     body: "It has left the shop.",
   },
+  cancelled: {
+    type: "shop_job_cancelled",
+    title: "A job was cancelled",
+    body: "This assigned job is no longer active.",
+  },
 };
 
 const RIDER_ASSIGNED_COPY = {
@@ -215,19 +242,25 @@ const RIDER_ASSIGNED_COPY = {
     title: "Left at GRIDGO Office",
     body: "The client will collect this job at the counter.",
   },
+  cancelled: {
+    type: "order_cancelled",
+    title: "A job was cancelled",
+    body: "This delivery is no longer active.",
+  },
 };
 
 function sameLiveNotification(store, draft) {
   return (store.notifications || []).find(
     (notification) =>
       notification.userId === draft.userId
-      && notification.orderId === draft.orderId
       && notification.type === draft.type
-      && notification.deletedAt == null,
+      && notification.deletedAt == null
+      && (notification.orderId ?? null) === (draft.orderId ?? null)
+      && (notification.approvalCaseId ?? null) === (draft.approvalCaseId ?? null),
   );
 }
 
-function writeDraft(store, draft, { id, at }) {
+export function writeDraft(store, draft, { id, at }) {
   if (!draft) return { notification: null, created: false };
   if (!id || !at) {
     throw new Error("order inbox write requires id and at");
@@ -342,4 +375,124 @@ export function backfillOrderInboxNotifications(store, createId, clock = () => n
     created.push(...result.created);
   }
   return created;
+}
+
+function writeEach(store, drafts, { createId, at }) {
+  const created = [];
+  for (const draft of drafts) {
+    const result = writeDraft(store, draft, { id: createId("ntf"), at });
+    if (result.created) created.push(result.notification);
+  }
+  return created;
+}
+
+function opsDrafts(store, fields) {
+  return opsAdminRecipientIds(store).map((userId) => ({
+    userId,
+    type: fields.type,
+    title: fields.title,
+    body: fields.body,
+    read: false,
+    ...(fields.orderId ? { orderId: fields.orderId } : {}),
+    ...(fields.approvalCaseId ? { approvalCaseId: fields.approvalCaseId } : {}),
+  }));
+}
+
+export function notifyOpsJobNeedsQa(store, order, { createId, at }) {
+  if (!order?.id) return [];
+  return writeEach(
+    store,
+    opsDrafts(store, {
+      type: "ops_job_needs_qa",
+      orderId: order.id,
+      title: "New job needs a check",
+      body: "A new job is waiting for payment confirmation and artwork review.",
+    }),
+    { createId, at },
+  );
+}
+
+export function notifyOpsPaymentSubmitted(store, order, { createId, at }) {
+  if (!order?.id) return [];
+  return writeEach(
+    store,
+    opsDrafts(store, {
+      type: "ops_payment_submitted",
+      orderId: order.id,
+      title: "Payment submitted",
+      body: "A client submitted a QR payment for confirmation.",
+    }),
+    { createId, at },
+  );
+}
+
+export function notifyOpsIssueReported(store, order, { createId, at }) {
+  if (!order?.id) return [];
+  return writeEach(
+    store,
+    opsDrafts(store, {
+      type: "ops_issue_reported",
+      orderId: order.id,
+      title: "Client reported an issue",
+      body: "A client opened an issue. The shop payout is held.",
+    }),
+    { createId, at },
+  );
+}
+
+function signupBody(kind) {
+  if (kind === "supplier") return "A supplier application is waiting for review.";
+  if (kind === "rider") return "A rider application is waiting for review.";
+  if (kind === "business_client") return "A business application is waiting for review.";
+  return "A sign-up or reapply is waiting for review.";
+}
+
+export function notifyOpsSignupSubmitted(store, approvalCase, { createId, at }) {
+  if (!approvalCase?.id) return [];
+  return writeEach(
+    store,
+    opsDrafts(store, {
+      type: "ops_signup_submitted",
+      approvalCaseId: approvalCase.id,
+      title: "New application",
+      body: signupBody(approvalCase.kind),
+    }),
+    { createId, at },
+  );
+}
+
+export function notifyShopPayoutHeld(store, order, { createId, at }) {
+  if (!order?.id || !order.supplierId) return [];
+  const result = writeDraft(
+    store,
+    {
+      userId: order.supplierId,
+      type: "shop_payout_held",
+      orderId: order.id,
+      title: "Payout on hold",
+      body: "An issue or claim has held the payout on this job.",
+      read: false,
+    },
+    { id: createId("ntf"), at },
+  );
+  return result.created ? [result.notification] : [];
+}
+
+export function notifyClientPaymentRejected(store, order, { createId, at, reason }) {
+  if (!order?.id || !order.clientId) return [];
+  const result = writeDraft(
+    store,
+    {
+      userId: order.clientId,
+      type: "order_payment_rejected",
+      orderId: order.id,
+      title: "Payment was not accepted",
+      body: reason
+        ? `Operations could not confirm this payment. ${reason}`
+        : "Operations could not confirm this payment. Submit again with a correct reference.",
+      read: false,
+    },
+    { id: createId("ntf"), at },
+  );
+  return result.created ? [result.notification] : [];
 }

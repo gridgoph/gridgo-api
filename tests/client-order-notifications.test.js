@@ -5,9 +5,16 @@ import {
   backfillOrderInboxNotifications,
   clientNotificationDraft,
   ensureClientOrderNotification,
+  notifyClientPaymentRejected,
+  notifyOpsIssueReported,
+  notifyOpsJobNeedsQa,
+  notifyOpsPaymentSubmitted,
+  notifyOpsSignupSubmitted,
   notifyOrderParties,
+  notifyShopPayoutHeld,
   riderNotificationDrafts,
   shopNotificationDraft,
+  writeDraft,
 } from "../src/client-order-notifications.js";
 
 test("client-initiated states do not invent an inbox row", () => {
@@ -105,6 +112,154 @@ test("the shop is told about work on its board, not about artwork QA", () => {
   const qc = shopNotificationDraft({ id: "ord_1", supplierId: "user_s", state: "supplier_self_qc" });
   assert.equal(qc.type, "shop_job_self_qc");
   assert.equal(qc.userId, "user_s");
+});
+
+test("assignment writes one shop row and a retry of the same type does not duplicate", () => {
+  const store = { notifications: [] };
+  const order = { id: "ord_1", supplierId: "user_s", state: "supplier_assigned" };
+  assert.equal(shopNotificationDraft(order).type, "shop_job_assigned");
+  let n = 0;
+  const first = notifyOrderParties(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
+  assert.deepEqual(first.created.map((row) => row.type), ["shop_job_assigned"]);
+  const second = notifyOrderParties(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
+  assert.equal(second.created.length, 0);
+  assert.equal(store.notifications.length, 1);
+  const again = writeDraft(store, shopNotificationDraft(order), { id: "ntf_dup", at: "2026-09-01T00:00:00.000Z" });
+  assert.equal(again.created, false);
+  assert.equal(again.notification.id, first.created[0].id);
+});
+
+test("payment_authorized tells an assigned shop it may start", () => {
+  const draft = shopNotificationDraft({ id: "ord_1", supplierId: "user_s", state: "payment_authorized" });
+  assert.equal(draft.type, "shop_job_may_start");
+});
+
+test("cancelled tells the client, assigned shop, and assigned rider", () => {
+  assert.equal(
+    clientNotificationDraft({ id: "ord_1", clientId: "user_c", state: "cancelled" }).type,
+    "order_cancelled",
+  );
+  assert.equal(
+    shopNotificationDraft({ id: "ord_1", supplierId: "user_s", state: "cancelled" }).type,
+    "shop_job_cancelled",
+  );
+  const riders = riderNotificationDrafts({}, {
+    id: "ord_1",
+    riderId: "user_r",
+    state: "cancelled",
+  });
+  assert.equal(riders.length, 1);
+  assert.equal(riders[0].type, "order_cancelled");
+  assert.equal(shopNotificationDraft({ id: "ord_1", state: "cancelled" }), null);
+  assert.deepEqual(riderNotificationDrafts({}, { id: "ord_1", state: "cancelled" }), []);
+});
+
+test("QR submit writes one ops row per ops/admin membership and none for client or shop", () => {
+  const store = {
+    userRoleMemberships: [
+      { userId: "user_ops", role: "ops_admin" },
+      { userId: "user_admin", role: "super_admin" },
+      { userId: "user_admin", role: "ops_admin" },
+      { userId: "user_c", role: "client" },
+      { userId: "user_s", role: "supplier" },
+    ],
+    notifications: [],
+  };
+  const order = { id: "ord_1", clientId: "user_c", supplierId: "user_s" };
+  let n = 0;
+  const created = notifyOpsPaymentSubmitted(store, order, {
+    createId: () => `ntf_${++n}`,
+    at: "2026-09-01T00:00:00.000Z",
+  });
+  assert.deepEqual(
+    created.map((row) => `${row.userId}:${row.type}`).sort(),
+    ["user_admin:ops_payment_submitted", "user_ops:ops_payment_submitted"],
+  );
+  const again = notifyOpsPaymentSubmitted(store, order, {
+    createId: () => `ntf_${++n}`,
+    at: "2026-09-01T00:00:00.000Z",
+  });
+  assert.equal(again.length, 0);
+  assert.equal(store.notifications.some((row) => row.userId === "user_c" || row.userId === "user_s"), false);
+});
+
+test("checkout / enter needs_qa writes ops needs-QA rows once", () => {
+  const store = {
+    userRoleMemberships: [{ userId: "user_ops", role: "ops_admin" }],
+    notifications: [],
+  };
+  const order = { id: "ord_1" };
+  let n = 0;
+  const first = notifyOpsJobNeedsQa(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
+  assert.equal(first[0].type, "ops_job_needs_qa");
+  const second = notifyOpsJobNeedsQa(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
+  assert.equal(second.length, 0);
+});
+
+test("a client issue writes shop hold + ops rows without inventing a second hold", () => {
+  const store = {
+    userRoleMemberships: [{ userId: "user_ops", role: "ops_admin" }],
+    notifications: [],
+  };
+  const order = { id: "ord_1", supplierId: "user_s", payoutHold: true };
+  let n = 0;
+  const shop = notifyShopPayoutHeld(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
+  const ops = notifyOpsIssueReported(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
+  assert.equal(shop[0].type, "shop_payout_held");
+  assert.equal(ops[0].type, "ops_issue_reported");
+  assert.equal(order.payoutHold, true);
+  assert.equal(
+    notifyShopPayoutHeld(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" }).length,
+    0,
+  );
+});
+
+test("signup submit writes ops rows; an approval decision still notifies only the applicant", () => {
+  const store = {
+    userRoleMemberships: [
+      { userId: "user_ops", role: "ops_admin" },
+      { userId: "user_admin", role: "super_admin" },
+    ],
+    notifications: [],
+  };
+  let n = 0;
+  const created = notifyOpsSignupSubmitted(
+    store,
+    { id: "case_1", kind: "supplier" },
+    { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" },
+  );
+  assert.deepEqual(
+    created.map((row) => row.userId).sort(),
+    ["user_admin", "user_ops"],
+  );
+  assert.equal(created[0].type, "ops_signup_submitted");
+  const again = notifyOpsSignupSubmitted(
+    store,
+    { id: "case_1", kind: "supplier" },
+    { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" },
+  );
+  assert.equal(again.length, 0);
+});
+
+test("a rejected payment tells the client to resubmit, once", () => {
+  const store = { notifications: [] };
+  const order = { id: "ord_1", clientId: "user_c" };
+  let n = 0;
+  const first = notifyClientPaymentRejected(store, order, {
+    createId: () => `ntf_${++n}`,
+    at: "2026-09-01T00:00:00.000Z",
+    reason: "The reference does not match.",
+  });
+  assert.equal(first[0].type, "order_payment_rejected");
+  assert.equal(first[0].userId, "user_c");
+  assert.equal(
+    notifyClientPaymentRejected(store, order, {
+      createId: () => `ntf_${++n}`,
+      at: "2026-09-01T00:00:00.000Z",
+      reason: "Still wrong.",
+    }).length,
+    0,
+  );
 });
 
 test("an unassigned packed job is offered to approved riders", () => {

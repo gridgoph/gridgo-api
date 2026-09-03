@@ -25,6 +25,11 @@ import {
   multiplyMinor,
   validatePreferenceRanking,
 } from "./order-match.js";
+import {
+  notifyOpsJobNeedsQa,
+  notifyOpsPaymentSubmitted,
+} from "./client-order-notifications.js";
+import { queueOrderInvalidate } from "./notifications.js";
 
 const DEFAULT_RANKING = Object.freeze(["quality", "speed", "cost", "distance"]);
 
@@ -657,6 +662,9 @@ function checkout(store, user, cart, body, createId, at) {
     entityType: "order", entityId: orderId, orderId,
     detail: { jobCount: jobs.length, itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
+  notifyOpsJobNeedsQa(store, order, { createId, at });
+  notifyOpsPaymentSubmitted(store, order, { createId, at });
+  queueOrderInvalidate(store, order, ["orders"]);
   return { order: publicMatchedOrder(store, order), invoice };
 }
 
