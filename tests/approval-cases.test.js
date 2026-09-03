@@ -6,6 +6,7 @@ import {
   decideApprovalCase,
   supplierApprovalReadiness,
 } from "../src/approval-cases.js";
+import { notifyOpsSignupSubmitted } from "../src/client-order-notifications.js";
 
 const AT = "2026-08-16T00:00:00.000Z";
 
@@ -207,4 +208,32 @@ test("supplier approve, suspend, and restore preserve explicit service review", 
   });
   assert.equal(store.approvalCases[0].status, "approved");
   assert.equal(store.supplierServices[0].state, "suspended");
+});
+
+test("approve still notifies only the applicant after ops signup rows exist", () => {
+  const store = supplierStore();
+  store.userRoleMemberships.push(
+    { userId: "ops", role: "ops_admin", createdAt: AT },
+    { userId: "admin", role: "super_admin", createdAt: AT },
+  );
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_${sequence += 1}`;
+  notifyOpsSignupSubmitted(store, store.approvalCases[0], { createId, at: AT });
+  assert.equal(store.notifications.length, 2);
+  assert.ok(store.notifications.every((row) => row.type === "ops_signup_submitted"));
+
+  decideApprovalCase({
+    store,
+    caseId: "case_supplier",
+    action: "approve",
+    input: { expectedVersion: 1, requestId: "request_approve_only_applicant", reason: null },
+    actor: { id: "ops", role: "ops_admin" },
+    actorRole: "ops_admin",
+    at: AT,
+    createId,
+  });
+  const after = store.notifications.filter((row) => row.type !== "ops_signup_submitted");
+  assert.equal(after.length, 1);
+  assert.equal(after[0].userId, "supplier");
+  assert.match(after[0].type, /^approval_/);
 });

@@ -495,14 +495,24 @@ Returns the caller's non-deleted notifications, newest first, plus an append-ord
 
 ### `GET /notifications/stream`
 
-Opens a caller-scoped Server-Sent Events stream using the same bearer token as other authenticated routes. The response uses `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and a five-second reconnect hint. Each new notification created by any server path is sent only to its owner:
+Opens a caller-scoped Server-Sent Events stream using the same bearer token as other authenticated routes. The response uses `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and a five-second reconnect hint. Each new notification created by any server path is sent only to its owner. The `data` object is the same public inbox row as `GET /notifications` (including `orderTitle` / `orderState` when the row names an order — never the hydrated order):
 
 ```text
 id: ntf_124
 event: notification
-data: {"id":"ntf_124","userId":"user_client","title":"Final price ready","body":"Review your order.","read":false,"at":"2026-08-11T02:01:00.000Z"}
+data: {"id":"ntf_124","userId":"user_client","title":"Final price ready","body":"Review your order.","read":false,"at":"2026-08-11T02:01:00.000Z","orderTitle":"Grand opening tarpaulin","orderState":"production"}
 
 ```
+
+After a mutation commits, the same stream may also send a silent refetch ping. It has no `id:` field and is not replayed from `Last-Event-ID` — reconnect and list snapshot are enough:
+
+```text
+event: invalidate
+data: {"resource":"orders","id":"ord_1"}
+
+```
+
+`resource` is one of `orders`, `jobs`, `approvals`, `escalations`, `claims`, `dispatch`, `payouts`. `id` is optional. The payload is never a collection.
 
 The server sends a comment heartbeat every 25 seconds (`: heartbeat <ISO timestamp>`) and removes the subscription and timer immediately when either side closes.
 
