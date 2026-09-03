@@ -245,6 +245,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     supplierId: "supplier_a",
     fromPriceMinor: 12_500,
     effectivePriceMinor: 12_500,
+    printerMaxWidthFeet: null,
     selectedOptions: [{ id: "option_item_a_matte", label: "Matte" }],
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 25_000);
@@ -351,6 +352,42 @@ test("a tarpaulin priced by the square foot can actually be ordered", async () =
       measurement: { width: 3_000, height: 5_000 },
     }),
     (error) => error.code === "measurement_not_accepted",
+  );
+});
+
+test("a tarpaulin cart line is refused when requested width exceeds the printer cap", async () => {
+  const { store, client } = fixture();
+  const tarpaulin = store.catalogItems.find((row) => row.id === "item_a");
+  tarpaulin.subcategoryCode = "tarpaulins_outdoor_banners";
+  tarpaulin.pricingUnit = "per_area";
+  tarpaulin.measureUnit = "ft";
+  tarpaulin.basePriceMinor = 4_000;
+  tarpaulin.printerMaxWidthFeet = 5;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  const fits = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    measurement: { width: 5_000, height: 8_000 },
+  });
+  assert.equal(fits.status, 201);
+  assert.equal(fits.body.cart.lines[0].listing.printerMaxWidthFeet, 5);
+
+  await assert.rejects(
+    call("PATCH", `/me/carts/${cartId}/lines/${fits.body.cart.lines[0].id}`, {
+      measurement: { width: 6_000, height: 8_000 },
+    }),
+    (error) => error.status === 409 && error.code === "printer_cap_exceeded" && error.details.field === "printerMaxWidthFeet",
+  );
+
+  const cartId2 = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId2}/lines`, {
+      catalogItemId: "item_a", optionIds: [], quantity: 1,
+      measurement: { width: 6_000, height: 8_000 },
+    }),
+    (error) => error.status === 409 && error.code === "printer_cap_exceeded",
   );
 });
 

@@ -52,7 +52,7 @@ const TABLES = [
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "turnaround_mode", "turnaround_hours", "file_format_mode", "active", "sort_order", "version", "created_at", "updated_at"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "turnaround_mode", "turnaround_hours", "file_format_mode", "active", "sort_order", "version", "created_at", "updated_at"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
   { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_price_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "min_quantity", "unit_price_minor", "created_at", "updated_at"] },
@@ -322,6 +322,7 @@ function rowsFromStore(store) {
       minimum_height_milli: item.minimumHeightMilli ?? null,
       minimum_length_milli: item.minimumLengthMilli ?? null,
       minimum_order_quantity: item.minimumOrderQuantity ?? null,
+      printer_max_width_feet: item.printerMaxWidthFeet ?? null,
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       file_format_mode: item.fileFormatMode || "inherit", active: item.active !== false,
       sort_order: item.sortOrder, version: item.version || 1,
@@ -768,6 +769,7 @@ export async function loadStore(database) {
     measureUnit: row.measure_unit,
     minimumWidthMilli: row.minimum_width_milli, minimumHeightMilli: row.minimum_height_milli,
     minimumLengthMilli: row.minimum_length_milli, minimumOrderQuantity: row.minimum_order_quantity,
+    printerMaxWidthFeet: row.printer_max_width_feet,
     turnaroundMode: row.turnaround_mode, turnaroundHours: row.turnaround_hours,
     fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
     version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
@@ -1221,6 +1223,7 @@ function catalogHitsCte() {
              item.package_qty, item.turnaround_mode, item.turnaround_hours,
              item.file_format_mode, item.active, item.sort_order, item.version,
              item.created_at, item.updated_at, item.search_text, item.search_tsv,
+             item.printer_max_width_feet,
              COALESCE(item.turnaround_hours, service.standard_turnaround_hours, service.turnaround_hours)
                AS effective_hours
         FROM supplier_catalog_items item
@@ -1281,6 +1284,7 @@ function catalogItemFromListRow(row) {
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    printerMaxWidthFeet: row.printer_max_width_feet ?? null,
   };
 }
 

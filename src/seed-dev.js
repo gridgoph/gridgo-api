@@ -10,8 +10,21 @@ import { loadStore, saveStore } from "./postgres-store.js";
 import { notifyOrderParties } from "./client-order-notifications.js";
 import { seedReferenceData } from "./seed.js";
 import { measurementKindFor } from "./pricing.js";
-import { priceCatalogSelection, selectedCatalogPrice } from "./supplier-catalog.js";
+import { priceCatalogSelection, selectedCatalogPrice, TARPAULIN_OUTDOOR_BANNERS } from "./supplier-catalog.js";
 import { defaultTaxonomy } from "./taxonomy.js";
+
+/**
+ * Printer roll width for a seeded tarpaulin listing.
+ *
+ * Polymedia's presses stop at 5 ft. Any other seeded shop that already sells
+ * tarpaulin is 7 ft -- do not invent a shop named Jools to hold that number.
+ */
+function seededPrinterCap(listing, starter, shopSlug) {
+  const code = listing.subcategoryCode || starter?.subcategoryCode;
+  if (code !== TARPAULIN_OUTDOOR_BANNERS) return null;
+  if (Number.isSafeInteger(listing.printerMaxWidthFeet)) return listing.printerMaxWidthFeet;
+  return shopSlug === "polymedia" ? 5 : 7;
+}
 
 /** Local development shop. Production `npm run seed` never creates this. */
 export const LOVIS_DEV_SHOP = Object.freeze({
@@ -479,6 +492,7 @@ export async function seedDevelopmentShop(database, {
         minimumHeightMilli: listing.minimumHeightMilli ?? null,
         minimumLengthMilli: listing.minimumLengthMilli ?? null,
         minimumOrderQuantity: listing.minimumOrderQuantity ?? null,
+        printerMaxWidthFeet: seededPrinterCap(listing, starter, "lovis"),
         turnaroundMode: starter.defaultTurnaroundHours ? "override" : "inherit",
         turnaroundHours: starter.defaultTurnaroundHours ?? null,
         fileFormatMode: starter.defaultFormatCodes?.length ? "override" : "inherit",
@@ -765,6 +779,8 @@ export const ADDITIONAL_DEV_SHOPS = Object.freeze([
             priceMinor: 4_000, // PHP 40.00 per square foot, eco-solvent
             minimumWidthMilli: 2_000,
             minimumHeightMilli: 4_000,
+            // Roll width of the shop's printers. Not the 2x4 billing minimum.
+            printerMaxWidthFeet: 5,
             description: "Heavy-duty eco-solvent tarpaulin for events, campaigns and roadside signs.",
           },
           {
@@ -1055,6 +1071,7 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
         minimumHeightMilli: listing.minimumHeightMilli ?? null,
         minimumLengthMilli: listing.minimumLengthMilli ?? null,
         minimumOrderQuantity: listing.minimumOrderQuantity ?? null,
+        printerMaxWidthFeet: seededPrinterCap(listing, starter, fixture.slug),
         turnaroundMode: "override",
         turnaroundHours: listing.turnaroundHours,
         fileFormatMode: starter.defaultFormatCodes?.length ? "override" : "inherit",

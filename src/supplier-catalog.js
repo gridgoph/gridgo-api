@@ -28,6 +28,154 @@ const GOVERNED_BINDING_FIELDS = new Set([
   "material", "finish", "size", "paper_size", "item_size", "dimensions", "color_mode",
 ]);
 
+/** Tarpaulin & Outdoor Banners. The only family that carries a printer width cap. */
+export const TARPAULIN_OUTDOOR_BANNERS = "tarpaulins_outdoor_banners";
+const PRINTER_CAP_MIN_FEET = 1;
+const PRINTER_CAP_MAX_FEET = 20;
+const SIZE_WXH = /^(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/i;
+const FEET_TEXT = /^(\d+(?:\.\d+)?)\s*(?:ft|feet|')?$/i;
+const SIZE_BINDING_FIELDS = new Set(["size", "item_size", "dimensions"]);
+
+function milliToFeet(milli, unit) {
+  if (!Number.isFinite(milli) || milli <= 0) return null;
+  const value = milli / 1000;
+  switch (unit) {
+    case "ft": return value;
+    case "in": return value / 12;
+    case "m": return value / 0.3048;
+    case "cm": return value / 30.48;
+    case "mm": return value / 304.8;
+    default: return null;
+  }
+}
+
+/**
+ * A width in feet from a size string, a number, or a `{ width }` / `{ widthFeet }` bag.
+ *
+ * `2x3` and `4x8` are the shop-board size labels; the first number is the
+ * width. A bare `5` or `5ft` is already feet. Does not interpret milli-unit
+ * measurements -- those go through `milliToFeet`.
+ */
+export function parseWidthFeet(value) {
+  if (value == null) return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return parseWidthFeet(value.widthFeet) ?? parseWidthFeet(value.width) ?? parseWidthFeet(value.size);
+  }
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text) return null;
+  const size = text.match(SIZE_WXH);
+  if (size) {
+    const width = Number(size[1]);
+    return Number.isFinite(width) && width > 0 ? width : null;
+  }
+  const feet = text.match(FEET_TEXT);
+  if (!feet) return null;
+  const width = Number(feet[1]);
+  return Number.isFinite(width) && width > 0 ? width : null;
+}
+
+function widthFromMeasurement(measurement, measureUnit) {
+  if (!measurement || measurement.width == null) return null;
+  return milliToFeet(Number(measurement.width), measurement.unit || measurement.measureUnit || measureUnit);
+}
+
+function widthFromStructuredSpec(spec, measureUnit) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) return null;
+  return parseWidthFeet(spec.widthFeet)
+    ?? parseWidthFeet(spec.size)
+    ?? parseWidthFeet(spec.dimensions)
+    ?? widthFromMeasurement(spec, measureUnit)
+    ?? parseWidthFeet(spec.width);
+}
+
+function widthFromSelectedOptions(request, listing, store) {
+  const optionIds = request?.optionIds || request?.line?.optionIds;
+  if (!Array.isArray(optionIds) || optionIds.length === 0) return null;
+  const idSet = new Set(optionIds.map(String));
+  const options = [];
+  if (Array.isArray(listing?.optionGroups)) {
+    for (const group of listing.optionGroups) {
+      for (const option of (group.options || [])) {
+        if (idSet.has(String(option.id))) options.push(option);
+      }
+    }
+  } else if (store) {
+    for (const option of (store.catalogOptions || [])) {
+      if (idSet.has(String(option.id))) options.push(option);
+    }
+  }
+  for (const option of options) {
+    const binding = option.specBinding;
+    if (binding && SIZE_BINDING_FIELDS.has(binding.fieldCode)) {
+      const width = parseWidthFeet(binding.value ?? binding.valueCode);
+      if (width != null) return width;
+    }
+    const fromLabel = parseWidthFeet(option.label);
+    if (fromLabel != null) return fromLabel;
+  }
+  return null;
+}
+
+/**
+ * The client's requested width in feet, or null when none was stated.
+ *
+ * Sources, first match wins: an explicit `widthFeet`, a measurement (thousandths
+ * of the listing's `measureUnit`), structured spec, a selected size option, or
+ * a `size` / `widthFeet` field already on a cart line. No width means "do not
+ * newly fail" -- matching and the basket stay open until the client states one.
+ */
+export function requestedWidthFeet(request = {}, listing = null, store = null) {
+  const measureUnit = listing?.measureUnit ?? request?.measureUnit ?? null;
+  const line = request.line;
+  const sources = [
+    parseWidthFeet(request.widthFeet),
+    widthFromMeasurement(request.measurement, measureUnit),
+    widthFromStructuredSpec(request.structuredSpec, measureUnit),
+    widthFromSelectedOptions(request, listing, store),
+    line ? parseWidthFeet(line.widthFeet) : null,
+    line ? parseWidthFeet(line.size) : null,
+    line ? widthFromMeasurement(line.measurement, measureUnit) : null,
+    line ? widthFromStructuredSpec(line.structuredSpec, measureUnit) : null,
+  ];
+  if (Array.isArray(request.cartLines)) {
+    for (const cartLine of request.cartLines) {
+      sources.push(requestedWidthFeet({ line: cartLine }, listing, store));
+    }
+  }
+  for (const width of sources) {
+    if (width != null) return width;
+  }
+  return null;
+}
+
+export function isValidPrinterMaxWidthFeet(value) {
+  return Number.isSafeInteger(value) && value >= PRINTER_CAP_MIN_FEET && value <= PRINTER_CAP_MAX_FEET;
+}
+
+/** Null on every family except tarpaulin, even if a stale value is still on the row. */
+export function projectedPrinterMaxWidthFeet(item) {
+  if (item?.subcategoryCode !== TARPAULIN_OUTDOOR_BANNERS) return null;
+  return isValidPrinterMaxWidthFeet(item.printerMaxWidthFeet) ? item.printerMaxWidthFeet : null;
+}
+
+/**
+ * Whether this listing can print the requested width.
+ *
+ * A listing with no cap, or a request with no width, is left alone. Only a
+ * stated width larger than `printerMaxWidthFeet` makes the listing ineligible.
+ */
+export function listingFitsPrinterCap(listing, request = {}, store = null) {
+  const cap = listing?.printerMaxWidthFeet;
+  if (!isValidPrinterMaxWidthFeet(cap)) return true;
+  const width = requestedWidthFeet(request, listing, store);
+  if (width == null) return true;
+  return width <= cap;
+}
+
 export class CatalogError extends Error {
   constructor(status, code, message, details = {}) {
     super(message);
@@ -195,6 +343,9 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
   if (!String(item.name || "").trim()) blockers.push("name");
   if (!Number.isSafeInteger(item.basePriceMinor) || item.basePriceMinor < 0) blockers.push("base_price");
   if (!item.subcategoryCode) blockers.push("subcategory");
+  if (item.subcategoryCode === TARPAULIN_OUTDOOR_BANNERS && !isValidPrinterMaxWidthFeet(item.printerMaxWidthFeet)) {
+    blockers.push("printer_max_width_feet");
+  }
   if (effectiveAcceptedFormats(store, item).length === 0) blockers.push("accepted_file_formats");
   const photos = (store.catalogItemPhotos || [])
     .filter((photo) => photo.catalogItemId === item.id)
@@ -339,6 +490,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     minimumHeightMilli: item.minimumHeightMilli ?? null,
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
+    printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),
     pricingBasis: service.pricingBasis,
@@ -937,6 +1089,7 @@ export function privateCatalogItem(store, item) {
     minimumHeightMilli: item.minimumHeightMilli ?? null,
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
+    printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),
     turnaroundMode: item.turnaroundMode || "inherit",

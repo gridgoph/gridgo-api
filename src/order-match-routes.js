@@ -5,7 +5,9 @@ import {
 import {
   catalogItemBlockers,
   createOrderLineSnapshot,
+  listingFitsPrinterCap,
   minimumCatalogPrice,
+  projectedPrinterMaxWidthFeet,
   publicCatalogItem,
   publicSupplierShop,
   priceCatalogSelection,
@@ -234,8 +236,17 @@ function publicCartListingStub(store, item, optionIds) {
     supplierId: item.supplierId,
     fromPriceMinor: minimumCatalogPrice(store, item),
     effectivePriceMinor: selected.effectiveUnitPriceMinor,
+    printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
+}
+
+function assertPrinterCap(store, item, request) {
+  if (listingFitsPrinterCap(item, request, store)) return;
+  fail(409, "printer_cap_exceeded", "This shop's printer cannot print that width.", {
+    field: "printerMaxWidthFeet",
+    printerMaxWidthFeet: item.printerMaxWidthFeet,
+  });
 }
 
 function cartShops(store, lines) {
@@ -471,6 +482,7 @@ function checkout(store, user, cart, body, createId, at) {
     if (!listing || listing.supplierId !== line.supplierId) {
       fail(409, "catalog_item_stale", "A cart listing changed or is no longer public. Refresh the cart before checkout.", { lineId: line.id });
     }
+    assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     if (line.artworkFileId) fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
     if (line.mockupFileId) fileFor(store, user, line.mockupFileId, "mockup", "mockupFileId");
     if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
@@ -748,6 +760,10 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (pathname.endsWith("/next") && (!Array.isArray(body.excludedSupplierIds) || body.excludedSupplierIds.length === 0)) {
       fail(400, "excluded_shops_required", "Send at least one already-seen shop id.", { field: "excludedSupplierIds" });
     }
+    const cartId = body.cartId == null ? null : String(body.cartId);
+    const cartLines = cartId
+      ? (store.cartLines || []).filter((row) => row.cartId === cartId)
+      : [];
     return {
       status: 200,
       body: clientFacingMatch(matchShop(store, {
@@ -761,6 +777,11 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
         // checkout.
         deadline: body.deadline ?? null,
         now: now(),
+        measurement: body.measurement,
+        structuredSpec: body.structuredSpec,
+        optionIds: body.optionIds,
+        widthFeet: body.widthFeet,
+        cartLines,
       })),
       mutated: false,
     };
@@ -841,11 +862,14 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
         field: "catalogItemId",
       });
     }
+    const measurement = measurementFor(item, body);
+    const structuredSpec = body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec"));
+    assertPrinterCap(store, item, { measurement, structuredSpec, optionIds: body.optionIds });
     const line = {
       id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id,
       optionIds: [...body.optionIds], quantity: positiveInteger(body.quantity, "quantity"),
-      measurement: measurementFor(item, body),
-      structuredSpec: body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec")),
+      measurement,
+      structuredSpec,
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
     };
@@ -888,6 +912,8 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (Object.hasOwn(body, "structuredSpec")) line.structuredSpec = structuredClone(record(body.structuredSpec, "structuredSpec"));
     if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
+    const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+    if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     line.updatedAt = at;
     updateCart(cart, at);
     return { status: 200, body: { cart: publicCartForLineMutation(store, cart) }, mutated: true };

@@ -14,7 +14,7 @@ Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `
 - `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
 - `GET /catalog/media/:fileId` returns metadata for a photo or shop image that is already public.
 
-A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item is active, it has a ready photo, every option group has an active option, and the effective accepted-format set is nonempty.
+A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item is active, it has a ready photo, every option group has an active option, the effective accepted-format set is nonempty, and a `tarpaulins_outdoor_banners` listing has `printerMaxWidthFeet`.
 
 ## Shop self-service
 
@@ -76,7 +76,17 @@ Response (additive):
 
 `total` is the filtered count (same predicates as the page, no rank). `GET /catalog/shops` does not accept `q` in this slice.
 
-`POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`. A starter is copied into catalog rows at create time and is never referenced after.
+`POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `printerMaxWidthFeet?`. A starter is copied into catalog rows at create time and is never referenced after.
+
+### Printer max width (`printerMaxWidthFeet`)
+
+Integer feet, 1–20 inclusive. SQL column `printer_max_width_feet` on `supplier_catalog_items`. This is the shop's printing-machine cap, not `minimumWidthMilli` (the smallest billable size).
+
+- Required on create, and on any mutation that would put a `tarpaulins_outdoor_banners` listing on the board. Missing, null, non-integer, or out of range is `400 printer_cap_required` with `field: "printerMaxWidthFeet"`.
+- On every other subcategory the field must be `null`. Sending a non-null value is `400 printer_cap_not_applicable`.
+- Private and public listing projections include `printerMaxWidthFeet` (`null` when the listing is not tarpaulin).
+- A tarpaulin listing is not complete and not public without it.
+- Matching and cart: if the request or line has a width in feet (structured spec, selected size option, measurement, or an existing size field already on the line), the listing is ineligible when requested width > `printerMaxWidthFeet`. If no width is present, the line is not newly failed.
 
 Existing-record mutations require `expectedVersion` or `If-Match`. DELETE may send `If-Match` with no JSON body. Caps: 8 photos, 6 option groups, 20 options per group, 8 prep steps. Option groups have `kind` `spec` | `addon` and optional `helpText`. A group may be created with zero options; it cannot go on the board until it has an active option. Addon groups are optional. Options use integer `priceModifierMinor` and optional `specBinding` to governed fields only; a custom label with no binding is valid. Deleting an item referenced by an order snapshot archives it (`active=false`); a never-ordered item is removed.
 
