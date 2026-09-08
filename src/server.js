@@ -141,6 +141,12 @@ import {
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
 import { createDatabase } from "./database.js";
+import { createSupportMailer, emailConfigured } from "./support-mail.js";
+import {
+  isSupportDeskRoute,
+  routeSupportDesk,
+  seedSupportDeskAdmin,
+} from "./support-desk.js";
 import {
   loadDeviceTokenStore,
   loadStore,
@@ -170,8 +176,8 @@ const objectStorage = createObjectStorage(process.env);
 // reports `push.status` as `disabled` or `misconfigured` with the reason, so
 // the gap is loud rather than silent.
 const pushDelivery = createPushDeliveryOrDisable(process.env);
-// Ceiling on registrations nobody has signed in on; `POST /devices` is the one
-// unauthenticated write on the platform. See `registerUnclaimedDeviceToken`.
+const supportMailer = createSupportMailer(process.env);
+// Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
@@ -1638,12 +1644,25 @@ async function handleRequest(req, res) {
         database: databaseHealth,
         storage: objectStorage.health(),
         push: pushDelivery.health(),
+        emailConfigured: emailConfigured(process.env),
         at: now(),
       });
     }
+    if (await routeSupportDesk({
+      req,
+      res,
+      pathname,
+      readBody,
+      send,
+      database,
+      mailer: supportMailer,
+    })) {
+      return;
+    }
+
     // ---- push registration before there is an account ----
     //
-    // The only unauthenticated write on the platform, and it exists so an
+    // An unauthenticated write, and it exists so an
     // "update your app" announcement reaches an install whose owner never
     // signed in — the people most likely to be stuck on a broken build.
     //
@@ -5465,6 +5484,28 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (mutatesStore && isSupportDeskRoute(pathname)) {
+    // Public ticket submit and the desk JWT are not Clerk. They commit under
+    // their own advisory lock inside the handler, the same way anonymous
+    // device registration does, so they never wait on JWKS or the domain lock.
+    void readBody(req)
+      .then(() => handleRequest(req, res))
+      .catch((error) => {
+        if (res.headersSent) {
+          res.destroy(error);
+          return;
+        }
+        if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+          sendDomainError(res, error);
+          return;
+        }
+        send(res, 500, {
+          error: "server_error",
+          message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
+        });
+      });
+    return;
+  }
   if (mutatesStore) {
     // Only a mutation bearing a verified Clerk subject enters the global
     // domain transaction. Without one, no store-mutating route is reachable:
@@ -5522,6 +5563,7 @@ async function reconcileInterruptedFiles() {
 // Migrations and the reference seed are explicit operator steps. Boot never
 // creates schema or data; it refuses before listening when PostgreSQL is not ready.
 await database.assertReady();
+await seedSupportDeskAdmin(database);
 
 server.listen(PORT, HOST, () => {
   console.log(`gridgo-api listening on http://${HOST}:${PORT}`);

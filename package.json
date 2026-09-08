@@ -20,6 +20,7 @@
     "@clerk/backend": "3.16.5",
     "minio": "8.0.7",
     "node-pg-migrate": "^8.0.3",
+    "nodemailer": "10.0.1",
     "pg": "^8.16.3"
   },
   "overrides": {

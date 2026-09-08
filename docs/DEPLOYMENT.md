@@ -45,6 +45,15 @@ CLERK_WEBHOOK_SIGNING_SECRET=whsec_<production signing secret>
 # Bucket-scoped MinIO identity; must match minio.env.
 MINIO_ACCESS_KEY=<bucket user>
 MINIO_SECRET_KEY=<bucket secret>
+
+# Optional public support desk (landing /support). Firstmate installs these
+# after the API merge; they are not required to boot. Never put EMAIL_* in a
+# VITE_* or public payload. SUPPORT_DESK_JWT_SECRET must not be a Clerk secret.
+# EMAIL_USER=<gmail address>
+# EMAIL_PASSWORD=<gmail app password>
+# SUPPORT_DESK_USERNAME=<desk username>
+# SUPPORT_DESK_PASSWORD=<desk password, hashed into support_admins at boot>
+# SUPPORT_DESK_JWT_SECRET=<desk session HMAC secret>
 ```
 
 `minio.env` is read by MinIO and its initializer:
