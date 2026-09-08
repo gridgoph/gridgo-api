@@ -63,9 +63,14 @@ export function createRealtimeTransport({
     next.on("notification", (message) => {
       chain = chain
         .then(() => receive(message.payload))
-        .catch(() =>
-          logger.warn?.("realtime delivery could not refresh committed state"),
-        );
+        .catch(async () => {
+          logger.warn?.("realtime delivery could not refresh committed state");
+          // Reconnect coalesces failed deliveries into a current-state collection
+          // refresh, using the same bounded backoff as a lost LISTEN connection.
+          // Never replay a private pointer from a projection that failed to load.
+          await next.end().catch(() => {});
+          reconnect();
+        });
     });
     next.on("error", () => {
       void next.end().catch(() => {});

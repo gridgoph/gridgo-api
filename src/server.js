@@ -2453,7 +2453,7 @@ async function handleRequest(req, res) {
       res.write("retry: 5000\n\n");
 
       const writeNotification = (notification, committedStore = store) => {
-        if (!notificationVisible(committedStore,notification,user.id,eventRole)) return;
+        if (notification.push === false || !notificationVisible(committedStore, notification, user.id, eventRole)) return;
         res.write(formatNotificationEvent(notification, orderFromNotification(committedStore, notification)));
       };
       const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
@@ -2517,6 +2517,9 @@ async function handleRequest(req, res) {
       const notification = store.notifications.find((candidate) => candidate.id === notificationId);
       if (!notification) return send(res, 404, { error: "notification_not_found" });
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
+      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole)) {
+        return send(res, 403, { error: "forbidden" });
+      }
       if (notification.deletedAt != null) return send(res, 404, { error: "notification_not_found" });
       const body = await readBody(req);
       if (typeof body.read !== "boolean") {
@@ -2524,7 +2527,7 @@ async function handleRequest(req, res) {
       }
       notification.read = body.read;
       await save(store);
-      return send(res, 200, { notification });
+      return send(res, 200, { notification: publicNotification(notification, orderFromNotification(store, notification)) });
     }
 
     if (req.method === "DELETE" && /^\/notifications\/[^/]+$/.test(pathname)) {
@@ -2532,6 +2535,9 @@ async function handleRequest(req, res) {
       const notification = store.notifications.find((candidate) => candidate.id === notificationId);
       if (!notification) return send(res, 404, { error: "notification_not_found" });
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
+      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole)) {
+        return send(res, 403, { error: "forbidden" });
+      }
       if (notification.deletedAt == null) {
         notification.deletedAt = now();
         await save(store);

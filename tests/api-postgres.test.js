@@ -2698,3 +2698,132 @@ test(
     }
   },
 );
+
+test(
+  "notification mutations enforce role context and revoked assignment with public responses",
+  { skip: !DATABASE_URL },
+  async () => {
+    const database = createDatabase({ DATABASE_URL });
+    await clearAndFixture(database);
+    await database.transaction(async () => {
+      const s = await loadStore(database);
+      s.userRoleMemberships.push({
+        userId: "user_rider",
+        role: "client",
+        createdAt: AT,
+      });
+      s.clientProfiles.push({
+        userId: "user_rider",
+        clientKind: "personal",
+        updatedAt: AT,
+      });
+      s.orders.find((o) => o.id === "ord_payout").riderId = "user_rider";
+      s.notifications.push({
+        id: "scoped_rider_n",
+        userId: "user_rider",
+        appRole: "rider",
+        type: "order_rider_assigned",
+        orderId: "ord_payout",
+        title: "Assigned trip",
+        body: "Safe",
+        read: false,
+        at: AT,
+        occurrenceKey: "internal_occurrence",
+      });
+      await saveStore(database, s);
+    });
+    const instance = await startApi();
+    try {
+      for (const method of ["PATCH", "DELETE"]) {
+        const response = await request(
+          instance.api,
+          "/notifications/scoped_rider_n",
+          {
+            method,
+            subject: "clerk_rider",
+            headers: { "X-GRIDGO-Role": "client" },
+            ...(method === "PATCH" ? { body: { read: true } } : {}),
+          },
+        );
+        assert.equal(response.status, 403, JSON.stringify(response.body));
+      }
+      await database.transaction(async () => {
+        const s = await loadStore(database);
+        s.notifications.push({
+          id: "silent_replay_n",
+          userId: "user_rider",
+          appRole: "rider",
+          type: "general",
+          title: "Silent own action",
+          body: "Safe",
+          read: false,
+          at: AT,
+          push: false,
+        });
+        await saveStore(database, s);
+      });
+      const controller = new AbortController();
+      const stream = await fetch(
+        `${instance.api}/notifications/stream?role=rider`,
+        {
+          headers: { Authorization: `Bearer ${token("clerk_rider")}` },
+          signal: controller.signal,
+        },
+      );
+      assert.equal(stream.status, 200);
+      const reader = stream.body.getReader();
+      let received = "";
+      const stop = setTimeout(() => controller.abort(), 300);
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          received += new TextDecoder().decode(chunk.value);
+        }
+      } catch (error) {
+        if (error.name !== "AbortError") throw error;
+      } finally {
+        clearTimeout(stop);
+        controller.abort();
+      }
+      assert.match(received, /scoped_rider_n/);
+      assert.doesNotMatch(received, /silent_replay_n/);
+      const permitted = await request(
+        instance.api,
+        "/notifications/scoped_rider_n",
+        {
+          method: "PATCH",
+          subject: "clerk_rider",
+          headers: { "X-GRIDGO-Role": "rider" },
+          body: { read: true },
+        },
+      );
+      assert.equal(permitted.status, 200);
+      assert.equal(permitted.body.notification.occurrenceKey, undefined);
+      assert.equal(permitted.body.notification.appRole, undefined);
+      assert.equal(permitted.body.notification.orderState, "completed");
+      await database.transaction(async () => {
+        const s = await loadStore(database);
+        s.orders.find((o) => o.id === "ord_payout").riderId = null;
+        await saveStore(database, s);
+      });
+      for (const method of ["PATCH", "DELETE"]) {
+        const response = await request(
+          instance.api,
+          "/notifications/scoped_rider_n",
+          {
+            method,
+            subject: "clerk_rider",
+            headers: { "X-GRIDGO-Role": "rider" },
+            ...(method === "PATCH" ? { body: { read: false } } : {}),
+          },
+        );
+        assert.equal(response.status, 403, JSON.stringify(response.body));
+      }
+    } finally {
+      instance.child.kill("SIGTERM");
+      await new Promise((r) => instance.child.once("exit", r));
+      await database.close();
+    }
+  },
+);

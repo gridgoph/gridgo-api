@@ -22,6 +22,7 @@ test(
     const at = new Date().toISOString();
     const eventsA = createNotificationEvents(),
       eventsB = createNotificationEvents();
+    let rejectNextRead = false;
     const a = createRealtimeTransport({
         database: db,
         loadStore,
@@ -30,7 +31,14 @@ test(
       }),
       b = createRealtimeTransport({
         database: db,
-        loadStore,
+        loadStore: async (...args) => {
+          if (rejectNextRead) {
+            rejectNextRead = false;
+            throw new Error("transient read failure");
+          }
+          return loadStore(...args);
+        },
+        logger: { warn() {} },
         events: eventsB,
         connectionString: url,
       });
@@ -86,6 +94,31 @@ test(
       assert.equal(seenB.length, 1);
       assert.equal(seenB[0].title, "Committed");
       assert.deepEqual(hints, [{ resource: "notifications" }]);
+      hints.length = 0;
+      rejectNextRead = true;
+      await db.transaction(async () => {
+        const s = await loadStore(db);
+        queueInvalidate(s, {
+          resource: "orders",
+          id: "private_pointer",
+          userIds: [userId],
+        });
+        await a.enqueue(s, []);
+      });
+      for (
+        let i = 0;
+        i < 200 && !hints.some((h) => h.resource === "orders");
+        i++
+      )
+        await delay(20);
+      assert.ok(
+        hints.some((h) => h.resource === "orders"),
+        "failed remote reads recover even while subscribers stay connected",
+      );
+      assert.ok(
+        hints.every((h) => !h.id),
+        "recovery carries no stale private pointers",
+      );
       await assert.rejects(
         db.transaction(async () => {
           const s = await loadStore(db);
