@@ -50,7 +50,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "order_invoices",
+      "order_jobs", "order_invoices", "support_admins", "support_tickets",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -90,9 +90,22 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786946400000_line_math_understands_measured_units",
     "1786950000000_a_collected_order_waits_on_our_shelf",
     "1786953600000_a_shop_is_paid_across_four_stages",
+    "1786955400000_public_support_tickets",
     "1786957200000_tarpaulin_printer_max_width",
     "1786959000000_notification_push_outbox",
       ],
+    );
+
+    await client.query(`
+      INSERT INTO support_tickets (name, email, subject, message)
+      VALUES ('Ana', 'ana@example.com', 'Late delivery', 'Still waiting.')
+    `);
+    await assert.rejects(
+      client.query(`
+        INSERT INTO support_tickets (name, email, subject, message, status)
+        VALUES ('Ana', 'ana@example.com', 'Hi', 'x', 'pending')
+      `),
+      (error) => error.code === "23514",
     );
     await client.query(`
       INSERT INTO users
@@ -226,6 +239,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
   )).rows.map((row) => row.column_name));
   assert.equal(printerCapColumns.has("printer_max_width_feet"), false);
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_tickets`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_admins`])).rows[0].t, null);
     await runner(migrationOptions(schema, "down", 1, client));
   // The four-stage payout has no honest reverse -- two stages cannot say which
   // of four a shop had reached -- so its down leaves the rows alone. What it
