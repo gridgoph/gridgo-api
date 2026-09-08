@@ -264,6 +264,7 @@ test("a rejected payment tells the client to resubmit, once", () => {
 
 test("an unassigned packed job is offered to approved riders", () => {
   const store = {
+    userRoleMemberships: [{userId:"user_r",role:"rider"},{userId:"user_pending",role:"rider"}],
     users: [
       { id: "user_r", role: "rider", verificationStatus: "approved" },
       { id: "user_pending", role: "rider", verificationStatus: "pending" },

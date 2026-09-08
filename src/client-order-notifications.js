@@ -1,4 +1,5 @@
-import { opsAdminRecipientIds } from "./notifications.js";
+import { isContainedPickup } from "./operational-model.js";
+import { opsAdminRecipientIds, eligibleRiderIds } from "./notifications.js";
 
 /**
  * Client inbox rows for a job moving without the client doing the moving.
@@ -160,7 +161,9 @@ export function clientNotificationDraft(order) {
   if (!copy) return null;
   return {
     userId: order.clientId,
+    appRole: "client",
     type: copy.type,
+    occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
     orderId: order.id,
     title: copy.title,
     body: copy.body,
@@ -254,7 +257,8 @@ function sameLiveNotification(store, draft) {
     (notification) =>
       notification.userId === draft.userId
       && notification.type === draft.type
-      && notification.deletedAt == null
+      && (notification.appRole ?? null) === (draft.appRole ?? null)
+      && (notification.occurrenceKey ?? null) === (draft.occurrenceKey ?? null)
       && (notification.orderId ?? null) === (draft.orderId ?? null)
       && (notification.approvalCaseId ?? null) === (draft.approvalCaseId ?? null),
   );
@@ -279,7 +283,9 @@ export function shopNotificationDraft(order) {
   if (!copy) return null;
   return {
     userId: order.supplierId,
+    appRole: "supplier",
     type: copy.type,
+    occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
     orderId: order.id,
     title: copy.title,
     body: copy.body,
@@ -288,9 +294,7 @@ export function shopNotificationDraft(order) {
 }
 
 function approvedRiders(store) {
-  return (store.users || []).filter(
-    (user) => user.role === "rider" && user.verificationStatus === "approved",
-  );
+  return eligibleRiderIds(store).map(id => ({id}));
 }
 
 export function riderNotificationDrafts(store, order) {
@@ -300,18 +304,22 @@ export function riderNotificationDrafts(store, order) {
   if (assigned && order.riderId) {
     drafts.push({
       userId: order.riderId,
+      appRole: "rider",
       type: assigned.type,
+      occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
       orderId: order.id,
       title: assigned.title,
       body: assigned.body,
       read: false,
     });
   }
-  if (order.state === "ready_for_dispatch" && !order.riderId) {
+  if (order.state === "ready_for_dispatch" && !order.riderId && !isContainedPickup(order)) {
     for (const rider of approvedRiders(store)) {
       drafts.push({
         userId: rider.id,
+        appRole: "rider",
         type: "dispatch_available",
+        occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
         orderId: order.id,
         title: "A job is ready to collect",
         body: "Open Offers to take it before another rider does.",
@@ -389,10 +397,12 @@ function writeEach(store, drafts, { createId, at }) {
 function opsDrafts(store, fields) {
   return opsAdminRecipientIds(store).map((userId) => ({
     userId,
+    appRole: (store.userRoleMemberships || []).some(m=>m.userId===userId&&m.role==="ops_admin") ? "ops_admin" : "super_admin",
     type: fields.type,
     title: fields.title,
     body: fields.body,
     read: false,
+    ...(fields.occurrenceKey ? { occurrenceKey: fields.occurrenceKey } : {}),
     ...(fields.orderId ? { orderId: fields.orderId } : {}),
     ...(fields.approvalCaseId ? { approvalCaseId: fields.approvalCaseId } : {}),
   }));
@@ -418,6 +428,7 @@ export function notifyOpsPaymentSubmitted(store, order, { createId, at }) {
     store,
     opsDrafts(store, {
       type: "ops_payment_submitted",
+      occurrenceKey: Object.entries(order.payments || {}).filter(([,p]) => p.submittedAt).map(([code,p]) => `${code}:${p.submittedAt}`).sort().join("|") || at,
       orderId: order.id,
       title: "Payment submitted",
       body: "A client submitted a QR payment for confirmation.",
@@ -453,6 +464,7 @@ export function notifyOpsSignupSubmitted(store, approvalCase, { createId, at }) 
     store,
     opsDrafts(store, {
       type: "ops_signup_submitted",
+      occurrenceKey: String(approvalCase.applicationRevision || approvalCase.version || approvalCase.submittedAt || at),
       approvalCaseId: approvalCase.id,
       title: "New application",
       body: signupBody(approvalCase.kind),
@@ -467,7 +479,9 @@ export function notifyShopPayoutHeld(store, order, { createId, at }) {
     store,
     {
       userId: order.supplierId,
+      appRole: "supplier",
       type: "shop_payout_held",
+      occurrenceKey: `${order.updatedAt || at}:${(store.claims || []).filter(c => c.orderId === order.id).map(c => c.id + ":" + c.updatedAt).join("|")}`,
       orderId: order.id,
       title: "Payout on hold",
       body: "An issue or claim has held the payout on this job.",
@@ -484,12 +498,12 @@ export function notifyClientPaymentRejected(store, order, { createId, at, reason
     store,
     {
       userId: order.clientId,
+      appRole: "client",
       type: "order_payment_rejected",
+      occurrenceKey: Object.entries(order.payments || {}).filter(([,p]) => p.rejectedAt).map(([code,p]) => `${code}:${p.rejectedAt}`).sort().join("|") || at,
       orderId: order.id,
       title: "Payment was not accepted",
-      body: reason
-        ? `Operations could not confirm this payment. ${reason}`
-        : "Operations could not confirm this payment. Submit again with a correct reference.",
+      body: "Operations could not confirm this payment. Open the order to review and submit again.",
       read: false,
     },
     { id: createId("ntf"), at },

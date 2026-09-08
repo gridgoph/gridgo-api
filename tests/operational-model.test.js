@@ -433,3 +433,12 @@ test("publicOrderFor fills specification from checkout line items", () => {
   assert.equal(projected.artworkName, "flyer.jpeg");
   assert.equal("quantity" in order, false);
 });
+
+test('expiry worker processes a bounded batch and repeats without double closing',()=>{
+ const at='2026-09-08T01:00:00.000Z';const store={orders:Array.from({length:3},(_,i)=>({id:`bounded_${i}`,state:'issue_window_open',issueWindowExpiresAt:'2026-09-08T00:00:00.000Z',payoutHold:false,timeline:[],payoutMilestones:[]})),claims:[]};
+ assert.equal(expireIssueWindows(store,at,{limit:2}),true);
+ assert.equal(store.orders.filter(o=>o.state==='completed').length,2);
+ assert.equal(expireIssueWindows(store,at,{limit:2}),true);
+ assert.equal(store.orders.every(o=>o.timeline.length===1),true);
+ assert.equal(expireIssueWindows(store,at,{limit:2}),false);
+});

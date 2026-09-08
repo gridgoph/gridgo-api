@@ -1,3 +1,4 @@
+import { isContainedPickup } from "./operational-model.js";
 export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
@@ -9,6 +10,7 @@ export const INVALIDATE_RESOURCES = Object.freeze([
   "claims",
   "dispatch",
   "payouts",
+  "notifications", "identity", "catalog", "services", "availability", "settings", "location", "credits",
 ]);
 
 const pendingInvalidates = new WeakMap();
@@ -56,7 +58,7 @@ export function publicNotification(notification, order) {
 export function listInbox(store, userId, options = {}) {
   const cap = parseNotificationListLimit(options.limit);
   const owned = (store.notifications || [])
-    .filter((notification) => notification.userId === userId && notification.deletedAt == null)
+    .filter((notification) => notificationVisible(store, notification, userId, options.role))
     .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const ordersById = new Map((store.orders || []).map((order) => [order.id, order]));
   return {
@@ -86,10 +88,10 @@ function addSubscriber(subscribers, userId, handler) {
   };
 }
 
-function publishTo(subscribers, userId, payload) {
+function publishTo(subscribers, userId, payload, store) {
   for (const handler of subscribers.get(userId) || []) {
     try {
-      handler(payload);
+      handler(payload, store);
     } catch {
       // A broken/disconnected stream must not fail the already-persisted mutation.
     }
@@ -109,13 +111,15 @@ export function createNotificationEvents() {
       return addSubscriber(invalidateSubscribers, userId, handler);
     },
 
-    publish(notification) {
-      publishTo(subscribers, notification.userId, notification);
+    publish(notification, store) {
+      publishTo(subscribers, notification.userId, notification, store);
     },
 
-    publishInvalidate(userId, payload) {
-      publishTo(invalidateSubscribers, userId, payload);
+    publishInvalidate(userId, payload, store) {
+      publishTo(invalidateSubscribers, userId, payload, store);
     },
+
+    userIds() { return [...new Set([...subscribers.keys(), ...invalidateSubscribers.keys()])]; },
 
     subscriberCount(userId) {
       return subscribers.get(userId)?.size || 0;
@@ -161,7 +165,12 @@ export function orderFromNotification(store, notification) {
  * client/rider when the ping is about their order.
  */
 export function invalidateAudienceIds(store, event) {
-  const ids = new Set();
+  const ids = new Set(event.userIds || []);
+  if (["notifications", "identity", "credits"].includes(event.resource)) return [...ids];
+  if (event.resource === "location") {
+    const order = (store.orders || []).find(o => o.id === event.id);
+    return (store.users || []).filter(u => canAccessOrder(store,u.id,order,{location:true})).map(u => u.id);
+  }
   if (INVALIDATE_RESOURCES.includes(event.resource)) {
     for (const userId of opsAdminRecipientIds(store)) ids.add(userId);
   }
@@ -189,9 +198,15 @@ export function queueInvalidate(store, event) {
     pendingInvalidates.set(store, list);
   }
   const key = `${event.resource}:${event.id || ""}`;
-  if (list.some((row) => `${row.resource}:${row.id || ""}` === key)) return;
+  const prior = list.find((row) => `${row.resource}:${row.id || ""}` === key);
+  if (prior) {
+    prior.userIds = [...new Set([...(prior.userIds || []), ...(event.userIds || []), ...invalidateAudienceIds(store,prior), ...invalidateAudienceIds(store,event)])];
+    for (const field of ['supplierId','clientId','riderId']) if (!prior[field] && event[field]) prior[field]=event[field];
+    return;
+  }
   list.push({
     resource: event.resource,
+    ...(event.userIds ? { userIds: [...event.userIds] } : {}),
     ...(event.id ? { id: event.id } : {}),
     ...(event.supplierId ? { supplierId: event.supplierId } : {}),
     ...(event.clientId ? { clientId: event.clientId } : {}),
@@ -222,7 +237,48 @@ export function publishQueuedInvalidates(events, store) {
   for (const event of takeQueuedInvalidates(store)) {
     const frame = { resource: event.resource, ...(event.id ? { id: event.id } : {}) };
     for (const userId of invalidateAudienceIds(store, event)) {
-      events.publishInvalidate(userId, frame);
+      events.publishInvalidate(userId, frame, store);
     }
   }
+}
+
+export const EVENT_ROLES = Object.freeze(['client', 'supplier', 'rider', 'ops_admin', 'super_admin']);
+export function hasRole(store, userId, role) {
+  return (store.userRoleMemberships || []).some(m => m.userId === userId && m.role === role);
+}
+export function approvedRole(store, userId, role) {
+  if (!hasRole(store, userId, role)) return false;
+  if (!['supplier', 'rider'].includes(role)) return true;
+  const approval = (store.approvalCases || []).find(c => c.userId === userId && c.kind === role);
+  // Explicit migration-era fallback only where a case is absent.
+  return approval ? approval.status === 'approved' : (store.users || []).some(u => u.id === userId && u.role === role && u.verificationStatus === 'approved');
+}
+export function eligibleRiderIds(store) {
+  return [...new Set((store.userRoleMemberships || []).filter(m => m.role === 'rider' && approvedRole(store,m.userId,'rider')).map(m => m.userId))];
+}
+export function canAccessOrder(store, userId, order, {role, location = false, offer = false} = {}) {
+  if (!order) return false;
+  const roles = role ? [role] : EVENT_ROLES;
+  return roles.some(r => {
+    if (!hasRole(store,userId,r)) return false;
+    if (r === 'ops_admin' || r === 'super_admin') return true;
+    if (r === 'client') return order.clientId === userId && (!location || order.fulfillmentMode !== 'pickup');
+    if (!approvedRole(store,userId,r)) return false;
+    if (r === 'supplier') return order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled'));
+    return order.riderId === userId || (!location && offer && order.state === 'ready_for_dispatch' && !order.riderId && !isContainedPickup(order));
+  });
+}
+export function notificationVisible(store, notification, userId, role) {
+  if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
+  if (role && !hasRole(store,userId,role)) return false;
+  const requiredRole = notification.appRole || (notification.type?.startsWith('shop_') ? 'supplier' : notification.type?.startsWith('ops_') ? 'ops_admin' : null);
+  if (requiredRole && role && requiredRole !== role && !(requiredRole==='ops_admin'&&role==='super_admin')) return false;
+  if (requiredRole && !hasRole(store,userId,requiredRole) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
+  if (notification.audienceRoles && !(role ? notification.audienceRoles.includes(role) && hasRole(store,userId,role) : notification.audienceRoles.some(r=>hasRole(store,userId,r)))) return false;
+  if (notification.approvalCaseId) {
+    const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);
+    return Boolean(c && ((c.userId === userId && (!role || role === (c.kind === 'business_client' ? 'client' : c.kind))) || ((!role || ['ops_admin','super_admin'].includes(role)) && opsAdminRecipientIds(store).includes(userId))));
+  }
+  if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || requiredRole,offer:notification.type === 'dispatch_available'});
+  return true;
 }

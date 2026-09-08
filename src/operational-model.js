@@ -793,13 +793,16 @@ export function issueWindowExpiresAt(openedAt, issueWindowHours) {
   return new Date(opened + issueWindowHours * 60 * 60 * 1000).toISOString();
 }
 
-export function expireIssueWindows(store, at) {
+export function expireIssueWindows(store, at, {limit = 100} = {}) {
+  let processed = 0;
   const timestamp = new Date(at).getTime();
   let changed = false;
   for (const order of store.orders || []) {
     if (order.state !== "issue_window_open" || !order.issueWindowExpiresAt) continue;
     if (new Date(order.issueWindowExpiresAt).getTime() > timestamp) continue;
     if (activePayoutHold(store, order)) continue;
+    if (processed >= limit) break;
+    processed += 1;
     order.state = "completed";
     order.updatedAt = at;
     if (!Array.isArray(order.timeline)) order.timeline = [];

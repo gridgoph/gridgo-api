@@ -154,6 +154,8 @@ export function publicDevice(record) {
     id: record.id,
     userId: record.userId,
     platform: record.platform,
+    appRole: record.appRole || null,
+    tokenProvider: record.tokenProvider || (record.platform === "ios" ? "apns" : "fcm"),
     tokenTail: record.token.slice(-8),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -170,7 +172,7 @@ export function publicDevice(record) {
  *
  * Returns `{ device, created, reassignedFrom, changed }`.
  */
-export function registerDeviceToken(store, { userId, token, platform, at }) {
+export function registerDeviceToken(store, { userId, token, platform, at, appRole = null, tokenProvider = platform === "ios" ? "apns" : "fcm" }) {
   ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
 
@@ -180,6 +182,7 @@ export function registerDeviceToken(store, { userId, token, platform, at }) {
       userId,
       token,
       platform,
+      appRole, tokenProvider,
       createdAt: at,
       updatedAt: at,
     };
@@ -193,6 +196,7 @@ export function registerDeviceToken(store, { userId, token, platform, at }) {
   const claimedFromUnclaimed = !isClaimedDevice(existing);
   existing.userId = userId;
   existing.platform = platform;
+  existing.appRole = appRole; existing.tokenProvider = tokenProvider;
   // `updatedAt` moves on every re-registration: the app refreshes its token on
   // a schedule, and that recency is the only staleness signal ops has.
   existing.updatedAt = at;
@@ -475,8 +479,8 @@ export function pushMessageFor(notification, env = process.env) {
   }
   const image = resolveFcmImageUrl(notification.imageUrl, env);
   return {
-    title: trimmedString(notification.title) || "GRIDGO",
-    body: trimmedString(notification.body) || "Open GRIDGO for the latest update.",
+    title: notification.type === "announcement" ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
+    body: notification.type === "announcement" ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",
     data,
     ...(image ? { image } : {}),
   };

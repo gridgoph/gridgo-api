@@ -166,7 +166,7 @@ test("the public device projection never carries the raw token", () => {
     at: AT,
   });
   const projected = publicDevice(device);
-  assert.deepEqual(Object.keys(projected).sort(), ["createdAt", "id", "platform", "tokenTail", "updatedAt", "userId"]);
+  assert.deepEqual(Object.keys(projected).sort(), ["appRole", "createdAt", "id", "platform", "tokenProvider", "tokenTail", "updatedAt", "userId"]);
   assert.equal(projected.tokenTail, "ijklmnop");
   assert.equal(JSON.stringify(projected).includes("abcdefgh"), false);
 });
@@ -377,7 +377,7 @@ test("push payload carries only allowlisted routing data, never money detail", (
 
 test("a notification with no type or order still produces a readable lock-screen message", () => {
   const message = pushMessageFor({ id: "ntf_2", userId: "u", title: "  ", body: "", at: AT });
-  assert.equal(message.title, "GRIDGO");
+  assert.equal(message.title, "GRIDGO update");
   assert.equal(message.body, "Open GRIDGO for the latest update.");
   assert.deepEqual(message.data, { notificationId: "ntf_2", at: AT });
 });
