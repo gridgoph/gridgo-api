@@ -1901,7 +1901,11 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
-    const eventRole = url.searchParams.get("role") || req.headers['x-gridgo-role'] || undefined;
+    // Other routes already use ?role as a directory filter. Only the inbox
+    // contract interprets that query as actor context.
+    const notificationRoleQuery = ["/notifications", "/notifications/stream", "/notifications/read-all"].includes(pathname)
+      ? url.searchParams.get("role") : undefined;
+    const eventRole = notificationRoleQuery || req.headers['x-gridgo-role'] || undefined;
     if (user) {
       if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
       const inferredRole = !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'

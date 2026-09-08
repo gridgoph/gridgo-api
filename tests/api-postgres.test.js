@@ -2827,3 +2827,40 @@ test(
     }
   },
 );
+
+ test(
+   "directory role filters remain distinct from authenticated app context",
+   { skip: !DATABASE_URL },
+   async () => {
+     const database = createDatabase({ DATABASE_URL });
+     await clearAndFixture(database);
+     const instance = await startApi();
+     try {
+       for (const [subject, role] of [
+         ["clerk_ops", "ops_admin"],
+         ["clerk_super", "super_admin"],
+       ]) {
+         for (const filter of ["supplier", "rider", "client"]) {
+           const response = await request(
+             instance.api,
+             `/users?role=${filter}`,
+             { subject, headers: { "X-GRIDGO-Role": role } },
+           );
+           assert.equal(response.status, 200, JSON.stringify(response.body));
+           assert.ok(response.body.users.length > 0);
+           assert.ok(response.body.users.every((u) => u.role === filter));
+         }
+         const response = await request(
+           instance.api,
+           "/notifications?role=rider",
+           { subject, headers: { "X-GRIDGO-Role": role } },
+         );
+         assert.equal(response.status, 403);
+       }
+     } finally {
+       instance.child.kill("SIGTERM");
+       await new Promise((r) => instance.child.once("exit", r));
+       await database.close();
+     }
+   },
+ );
