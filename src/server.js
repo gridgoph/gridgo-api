@@ -632,6 +632,23 @@ function publicUser(u) {
   return rest;
 }
 
+/** Directory filters select authoritative memberships, retaining their role profile. */
+function roleDirectoryUser(store, user, role) {
+  const projected = { ...user, role };
+  if (["supplier", "rider"].includes(role)) {
+    const approval = (store.approvalCases || []).find((c) => c.userId === user.id && c.kind === role);
+    projected.verificationStatus = approval?.status || (user.role === role ? user.verificationStatus : "unverified");
+  }
+  if (role === "supplier") {
+    const profile = supplierProfileProjection(store, user.id);
+    if (profile) { projected.supplierName = profile.shopName; projected.shop = profile.shop; }
+  } else if (role === "rider") {
+    const profile = riderProfileProjection(store, user.id);
+    if (profile) projected.riderProfile = profile;
+  }
+  return projected;
+}
+
 function publicIdentity(user) {
   if (!user) return null;
   return {
@@ -1402,7 +1419,8 @@ function serviceCoversOrder(service, order, product, taxonomy) {
 
 function eligibleSuppliersForOrder(store, order) {
   const product = (store.catalog || []).find((p) => p.id === order.productId);
-  const suppliers = (store.users || []).filter((u) => u.role === "supplier");
+  const suppliers = (store.users || []).filter((u) => hasRole(store, u.id, "supplier"))
+    .map((u) => roleDirectoryUser(store, u, "supplier"));
   const results = [];
 
   for (const supplier of suppliers) {
@@ -2848,8 +2866,9 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && pathname === "/users") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const role = url.searchParams.get("role");
-      let list = store.users.map(publicUser);
-      if (role) list = list.filter((u) => u.role === role);
+      const list = role
+        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => publicUser(roleDirectoryUser(store, u, role)))
+        : store.users.map(publicUser);
       return send(res, 200, { users: list });
     }
 
@@ -3508,8 +3527,9 @@ async function handleRequest(req, res) {
       const service = (store.supplierServices || []).find((s) => s.id === sid);
       if (!service) return send(res, 404, { error: "service_not_found" });
       const owner = store.users.find((u) => u.id === service.supplierId);
-      if (!owner || owner.verificationStatus !== "approved") {
-        return send(res, 409, { error: "supplier_not_approved", verificationStatus: owner?.verificationStatus || null });
+      if (!owner || !approvedRole(store, owner.id, "supplier")) {
+        const approval = (store.approvalCases || []).find((c) => c.userId === owner?.id && c.kind === "supplier");
+        return send(res, 409, { error: "supplier_not_approved", verificationStatus: approval?.status || owner?.verificationStatus || null });
       }
       if (service.state === "withdrawn") return send(res, 409, { error: "service_withdrawn" });
       const body = await readBody(req);
@@ -4589,7 +4609,7 @@ async function handleRequest(req, res) {
       const handingToMatchedShop = next === "supplier_assigned" && !body.supplierId && Boolean(order.supplierId);
       if (next === "supplier_assigned" && !handingToMatchedShop) {
         const supplier = store.users.find(
-          (candidate) => candidate.id === body.supplierId && candidate.role === "supplier",
+          (candidate) => candidate.id === body.supplierId && hasRole(store, candidate.id, "supplier"),
         );
         if (!supplier) {
           return send(res, 404, {
@@ -4597,11 +4617,12 @@ async function handleRequest(req, res) {
             message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
           });
         }
-        if (supplier.verificationStatus !== "approved") {
+        if (!approvedRole(store, supplier.id, "supplier")) {
+          const approval = (store.approvalCases || []).find((c) => c.userId === supplier.id && c.kind === "supplier");
           return send(res, 409, {
             error: "supplier_not_approved",
             message: "Operations must approve this supplier before assigning new work.",
-            verificationStatus: supplier.verificationStatus || "unverified",
+            verificationStatus: approval?.status || supplier.verificationStatus || "unverified",
           });
         }
         const candidate = eligibleSuppliersForOrder(store, order).candidates.find(

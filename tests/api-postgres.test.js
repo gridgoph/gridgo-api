@@ -2864,3 +2864,160 @@ test(
      }
    },
  );
+
+test(
+  "supplier service verification and assignment use current membership approval",
+  { skip: !DATABASE_URL },
+  async () => {
+    const database = createDatabase({ DATABASE_URL });
+    await clearAndFixture(database);
+    await database.transaction(async () => {
+      const s = await loadStore(database);
+      const rider = s.users.find((u) => u.id === "user_rider");
+      rider.role = "client";
+      delete rider.verificationStatus;
+      s.userRoleMemberships.push({
+        userId: rider.id,
+        role: "client",
+        createdAt: AT,
+      });
+      s.clientProfiles.push({
+        userId: rider.id,
+        clientKind: "personal",
+        updatedAt: AT,
+      });
+      const u = s.users.find((u) => u.id === "user_supplier");
+      u.role = "client";
+      delete u.verificationStatus;
+      delete u.shop;
+      s.userRoleMemberships.push({
+        userId: u.id,
+        role: "client",
+        createdAt: AT,
+      });
+      s.clientProfiles.push({
+        userId: u.id,
+        clientKind: "personal",
+        updatedAt: AT,
+      });
+      s.supplierServices.find((v) => v.id === "svc_banner").state =
+        "pending_verification";
+      await saveStore(database, s);
+    });
+    const instance = await startApi();
+    try {
+      const directory = await request(instance.api, "/users?role=supplier", {
+        subject: "clerk_ops",
+        headers: { "X-GRIDGO-Role": "ops_admin" },
+      });
+      assert.equal(directory.status, 200);
+      const member = directory.body.users.find((u) => u.id === "user_supplier");
+      assert.equal(member?.role, "supplier");
+      assert.equal(member.verificationStatus, "approved");
+      assert.ok(member.shop);
+      const riderDirectory = await request(instance.api, "/users?role=rider", {
+        subject: "clerk_ops",
+        headers: { "X-GRIDGO-Role": "ops_admin" },
+      });
+      assert.equal(riderDirectory.status, 200);
+      const riderMember = riderDirectory.body.users.find(
+        (u) => u.id === "user_rider",
+      );
+      assert.equal(riderMember?.role, "rider");
+      assert.equal(riderMember.verificationStatus, "approved");
+      assert.ok(riderMember.riderProfile);
+      const verify = await request(
+        instance.api,
+        "/supplier-services/svc_banner/verify",
+        {
+          method: "POST",
+          subject: "clerk_ops",
+          headers: { "X-GRIDGO-Role": "ops_admin" },
+          body: {},
+        },
+      );
+      assert.equal(verify.status, 200, JSON.stringify(verify.body));
+      assert.equal(verify.body.service.state, "live");
+      const created = await request(instance.api, "/orders", {
+        method: "POST",
+        subject: "clerk_client",
+        body: {
+          productId: "prod_tarpaulin",
+          title: "Membership assignment",
+          quantity: 1,
+          size: "2m x 3m",
+          material: "13oz tarpaulin",
+          finish: "hemmed",
+          address: "Bajada",
+          zone: "davao_central",
+          submit: true,
+        },
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      const id = created.body.order.id;
+      for (const state of ["needs_qa", "approved_for_matching"]) {
+        const result = await request(instance.api, `/orders/${id}/transition`, {
+          method: "POST",
+          subject: "clerk_ops",
+          body: { state },
+        });
+        assert.equal(result.status, 200, JSON.stringify(result.body));
+      }
+      const candidates = await request(
+        instance.api,
+        `/orders/${id}/eligible-suppliers`,
+        { subject: "clerk_ops" },
+      );
+      assert.equal(candidates.status, 200);
+      assert.equal(
+        candidates.body.candidates.find(
+          (c) => c.supplier.id === "user_supplier",
+        )?.eligible,
+        true,
+      );
+      const assigned = await request(instance.api, `/orders/${id}/transition`, {
+        method: "POST",
+        subject: "clerk_ops",
+        body: { state: "supplier_assigned", supplierId: "user_supplier" },
+      });
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+      await database.transaction(async () => {
+        const s = await loadStore(database);
+        s.approvalCases.find((c) => c.id === "case_supplier").status =
+          "suspended";
+        s.approvalCases.find((c) => c.id === "case_supplier").suspensionReason =
+          "Approval hold";
+        await saveStore(database, s);
+      });
+      const denied = await request(
+        instance.api,
+        "/supplier-services/svc_banner/verify",
+        { method: "POST", subject: "clerk_ops", body: {} },
+      );
+      assert.equal(denied.status, 409);
+      assert.equal(denied.body.verificationStatus, "suspended");
+      const ineligible = await request(
+        instance.api,
+        `/orders/${id}/eligible-suppliers`,
+        { subject: "clerk_ops" },
+      );
+      assert.equal(
+        ineligible.body.candidates.find(
+          (c) => c.supplier.id === "user_supplier",
+        )?.eligible,
+        false,
+      );
+      const refused = await request(instance.api, `/orders/${id}/transition`, {
+        method: "POST",
+        subject: "clerk_ops",
+        body: { state: "supplier_assigned", supplierId: "user_supplier" },
+      });
+      assert.equal(refused.status, 409);
+      assert.equal(refused.body.error, "supplier_not_approved");
+    } finally {
+      instance.child.kill("SIGTERM");
+      await new Promise((r) => instance.child.once("exit", r));
+      await database.close();
+    }
+  },
+);
