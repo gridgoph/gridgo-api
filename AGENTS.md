@@ -47,13 +47,13 @@ Coordinates use constrained latitude/longitude columns. Current database queries
 
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 
-Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
+Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
 ## Files and push
 
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.
 
-- `save()` is the only place a notification push fires; publication occurs after transaction commit. Do not send at individual notification append sites.
+- `save()` is the only place a notification push fires; publication occurs after transaction commit. Do not send at individual notification append sites. Invalidate pings (`event: invalidate`) use the same after-commit hook — queue them with `queueInvalidate` / `queueOrderInvalidate` before `save()`.
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.
 - One token belongs to one `user.id`. Anonymous registration is hostile input and exposes only a fixed `{ok:true}` body.
 - Unclaimed handsets may receive only `everyone` announcements with `data` exactly `{type:"announcement"}`.

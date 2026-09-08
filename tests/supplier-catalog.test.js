@@ -64,6 +64,7 @@ function fixture({ approvalStatus = "approved", fileFormatMode = "inherit", subc
       id: "item", supplierId: "supplier", supplierServiceId: "service",
       name: "Tarpaulin", description: "Outdoor banner", basePriceMinor: 100,
       subcategoryCode, pricingUnit: "per_unit", packageQty: null,
+      printerMaxWidthFeet: subcategoryCode === "tarpaulins_outdoor_banners" ? 5 : null,
       turnaroundMode: "inherit", turnaroundHours: null,
       fileFormatMode, active: true, sortOrder: 0, version: 3, createdAt: AT, updatedAt: AT,
     }],
@@ -309,6 +310,7 @@ test("creating from a starter copies groups and never stores the starter id", as
       subcategoryCode: "tarpaulins_outdoor_banners",
       pricingUnit: "per_unit",
       turnaroundMode: "inherit",
+      printerMaxWidthFeet: 5,
     }),
     id: (prefix) => `${prefix}_copied`,
     now: () => AT,
@@ -318,6 +320,7 @@ test("creating from a starter copies groups and never stores the starter id", as
   const item = response.body.item;
   assert.equal(item.starterId, undefined);
   assert.equal(item.subcategoryCode, "tarpaulins_outdoor_banners");
+  assert.equal(item.printerMaxWidthFeet, 5);
   assert.equal(item.optionGroups.length, 2);
   assert.equal(item.optionGroups[0].options[0].label, "2x3");
   assert.equal(item.optionGroups[1].kind, "addon");
@@ -1029,4 +1032,132 @@ test("a shop can price an extra as a multiple rather than a flat amount", async 
   );
   assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
   assert.equal(store.catalogOptions.find((option) => option.id === stored.id).priceMultiplierBps, null);
+});
+
+function catalogCall(store, { method, path, body = {} }) {
+  let sequence = store._capIds || 0;
+  return routeSupplierCatalog({
+    req: { method, headers: {} },
+    url: new URL(`http://127.0.0.1${path}`),
+    store,
+    user: store.users[0],
+    readBody: async () => body,
+    id: (prefix) => {
+      sequence += 1;
+      store._capIds = sequence;
+      return `${prefix}_cap_${sequence}`;
+    },
+    now: () => AT,
+    audit: () => {},
+  });
+}
+
+test("a tarpaulin listing is not complete or public without printerMaxWidthFeet", () => {
+  const store = fixture();
+  store.catalogItems[0].printerMaxWidthFeet = null;
+  assert.ok(catalogItemBlockers(store, store.catalogItems[0]).includes("printer_max_width_feet"));
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+
+  store.catalogItems[0].printerMaxWidthFeet = 5;
+  assert.equal(catalogItemBlockers(store, store.catalogItems[0]).join(","), "");
+  const published = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(published.printerMaxWidthFeet, 5);
+  assert.equal(privateCatalogItem(store, store.catalogItems[0]).printerMaxWidthFeet, 5);
+});
+
+test("printerMaxWidthFeet is required on tarpaulin create and forbidden on every other family", async () => {
+  const store = fixture();
+  store.catalogItems = [];
+
+  await assert.rejects(
+    () => catalogCall(store, {
+      method: "POST",
+      path: "/me/catalog-items",
+      body: {
+        supplierServiceId: "service",
+        name: "Shop tarp",
+        basePriceMinor: 4000,
+        subcategoryCode: "tarpaulins_outdoor_banners",
+        pricingUnit: "per_unit",
+        turnaroundMode: "inherit",
+      },
+    }),
+    (error) => error.status === 400 && error.code === "printer_cap_required" && error.details.field === "printerMaxWidthFeet",
+  );
+
+  for (const value of [null, 0, 21, 5.5, "5", 1.2]) {
+    await assert.rejects(
+      () => catalogCall(store, {
+        method: "POST",
+        path: "/me/catalog-items",
+        body: {
+          supplierServiceId: "service",
+          name: "Shop tarp",
+          basePriceMinor: 4000,
+          subcategoryCode: "tarpaulins_outdoor_banners",
+          pricingUnit: "per_unit",
+          turnaroundMode: "inherit",
+          printerMaxWidthFeet: value,
+        },
+      }),
+      (error) => error.status === 400 && error.code === "printer_cap_required" && error.details.field === "printerMaxWidthFeet",
+    );
+  }
+
+  const created = await catalogCall(store, {
+    method: "POST",
+    path: "/me/catalog-items",
+    body: {
+      supplierServiceId: "service",
+      name: "Shop tarp",
+      basePriceMinor: 4000,
+      subcategoryCode: "tarpaulins_outdoor_banners",
+      pricingUnit: "per_unit",
+      turnaroundMode: "inherit",
+      printerMaxWidthFeet: 5,
+    },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.item.printerMaxWidthFeet, 5);
+
+  await assert.rejects(
+    () => catalogCall(store, {
+      method: "POST",
+      path: "/me/catalog-items",
+      body: {
+        supplierServiceId: "service",
+        name: "Flyers",
+        basePriceMinor: 1200,
+        subcategoryCode: "flyers",
+        pricingUnit: "per_unit",
+        turnaroundMode: "inherit",
+        printerMaxWidthFeet: 5,
+      },
+    }),
+    (error) => error.status === 400 && error.code === "printer_cap_not_applicable" && error.details.field === "printerMaxWidthFeet",
+  );
+
+  const flyer = await catalogCall(store, {
+    method: "POST",
+    path: "/me/catalog-items",
+    body: {
+      supplierServiceId: "service",
+      name: "Flyers",
+      basePriceMinor: 1200,
+      subcategoryCode: "flyers",
+      pricingUnit: "per_unit",
+      turnaroundMode: "inherit",
+    },
+  });
+  assert.equal(flyer.status, 201);
+  assert.equal(flyer.body.item.printerMaxWidthFeet, null);
+
+  await assert.rejects(
+    () => catalogCall(store, {
+      method: "PATCH",
+      path: `/me/catalog-items/${flyer.body.item.id}`,
+      body: { expectedVersion: flyer.body.item.version, printerMaxWidthFeet: 7 },
+    }),
+    (error) => error.status === 400 && error.code === "printer_cap_not_applicable",
+  );
 });

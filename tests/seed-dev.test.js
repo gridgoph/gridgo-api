@@ -253,6 +253,18 @@ test("the pilot board carries the pricing shapes the master list actually quotes
   assert.equal(tarpaulin.priceMinor, 4_000);
   assert.equal(tarpaulin.minimumWidthMilli, 2_000);
   assert.equal(tarpaulin.minimumHeightMilli, 4_000);
+  assert.equal(tarpaulin.printerMaxWidthFeet, 5);
+
+  for (const listing of listings.filter((row) => row.starterId === "lst_tarpaulins_outdoor_banners")) {
+    assert.equal(
+      listing.printerMaxWidthFeet,
+      listing.shop === "polymedia" ? 5 : 7,
+      `${listing.shop} tarpaulin listings must carry the shop printer cap`,
+    );
+  }
+  for (const listing of listings.filter((row) => row.starterId !== "lst_tarpaulins_outdoor_banners")) {
+    assert.equal(listing.printerMaxWidthFeet ?? null, null, `${listing.shop}/${listing.starterId} must not carry a printer cap`);
+  }
 
   // Plaques are priced by height, which is a length and not an area.
   const plaques = find("polymedia", "lst_plaques_trophies");

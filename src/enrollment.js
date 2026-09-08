@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 
 import { clerkClientProfile } from "./auth.js";
+import { notifyOpsSignupSubmitted } from "./client-order-notifications.js";
+import { queueInvalidate } from "./notifications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 
 const VEHICLE_TYPES = new Set(["motorcycle", "car", "van", "truck", "bicycle"]);
@@ -337,6 +339,11 @@ function retryResult(store, user, role, kind) {
   };
 }
 
+function notifySignupAndInvalidate(store, approvalCase, createId, at) {
+  notifyOpsSignupSubmitted(store, approvalCase, { createId, at });
+  queueInvalidate(store, { resource: "approvals", id: approvalCase.id });
+}
+
 export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotencyKey, createId, now }) {
   const validated = validateSupplierInput(body);
   const existing = mappedUser(store, clerkUserId);
@@ -392,6 +399,7 @@ export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotenc
     user, kind: "supplier", submittedAt: at, key: idempotencyKey, body, createId, at,
     snapshot: { shopName: application.shopName, serviceCategories: application.categoryCodes },
   });
+  notifySignupAndInvalidate(store, approvalCase, createId, at);
   return { status: 201, user, membership, supplierProfile: profile, approvalCase, supplierServices };
 }
 
@@ -461,6 +469,7 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
     user, kind: "business_client", submittedAt: at, key: idempotencyKey, body, createId, at,
     snapshot: { businessName, businessNature },
   });
+  notifySignupAndInvalidate(store, approvalCase, createId, at);
   return {
     status: 201,
     user,
@@ -632,6 +641,7 @@ export function submitRiderApplication({ store, user, body, idempotencyKey, crea
     snapshot: { requestPayloadHash: payloadHash(body), approvalCase: response },
     createdAt: at,
   });
+  notifySignupAndInvalidate(store, approvalCase, createId, at);
   return { approvalCase: response, replay: false };
 }
 
@@ -718,5 +728,6 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
     entityId: approvalCase.id,
     detail: { kind: kind.caseKind, correctionSummary, applicationRevision: approvalCase.applicationRevision },
   });
+  notifySignupAndInvalidate(store, approvalCase, createId, at);
   return { status: 200, approvalCase, replay: false };
 }

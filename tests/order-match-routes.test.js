@@ -176,6 +176,7 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
     "the client's promise cannot fall before the shop's own date",
   );
   assert.deepEqual(store.jobQaChecklist, []);
+  // No ops/admin memberships in this fixture, so checkout has nobody to inbox.
   assert.deepEqual(store.notifications, []);
 
   const invoice = await call("GET", `/orders/${checkedOut.body.order.id}/invoice`);
@@ -244,6 +245,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     supplierId: "supplier_a",
     fromPriceMinor: 12_500,
     effectivePriceMinor: 12_500,
+    printerMaxWidthFeet: null,
     selectedOptions: [{ id: "option_item_a_matte", label: "Matte" }],
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 25_000);
@@ -353,6 +355,42 @@ test("a tarpaulin priced by the square foot can actually be ordered", async () =
   );
 });
 
+test("a tarpaulin cart line is refused when requested width exceeds the printer cap", async () => {
+  const { store, client } = fixture();
+  const tarpaulin = store.catalogItems.find((row) => row.id === "item_a");
+  tarpaulin.subcategoryCode = "tarpaulins_outdoor_banners";
+  tarpaulin.pricingUnit = "per_area";
+  tarpaulin.measureUnit = "ft";
+  tarpaulin.basePriceMinor = 4_000;
+  tarpaulin.printerMaxWidthFeet = 5;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  const fits = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    measurement: { width: 5_000, height: 8_000 },
+  });
+  assert.equal(fits.status, 201);
+  assert.equal(fits.body.cart.lines[0].listing.printerMaxWidthFeet, 5);
+
+  await assert.rejects(
+    call("PATCH", `/me/carts/${cartId}/lines/${fits.body.cart.lines[0].id}`, {
+      measurement: { width: 6_000, height: 8_000 },
+    }),
+    (error) => error.status === 409 && error.code === "printer_cap_exceeded" && error.details.field === "printerMaxWidthFeet",
+  );
+
+  const cartId2 = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId2}/lines`, {
+      catalogItemId: "item_a", optionIds: [], quantity: 1,
+      measurement: { width: 6_000, height: 8_000 },
+    }),
+    (error) => error.status === 409 && error.code === "printer_cap_exceeded",
+  );
+});
+
 test("a document priced by the page bills pages times copies", async () => {
   const { store, client } = fixture();
   const booklet = store.catalogItems.find((row) => row.id === "item_a");
@@ -373,4 +411,40 @@ test("a document priced by the page bills pages times copies", async () => {
   assert.equal(added.body.cart.lines[0].quantity, 3);
   assert.deepEqual(added.body.cart.lines[0].measurement, { pages: 10 });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 9_000);
+});
+
+test("checkout writes ops needs-QA and payment-submitted rows, not client or shop inbox", async () => {
+  const { store, client } = fixture();
+  store.users.push(
+    { id: "user_ops", role: "ops_admin", email: "ops@gridgo.test" },
+    { id: "user_admin", role: "client", email: "admin@gridgo.test" },
+  );
+  store.userRoleMemberships.push(
+    { userId: "user_ops", role: "ops_admin" },
+    { userId: "user_admin", role: "super_admin" },
+  );
+  const call = caller(store, client);
+  const created = await call("POST", "/me/carts", {
+    fulfillmentMode: "delivery",
+    defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
+  });
+  const cartId = created.body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
+  });
+  const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" },
+  });
+  assert.equal(checkedOut.status, 201);
+  assert.deepEqual(
+    store.notifications.map((row) => `${row.userId}:${row.type}`).sort(),
+    [
+      "user_admin:ops_job_needs_qa",
+      "user_admin:ops_payment_submitted",
+      "user_ops:ops_job_needs_qa",
+      "user_ops:ops_payment_submitted",
+    ],
+  );
+  assert.equal(store.notifications.some((row) => row.userId === client.id), false);
+  assert.equal(store.notifications.some((row) => row.userId === "supplier_a"), false);
 });

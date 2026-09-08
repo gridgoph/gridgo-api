@@ -1,5 +1,5 @@
 import { distanceMetersBetween } from "./operational-model.js";
-import { publicCatalogItem } from "./supplier-catalog.js";
+import { listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
 
 /**
@@ -229,7 +229,7 @@ function allowanceMinutesFrom(settings) {
   return Number.isSafeInteger(declared) && declared >= 0 ? declared : DEFAULT_ALLOWANCE_MINUTES;
 }
 
-function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units }) {
+function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units, widthRequest }) {
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
   const allowanceMinutes = allowanceMinutesFrom(store.settings);
@@ -248,6 +248,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
     const listings = items
       .map((item) => publicCatalogItem(store, item))
       .filter(Boolean)
+      .filter((listing) => listingFitsPrinterCap(listing, widthRequest, store))
       .sort((left, right) => left.id.localeCompare(right.id));
     if (listings.length === 0) continue;
     const profile = shops.get(supplierId);
@@ -474,6 +475,13 @@ export function matchShop(store, input = {}) {
     deadline,
     now,
     units: input.units,
+    widthRequest: {
+      widthFeet: input.widthFeet,
+      measurement: input.measurement,
+      structuredSpec: input.structuredSpec,
+      optionIds: input.optionIds,
+      cartLines: input.cartLines,
+    },
   });
 
   if (rows.length === 0) {

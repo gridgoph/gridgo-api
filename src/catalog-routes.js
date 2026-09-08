@@ -28,6 +28,7 @@ import {
   publicSupplierShop,
   publicSupplierShops,
   supplierCatalogReadiness,
+  TARPAULIN_OUTDOOR_BANNERS,
   validateSpecBinding,
 } from "./supplier-catalog.js";
 
@@ -290,6 +291,33 @@ function pricingFields(body, current = {}) {
     minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
     turnaroundMode, turnaroundHours,
   };
+}
+
+/**
+ * Printer roll width, in whole feet. Only Tarpaulin & Outdoor Banners.
+ *
+ * Not `minimumWidthMilli` -- that is the smallest size the shop will bill for.
+ * This is the machine's maximum. Missing, null, non-integer, or outside 1–20
+ * on a tarpaulin listing is `printer_cap_required`. A value on any other
+ * family is `printer_cap_not_applicable`.
+ */
+function printerCapFields(body, current = {}, subcategoryCode) {
+  const sent = Object.hasOwn(body, "printerMaxWidthFeet");
+  if (subcategoryCode !== TARPAULIN_OUTDOOR_BANNERS) {
+    if (sent && body.printerMaxWidthFeet != null) {
+      fail(400, "printer_cap_not_applicable", "printerMaxWidthFeet is only for Tarpaulin & Outdoor Banners listings.", {
+        field: "printerMaxWidthFeet",
+      });
+    }
+    return { printerMaxWidthFeet: null };
+  }
+  const raw = sent ? body.printerMaxWidthFeet : current.printerMaxWidthFeet;
+  if (raw == null || typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1 || raw > 20) {
+    fail(400, "printer_cap_required", "Set the shop printer's maximum width in feet (1 through 20).", {
+      field: "printerMaxWidthFeet",
+    });
+  }
+  return { printerMaxWidthFeet: raw };
 }
 
 function shopPoint(value) {
@@ -776,6 +804,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
       description: optionalText(body.description, "description", 4000),
       basePriceMinor: moneyMinor(body.basePriceMinor ?? 0, "basePriceMinor"),
       ...pricing,
+      ...printerCapFields(body, {}, subcategoryCode),
       fileFormatMode: "inherit",
       active: body.active == null ? true : booleanValue(body.active, "active"),
       sortOrder: integer(body.sortOrder ?? existing.length, "sortOrder", { min: 0 }),
@@ -829,6 +858,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (body.basePriceMinor != null) item.basePriceMinor = moneyMinor(body.basePriceMinor, "basePriceMinor");
     if (body.subcategoryCode != null) item.subcategoryCode = subcategoryForService(store, service, body.subcategoryCode);
     Object.assign(item, pricingFields(body, item));
+    Object.assign(item, printerCapFields(body, item, item.subcategoryCode));
     // Tiers are small ordered sets a shop edits as a whole -- add a break,
     // change a price, drop a speed -- so they are replaced wholesale rather
     // than through six more routes each with its own version check.

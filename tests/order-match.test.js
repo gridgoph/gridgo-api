@@ -425,6 +425,53 @@ test("quality comes from stars once a shop has enough of them, and from the list
   assert.equal(unrated.shop.supplierId, "shop_complete");
 });
 
+test("a tarpaulin listing is ineligible when requested width exceeds the printer cap", () => {
+  const store = fixture();
+  store.taxonomy.subcategories.push({
+    code: "tarpaulins_outdoor_banners", categoryCode: "marketing_collateral", active: true,
+  });
+  addShop(store, {
+    id: "shop_5ft", lat: 7.0701, lng: 125.6101, turnaroundHours: 24,
+    subcategories: ["tarpaulins_outdoor_banners"],
+  });
+  addShop(store, {
+    id: "shop_7ft", lat: 7.0701, lng: 125.6101, turnaroundHours: 24,
+    subcategories: ["tarpaulins_outdoor_banners"],
+  });
+  store.catalogItems.find((row) => row.supplierId === "shop_5ft").printerMaxWidthFeet = 5;
+  store.catalogItems.find((row) => row.supplierId === "shop_7ft").printerMaxWidthFeet = 7;
+
+  const ranking = ["quality", "speed", "cost", "distance"];
+  const both = matchShop(store, {
+    now: MONDAY_8AM, subcategoryCode: "tarpaulins_outdoor_banners", ranking, dropoff: DROPOFF,
+  });
+  assert.equal(both.alternativesCount, 1);
+
+  const wide = matchShop(store, {
+    now: MONDAY_8AM, subcategoryCode: "tarpaulins_outdoor_banners", ranking, dropoff: DROPOFF,
+    structuredSpec: { size: "6x10" },
+  });
+  assert.equal(wide.shop.supplierId, "shop_7ft");
+  assert.equal(wide.alternativesCount, 0);
+  assert.equal(wide.listings[0].printerMaxWidthFeet, 7);
+
+  const measured = matchShop(store, {
+    now: MONDAY_8AM, subcategoryCode: "tarpaulins_outdoor_banners", ranking, dropoff: DROPOFF,
+    measurement: { width: 6_000, height: 10_000 },
+  });
+  // Listings are per_unit in this fixture, so milli width has no measureUnit
+  // and is not newly treated as a fail. A size option still is.
+  assert.equal(measured.alternativesCount, 1);
+
+  store.catalogItems.forEach((item) => { item.measureUnit = "ft"; });
+  const measuredFeet = matchShop(store, {
+    now: MONDAY_8AM, subcategoryCode: "tarpaulins_outdoor_banners", ranking, dropoff: DROPOFF,
+    measurement: { width: 6_000, height: 10_000 },
+  });
+  assert.equal(measuredFeet.shop.supplierId, "shop_7ft");
+  assert.equal(measuredFeet.alternativesCount, 0);
+});
+
 test("the deadline calendar says which days GRIDGO could make, and never how many shops", () => {
   // The client's half of the shop schedule. A shop's calendar asks how full it
   // is; this asks whether anybody can finish by then, which is the only form

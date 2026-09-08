@@ -75,12 +75,26 @@ import {
   requireIdempotencyKey,
   submitRiderApplication,
 } from "./enrollment.js";
-import { notifyOrderParties } from "./client-order-notifications.js";
+import {
+  notifyClientPaymentRejected,
+  notifyOpsIssueReported,
+  notifyOpsJobNeedsQa,
+  notifyOpsPaymentSubmitted,
+  notifyOrderParties,
+  notifyShopPayoutHeld,
+} from "./client-order-notifications.js";
 import {
   createNotificationEvents,
+  formatInvalidateEvent,
   formatNotificationEvent,
   listInbox,
   notificationSnapshot,
+  orderFromNotification,
+  opsAdminRecipientIds,
+  publicNotification,
+  publishQueuedInvalidates,
+  queueInvalidate,
+  queueOrderInvalidate,
 } from "./notifications.js";
 import { createObjectStorage } from "./object-storage.js";
 import {
@@ -182,9 +196,12 @@ async function save(store) {
   await saveStore(database, store);
   database.afterCommit(() => {
     for (const notification of createdNotifications) {
-      notificationEvents.publish(notification);
+      notificationEvents.publish(
+        publicNotification(notification, orderFromNotification(store, notification)),
+      );
       deliverPush(store, notification);
     }
+    publishQueuedInvalidates(notificationEvents, store);
   });
 }
 
@@ -1270,21 +1287,30 @@ async function expireElapsedIssueWindows() {
 }
 
 /*
- Whether a job may be handed to a rider yet.
+ Remaining QR balance vs handing the job to a rider.
 
- The balance used to be collected at the client's door, which meant a rider
- could ride an hour to find nobody had paid and nothing they could do about it.
- It is asked for while the job is still on the press instead, and a delivery
- that has not settled it is simply not offered.
+ A shop-marked ready delivery is a rider offer even when the client's remaining
+ installment is still unpaid — that money is owed at the door (or at the office
+ counter), not as a condition of leaving the shop. Withholding the offer left a
+ packed Business Card job sitting at the printer while Rider showed nothing.
 
- A collected job is exempt: it is carried to our own counter, and its balance
- is settled there.
+ The remaining balance still gates completing a door delivery and releasing a
+ collected job at the counter.
 */
 function deliveryBalanceSettled(order) {
   if (carriedToOffice(order)) return true;
   const balance = order?.payments?.final_online;
   if (!balance) return true;
   return balance.status === "confirmed";
+}
+
+function syncJobsWithOrder(store, order, at) {
+  for (const job of store.orderJobs || []) {
+    if (job.orderId !== order.id || job.state === "cancelled") continue;
+    job.state = order.state;
+    job.riderId = order.riderId ?? null;
+    job.updatedAt = at;
+  }
 }
 
 function canViewOrderLocation(user, order) {
@@ -2074,7 +2100,10 @@ async function handleRequest(req, res) {
         at: now(),
         createId: id,
       });
-      if (!outcome.replayed) await save(store);
+      if (!outcome.replayed) {
+        queueInvalidate(store, { resource: "approvals", id: outcome.approvalCase.id });
+        await save(store);
+      }
       return send(res, 200, {
         ...approvalCaseDetail(store, outcome.approvalCase),
         publishedServiceIds: outcome.publishedServiceIds,
@@ -2449,13 +2478,18 @@ async function handleRequest(req, res) {
       res.flushHeaders();
       res.write("retry: 5000\n\n");
 
-      const unsubscribe = notificationEvents.subscribe(user.id, (notification) => {
-        if (notification.deletedAt == null) res.write(formatNotificationEvent(notification));
+      const writeNotification = (notification) => {
+        if (notification.deletedAt != null) return;
+        res.write(formatNotificationEvent(notification, orderFromNotification(store, notification)));
+      };
+      const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
+      const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload) => {
+        res.write(formatInvalidateEvent(payload));
       });
       for (let index = resumeIndex + 1; index < store.notifications.length; index += 1) {
         const notification = store.notifications[index];
         if (notification.userId === user.id && notification.deletedAt == null) {
-          res.write(formatNotificationEvent(notification));
+          writeNotification(notification);
         }
       }
 
@@ -2469,6 +2503,7 @@ async function handleRequest(req, res) {
         closed = true;
         clearInterval(heartbeat);
         unsubscribe();
+        unsubscribeInvalidate();
       };
       req.once("aborted", cleanup);
       res.once("close", cleanup);
@@ -3628,6 +3663,11 @@ async function handleRequest(req, res) {
         reason: body.reason,
         detail: { status: claim.status },
       });
+      if (claim.status === "payout_held") {
+        notifyShopPayoutHeld(store, order, { createId: id, at: ts });
+      }
+      queueOrderInvalidate(store, order, ["payouts", "orders"]);
+      queueInvalidate(store, { resource: "claims", id: claim.id, supplierId: order.supplierId });
       await save(store);
       return send(res, 201, { claim });
     }
@@ -3671,6 +3711,9 @@ async function handleRequest(req, res) {
         orderId: claim.orderId,
         reason: body.reason,
       });
+      if (order) notifyShopPayoutHeld(store, order, { createId: id, at: ts });
+      queueInvalidate(store, { resource: "payouts", id: claim.orderId, supplierId: order?.supplierId });
+      queueInvalidate(store, { resource: "claims", id: claim.id, supplierId: order?.supplierId });
       await save(store);
       return send(res, 200, { claim });
     }
@@ -3707,6 +3750,8 @@ async function handleRequest(req, res) {
         orderId: claim.orderId,
         reason: body.reason,
       });
+      queueInvalidate(store, { resource: "payouts", id: claim.orderId, supplierId: order?.supplierId });
+      queueInvalidate(store, { resource: "claims", id: claim.id, supplierId: order?.supplierId });
       await save(store);
       return send(res, 200, { claim });
     }
@@ -3892,6 +3937,9 @@ async function handleRequest(req, res) {
         detail: { kind: issue.kind, claimId: claim.id },
         reason: issue.description,
       });
+      notifyShopPayoutHeld(store, order, { createId: id, at: ts });
+      notifyOpsIssueReported(store, order, { createId: id, at: ts });
+      queueOrderInvalidate(store, order, ["orders", "claims"]);
       await save(store);
       return send(res, 201, { issue, claim });
     }
@@ -3964,6 +4012,8 @@ async function handleRequest(req, res) {
         reason: issue.resolution,
         detail: { status: issue.status, releasePayout: Boolean(body.releasePayout) },
       });
+      if (order) queueOrderInvalidate(store, order, ["orders", "claims"]);
+      else queueInvalidate(store, { resource: "claims", id: issue.orderId });
       await save(store);
       return send(res, 200, { issue });
     }
@@ -4034,6 +4084,12 @@ async function handleRequest(req, res) {
         orderId: escalation.orderId,
         reason: resolution,
       });
+      queueInvalidate(store, {
+        resource: "escalations",
+        id: escalation.id,
+        riderId: escalation.riderId,
+      });
+      if (order) queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
       return send(res, 200, { escalation, order: publicOrder(order, user, store) });
     }
@@ -4105,6 +4161,7 @@ async function handleRequest(req, res) {
           at: releasedAt,
         });
       }
+      queueOrderInvalidate(store, order, ["payouts"]);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store), milestone });
     }
@@ -4198,6 +4255,8 @@ async function handleRequest(req, res) {
         orderId: order.id,
         detail: { amountMinor: installment.amountMinor, method: "qr_manual" },
       });
+      notifyOpsPaymentSubmitted(store, order, { createId: id, at: submittedAt });
+      queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
@@ -4268,6 +4327,8 @@ async function handleRequest(req, res) {
         detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
         reason,
       });
+      notifyClientPaymentRejected(store, order, { createId: id, at: rejectedAt, reason });
+      queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
@@ -4306,6 +4367,10 @@ async function handleRequest(req, res) {
       }
       order.updatedAt = confirmedAt;
       notifyOrderParties(store, order, { createId: id, at: confirmedAt });
+      if (order.state === "needs_qa") {
+        notifyOpsJobNeedsQa(store, order, { createId: id, at: confirmedAt });
+      }
+      queueOrderInvalidate(store, order, ["orders", "jobs"]);
       order.timeline.push({
         at: confirmedAt,
         state: order.state,
@@ -4594,12 +4659,6 @@ async function handleRequest(req, res) {
             verificationStatus: rider.verificationStatus || "unverified",
           });
         }
-        if (!deliveryBalanceSettled(order)) {
-          return send(res, 409, {
-            error: "final_payment_not_confirmed",
-            message: "This delivery is waiting on the client's remaining balance. Confirm it before assigning a rider.",
-          });
-        }
       }
       if (next === "cancelled") {
         const reason = String(body.reason || "").trim();
@@ -4763,6 +4822,7 @@ async function handleRequest(req, res) {
           by: "system",
           note: "Client notified that the final quote is ready for checkout",
         });
+        queueOrderInvalidate(store, order, ["orders", "jobs"]);
         await save(store);
         return send(res, 200, { order: publicOrder(order, user, store) });
       }
@@ -4909,7 +4969,18 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
+      if (next === "ready_for_dispatch" || next === "rider_assigned") {
+        syncJobsWithOrder(store, order, order.updatedAt);
+      }
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
+      if (next === "needs_qa") {
+        notifyOpsJobNeedsQa(store, order, { createId: id, at: order.updatedAt });
+      }
+      queueOrderInvalidate(
+        store,
+        order,
+        next === "ready_for_dispatch" ? ["orders", "jobs", "dispatch"] : ["orders", "jobs"],
+      );
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
@@ -4931,7 +5002,7 @@ async function handleRequest(req, res) {
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
         (o) => !isContainedPickup(o)
-          && ((o.state === "ready_for_dispatch" && deliveryBalanceSettled(o))
+          && (o.state === "ready_for_dispatch"
             || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
       return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });
@@ -4954,16 +5025,13 @@ async function handleRequest(req, res) {
       if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
-      if (!deliveryBalanceSettled(order)) {
-        return send(res, 409, {
-          error: "final_payment_not_confirmed",
-          message: "This delivery is waiting on the client's remaining balance. It is offered again once Operations confirms it.",
-        });
-      }
       order.riderId = user.id;
       order.state = "rider_assigned";
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
+      syncJobsWithOrder(store, order, order.updatedAt);
+      notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
+      queueOrderInvalidate(store, order, ["dispatch", "orders", "jobs"]);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
@@ -5067,10 +5135,10 @@ async function handleRequest(req, res) {
           note: `Pickup blocked and escalated: ${failedCheckCodes.join(", ")}`,
           escalationId: escalation.id,
         });
-        for (const recipient of store.users.filter((candidate) => isOps(candidate))) {
+        for (const recipientId of opsAdminRecipientIds(store)) {
           store.notifications.push({
             id: id("ntf"),
-            userId: recipient.id,
+            userId: recipientId,
             type: "pickup_check_escalation",
             orderId: order.id,
             title: "Pickup blocked by a failed quality check",
@@ -5088,6 +5156,8 @@ async function handleRequest(req, res) {
           detail: { failedCheckCodes, evidenceFileIds },
           reason: failureNote,
         });
+        queueInvalidate(store, { resource: "escalations", id: escalation.id, riderId: user.id });
+        queueOrderInvalidate(store, order, ["orders"]);
         await save(store);
         return send(res, 200, { order: publicOrder(order, user, store), escalation });
       }
@@ -5111,6 +5181,7 @@ async function handleRequest(req, res) {
         note: "All six pickup checks passed; rider prompted to give the trained verbal sign-off",
       });
       notifyOrderParties(store, order, { createId: id, at: checkedAt });
+      queueOrderInvalidate(store, order, ["orders", "jobs"]);
       await save(store);
       return send(res, 200, {
         order: publicOrder(order, user, store),
@@ -5224,6 +5295,7 @@ async function handleRequest(req, res) {
           fileId: evidenceFileId,
         });
         notifyOrderParties(store, order, { createId: id, at: deliveredAt });
+        queueOrderInvalidate(store, order, ["orders", "jobs"]);
         await save(store);
         return send(res, 200, { order: publicOrder(order, user, store) });
       }
@@ -5246,6 +5318,7 @@ async function handleRequest(req, res) {
         note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
       });
       notifyOrderParties(store, order, { createId: id, at: deliveredAt });
+      queueOrderInvalidate(store, order, ["orders", "jobs"]);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
@@ -5312,6 +5385,7 @@ async function handleRequest(req, res) {
         orderId: order.id,
         detail: { receivedBy },
       });
+      queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
       return send(res, 200, { order: publicOrder(order, user, store) });
     }
