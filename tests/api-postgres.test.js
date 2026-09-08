@@ -2609,3 +2609,92 @@ test("legacy verification can approve a rider who enrolled with a typed licence 
     await database.close();
   }
 });
+
+test(
+  "event role actor uses database membership and role approval, not legacy primary role",
+  { skip: !DATABASE_URL },
+  async () => {
+    const database = createDatabase({ DATABASE_URL });
+    await clearAndFixture(database);
+    await database.transaction(async () => {
+      const s = await loadStore(database);
+      const u = s.users.find((u) => u.id === "user_rider");
+      u.role = "client";
+      u.accountType = "individual";
+      u.verificationStatus = null;
+      const supplier = s.users.find((u) => u.id === "user_supplier");
+      supplier.role = "client";
+      supplier.accountType = "individual";
+      supplier.verificationStatus = null;
+      s.userRoleMemberships.push({
+        userId: supplier.id,
+        role: "client",
+        createdAt: AT,
+      });
+      s.clientProfiles.push({
+        userId: supplier.id,
+        clientKind: "personal",
+        updatedAt: AT,
+      });
+      s.orders.find((o) => o.id === "ord_payout").state = "delivered";
+      s.userRoleMemberships.push({
+        userId: u.id,
+        role: "client",
+        createdAt: AT,
+      });
+      s.clientProfiles.push({
+        userId: u.id,
+        clientKind: "personal",
+        updatedAt: AT,
+      });
+      await saveStore(database, s);
+    });
+    const instance = await startApi();
+    try {
+      const offers = await request(instance.api, "/dispatch/offers", {
+        subject: "clerk_rider",
+        headers: { "X-GRIDGO-Role": "rider" },
+      });
+      assert.equal(offers.status, 200, JSON.stringify(offers.body));
+      const jobs = await request(instance.api, "/jobs", {
+        subject: "clerk_supplier",
+        headers: { "X-GRIDGO-Role": "supplier" },
+      });
+      assert.equal(jobs.status, 200);
+      assert.ok(jobs.body.jobs.some((o) => o.id === "ord_payout"));
+      const bypass = await request(
+        instance.api,
+        "/orders/ord_payout/transition",
+        {
+          method: "POST",
+          subject: "clerk_supplier",
+          headers: { "X-GRIDGO-Role": "supplier" },
+          body: { state: "issue_window_open" },
+        },
+      );
+      assert.equal(bypass.status, 409);
+      assert.equal(bypass.body.error, "transition_not_allowed");
+      const forged = await request(instance.api, "/orders", {
+        subject: "clerk_client",
+        headers: { "X-GRIDGO-Role": "super_admin" },
+      });
+      assert.equal(forged.status, 403);
+      const me = await request(instance.api, "/auth/me", {
+        subject: "clerk_rider",
+        headers: { "X-GRIDGO-Role": "rider" },
+      });
+      assert.equal(me.status, 200);
+      assert.equal(me.body.user.role, "rider");
+      assert.equal(me.body.user.verificationStatus, "approved");
+      const original = await loadStore(database);
+      assert.equal(
+        original.users.find((u) => u.id === "user_rider").role,
+        "client",
+      );
+    } finally {
+      instance.child.kill("SIGTERM");
+      await new Promise((r) => instance.child.once("exit", r));
+      await database.close();
+    }
+  },
+);

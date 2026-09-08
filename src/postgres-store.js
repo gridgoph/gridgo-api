@@ -600,7 +600,10 @@ function deviceTokenItem(row) {
   return { ...row.data, id: row.id, userId: row.user_id, token: row.token, platform: row.platform, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
+const domainBaselines = new WeakMap();
+export function originalDomainStore(store) { return domainBaselines.get(store); }
 function attachBaseline(store, rows) {
+  domainBaselines.set(store, structuredClone(store));
   Object.defineProperty(store, BASELINE, { value: structuredClone(rows), writable: true, enumerable: false });
   return store;
 }
@@ -1128,6 +1131,7 @@ export async function saveStore(database, store) {
   }
   if (Object.hasOwn(store, BASELINE)) {
     store[BASELINE] = structuredClone(currentRows);
+    domainBaselines.set(store, structuredClone(store));
   } else {
     attachBaseline(store, currentRows);
   }

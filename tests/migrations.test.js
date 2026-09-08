@@ -91,6 +91,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786950000000_a_collected_order_waits_on_our_shelf",
     "1786953600000_a_shop_is_paid_across_four_stages",
     "1786957200000_tarpaulin_printer_max_width",
+    "1786959000000_notification_push_outbox",
       ],
     );
     await client.query(`
@@ -215,6 +216,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name='notification_push_outbox'",[schema])).rowCount,0);
     await runner(migrationOptions(schema, "down", 1, client));
   const printerCapColumns = new Set((await client.query(
     `SELECT column_name FROM information_schema.columns

@@ -143,6 +143,7 @@ test("list inbox is bounded and carries the job title and state, not the whole o
   assert.equal(parseNotificationListLimit("5000"), 100);
 
   const store = {
+    userRoleMemberships: [{userId:"client",role:"client"}],
     notifications: [
       { id: "ntf_old", userId: "client", title: "Old", body: "x", read: true, at: "2026-08-11T01:00:00.000Z", orderId: "ord_1" },
       { id: "ntf_mid", userId: "client", title: "Mid", body: "x", read: false, at: "2026-08-11T02:00:00.000Z", orderId: "ord_1" },
@@ -152,6 +153,7 @@ test("list inbox is bounded and carries the job title and state, not the whole o
     orders: [
       {
         id: "ord_1",
+        clientId: "client",
         title: "Grand opening tarpaulin",
         state: "production",
         timeline: [{ at: "2026-08-11T00:00:00.000Z", state: "production" }],
@@ -177,6 +179,7 @@ test("list inbox is bounded and carries the job title and state, not the whole o
 
 test("list inbox stamps collect jobs so the phone can tell pickup from a door delivery", () => {
   const store = {
+    userRoleMemberships: [{userId:"client",role:"client"}],
     notifications: [
       {
         id: "ntf_hold",
@@ -192,6 +195,7 @@ test("list inbox stamps collect jobs so the phone can tell pickup from a door de
     orders: [
       {
         id: "ord_pick",
+        clientId: "client",
         title: "Booth backdrops",
         state: "awaiting_collection",
         fulfillmentMode: "pickup",
