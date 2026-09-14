@@ -447,7 +447,7 @@ export function moneyReportingForOrder(order) {
   };
 }
 
-function activePayoutHold(store, order) {
+export function activePayoutHold(store, order) {
   return Boolean(
     order.payoutHold ||
       (store?.claims || []).some(

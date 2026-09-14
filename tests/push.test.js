@@ -871,3 +871,27 @@ test("health names the Firebase project once a send has succeeded", async () => 
   assert.equal(health.status, "available");
   assert.equal(typeof health.checkedAt, "string");
 });
+
+test("claimed and anonymous iOS registrations default to FCM and accept explicit APNs", () => {
+  for (const register of [registerDeviceToken, registerUnclaimedDeviceToken]) {
+    const store = { deviceTokens: [] };
+    const args = { userId: "user", platform: "ios", token: "legacy-fcm-token", at: AT };
+    const legacy = register(store, args).device;
+    assert.equal(legacy.tokenProvider, "fcm");
+    assert.equal(publicDevice(legacy).tokenProvider, "fcm");
+    delete legacy.tokenProvider;
+    assert.equal(publicDevice(legacy).tokenProvider, "fcm");
+    assert.equal(register(store, { ...args, at: LATER }).device.tokenProvider, "fcm");
+    const native = register(store, { ...args, token: "a".repeat(64), tokenProvider: "apns" }).device;
+    assert.equal(native.tokenProvider, "apns");
+    assert.equal(register(store, { ...args, token: native.token, tokenProvider: "apns", at: LATER }).device.tokenProvider, "apns");
+  }
+});
+
+test("anonymous registration cannot rewrite a claimed device provider", () => {
+  const store = { deviceTokens: [] };
+  const device = registerDeviceToken(store, { userId: "user", platform: "ios", token: "a".repeat(64), at: AT }).device;
+  const result = registerUnclaimedDeviceToken(store, { platform: "ios", token: device.token, tokenProvider: "apns", at: LATER });
+  assert.equal(result.changed, false);
+  assert.equal(device.tokenProvider, "fcm");
+});

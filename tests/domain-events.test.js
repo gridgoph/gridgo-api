@@ -256,3 +256,113 @@ test("final payment clears actual assigned delivery gate once", () => {
     1,
   );
 });
+
+test("same-state payment decisions reach both privileged inboxes once", () => {
+  for (const status of ["confirmed", "not_submitted"]) {
+    const before = fixture();
+    Object.assign(before.orders[0], {
+      state: "out_for_delivery", riderId: "r1", fulfillmentMode: "delivery",
+      payments: { final_online: { status: "pending_confirmation" } },
+      timeline: [{ state: "out_for_delivery", at: "earlier" }],
+    });
+    const s = structuredClone(before);
+    Object.assign(s.orders[0].payments.final_online, {
+      status, ...(status === "confirmed" ? { confirmedAt: options.at } : { rejectedAt: options.at }),
+    });
+    s.orders[0].timeline.push({ state: "out_for_delivery", at: options.at });
+    deriveDomainEvents(s, before, options);
+    const type = status === "confirmed" ? "ops_payment_confirmed" : "ops_payment_rejected";
+    assert.deepEqual(s.notifications.filter((n) => n.type === type).map((n) => `${n.userId}:${n.appRole}`).sort(), ["ops:ops_admin", "super:super_admin"]);
+    assert.equal(s.notifications.some((n) => ["ops_order_progress", "order_out_for_delivery", "shop_job_out_for_delivery"].includes(n.type)), false);
+    const count = s.notifications.length;
+    deriveDomainEvents(s, before, options);
+    deriveDomainEvents(s, structuredClone(s), options);
+    assert.equal(s.notifications.length, count);
+  }
+});
+
+for (const [name, type, setup, change] of [
+  ["credit adjustments", "ops_credit_updated", (s) => { s.credits = { c: { balanceMinor: 0 } }; }, (s) => { s.credits.c.balanceMinor = 100; }],
+  ["claim release", "ops_claim_changed", (s) => { s.claims = [{ id: "claim", orderId: "o", status: "payout_held" }]; }, (s) => { s.claims[0].status = "released"; }],
+  ["claim hold reason", "ops_claim_changed", (s) => { s.claims = [{ id: "claim", orderId: "o", status: "payout_held", holdReason: "first" }]; }, (s) => { s.claims[0].holdReason = "second"; }],
+  ["issue resolution", "ops_issue_changed", (s) => { s.issues = [{ id: "issue", orderId: "o", status: "open" }]; }, (s) => { s.issues[0].status = "resolved"; }],
+  ["pickup resolution", "pickup_escalation_changed", (s) => { s.escalations = [{ id: "esc", orderId: "o", riderId: "r1", status: "open" }]; }, (s) => { s.escalations[0].status = "resolved"; }],
+  ["payout release", "ops_payout_released", (s) => { s.orders[0].payoutMilestones = [{ code: "printing", status: "pof_attached" }]; }, (s) => { s.orders[0].payoutMilestones[0].status = "released"; }],
+  ["approval decision", "ops_approval_decision", () => {}, (s) => { s.approvalCases[0].status = "suspended"; }],
+  ["service decision", "ops_service_decision", (s) => { s.supplierServices = [{ id: "svc", supplierId: "s", state: "pending_verification" }]; }, (s) => { s.supplierServices[0].state = "live"; }],
+  ["role change", "ops_role_changed", () => {}, (s) => { s.userRoleMemberships.push({ userId: "c", role: "supplier" }); }],
+  ["job assignment", "ops_assignment_changed", (s) => { s.orderJobs = []; }, (s) => { s.orderJobs.push({ id: "job", orderId: "o", supplierId: "s", state: "supplier_assigned" }); }],
+]) {
+  test(`${name} writes a durable row to every privileged membership`, () => {
+    const before = fixture();
+    setup(before);
+    const s = structuredClone(before);
+    change(s);
+    s.auditLog = [{ actorId: "ops" }];
+    deriveDomainEvents(s, before, options);
+    const rows = s.notifications.filter((n) => n.type === type && ["ops_admin", "super_admin"].includes(n.appRole));
+    assert.deepEqual(rows.map((n) => `${n.userId}:${n.appRole}`).sort(), ["ops:ops_admin", "super:super_admin"]);
+    assert.equal(rows.find((n) => n.userId === "ops").push, false);
+    const count = s.notifications.length;
+    deriveDomainEvents(s, structuredClone(s), options);
+    assert.equal(s.notifications.length, count);
+  });
+}
+
+test("distinct credit and payout events in one transaction keep their own inbox rows", () => {
+  const before = fixture();
+  before.credits = { c: { balanceMinor: 0 }, new: { balanceMinor: 0 } };
+  before.orders[0].payoutMilestones = ["printing", "retention"].map((code) => ({ code, status: "pof_attached" }));
+  const s = structuredClone(before);
+  for (const credit of Object.values(s.credits)) credit.balanceMinor = 100;
+  for (const milestone of s.orders[0].payoutMilestones) milestone.status = "released";
+  deriveDomainEvents(s, before, options);
+  for (const type of ["ops_credit_updated", "ops_payout_released"]) {
+    for (const userId of ["ops", "super"]) {
+      const rows = s.notifications.filter((n) => n.type === type && n.userId === userId);
+      assert.equal(rows.length, 2);
+      assert.equal(new Set(rows.map((n) => n.occurrenceKey)).size, 2);
+    }
+  }
+});
+
+test("hold release follows the aggregate across claims and the order flag", () => {
+  for (const orderFlag of [true, false]) {
+    const before = fixture();
+    before.orders[0].payoutHold = orderFlag;
+    before.claims = ["first", "second"].map((id) => ({ id, orderId: "o", status: "payout_held" }));
+    const s = structuredClone(before);
+    s.claims[0].status = "released";
+    deriveDomainEvents(s, before, options);
+    assert.equal(s.notifications.some((n) => n.type === "shop_payout_hold_released"), false);
+    const partial = structuredClone(s);
+    s.claims[1].status = "released";
+    s.orders[0].payoutHold = false;
+    deriveDomainEvents(s, partial, options);
+    assert.equal(s.notifications.filter((n) => n.type === "shop_payout_hold_released").length, 1);
+    deriveDomainEvents(s, partial, options);
+    assert.equal(s.notifications.filter((n) => n.type === "shop_payout_hold_released").length, 1);
+  }
+});
+
+test("a remaining order hold prevents a claim release notice", () => {
+  const before = fixture();
+  before.orders[0].payoutHold = true;
+  before.claims = [{ id: "claim", orderId: "o", status: "payout_held" }];
+  const s = structuredClone(before);
+  s.claims[0].status = "released";
+  deriveDomainEvents(s, before, options);
+  assert.equal(s.notifications.some((n) => n.type === "shop_payout_hold_released"), false);
+});
+
+test("derived supplier assignment writes one lifecycle row per recipient", () => {
+  const before = fixture();
+  before.orders[0].supplierId = null;
+  before.orders[0].state = "approved_for_matching";
+  const s = structuredClone(before);
+  s.orders[0].supplierId = "s";
+  s.orders[0].state = "supplier_assigned";
+  s.orders[0].timeline = [{ state: "supplier_assigned", at: options.at }];
+  deriveDomainEvents(s, before, options);
+  assert.equal(s.notifications.filter((n) => n.userId === "s" && n.type === "shop_job_assigned").length, 1);
+});

@@ -1,3 +1,4 @@
+import { activePayoutHold } from "./operational-model.js";
 import {
   writeDraft,
   notifyOrderParties,
@@ -25,6 +26,9 @@ export function deriveDomainEvents(store, before, { createId, at }) {
   const oldNotificationIds = new Set(
     (before.notifications || []).map((n) => n.id),
   );
+  const routeNotificationIds = new Set(
+    (store.notifications || []).filter((n) => !oldNotificationIds.has(n.id)).map((n) => n.id),
+  );
   const actor =
     (store.auditLog || []).slice((before.auditLog || []).length).at(-1)
       ?.actorId ||
@@ -43,17 +47,18 @@ export function deriveDomainEvents(store, before, { createId, at }) {
       ...(userIds ? { userIds: [...new Set(userIds.filter(Boolean))] } : {}),
     });
   }
-  function notify(userId, type, title, order, occurrence, appRole, extra = {}) {
+  function notify(userId, type, title, order, occurrence, appRole, extra = {}, preserveOccurrences = false) {
     if (!userId) return;
     // Existing route effect for the same recipient/purpose wins in this transaction.
     if (
       (store.notifications || []).some(
         (n) =>
-          !oldNotificationIds.has(n.id) &&
+          (preserveOccurrences ? routeNotificationIds.has(n.id) : !oldNotificationIds.has(n.id)) &&
           n.userId === userId &&
           n.type === type &&
           (n.appRole ?? null) === (appRole ?? null) &&
-          (n.orderId || null) === (order?.id || null),
+          (n.orderId || null) === (order?.id || null) &&
+          (n.approvalCaseId || null) === (extra.approvalCaseId || null),
       )
     )
       return;
@@ -83,13 +88,25 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         occurrence,
         membership.role,
         extra,
+        true,
       );
   }
   const priorOrders = keyed(before.orders);
   for (const order of store.orders || []) {
     const old = priorOrders.get(order.id);
-    if (!changed(old, order)) continue;
     const occurrence = `${order.id}:${order.updatedAt || at}:${order.timeline?.length || 0}`;
+    if (old && activePayoutHold(before, old) && !activePayoutHold(store, order)) {
+      notify(
+        order.supplierId,
+        "shop_payout_hold_released",
+        "Payout hold released",
+        order,
+        `${occurrence}:hold_released`,
+        "supplier",
+      );
+      notifyAdmins("ops_payout_hold_released", "Payout hold released", order, `${occurrence}:hold_released`);
+    }
+    if (!changed(old, order)) continue;
     queueOrderInvalidate(store, order, [
       "orders",
       "jobs",
@@ -163,6 +180,16 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         hint(resource, order.id, [old.riderId]);
     for (const [code, payment] of Object.entries(order.payments || {})) {
       const prior = old?.payments?.[code];
+      const rejected = payment.rejectedAt && payment.rejectedAt !== prior?.rejectedAt;
+      if (rejected || (payment.status !== prior?.status && ["pending_confirmation", "confirmed"].includes(payment.status))) {
+        const status = rejected ? "rejected" : payment.status === "pending_confirmation" ? "submitted" : "confirmed";
+        notifyAdmins(
+          `ops_payment_${status}`,
+          `Payment ${status}`,
+          order,
+          `${occurrence}:${code}:${payment.submittedAt || ""}:${payment.confirmedAt || payment.rejectedAt || at}`,
+        );
+      }
       if (payment.status === "confirmed" && prior?.status !== "confirmed")
         notify(
           order.clientId,
@@ -193,7 +220,8 @@ export function deriveDomainEvents(store, before, { createId, at }) {
       const prior = (old?.payoutMilestones || []).find(
         (m) => m.code === milestone.code,
       );
-      if (milestone.status === "released" && prior?.status !== "released")
+      if (milestone.status === "released" && prior?.status !== "released") {
+        notifyAdmins("ops_payout_released", "Payout milestone recorded as released", order, `${occurrence}:${milestone.code}:${milestone.releasedAt || at}`);
         notify(
           order.supplierId,
           "shop_payout_released",
@@ -202,16 +230,8 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           `${occurrence}:${milestone.code}:${milestone.releasedAt || at}`,
           "supplier",
         );
+      }
     }
-    if (old && old.payoutHold && !order.payoutHold)
-      notify(
-        order.supplierId,
-        "shop_payout_hold_released",
-        "Payout hold released",
-        order,
-        occurrence,
-        "supplier",
-      );
     if (old?.state === "proof_approval" && order.state !== old.state) {
       notifyAdmins(
         "ops_proof_decided",
@@ -289,7 +309,8 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         if (
           (!old || old.supplierId !== row.supplierId) &&
           row.state !== "cancelled"
-        )
+        ) {
+          notifyAdmins("ops_assignment_changed", "Supplier assignment changed", order, occurrence);
           notify(
             row.supplierId,
             "shop_job_assigned",
@@ -298,7 +319,18 @@ export function deriveDomainEvents(store, before, { createId, at }) {
             occurrence,
             "supplier",
           );
+        }
       } else if (table === "approvalCases") {
+        if (row.status !== old?.status || row.applicationRevision !== old?.applicationRevision) {
+          const submitted = row.status === "pending";
+          notifyAdmins(
+            submitted ? "ops_signup_submitted" : "ops_approval_decision",
+            submitted ? "New application" : "Application status changed",
+            null,
+            occurrence,
+            { approvalCaseId: row.id },
+          );
+        }
         if (old?.status !== "suspended" && row.status === "suspended") {
           for (const affected of store.orders || [])
             if (
@@ -366,7 +398,8 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         if (
           row.state !== old?.state &&
           ["live", "suspended"].includes(row.state)
-        )
+        ) {
+          notifyAdmins("ops_service_decision", "Service status changed", null, occurrence);
           notify(
             row.supplierId,
             "supplier_service_decision",
@@ -375,34 +408,35 @@ export function deriveDomainEvents(store, before, { createId, at }) {
             occurrence,
             "supplier",
           );
+        }
       } else {
         hint(table === "issues" ? "claims" : table, row.id);
         if (order)
           queueOrderInvalidate(store, order, ["orders", "jobs", "payouts"]);
         if (table === "escalations" && row.status !== old?.status) {
-          const escalationAlreadyWritten = (userId) =>
+          const escalationAlreadyWritten = (userId, appRole) =>
             (store.notifications || []).some(
               (n) =>
                 !oldNotificationIds.has(n.id) &&
                 n.userId === userId &&
+                (!appRole || n.appRole === appRole) &&
                 n.orderId === order?.id &&
                 [
                   "pickup_escalation_resolved",
                   "pickup_check_escalation",
                 ].includes(n.type),
             );
-          if (row.status === "open") {
-            for (const membership of admins)
-              if (!escalationAlreadyWritten(membership.userId))
-                notify(
-                  membership.userId,
-                  "pickup_escalation_changed",
-                  "Pickup issue status changed",
-                  order,
-                  occurrence,
-                  membership.role,
-                );
-          } else {
+          for (const membership of admins)
+            if (!escalationAlreadyWritten(membership.userId, membership.role))
+              notify(
+                membership.userId,
+                "pickup_escalation_changed",
+                "Pickup issue status changed",
+                order,
+                occurrence,
+                membership.role,
+              );
+          if (row.status !== "open") {
             const userId = row.riderId || order?.riderId;
             if (userId && !escalationAlreadyWritten(userId))
               notify(
@@ -424,6 +458,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           );
         }
         if (table === "issues") {
+          notifyAdmins(
+            old ? "ops_issue_changed" : "ops_issue_reported",
+            old ? "Issue status updated" : "Client reported an issue",
+            order,
+            occurrence,
+          );
           if (old && row.status !== old.status)
             notify(
               order?.clientId,
@@ -459,20 +499,9 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           );
         if (
           table === "claims" &&
-          old &&
-          ["released", "resolved", "dismissed", "closed"].includes(
-            row.status,
-          ) &&
-          row.status !== old.status
+          (!old || row.status !== old.status || row.holdReason !== old.holdReason)
         )
-          notify(
-            order?.supplierId,
-            "shop_payout_hold_released",
-            "Payout hold released",
-            order,
-            occurrence,
-            "supplier",
-          );
+          notifyAdmins("ops_claim_changed", "Claim status updated", order, occurrence);
       }
     }
   }
@@ -502,6 +531,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         `${key}:${at}`,
         null,
       );
+      notifyAdmins("ops_role_changed", "Account access changed", null, `${key}:${at}`);
       if (["ops_admin", "super_admin"].includes(role))
         for (const m of store.userRoleMemberships || [])
           if (m.role === "super_admin" && m.userId !== userId)
@@ -577,6 +607,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
     ]))
       if (changed(before.credits?.[userId], store.credits?.[userId])) {
         hint("credits", null, [userId]);
+        notifyAdmins("ops_credit_updated", "Credit account updated", null, `${userId}:${at}`);
         notify(
           userId,
           "credit_updated",

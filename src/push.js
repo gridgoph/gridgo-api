@@ -155,7 +155,7 @@ export function publicDevice(record) {
     userId: record.userId,
     platform: record.platform,
     appRole: record.appRole || null,
-    tokenProvider: record.tokenProvider || (record.platform === "ios" ? "apns" : "fcm"),
+    tokenProvider: record.tokenProvider || "fcm",
     tokenTail: record.token.slice(-8),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -172,7 +172,7 @@ export function publicDevice(record) {
  *
  * Returns `{ device, created, reassignedFrom, changed }`.
  */
-export function registerDeviceToken(store, { userId, token, platform, at, appRole = null, tokenProvider = platform === "ios" ? "apns" : "fcm" }) {
+export function registerDeviceToken(store, { userId, token, platform, at, appRole = null, tokenProvider = "fcm" }) {
   ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
 
@@ -264,7 +264,7 @@ function evictOldestUnclaimed(store, keep) {
  *     attacker's fabricated rows first and a real phone only until its next
  *     launch, when the app re-registers. Claimed rows are never evicted.
  */
-export function registerUnclaimedDeviceToken(store, { token, platform, at, limit = UNCLAIMED_DEVICE_LIMIT }) {
+export function registerUnclaimedDeviceToken(store, { token, platform, at, tokenProvider = "fcm", limit = UNCLAIMED_DEVICE_LIMIT }) {
   ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
   if (existing) {
@@ -272,12 +272,13 @@ export function registerUnclaimedDeviceToken(store, { token, platform, at, limit
       return { device: null, created: false, changed: false, claimedElsewhere: true, evicted: 0 };
     }
     existing.platform = platform;
+    existing.tokenProvider = tokenProvider;
     existing.updatedAt = at;
     return { device: existing, created: false, changed: true, claimedElsewhere: false, evicted: 0 };
   }
 
   const evicted = evictOldestUnclaimed(store, Math.max(limit - 1, 0));
-  const device = { id: deviceId(), userId: null, token, platform, createdAt: at, updatedAt: at };
+  const device = { id: deviceId(), userId: null, token, platform, tokenProvider, createdAt: at, updatedAt: at };
   store.deviceTokens.push(device);
   return { device, created: true, changed: true, claimedElsewhere: false, evicted };
 }

@@ -151,6 +151,19 @@ function resolveCopy(entry, order) {
   };
 }
 
+function stateOccurrence(order) {
+  let state;
+  let occurrence = "legacy";
+  for (const [index, entry] of (order.timeline || []).entries()) {
+    if (entry.state && entry.state !== state) {
+      state = entry.state;
+      occurrence = `${index}:${entry.at || "legacy"}`;
+    }
+  }
+  const marker = state === order.state ? occurrence : state ? order.updatedAt || "legacy" : order.createdAt || "legacy";
+  return `${order.state}:${marker}`;
+}
+
 export function clientNotificationDraft(order) {
   if (!order?.clientId || !order.id || !order.state) return null;
   const collecting = order.fulfillmentMode === "pickup";
@@ -163,7 +176,7 @@ export function clientNotificationDraft(order) {
     userId: order.clientId,
     appRole: "client",
     type: copy.type,
-    occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
+    occurrenceKey: stateOccurrence(order),
     orderId: order.id,
     title: copy.title,
     body: copy.body,
@@ -285,7 +298,7 @@ export function shopNotificationDraft(order) {
     userId: order.supplierId,
     appRole: "supplier",
     type: copy.type,
-    occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
+    occurrenceKey: stateOccurrence(order),
     orderId: order.id,
     title: copy.title,
     body: copy.body,
@@ -306,7 +319,7 @@ export function riderNotificationDrafts(store, order) {
       userId: order.riderId,
       appRole: "rider",
       type: assigned.type,
-      occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
+      occurrenceKey: stateOccurrence(order),
       orderId: order.id,
       title: assigned.title,
       body: assigned.body,
@@ -319,7 +332,7 @@ export function riderNotificationDrafts(store, order) {
         userId: rider.id,
         appRole: "rider",
         type: "dispatch_available",
-        occurrenceKey: `${order.state}:${order.timeline?.at(-1)?.at || order.updatedAt || "legacy"}`,
+        occurrenceKey: stateOccurrence(order),
         orderId: order.id,
         title: "A job is ready to collect",
         body: "Open Offers to take it before another rider does.",
@@ -518,7 +531,7 @@ export function notifyOpsOrderProgress(store, order, { createId, at }) {
     opsDrafts(store, {
       type: "ops_order_progress",
       orderId: order.id,
-      occurrenceKey: `${order.id}:${order.state}:${order.updatedAt || at}`,
+      occurrenceKey: stateOccurrence(order),
       title: `${copy[0]} · ${order.id}`,
       body: copy[1],
     }),

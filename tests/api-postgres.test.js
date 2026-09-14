@@ -2987,6 +2987,7 @@ test(
           "suspended";
         s.approvalCases.find((c) => c.id === "case_supplier").suspensionReason =
           "Approval hold";
+        s.orders.find((o) => o.id === id).state = "approved_for_matching";
         await saveStore(database, s);
       });
       const denied = await request(
@@ -3014,6 +3015,35 @@ test(
       });
       assert.equal(refused.status, 409);
       assert.equal(refused.body.error, "supplier_not_approved");
+      const matchedRefused = await request(instance.api, `/orders/${id}/transition`, {
+        method: "POST",
+        subject: "clerk_ops",
+        body: { state: "supplier_assigned" },
+      });
+      assert.equal(matchedRefused.status, 409);
+      assert.equal(matchedRefused.body.error, "supplier_not_approved");
+      assert.equal((await loadStore(database)).orders.find((o) => o.id === id).state, "approved_for_matching");
+      await database.transaction(async () => {
+        const s = await loadStore(database);
+        s.userRoleMemberships = s.userRoleMemberships.filter((m) => m.userId !== "user_supplier" || m.role !== "supplier");
+        await saveStore(database, s);
+      });
+      const revoked = await request(instance.api, `/orders/${id}/transition`, {
+        method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
+      });
+      assert.equal(revoked.status, 404);
+      assert.equal(revoked.body.error, "supplier_not_found");
+      await database.transaction(async () => {
+        const s = await loadStore(database);
+        s.userRoleMemberships.push({ userId: "user_supplier", role: "supplier", createdAt: AT });
+        s.approvalCases.find((c) => c.id === "case_supplier").status = "approved";
+        await saveStore(database, s);
+      });
+      const matched = await request(instance.api, `/orders/${id}/transition`, {
+        method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
+      });
+      assert.equal(matched.status, 200, JSON.stringify(matched.body));
+
     } finally {
       instance.child.kill("SIGTERM");
       await new Promise((r) => instance.child.once("exit", r));
@@ -3021,3 +3051,82 @@ test(
     }
   },
 );
+
+test("device HTTP registration preserves legacy FCM and honors explicit anonymous APNs", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    for (const subject of [undefined, "clerk_client"]) {
+      const prefix = subject || "anonymous";
+      const fcmToken = `${prefix}:` + "x".repeat(150);
+      const nativeToken = (subject ? "a" : "b").repeat(64);
+      for (const [deviceToken, tokenProvider] of [[fcmToken, undefined], [nativeToken, "apns"]]) {
+        const response = await request(instance.api, "/devices", {
+          method: "POST", subject, body: { platform: "ios", token: deviceToken, ...(tokenProvider ? { tokenProvider } : {}) },
+        });
+        assert.equal(response.status, subject ? 201 : 200, JSON.stringify(response.body));
+        if (!subject) assert.deepEqual(response.body, { ok: true });
+        const s = await loadStore(database);
+        assert.equal(s.deviceTokens.find((d) => d.token === deviceToken).tokenProvider, tokenProvider || "fcm");
+      }
+    }
+    const invalid = await request(instance.api, "/devices", {
+      method: "POST", body: { platform: "android", token: "a".repeat(64), tokenProvider: "apns" },
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, "invalid_token_provider");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("payment HTTP confirmation emits one QA transition and no repeated delivery lifecycle", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const s = await loadStore(database);
+    const order = s.orders.find((o) => o.id === "ord_payout");
+    order.moneyModelVersion = 3;
+    order.state = "initial_payment_review";
+    order.payments.initial.status = "pending_confirmation";
+    order.payoutMilestones = [];
+    order.timeline = [{ state: "initial_payment_review", at: AT, by: "user_client" }];
+    await saveStore(database, s);
+  });
+  const instance = await startApi();
+  try {
+    const initial = await request(instance.api, "/orders/ord_payout/payments/initial/confirm", {
+      method: "POST", subject: "clerk_ops", body: {},
+    });
+    assert.equal(initial.status, 200, JSON.stringify(initial.body));
+    assert.equal(initial.body.order.state, "needs_qa");
+    const qaStore = await loadStore(database);
+    assert.equal(qaStore.notifications.filter((n) => n.orderId === "ord_payout" && n.type === "order_needs_qa").length, 1);
+    await database.transaction(async () => {
+      const s = await loadStore(database);
+      const order = s.orders.find((o) => o.id === "ord_payout");
+      order.state = "out_for_delivery";
+      order.riderId = "user_rider";
+      order.payments.final_online.status = "pending_confirmation";
+      order.timeline.push({ state: "out_for_delivery", at: AT, by: "user_rider" });
+      await saveStore(database, s);
+    });
+    const final = await request(instance.api, "/orders/ord_payout/payments/final_online/confirm", {
+      method: "POST", subject: "clerk_ops", body: {},
+    });
+    assert.equal(final.status, 200, JSON.stringify(final.body));
+    const s = await loadStore(database);
+    assert.equal(s.notifications.some((n) => n.orderId === "ord_payout" && n.type === "order_out_for_delivery"), false);
+    for (const [userId, appRole] of [["user_ops", "ops_admin"], ["user_super", "super_admin"]]) {
+      assert.equal(s.notifications.filter((n) => n.orderId === "ord_payout" && n.type === "ops_payment_confirmed" && n.userId === userId && n.appRole === appRole).length, 2);
+    }
+    assert.equal(s.notifications.filter((n) => n.type === "rider_delivery_payment_cleared").length, 1);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});

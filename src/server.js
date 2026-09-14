@@ -1668,11 +1668,15 @@ async function handleRequest(req, res) {
           message: "Send the FCM registration token this device received from Firebase.",
         });
       }
-      if (!isFcmTokenShaped(token)) {
+      const tokenProvider = body.tokenProvider || "fcm";
+      if (!["fcm", "apns"].includes(tokenProvider) || (tokenProvider === "apns" && body.platform !== "ios")) {
+        return send(res, 400, { error: "invalid_token_provider" });
+      }
+      if (tokenProvider === "apns" ? !/^[a-fA-F0-9]{64}$/.test(token) : !isFcmTokenShaped(token)) {
         return send(res, 400, {
           error: "invalid_device_token",
           message:
-            "This is not an FCM registration token. Send the token Firebase issued to this installation, unmodified.",
+            "Send the unmodified registration token issued by the selected push provider.",
         });
       }
       const platform = String(body.platform || "").trim();
@@ -1687,6 +1691,7 @@ async function handleRequest(req, res) {
         const deviceStore = await loadDeviceTokenStore(database);
         const outcome = registerUnclaimedDeviceToken(deviceStore, {
           token,
+          tokenProvider,
           platform,
           at: now(),
           limit: MAX_UNCLAIMED_DEVICES,
@@ -2431,7 +2436,7 @@ async function handleRequest(req, res) {
       }
       const appRole = body.appRole || null;
       if (appRole && (!EVENT_ROLES.includes(appRole) || !hasRole(store,user.id,appRole))) return send(res,403,{error:'forbidden'});
-      const tokenProvider = body.tokenProvider || (platform === 'ios' ? 'apns' : 'fcm');
+      const tokenProvider = body.tokenProvider || "fcm";
       if (!['fcm','apns'].includes(tokenProvider) || (tokenProvider === 'apns' && platform !== 'ios')) return send(res,400,{error:'invalid_token_provider'});
       const { device, created, reassignedFrom } = registerDeviceToken(store, {
         userId: user.id,
@@ -4381,6 +4386,7 @@ async function handleRequest(req, res) {
       }
       const body = await readBody(req);
       const confirmedAt = now();
+      const previousState = order.state;
       installment.status = "confirmed";
       installment.confirmedAt = confirmedAt;
       installment.confirmedBy = user.id;
@@ -4396,7 +4402,6 @@ async function handleRequest(req, res) {
         order.paymentStatus = "paid";
       }
       order.updatedAt = confirmedAt;
-      notifyOrderParties(store, order, { createId: id, at: confirmedAt });
       if (order.state === "needs_qa") {
         notifyOpsJobNeedsQa(store, order, { createId: id, at: confirmedAt });
       }
@@ -4407,6 +4412,9 @@ async function handleRequest(req, res) {
         by: user.id,
         note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} confirmed manually by Operations`,
       });
+      if (order.state !== previousState) {
+        notifyOrderParties(store, order, { createId: id, at: confirmedAt });
+      }
       audit(store, {
         actor: user,
         action: `payment.${installmentCode}_confirm`,
@@ -4660,9 +4668,9 @@ async function handleRequest(req, res) {
       // it to that shop is not an assignment decision, so the legacy eligibility
       // check -- which reads the retired product catalogue -- has nothing to say.
       const handingToMatchedShop = next === "supplier_assigned" && !body.supplierId && Boolean(order.supplierId);
-      if (next === "supplier_assigned" && !handingToMatchedShop) {
+      if (next === "supplier_assigned") {
         const supplier = store.users.find(
-          (candidate) => candidate.id === body.supplierId && hasRole(store, candidate.id, "supplier"),
+          (candidate) => candidate.id === (body.supplierId || order.supplierId) && hasRole(store, candidate.id, "supplier"),
         );
         if (!supplier) {
           return send(res, 404, {
@@ -4678,10 +4686,10 @@ async function handleRequest(req, res) {
             verificationStatus: approval?.status || supplier.verificationStatus || "unverified",
           });
         }
-        const candidate = eligibleSuppliersForOrder(store, order).candidates.find(
+        const candidate = !handingToMatchedShop && eligibleSuppliersForOrder(store, order).candidates.find(
           (item) => item.supplier.id === supplier.id,
         );
-        if (!candidate?.eligible) {
+        if (!handingToMatchedShop && !candidate?.eligible) {
           return send(res, 409, {
             error: "supplier_not_eligible",
             message: "This supplier has no approved live service that covers the order. Refresh eligible suppliers and choose a listed match.",
@@ -4873,6 +4881,12 @@ async function handleRequest(req, res) {
         });
         order.state = "awaiting_checkout";
         order.updatedAt = acceptedAt;
+        order.timeline.push({
+          at: acceptedAt,
+          state: "awaiting_checkout",
+          by: "system",
+          note: "Client notified that the final quote is ready for checkout",
+        });
         const { client: notification } = notifyOrderParties(store, order, {
           createId: id,
           at: acceptedAt,
@@ -4881,12 +4895,6 @@ async function handleRequest(req, res) {
           order.assignmentNotificationId = notification.id;
           order.assignmentNotifiedAt = notification.at;
         }
-        order.timeline.push({
-          at: acceptedAt,
-          state: "awaiting_checkout",
-          by: "system",
-          note: "Client notified that the final quote is ready for checkout",
-        });
         queueOrderInvalidate(store, order, ["orders", "jobs"]);
         await save(store);
         return send(res, 200, { order: publicOrder(order, user, store) });

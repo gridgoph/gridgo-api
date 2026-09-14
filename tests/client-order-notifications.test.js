@@ -416,3 +416,39 @@ test("notifyOrderParties writes client, shop, and rider once", () => {
   const second = notifyOrderParties(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" });
   assert.equal(second.created.length, 0);
 });
+
+test("lifecycle occurrence ignores same-state timeline entries and records a real return", () => {
+  const store = { notifications: [] };
+  const order = {
+    id: "order", clientId: "client", supplierId: "shop", riderId: "rider",
+    state: "out_for_delivery", updatedAt: "t1",
+    timeline: [{ state: "picked_up", at: "t0" }, { state: "out_for_delivery", at: "t1" }],
+  };
+  let i = 0;
+  const args = { createId: () => `n${++i}`, at: "t1" };
+  assert.equal(notifyOrderParties(store, order, args).created.length, 3);
+  order.updatedAt = "t2";
+  order.timeline.push({ state: "out_for_delivery", at: "t2", note: "Payment confirmed" });
+  assert.equal(notifyOrderParties(store, order, { ...args, at: "t2" }).created.length, 0);
+  order.timeline.push({ state: "picked_up", at: "t3" }, { state: "out_for_delivery", at: "t4" });
+  order.updatedAt = "t4";
+  assert.equal(notifyOrderParties(store, order, { ...args, at: "t4" }).created.length, 3);
+});
+
+test("route and derived writers share one QA transition occurrence", async () => {
+  const { deriveDomainEvents } = await import("../src/domain-events.js");
+  const before = {
+    orders: [{ id: "order", clientId: "client", state: "initial_payment_review", timeline: [{ state: "initial_payment_review", at: "t0" }] }],
+    notifications: [],
+  };
+  const store = structuredClone(before);
+  const order = store.orders[0];
+  order.state = "needs_qa";
+  order.updatedAt = "t1";
+  order.timeline.push({ state: "needs_qa", at: "t1" });
+  let i = 0;
+  const args = { createId: () => `n${++i}`, at: "t1" };
+  notifyOrderParties(store, order, args);
+  deriveDomainEvents(store, before, args);
+  assert.equal(store.notifications.filter((n) => n.type === "order_needs_qa").length, 1);
+});

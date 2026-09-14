@@ -31,3 +31,25 @@ test("missing APNs credentials remain explicitly disabled", () => {
   assert.equal(d.configured, false);
   assert.equal(d.health().status, "disabled");
 });
+
+test("legacy iOS FCM tokens never enter APNs delivery or pruning", async () => {
+  const { routePushDelivery } = await import("../src/apns.js");
+  const received = [];
+  const fcm = {
+    configured: true,
+    send: async (_message, devices) => {
+      received.push(...devices.map((d) => d.id));
+      return devices.map((d) => ({ deviceId: d.id, ok: true, prune: false }));
+    },
+  };
+  const apns = createApnsDelivery({ GRIDGO_APNS_TOPIC: "test.app" }, { credentials: {} });
+  const devices = [
+    { id: "legacy", userId: "u", platform: "ios", token: "existing-fcm-registration" },
+    { id: "explicit-fcm", userId: "u", platform: "ios", tokenProvider: "fcm", token: "another-fcm-registration" },
+    { id: "explicit-apns", userId: "u", platform: "ios", tokenProvider: "apns", token: "invalid-native-token" },
+  ];
+  const results = await routePushDelivery(fcm, apns).send({ title: "test", body: "test", data: {} }, devices);
+  assert.deepEqual(received, ["legacy", "explicit-fcm"]);
+  assert.deepEqual(results.map((r) => r.prune), [false, false, true]);
+  assert.equal(results[2].code, "BadDeviceToken");
+});

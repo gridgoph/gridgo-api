@@ -139,7 +139,7 @@ export function routePushDelivery(fcm, apns) {
       const results = [];
       for (const device of devices) {
         const provider =
-          device.tokenProvider || (device.platform === "ios" ? "apns" : "fcm");
+          device.tokenProvider || "fcm";
         const delivery = provider === "apns" ? apns : fcm;
         if (!delivery.configured)
           results.push({
