@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import http2 from "node:http2";
+import { once } from "node:events";
 import { apnsPayload, apnsToken, createApnsDelivery } from "../src/apns.js";
 test("APNs uses native device tokens and minimal data with signed provider JWT", () => {
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", {
@@ -132,4 +134,114 @@ test("concurrent routing rejects unsafe anonymous batches before any delivery", 
   ));
   assert.equal(calls, 0);
   assert.deepEqual(await routePushDelivery(delivery, delivery).send({}, []), []);
+});
+
+async function apnsHarness(t, handle) {
+  const server = http2.createServer();
+  const clients = [];
+  const servers = [];
+  const received = [];
+  server.on("session", (session) => {
+    servers.push(session);
+    session.on("error", () => {});
+  });
+  server.on("stream", (stream, headers) => {
+    received.push(headers);
+    stream.on("error", () => {});
+    stream.on("end", () => handle(stream, headers));
+    stream.resume();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    for (const session of [...clients, ...servers]) session.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  let now = 1_800_000_000_000;
+  const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const delivery = createApnsDelivery({ GRIDGO_APNS_TOPIC: "test.app" }, {
+    credentials: { keyId: "key", teamId: "team", privateKey },
+    now: () => now,
+    timeoutMs: 200,
+    connect: () => {
+      const session = http2.connect(`http://127.0.0.1:${server.address().port}`);
+      clients.push(session);
+      return session;
+    },
+  });
+  return {
+    delivery, clients, servers, received,
+    advance: (seconds) => { now += seconds * 1000; },
+    send: (ids) => delivery.send({ title: "Update", body: "Ready", data: {} },
+      ids.map((id) => ({ id, userId: "user", token: id.padStart(64, "0") }))),
+  };
+}
+
+test("APNs reuses one HTTP/2 session and provider JWT across concurrent batches", async (t) => {
+  const h = await apnsHarness(t, (stream) => { stream.respond({ ":status": 200 }); stream.end(); });
+  const first = await h.send(["1", "2", "3"]);
+  const second = await h.send(["4"]);
+  assert.ok([...first, ...second].every((result) => result.ok));
+  assert.equal(h.clients.length, 1);
+  assert.equal(h.servers.length, 1);
+  const token = h.received[0].authorization;
+  assert.ok(h.received.every((headers) => headers.authorization === token));
+  h.advance(49 * 60);
+  await h.send(["5"]);
+  assert.equal(h.received.at(-1).authorization, token);
+  h.advance(60);
+  await h.send(["6"]);
+  const refreshed = h.received.at(-1).authorization;
+  assert.notEqual(refreshed, token);
+  const issuedAt = (value) => JSON.parse(Buffer.from(value.split(".")[1], "base64url")).iat;
+  assert.equal(issuedAt(refreshed) - issuedAt(token), 50 * 60);
+  assert.equal(h.clients.length, 1);
+});
+
+test("APNs replaces a GOAWAY session while accepted requests finish", async (t) => {
+  let finish;
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const h = await apnsHarness(t, (stream, headers) => {
+    if (headers[":path"].endsWith("1")) {
+      finish = () => { stream.respond({ ":status": 200 }); stream.end(); };
+      started();
+    } else {
+      stream.respond({ ":status": 200 }); stream.end();
+    }
+  });
+  const first = h.send(["1"]);
+  await ready;
+  const goaway = once(h.clients[0], "goaway");
+  h.servers[0].goaway(http2.constants.NGHTTP2_NO_ERROR);
+  await goaway;
+  finish();
+  assert.equal((await first)[0].ok, true);
+  assert.equal((await h.send(["2"]))[0].ok, true);
+  assert.equal(h.clients.length, 2);
+  assert.equal(h.received[0].authorization, h.received[1].authorization);
+});
+
+test("APNs stream timeouts and errors leave other deliveries and the session usable", async (t) => {
+  const h = await apnsHarness(t, (stream, headers) => {
+    if (headers[":path"].endsWith("1")) return;
+    if (headers[":path"].endsWith("2")) {
+      stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
+      return;
+    }
+    stream.respond({ ":status": 200 }); stream.end();
+  });
+  const results = await h.send(["1", "2", "3"]);
+  assert.deepEqual(results.map((result) => [result.ok, result.prune, result.code]), [
+    [false, false, "apns_timeout"],
+    [false, false, "apns_transport_error"],
+    [true, false, null],
+  ]);
+  assert.equal((await h.send(["4"]))[0].ok, true);
+  assert.equal(h.clients.length, 1);
+  const closed = once(h.clients[0], "close");
+  h.servers[0].destroy();
+  await closed;
+  assert.equal((await h.send(["5"]))[0].ok, true);
+  assert.equal(h.clients.length, 2);
 });

@@ -47,6 +47,35 @@ export function createApnsDelivery(env = process.env, options = {}) {
     env.GRIDGO_APNS_SANDBOX === "true"
       ? "https://api.sandbox.push.apple.com"
       : "https://api.push.apple.com";
+  let session = null;
+  let cachedToken = null;
+  let tokenIssuedAt = 0;
+  const now = options.now || Date.now;
+  function providerToken() {
+    const issuedAt = Math.floor(now() / 1000);
+    if (!cachedToken || issuedAt < tokenIssuedAt || issuedAt - tokenIssuedAt >= 50 * 60) {
+      cachedToken = apnsToken(credentials, issuedAt);
+      tokenIssuedAt = issuedAt;
+    }
+    return cachedToken;
+  }
+  function connection() {
+    if (session && !session.closed && !session.destroyed) return session;
+    const current = (options.connect || http2.connect)(origin);
+    session = current;
+    const forget = () => { if (session === current) session = null; };
+    current.on("error", () => {
+      forget();
+      current.destroy();
+    });
+    current.once("goaway", () => {
+      forget();
+      current.close();
+    });
+    current.once("close", forget);
+    return current;
+  }
+  const activeRequests = new WeakMap();
   async function send(message, devices) {
     if (!configured) return [];
     if (devices.some((d) => !isClaimedDevice(d)))
@@ -69,27 +98,45 @@ export function createApnsDelivery(env = process.env, options = {}) {
             code: "BadDeviceToken",
           };
         return new Promise((resolve) => {
-          const session = (options.connect || http2.connect)(origin);
+          let current;
+          let request;
           let finished = false;
           const done = (result) => {
             if (finished) return;
             finished = true;
-            session.destroy();
+            if (request) {
+              request.setTimeout(0);
+              request.close(http2.constants.NGHTTP2_CANCEL);
+            }
+            if (current) {
+              const active = (activeRequests.get(current) || 1) - 1;
+              activeRequests.set(current, active);
+              if (active === 0) current.unref();
+            }
             resolve({ deviceId: d.id, ...result });
           };
-          session.on("error", () =>
-            done({ ok: false, prune: false, code: "apns_transport_error" }),
-          );
-          const request = session.request({
-            ":method": "POST",
-            ":path": `/3/device/${d.token}`,
-            authorization: `bearer ${apnsToken(credentials, Math.floor(Date.now() / 1000))}`,
-            "apns-topic": topic,
-            "apns-push-type": "alert",
-            "apns-priority": "10",
-          });
-          request.setTimeout(10000, () =>
+          try {
+            const token = providerToken();
+            current = connection();
+            activeRequests.set(current, (activeRequests.get(current) || 0) + 1);
+            current.ref();
+            request = current.request({
+              ":method": "POST",
+              ":path": `/3/device/${d.token}`,
+              authorization: `bearer ${token}`,
+              "apns-topic": topic,
+              "apns-push-type": "alert",
+              "apns-priority": "10",
+            });
+          } catch {
+            done({ ok: false, prune: false, code: "apns_transport_error" });
+            return;
+          }
+          request.setTimeout(options.timeoutMs ?? 10000, () =>
             done({ ok: false, prune: false, code: "apns_timeout" }),
+          );
+          request.on("close", () =>
+            done({ ok: false, prune: false, code: "apns_transport_error" }),
           );
           let status = 0;
           let body = "";
