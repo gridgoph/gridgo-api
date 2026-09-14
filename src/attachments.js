@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { identityHasMembership } from "./authorization-context.js";
+import { approvalCaseFor, authorizationContextFor, identityHasMembership } from "./authorization-context.js";
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
 import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
@@ -851,6 +851,12 @@ export function authorizeFileAttachOwner(user, file) {
   }
 }
 
+function hasApprovedWorkRole(user, role) {
+  if (!hasRole(user, role)) return false;
+  const approval = approvalCaseFor(authorizationContextFor(user), role);
+  return approval ? approval.status === "approved" : user.role === role && user.verificationStatus === "approved";
+}
+
 export function authorizeFileAttach(user, file, target) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
@@ -861,13 +867,13 @@ export function authorizeFileAttach(user, file, target) {
   if (file.purpose === "fulfilment_proof") {
     if (target?.type !== "order") forbidden();
     const requiredRole = FULFILMENT_MILESTONE_ACTOR[target.milestoneCode];
-    if (!requiredRole || !hasRole(user, requiredRole)) forbidden();
+    if (!requiredRole || !hasApprovedWorkRole(user, requiredRole)) forbidden();
     if (requiredRole === "supplier" && record.supplierId !== user.id) forbidden();
     if (requiredRole === "rider" && record.riderId !== user.id) forbidden();
     return;
   }
   if (file.purpose === "delivery_photo") {
-    if (target?.type !== "order" || !hasRole(user, "rider") || record.riderId !== user.id) forbidden();
+    if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
     if (!DELIVERY_PHOTO_STATES.has(record.state)) {
       fail(
         409,
@@ -1093,6 +1099,9 @@ export function authorizeFileRead(user, store, file) {
     if (hasRole(user, "rider") && file.ownerId === user.id) return;
     forbidden();
   }
+  if (["supplier", "rider"].includes(user.role)
+      && (file.references || []).some((reference) => reference.type === "order")
+      && !hasApprovedWorkRole(user, user.role)) forbidden();
   if (file.ownerId === user.id) return;
   if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
   forbidden();

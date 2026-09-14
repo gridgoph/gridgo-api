@@ -24,7 +24,7 @@ import {
   RIDER_DOCUMENT_TYPES,
   VERIFICATION_DOCUMENT_TYPES,
 } from "../src/attachments.js";
-import { resolveAuthorizationContext } from "../src/authorization-context.js";
+import { resolveAuthorizationContext, selectActorRole } from "../src/authorization-context.js";
 
 function expectError(fn, status, code) {
   assert.throws(fn, (error) => {
@@ -63,9 +63,9 @@ function multipart(parts, boundary = "expo-boundary-123") {
 
 const client = { id: "client-a", role: "client" };
 const otherClient = { id: "client-b", role: "client" };
-const supplier = { id: "supplier-a", role: "supplier" };
+const supplier = { id: "supplier-a", role: "supplier", verificationStatus: "approved" };
 const otherSupplier = { id: "supplier-b", role: "supplier" };
-const rider = { id: "rider-a", role: "rider" };
+const rider = { id: "rider-a", role: "rider", verificationStatus: "approved" };
 const ops = { id: "ops-a", role: "ops_admin" };
 const superAdmin = { id: "super-a", role: "super_admin" };
 const MANILA_YEAR = Number(new Intl.DateTimeFormat("en-US", {
@@ -575,6 +575,68 @@ test("a matched job shop can read the client's attached mockup", () => {
 
 test("referenced evidence cannot be deleted", () => {
   expectError(() => markFileDeletePending(readyFile("artwork", { references: [{ type: "order", id: "order-a" }] }), client, "2026-08-09T00:00:00Z"), 409, "file_in_use");
+});
+
+test("order files require approved work membership while verification evidence stays accessible", () => {
+  for (const role of ["supplier", "rider"]) {
+    for (const status of ["approved", "suspended", "pending", "rejected", null]) {
+      const member = { id: `${role}-member`, role: "client" };
+      const assignedOrder = order({ supplierId: member.id, riderId: member.id, state: "out_for_delivery" });
+      const store = {
+        users: [member], orders: [assignedOrder],
+        userRoleMemberships: ["client", role].map((membershipRole) => ({ userId: member.id, role: membershipRole })),
+        approvalCases: status ? [{ userId: member.id, kind: role, status }] : [],
+      };
+      const actor = selectActorRole(store, member, role, { restrictMemberships: true });
+      const artwork = readyFile("artwork", {
+        references: [{ type: "order", id: assignedOrder.id, field: "artworkFileIds" }],
+      });
+      const proof = readyFile("fulfilment_proof", { ownerId: member.id });
+      const target = { type: "order", record: assignedOrder, milestoneCode: role === "supplier" ? "printing" : "delivered" };
+      const ownAttachedProof = { ...proof, references: [{ type: "order", id: assignedOrder.id, field: "fulfilmentProofFileIds" }] };
+      const workOperations = [
+        () => authorizeFileRead(actor, store, artwork),
+        () => authorizeFileRead(actor, store, ownAttachedProof),
+        () => authorizeFileAttach(actor, proof, target),
+      ];
+      if (role === "rider") workOperations.push(() => authorizeFileAttach(actor,
+        readyFile("delivery_photo", { ownerId: member.id }), { type: "order", record: assignedOrder }));
+      for (const operation of workOperations) {
+        if (status === "approved") assert.doesNotThrow(operation);
+        else expectError(operation, 403, "forbidden");
+      }
+      assignedOrder.supplierId = null;
+      assignedOrder.riderId = null;
+      store.orderJobs = [{ id: "job", orderId: assignedOrder.id, supplierId: member.id, riderId: member.id }];
+      if (status === "approved") assert.doesNotThrow(() => authorizeFileRead(actor, store, artwork));
+      else expectError(() => authorizeFileRead(actor, store, artwork), 403, "forbidden");
+
+      const verification = readyFile(role === "supplier" ? "verification_document" : "rider_verification_document", { ownerId: member.id });
+      const verificationTarget = role === "supplier"
+        ? { type: "user", record: member, documentType: "valid_id" }
+        : { type: "rider_document", record: member, kind: "selfie" };
+      assert.doesNotThrow(() => authorizeFileRead(actor, store, verification));
+      assert.doesNotThrow(() => authorizeFileAttach(actor, verification, verificationTarget));
+      const clientActor = selectActorRole(store, member, "client", { restrictMemberships: true });
+      expectError(() => authorizeFileRead(clientActor, store, verification), 403, "forbidden");
+    }
+  }
+});
+
+test("approval cases override legacy approval when authorizing order files", () => {
+  const member = { ...supplier };
+  const store = {
+    users: [member], orders: [order()],
+    userRoleMemberships: [{ userId: member.id, role: "supplier" }],
+    approvalCases: [{ userId: member.id, kind: "supplier", status: "suspended" }],
+  };
+  resolveAuthorizationContext(store, member);
+  expectError(() => authorizeFileRead(member, store, readyFile("artwork", {
+    references: [{ type: "order", id: "order-a", field: "artworkFileIds" }],
+  })), 403, "forbidden");
+  expectError(() => authorizeFileAttach(member, readyFile("fulfilment_proof"), {
+    type: "order", record: store.orders[0], milestoneCode: "printing",
+  }), 403, "forbidden");
 });
 
 test("delivered POF belongs to the rider and also gates retention", () => {
