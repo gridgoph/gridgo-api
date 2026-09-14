@@ -249,6 +249,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.deepEqual(inbox, [
     "supplier_a:shop_job_assigned",
     "user_client:order_submitted",
+    "user_ops:ops_assignment_changed",
     "user_ops:ops_job_needs_qa",
     "user_ops:ops_order_progress",
     "user_ops:ops_payment_submitted",

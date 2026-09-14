@@ -321,11 +321,10 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           );
         }
       } else if (table === "approvalCases") {
-        if (row.status !== old?.status || row.applicationRevision !== old?.applicationRevision) {
-          const submitted = row.status === "pending";
+        if (row.status !== old?.status && row.status !== "pending") {
           notifyAdmins(
-            submitted ? "ops_signup_submitted" : "ops_approval_decision",
-            submitted ? "New application" : "Application status changed",
+            "ops_approval_decision",
+            "Application status changed",
             null,
             occurrence,
             { approvalCaseId: row.id },

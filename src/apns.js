@@ -136,21 +136,27 @@ export function routePushDelivery(fcm, apns) {
     configured: fcm.configured || apns.configured,
     health: () => ({ ...fcm.health(), apns: apns.health() }),
     send: async (message, devices) => {
-      const results = [];
-      for (const device of devices) {
-        const provider =
-          device.tokenProvider || "fcm";
-        const delivery = provider === "apns" ? apns : fcm;
-        if (!delivery.configured)
-          results.push({
-            deviceId: device.id,
-            ok: false,
-            prune: false,
-            code: `${provider}_disabled`,
-          });
-        else results.push(...(await delivery.send(message, [device])));
+      if (devices.some((device) => !isClaimedDevice(device)))
+        assertStrangerSafeMessage(message);
+      const results = new Array(devices.length);
+      let next = 0;
+      async function worker() {
+        while (next < devices.length) {
+          const index = next++;
+          const device = devices[index];
+          const provider = device.tokenProvider || "fcm";
+          const delivery = provider === "apns" ? apns : fcm;
+          try {
+            results[index] = delivery.configured
+              ? await delivery.send(message, [device])
+              : [{ deviceId: device.id, ok: false, prune: false, code: `${provider}_disabled` }];
+          } catch {
+            results[index] = [{ deviceId: device.id, ok: false, prune: false, code: `${provider}_transport_error` }];
+          }
+        }
       }
-      return results;
+      await Promise.all(Array.from({ length: Math.min(10, devices.length) }, worker));
+      return results.flat();
     },
   };
 }

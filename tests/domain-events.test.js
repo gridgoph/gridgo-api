@@ -366,3 +366,41 @@ test("derived supplier assignment writes one lifecycle row per recipient", () =>
   deriveDomainEvents(s, before, options);
   assert.equal(s.notifications.filter((n) => n.userId === "s" && n.type === "shop_job_assigned").length, 1);
 });
+
+test("unsubmitted rider cases stay silent until the explicit submission writer runs", async () => {
+  const { notifyOpsSignupSubmitted } = await import("../src/client-order-notifications.js");
+  const before = fixture();
+  before.approvalCases = [];
+  const s = structuredClone(before);
+  s.approvalCases.push({
+    id: "rider-intake", userId: "r1", kind: "rider", status: "pending",
+    version: 1, applicationRevision: 1,
+  });
+  deriveDomainEvents(s, before, options);
+  assert.deepEqual(s.notifications, []);
+  const intake = structuredClone(s);
+  s.approvalCases[0].submittedAt = options.at;
+  notifyOpsSignupSubmitted(s, s.approvalCases[0], options);
+  deriveDomainEvents(s, intake, options);
+  assert.deepEqual(
+    s.notifications.map((n) => `${n.userId}:${n.appRole}:${n.type}`).sort(),
+    ["ops:ops_admin:ops_signup_submitted", "super:super_admin:ops_signup_submitted"],
+  );
+  const submitted = structuredClone(s);
+  s.approvalCases[0].status = "approved";
+  s.approvalCases[0].version += 1;
+  deriveDomainEvents(s, submitted, options);
+  assert.deepEqual(
+    s.notifications.filter((n) => n.type === "ops_approval_decision").map((n) => `${n.userId}:${n.appRole}`).sort(),
+    ["ops:ops_admin", "super:super_admin"],
+  );
+});
+
+test("pending application revisions do not derive submission alerts", () => {
+  const before = fixture();
+  before.approvalCases = [{ id: "case", userId: "r1", kind: "rider", status: "pending", applicationRevision: 1 }];
+  const s = structuredClone(before);
+  s.approvalCases[0].applicationRevision = 2;
+  deriveDomainEvents(s, before, options);
+  assert.deepEqual(s.notifications, []);
+});
