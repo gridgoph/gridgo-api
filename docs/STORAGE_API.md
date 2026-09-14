@@ -378,7 +378,7 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 | Assume object put + database commit are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
 | Delete referenced evidence on uploader request | Prohibited for every purpose except `rider_verification_document` (`409 file_in_use`). A rider deleting their own evidence invalidates the backing rider-document rows in the same transaction instead of orphaning them. |
 | API uses root credentials | Prohibited; Compose provisions a separate bucket-policy API user. Root credentials are init/console only. |
-| Floating MinIO image | Prohibited; both `minio/minio` and `minio/mc` use pinned release tags. |
+| Floating MinIO image | Prohibited; both `quay.io/minio/minio` and `quay.io/minio/mc` use pinned release tags. Docker Hub `minio/minio` is withdrawn. |
 
 ## PostgreSQL reconciliation
 

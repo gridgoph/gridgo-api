@@ -67,6 +67,8 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 
 Every merge to the default branch builds/tests/publishes and invokes the restricted deploy command. CI must keep proving the named PostgreSQL volume survives both API replacement and database-container recreation.
 
+MinIO and `mc` images are the pinned `quay.io/minio/...` release tags in compose and CI smoke; Docker Hub `minio/minio` is withdrawn.
+
 Uploads spool to `$PWD/.tmp/uploads`; the image must keep it writable by uid 1001. `/health` reports database, storage, push, `commit`, and `builtAt`.
 
 ## Constraints
