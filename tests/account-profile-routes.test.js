@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { routeAccountProfile } from "../src/account-profile-routes.js";
+import { selectActorRole } from "../src/authorization-context.js";
 
 const AT = "2026-08-25T10:00:00.000Z";
 
@@ -126,4 +127,36 @@ test("an individual remains valid without orgName", async () => {
   assert.equal(response.body.user.accountType, "individual");
   assert.equal(Object.hasOwn(response.body.user, "orgName"), false);
   assert.equal(response.body.user.version, 2);
+});
+
+test("selected client membership cannot edit a non-client primary profile", async () => {
+  const context = fixture({ role: "supplier", accountType: undefined });
+  context.store.userRoleMemberships.push({ userId: context.user.id, role: "supplier", createdAt: AT });
+  context.user = selectActorRole(context.store, context.user, "client", { restrictMemberships: true });
+  const before = structuredClone(context.store);
+
+  await assert.rejects(call(context, "POST", "/me/business-apply", {
+    accountType: "business", businessName: "Supplier Business",
+  }), { status: 409, code: "client_profile_unavailable" });
+  await assert.rejects(call(context, "PATCH", "/me", {
+    expectedVersion: 1, name: "Updated Name",
+  }), { status: 409, code: "client_profile_unavailable" });
+  assert.deepEqual(context.store, before);
+});
+
+test("primary client profile edits still respect selected membership isolation", async () => {
+  const context = fixture();
+  context.store.userRoleMemberships.push({ userId: context.user.id, role: "supplier", createdAt: AT });
+  const persisted = context.user;
+  context.user = selectActorRole(context.store, persisted, "supplier", { restrictMemberships: true });
+  await assert.rejects(call(context, "POST", "/me/business-apply", {
+    accountType: "business", businessName: "Client Business",
+  }), { status: 403, code: "membership_required" });
+  context.user = selectActorRole(context.store, persisted, "client", { restrictMemberships: true });
+  const response = await call(context, "POST", "/me/business-apply", {
+    accountType: "business", businessName: "Client Business",
+  });
+  assert.equal(response.status, 200);
+  assert.equal(persisted.orgName, "Client Business");
+  assert.equal(persisted.role, "client");
 });

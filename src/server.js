@@ -23,6 +23,7 @@ import {
 } from "./auth.js";
 import {
   selectActorRole,
+  authorizationContextFor,
   approvalCaseFor,
   approvalCaseSummary,
   contextHasMembership,
@@ -2096,7 +2097,7 @@ async function handleRequest(req, res) {
         [caseId],
       );
       if (locked.rowCount === 0) return send(res, 404, { error: "approval_case_not_found" });
-      const actorRole = contextHasMembership(auth.authorization, "super_admin")
+      const actorRole = contextHasMembership(authorizationContextFor(user), "super_admin")
         ? "super_admin"
         : "ops_admin";
       const outcome = decideApprovalCase({

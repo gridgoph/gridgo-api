@@ -43,7 +43,7 @@ function text(value, field, maxLength) {
   return normalized;
 }
 
-function requireClient(user) {
+function requireClient(store, user) {
   if (!user) fail(401, "unauthorized", "Sign in to edit your GRIDGO account.");
   if (!identityHasMembership(user, "client")) {
     fail(403, "membership_required", "A GRIDGO client membership is required.", {
@@ -52,7 +52,7 @@ function requireClient(user) {
   }
   // account_type and org_name are still legacy users columns during the
   // membership compatibility window and are constrained to a client primary row.
-  if (user.role !== "client") {
+  if (store.users.find((candidate) => candidate.id === user.id)?.role !== "client") {
     fail(409, "client_profile_unavailable", "This identity does not have an editable client account profile.");
   }
 }
@@ -171,7 +171,7 @@ export function isAccountProfileRoute(method, pathname) {
 export async function routeAccountProfile({ req, url, store, user, readBody, createId, now, audit, publicUser }) {
   const { pathname } = url;
   if (!isAccountProfileRoute(req.method, pathname)) return null;
-  requireClient(user);
+  requireClient(store, user);
 
   if (req.method === "GET") {
     return { status: 200, body: { user: publicAccount(user, publicUser) }, mutated: false };

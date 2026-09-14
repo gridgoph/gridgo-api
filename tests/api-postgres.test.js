@@ -749,6 +749,42 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
   }
 });
 
+test("approval audit authority follows the selected role and implicit Super Admin precedence", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships.push({ userId: "user_ops", role: "super_admin", createdAt: AT });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const decisions = [
+      { action: "suspend", role: "ops_admin", authority: "ops_admin" },
+      { action: "restore", role: "super_admin", authority: "super_admin" },
+      { action: "suspend", role: undefined, authority: "super_admin" },
+    ];
+    for (const [index, decision] of decisions.entries()) {
+      const requestId = `selected-authority-${index}`;
+      const response = await request(instance.api, `/approval-cases/case_rider/${decision.action}`, {
+        method: "POST", subject: "clerk_ops",
+        headers: decision.role ? { "X-GRIDGO-Role": decision.role } : {},
+        body: { expectedVersion: index + 1, requestId, reason: "Review evidence" },
+      });
+      assert.equal(response.status, 200, JSON.stringify(response.body));
+      const persisted = await loadStore(database);
+      const audit = persisted.auditLog.find((entry) => entry.detail?.requestId === requestId);
+      assert.ok(audit);
+      assert.equal(audit.actorId, "user_ops");
+      assert.equal(audit.actorRole, decision.authority);
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("canonical rider decisions enforce readiness after replay handling", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
