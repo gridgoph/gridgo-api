@@ -5481,7 +5481,7 @@ async function handleRequest(req, res) {
 
     // ---- supplier jobs helper alias ----
     if (req.method === "GET" && pathname === "/jobs") {
-      if (!approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
+      if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
         jobs: store.orders
           .filter((o) => o.supplierId === user.id)

@@ -151,7 +151,7 @@ function resolveCopy(entry, order) {
   };
 }
 
-function stateOccurrence(order) {
+export function stateOccurrence(order) {
   let state;
   let occurrence = "legacy";
   for (const [index, entry] of (order.timeline || []).entries()) {
@@ -160,7 +160,7 @@ function stateOccurrence(order) {
       occurrence = `${index}:${entry.at || "legacy"}`;
     }
   }
-  const marker = state === order.state ? occurrence : state ? order.updatedAt || "legacy" : order.createdAt || "legacy";
+  const marker = state === order.state ? occurrence : order.createdAt || "legacy";
   return `${order.state}:${marker}`;
 }
 

@@ -404,3 +404,46 @@ test("pending application revisions do not derive submission alerts", () => {
   deriveDomainEvents(s, before, options);
   assert.deepEqual(s.notifications, []);
 });
+
+test("quote revisions share a new lifecycle occurrence across client and privileged inboxes", async () => {
+  const { notifyOrderParties, notifyOpsOrderProgress } = await import("../src/client-order-notifications.js");
+  const before = fixture();
+  Object.assign(before.orders[0], {
+    state: "awaiting_checkout", pendingQuote: { version: 1 },
+    timeline: [{ state: "supplier_accepted", at: "t1" }, { state: "awaiting_checkout", at: "t1" }],
+  });
+  notifyOrderParties(before, before.orders[0], options);
+  notifyOpsOrderProgress(before, before.orders[0], options);
+  const s = structuredClone(before);
+  const order = s.orders[0];
+  order.pendingQuote.version = 2;
+  order.updatedAt = "t2";
+  order.timeline.push({ state: "supplier_accepted", at: "t2" }, { state: "awaiting_checkout", at: "t2" });
+  notifyOrderParties(s, order, options);
+  deriveDomainEvents(s, before, options);
+  const clientRows = s.notifications.filter((n) => n.type === "supplier_assignment_final_price");
+  assert.equal(clientRows.length, 2);
+  for (const [userId, appRole] of [["ops", "ops_admin"], ["super", "super_admin"]]) {
+    const rows = s.notifications.filter((n) => n.type === "ops_order_progress" && n.userId === userId && n.appRole === appRole);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].occurrenceKey, clientRows[1].occurrenceKey);
+    assert.notEqual(rows[0].occurrenceKey, rows[1].occurrenceKey);
+  }
+  const count = s.notifications.length;
+  deriveDomainEvents(s, before, options);
+  const revised = structuredClone(s);
+  order.updatedAt = "t3";
+  order.timeline.push({ state: "awaiting_checkout", at: "t3", note: "Unrelated update" });
+  deriveDomainEvents(s, revised, options);
+  assert.equal(s.notifications.length, count);
+});
+
+test("legacy timeline mismatches do not turn same-state edits into lifecycle events", () => {
+  const before = fixture();
+  before.orders[0].state = "awaiting_checkout";
+  before.orders[0].timeline = [{ state: "supplier_accepted", at: "t1" }];
+  const s = structuredClone(before);
+  s.orders[0].updatedAt = "t2";
+  deriveDomainEvents(s, before, options);
+  assert.deepEqual(s.notifications, []);
+});

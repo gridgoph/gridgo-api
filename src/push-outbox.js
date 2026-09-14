@@ -64,21 +64,14 @@ export function createOutboxWorker({
         `UPDATE notification_push_outbox SET status='expired',updated_at=now() WHERE status IN ('pending','sending') AND expires_at<=now()`,
       );
       if (!delivery.configured) return;
-      const claimed = await database.transaction(
-        () =>
-          database.query(
-            `WITH due AS (SELECT id FROM notification_push_outbox WHERE status IN ('pending','sending') AND next_attempt_at<=now() AND expires_at>now() ORDER BY id LIMIT 25 FOR UPDATE SKIP LOCKED) UPDATE notification_push_outbox o SET status='sending',attempts=attempts+1,next_attempt_at=now()+interval '5 minutes',updated_at=now() FROM due WHERE o.id=due.id RETURNING o.*`,
-          ),
-        { lockKey: "gridgo-push-outbox-claim" },
-      );
-      for (const row of claimed.rows) {
+      async function processRow(row) {
         // A slow earlier send may outlive a batch lease. Renew only if this
         // attempt still owns the row; another worker's newer claim wins.
         const lease = await database.query(
           "UPDATE notification_push_outbox SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND status='sending' AND attempts=$2 RETURNING id",
           [row.id, row.attempts],
         );
-        if (!lease.rowCount) continue;
+        if (!lease.rowCount) return;
         const store = await loadStore(database);
         const n = store.notifications.find((n) => n.id === row.notification_id);
         const d = store.deviceTokens.find((d) => d.id === row.device_id);
@@ -91,7 +84,11 @@ export function createOutboxWorker({
           n.push !== false &&
           deviceAcceptsNotification(store, d, n)
         ) {
-          results = await delivery.send(pushMessageFor(n), [d]);
+          try {
+            results = await delivery.send(pushMessageFor(n), [d]);
+          } catch {
+            results = [{ deviceId: d.id, ok: false, prune: false, code: "transport_error" }];
+          }
           status = outboxVerdict(
             { attempts: row.attempts, expiresAt: row.expires_at },
             results,
@@ -113,6 +110,28 @@ export function createOutboxWorker({
             "DELETE FROM device_tokens WHERE id=$1 AND user_id=$2 AND token=$3",
             [d.id, row.user_id, d.token],
           );
+      }
+      while (true) {
+        const claimed = await database.transaction(
+          () =>
+            database.query(
+              `WITH due AS (SELECT id FROM notification_push_outbox WHERE status IN ('pending','sending') AND next_attempt_at<=now() AND expires_at>now() ORDER BY id LIMIT 25 FOR UPDATE SKIP LOCKED) UPDATE notification_push_outbox o SET status='sending',attempts=attempts+1,next_attempt_at=now()+interval '5 minutes',updated_at=now() FROM due WHERE o.id=due.id RETURNING o.*`,
+            ),
+          { lockKey: "gridgo-push-outbox-claim" },
+        );
+        if (!claimed.rows.length) break;
+        let next = 0;
+        async function worker() {
+          while (next < claimed.rows.length) {
+            const row = claimed.rows[next++];
+            await processRow(row);
+          }
+        }
+        const outcomes = await Promise.allSettled(
+          Array.from({ length: Math.min(10, claimed.rows.length) }, worker),
+        );
+        const failure = outcomes.find((outcome) => outcome.status === "rejected");
+        if (failure) throw failure.reason;
       }
     } finally {
       busy = false;

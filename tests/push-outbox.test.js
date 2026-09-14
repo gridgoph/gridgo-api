@@ -65,3 +65,105 @@ test("safe own-account role-change push reaches the removed role app without rev
     false,
   );
 });
+
+function workerFixture(count) {
+  const at = Date.parse("2026-09-15T00:00:00Z");
+  const rows = Array.from({ length: count }, (_, i) => ({
+    id: i, notification_id: `n${i}`, device_id: `d${i}`, user_id: "u",
+    attempts: 1, expires_at: new Date(at + 3600000).toISOString(),
+  }));
+  const store = {
+    users: [{ id: "u" }], userRoleMemberships: [{ userId: "u", role: "client" }],
+    notifications: rows.map((r) => ({ id: r.notification_id, userId: "u", appRole: "client", type: "credit_updated", title: "Credit", at: new Date(at).toISOString() })),
+    deviceTokens: rows.map((r) => ({ id: r.device_id, userId: "u", appRole: "client", token: `token-${r.id}` })),
+  };
+  const batches = [];
+  for (let i = 0; i < rows.length; i += 25) batches.push(rows.slice(i, i + 25));
+  const completed = new Map();
+  const pruned = [];
+  const lostLeases = new Set();
+  let claims = 0;
+  const database = {
+    transaction: async () => { claims += 1; return { rows: batches.shift() || [] }; },
+    query: async (_sql, values) => {
+      if (!values) return { rowCount: 0, rows: [] };
+      if (values.length === 2) return { rowCount: lostLeases.has(values[0]) ? 0 : 1 };
+      if (values.length === 5) {
+        const [id, status, nextAttemptAt, code, attempts] = values;
+        completed.set(id, { status, nextAttemptAt, code, attempts });
+        return { rowCount: 1 };
+      }
+      pruned.push(values);
+      return { rowCount: 1 };
+    },
+  };
+  return { database, store, completed, pruned, lostLeases, clock: () => at, claims: () => claims };
+}
+
+test("outbox bounds concurrent sends and drains multiple batches in one invocation", async () => {
+  const { createOutboxWorker } = await import("../src/push-outbox.js");
+  const f = workerFixture(61);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let active = 0;
+  let peak = 0;
+  const sent = [];
+  const drain = createOutboxWorker({
+    ...f, loadStore: async () => f.store,
+    delivery: { configured: true, send: async (_message, [device]) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      sent.push(device.id);
+      await gate;
+      active -= 1;
+      return [{ deviceId: device.id, ok: true }];
+    } },
+  });
+  const pending = drain();
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(active, 10);
+    assert.equal(f.claims(), 1);
+    await drain();
+    assert.equal(f.claims(), 1);
+  } finally {
+    release();
+    await pending;
+  }
+  assert.equal(peak, 10);
+  assert.equal(sent.length, 61);
+  assert.equal(new Set(sent).size, 61);
+  assert.equal(f.completed.size, 61);
+  assert.ok([...f.completed.values()].every((r) => r.status === "delivered"));
+  assert.equal(f.claims(), 4);
+});
+
+test("concurrent outbox retries failed sends and rechecks ownership and leases", async () => {
+  const { createOutboxWorker } = await import("../src/push-outbox.js");
+  const f = workerFixture(30);
+  f.store.deviceTokens[1].userId = "rebound-owner";
+  f.lostLeases.add(2);
+  const sent = [];
+  const drain = createOutboxWorker({
+    ...f, loadStore: async () => f.store,
+    delivery: { configured: true, send: async (_message, [device]) => {
+      sent.push(device.id);
+      if (device.id === "d0") throw new Error("provider unavailable");
+      if (device.id === "d3") return [{ deviceId: device.id, ok: false, prune: true, code: "BadDeviceToken" }];
+      return [{ deviceId: device.id, ok: true }];
+    } },
+  });
+  await drain();
+  assert.equal(sent.length, 28);
+  assert.equal(sent.includes("d1"), false);
+  assert.equal(sent.includes("d2"), false);
+  assert.deepEqual(f.completed.get(0), {
+    status: "pending", nextAttemptAt: new Date(f.clock() + 30000).toISOString(), code: "transport_error", attempts: 1,
+  });
+  assert.equal(f.completed.get(1).status, "suppressed");
+  assert.equal(f.completed.has(2), false);
+  assert.equal(f.completed.get(3).status, "suppressed");
+  assert.deepEqual(f.pruned, [["d3", "u", "token-3"]]);
+  assert.equal(f.completed.get(29).status, "delivered");
+  assert.equal(f.claims(), 3);
+});

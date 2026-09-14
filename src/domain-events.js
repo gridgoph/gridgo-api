@@ -3,6 +3,7 @@ import {
   writeDraft,
   notifyOrderParties,
   notifyOpsOrderProgress,
+  stateOccurrence,
 } from "./client-order-notifications.js";
 import {
   queueInvalidate,
@@ -134,7 +135,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         occurrence,
         "client",
       );
-    if (!old || old.state !== order.state) {
+    if (!old || stateOccurrence(old) !== stateOccurrence(order)) {
       notifyOrderParties(store, order, { createId, at });
       notifyOpsOrderProgress(store, order, { createId, at });
     }

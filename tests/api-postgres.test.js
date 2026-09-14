@@ -1280,6 +1280,12 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     });
     assert.equal(pendingSuperseded.status, 200, JSON.stringify(pendingSuperseded.body));
     assert.equal(pendingSuperseded.body.order.pendingQuote.version, 2);
+    const quoteInbox = (await loadStore(database)).notifications;
+    for (const [userId, appRole] of [["user_ops", "ops_admin"], ["user_super", "super_admin"]]) {
+      const quoteRows = quoteInbox.filter((n) => n.orderId === orderId && n.userId === userId && n.appRole === appRole && n.type === "ops_order_progress" && n.title === `Quote ready · ${orderId}`);
+      assert.equal(quoteRows.length, 2);
+      assert.notEqual(quoteRows[0].occurrenceKey, quoteRows[1].occurrenceKey);
+    }
     const pendingSupersessionStore = await loadStoreEventually(
       database,
       (store) => store.auditLog.some(
@@ -2662,6 +2668,15 @@ test(
       });
       assert.equal(jobs.status, 200);
       assert.ok(jobs.body.jobs.some((o) => o.id === "ord_payout"));
+      const clientJobs = await request(instance.api, "/jobs", {
+        subject: "clerk_supplier",
+        headers: { "X-GRIDGO-Role": "client" },
+      });
+      assert.equal(clientJobs.status, 403);
+      assert.deepEqual(clientJobs.body, { error: "forbidden" });
+      const inferredJobs = await request(instance.api, "/jobs", { subject: "clerk_supplier" });
+      assert.equal(inferredJobs.status, 200);
+      assert.ok(inferredJobs.body.jobs.some((o) => o.id === "ord_payout"));
       const bypass = await request(
         instance.api,
         "/orders/ord_payout/transition",
