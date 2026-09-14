@@ -192,7 +192,7 @@ PAYMENT_QR_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $O
 
 ## POST /files/:fileId/attach — bind to a domain record
 
-Auth: the caller must be the file owner **and** the relevant parent owner/assignee. The body is JSON and contains exactly the fields selected by the stored purpose:
+Auth: the caller must be the file owner **and** the relevant parent owner/assignee. Attaching `fulfilment_proof` or `delivery_photo` also requires current approval for the required supplier/rider membership. Verification-document intake remains available to its unapproved owner. The body is JSON and contains exactly the fields selected by the stored purpose:
 
 | Purpose | Body | Required state/ownership |
 |---|---|---|
@@ -241,7 +241,7 @@ curl -fsS -X POST "$API/files/$RIDER_LICENSE_FILE_ID/attach" -H "Authorization: 
 
 ## GET /files/:fileId — metadata
 
-Auth for ordinary purposes: file owner, `ops_admin`, `super_admin`, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super.
+Auth for ordinary purposes: `ops_admin`, `super_admin`, file owner, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super. When acting as supplier/rider, an order-referenced file additionally requires current approval, even for its uploader. Explicit [actor role selection](OPERATIONAL_MODEL_V2_API.md#selecting-an-actor-role) applies to file authorization and returned parent projections throughout upload/attach transactions.
 
 Auth for `verification_document` is intentionally stricter and never inherits order/service visibility: only the supplier owner, `ops_admin`, or `super_admin` may read metadata or request a download URL. Another supplier, client, and rider always receive `403 forbidden`, even if a malformed legacy reference points at one of their orders/services. Supplier document lists use `GET /users/:id/verification-documents` as specified in `docs/OPERATIONAL_MODEL_V2_API.md`.
 

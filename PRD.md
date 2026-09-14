@@ -54,7 +54,7 @@ Orders carry `pickup` and `dropoff` map points; suppliers carry a shop point; ri
 
 Artwork, fulfilment proof, delivery evidence, supplier images, and verification documents remain private MinIO objects. API records use opaque file IDs and authorize short-lived signed downloads.
 
-Notifications are durable, caller-scoped PostgreSQL rows delivered through list, SSE, and optional FCM. A failed push never fails the committed action. Unclaimed devices receive only `everyone` announcements and never personal data.
+Notifications are durable, caller-scoped PostgreSQL inbox rows. Event coverage, silent refresh, push privacy, and delivery guarantees are defined in [Realtime events](docs/REALTIME_EVENTS.md).
 
 ## Non-goals
 

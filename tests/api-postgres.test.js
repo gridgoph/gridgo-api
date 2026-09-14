@@ -5,6 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
 
 import { createDatabase } from "../src/database.js";
 import {
@@ -141,7 +142,7 @@ function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
   });
 }
 
-async function clearAndFixture(database) {
+async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
   await database.query(`TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
@@ -229,7 +230,7 @@ async function clearAndFixture(database) {
       supplierSubtotalMinor: 100000, subtotalMinor: 100000, serviceFeeRateBps: 1000, serviceFeeMinor: 10000,
       deliveryFeeMinor: 2500, totalMinor: 112500, fulfillmentMode: "delivery", paymentPlan: "delivery_online",
       quoteVersion: 1, supplierDownpaymentRateBps: null, onlineDueMinor: 112500, directStoreDueMinor: 0,
-      supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion: 1,
+      supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion,
       payoutHold: false, pickup: { lat: 7.064, lng: 125.6085, label: "Davao Shop" },
       dropoff: { lat: 7.08, lng: 125.62, label: "Client" }, payments: {
         initial: { amountMinor: 84375, method: "qr_manual", status: "confirmed" },
@@ -769,7 +770,7 @@ test("approval audit authority follows the selected role and implicit Super Admi
       const response = await request(instance.api, `/approval-cases/case_rider/${decision.action}`, {
         method: "POST", subject: "clerk_ops",
         headers: decision.role ? { "X-GRIDGO-Role": decision.role } : {},
-        body: { expectedVersion: index + 1, requestId, reason: "Review evidence" },
+        body: { expectedVersion: index + 1, requestId, [decision.action === "restore" ? "note" : "reason"]: "Review evidence" },
       });
       assert.equal(response.status, 200, JSON.stringify(response.body));
       const persisted = await loadStore(database);
@@ -1429,6 +1430,42 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal(lifecycleOrder.state, "out_for_delivery");
     assert.equal(persistedPayment.body.orders.find((order) => order.id === "ord_payout").state, "payout_released");
     assert.equal(persistedPayment.body.orders.find((order) => order.id === "ord_expired").state, "completed");
+    const evidence = { scenario: "Order, revised quote, confirmed payments and inboxes survive API restart", inboxes: {}, riderMaps: {} };
+    for (const [subject, role] of [["clerk_ops", "ops_admin"], ["clerk_super", "super_admin"]]) {
+      const inbox = await request(instance.api, "/notifications?limit=100", {
+        subject, headers: { "X-GRIDGO-Role": role },
+      });
+      assert.equal(inbox.status, 200);
+      const rows = inbox.body.notifications.filter((n) => n.orderId === lifecycleOrder.id);
+      assert.equal(rows.filter((n) => n.type === "ops_payment_confirmed").length, 2);
+      assert.equal(rows.filter((n) => n.title === `Quote ready · ${lifecycleOrder.id}`).length, 3);
+      assert.ok(rows.every((n) => !Object.hasOwn(n, "occurrenceKey")));
+      evidence.inboxes[role] = { status: inbox.status, notifications: rows };
+    }
+    const recordedAt = new Date().toISOString();
+    const ping = await request(instance.api, `/dispatch/${lifecycleOrder.id}/location`, {
+      method: "POST", subject: "clerk_rider",
+      body: { lat: 7.07, lng: 125.61, accuracy: 5, recordedAt },
+    });
+    assert.equal(ping.status, 201, JSON.stringify(ping.body));
+    evidence.locationSubmission = ping;
+    for (const subject of ["clerk_ops", "clerk_super"]) {
+      const map = await request(instance.api, "/ops/riders/locations", { subject });
+      assert.equal(map.status, 200);
+      assert.deepEqual(map.body.riders, [{ riderId: "user_rider", name: "Rider", orderId: lifecycleOrder.id,
+        orderTitle: "API banner", state: "out_for_delivery", lat: 7.07, lng: 125.61, accuracy: 5, at: recordedAt }]);
+      evidence.riderMaps[subject] = map;
+    }
+    const denied = await request(instance.api, "/ops/riders/locations", { subject: "clerk_client" });
+    assert.equal(denied.status, 403);
+    evidence.clientMapAccess = denied;
+    evidence.persistedInboxRows = (await database.query(
+      "SELECT user_id, data->>'appRole' AS app_role, type, data->>'title' AS title FROM notifications WHERE order_id=$1 AND user_id IN ('user_ops','user_super') ORDER BY user_id, type, title",
+      [lifecycleOrder.id],
+    )).rows;
+    if (process.env.GRIDGO_TEST_EVIDENCE_DIR) {
+      await writeFile(path.join(process.env.GRIDGO_TEST_EVIDENCE_DIR, "order-inboxes-rider-map.json"), JSON.stringify(evidence, null, 2) + "\n");
+    }
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -3136,11 +3173,10 @@ test("device HTTP registration preserves legacy FCM and honors explicit anonymou
 
 test("payment HTTP confirmation emits one QA transition and no repeated delivery lifecycle", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
-  await clearAndFixture(database);
+  await clearAndFixture(database, { moneyModelVersion: 3 });
   await database.transaction(async () => {
     const s = await loadStore(database);
     const order = s.orders.find((o) => o.id === "ord_payout");
-    order.moneyModelVersion = 3;
     order.state = "initial_payment_review";
     order.payments.initial.status = "pending_confirmation";
     order.payoutMilestones = [];

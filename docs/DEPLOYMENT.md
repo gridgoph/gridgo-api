@@ -67,6 +67,10 @@ MINIO_SECRET_KEY=<same bucket secret as gridgo-api.env>
 
 `fcm-service-account.json` is the Firebase service account for project `gridgo-c2ce9`. The compose file mounts it read-only at `/run/secrets/fcm-service-account.json`. It must be readable by uid/gid 1001 and must never be committed or printed.
 
+Native APNs is optional and separate from the Firebase credential. To enable it, install a private `.p8` file readable by uid 1001, mount it read-only into the API container, and set `GRIDGO_APNS_KEY_FILE` to that container path in `gridgo-api.env`. Set `GRIDGO_APNS_KEY_ID` and `GRIDGO_APNS_TEAM_ID`, plus the bundle topics `GRIDGO_APNS_CLIENT_TOPIC`, `GRIDGO_APNS_SUPPLIER_TOPIC`, and `GRIDGO_APNS_RIDER_TOPIC` for the apps being served. `GRIDGO_APNS_TOPIC` is the fallback for registrations without a matching app role; a fresh anonymous registration has no app role. Without a matching/fallback topic, delivery reports `apns_topic_missing`. Set `GRIDGO_APNS_SANDBOX=true` only for development APNs tokens; the default is production. The committed compose file does not mount an APNs key automatically. Device provider selection is defined in [Operational Model v2](OPERATIONAL_MODEL_V2_API.md#device-registration-model).
+
+`/health` keeps the FCM report at `push` and adds the separate APNs report at `push.apns`. Each may report `configured`, `disabled`, or `misconfigured`; FCM also reports `available` after successful delivery or `unavailable` after provider/transport failures. The top-level push status is not an aggregate: FCM can be disabled while APNs is configured. APNs `configured` confirms key parsing, not topic validity or physical delivery. Runtime topic/provider errors are recorded on claimed-device outbox attempts; see [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope) for retry and expiry behavior.
+
 Configuration fixed in compose includes `NODE_ENV`, `HOST`, `PORT`, exact dashboard CORS origin, private/public MinIO origins, bucket, region, TTL, and upload timeout. Optional runtime tuning variables belong in `gridgo-api.env` only when needed:
 
 ```dotenv
@@ -138,7 +142,7 @@ Every deployment runs `migrate` and `seed` before API start through compose depe
 
 All HTTP mutations run in PostgreSQL transactions. A transaction-scoped advisory lock serializes route-compatible object-graph mutations across API processes. Order transitions, payment confirmation/rejection, payout milestone movement, final payout release, credits, claims, and issue-created holds commit with their audit/notification rows or roll back together.
 
-Push/SSE publication is registered after commit. Failed push delivery cannot fail or undo a completed money/order mutation.
+Push/SSE durability and after-commit delivery follow [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope). Apply the notification outbox forward migration before starting this version; startup never creates it.
 
 CI's image smoke test creates a named PostgreSQL volume, migrates/seeds it, writes a marker, replaces the API container, proves the marker through the API, recreates the PostgreSQL container on the same volume, and proves the marker again. Do not weaken or remove this test.
 
@@ -154,7 +158,7 @@ Required fields:
 - `commit` equals the merged Git SHA and `builtAt` is present;
 - `database.status: "available"`;
 - `storage.status: "available"` after MinIO initialization;
-- push is `available`, `disabled`, or `misconfigured` with a non-secret reason.
+- inspect FCM and APNs health independently as described in §2; neither report certifies physical handset delivery.
 
 The database failure state is visible even when SQL-backed route loading is impossible because `/health` checks it independently. The container healthcheck fails when `ok` is false.
 

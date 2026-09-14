@@ -1,6 +1,6 @@
 # GRIDGO API
 
-Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and Firebase Cloud Messaging as an optional notification delivery leg.
+Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
 
 The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_MODEL_V2_API.md), [Storage API](docs/STORAGE_API.md), and [Taxonomy API](docs/TAXONOMY_API.md). Production setup, cutover, backup, and recovery are in [Deployment](docs/DEPLOYMENT.md).
 
@@ -24,7 +24,7 @@ Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Autho
 - `POST /auth/clerk/activate` is the explicit client-only Google/public SSO path. It creates a new personal client identity, or adds a personal client membership to an already-mapped identity, and returns `{ "user": ... }`; it never merges by email or grants another membership.
 - Fixed supplier/rider enrollment routes add only the membership named by the URL; `/me/business-application` submits a case for an existing client membership. All three require `Idempotency-Key`; supplier/business submit immediately, while rider sign-in resumes document intake followed by explicit submission after a current licence is attached.
 - Supplier/rider memberships come only from their fixed enrollment routes or the audited GRIDGO role route; Operations and administrator memberships are assignment-only. An activation request can never choose or inherit one of those memberships.
-- `POST /auth/logout` releases the optional FCM device token to the anonymous app-update pool. The app terminates its Clerk session with Clerk; the API has no local session to revoke.
+- `POST /auth/logout` releases the optional push device token to the anonymous app-update pool. The app terminates its Clerk session with Clerk; the API has no local session to revoke.
 
 This preserves the existing Google activation response shape. Follow-up app/dashboard work must remove calls expecting `{token,user}` from API login/signup, use Clerk JWTs directly, and call authenticated `POST /devices` after sign-in to claim a phone.
 

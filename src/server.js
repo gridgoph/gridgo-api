@@ -185,8 +185,7 @@ const objectStorage = createObjectStorage(process.env);
 // the gap is loud rather than silent.
 const pushDelivery = routePushDelivery(createPushDeliveryOrDisable(process.env),createApnsDelivery(process.env));
 const supportMailer = createSupportMailer(process.env);
-// Ceiling on registrations nobody has signed in on; `POST /devices` is the one
-// unauthenticated write on the platform. See `registerUnclaimedDeviceToken`.
+// Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
@@ -2603,7 +2602,7 @@ async function handleRequest(req, res) {
     //
     // One general message to a whole audience. `everyone` is the app-update
     // channel: it writes a notification for every account (which pushes to
-    // their claimed devices through `save()`) *and* pushes to every unclaimed
+    // their claimed devices through the outbox) *and* pushes to every unclaimed
     // handset, which is the only way to reach an install that never signed in.
     //
     // An announcement is deliberately not a way to say something personal to a
@@ -2662,7 +2661,7 @@ async function handleRequest(req, res) {
           at,
         });
       }
-      // Read before `save()`, which is where the per-account pushes fire; the
+      // Read before `save()`, which queues the per-account outbox rows; the
       // records themselves carry no identity, so the anonymous fan-out below
       // can use them after the write.
       const unclaimed = audience === "everyone" ? unclaimedDeviceTokens(store) : [];
