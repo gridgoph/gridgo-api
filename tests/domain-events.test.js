@@ -447,3 +447,25 @@ test("legacy timeline mismatches do not turn same-state edits into lifecycle eve
   deriveDomainEvents(s, before, options);
   assert.deepEqual(s.notifications, []);
 });
+
+for (const state of ["submitted", "needs_qa", "cancelled", "client_correction"]) {
+  test(`leaving artwork correction for ${state} emits only the matching event`, () => {
+    const before = fixture();
+    before.orders[0].state = "client_correction";
+    before.orders[0].timeline = [{ state: "client_correction", at: "t1" }];
+    const s = structuredClone(before);
+    s.orders[0].state = state;
+    s.orders[0].updatedAt = "t2";
+    s.orders[0].timeline.push({ state, at: "t2" });
+    deriveDomainEvents(s, before, options);
+    const rows = s.notifications.filter((n) => n.type === "ops_artwork_resubmitted");
+    assert.deepEqual(
+      rows.map((n) => `${n.userId}:${n.appRole}`).sort(),
+      ["submitted", "needs_qa"].includes(state) ? ["ops:ops_admin", "super:super_admin"] : [],
+    );
+    if (state === "cancelled") {
+      assert.equal(s.notifications.filter((n) => n.type === "ops_order_progress").length, 2);
+      assert.ok(s.notifications.some((n) => n.userId === "c" && n.type === "order_cancelled"));
+    }
+  });
+}

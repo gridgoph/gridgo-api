@@ -249,7 +249,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         "supplier",
       );
     }
-    if (old?.state === "client_correction" && order.state !== old.state)
+    if (old?.state === "client_correction" && ["submitted", "needs_qa"].includes(order.state))
       notifyAdmins(
         "ops_artwork_resubmitted",
         "Artwork resubmitted",

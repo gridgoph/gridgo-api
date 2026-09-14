@@ -106,9 +106,11 @@ export function createOutboxWorker({
           ],
         );
         if (results.some((r) => r.prune))
-          await database.query(
-            "DELETE FROM device_tokens WHERE id=$1 AND user_id=$2 AND token=$3",
-            [d.id, row.user_id, d.token],
+          await database.transaction(() =>
+            database.query(
+              "DELETE FROM device_tokens WHERE id=$1 AND user_id=$2 AND token=$3",
+              [d.id, row.user_id, d.token],
+            ),
           );
       }
       while (true) {
