@@ -250,6 +250,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
     "supplier_a:shop_job_assigned",
     "user_client:order_submitted",
     "user_ops:ops_job_needs_qa",
+    "user_ops:ops_order_progress",
     "user_ops:ops_payment_submitted",
   ]);
   assert.equal(persisted.notifications.find(n=>n.type==="order_submitted").push,false);

@@ -8,6 +8,7 @@ import {
   notifyClientPaymentRejected,
   notifyOpsIssueReported,
   notifyOpsJobNeedsQa,
+  notifyOpsOrderProgress,
   notifyOpsPaymentSubmitted,
   notifyOpsSignupSubmitted,
   notifyOrderParties,
@@ -172,8 +173,12 @@ test("QR submit writes one ops row per ops/admin membership and none for client 
     at: "2026-09-01T00:00:00.000Z",
   });
   assert.deepEqual(
-    created.map((row) => `${row.userId}:${row.type}`).sort(),
-    ["user_admin:ops_payment_submitted", "user_ops:ops_payment_submitted"],
+    created.map((row) => `${row.userId}:${row.appRole}:${row.type}`).sort(),
+    [
+      "user_admin:ops_admin:ops_payment_submitted",
+      "user_admin:super_admin:ops_payment_submitted",
+      "user_ops:ops_admin:ops_payment_submitted",
+    ],
   );
   const again = notifyOpsPaymentSubmitted(store, order, {
     createId: () => `ntf_${++n}`,
@@ -229,8 +234,8 @@ test("signup submit writes ops rows; an approval decision still notifies only th
     { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" },
   );
   assert.deepEqual(
-    created.map((row) => row.userId).sort(),
-    ["user_admin", "user_ops"],
+    created.map((row) => `${row.userId}:${row.appRole}`).sort(),
+    ["user_admin:super_admin", "user_ops:ops_admin"],
   );
   assert.equal(created[0].type, "ops_signup_submitted");
   const again = notifyOpsSignupSubmitted(
@@ -239,6 +244,120 @@ test("signup submit writes ops rows; an approval decision still notifies only th
     { createId: () => `ntf_${++n}`, at: "2026-09-01T00:00:00.000Z" },
   );
   assert.equal(again.length, 0);
+});
+
+test("progress, payment, and application rows reach both privileged roles with matching appRole", () => {
+  const store = {
+    userRoleMemberships: [
+      { userId: "user_ops", role: "ops_admin" },
+      { userId: "user_admin", role: "super_admin" },
+    ],
+    notifications: [],
+  };
+  const order = {
+    id: "ord_1",
+    state: "production",
+    updatedAt: "2026-09-01T00:00:00.000Z",
+    payments: { initial: { submittedAt: "2026-09-01T00:00:00.000Z" } },
+  };
+  let n = 0;
+  const args = { createId: () => `ntf_${++n}`, at: order.updatedAt };
+  const progress = notifyOpsOrderProgress(store, order, args);
+  const payment = notifyOpsPaymentSubmitted(store, order, args);
+  const application = notifyOpsSignupSubmitted(
+    store,
+    { id: "case_1", kind: "supplier", applicationRevision: 1 },
+    args,
+  );
+  for (const created of [progress, payment, application]) {
+    assert.deepEqual(
+      created.map((row) => `${row.userId}:${row.appRole}`).sort(),
+      ["user_admin:super_admin", "user_ops:ops_admin"],
+    );
+    assert.equal(
+      created.some((row) => row.push === false),
+      false,
+    );
+  }
+  assert.equal(progress[0].type, "ops_order_progress");
+  assert.match(progress[0].title, /ord_1/);
+  assert.equal(payment[0].type, "ops_payment_submitted");
+  assert.equal(application[0].type, "ops_signup_submitted");
+});
+
+test("draft orders do not ping Operations or Super Admin", () => {
+  const store = {
+    userRoleMemberships: [
+      { userId: "user_ops", role: "ops_admin" },
+      { userId: "user_admin", role: "super_admin" },
+    ],
+    notifications: [],
+  };
+  const created = notifyOpsOrderProgress(
+    store,
+    { id: "ord_draft", state: "draft", updatedAt: "2026-09-01T00:00:00.000Z" },
+    { createId: () => "ntf_x", at: "2026-09-01T00:00:00.000Z" },
+  );
+  assert.deepEqual(created, []);
+  assert.equal(store.notifications.length, 0);
+});
+
+test("progress occurrence keys do not duplicate the same state", () => {
+  const store = {
+    userRoleMemberships: [
+      { userId: "user_ops", role: "ops_admin" },
+      { userId: "user_admin", role: "super_admin" },
+    ],
+    notifications: [],
+  };
+  const order = { id: "ord_1", state: "delivered", updatedAt: "t1" };
+  let n = 0;
+  const first = notifyOpsOrderProgress(store, order, {
+    createId: () => `ntf_${++n}`,
+    at: "t1",
+  });
+  const again = notifyOpsOrderProgress(store, order, {
+    createId: () => `ntf_${++n}`,
+    at: "t1",
+  });
+  assert.equal(first.length, 2);
+  assert.equal(again.length, 0);
+  assert.equal(store.notifications.length, 2);
+  order.state = "completed";
+  order.updatedAt = "t2";
+  const next = notifyOpsOrderProgress(store, order, {
+    createId: () => `ntf_${++n}`,
+    at: "t2",
+  });
+  assert.equal(next.length, 2);
+  assert.equal(store.notifications.length, 4);
+});
+
+test("a super_admin-only fleet still receives progress, payment, and application rows", () => {
+  const store = {
+    userRoleMemberships: [{ userId: "user_admin", role: "super_admin" }],
+    notifications: [],
+  };
+  const order = {
+    id: "ord_1",
+    state: "proof_approval",
+    updatedAt: "t1",
+    payments: { initial: { submittedAt: "t1" } },
+  };
+  let n = 0;
+  const args = { createId: () => `ntf_${++n}`, at: "t1" };
+  const progress = notifyOpsOrderProgress(store, order, args);
+  const payment = notifyOpsPaymentSubmitted(store, order, args);
+  const application = notifyOpsSignupSubmitted(
+    store,
+    { id: "case_1", kind: "rider" },
+    args,
+  );
+  for (const created of [progress, payment, application]) {
+    assert.equal(created.length, 1);
+    assert.equal(created[0].userId, "user_admin");
+    assert.equal(created[0].appRole, "super_admin");
+  }
 });
 
 test("a rejected payment tells the client to resubmit, once", () => {

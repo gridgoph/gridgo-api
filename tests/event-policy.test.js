@@ -148,6 +148,47 @@ test("duplicate invalidate unions early explicit and later relational recipients
     "s",
   ]);
 });
+test("super_admin sees its membership row; dual members do not inherit the ops copy", () => {
+  const s = store();
+  s.users.push({ id: "admin", role: "super_admin" });
+  s.userRoleMemberships.push({ userId: "admin", role: "super_admin" });
+  const opsRow = {
+    userId: "ops",
+    type: "ops_order_progress",
+    appRole: "ops_admin",
+    orderId: "o",
+  };
+  const superRow = {
+    userId: "admin",
+    type: "ops_order_progress",
+    appRole: "super_admin",
+    orderId: "o",
+  };
+  const legacy = {
+    userId: "admin",
+    type: "ops_order_progress",
+    appRole: "ops_admin",
+    orderId: "o",
+  };
+  assert.equal(policy.notificationVisible(s, opsRow, "ops", "ops_admin"), true);
+  assert.equal(
+    policy.notificationVisible(s, superRow, "admin", "super_admin"),
+    true,
+  );
+  assert.equal(
+    policy.notificationVisible(s, legacy, "admin", "super_admin"),
+    true,
+  );
+  s.userRoleMemberships.push({ userId: "admin", role: "ops_admin" });
+  assert.equal(
+    policy.notificationVisible(s, legacy, "admin", "super_admin"),
+    false,
+  );
+  assert.equal(
+    policy.notificationVisible(s, superRow, "admin", "super_admin"),
+    true,
+  );
+});
 test("same person distinct app-role purposes are not deduplicated together", () => {
   const s = store();
   const d = {

@@ -143,15 +143,23 @@ export function formatInvalidateEvent(payload) {
   return `event: invalidate\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/** Ops and Super Admin memberships, one row per (user, role). Invalidate uses unique ids. */
+export function privilegedAdminMemberships(store) {
+  const seen = new Set();
+  const rows = [];
+  for (const membership of store.userRoleMemberships || []) {
+    if (membership.role !== "ops_admin" && membership.role !== "super_admin") continue;
+    const key = `${membership.userId}:${membership.role}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(membership);
+  }
+  return rows;
+}
+
 /** Identities that are ops or super_admin via memberships, not only users.role. */
 export function opsAdminRecipientIds(store) {
-  const ids = new Set();
-  for (const membership of store.userRoleMemberships || []) {
-    if (membership.role === "ops_admin" || membership.role === "super_admin") {
-      ids.add(membership.userId);
-    }
-  }
-  return [...ids];
+  return [...new Set(privilegedAdminMemberships(store).map((membership) => membership.userId))];
 }
 
 export function orderFromNotification(store, notification) {
@@ -272,7 +280,15 @@ export function notificationVisible(store, notification, userId, role) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
   if (role && !hasRole(store,userId,role)) return false;
   const requiredRole = notification.appRole || (notification.type?.startsWith('shop_') ? 'supplier' : notification.type?.startsWith('ops_') ? 'ops_admin' : null);
-  if (requiredRole && role && requiredRole !== role && !(requiredRole==='ops_admin'&&role==='super_admin')) return false;
+  if (requiredRole && role && requiredRole !== role) {
+    // Super-only accounts still see historical ops_admin-tagged rows. Dual members
+    // get a super_admin-appRole copy and must not see the ops copy in that inbox.
+    const legacySuperSeesOps =
+      requiredRole === "ops_admin" &&
+      role === "super_admin" &&
+      !hasRole(store, userId, "ops_admin");
+    if (!legacySuperSeesOps) return false;
+  }
   if (requiredRole && !hasRole(store,userId,requiredRole) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
   if (notification.audienceRoles && !(role ? notification.audienceRoles.includes(role) && hasRole(store,userId,role) : notification.audienceRoles.some(r=>hasRole(store,userId,r)))) return false;
   if (notification.approvalCaseId) {

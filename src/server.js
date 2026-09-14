@@ -97,7 +97,7 @@ import {
   listInbox,
   notificationSnapshot,
   orderFromNotification,
-  opsAdminRecipientIds,
+  privilegedAdminMemberships,
   publicNotification,
   publishQueuedInvalidates,
   queueInvalidate,
@@ -4421,6 +4421,39 @@ async function handleRequest(req, res) {
     }
 
     // ---- orders list / create ----
+    // Latest ping per rider who is currently sharing location on an active trip.
+    if (req.method === "GET" && pathname === "/ops/riders/locations") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const tracking = new Set(["picked_up", "out_for_delivery"]);
+      const latestByRider = new Map();
+      for (const order of store.orders || []) {
+        if (!order.riderId || !tracking.has(order.state)) continue;
+        const ping = (store.locationPings || [])
+          .filter((p) => p.orderId === order.id && p.riderId === order.riderId)
+          .sort((a, b) => b.at.localeCompare(a.at))[0];
+        if (!ping) continue;
+        const prev = latestByRider.get(order.riderId);
+        if (!prev || ping.at > prev.ping.at) {
+          latestByRider.set(order.riderId, { order, ping });
+        }
+      }
+      const riders = [...latestByRider.values()].map(({ order, ping }) => {
+        const rider = (store.users || []).find((u) => u.id === order.riderId);
+        return {
+          riderId: order.riderId,
+          name: rider?.name || "Rider",
+          orderId: order.id,
+          orderTitle: order.title || null,
+          state: order.state,
+          lat: ping.lat,
+          lng: ping.lng,
+          accuracy: ping.accuracy ?? null,
+          at: ping.at,
+        };
+      });
+      return send(res, 200, { riders });
+    }
+
     if (req.method === "GET" && pathname === "/orders") {
       return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user, store)) });
     }
@@ -5167,10 +5200,11 @@ async function handleRequest(req, res) {
           note: `Pickup blocked and escalated: ${failedCheckCodes.join(", ")}`,
           escalationId: escalation.id,
         });
-        for (const recipientId of opsAdminRecipientIds(store)) {
+        for (const membership of privilegedAdminMemberships(store)) {
           store.notifications.push({
             id: id("ntf"),
-            userId: recipientId,
+            userId: membership.userId,
+            appRole: membership.role,
             type: "pickup_check_escalation",
             orderId: order.id,
             title: "Pickup blocked by a failed quality check",

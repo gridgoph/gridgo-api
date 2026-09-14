@@ -11,6 +11,7 @@ function fixture() {
       { id: "r1" },
       { id: "r2" },
       { id: "ops" },
+      { id: "super" },
     ],
     userRoleMemberships: [
       ["c", "client"],
@@ -19,6 +20,7 @@ function fixture() {
       ["r1", "rider"],
       ["r2", "rider"],
       ["ops", "ops_admin"],
+      ["super", "super_admin"],
     ].map(([userId, role]) => ({ userId, role })),
     approvalCases: ["s", "new", "r1", "r2"].map((userId) => ({
       userId,
@@ -40,6 +42,70 @@ function fixture() {
 }
 let id = 0;
 const options = { createId: () => `n${++id}`, at: "2026-09-08T01:00:00Z" };
+test("order state change pings Operations and Super Admin with the order id even when they need not act", () => {
+  const before = fixture(),
+    s = structuredClone(before);
+  s.orders[0].state = "production";
+  s.orders[0].updatedAt = "now";
+  deriveDomainEvents(s, before, options);
+  const rows = s.notifications.filter((n) => n.type === "ops_order_progress");
+  assert.deepEqual(
+    rows.map((n) => `${n.userId}:${n.appRole}`).sort(),
+    ["ops:ops_admin", "super:super_admin"],
+  );
+  for (const row of rows) {
+    assert.equal(row.orderId, "o");
+    assert.match(row.title, /o/);
+    assert.match(row.title, /production/i);
+    assert.notEqual(row.push, false);
+  }
+});
+test("draft orders do not create privileged progress rows", () => {
+  const before = fixture(),
+    s = structuredClone(before);
+  s.orders.push({
+    id: "draft",
+    clientId: "c",
+    state: "draft",
+    updatedAt: "now",
+  });
+  deriveDomainEvents(s, before, options);
+  assert.equal(
+    s.notifications.some(
+      (n) => n.orderId === "draft" && (n.userId === "ops" || n.userId === "super"),
+    ),
+    false,
+  );
+});
+test("progress occurrence keys do not duplicate when the snapshot is derived twice", () => {
+  const before = fixture(),
+    s = structuredClone(before);
+  s.orders[0].state = "delivered";
+  s.orders[0].updatedAt = "now";
+  deriveDomainEvents(s, before, options);
+  const once = s.notifications.filter((n) => n.type === "ops_order_progress");
+  assert.equal(once.length, 2);
+  deriveDomainEvents(s, before, options);
+  assert.equal(
+    s.notifications.filter((n) => n.type === "ops_order_progress").length,
+    2,
+  );
+});
+test("a super_admin-only fleet still receives the progress row", () => {
+  const before = fixture();
+  before.userRoleMemberships = before.userRoleMemberships.filter(
+    (m) => m.role !== "ops_admin",
+  );
+  const s = structuredClone(before);
+  s.orders[0].state = "production";
+  s.orders[0].updatedAt = "now";
+  deriveDomainEvents(s, before, options);
+  const row = s.notifications.find((n) => n.type === "ops_order_progress");
+  assert.ok(row);
+  assert.equal(row.userId, "super");
+  assert.equal(row.appRole, "super_admin");
+  assert.notEqual(row.push, false);
+});
 test("offer acceptance removes offer for both prior eligible riders with minimal refresh", () => {
   const before = fixture(),
     s = structuredClone(before);

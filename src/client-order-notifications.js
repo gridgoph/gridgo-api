@@ -1,5 +1,5 @@
 import { isContainedPickup } from "./operational-model.js";
-import { opsAdminRecipientIds, eligibleRiderIds } from "./notifications.js";
+import { privilegedAdminMemberships, eligibleRiderIds } from "./notifications.js";
 
 /**
  * Client inbox rows for a job moving without the client doing the moving.
@@ -395,9 +395,9 @@ function writeEach(store, drafts, { createId, at }) {
 }
 
 function opsDrafts(store, fields) {
-  return opsAdminRecipientIds(store).map((userId) => ({
-    userId,
-    appRole: (store.userRoleMemberships || []).some(m=>m.userId===userId&&m.role==="ops_admin") ? "ops_admin" : "super_admin",
+  return privilegedAdminMemberships(store).map((membership) => ({
+    userId: membership.userId,
+    appRole: membership.role,
     type: fields.type,
     title: fields.title,
     body: fields.body,
@@ -468,6 +468,59 @@ export function notifyOpsSignupSubmitted(store, approvalCase, { createId, at }) 
       approvalCaseId: approvalCase.id,
       title: "New application",
       body: signupBody(approvalCase.kind),
+    }),
+    { createId, at },
+  );
+}
+
+/** Human labels for Operations progress pings. Actionable alerts stay separate. */
+const OPS_PROGRESS = {
+  submitted: ["Order received", "A client submitted this order."],
+  needs_qa: ["Artwork check", "This order is in artwork and payment check."],
+  client_correction: ["Waiting on artwork", "The client was asked to fix the artwork."],
+  proof_approval: ["Proof with the client", "The client needs to approve the proof."],
+  approved_for_matching: ["Ready to assign a shop", "This order is ready for a supplier."],
+  supplier_assigned: ["Shop assigned", "Waiting for the shop to accept."],
+  supplier_accepted: ["Shop accepted", "The shop accepted this order."],
+  awaiting_checkout: ["Quote ready", "The client has a final quote to pay."],
+  awaiting_initial_payment: ["Awaiting downpayment", "Waiting for the client to pay."],
+  awaiting_downpayment: ["Awaiting downpayment", "Waiting for the client to pay."],
+  initial_payment_review: ["Payment to confirm", "A downpayment is waiting for confirmation."],
+  downpayment_review: ["Payment to confirm", "A downpayment is waiting for confirmation."],
+  payment_authorized: ["Payment confirmed", "Downpayment is confirmed."],
+  production: ["In production", "The shop has started printing."],
+  supplier_self_qc: ["Shop quality check", "The shop is checking the finished job."],
+  ready_for_dispatch: ["Ready for a rider", "The job is packed and waiting for dispatch."],
+  rider_assigned: ["Rider assigned", "A rider is assigned to this order."],
+  picked_up: ["Picked up", "The rider has collected this order."],
+  out_for_delivery: ["Out for delivery", "The rider is delivering this order."],
+  awaiting_collection: ["At the counter", "This order is waiting at GRIDGO Office."],
+  delivered: ["Delivered", "This order was handed over."],
+  issue_window_open: ["Issue window open", "The client can still raise an issue."],
+  completed: ["Completed", "This order is complete."],
+  cancelled: ["Cancelled", "This order was cancelled."],
+  payout_released: ["Payout released", "Shop payout was recorded as released."],
+};
+
+/**
+ * Ping every Operations and Super Admin membership when an order moves,
+ * including steps that do not need an Operations action. Title carries the
+ * order id. Drafts stay silent.
+ */
+export function notifyOpsOrderProgress(store, order, { createId, at }) {
+  if (!order?.id || !order.state || order.state === "draft") return [];
+  const copy = OPS_PROGRESS[order.state] || [
+    "Order updated",
+    `This order is now ${String(order.state).replaceAll("_", " ")}.`,
+  ];
+  return writeEach(
+    store,
+    opsDrafts(store, {
+      type: "ops_order_progress",
+      orderId: order.id,
+      occurrenceKey: `${order.id}:${order.state}:${order.updatedAt || at}`,
+      title: `${copy[0]} · ${order.id}`,
+      body: copy[1],
     }),
     { createId, at },
   );

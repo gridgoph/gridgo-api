@@ -37,7 +37,7 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR 75/25 c
 
 ## Geography
 
-Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties.
+Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties. `GET /ops/riders/locations` is the ops live map of riders currently sharing on an active trip (`picked_up` | `out_for_delivery`).
 
 Coordinates use constrained latitude/longitude columns. Current database queries select an order point or the latest ping by order/time, so PostGIS is intentionally absent. Add it only with a forward migration when radius/nearest-neighbor SQL exists.
 
@@ -59,6 +59,7 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 - Unclaimed handsets may receive only `everyone` announcements with `data` exactly `{type:"announcement"}`.
 - Prune `INVALID_ARGUMENT` only when the violation identifies `message.token`.
 - Push payload data is allowlisted to `notificationId`, `type`, `orderId`, and `at`.
+- Every implemented domain event writes a durable inbox row to each current `ops_admin` and `super_admin` membership (`privilegedAdminMemberships` in `src/notifications.js`). Super Admin is never invalidate-only. Contract: `docs/REALTIME_EVENTS.md`.
 
 ## Deployment
 

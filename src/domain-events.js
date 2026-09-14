@@ -1,12 +1,13 @@
 import {
   writeDraft,
   notifyOrderParties,
+  notifyOpsOrderProgress,
 } from "./client-order-notifications.js";
 import {
   queueInvalidate,
   queueOrderInvalidate,
   eligibleRiderIds,
-  opsAdminRecipientIds,
+  privilegedAdminMemberships,
   hasRole,
 } from "./notifications.js";
 const changed = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
@@ -20,7 +21,7 @@ const keyed = (rows) =>
 /** Derive effects from the transaction's before/after domain snapshots. Never from request recipients. */
 export function deriveDomainEvents(store, before, { createId, at }) {
   if (!before) return;
-  const ops = opsAdminRecipientIds(store);
+  const admins = privilegedAdminMemberships(store);
   const oldNotificationIds = new Set(
     (before.notifications || []).map((n) => n.id),
   );
@@ -51,6 +52,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           !oldNotificationIds.has(n.id) &&
           n.userId === userId &&
           n.type === type &&
+          (n.appRole ?? null) === (appRole ?? null) &&
           (n.orderId || null) === (order?.id || null),
       )
     )
@@ -71,6 +73,18 @@ export function deriveDomainEvents(store, before, { createId, at }) {
       { id: createId("ntf"), at },
     );
   }
+  function notifyAdmins(type, title, order, occurrence, extra = {}) {
+    for (const membership of admins)
+      notify(
+        membership.userId,
+        type,
+        title,
+        order,
+        occurrence,
+        membership.role,
+        extra,
+      );
+  }
   const priorOrders = keyed(before.orders);
   for (const order of store.orders || []) {
     const old = priorOrders.get(order.id);
@@ -83,15 +97,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
       "payouts",
     ]);
     if (order.state === "submitted" && old?.state !== "submitted")
-      for (const userId of ops)
-        notify(
-          userId,
-          "ops_order_submitted",
-          "An order needs review",
-          order,
-          occurrence,
-          "ops_admin",
-        );
+      notifyAdmins(
+        "ops_order_submitted",
+        "An order needs review",
+        order,
+        occurrence,
+      );
     if (
       old?.state === "supplier_assigned" &&
       ["supplier_accepted", "payment_authorized", "production"].includes(
@@ -106,8 +117,10 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         occurrence,
         "client",
       );
-    if (!old || old.state !== order.state)
+    if (!old || old.state !== order.state) {
       notifyOrderParties(store, order, { createId, at });
+      notifyOpsOrderProgress(store, order, { createId, at });
+    }
     if (
       old?.state === "ready_for_dispatch" &&
       !old.riderId &&
@@ -119,17 +132,14 @@ export function deriveDomainEvents(store, before, { createId, at }) {
     if (old && old.supplierId !== order.supplierId) {
       for (const resource of ["jobs", "orders", "payouts"])
         hint(resource, order.id, [old.supplierId]);
-      for (const userId of ops)
-        notify(
-          userId,
-          "ops_assignment_changed",
-          order.supplierId
-            ? "Supplier assignment changed"
-            : "An order needs a supplier",
-          order,
-          occurrence,
-          "ops_admin",
-        );
+      notifyAdmins(
+        "ops_assignment_changed",
+        order.supplierId
+          ? "Supplier assignment changed"
+          : "An order needs a supplier",
+        order,
+        occurrence,
+      );
       notify(
         order.clientId,
         "order_assignment_changed",
@@ -203,15 +213,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         "supplier",
       );
     if (old?.state === "proof_approval" && order.state !== old.state) {
-      for (const userId of ops)
-        notify(
-          userId,
-          "ops_proof_decided",
-          "Client proof decision received",
-          order,
-          occurrence,
-          "ops_admin",
-        );
+      notifyAdmins(
+        "ops_proof_decided",
+        "Client proof decision received",
+        order,
+        occurrence,
+      );
       notify(
         order.supplierId,
         "shop_proof_decided",
@@ -222,15 +229,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
       );
     }
     if (old?.state === "client_correction" && order.state !== old.state)
-      for (const userId of ops)
-        notify(
-          userId,
-          "ops_artwork_resubmitted",
-          "Artwork resubmitted",
-          order,
-          occurrence,
-          "ops_admin",
-        );
+      notifyAdmins(
+        "ops_artwork_resubmitted",
+        "Artwork resubmitted",
+        order,
+        occurrence,
+      );
     if (
       [
         "delivered",
@@ -314,15 +318,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
                 "jobs",
                 "dispatch",
               ]);
-              for (const userId of ops)
-                notify(
-                  userId,
-                  "ops_active_work_suspended",
-                  "Active work needs reassignment review",
-                  affected,
-                  occurrence,
-                  "ops_admin",
-                );
+              notifyAdmins(
+                "ops_active_work_suspended",
+                "Active work needs reassignment review",
+                affected,
+                occurrence,
+              );
             }
         }
         hint("approvals", row.id, [row.userId]);
@@ -356,15 +357,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           (store.users || []).map((u) => u.id),
         );
         if (row.state !== old?.state && row.state === "pending_verification")
-          for (const userId of ops)
-            notify(
-              userId,
-              "ops_service_submitted",
-              "Service needs review",
-              null,
-              occurrence,
-              "ops_admin",
-            );
+          notifyAdmins(
+            "ops_service_submitted",
+            "Service needs review",
+            null,
+            occurrence,
+          );
         if (
           row.state !== old?.state &&
           ["live", "suspended"].includes(row.state)
@@ -382,30 +380,40 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         if (order)
           queueOrderInvalidate(store, order, ["orders", "jobs", "payouts"]);
         if (table === "escalations" && row.status !== old?.status) {
-          for (const userId of (row.status === "open"
-            ? ops
-            : [row.riderId || order?.riderId]
-          ).filter(
-            (userId) =>
-              !(store.notifications || []).some(
-                (n) =>
-                  !oldNotificationIds.has(n.id) &&
-                  n.userId === userId &&
-                  n.orderId === order?.id &&
-                  [
-                    "pickup_escalation_resolved",
-                    "pickup_check_escalation",
-                  ].includes(n.type),
-              ),
-          ))
-            notify(
-              userId,
-              "pickup_escalation_changed",
-              "Pickup issue status changed",
-              order,
-              occurrence,
-              row.status === "open" ? "ops_admin" : "rider",
+          const escalationAlreadyWritten = (userId) =>
+            (store.notifications || []).some(
+              (n) =>
+                !oldNotificationIds.has(n.id) &&
+                n.userId === userId &&
+                n.orderId === order?.id &&
+                [
+                  "pickup_escalation_resolved",
+                  "pickup_check_escalation",
+                ].includes(n.type),
             );
+          if (row.status === "open") {
+            for (const membership of admins)
+              if (!escalationAlreadyWritten(membership.userId))
+                notify(
+                  membership.userId,
+                  "pickup_escalation_changed",
+                  "Pickup issue status changed",
+                  order,
+                  occurrence,
+                  membership.role,
+                );
+          } else {
+            const userId = row.riderId || order?.riderId;
+            if (userId && !escalationAlreadyWritten(userId))
+              notify(
+                userId,
+                "pickup_escalation_changed",
+                "Pickup issue status changed",
+                order,
+                occurrence,
+                "rider",
+              );
+          }
           notify(
             order?.supplierId,
             "shop_pickup_issue_changed",
@@ -586,11 +594,5 @@ export function deriveDomainEvents(store, before, { createId, at }) {
     if (changed(oldNotifications.get(n.id), n)) {
       hint("notifications", null, [n.userId]);
       if (!oldNotificationIds.has(n.id) && n.userId === actor) n.push = false;
-      if (
-        !oldNotificationIds.has(n.id) &&
-        n.type?.startsWith("ops_") &&
-        !hasRole(store, n.userId, "ops_admin")
-      )
-        n.push = false;
     }
 }
