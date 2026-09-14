@@ -280,13 +280,13 @@ export function notificationVisible(store, notification, userId, role) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
   if (role && !hasRole(store,userId,role)) return false;
   const requiredRole = notification.appRole || (notification.type?.startsWith('shop_') ? 'supplier' : notification.type?.startsWith('ops_') ? 'ops_admin' : null);
+  const legacySuperSeesOps = requiredRole === "ops_admin"
+    && (!role || role === "super_admin")
+    && !hasRole(store, userId, "ops_admin")
+    && hasRole(store, userId, "super_admin");
   if (requiredRole && role && requiredRole !== role) {
     // Super-only accounts still see historical ops_admin-tagged rows. Dual members
     // get a super_admin-appRole copy and must not see the ops copy in that inbox.
-    const legacySuperSeesOps =
-      requiredRole === "ops_admin" &&
-      role === "super_admin" &&
-      !hasRole(store, userId, "ops_admin");
     if (!legacySuperSeesOps) return false;
   }
   if (requiredRole && !hasRole(store,userId,requiredRole) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
@@ -295,6 +295,6 @@ export function notificationVisible(store, notification, userId, role) {
     const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);
     return Boolean(c && ((c.userId === userId && (!role || role === (c.kind === 'business_client' ? 'client' : c.kind))) || ((!role || ['ops_admin','super_admin'].includes(role)) && opsAdminRecipientIds(store).includes(userId))));
   }
-  if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || requiredRole,offer:notification.type === 'dispatch_available'});
+  if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || (legacySuperSeesOps ? 'super_admin' : requiredRole),offer:notification.type === 'dispatch_available'});
   return true;
 }

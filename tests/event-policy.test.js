@@ -209,3 +209,23 @@ test("same person distinct app-role purposes are not deduplicated together", () 
     true,
   );
 });
+
+test("combined inbox retains historical Operations order rows for Super Admin", () => {
+  const s = store();
+  s.users.push({ id: "admin", role: "super_admin" });
+  s.userRoleMemberships.push({ userId: "admin", role: "super_admin" }, { userId: "admin", role: "client" });
+  s.notifications = ["ops_job_needs_qa", "ops_payment_submitted"].flatMap((type) => [
+    { id: `${type}-inferred`, userId: "admin", type, orderId: "o", at: "t1" },
+    { id: `${type}-tagged`, userId: "admin", type, appRole: "ops_admin", orderId: "o", at: "t1" },
+  ]);
+  const ids = s.notifications.map((n) => n.id).sort();
+  assert.deepEqual(policy.listInbox(s, "admin").notifications.map((n) => n.id).sort(), ids);
+  assert.deepEqual(policy.listInbox(s, "admin", { role: "super_admin" }).notifications.map((n) => n.id).sort(), ids);
+  assert.deepEqual(policy.listInbox(s, "admin", { role: "client" }).notifications, []);
+  assert.deepEqual(policy.listInbox(s, "admin", { role: "ops_admin" }).notifications, []);
+  s.userRoleMemberships.push({ userId: "admin", role: "ops_admin" });
+  assert.deepEqual(policy.listInbox(s, "admin").notifications.map((n) => n.id).sort(), ids);
+  assert.deepEqual(policy.listInbox(s, "admin", { role: "super_admin" }).notifications, []);
+  assert.deepEqual(policy.listInbox(s, "admin", { role: "ops_admin" }).notifications.map((n) => n.id).sort(), ids);
+  assert.deepEqual(policy.listInbox(s, "admin", { role: "client" }).notifications, []);
+});

@@ -22,7 +22,7 @@ import {
   authFailureBody,
 } from "./auth.js";
 import {
-  resolveAuthorizationContext,
+  selectActorRole,
   approvalCaseFor,
   approvalCaseSummary,
   contextHasMembership,
@@ -1954,16 +1954,9 @@ async function handleRequest(req, res) {
       const inferredRole = !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
         : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
       const selectedRole = eventRole || inferredRole;
-      const approval = (store.approvalCases || []).find(c=>c.userId===user.id&&c.kind===selectedRole);
       // Actor projection is never written into users.role. Other legacy user-field
       // writes still target the actual row through this proxy.
-      user = new Proxy(user,{get(target,key,receiver){
-        if(key==='role')return selectedRole;
-        if(key==='verificationStatus' && ['supplier','rider'].includes(selectedRole)) return approval?.status || (target.role===selectedRole?target.verificationStatus:'unverified');
-        return Reflect.get(target,key,receiver);
-      }});
-      const actorContext = resolveAuthorizationContext(store,user);
-      if (eventRole) actorContext.memberships = actorContext.memberships.filter(m=>m.role===eventRole);
+      user = selectActorRole(store, user, selectedRole, { restrictMemberships: Boolean(eventRole) });
       if (/^\/(orders|jobs|dispatch|payouts|claims|issues|escalations)(\/|$)/.test(pathname)) {
         if (!hasRole(store,user.id,selectedRole) || (['supplier','rider'].includes(selectedRole) && !approvedRole(store,user.id,selectedRole))) return send(res,403,{error:'forbidden'});
       }
@@ -2212,7 +2205,10 @@ async function handleRequest(req, res) {
 
         await enqueueMutation(async () => {
           const latestStore = await load();
-          const latestUser = (await authenticateRequest(req, latestStore)).user;
+          const latestUser = selectActorRole(
+            latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+            { restrictMemberships: Boolean(eventRole) },
+          );
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
           }
@@ -2236,7 +2232,10 @@ async function handleRequest(req, res) {
         try {
           const ready = await enqueueMutation(async () => {
             const latestStore = await load();
-            const latestUser = (await authenticateRequest(req, latestStore)).user;
+            const latestUser = selectActorRole(
+              latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+              { restrictMemberships: Boolean(eventRole) },
+            );
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
               throw new AttachmentError(
@@ -2245,6 +2244,7 @@ async function handleRequest(req, res) {
                 "Your sign-in expired while the file was uploading. Sign in and upload the file again.",
               );
             }
+            authorizeFileUpload(latestUser, purpose);
             markFileReady(latestFile, now());
             await save(latestStore);
             return latestFile;
@@ -2298,7 +2298,10 @@ async function handleRequest(req, res) {
       }
       return await enqueueMutation(async () => {
         const latestStore = await load();
-        const latestUser = (await authenticateRequest(req, latestStore)).user;
+        const latestUser = selectActorRole(
+          latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+          { restrictMemberships: Boolean(eventRole) },
+        );
         if (!latestUser) {
           throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
         }
@@ -2375,7 +2378,10 @@ async function handleRequest(req, res) {
       const fileId = pathname.split("/")[2];
       const pending = await enqueueMutation(async () => {
         const latestStore = await load();
-        const latestUser = (await authenticateRequest(req, latestStore)).user;
+        const latestUser = selectActorRole(
+          latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+          { restrictMemberships: Boolean(eventRole) },
+        );
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";
