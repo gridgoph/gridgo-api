@@ -210,6 +210,14 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   expectError(() => authorizeFileUpload(supplier, "payment_qr"), 403, "forbidden");
   expectError(() => resolveFileTarget({}, "announcement_image", { orderId: "ord_1" }, ops), 400, "announcement_image_not_attachable");
   expectError(() => resolveFileTarget({}, "payment_qr", { orderId: "ord_1" }, ops), 400, "payment_qr_not_attachable");
+  assert.doesNotThrow(() => authorizeFileUpload(supplier, "supplier_payout_qr"));
+  expectError(() => authorizeFileUpload(ops, "supplier_payout_qr"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(client, "supplier_payout_qr"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(rider, "supplier_payout_qr"), 403, "forbidden");
+  expectError(() => resolveFileTarget({}, "supplier_payout_qr", {}, supplier), 400, "supplier_payout_qr_not_attachable");
+  assert.equal(validateUpload({ originalFilename: "gcash.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 2 * 1024 * 1024 }, "supplier_payout_qr"), "image/jpeg");
+  expectError(() => validateUpload({ originalFilename: "gcash.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 5 * 1024 * 1024 + 1 }, "supplier_payout_qr"), 413, "file_too_large");
+  expectError(() => validateUpload({ originalFilename: "gcash.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "supplier_payout_qr"), 415, "purpose_media_type_not_allowed");
   expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
   expectError(() => authorizeFileUpload(client, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(rider, "verification_document"), 403, "forbidden");
@@ -648,4 +656,16 @@ test("delivered POF belongs to the rider and also gates retention", () => {
   attachFileReference(file, target);
   assert.deepEqual(target.record.payoutMilestones.find((item) => item.code === "delivered").pofFileIds, [file.fileId]);
   assert.deepEqual(target.record.payoutMilestones.find((item) => item.code === "retention").pofFileIds, [file.fileId]);
+});
+
+
+test("payment receipts stay private to their owner and Operations after order binding", () => {
+  const store = { orders: [order()] };
+  const receipt = readyFile("payment_proof", { ownerId: client.id, references: [{ type: "order", id: "order-a", field: "payment:final_online:proof" }] });
+  for (const user of [client, ops, superAdmin]) assert.doesNotThrow(() => authorizeFileRead(user, store, receipt));
+  for (const user of [supplier, rider, otherClient]) expectError(() => authorizeFileRead(user, store, receipt), 403, "forbidden");
+  for (const purpose of ["artwork", "mockup"]) {
+    const file = readyFile(purpose, { ownerId: client.id, references: [{ type: "order", id: "order-a", field: "line:one:artwork" }] });
+    for (const user of [supplier, rider]) assert.doesNotThrow(() => authorizeFileRead(user, store, file));
+  }
 });

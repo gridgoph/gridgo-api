@@ -1,4 +1,5 @@
 import { gridgoOfficePoint } from "./gridgo-office.js";
+import { opsPayoutAccountProjection } from "./payout-account.js";
 
 const BPS_DENOMINATOR = 10_000n;
 const BPS_HALF = 5_000n;
@@ -486,7 +487,7 @@ const STAGE_GATES = Object.freeze({
       "completed", "payout_released",
     ]),
     code: "milestone_not_reached",
-    message: "The shop has not finished its own quality check. Packing is released once it has.",
+    message: "The job is not packed and ready for a rider yet. Packaging is released once it is.",
   }),
   delivered: Object.freeze({
     states: Object.freeze(["delivered", "issue_window_open", "completed", "payout_released"]),
@@ -629,10 +630,48 @@ function fillOrderSpecFromLineItems(store, order) {
   }
 }
 
+function productionItemsFor(store, order, user) {
+  const jobs = (store?.orderJobs || []).filter((job) => job.orderId === order.id);
+  const allLines = ["ops_admin", "super_admin"].includes(user?.role)
+    || (user?.role === "client" && order.clientId === user.id)
+    || (jobs.length === 0 && ((user?.role === "supplier" && order.supplierId === user.id)
+      || (user?.role === "rider" && order.riderId === user.id)));
+  const jobIds = new Set(jobs.filter((job) => (
+    (user?.role === "supplier" && job.supplierId === user.id)
+    || (user?.role === "rider" && job.riderId === user.id)
+  )).map((job) => job.id));
+  return (store?.orderLineItems || [])
+    .filter((line) => line.orderId === order.id && (allLines || jobIds.has(line.jobId)))
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.id).localeCompare(String(b.id)))
+    .map((line) => {
+      const spec = line.structuredSpecSnapshot || {};
+      const measurement = line.measurement ? {
+        ...(line.measurement.pages == null ? {} : { pages: line.measurement.pages }),
+        ...(line.measurement.width == null ? {} : { widthMilli: line.measurement.width }),
+        ...(line.measurement.height == null ? {} : { heightMilli: line.measurement.height }),
+        ...(line.measurement.length == null ? {} : { lengthMilli: line.measurement.length }),
+        // Old snapshots did not keep the unit. Never substitute today's listing unit.
+        unit: ["mm", "cm", "m", "in", "ft"].includes(spec.measureUnit) ? spec.measureUnit : null,
+      } : null;
+      return {
+        id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
+        pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
+        measurement,
+        structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
+          ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
+        options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
+          .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+          .map((option) => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })),
+        artworkFileId: line.artworkFileId || null, mockupFileId: line.mockupFileId || null,
+      };
+    });
+}
+
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
+  publicRecord.productionItems = productionItemsFor(store, order, user);
   /*
     Whether this order has been rated, so a client is asked once.
 
@@ -694,9 +733,11 @@ export function publicOrderFor(order, user, store = null) {
     delete publicRecord.supplierPlatformPayoutMinor;
     delete publicRecord.supplierEarningsMinor;
     delete publicRecord.paymentAllocations;
+    // A client never sees the shop's money, nor the wallet receipt that paid it.
+    delete publicRecord.payoutReceiptFileIds;
     if (Array.isArray(publicRecord.payoutMilestones)) {
       publicRecord.payoutMilestones = publicRecord.payoutMilestones.map((milestone) => {
-        const { amountMinor: _amountMinor, ...visible } = milestone;
+        const { amountMinor: _amountMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
         return visible;
       });
     }
@@ -705,6 +746,11 @@ export function publicOrderFor(order, user, store = null) {
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;
     publicRecord.platformRevenue = reporting.platformRevenue;
+  }
+  // The release desk pays a shop by scanning its own receiving QR, so the
+  // account rides with every order Operations reads. Never for anyone else.
+  if (ops && store && order.supplierId) {
+    publicRecord.supplierPayoutAccount = opsPayoutAccountProjection(store, order.supplierId);
   }
   if (rider) {
     delete publicRecord.payoutMilestones;
@@ -775,9 +821,10 @@ export function publicOrderFor(order, user, store = null) {
     else delete publicRecord.dropoff;
   }
 
-  if (!ops && !owningClient && publicRecord.payments) {
-    for (const installment of Object.values(publicRecord.payments)) {
+  if (!ops && !owningClient) {
+    for (const installment of [publicRecord.payments, publicRecord.acceptedQuote?.payments].flatMap((payments) => Object.values(payments || {}))) {
       if (!installment || typeof installment !== "object") continue;
+      delete installment.proofFileId;
       delete installment.reference;
       delete installment.submittedBy;
       delete installment.confirmedBy;
@@ -793,6 +840,29 @@ export function issueWindowExpiresAt(openedAt, issueWindowHours) {
   return new Date(opened + issueWindowHours * 60 * 60 * 1000).toISOString();
 }
 
+/*
+ Closing the issue window is one transition with two triggers: the clock, and
+ the client saying the order arrived fine. Both end the same way -- the order
+ completes and the retention share the rider's evidence already covers is
+ released -- so both go through here, and only the timeline note says which.
+*/
+function closeIssueWindow(store, order, at, { by, note }) {
+  order.state = "completed";
+  order.updatedAt = at;
+  if (!Array.isArray(order.timeline)) order.timeline = [];
+  order.timeline.push({ at, state: "completed", by, note });
+  const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
+  if (retention?.pofFileIds?.length) {
+    releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);
+    order.timeline.push({
+      at,
+      state: "completed",
+      by: "system",
+      note: "Client retention milestone released",
+    });
+  }
+}
+
 export function expireIssueWindows(store, at, {limit = 100} = {}) {
   let processed = 0;
   const timestamp = new Date(at).getTime();
@@ -803,26 +873,42 @@ export function expireIssueWindows(store, at, {limit = 100} = {}) {
     if (activePayoutHold(store, order)) continue;
     if (processed >= limit) break;
     processed += 1;
-    order.state = "completed";
-    order.updatedAt = at;
-    if (!Array.isArray(order.timeline)) order.timeline = [];
-    order.timeline.push({
-      at,
-      state: "completed",
+    closeIssueWindow(store, order, at, {
       by: "system",
       note: "Issue window expired with no active claim",
     });
-    const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
-    if (retention?.pofFileIds?.length) {
-      releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);
-      order.timeline.push({
-        at,
-        state: "completed",
-        by: "system",
-        note: "Client retention milestone released",
-      });
-    }
     changed = true;
   }
   return changed;
+}
+
+/*
+ The client confirming the order arrived with no problems.
+
+ It is the issue window's other ending. Rather than sit out the clock, the
+ owning client says the job is fine, the window closes now, and the shop's
+ retention is released today instead of tomorrow. The refusals are the two
+ things the clock would also have waited on: the window has to be open, and
+ nothing can be holding the payout -- a client with an open report cannot
+ also call the job clean.
+*/
+export function confirmIssueWindow(store, order, actor, at) {
+  if (order.state !== "issue_window_open") {
+    fail(409, "issue_window_not_open", "This order is not in its issue window, so there is nothing to confirm.", {
+      state: order.state,
+    });
+  }
+  const openIssue = (store?.issues || []).find(
+    (issue) => issue.orderId === order.id && !["resolved", "dismissed"].includes(issue.status),
+  );
+  if (openIssue || activePayoutHold(store, order)) {
+    fail(409, "issue_open", "A problem is already reported on this order. Operations closes it once that is settled.", {
+      issueId: openIssue?.id || null,
+    });
+  }
+  closeIssueWindow(store, order, at, {
+    by: actor.id,
+    note: "Client confirmed the order arrived with no problems",
+  });
+  return order;
 }

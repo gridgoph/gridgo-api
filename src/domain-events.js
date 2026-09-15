@@ -1,4 +1,5 @@
 import { activePayoutHold } from "./operational-model.js";
+import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
   writeDraft,
   notifyOrderParties,
@@ -16,7 +17,7 @@ const changed = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
 const keyed = (rows) =>
   new Map(
     (rows || []).map((r) => [
-      r.id || `${r.userId}:${r.role || r.kind || ""}`,
+      r.id || `${r.userId || r.supplierId}:${r.role || r.kind || ""}`,
       r,
     ]),
   );
@@ -222,14 +223,24 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         (m) => m.code === milestone.code,
       );
       if (milestone.status === "released" && prior?.status !== "released") {
-        notifyAdmins("ops_payout_released", "Payout milestone recorded as released", order, `${occurrence}:${milestone.code}:${milestone.releasedAt || at}`);
+        const stage = payoutStageLabel(milestone.code);
+        const figure = formatMinorPhp(milestone.amountMinor || 0);
+        const shop = (store.users || []).find((u) => u.id === order.supplierId)?.name || "the shop";
+        notifyAdmins(
+          "ops_payout_released",
+          `Payout released · ${order.id}`,
+          order,
+          `${occurrence}:${milestone.code}:${milestone.releasedAt || at}`,
+          { body: `${stage} share of ${figure} released to ${shop}.` },
+        );
         notify(
           order.supplierId,
           "shop_payout_released",
-          "Payout milestone recorded as released",
+          `${figure} released`,
           order,
           `${occurrence}:${milestone.code}:${milestone.releasedAt || at}`,
           "supplier",
+          { body: `${stage} was recorded as released. Open the payout ledger for the recorded details.` },
         );
       }
     }
@@ -549,11 +560,12 @@ export function deriveDomainEvents(store, before, { createId, at }) {
     "supplierProfiles",
     "riderProfiles",
     "clientProfiles",
+    "supplierPayoutAccounts",
   ]) {
     const previous = keyed(before[table]);
     for (const row of store[table] || [])
-      if (changed(previous.get(row.id || `${row.userId}:`), row))
-        hint("identity", null, [row.userId || row.id]);
+      if (changed(previous.get(row.id || `${row.userId || row.supplierId}:`), row))
+        hint("identity", null, [row.userId || row.supplierId || row.id]);
   }
   const catalogTables = [
     "catalog",

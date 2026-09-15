@@ -77,6 +77,13 @@ export const PRIVILEGED_DEV_ACCOUNTS = Object.freeze([
     primaryRole: "ops_admin",
     roles: Object.freeze(["ops_admin"]),
   },
+  {
+    id: "user_gridgo26_ops",
+    email: "gridgo26@gmail.com",
+    name: "GRIDGO Operations",
+    primaryRole: "ops_admin",
+    roles: Object.freeze(["ops_admin"]),
+  },
 ]);
 
 const USER_ID = "user_lovis_printshop";
@@ -1276,7 +1283,12 @@ export async function seedDevelopmentPrivilegedAccounts(database, {
   const backend = clerkBackend || createClerkBackend(authConfiguration(process.env));
   const accounts = [];
   for (const account of PRIVILEGED_DEV_ACCOUNTS) {
-    accounts.push(await seedDevelopmentPrivilegedAccount(database, account, backend, now));
+    try {
+      accounts.push(await seedDevelopmentPrivilegedAccount(database, account, backend, now));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Skipping portal tester ${account.email}: ${message}`);
+    }
   }
   return accounts;
 }
@@ -1377,6 +1389,8 @@ export async function seedDevelopmentShops(database, {
   */
   if (client.userId && seedQueueRequested()) {
     await seedDevelopmentQueue(database, client.userId, now);
+  } else {
+    await clearDevelopmentOrders(database);
   }
   const privileged = await seedDevelopmentPrivilegedAccounts(database, { clerkBackend: backend, now });
   return { shops, client, rider, privileged, photos: shops.every((shop) => shop.photos) };
@@ -1541,6 +1555,22 @@ function measurementForSeed(item, quantity) {
   // Pages times copies, so the quantity a client asked for is the page count.
   if (kind === "pages") return { pages: Math.max(1, quantity) };
   return null;
+}
+
+/**
+ * Drop operational work while keeping shops, catalogues, and people.
+ * Used when GRIDGO_SEED_ORDERS=0 so a fresh local board is empty.
+ */
+async function clearDevelopmentOrders(database) {
+  await database.transaction(async () => {
+    // Line snapshots refuse ordinary deletes. Replica role skips that trigger
+    // so a local empty-board seed can drop operational work without touching
+    // catalogues or people.
+    await database.query("SET LOCAL session_replication_role = replica");
+    await database.query("TRUNCATE TABLE orders CASCADE");
+    await database.query("TRUNCATE TABLE notifications CASCADE");
+    await database.query("DELETE FROM audit_log WHERE entity_type IN ('order', 'job') OR order_id IS NOT NULL");
+  });
 }
 
 async function seedDevelopmentQueue(database, clientId, now) {

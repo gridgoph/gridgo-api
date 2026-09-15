@@ -1,5 +1,5 @@
 import { isContainedPickup } from "./operational-model.js";
-import { privilegedAdminMemberships, eligibleRiderIds } from "./notifications.js";
+import { privilegedAdminMemberships, eligibleRiderIds, finalPaymentAction } from "./notifications.js";
 
 /**
  * Client inbox rows for a job moving without the client doing the moving.
@@ -43,13 +43,13 @@ const COPY = {
   },
   ready_for_dispatch: {
     type: "order_ready_for_dispatch",
-    title: "Ready to leave the shop",
-    body: "This job is packed and waiting for a rider.",
+    title: "Packed and waiting for a rider",
+    body: "The rider and supplier will check this job together before it leaves the shop.",
   },
   rider_assigned: {
     type: "order_rider_assigned",
-    title: "A rider has your job",
-    body: "A GRIDGO rider is on the way to collect it from the shop.",
+    title: "A rider is on the way to the shop",
+    body: "A GRIDGO rider is on the way to check this job with the supplier before collecting it.",
   },
   picked_up: {
     type: "order_picked_up",
@@ -64,9 +64,10 @@ const COPY = {
   awaiting_collection: {
     type: "order_ready_for_pickup",
     title(order) {
-      return collectionOwed(order) ? "Settle, then collect" : "Waiting at the counter";
+      return collectionPending(order) ? "Payment is being checked" : collectionOwed(order) ? "Settle, then collect" : "Waiting at the counter";
     },
     body(order) {
+      if (collectionPending(order)) return "Your order is at GRIDGO Office. Your final payment is awaiting Operations confirmation before collection.";
       return collectionOwed(order)
         ? "Your order is waiting at GRIDGO Office. Settle the remaining balance in the app, then collect it at the counter."
         : "Your order is waiting for you at the GRIDGO Office counter.";
@@ -103,12 +104,12 @@ const COLLECT_COPY = {
   ready_for_dispatch: {
     type: "order_ready_for_dispatch",
     title: "Packed for the office",
-    body: "This job is packed. A GRIDGO rider will bring it to the GRIDGO Office counter.",
+    body: "This job is packed. A rider will check it with the supplier before bringing it to GRIDGO Office.",
   },
   rider_assigned: {
     type: "order_rider_assigned",
     title: "A rider is collecting it",
-    body: "A GRIDGO rider is picking this up from the shop to bring it to the office.",
+    body: "A GRIDGO rider is on the way to check this job with the supplier before taking it to the office.",
   },
   picked_up: {
     type: "order_picked_up",
@@ -137,8 +138,12 @@ const COLLECT_COPY = {
   },
 };
 
+function collectionPending(order) {
+  return (order?.payments?.final_online ?? order?.payments?.balance)?.status === "pending_confirmation";
+}
+
 function collectionOwed(order) {
-  const status = order?.payments?.final_online?.status;
+  const status = (order?.payments?.final_online ?? order?.payments?.balance)?.status;
   return Boolean(status) && status !== "confirmed" && status !== "legacy_confirmed";
 }
 
@@ -172,6 +177,12 @@ export function clientNotificationDraft(order) {
     order,
   );
   if (!copy) return null;
+  const action = finalPaymentAction(order);
+  if (action && order.state !== "awaiting_collection") {
+    copy.body += action.status === "pending_confirmation"
+      ? " Your final payment is awaiting Operations confirmation."
+      : ` Pay the remaining balance by QR in the app and upload the receipt. Operations must confirm it before ${collecting ? "collection" : "handover"}.`;
+  }
   return {
     userId: order.clientId,
     appRole: "client",
@@ -203,12 +214,12 @@ const SHOP_COPY = {
   supplier_self_qc: {
     type: "shop_job_self_qc",
     title: "Check the finished job",
-    body: "Printing is done. Run your quality check before it leaves the shop.",
+    body: "Printing is done. Pack the job and mark it ready; the rider checks it with you at pickup.",
   },
   ready_for_dispatch: {
     type: "shop_job_ready_for_dispatch",
     title: "Ready for a rider",
-    body: "This job is packed and waiting for dispatch.",
+    body: "This job is available to riders. Check it together when your rider arrives, before handing it over.",
   },
   client_correction: {
     type: "shop_job_client_correction",
@@ -218,7 +229,7 @@ const SHOP_COPY = {
   rider_assigned: {
     type: "shop_job_rider_assigned",
     title: "A rider is coming",
-    body: "A GRIDGO rider is on the way to collect this job.",
+    body: "A GRIDGO rider is on the way. Complete the pickup checks together before handing over this job.",
   },
   picked_up: {
     type: "shop_job_picked_up",
@@ -241,7 +252,7 @@ const RIDER_ASSIGNED_COPY = {
   rider_assigned: {
     type: "order_rider_assigned",
     title: "You have this job",
-    body: "Collect it from the shop and run the pickup checks.",
+    body: "Go to the shop and complete all six pickup checks with the supplier before taking the package.",
   },
   picked_up: {
     type: "order_picked_up",
@@ -334,8 +345,8 @@ export function riderNotificationDrafts(store, order) {
         type: "dispatch_available",
         occurrenceKey: stateOccurrence(order),
         orderId: order.id,
-        title: "A job is ready to collect",
-        body: "Open Offers to take it before another rider does.",
+        title: "A packed job needs a rider",
+        body: "Accept in Offers, then check the job with the supplier at pickup before taking the package.",
         read: false,
       });
     }
@@ -502,9 +513,9 @@ const OPS_PROGRESS = {
   downpayment_review: ["Payment to confirm", "A downpayment is waiting for confirmation."],
   payment_authorized: ["Payment confirmed", "Downpayment is confirmed."],
   production: ["In production", "The shop has started printing."],
-  supplier_self_qc: ["Shop quality check", "The shop is checking the finished job."],
-  ready_for_dispatch: ["Ready for a rider", "The job is packed and waiting for dispatch."],
-  rider_assigned: ["Rider assigned", "A rider is assigned to this order."],
+  supplier_self_qc: ["Packing at the shop", "The shop is packing the finished job (older app flow). Supplier and rider check it together at pickup."],
+  ready_for_dispatch: ["Packed, rider needed", "The package is ready at the shop. The rider goes to the supplier and they check the job together before it leaves."],
+  rider_assigned: ["Rider heading to the shop", "The rider is on the way to the supplier. They run the six pickup checks together before transport."],
   picked_up: ["Picked up", "The rider has collected this order."],
   out_for_delivery: ["Out for delivery", "The rider is delivering this order."],
   awaiting_collection: ["At the counter", "This order is waiting at GRIDGO Office."],

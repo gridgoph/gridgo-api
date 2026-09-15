@@ -76,6 +76,7 @@ const TABLES = [
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
+  { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
   { name: "file_references", keys: ["file_id", "reference_type", "reference_id", "field"], columns: ["file_id", "reference_type", "reference_id", "field", "position", "data"] },
   { name: "rider_documents", keys: ["id"], columns: ["id", "rider_id", "kind", "file_id", "expires_on", "is_current", "uploaded_at", "replaced_at"] },
   { name: "credit_accounts", keys: ["user_id"], columns: ["user_id", "balance_minor", "data"] },
@@ -113,6 +114,7 @@ export function emptyStore() {
     catalogItems: [],
     catalogItemPhotos: [],
     supplierShopMedia: [],
+    supplierPayoutAccounts: [],
     catalogOptionGroups: [],
     catalogOptions: [],
     catalogItemFileFormats: [],
@@ -571,6 +573,13 @@ function rowsFromStore(store) {
       supplier_id: media.supplierId, slot: media.slot, file_id: media.fileId, updated_at: media.updatedAt,
     });
   }
+  for (const account of (store.supplierPayoutAccounts || [])) {
+    rows.supplier_payout_accounts.push({
+      supplier_id: account.supplierId, provider: account.provider, account_name: account.accountName,
+      account_number: account.accountNumber ?? null, institution: account.institution ?? null,
+      qr_file_id: account.qrFileId ?? null, version: account.version || 1, updated_at: account.updatedAt,
+    });
+  }
   for (const document of (store.riderDocuments || [])) {
     rows.rider_documents.push({ id: document.id, rider_id: document.riderId, kind: document.kind, file_id: document.fileId, expires_on: document.expiresOn ?? null, is_current: document.isCurrent !== false, uploaded_at: document.uploadedAt, replaced_at: document.replacedAt ?? null });
   }
@@ -867,6 +876,7 @@ export async function loadStore(database) {
     effectiveUnitPriceMinor: row.effective_unit_price_minor, quantity: row.quantity,
     lineSubtotalMinor: row.line_subtotal_minor, acceptedFormatCodesSnapshot: row.accepted_format_codes_snapshot,
     structuredSpecSnapshot: row.structured_spec_snapshot, sortOrder: row.sort_order,
+    ...(readMeasurement(row) ? { measurement: readMeasurement(row) } : {}),
     snapshotFinalized: row.snapshot_finalized, createdAt: row.created_at,
     ...(row.job_id == null ? {} : { jobId: row.job_id }),
     ...(row.artwork_file_id == null ? {} : { artworkFileId: row.artwork_file_id }),
@@ -973,6 +983,11 @@ export async function loadStore(database) {
   }));
   store.supplierShopMedia = orderedBy(loaded.supplier_shop_media, "supplier_id", "slot").map((row) => ({
     supplierId: row.supplier_id, slot: row.slot, fileId: row.file_id, updatedAt: row.updated_at,
+  }));
+  store.supplierPayoutAccounts = orderedBy(loaded.supplier_payout_accounts, "supplier_id").map((row) => ({
+    supplierId: row.supplier_id, provider: row.provider, accountName: row.account_name,
+    accountNumber: row.account_number, institution: row.institution, qrFileId: row.qr_file_id,
+    version: row.version || 1, updatedAt: row.updated_at,
   }));
   store.riderDocuments = orderedBy(loaded.rider_documents, "uploaded_at", "id").map((row) => {
     const item = { id: row.id, riderId: row.rider_id, kind: row.kind, fileId: row.file_id, isCurrent: row.is_current, uploadedAt: row.uploaded_at };

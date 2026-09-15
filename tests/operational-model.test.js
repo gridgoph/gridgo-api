@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   OperationalError,
   calculateOrderMoney,
+  confirmIssueWindow,
   createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
@@ -391,6 +392,60 @@ test("elapsed global issue window completes an already settled order", () => {
   assert.equal(expireIssueWindows(store, AT), false);
 });
 
+test("client confirmation closes the issue window now, the same way expiry would", () => {
+  const money = plan();
+  const milestones = createPayoutMilestones(money);
+  for (const milestone of milestones) milestone.status = "released";
+  const order = {
+    id: "ord-fine",
+    clientId: "client-a",
+    state: "issue_window_open",
+    payoutHold: false,
+    issueWindowExpiresAt: "2026-08-11T12:00:00.000Z",
+    payoutMilestones: milestones,
+    timeline: [],
+  };
+  const store = { claims: [], issues: [], settings: defaultOperationalSettings(), orders: [order] };
+
+  assert.equal(confirmIssueWindow(store, order, { id: "client-a", role: "client" }, AT), order);
+  assert.equal(order.state, "completed");
+  assert.equal(order.updatedAt, AT);
+  assert.equal(order.timeline[0].by, "client-a");
+  assert.match(order.timeline[0].note, /no problems/);
+  assert.equal(order.payoutMilestones.every((milestone) => milestone.status === "released"), true);
+  // Already closed: the clock has nothing left to do, and a second confirm is refused.
+  assert.equal(expireIssueWindows(store, "2026-08-12T00:00:00.000Z"), false);
+  expectDomainError(
+    () => confirmIssueWindow(store, order, { id: "client-a", role: "client" }, AT),
+    409,
+    "issue_window_not_open",
+  );
+});
+
+test("a client with a report open cannot call the job clean", () => {
+  const order = {
+    id: "ord-held",
+    clientId: "client-a",
+    state: "issue_window_open",
+    payoutHold: true,
+    issueWindowExpiresAt: "2026-08-11T12:00:00.000Z",
+    payoutMilestones: [],
+    timeline: [],
+  };
+  const store = {
+    claims: [{ orderId: "ord-held", status: "payout_held" }],
+    issues: [{ id: "iss-1", orderId: "ord-held", status: "open" }],
+    orders: [order],
+  };
+
+  expectDomainError(
+    () => confirmIssueWindow(store, order, { id: "client-a", role: "client" }, AT),
+    409,
+    "issue_open",
+  );
+  assert.equal(order.state, "issue_window_open");
+});
+
 test("publicOrderFor fills specification from checkout line items", () => {
   const order = {
     id: "ord_line",
@@ -441,4 +496,34 @@ test('expiry worker processes a bounded batch and repeats without double closing
  assert.equal(expireIssueWindows(store,at,{limit:2}),true);
  assert.equal(store.orders.every(o=>o.timeline.length===1),true);
  assert.equal(expireIssueWindows(store,at,{limit:2}),false);
+});
+
+
+test("production items show every assigned line and options without payment evidence or prices", () => {
+  const order = { id: "production-order", clientId: "client", supplierId: "supplier", riderId: "rider", state: "out_for_delivery", payments: { final_online: { status: "pending_confirmation", proofFileId: "receipt" } }, timeline: [] };
+  const store = { orderLineItems: [1, 2].map((n) => ({ id: `line-${n}`, orderId: order.id, itemNameSnapshot: `Item ${n}`, quantity: n, pricingUnitSnapshot: "per_area", measurement: { width: 2000, height: 3000 }, structuredSpecSnapshot: { size: "2 × 3 ft", material: "Canvas", finish: "None", measureUnit: "ft", privateData: { reference: "secret" } }, artworkFileId: `art-${n}`, mockupFileId: `mock-${n}`, baseUnitPriceMinor: 900, sortOrder: n })), orderLineItemOptions: [{ orderLineItemId: "line-2", groupNameSnapshot: "Sides", optionLabelSnapshot: "Both", priceModifierMinor: 100 }] };
+  for (const role of ["client", "supplier", "rider", "ops_admin"]) {
+    const projected = publicOrderFor(order, { id: role, role }, store);
+    assert.equal(projected.productionItems.length, 2);
+    assert.deepEqual(projected.productionItems[0].measurement, { widthMilli: 2000, heightMilli: 3000, unit: "ft" });
+    assert.deepEqual(projected.productionItems[1].options, [{ groupName: "Sides", label: "Both" }]);
+    assert.deepEqual(projected.productionItems[1].structuredSpec, { size: "2 × 3 ft", material: "Canvas", finish: "None" });
+    assert.equal(JSON.stringify(projected.productionItems).includes("Minor"), false);
+    assert.equal(projected.payments.final_online.proofFileId, ["client", "ops_admin"].includes(role) ? "receipt" : undefined);
+  }
+  assert.deepEqual(publicOrderFor(order, { id: "unassigned", role: "rider" }, store).productionItems, []);
+  assert.equal(order.payments.final_online.proofFileId, "receipt");
+});
+
+
+test("production line visibility follows jobs ahead of legacy primary party ids", () => {
+  const order = { id: "mixed", clientId: "client", supplierId: "supplier-a", riderId: "rider-a", timeline: [] };
+  const store = {
+    orderJobs: ["a", "b"].map((key) => ({ id: `job-${key}`, orderId: order.id, supplierId: `supplier-${key}`, riderId: `rider-${key}` })),
+    orderLineItems: ["a", "b"].map((key) => ({ id: `line-${key}`, orderId: order.id, jobId: `job-${key}`, quantity: 1 })),
+  };
+  for (const role of ["supplier", "rider"]) for (const key of ["a", "b"]) {
+    assert.deepEqual(publicOrderFor(order, { role, id: `${role}-${key}` }, store).productionItems.map((line) => line.id), [`line-${key}`]);
+  }
+  assert.equal(publicOrderFor(order, { role: "client", id: "client" }, store).productionItems.length, 2);
 });

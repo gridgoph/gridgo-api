@@ -2,6 +2,10 @@
 
 HTTP role selection, device registration, notification list/SSE/resume, and rider location are defined in [Operational Model v2](OPERATIONAL_MODEL_V2_API.md). Provider credentials and health are defined in [Deployment](DEPLOYMENT.md#2-required-environment-and-secret-files).
 
+## Client payment action and event history
+
+Inbox/SSE `orderState` is current order context. `eventState`, when present, identifies the known historical lifecycle event; title/body/type remain unchanged. `paymentAction` is current client-only final-payment guidance (`installment: "final_online"`, `status: "due" | "pending_confirmation"`, `amountMinor`), including on older inbox rows. New production, packaging, pickup and transport notifications explain QR receipt submission or Operations review as appropriate. Existing occurrence deduplication and push privacy remain unchanged; no repeated reminder or automatic payment confirmation is introduced.
+
 ## Invalidate payload
 
 `event: invalidate` contains only `resource` and optional `id`. The supported resources come from `INVALIDATE_RESOURCES` in [`src/notifications.js`](../src/notifications.js). For `jobs`, `orders`, `dispatch`, `payouts`, and `location`, `id` is the order ID. Approval, service, claim, and escalation hints use their record IDs; collection hints omit `id`. A resource hint tells the app to refetch through its independently authorized read endpoint.
@@ -46,8 +50,8 @@ User action acknowledgements remain durable inbox records but use silent inbox i
 | 20 | Balance due/reminder | Existing payment state/collection-balance messages and silent order refresh. No automated reminder enabled: matrix approves no business reminder cadence/preferences. |
 | 21 | Credit/refund adjustment | Existing credit account/ledger changes generate owner and privileged credit notices and credits refresh. No bank/provider refund workflow is invented. |
 | 22 | Production started | Existing client/shop lifecycle notices; actor silent; order/job/payout refresh. |
-| 23 | Printing complete/QC | Existing role-specific QC milestone, occurrence-aware; actor silent and other screens refreshed. |
-| 24 | QC passed/ready | Existing client/shop milestone plus one rider offer occurrence; duplicate derivation deduplicates. |
+| 23 | Legacy supplier self-QC | Existing role-specific compatibility milestone, occurrence-aware; actor silent and other screens refreshed. New supplier flow skips this state. |
+| 24 | Packaging ready | Direct production-to-ready transition writes client/shop progress and one offer occurrence per approved rider; duplicate derivation deduplicates. Ready means packed, with joint supplier/rider QC still required at pickup. |
 | 25 | Delayed/promise at risk | Supported order/deadline changes invalidate authorized views. No direct delay-report route or configured lateness SLA exists, so no synthetic alert/scheduler added. |
 | 26 | Offer available | Current approved membership riders, same contained-pickup eligibility exclusion as accept/offers; durable single offer occurrence. |
 | 27 | Assigned/accepted | Existing role-specific client/shop/winner notices and board refresh; office-client safe copy preserved. |

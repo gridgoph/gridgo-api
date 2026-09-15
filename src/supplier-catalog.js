@@ -854,7 +854,7 @@ export function createOrderLineSnapshot(store, selection, createId) {
       measurement: selection.measurement ?? null,
       lineSubtotalMinor: subtotal,
       acceptedFormatCodesSnapshot: formats,
-      structuredSpecSnapshot: structuredSpec,
+      structuredSpecSnapshot: { ...structuredSpec, ...(item.measureUnit ? { measureUnit: item.measureUnit } : {}) },
       sortOrder,
       snapshotFinalized: true,
       createdAt,

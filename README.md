@@ -99,6 +99,7 @@ All routes except `/health`, `/catalog`, public support-ticket submit, the suppo
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
 - Supplier matching: `/supplier-services`, `/orders/:id/eligible-suppliers`
+- Supplier payout account: `/me/payout-account` (where a shop wants to be paid, with its receiving-QR file) and the Operations read `/users/:id/payout-account`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
 - Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
