@@ -92,6 +92,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786953600000_a_shop_is_paid_across_four_stages",
     "1786955400000_public_support_tickets",
     "1786957200000_tarpaulin_printer_max_width",
+    "1786959000000_notification_push_outbox",
       ],
     );
 
@@ -229,6 +230,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
     await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name='notification_push_outbox'",[schema])).rowCount,0);
+    await runner(migrationOptions(schema, "down", 1, client));
   const printerCapColumns = new Set((await client.query(
     `SELECT column_name FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = 'supplier_catalog_items'`,
@@ -239,7 +242,6 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_tickets`])).rows[0].t, null);
     assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_admins`])).rows[0].t, null);
-
     await runner(migrationOptions(schema, "down", 1, client));
   // The four-stage payout has no honest reverse -- two stages cannot say which
   // of four a shop had reached -- so its down leaves the rows alone. What it

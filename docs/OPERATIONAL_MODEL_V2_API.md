@@ -11,6 +11,16 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 - Approval cases: `pending | approved | suspended | rejected`. Only `approved` supplier/rider cases can receive work.
 - Client `accountType`: `individual | business | organization`. Clerk self-activation creates an `individual` client; Operations can update the profile later.
 
+### Selecting an actor role
+
+Authenticated domain requests may send `X-GRIDGO-Role` with one of the caller's memberships; CORS permits this header. It selects authorization and response projection without changing the stored primary role. Unknown or missing memberships return `403 forbidden`. Fixed auth projections, activation, and enrollment keep their URL-selected bootstrap behavior. `/auth/me` still returns all memberships; a supported header projects `user.role` and approval when that membership exists, otherwise it returns the bootstrap identity needed for enrollment.
+
+Without the header, primary-role compatibility remains, except `/dispatch/offers` and `POST /dispatch/*` infer a held rider membership for non-Operations actors, and `/jobs` infers a held supplier membership. Location GET does not infer rider. Explicit role selection also limits approval-decision audit authority to that role; requests without it keep existing administrator precedence. Account-profile routes, including `POST /me/business-apply`, still require a persisted client primary row during the compatibility window (`409 client_profile_unavailable` otherwise).
+
+Supplier/rider order and dispatch access requires current approval. Order reads expose assigned work and, for approved riders, unassigned eligible dispatch offers; other riders' active jobs are excluded. Reassignment removes the former assignee's access. File rules are in [Storage API](STORAGE_API.md#post-filesfileidattach--bind-to-a-domain-record).
+
+`GET /users?role=` remains a membership directory filter, not an actor selector. It includes secondary memberships and projects that role's profile/approval; without the filter it retains the primary-user directory.
+
 ## Complete route index
 
 | Method | Path | Authorization | Contract |
@@ -45,7 +55,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | POST | `/files/:fileId/attach` | file owner + parent owner/assignee | attach opaque file ID |
 | DELETE | `/files/:fileId` | purpose-specific; see Storage API | safe delete lifecycle |
 | GET | `/devices` | authenticated | caller's own push registrations |
-| POST | `/devices` | authenticated **or** anonymous | register this phone's FCM token against the caller, or unclaimed when no bearer token is sent |
+| POST | `/devices` | authenticated **or** anonymous | register this phone's push token against the caller, or unclaimed when no bearer token is sent |
 | POST | `/devices/unregister` | authenticated **or** anonymous | stop push to one of the caller's own phones; an anonymous call may remove only an unclaimed registration |
 | POST | `/announcements` | ops/super | one general message to an audience; `everyone` also reaches unclaimed handsets |
 | GET | `/notifications` | authenticated | caller's notifications, newest first |
@@ -92,6 +102,7 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/orders/:id` | related party/ops/super | role-filtered order detail |
 | POST | `/orders` | client | draft/submit order and return estimate range |
 | POST | `/orders/:id/transition` | edge-specific role | unchanged QA/production edges below |
+| POST | `/orders/:id/decline` | assigned approved supplier | [decline response](#supplier-decline) |
 | POST | `/orders/:id/payments/:installment/submit` | owning client | submit QR reference |
 | POST | `/orders/:id/payments/:installment/confirm` | ops/super | manual confirmation |
 | POST | `/orders/:id/payments/:installment/reject` | ops/super | reject submitted reference with client-visible reason |
@@ -111,10 +122,11 @@ This is the rebuild contract for the three mobile apps and Operations web portal
 | GET | `/dispatch/offers` | approved rider/ops/super | available/assigned dispatches |
 | POST | `/dispatch/:id/accept` | approved rider | assign self to ready dispatch |
 | POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | pass or escalate all six checks |
-| POST/GET | `/dispatch/:id/location` | POST assigned rider; GET related parties/ops/super | live location ping/latest ping |
+| POST/GET | `/dispatch/:id/location` | POST assigned approved rider; GET related parties/ops/super | [location contract](#rider-location) |
+| GET | `/ops/riders/locations` | ops/super | [active rider map](#rider-location) |
 | POST | `/dispatch/:id/delivery` | assigned rider | file-backed delivery evidence; opens issue window |
 | POST | `/dispatch/:id/proof` | authenticated | retired: always `410 dispatch_proof_route_retired` |
-| GET | `/jobs` | supplier | only the caller's assigned supplier jobs |
+| GET | `/jobs` | approved supplier | only the caller's assigned supplier jobs |
 
 ## Clerk identity and role provisioning
 
@@ -239,24 +251,21 @@ Each array item is the complete public `File` metadata object; the abbreviated e
 
 The existing Operations/Super Admin `GET /users/:id` approval response is now `{ "user": PublicUser, "verificationDocuments": File[] }` for a supplier. The same array is returned by `POST /users/:id/verification`, so the decision response remains a complete approval surface. General `PublicUser` values—including `/users`, login, `/auth/me`, matching, and catalogue projections—never contain `verificationDocumentFileIds`.
 
-## Push notifications (Firebase Cloud Messaging)
+## Push notifications
 
-`GET /notifications` and `/notifications/stream` only reach a phone while the app is open and connected. Push is the third delivery leg: the server sends the same notification through **FCM HTTP v1** to every device the owner has registered, so it arrives with the app closed and the screen locked.
+Push supplements the in-app inbox through FCM HTTP v1 or explicit native APNs registrations. The inbox remains the source of truth when notifications are denied, a token is stale, or a device is offline. Silent acknowledgements and delivery/retry guarantees are defined in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope).
 
-Firebase project: **`gridgo-c2ce9`**. The apps need its `google-services.json` / `GoogleService-Info.plist`; the sending credential is server-side only and is never distributed to a device.
-
-Push **supplements** the existing legs and never replaces them. Every push corresponds to exactly one notification record the same user can read in `GET /notifications`, carries that record's ID, and is emitted once — the server pushes from the single place that already persists notifications, so no server path can create a notification without a push or push the same record twice. Apps must still render the in-app list as the source of truth: a phone with notifications denied, a stale token, or an offline period receives nothing, and the list is what closes that gap.
-
-When the deployment has no FCM credential installed, every route below still works and stores registrations; nothing is sent. `GET /health` reports `push.status: "disabled"` in that case — see `docs/DEPLOYMENT.md` §2.
+Firebase project: **`gridgo-c2ce9`**. FCM apps need its `google-services.json` / `GoogleService-Info.plist`; sending credentials stay server-side. Provider configuration and health are in [Deployment](DEPLOYMENT.md#2-required-environment-and-secret-files). Registration routes remain usable without configured providers.
 
 ### Device registration model
 
-- A registration is `{ token, platform }`. `token` is the FCM registration token Firebase issued to that installation; `platform` is `android`, `ios`, or `web`.
+- A registration accepts `{ token, platform, appRole?, tokenProvider? }`. `platform` is `android`, `ios`, or `web`. `tokenProvider` defaults to `fcm` on every platform, including existing iOS registrations. Native APNs requires explicit `tokenProvider: "apns"` and `platform: "ios"`; its device token is 64 hexadecimal characters. Authenticated registration validates provider/platform but APNs token shape is checked at delivery.
+- Optional `appRole` must be a held membership. It scopes claimed-device delivery to notifications currently visible in that app role; omitting it retains combined-account delivery. Send it on each authenticated re-registration, because omission clears the previous app role. Anonymous registration does not accept an app-role discriminator.
 - **A registration is either claimed or unclaimed.** A claimed registration belongs to one account. An *unclaimed* one belongs to nobody: a phone that installed the app and never signed in, or one whose owner signed out. Unclaimed registrations exist so an app-update announcement reaches every install — see *Reaching a phone that has never signed in*.
 - **A token belongs to exactly one user.** Registering a token that is already registered to somebody else moves it to the caller and removes the previous owner's claim, which is what a shared handset or a sign-out/sign-in on the same phone produces. Without that move, one person's orders would appear on another person's lock screen.
-- **One user may hold many devices.** A phone and a tablet both receive every notification; one dead device never suppresses the others.
-- Re-registering the same token under the same account updates the existing record instead of adding a second one. Apps should re-register on every launch and on every Firebase token refresh; it is idempotent and cheap.
-- The server deletes a registration as soon as FCM reports it unregistered or its token invalid. An app that finds itself receiving nothing should simply register again.
+- **One user may hold many devices.** Each eligible device can receive a notification; one dead device never suppresses the others.
+- Re-registering the same token under the same account updates the existing record instead of adding a second one. Apps should re-register on every launch and on every provider token refresh; it is idempotent and cheap.
+- The server deletes a registration when the provider identifies a dead or invalid token. An app that finds itself receiving nothing should simply register again.
 - **Registrations are strictly caller-owned.** Ownership is established exactly as it is for `/notifications` — from the bearer token. There is no operations override and no route through which one account can read, move, or delete another account's registrations.
 - **A registration is bound to the account, not to its login address.** The stored record holds `userId`; it never holds an email. Changing an account's Clerk sign-in address leaves the phone registered to the same person, and apps do not need to re-register afterward.
 
@@ -274,6 +283,8 @@ When the deployment has no FCM credential installed, every route below still wor
     "id": "dev_9f2c41a7c8d3",
     "userId": "user_client",
     "platform": "android",
+    "appRole": null,
+    "tokenProvider": "fcm",
     "tokenTail": "a7c8d3f1",
     "createdAt": "2026-08-11T02:00:00.000Z",
     "updatedAt": "2026-08-11T02:00:00.000Z"
@@ -291,13 +302,15 @@ Registering a token that is currently **unclaimed** claims it for the caller: th
 |---|---|---|
 | `400` | `device_token_required` | `token` missing, empty, or not a string |
 | `400` | `device_token_too_long` | `token` longer than 4096 characters |
+| `400` | `invalid_token_provider` | unsupported provider, or APNs with a non-iOS platform |
+| `403` | `forbidden` | authenticated `appRole` is unknown or not a held membership |
 | `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
 | `401` | `unauthorized` | the request carried a bearer token that is expired or unknown |
 
 ### `GET /devices`
 
 ```json
-{ "devices": [ { "id": "dev_9f2c41a7c8d3", "userId": "user_client", "platform": "android", "tokenTail": "a7c8d3f1", "createdAt": "…", "updatedAt": "…" } ] }
+{ "devices": [ { "id": "dev_9f2c41a7c8d3", "userId": "user_client", "platform": "android", "appRole": null, "tokenProvider": "fcm", "tokenTail": "a7c8d3f1", "createdAt": "…", "updatedAt": "…" } ] }
 ```
 
 Only the caller's own registrations, always — and never an unclaimed one, which belongs to nobody and is therefore nobody's to list. An account with none receives `{"devices": []}`. There is no route, for any role, that lists or counts unclaimed registrations.
@@ -356,7 +369,8 @@ POST /devices          (no Authorization header)
 | Status | Error | Cause |
 |---|---|---|
 | `400` | `device_token_required` | `token` missing or empty |
-| `400` | `invalid_device_token` | `token` is not shaped like an FCM registration token (64–4096 characters of `A–Z a–z 0–9 _ : . -`) |
+| `400` | `invalid_device_token` | FCM token is not 64–4096 characters of `A–Z a–z 0–9 _ : . -`, or explicit APNs token is not 64 hexadecimal characters |
+| `400` | `invalid_token_provider` | unsupported provider, or APNs with a non-iOS platform |
 | `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
 
 What apps can rely on:
@@ -366,19 +380,19 @@ What apps can rely on:
 - **`POST /devices/unregister` with no `Authorization` header** removes an unclaimed registration and answers `200 {"ok": true}`. A *claimed* registration is left alone and answers identically; removing one still requires its owner's bearer token.
 - **The unclaimed pool is bounded.** Past the pilot ceiling (5,000; `GRIDGO_MAX_UNCLAIMED_DEVICES`) the least recently seen unclaimed registrations are evicted to make room. Claimed registrations are never evicted, and a phone evicted while idle re-registers on its next launch. Registration is not refused at the ceiling: a refusal would let one script close the app-update channel to every genuine new install until an operator intervened.
 
-**What an unclaimed handset may receive — the hard rule.** An unclaimed registration is an anonymous phone; nothing proves who is holding it. It may only ever be sent a general announcement: never an order, a payout, a claim, an issue, a name, an amount, or anything else tied to a person. This is enforced in the delivery path — the client that talks to FCM refuses any batch containing an unclaimed device unless the message carries `data` of exactly `{"type": "announcement"}` — not by convention at the call sites.
+**What an unclaimed handset may receive — the hard rule.** An unclaimed registration is an anonymous phone; nothing proves who is holding it. It may only ever be sent a general announcement: never an order, a payout, a claim, an issue, a name, an amount, or anything else tied to a person. This is enforced in the delivery path — the delivery router refuses any batch containing an unclaimed device unless the message carries `data` of exactly `{"type": "announcement"}` — not by convention at the call sites.
 
 ### What a push looks like
 
-One FCM v1 message per registered device:
+Example FCM v1 message for an eligible device:
 
 ```json
 {
   "message": {
     "token": "<one device token>",
     "notification": {
-      "title": "Final quote ready",
-      "body": "Review the final quote, fulfillment choice, and payment plan."
+      "title": "GRIDGO update",
+      "body": "Open GRIDGO for the latest update."
     },
     "data": {
       "notificationId": "ntf_9c1f3a",
@@ -392,17 +406,19 @@ One FCM v1 message per registered device:
 }
 ```
 
-- `title` and `body` are the notification record's own, readable with the phone locked.
+- Domain push copy follows the privacy policy in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope); fetch the inbox for the detailed message. Announcements retain their public broadcast copy.
 - `data` values are always strings, and the keys are exactly `notificationId`, `type`, `orderId`, `at`. Keys with no value are omitted — a notification with no order carries no `orderId`. Route on `type` and `orderId`; fetch the order and re-read `GET /notifications` after opening, because the push carries no order state.
 - **Android apps must create the notification channel `gridgo_default`** before requesting a token. A message naming a channel the app has not created is downgraded or dropped on Android 8+.
 - `type` is the same discriminator as on the notification record: `supplier_assignment_final_price`, `pickup_check_escalation`, `pickup_escalation_resolved`, and any later value. Treat unknown types as "open the notification list".
 
-**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Titles and bodies are the owner-scoped strings the same user already sees in-app.
+**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Domain title/body copy is also generic under the realtime privacy policy.
+
+Native APNs sends the same allowed data fields at the payload root alongside `aps.alert` and `aps.sound: "default"`. It does not include the optional announcement image.
 
 ### Failure behaviour apps can rely on
 
 - A failed push never fails the action that caused it. If a payout releases and FCM is unreachable, the payout still happened, the notification record still exists, and `GET /notifications` still returns it.
-- A dead token is pruned, a transient FCM failure is not. A phone that is merely offline or unreachable keeps its registration.
+- A dead token is pruned, a transient provider failure is not. A phone that is merely offline or unreachable keeps its registration.
 - There is no delivery receipt and no read receipt. `read` is set only through `PATCH /notifications/:id` or `PATCH /notifications/read-all`; a push does not mark anything read.
 
 ## Platform announcements
@@ -438,7 +454,7 @@ Authorization: `ops_admin` or `super_admin`.
 }
 ```
 
-Every targeted account gets one notification record (`type: "announcement"`, `orderId: null`, plus the `announcementId` that groups them), readable in `GET /notifications`, on the SSE stream, and pushed to that account's registered devices like any other notification.
+Every targeted account gets one notification record (`type: "announcement"`, `orderId: null`, plus the `announcementId` that groups them). Audience selection uses current memberships, including secondary roles; reading and delivery follow the notification visibility and device app-role rules below.
 
 **Which audiences reach unclaimed devices:**
 
@@ -466,11 +482,13 @@ Every announcement is written to the platform audit log (`announcement.broadcast
 
 ## Notifications
 
-Notification IDs are opaque. Every notification route is owner-only: an authenticated caller receives only records whose `userId` is their own user ID. A known notification owned by another user returns `403 {"error":"forbidden"}`; an unknown notification returns `404 {"error":"notification_not_found"}`. Deleted notifications are omitted from all later lists.
+Notification IDs are opaque. Every notification route is owner-only: an authenticated caller receives only records whose `userId` is their own user ID. A known notification owned by another user returns `403 {"error":"forbidden"}`; an unknown notification returns `404 {"error":"notification_not_found"}`. Deleted notifications are omitted from all later lists. Current membership, approval, assignment, and audience visibility also apply to list/replay and individual mutations; an owned but no-longer-visible row returns `403 forbidden` on mutation.
+
+`GET /notifications`, `GET /notifications/stream`, and `PATCH /notifications/read-all` accept optional `?role=` using the membership roles above. This overrides `X-GRIDGO-Role` for these three routes; an unknown/nonmember role returns `403 forbidden`. With neither selector, the inbox combines currently visible owned rows. Pending applicants can read their own approval decisions. Super-only users retain historical Operations-tagged rows; dual Operations/Super Admin users see each role's own copy when selecting that role. Use the same selector for list, stream, and mark-all.
 
 ### `GET /notifications`
 
-Returns the caller's non-deleted notifications, newest first, plus an append-order snapshot watermark. `limit` (default 40, max 100) bounds the window; the inbox is not the full history. A notification about a job the caller can see carries `orderTitle` and `orderState` so a client can draw the stage rail without `GET /orders` or hydrating the job.
+Returns the caller's currently visible, non-deleted notifications, newest first, plus an append-order snapshot watermark. `limit` (default 40, max 100) bounds the window; the inbox is not the full history. A notification about a job the caller can see carries `orderTitle` and `orderState` so a client can draw the stage rail without `GET /orders` or hydrating the job.
 
 ```json
 {
@@ -495,7 +513,7 @@ Returns the caller's non-deleted notifications, newest first, plus an append-ord
 
 ### `GET /notifications/stream`
 
-Opens a caller-scoped Server-Sent Events stream using the same bearer token as other authenticated routes. The response uses `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and a five-second reconnect hint. Each new notification created by any server path is sent only to its owner. The `data` object is the same public inbox row as `GET /notifications` (including `orderTitle` / `orderState` when the row names an order — never the hydrated order):
+Opens a caller-scoped Server-Sent Events stream using the same bearer token as other authenticated routes. The response uses `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and a five-second reconnect hint. Banner-eligible notifications are sent only to their currently authorized owner. Silent inbox rows are fetched through the list, not streamed as banners, including during replay. The `data` object is the same public inbox row as `GET /notifications` (including `orderTitle` / `orderState` when the row names an order — never the hydrated order):
 
 ```text
 id: ntf_124
@@ -504,7 +522,7 @@ data: {"id":"ntf_124","userId":"user_client","title":"Final price ready","body":
 
 ```
 
-After a mutation commits, the same stream may also send a silent refetch ping. It has no `id:` field and is not replayed from `Last-Event-ID` — reconnect and list snapshot are enough:
+After a mutation commits, the same stream may also send a silent refetch ping. It has no `id:` field and is not replayed from `Last-Event-ID`:
 
 ```text
 event: invalidate
@@ -512,11 +530,11 @@ data: {"resource":"orders","id":"ord_1"}
 
 ```
 
-`resource` is one of `orders`, `jobs`, `approvals`, `escalations`, `claims`, `dispatch`, `payouts`. `id` is optional. The payload is never a collection.
+Resource names and ID meanings are defined in [Realtime events](REALTIME_EVENTS.md#invalidate-payload). The payload never contains a collection. Refetch all active resources on foreground/reconnection; notification replay cannot recover missed invalidations.
 
-The server sends a comment heartbeat every 25 seconds (`: heartbeat <ISO timestamp>`) and removes the subscription and timer immediately when either side closes.
+The server sends a comment heartbeat every 25 seconds (`: heartbeat <ISO timestamp>`) and closes the stream at a heartbeat when the verified JWT has expired. Refresh the Clerk token before reconnecting. The subscription and timer are removed when either side closes.
 
-For initial synchronization, call `GET /notifications`, render that response, then open the stream with its non-null `snapshot` as the `Last-Event-ID` header. The server replays caller-owned, non-deleted notifications appended after that ID before continuing live delivery. Native SSE reconnection sends the most recently received event ID automatically, preventing gaps while a phone is backgrounded. With no `Last-Event-ID` (including when the list snapshot is `null`), the stream replays the caller's current non-deleted inbox before continuing live; clients should de-duplicate those IDs against the rendered list. An unknown cursor returns `409 {"error":"notification_resume_unavailable"}` (refresh the list); a cursor owned by another user returns `403 {"error":"forbidden"}` and no stream opens.
+For initial synchronization, call `GET /notifications`, render that response, then open the stream with its non-null `snapshot` as the `Last-Event-ID` header. The server replays currently visible, banner-eligible notifications appended after that ID before continuing live delivery. Native SSE reconnection sends the most recently received event ID automatically. Refetch the inbox and active resources on reconnect to recover silent updates. With no `Last-Event-ID` (including when the list snapshot is `null`), the stream replays the caller's currently visible, banner-eligible inbox rows before continuing live; clients should de-duplicate those IDs against the rendered list. An unknown cursor returns `409 {"error":"notification_resume_unavailable"}` (discard the cursor, refresh the list and active resources, then reconnect); a cursor owned by another user returns `403 {"error":"forbidden"}` and no stream opens.
 
 ### `PATCH /notifications/:id`
 
@@ -530,7 +548,7 @@ Returns `200 {"notification": {...}}`. `read` must be a JSON boolean; missing or
 
 ### `PATCH /notifications/read-all`
 
-Mark every non-deleted notification belonging to the caller that existed in a prior list snapshot:
+Mark every currently visible, non-deleted notification in the selected role context that existed in a prior list snapshot:
 
 ```json
 { "snapshot": "ntf_123" }
@@ -847,6 +865,10 @@ Endpoint-owned steps:
 
 Backfilled revision-1 rows may retain `awaiting_downpayment`/`downpayment_review`; new commercial commitments never create them. Supplier-proof states and `awaiting_payment` remain retired.
 
+## Supplier decline
+
+`POST /orders/:id/decline` accepts an optional `{reason}` from the assigned approved supplier while `supplier_assigned`. Success returns only `{order:{id,state},replaced}`; the departing supplier must remove the job from its local list and must not expect the previous full order projection. `replaced:true` leaves the order in `supplier_assigned`; `false` returns it to `approved_for_matching` for Operations. A later-state decline returns `409 decline_not_available`.
+
 ## Rider pickup checklist and escalation
 
 ```http
@@ -886,6 +908,14 @@ POST /escalations/:id/resolve
 
 The rider is notified and must resubmit all six checks.
 
+## Rider location
+
+`POST /dispatch/:id/location` accepts `{lat,lng,accuracy?,recordedAt?}` from the assigned approved rider during `picked_up` or `out_for_delivery`; other states return `409 tracking_not_active`. Coordinates must be finite numbers within latitude/longitude bounds; accuracy, if present, is nonnegative meters (`400 invalid_location` otherwise). Optional `recordedAt` is the source GPS fix timestamp; omission uses server time. Invalid timestamps, fixes more than 30 seconds ahead, or more than five minutes old return `400 invalid_location_timestamp`. A valid fix no newer than the current assigned rider's latest fix returns `200 {ping,ignored:true}`. Accepted fixes return `{ping}` with source time in `ping.at`.
+
+`GET /dispatch/:id/location` returns `{ping}` for the current rider only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. Consumers calculate staleness from `at` and `accuracy`.
+
+`GET /ops/riders/locations` returns `{riders:[{riderId,name,orderId,orderTitle,state,lat,lng,accuracy,at}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
+
 ## Delivery and issue window
 
 Upload and attach rider `delivery_photo` evidence, then:
@@ -908,7 +938,7 @@ POST /dispatch/:id/delivery
 }
 ```
 
-The hours snapshot comes from the one global setting. Request processing expires elapsed windows transactionally. A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed`; supplier principal was already released at delivery unless an active hold prevented it.
+The hours snapshot comes from the one global setting. Request processing and the bounded periodic worker expire elapsed windows transactionally; worker scheduling is defined in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope). A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed`; supplier principal was already released at delivery unless an active hold prevented it.
 
 ## Persistence contract
 

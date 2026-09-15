@@ -35,6 +35,25 @@ export function resolveAuthorizationContext(store, user) {
   return context;
 }
 
+export function selectActorRole(store, user, selectedRole = user?.role, { restrictMemberships = false } = {}) {
+  if (!user) return null;
+  if (restrictMemberships && (!ROLE_ORDER.has(selectedRole) || !(store.userRoleMemberships || []).some(
+    (membership) => membership.userId === user.id && membership.role === selectedRole,
+  ))) {
+    throw Object.assign(new Error("The selected role is no longer available for this account."), { status: 403, code: "forbidden" });
+  }
+  const approval = (store.approvalCases || []).find((c) => c.userId === user.id && c.kind === selectedRole);
+  const actor = new Proxy(user, { get(target, key, receiver) {
+    if (key === "role") return selectedRole;
+    if (key === "verificationStatus" && ["supplier", "rider"].includes(selectedRole))
+      return approval?.status || (target.role === selectedRole ? target.verificationStatus : "unverified");
+    return Reflect.get(target, key, receiver);
+  } });
+  const context = resolveAuthorizationContext(store, actor);
+  if (restrictMemberships) context.memberships = context.memberships.filter((m) => m.role === selectedRole);
+  return actor;
+}
+
 export function authorizationContextFor(user) {
   return user ? contextByUser.get(user) || null : null;
 }

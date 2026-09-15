@@ -37,7 +37,7 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR 75/25 c
 
 ## Geography
 
-Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties.
+Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties. Rider location and Operations map contracts: `docs/OPERATIONAL_MODEL_V2_API.md#rider-location`.
 
 Coordinates use constrained latitude/longitude columns. Current database queries select an order point or the latest ping by order/time, so PostGIS is intentionally absent. Add it only with a forward migration when radius/nearest-neighbor SQL exists.
 
@@ -53,18 +53,21 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.
 
-- `save()` is the only place a notification push fires; publication occurs after transaction commit. Do not send at individual notification append sites. Invalidate pings (`event: invalidate`) use the same after-commit hook — queue them with `queueInvalidate` / `queueOrderInvalidate` before `save()`.
+- `save()` is the notification/outbox and realtime enqueue boundary; delivery occurs after commit. Do not send at individual notification append sites. Queue invalidates with `queueInvalidate` / `queueOrderInvalidate` before `save()`; delivery contract: `docs/REALTIME_EVENTS.md`.
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.
 - One token belongs to one `user.id`. Anonymous registration is hostile input and exposes only a fixed `{ok:true}` body.
 - Unclaimed handsets may receive only `everyone` announcements with `data` exactly `{type:"announcement"}`.
 - Prune `INVALID_ARGUMENT` only when the violation identifies `message.token`.
 - Push payload data is allowlisted to `notificationId`, `type`, `orderId`, and `at`.
+- Every implemented domain event writes a durable inbox row to each current `ops_admin` and `super_admin` membership (`privilegedAdminMemberships` in `src/notifications.js`). Super Admin is never invalidate-only. Contract: `docs/REALTIME_EVENTS.md`.
 
 ## Deployment
 
 `deploy/docker-compose.yml` is the server copy but CI never installs it. PostgreSQL uses named volume `gridgo_postgres_data` and private network `gridgo-api-storage`; it has no production host port. API and MinIO container names are proxy addresses and must remain stable.
 
 Every merge to the default branch builds/tests/publishes and invokes the restricted deploy command. CI must keep proving the named PostgreSQL volume survives both API replacement and database-container recreation.
+
+MinIO and `mc` images are the pinned `quay.io/minio/...` release tags in compose and CI smoke; Docker Hub `minio/minio` is withdrawn.
 
 Uploads spool to `$PWD/.tmp/uploads`; the image must keep it writable by uid 1001. `/health` reports database, storage, push, `commit`, and `builtAt`.
 

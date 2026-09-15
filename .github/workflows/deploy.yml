@@ -122,7 +122,7 @@ jobs:
           MINIO_VOLUME="gridgo-smoke-minio"
           NETWORK="gridgo-smoke-net"
           DB_URL="postgresql://gridgo:smoke-db-secret@gridgo-postgres:5432/gridgo"
-          MC="minio/mc:RELEASE.2025-07-21T05-28-08Z"
+          MC="quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z"
           docker volume create "$DB_VOLUME" >/dev/null
           docker volume create "$MINIO_VOLUME" >/dev/null
           docker network create "$NETWORK" >/dev/null
@@ -143,7 +143,7 @@ jobs:
           docker run -d --name gridgo-minio --network "$NETWORK" \
             -e MINIO_ROOT_USER=smoke-root-user -e MINIO_ROOT_PASSWORD=smoke-root-secret \
             -e MINIO_BROWSER=off -v "$MINIO_VOLUME":/data \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data --address :9000 >/dev/null
+            quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z server /data --address :9000 >/dev/null
           for _ in $(seq 1 30); do
             docker run --rm --network "$NETWORK" --entrypoint /bin/sh "$MC" -ec \
               'mc alias set l http://gridgo-minio:9000 smoke-root-user smoke-root-secret' >/dev/null 2>&1 && break

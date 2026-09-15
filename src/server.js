@@ -1,3 +1,9 @@
+import { createRealtimeTransport } from "./realtime-transport.js";
+import { createApnsDelivery, routePushDelivery } from "./apns.js";
+import { enqueueNotificationPushes, createOutboxWorker } from "./push-outbox.js";
+import { deriveDomainEvents } from "./domain-events.js";
+import { originalDomainStore } from "./postgres-store.js";
+import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES } from "./notifications.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -16,6 +22,8 @@ import {
   authFailureBody,
 } from "./auth.js";
 import {
+  selectActorRole,
+  authorizationContextFor,
   approvalCaseFor,
   approvalCaseSummary,
   contextHasMembership,
@@ -90,7 +98,7 @@ import {
   listInbox,
   notificationSnapshot,
   orderFromNotification,
-  opsAdminRecipientIds,
+  privilegedAdminMemberships,
   publicNotification,
   publishQueuedInvalidates,
   queueInvalidate,
@@ -175,7 +183,7 @@ const objectStorage = createObjectStorage(process.env);
 // ships this code runs before an operator can install the secret. `/health`
 // reports `push.status` as `disabled` or `misconfigured` with the reason, so
 // the gap is loud rather than silent.
-const pushDelivery = createPushDeliveryOrDisable(process.env);
+const pushDelivery = routePushDelivery(createPushDeliveryOrDisable(process.env),createApnsDelivery(process.env));
 const supportMailer = createSupportMailer(process.env);
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
@@ -185,48 +193,19 @@ const enqueueMutation = (mutation) => database.transaction(mutation);
 // serializes every credentialed platform mutation.
 const enqueueDeviceMutation = (mutation) => database.transaction(mutation, { lockKey: "gridgo-device-tokens" });
 const notificationEvents = createNotificationEvents();
+const realtimeTransport = createRealtimeTransport({database,loadStore,events:notificationEvents,connectionString:process.env.DATABASE_URL});
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
 let storageInitializing = true;
 
 async function save(store) {
+  deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
     (notification) => !previousNotificationIds.has(notification.id),
   );
   await saveStore(database, store);
-  database.afterCommit(() => {
-    for (const notification of createdNotifications) {
-      notificationEvents.publish(
-        publicNotification(notification, orderFromNotification(store, notification)),
-      );
-      deliverPush(store, notification);
-    }
-    publishQueuedInvalidates(notificationEvents, store);
-  });
-}
-
-/**
- * Push the notifications this save just created, to every device its owner has
- * registered.
- *
- * Hooked here rather than at each `store.notifications.push(...)` call site for
- * two reasons: `save()` is already the one place that knows which records are
- * new, so a push can neither be forgotten by a future call site nor fire twice
- * for one record; and every push therefore corresponds to a notification the
- * same user can also read in `GET /notifications`.
- *
- * Intentionally not awaited and intentionally unable to reject. The triggering
- * action — a payout release, a payment confirmation — is already committed
- * by the time this runs, and a dead phone or an unreachable Google must
- * never turn that into a failed request.
- */
-function deliverPush(store, notification) {
-  if (!pushDelivery.configured) return;
-  if (notification.deletedAt != null) return;
-  const devices = deviceTokensFor(store, notification.userId);
-  if (devices.length === 0) return;
-
-  fanOutPush(`notification=${notification.id}`, pushMessageFor(notification), devices);
+  await enqueueNotificationPushes(database,store,createdNotifications);
+  await realtimeTransport.enqueue(store,createdNotifications);
 }
 
 /**
@@ -658,6 +637,23 @@ function publicUser(u) {
     delete rest.version;
   }
   return rest;
+}
+
+/** Directory filters select authoritative memberships, retaining their role profile. */
+function roleDirectoryUser(store, user, role) {
+  const projected = { ...user, role };
+  if (["supplier", "rider"].includes(role)) {
+    const approval = (store.approvalCases || []).find((c) => c.userId === user.id && c.kind === role);
+    projected.verificationStatus = approval?.status || (user.role === role ? user.verificationStatus : "unverified");
+  }
+  if (role === "supplier") {
+    const profile = supplierProfileProjection(store, user.id);
+    if (profile) { projected.supplierName = profile.shopName; projected.shop = profile.shop; }
+  } else if (role === "rider") {
+    const profile = riderProfileProjection(store, user.id);
+    if (profile) projected.riderProfile = profile;
+  }
+  return projected;
 }
 
 function publicIdentity(user) {
@@ -1313,31 +1309,12 @@ function syncJobsWithOrder(store, order, at) {
   }
 }
 
-function canViewOrderLocation(user, order) {
-  if (!user || !order) return false;
-  if (user.role === "ops_admin" || user.role === "super_admin") return true;
-  if (user.role === "rider" && order.riderId === user.id) return true;
-  // A collecting client is not being delivered to. The rider is moving the job
-  // between two of GRIDGO's own places, and watching that only tempts them to
-  // set out before it is on the shelf.
-  if (user.role === "client" && order.clientId === user.id) return !carriedToOffice(order);
-  if (user.role === "supplier" && order.supplierId === user.id) return true;
-  return false;
+function canViewOrderLocation(user, order, store) {
+  return canAccessOrder(store,user?.id,order,{role:user?.role,location:true});
 }
 
 function ordersFor(user, store) {
-  if (user.role === "client") return store.orders.filter((o) => o.clientId === user.id);
-  if (user.role === "supplier") return store.orders.filter((o) => o.supplierId === user.id);
-  if (user.role === "rider") {
-    if (user.verificationStatus !== "approved") {
-      return store.orders.filter((o) => o.riderId === user.id);
-    }
-    return store.orders.filter(
-      (o) => o.riderId === user.id || ["ready_for_dispatch", "rider_assigned", "picked_up", "out_for_delivery"].includes(o.state),
-    );
-  }
-  // ops / super see all
-  return store.orders;
+  return store.orders.filter(order => canAccessOrder(store,user.id,order,{role:user.role,offer:true}));
 }
 
 function orderVisible(user, order, store) {
@@ -1449,7 +1426,8 @@ function serviceCoversOrder(service, order, product, taxonomy) {
 
 function eligibleSuppliersForOrder(store, order) {
   const product = (store.catalog || []).find((p) => p.id === order.productId);
-  const suppliers = (store.users || []).filter((u) => u.role === "supplier");
+  const suppliers = (store.users || []).filter((u) => hasRole(store, u.id, "supplier"))
+    .map((u) => roleDirectoryUser(store, u, "supplier"));
   const results = [];
 
   for (const supplier of suppliers) {
@@ -1623,7 +1601,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -1690,11 +1668,15 @@ async function handleRequest(req, res) {
           message: "Send the FCM registration token this device received from Firebase.",
         });
       }
-      if (!isFcmTokenShaped(token)) {
+      const tokenProvider = body.tokenProvider || "fcm";
+      if (!["fcm", "apns"].includes(tokenProvider) || (tokenProvider === "apns" && body.platform !== "ios")) {
+        return send(res, 400, { error: "invalid_token_provider" });
+      }
+      if (tokenProvider === "apns" ? !/^[a-fA-F0-9]{64}$/.test(token) : !isFcmTokenShaped(token)) {
         return send(res, 400, {
           error: "invalid_device_token",
           message:
-            "This is not an FCM registration token. Send the token Firebase issued to this installation, unmodified.",
+            "Send the unmodified registration token issued by the selected push provider.",
         });
       }
       const platform = String(body.platform || "").trim();
@@ -1709,6 +1691,7 @@ async function handleRequest(req, res) {
         const deviceStore = await loadDeviceTokenStore(database);
         const outcome = registerUnclaimedDeviceToken(deviceStore, {
           token,
+          tokenProvider,
           platform,
           at: now(),
           limit: MAX_UNCLAIMED_DEVICES,
@@ -1802,6 +1785,15 @@ async function handleRequest(req, res) {
           }
           return latestUser;
         });
+      }
+      const requestedRole = req.headers['x-gridgo-role'];
+      if (requestedRole && !EVENT_ROLES.includes(requestedRole)) return send(res,403,{error:'forbidden'});
+      // An unenrolled app still receives the identity probe needed to enroll.
+      // Once the membership exists, return its compatible user projection.
+      if (requestedRole && hasRole(store,user.id,requestedRole)) {
+        const approval = (store.approvalCases || []).find(c=>c.userId===user.id&&c.kind===requestedRole);
+        const supplierProfile = (store.supplierProfiles || []).find(p=>p.userId===user.id);
+        user = {...user,role:requestedRole,...(['supplier','rider'].includes(requestedRole)?{verificationStatus:approval?.status || 'unverified'}:{}),...(requestedRole==='supplier' && supplierProfile?{supplierName:supplierProfile.shopName,shop:supplierProfile.shop}:{})};
       }
       const projected = publicUser(user);
       if ((store.userRoleMemberships || []).some(
@@ -1951,7 +1943,24 @@ async function handleRequest(req, res) {
     }
 
     const auth = await authenticateRequest(req, store);
-    const user = auth.user;
+    let user = auth.user;
+    // Other routes already use ?role as a directory filter. Only the inbox
+    // contract interprets that query as actor context.
+    const notificationRoleQuery = ["/notifications", "/notifications/stream", "/notifications/read-all"].includes(pathname)
+      ? url.searchParams.get("role") : undefined;
+    const eventRole = notificationRoleQuery || req.headers['x-gridgo-role'] || undefined;
+    if (user) {
+      if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
+      const inferredRole = !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
+        : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
+      const selectedRole = eventRole || inferredRole;
+      // Actor projection is never written into users.role. Other legacy user-field
+      // writes still target the actual row through this proxy.
+      user = selectActorRole(store, user, selectedRole, { restrictMemberships: Boolean(eventRole) });
+      if (/^\/(orders|jobs|dispatch|payouts|claims|issues|escalations)(\/|$)/.test(pathname)) {
+        if (!hasRole(store,user.id,selectedRole) || (['supplier','rider'].includes(selectedRole) && !approvedRole(store,user.id,selectedRole))) return send(res,403,{error:'forbidden'});
+      }
+    }
 
     if (!user
         && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
@@ -2087,7 +2096,7 @@ async function handleRequest(req, res) {
         [caseId],
       );
       if (locked.rowCount === 0) return send(res, 404, { error: "approval_case_not_found" });
-      const actorRole = contextHasMembership(auth.authorization, "super_admin")
+      const actorRole = contextHasMembership(authorizationContextFor(user), "super_admin")
         ? "super_admin"
         : "ops_admin";
       const outcome = decideApprovalCase({
@@ -2196,7 +2205,10 @@ async function handleRequest(req, res) {
 
         await enqueueMutation(async () => {
           const latestStore = await load();
-          const latestUser = (await authenticateRequest(req, latestStore)).user;
+          const latestUser = selectActorRole(
+            latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+            { restrictMemberships: Boolean(eventRole) },
+          );
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
           }
@@ -2220,7 +2232,10 @@ async function handleRequest(req, res) {
         try {
           const ready = await enqueueMutation(async () => {
             const latestStore = await load();
-            const latestUser = (await authenticateRequest(req, latestStore)).user;
+            const latestUser = selectActorRole(
+              latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+              { restrictMemberships: Boolean(eventRole) },
+            );
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
               throw new AttachmentError(
@@ -2229,6 +2244,7 @@ async function handleRequest(req, res) {
                 "Your sign-in expired while the file was uploading. Sign in and upload the file again.",
               );
             }
+            authorizeFileUpload(latestUser, purpose);
             markFileReady(latestFile, now());
             await save(latestStore);
             return latestFile;
@@ -2282,7 +2298,10 @@ async function handleRequest(req, res) {
       }
       return await enqueueMutation(async () => {
         const latestStore = await load();
-        const latestUser = (await authenticateRequest(req, latestStore)).user;
+        const latestUser = selectActorRole(
+          latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+          { restrictMemberships: Boolean(eventRole) },
+        );
         if (!latestUser) {
           throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
         }
@@ -2359,7 +2378,10 @@ async function handleRequest(req, res) {
       const fileId = pathname.split("/")[2];
       const pending = await enqueueMutation(async () => {
         const latestStore = await load();
-        const latestUser = (await authenticateRequest(req, latestStore)).user;
+        const latestUser = selectActorRole(
+          latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
+          { restrictMemberships: Boolean(eventRole) },
+        );
         if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
         const latestFile = findFile(latestStore, fileId);
         const alreadyDeleted = latestFile?.state === "deleted";
@@ -2418,10 +2440,15 @@ async function handleRequest(req, res) {
           allowed: DEVICE_PLATFORMS,
         });
       }
+      const appRole = body.appRole || null;
+      if (appRole && (!EVENT_ROLES.includes(appRole) || !hasRole(store,user.id,appRole))) return send(res,403,{error:'forbidden'});
+      const tokenProvider = body.tokenProvider || "fcm";
+      if (!['fcm','apns'].includes(tokenProvider) || (tokenProvider === 'apns' && platform !== 'ios')) return send(res,400,{error:'invalid_token_provider'});
       const { device, created, reassignedFrom } = registerDeviceToken(store, {
         userId: user.id,
         token,
         platform,
+        appRole, tokenProvider,
         at: now(),
       });
       await save(store);
@@ -2478,12 +2505,14 @@ async function handleRequest(req, res) {
       res.flushHeaders();
       res.write("retry: 5000\n\n");
 
-      const writeNotification = (notification) => {
-        if (notification.deletedAt != null) return;
-        res.write(formatNotificationEvent(notification, orderFromNotification(store, notification)));
+      const writeNotification = (notification, committedStore = store) => {
+        if (notification.push === false || !notificationVisible(committedStore, notification, user.id, eventRole)) return;
+        res.write(formatNotificationEvent(notification, orderFromNotification(committedStore, notification)));
       };
       const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
-      const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload) => {
+      const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
+        if (eventRole && !hasRole(committedStore,user.id,eventRole) && payload.resource !== 'identity') return;
+        if (payload.resource === 'location' && payload.id && !canAccessOrder(committedStore,user.id,(committedStore.orders || []).find(o=>o.id===payload.id),{role:eventRole,location:true})) return;
         res.write(formatInvalidateEvent(payload));
       });
       for (let index = resumeIndex + 1; index < store.notifications.length; index += 1) {
@@ -2494,6 +2523,7 @@ async function handleRequest(req, res) {
       }
 
       const heartbeat = setInterval(() => {
+        if (req.gridgoVerifiedClaims?.claims?.exp && Date.now() >= req.gridgoVerifiedClaims.claims.exp * 1000) { res.end(); return; }
         res.write(`: heartbeat ${now()}\n\n`);
       }, NOTIFICATION_HEARTBEAT_MS);
       heartbeat.unref();
@@ -2511,7 +2541,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/notifications") {
-      return send(res, 200, listInbox(store, user.id, { limit: url.searchParams.get("limit") }));
+      return send(res, 200, listInbox(store, user.id, { limit: url.searchParams.get("limit"), role:eventRole }));
     }
 
     if (req.method === "PATCH" && pathname === "/notifications/read-all") {
@@ -2527,7 +2557,7 @@ async function handleRequest(req, res) {
       let updatedCount = 0;
       for (let index = 0; index <= snapshotIndex; index += 1) {
         const notification = store.notifications[index];
-        if (notification.userId !== user.id || notification.deletedAt != null || notification.read) continue;
+        if (!notificationVisible(store,notification,user.id,eventRole) || notification.read) continue;
         notification.read = true;
         updatedCount += 1;
       }
@@ -2540,6 +2570,9 @@ async function handleRequest(req, res) {
       const notification = store.notifications.find((candidate) => candidate.id === notificationId);
       if (!notification) return send(res, 404, { error: "notification_not_found" });
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
+      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole)) {
+        return send(res, 403, { error: "forbidden" });
+      }
       if (notification.deletedAt != null) return send(res, 404, { error: "notification_not_found" });
       const body = await readBody(req);
       if (typeof body.read !== "boolean") {
@@ -2547,7 +2580,7 @@ async function handleRequest(req, res) {
       }
       notification.read = body.read;
       await save(store);
-      return send(res, 200, { notification });
+      return send(res, 200, { notification: publicNotification(notification, orderFromNotification(store, notification)) });
     }
 
     if (req.method === "DELETE" && /^\/notifications\/[^/]+$/.test(pathname)) {
@@ -2555,6 +2588,9 @@ async function handleRequest(req, res) {
       const notification = store.notifications.find((candidate) => candidate.id === notificationId);
       if (!notification) return send(res, 404, { error: "notification_not_found" });
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
+      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole)) {
+        return send(res, 403, { error: "forbidden" });
+      }
       if (notification.deletedAt == null) {
         notification.deletedAt = now();
         await save(store);
@@ -2566,7 +2602,7 @@ async function handleRequest(req, res) {
     //
     // One general message to a whole audience. `everyone` is the app-update
     // channel: it writes a notification for every account (which pushes to
-    // their claimed devices through `save()`) *and* pushes to every unclaimed
+    // their claimed devices through the outbox) *and* pushes to every unclaimed
     // handset, which is the only way to reach an install that never signed in.
     //
     // An announcement is deliberately not a way to say something personal to a
@@ -2607,7 +2643,7 @@ async function handleRequest(req, res) {
       const imageUrl = image.imageUrl;
 
       const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
-      const recipients = store.users.filter((candidate) => roles === null || roles.includes(candidate.role));
+      const recipients = store.users.filter((candidate) => roles === null || roles.some(role=>hasRole(store,candidate.id,role)));
       const announcementId = id("anc");
       const at = now();
       for (const recipient of recipients) {
@@ -2615,6 +2651,7 @@ async function handleRequest(req, res) {
           id: id("ntf"),
           userId: recipient.id,
           type: "announcement",
+          ...(roles ? {audienceRoles:roles} : {}),
           orderId: null,
           announcementId,
           title,
@@ -2624,7 +2661,7 @@ async function handleRequest(req, res) {
           at,
         });
       }
-      // Read before `save()`, which is where the per-account pushes fire; the
+      // Read before `save()`, which queues the per-account outbox rows; the
       // records themselves carry no identity, so the anonymous fan-out below
       // can use them after the write.
       const unclaimed = audience === "everyone" ? unclaimedDeviceTokens(store) : [];
@@ -2860,8 +2897,9 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && pathname === "/users") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const role = url.searchParams.get("role");
-      let list = store.users.map(publicUser);
-      if (role) list = list.filter((u) => u.role === role);
+      const list = role
+        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => publicUser(roleDirectoryUser(store, u, role)))
+        : store.users.map(publicUser);
       return send(res, 200, { users: list });
     }
 
@@ -3520,8 +3558,9 @@ async function handleRequest(req, res) {
       const service = (store.supplierServices || []).find((s) => s.id === sid);
       if (!service) return send(res, 404, { error: "service_not_found" });
       const owner = store.users.find((u) => u.id === service.supplierId);
-      if (!owner || owner.verificationStatus !== "approved") {
-        return send(res, 409, { error: "supplier_not_approved", verificationStatus: owner?.verificationStatus || null });
+      if (!owner || !approvedRole(store, owner.id, "supplier")) {
+        const approval = (store.approvalCases || []).find((c) => c.userId === owner?.id && c.kind === "supplier");
+        return send(res, 409, { error: "supplier_not_approved", verificationStatus: approval?.status || owner?.verificationStatus || null });
       }
       if (service.state === "withdrawn") return send(res, 409, { error: "service_withdrawn" });
       const body = await readBody(req);
@@ -4069,6 +4108,7 @@ async function handleRequest(req, res) {
           id: id("ntf"),
           userId: escalation.riderId,
           type: "pickup_escalation_resolved",
+          appRole: "rider",
           orderId: order.id,
           title: "Repeat the pickup quality check",
           body: resolution,
@@ -4154,9 +4194,10 @@ async function handleRequest(req, res) {
           id: id("ntf"),
           userId: order.supplierId,
           type: "shop_payout_released",
+          appRole: "supplier",
           orderId: order.id,
           title: `${formatMinorPhp(milestone.amountMinor)} released`,
-          body: `${payoutStageLabel(milestoneCode)} on ${order.title || "your job"}. It is on its way to your account.`,
+          body: `${payoutStageLabel(milestoneCode)} was recorded as released. Open the payout ledger for the recorded details.`,
           read: false,
           at: releasedAt,
         });
@@ -4351,6 +4392,7 @@ async function handleRequest(req, res) {
       }
       const body = await readBody(req);
       const confirmedAt = now();
+      const previousState = order.state;
       installment.status = "confirmed";
       installment.confirmedAt = confirmedAt;
       installment.confirmedBy = user.id;
@@ -4366,7 +4408,6 @@ async function handleRequest(req, res) {
         order.paymentStatus = "paid";
       }
       order.updatedAt = confirmedAt;
-      notifyOrderParties(store, order, { createId: id, at: confirmedAt });
       if (order.state === "needs_qa") {
         notifyOpsJobNeedsQa(store, order, { createId: id, at: confirmedAt });
       }
@@ -4377,6 +4418,9 @@ async function handleRequest(req, res) {
         by: user.id,
         note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} confirmed manually by Operations`,
       });
+      if (order.state !== previousState) {
+        notifyOrderParties(store, order, { createId: id, at: confirmedAt });
+      }
       audit(store, {
         actor: user,
         action: `payment.${installmentCode}_confirm`,
@@ -4391,6 +4435,39 @@ async function handleRequest(req, res) {
     }
 
     // ---- orders list / create ----
+    // Latest ping per rider who is currently sharing location on an active trip.
+    if (req.method === "GET" && pathname === "/ops/riders/locations") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const tracking = new Set(["picked_up", "out_for_delivery"]);
+      const latestByRider = new Map();
+      for (const order of store.orders || []) {
+        if (!order.riderId || !tracking.has(order.state)) continue;
+        const ping = (store.locationPings || [])
+          .filter((p) => p.orderId === order.id && p.riderId === order.riderId)
+          .sort((a, b) => b.at.localeCompare(a.at))[0];
+        if (!ping) continue;
+        const prev = latestByRider.get(order.riderId);
+        if (!prev || ping.at > prev.ping.at) {
+          latestByRider.set(order.riderId, { order, ping });
+        }
+      }
+      const riders = [...latestByRider.values()].map(({ order, ping }) => {
+        const rider = (store.users || []).find((u) => u.id === order.riderId);
+        return {
+          riderId: order.riderId,
+          name: rider?.name || "Rider",
+          orderId: order.id,
+          orderTitle: order.title || null,
+          state: order.state,
+          lat: ping.lat,
+          lng: ping.lng,
+          accuracy: ping.accuracy ?? null,
+          at: ping.at,
+        };
+      });
+      return send(res, 200, { riders });
+    }
+
     if (req.method === "GET" && pathname === "/orders") {
       return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user, store)) });
     }
@@ -4518,7 +4595,7 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
-      if (user.role !== "supplier" || order.supplierId !== user.id) {
+      if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier") || order.supplierId !== user.id) {
         return send(res, 403, {
           error: "forbidden",
           message: "Only the shop this job was handed to can decline it.",
@@ -4557,7 +4634,7 @@ async function handleRequest(req, res) {
         order.updatedAt = at;
         order.timeline.push({ at, state: order.state, by: user.id, note: reason ? `Declined: ${reason}` : "Declined" });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user, store), replaced: false });
+        return send(res, 200, { order: {id:order.id,state:order.state}, replaced: false });
       }
 
       order.supplierId = replacement.supplierId;
@@ -4575,7 +4652,7 @@ async function handleRequest(req, res) {
         detail: { supplierId: replacement.supplierId, readyBy: replacement.readyBy },
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store), replaced: true });
+      return send(res, 200, { order: {id:order.id,state:order.state}, replaced: true });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -4584,6 +4661,7 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});
       if (body.paymentMethod != null && String(body.paymentMethod).trim().toLowerCase() !== "qr_manual") {
         return send(res, 400, {
           error: "payment_method_not_allowed",
@@ -4596,9 +4674,9 @@ async function handleRequest(req, res) {
       // it to that shop is not an assignment decision, so the legacy eligibility
       // check -- which reads the retired product catalogue -- has nothing to say.
       const handingToMatchedShop = next === "supplier_assigned" && !body.supplierId && Boolean(order.supplierId);
-      if (next === "supplier_assigned" && !handingToMatchedShop) {
+      if (next === "supplier_assigned") {
         const supplier = store.users.find(
-          (candidate) => candidate.id === body.supplierId && candidate.role === "supplier",
+          (candidate) => candidate.id === (body.supplierId || order.supplierId) && hasRole(store, candidate.id, "supplier"),
         );
         if (!supplier) {
           return send(res, 404, {
@@ -4606,17 +4684,18 @@ async function handleRequest(req, res) {
             message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
           });
         }
-        if (supplier.verificationStatus !== "approved") {
+        if (!approvedRole(store, supplier.id, "supplier")) {
+          const approval = (store.approvalCases || []).find((c) => c.userId === supplier.id && c.kind === "supplier");
           return send(res, 409, {
             error: "supplier_not_approved",
             message: "Operations must approve this supplier before assigning new work.",
-            verificationStatus: supplier.verificationStatus || "unverified",
+            verificationStatus: approval?.status || supplier.verificationStatus || "unverified",
           });
         }
-        const candidate = eligibleSuppliersForOrder(store, order).candidates.find(
+        const candidate = !handingToMatchedShop && eligibleSuppliersForOrder(store, order).candidates.find(
           (item) => item.supplier.id === supplier.id,
         );
-        if (!candidate?.eligible) {
+        if (!handingToMatchedShop && !candidate?.eligible) {
           return send(res, 409, {
             error: "supplier_not_eligible",
             message: "This supplier has no approved live service that covers the order. Refresh eligible suppliers and choose a listed match.",
@@ -4645,14 +4724,14 @@ async function handleRequest(req, res) {
       }
       if (next === "rider_assigned") {
         const riderId = user.role === "rider" ? user.id : body.riderId;
-        const rider = store.users.find((candidate) => candidate.id === riderId && candidate.role === "rider");
+        const rider = store.users.find((candidate) => candidate.id === riderId && hasRole(store,candidate.id,"rider"));
         if (!rider) {
           return send(res, 404, {
             error: "rider_not_found",
             message: "That rider account no longer exists. Refresh approved riders and choose another.",
           });
         }
-        if (rider.verificationStatus !== "approved") {
+        if (!approvedRole(store,rider.id,"rider")) {
           return send(res, user.role === "rider" ? 403 : 409, {
             error: "rider_not_approved",
             message: "Operations must approve this rider profile before dispatch assignment.",
@@ -4677,7 +4756,7 @@ async function handleRequest(req, res) {
       }
 
       const allowed = TRANSITIONS[order.state]?.[next];
-      if (!allowed || (!allowed.includes(user.role) && !allowed.includes("system"))) {
+      if (!allowed || !allowed.includes(user.role)) {
         return send(res, 409, {
           error: "transition_not_allowed",
           message: "This order cannot move to the requested state from its current step. Refresh the order and use an available action.",
@@ -4716,7 +4795,7 @@ async function handleRequest(req, res) {
         }
       }
       if (next === "supplier_accepted") {
-        if (user.role !== "supplier" || order.supplierId !== user.id) {
+        if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier") || order.supplierId !== user.id) {
           return send(res, 403, {
             error: "forbidden",
             message: "Only the supplier assigned to this order can accept it and set the final price.",
@@ -4808,6 +4887,12 @@ async function handleRequest(req, res) {
         });
         order.state = "awaiting_checkout";
         order.updatedAt = acceptedAt;
+        order.timeline.push({
+          at: acceptedAt,
+          state: "awaiting_checkout",
+          by: "system",
+          note: "Client notified that the final quote is ready for checkout",
+        });
         const { client: notification } = notifyOrderParties(store, order, {
           createId: id,
           at: acceptedAt,
@@ -4816,12 +4901,6 @@ async function handleRequest(req, res) {
           order.assignmentNotificationId = notification.id;
           order.assignmentNotifiedAt = notification.at;
         }
-        order.timeline.push({
-          at: acceptedAt,
-          state: "awaiting_checkout",
-          by: "system",
-          note: "Client notified that the final quote is ready for checkout",
-        });
         queueOrderInvalidate(store, order, ["orders", "jobs"]);
         await save(store);
         return send(res, 200, { order: publicOrder(order, user, store) });
@@ -5009,7 +5088,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
-      if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       if (user.verificationStatus !== "approved") {
         return send(res, 403, {
           error: "rider_not_approved",
@@ -5037,7 +5116,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
-      if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       if (user.verificationStatus !== "approved") {
         return send(res, 403, {
           error: "rider_not_approved",
@@ -5135,10 +5214,11 @@ async function handleRequest(req, res) {
           note: `Pickup blocked and escalated: ${failedCheckCodes.join(", ")}`,
           escalationId: escalation.id,
         });
-        for (const recipientId of opsAdminRecipientIds(store)) {
+        for (const membership of privilegedAdminMemberships(store)) {
           store.notifications.push({
             id: id("ntf"),
-            userId: recipientId,
+            userId: membership.userId,
+            appRole: membership.role,
             type: "pickup_check_escalation",
             orderId: order.id,
             title: "Pickup blocked by a failed quality check",
@@ -5190,7 +5270,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
-      if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId && o.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
@@ -5198,6 +5278,14 @@ async function handleRequest(req, res) {
         return send(res, 409, { error: "tracking_not_active", state: order.state });
       }
       const body = await readBody(req);
+      const sourceMs = body.recordedAt == null ? Date.now() : Date.parse(body.recordedAt);
+      if (!Number.isFinite(sourceMs)) return send(res,400,{error:"invalid_location_timestamp"});
+      const recordedAt = new Date(sourceMs).toISOString();
+      const fixMs = Date.parse(recordedAt);
+      if (!Number.isFinite(fixMs) || fixMs > Date.now()+30000 || fixMs < Date.now()-5*60*1000) return send(res,400,{error:'invalid_location_timestamp'});
+      if (!Number.isFinite(body.lat) || Math.abs(body.lat)>90 || !Number.isFinite(body.lng) || Math.abs(body.lng)>180 || (body.accuracy != null && (!Number.isFinite(body.accuracy) || body.accuracy < 0))) return send(res,400,{error:'invalid_location'});
+      const latest = store.locationPings.filter(p=>p.orderId===orderId&&p.riderId===order.riderId).sort((a,b)=>b.at.localeCompare(a.at))[0];
+      if (latest && Date.parse(latest.at)>=fixMs) return send(res,200,{ping:latest,ignored:true});
       const ping = {
         id: id("ping"),
         orderId,
@@ -5205,7 +5293,7 @@ async function handleRequest(req, res) {
         lat: Number(body.lat),
         lng: Number(body.lng),
         accuracy: body.accuracy ?? null,
-        at: now(),
+        at: recordedAt,
       };
       store.locationPings.push(ping);
       await save(store);
@@ -5217,15 +5305,15 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
-      if (!canViewOrderLocation(user, order)) return send(res, 403, { error: "forbidden" });
-      const pings = store.locationPings.filter((p) => p.orderId === orderId);
+      if (!canViewOrderLocation(user, order, store)) return send(res, 403, { error: "forbidden" });
+      const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId);
       if (!pings.length) return send(res, 200, { ping: null });
       const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
       return send(res, 200, { ping });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {
-      if (user.role !== "rider") return send(res, 403, { error: "forbidden" });
+      if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
@@ -5399,7 +5487,7 @@ async function handleRequest(req, res) {
 
     // ---- supplier jobs helper alias ----
     if (req.method === "GET" && pathname === "/jobs") {
-      if (user.role !== "supplier") return send(res, 403, { error: "forbidden" });
+      if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
         jobs: store.orders
           .filter((o) => o.supplierId === user.id)
@@ -5560,12 +5648,25 @@ async function reconcileInterruptedFiles() {
   }
 }
 
+const drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery});
+let lifecycleBusy = false;
+async function runLifecycleWork() {
+  if (lifecycleBusy) return;
+  lifecycleBusy = true;
+  try { await expireElapsedIssueWindows(); await drainPushOutbox(); }
+  catch(error) { console.warn(`lifecycle worker failed: ${error?.code || 'unavailable'}`); }
+  finally { lifecycleBusy = false; }
+}
 // Migrations and the reference seed are explicit operator steps. Boot never
 // creates schema or data; it refuses before listening when PostgreSQL is not ready.
 await database.assertReady();
+await realtimeTransport.start();
 await seedSupportDeskAdmin(database);
 
 server.listen(PORT, HOST, () => {
+  const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));
+  lifecycleTimer.unref();
+  void runLifecycleWork();
   console.log(`gridgo-api listening on http://${HOST}:${PORT}`);
   console.log(`health: http://127.0.0.1:${PORT}/health`);
   objectStorage

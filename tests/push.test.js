@@ -166,7 +166,7 @@ test("the public device projection never carries the raw token", () => {
     at: AT,
   });
   const projected = publicDevice(device);
-  assert.deepEqual(Object.keys(projected).sort(), ["createdAt", "id", "platform", "tokenTail", "updatedAt", "userId"]);
+  assert.deepEqual(Object.keys(projected).sort(), ["appRole", "createdAt", "id", "platform", "tokenProvider", "tokenTail", "updatedAt", "userId"]);
   assert.equal(projected.tokenTail, "ijklmnop");
   assert.equal(JSON.stringify(projected).includes("abcdefgh"), false);
 });
@@ -377,7 +377,7 @@ test("push payload carries only allowlisted routing data, never money detail", (
 
 test("a notification with no type or order still produces a readable lock-screen message", () => {
   const message = pushMessageFor({ id: "ntf_2", userId: "u", title: "  ", body: "", at: AT });
-  assert.equal(message.title, "GRIDGO");
+  assert.equal(message.title, "GRIDGO update");
   assert.equal(message.body, "Open GRIDGO for the latest update.");
   assert.deepEqual(message.data, { notificationId: "ntf_2", at: AT });
 });
@@ -870,4 +870,28 @@ test("health names the Firebase project once a send has succeeded", async () => 
   const health = push.health();
   assert.equal(health.status, "available");
   assert.equal(typeof health.checkedAt, "string");
+});
+
+test("claimed and anonymous iOS registrations default to FCM and accept explicit APNs", () => {
+  for (const register of [registerDeviceToken, registerUnclaimedDeviceToken]) {
+    const store = { deviceTokens: [] };
+    const args = { userId: "user", platform: "ios", token: "legacy-fcm-token", at: AT };
+    const legacy = register(store, args).device;
+    assert.equal(legacy.tokenProvider, "fcm");
+    assert.equal(publicDevice(legacy).tokenProvider, "fcm");
+    delete legacy.tokenProvider;
+    assert.equal(publicDevice(legacy).tokenProvider, "fcm");
+    assert.equal(register(store, { ...args, at: LATER }).device.tokenProvider, "fcm");
+    const native = register(store, { ...args, token: "a".repeat(64), tokenProvider: "apns" }).device;
+    assert.equal(native.tokenProvider, "apns");
+    assert.equal(register(store, { ...args, token: native.token, tokenProvider: "apns", at: LATER }).device.tokenProvider, "apns");
+  }
+});
+
+test("anonymous registration cannot rewrite a claimed device provider", () => {
+  const store = { deviceTokens: [] };
+  const device = registerDeviceToken(store, { userId: "user", platform: "ios", token: "a".repeat(64), at: AT }).device;
+  const result = registerUnclaimedDeviceToken(store, { platform: "ios", token: device.token, tokenProvider: "apns", at: LATER });
+  assert.equal(result.changed, false);
+  assert.equal(device.tokenProvider, "fcm");
 });

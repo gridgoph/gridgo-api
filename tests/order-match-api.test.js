@@ -247,10 +247,14 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   const inbox = persisted.notifications.map((row) => `${row.userId}:${row.type}`).sort();
   assert.deepEqual(inbox, [
+    "supplier_a:shop_job_assigned",
+    "user_client:order_submitted",
+    "user_ops:ops_assignment_changed",
     "user_ops:ops_job_needs_qa",
+    "user_ops:ops_order_progress",
     "user_ops:ops_payment_submitted",
   ]);
-  assert.ok(inbox.every((row) => !row.startsWith("user_client:") && !row.startsWith("supplier_")));
+  assert.equal(persisted.notifications.find(n=>n.type==="order_submitted").push,false);
 });
 
 
@@ -401,7 +405,7 @@ test("a shop that cannot take the work hands it on rather than stopping it", asy
   // The order lands on Operations rather than costing the client more.
   assert.equal(declined.body.replaced, false);
   assert.equal(declined.body.order.state, "approved_for_matching");
-  assert.equal(declined.body.order.supplierId, null);
+  assert.equal(declined.body.order.supplierId, undefined);
 
   // And the shop that declined no longer sees it.
   const inbox = await call("/jobs", { subject: "clerk_supplier_a" });
