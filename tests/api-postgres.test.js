@@ -982,7 +982,17 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     const caseNotices = persisted.notifications.filter((notice) => notice.approvalCaseId === "case_supplier_pending");
     const caseAudits = persisted.auditLog.filter((entry) => entry.entityId === "case_supplier_pending");
     assert.equal(caseEvents.length, 3);
-    assert.equal(caseNotices.length, 3);
+    assert.deepEqual(caseNotices.map((notice) => `${notice.userId}:${notice.type}`).sort(), [
+      "user_ops:ops_approval_decision",
+      "user_ops:ops_approval_decision",
+      "user_ops:ops_approval_decision",
+      "user_super:ops_approval_decision",
+      "user_super:ops_approval_decision",
+      "user_super:ops_approval_decision",
+      "user_supplier_pending:approval_approved",
+      "user_supplier_pending:approval_restored",
+      "user_supplier_pending:approval_suspended",
+    ]);
     assert.equal(caseAudits.length, 3);
     assert.deepEqual(caseEvents.map((event) => event.requestId), [
       "approval-winner",
@@ -1037,7 +1047,11 @@ test("racing approval decisions have one PostgreSQL winner and one set of side e
     const notices = persisted.notifications.filter((notice) => notice.approvalCaseId === "case_rider");
     const audits = persisted.auditLog.filter((entry) => entry.entityId === "case_rider");
     assert.equal(events.length, 1);
-    assert.equal(notices.length, 1);
+    assert.deepEqual(notices.map((notice) => `${notice.userId}:${notice.type}`).sort(), [
+      "user_ops:ops_approval_decision",
+      `user_rider:approval_${approve.status === 200 ? "approved" : "rejected"}`,
+      "user_super:ops_approval_decision",
+    ]);
     assert.equal(audits.length, 1);
     assert.equal(persisted.approvalCases.find((candidate) => candidate.id === "case_rider").version, 2);
   } finally {
