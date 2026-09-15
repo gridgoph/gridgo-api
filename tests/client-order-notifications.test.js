@@ -452,3 +452,19 @@ test("route and derived writers share one QA transition occurrence", async () =>
   deriveDomainEvents(store, before, args);
   assert.equal(store.notifications.filter((n) => n.type === "order_needs_qa").length, 1);
 });
+
+
+test("production through delivery prompts final QR proof once due and explains review without another payment", () => {
+  for (const state of ["production", "ready_for_dispatch", "rider_assigned", "picked_up", "out_for_delivery"]) {
+    const order = { id: "order", clientId: "client", state, payments: { initial: { status: "confirmed" }, final_online: { status: "not_submitted", amountMinor: 10000 } } };
+    assert.match(clientNotificationDraft(order).body, /QR.*receipt.*Operations/i);
+    order.payments.final_online.status = "pending_confirmation";
+    assert.match(clientNotificationDraft(order).body, /awaiting Operations confirmation/i);
+    assert.doesNotMatch(clientNotificationDraft(order).body, /Pay the remaining/i);
+    order.payments.final_online.status = "confirmed";
+    assert.doesNotMatch(clientNotificationDraft(order).body, /QR|awaiting Operations/);
+  }
+  const collecting = { id: "order", clientId: "client", state: "awaiting_collection", fulfillmentMode: "pickup", payments: { final_online: { status: "pending_confirmation" } } };
+  assert.doesNotMatch(clientNotificationDraft(collecting).title, /settle/i);
+  assert.match(clientNotificationDraft(collecting).body, /awaiting Operations confirmation/i);
+});

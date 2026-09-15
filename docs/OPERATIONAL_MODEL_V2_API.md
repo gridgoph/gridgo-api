@@ -76,6 +76,8 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/users/:id` | ops/super | one public user; supplier detail also includes verification documents |
 | PATCH | `/users/:id/shop` | owning supplier; ops/super any supplier | replace supplier shop pin; existing orders are unchanged |
 | GET | `/users/:id/verification-documents` | owning supplier; ops/super any supplier | private attached verification-document metadata |
+| GET, PATCH, DELETE | `/me/payout-account` | supplier | where this shop wants payouts sent: wallet, account name, number, and the receiving-QR file |
+| GET | `/users/:id/payout-account` | owning supplier; ops/super any supplier | that shop's payout account with `shopName`, for the release desk |
 | PATCH | `/users/:id/role` | super | role change; audited |
 | POST | `/users/:id/verification` | ops/super | one-release legacy supplier/rider verification compatibility path |
 | GET | `/zones` | authenticated | address-zone records; order creation requires an active zone code, but zone fees are not used for v2 pricing |
@@ -103,7 +105,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | POST | `/orders` | client | draft/submit order and return estimate range |
 | POST | `/orders/:id/transition` | edge-specific role | unchanged QA/production edges below |
 | POST | `/orders/:id/decline` | assigned approved supplier | [decline response](#supplier-decline) |
-| POST | `/orders/:id/payments/:installment/submit` | owning client | submit QR reference |
+| POST | `/orders/:id/payments/:installment/submit` | owning client | submit QR reference and optional uploaded receipt |
 | POST | `/orders/:id/payments/:installment/confirm` | ops/super | manual confirmation |
 | POST | `/orders/:id/payments/:installment/reject` | ops/super | reject submitted reference with client-visible reason |
 | POST | `/orders/:id/milestones/:code/release` | ops/super | retry an eligible collection-capped supplier payout |
@@ -115,6 +117,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/issues[?orderId=&status=]` | client own/supplier own orders/ops/super | issue list |
 | GET | `/issues/:id` | related client/supplier/ops/super | issue detail |
 | POST | `/orders/:id/issues` | owning client, within window | issue + automatic payout-hold claim |
+| POST | `/orders/:id/confirm` | owning client, within window, no open issue | client confirms the order arrived fine; closes the window now as `completed` |
 | POST | `/issues/:id/resolve` | ops/super | resolve/dismiss, optionally release claim |
 | GET | `/escalations[?status=&orderId=]` | ops/super | pickup escalations |
 | POST | `/escalations/:id/resolve` | ops/super | instruction/resolution; rider must recheck |
@@ -250,6 +253,78 @@ File bytes use `purpose=verification_document` and the upload/attach contract in
 Each array item is the complete public `File` metadata object; the abbreviated example highlights identifying fields. A supplier cannot request another supplier's list. Clients and riders cannot request any list. All denied calls return `403 {"error":"forbidden","message":"..."}`; a non-supplier target returns `400 verification_documents_require_supplier`; an unknown target returns `404 user_not_found`.
 
 The existing Operations/Super Admin `GET /users/:id` approval response is now `{ "user": PublicUser, "verificationDocuments": File[] }` for a supplier. The same array is returned by `POST /users/:id/verification`, so the decision response remains a complete approval surface. General `PublicUser` values—including `/users`, login, `/auth/me`, matching, and catalogue projections—never contain `verificationDocumentFileIds`.
+
+## Supplier payout account
+
+Payout release is a person in Operations scanning the shop's own receiving QR with a wallet app. This record is that plate plus the words needed to check the right shop is being paid. It is private to the shop and to Operations / Super Admin; it never appears in any client, rider, or public catalogue projection.
+
+### `GET /me/payout-account`
+
+Auth: supplier membership, including a shop still waiting for accreditation. Success: `200 { "payoutAccount": PayoutAccount | null }`.
+
+```json
+{
+  "payoutAccount": {
+    "supplierId": "user_supplier",
+    "provider": "gcash",
+    "accountName": "Lovis P.",
+    "accountNumber": "+639171234567",
+    "institution": null,
+    "qr": {
+      "fileId": "file_8c9f61e4b2aa",
+      "originalFilename": "gcash-qr.jpg",
+      "detectedContentType": "image/jpeg",
+      "size": 184213,
+      "readyAt": "2026-09-15T02:10:00.000Z"
+    },
+    "version": 3,
+    "updatedAt": "2026-09-15T02:10:00.000Z"
+  }
+}
+```
+
+`provider` is one of `gcash`, `maya`, `bank`, or `other`. `accountName` is the name the wallet or bank shows back after a scan. `accountNumber` is optional: for `gcash` and `maya` it is normalised to `+639XXXXXXXXX`; for `bank` and `other` it is free text up to 60 characters. `institution` names the bank or wallet for `bank` and `other`. `qr` is `null` until a plate is bound; its bytes come from `GET /files/:fileId/download-url` (authorized for the owning shop and Operations only).
+
+### `PATCH /me/payout-account`
+
+Creates the account on the first write (`201`) and updates it afterwards (`200`). Every write after the first must carry `expectedVersion` (body, `If-Match`, or query) equal to the current `version`; a mismatch is `409 payout_account_stale`. Body fields are all optional on an update; `provider` and `accountName` are required when no account exists yet.
+
+```json
+{
+  "expectedVersion": 2,
+  "provider": "gcash",
+  "accountName": "Lovis P.",
+  "accountNumber": "0917 123 4567",
+  "institution": null,
+  "qrFileId": "file_8c9f61e4b2aa"
+}
+```
+
+`qrFileId` binds a ready `supplier_payout_qr` file the caller uploaded through `POST /files` (`docs/STORAGE_API.md`); the previous plate, if any, is retired to `delete_pending`. `"qrFileId": null` removes the picture and keeps the words. Every field is validated before anything is written, so a refused number or picture leaves no half-applied edit. Audited as `payout_account.create` / `payout_account.update`.
+
+| Status | `error` | Meaning and fix |
+|---:|---|---|
+| 400 | `invalid_payout_account` | `details.field` names the field: unknown provider, blank account name, a wallet number that is not a Philippine mobile number, or text over its limit. |
+| 400 | `invalid_payout_qr` | `qrFileId` is not the caller's own ready `supplier_payout_qr` upload. Upload the plate again and send the new id. |
+| 400 | `expected_version_required` | An account exists; send its current `version`. |
+| 403 | `forbidden` | The caller has no supplier membership. |
+| 404 | `supplier_profile_not_found` | Complete supplier enrollment first. |
+| 409 | `payout_account_stale` | The account changed since this screen loaded. Reload and try again. |
+| 409 | `file_already_attached` | That file is already bound somewhere. Upload the plate again. |
+
+### `DELETE /me/payout-account`
+
+Requires `expectedVersion` (`If-Match` header or query). Removes the account, retires the bound plate, and answers `200 { "payoutAccount": null }`. Audited as `payout_account.delete`. Deleting an absent account is a no-op `200`.
+
+### `GET /users/:id/payout-account`
+
+Authorized for that supplier or Operations / Super Admin. Success: `200 { "userId": "...", "payoutAccount": PayoutAccount & { "shopName": string } | null }`. A non-supplier target is `400 payout_account_requires_supplier`; an unknown target is `404 user_not_found`.
+
+### On orders
+
+Every order Operations / Super Admin reads carries `supplierPayoutAccount` (the same shape as above with `shopName`, or `null` when the assigned shop has not set one up), so the release desk has the plate beside the milestone it is releasing. The field is absent for every other role.
+
+Changing a payout account raises the `identity` live hint for that shop.
 
 ## Push notifications
 
@@ -480,6 +555,12 @@ Write `everyone` announcements accordingly: the same words land on handsets nobo
 
 Every announcement is written to the platform audit log (`announcement.broadcast`) with its audience, title, and both counts.
 
+## Production files and installment receipts
+
+Order reads include `productionItems` for the owning client, Operations, and assigned supplier/rider. Each item exposes `id`, `itemName`, `quantity`, `pricingUnit`, `packageQty`, `structuredSpec` (size/material/finish), selected `options` (`groupName`, `label`), `artworkFileId`, and `mockupFileId`. Supplier/rider items follow assigned job IDs; legacy primary-party fallback applies only when no jobs exist. Prices and payment receipts are excluded. `measurement` is null or contains whole `pages`, and/or `widthMilli`, `heightMilli`, `lengthMilli` in thousandths of its `unit`. New snapshots preserve the listing unit; historical snapshots without it return null rather than guessing from a changed listing.
+
+`POST /orders/:id/payments/:installment/submit` accepts `{method:"qr_manual",reference,proofFileId?}`. Canonical installment keys are `initial` and `final_online`; route aliases `downpayment` and `balance` remain supported. When supplied, `proofFileId` must identify the caller's ready `payment_proof` upload. Submission atomically binds that receipt to the order and installment, and changes payment status to `pending_confirmation`. Reference-only legacy submissions remain accepted. Receipt metadata and signed downloads are private to the owner and Operations; supplier/rider order reads omit receipt IDs. Rejection clears the installment's active receipt while retaining its private reference for review history. Receipt OCR never confirms payment: only Operations confirmation clears the existing handover/collection gate.
+
 ## Notifications
 
 Notification IDs are opaque. Every notification route is owner-only: an authenticated caller receives only records whose `userId` is their own user ID. A known notification owned by another user returns `403 {"error":"forbidden"}`; an unknown notification returns `404 {"error":"notification_not_found"}`. Deleted notifications are omitted from all later lists. Current membership, approval, assignment, and audience visibility also apply to list/replay and individual mutations; an owned but no-longer-visible row returns `403 forbidden` on mutation.
@@ -488,7 +569,7 @@ Notification IDs are opaque. Every notification route is owner-only: an authenti
 
 ### `GET /notifications`
 
-Returns the caller's currently visible, non-deleted notifications, newest first, plus an append-order snapshot watermark. `limit` (default 40, max 100) bounds the window; the inbox is not the full history. A notification about a job the caller can see carries `orderTitle` and `orderState` so a client can draw the stage rail without `GET /orders` or hydrating the job.
+Returns the caller's currently visible, non-deleted notifications, newest first, plus an append-order snapshot watermark. `limit` (default 40, max 100) bounds the window; the inbox is not the full history. A notification about a job the caller can see carries `orderTitle` and `orderState` as current order context. Known unambiguous client lifecycle types also carry `eventState` for the historical event rail; omitted values must not be inferred from the current state. Stored title/body/type remain historical. Client-owned rows can additionally carry `paymentAction: {installment:"final_online",status:"due"|"pending_confirmation",amountMinor}` from current order data, from production through delivery/collection while the initial payment is confirmed and a positive final installment remains outstanding. This applies equally to old inbox rows and SSE without rewriting history or creating duplicate notifications.
 
 ```json
 {
@@ -512,6 +593,8 @@ Returns the caller's currently visible, non-deleted notifications, newest first,
 `snapshot` is `null` when the caller has never had a notification. Clients must retain the non-null snapshot returned with the list and echo it to mark-all; it is not a notification timestamp. The snapshot is still the caller's last append, including a soft-deleted watermark, even when `limit` hides older rows.
 
 ### `GET /notifications/stream`
+
+A stream stays open for at most `NOTIFICATION_STREAM_MAX_MS` (default ten minutes) after the bearer was verified, heartbeating every `NOTIFICATION_HEARTBEAT_MS`; it no longer ends when the short-lived session token expires, because every frame is re-authorized against the committed store. Reconnect with a fresh token and `Last-Event-ID` to resume.
 
 Opens a caller-scoped Server-Sent Events stream using the same bearer token as other authenticated routes. The response uses `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`, and a five-second reconnect hint. Banner-eligible notifications are sent only to their currently authorized owner. Silent inbox rows are fetched through the list, not streamed as banners, including during replay. The `data` object is the same public inbox row as `GET /notifications` (including `orderTitle` / `orderState` when the row names an order — never the hydrated order):
 
@@ -805,18 +888,15 @@ Exact rejection errors:
 ```json
 {
   "payoutMilestones": [
-    { "code": "initial", "sharePercent": 25, "amountMinor": 25000, "status": "pending" },
-    { "code": "completion", "sharePercent": 75, "amountMinor": 75000, "status": "pending" }
+    { "code": "printing", "sharePercent": 50, "amountMinor": 50000, "status": "pending_pof", "pofFileIds": [] },
+    { "code": "packaging_qc", "sharePercent": 15, "amountMinor": 15000, "status": "pending_pof", "pofFileIds": [] },
+    { "code": "delivered", "sharePercent": 25, "amountMinor": 25000, "status": "pending_pof", "pofFileIds": [] },
+    { "code": "retention", "sharePercent": 10, "amountMinor": 10000, "status": "pending_pof", "pofFileIds": [] }
   ]
 }
 ```
 
-Statuses for current commitments are `pending | released`. The supplier original price is the supplier subtotal, never the client total with the service fee. Delivery terms produce these exact payout shapes:
-
-- 0%: one `completion` payout for the full supplier subtotal.
-- 25% or 50%: one `initial` payout for that percentage and one `completion` payout for the remainder.
-
-The initial payout releases automatically when production starts. The completion payout releases automatically when delivery is recorded. Both are capped cumulatively by confirmed `supplier_principal` payment allocations, so GRIDGO never fronts supplier cash. An active Operations or claim hold leaves an otherwise eligible milestone pending. Pickup payout remains unavailable until Task H supplies a handover signal; direct-at-store money remains due and unconfirmed.
+A shop is paid across four stages of the supplier subtotal (never the client total with the service fee): `printing` 50%, `packaging_qc` 15%, `delivered` 25%, and `retention` 10%, with `retention` absorbing rounding so the four sum exactly. Statuses are `pending_pof | pof_attached | released`. Nothing releases on a state change alone: the shop attaches a Proof of Fulfilment for `printing` and `packaging_qc`, the rider's delivery evidence serves `delivered` and is inherited by `retention`, and Operations releases each share once it has looked at the proof. `packaging_qc` means the job is packed and ready for a rider; the joint supplier/rider quality check happens at pickup and is recorded by the pickup checklist, not by this milestone. `retention` releases automatically when the issue window closes with proof attached.
 
 Release:
 
@@ -825,10 +905,16 @@ POST /orders/:id/milestones/:code/release
 ```
 
 ```json
-{ "note": "Hold resolved; retry eligible payout" }
+{
+  "note": "Proof of Fulfilment reviewed",
+  "reference": "GCASH-1234567890",
+  "receiptFileId": "file_5f2a…"
+}
 ```
 
-Only Operations/Super Admin. This is a recovery path when an automatic release was held. An early initial release is `409 milestone_not_reached`; an early completion release is `409 fulfilment_required`; insufficient confirmed principal is `409 supplier_principal_not_collected`; an active claim is `409 payout_held`. `completed -> payout_released` is permitted only after every milestone is released.
+`note`, `reference`, and `receiptFileId` are all optional. `reference` is the wallet's own reference number (trimmed, up to 80 characters; `400 invalid_payout_reference` beyond that). `receiptFileId` binds the caller's own ready `payout_receipt` upload (`docs/STORAGE_API.md`) to the share; anything else is `400 invalid_payout_receipt`, and a receipt already bound elsewhere is `409 file_already_attached`. Both are validated before the share moves. The released milestone then carries `reference` and `receiptFileId`, the order lists the file in `payoutReceiptFileIds`, the audit row records both, and the shop's `shop_payout_released` notification quotes the reference. Clients never receive either field.
+
+Only Operations/Super Admin. A share without proof is `409 pof_required`; a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before delivery is `409 delivery_required`, `retention` before the window closes is `409 issue_window_open`); insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold is `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
 
 ## Order states and transitions
 
@@ -849,8 +935,9 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `supplier_assigned` | `awaiting_checkout` | assigned approved supplier | request says `supplier_accepted`; creates the next final quote version |
 | `awaiting_checkout` | `awaiting_initial_payment` | owning client | accepts exact quote version and snapshots money/fulfillment |
 | `payment_authorized` | `production` | assigned supplier | after confirmed initial payment; automatically releases an eligible 25%/50% initial supplier payout |
-| `production` | `supplier_self_qc` | assigned supplier | production complete |
-| `supplier_self_qc` | `ready_for_dispatch` | assigned supplier | ready for pickup |
+| `production` | `ready_for_dispatch` | assigned supplier | packaging ready; offers and notifications go to approved riders; joint pickup QC still required |
+| `production` | `supplier_self_qc` | assigned supplier | legacy client/portal compatibility; new supplier flow skips this step |
+| `supplier_self_qc` | `ready_for_dispatch` | assigned supplier | legacy work can advance to the same rider handoff |
 | `ready_for_dispatch` | `rider_assigned` | approved rider/ops/super | normally dispatch accept; rider must be approved |
 | `picked_up` | `out_for_delivery` | assigned rider | checklist already passed |
 | `completed` | `payout_released` | ops/super | only when all milestones released/no hold |
@@ -859,11 +946,13 @@ Endpoint-owned steps:
 
 - `awaiting_initial_payment -> initial_payment_review`: client submits initial payment.
 - `initial_payment_review -> payment_authorized`: Operations/Super Admin confirms initial payment.
-- `rider_assigned -> picked_up`: all six pickup checks pass; no direct transition bypass.
+- `rider_assigned -> picked_up`: the assigned rider completes all six pickup checks together with the supplier before taking the package; no direct transition bypass. Failed checks require evidence and an Operations escalation; after resolution, repeat all six checks.
 - `picked_up|out_for_delivery -> delivered -> issue_window_open`: delivery evidence route atomically records delivery and opens window; no direct transition bypass.
 - `issue_window_open -> completed`: system only, when `issueWindowExpiresAt` has elapsed and no active hold. No actor can close it early.
 
 Backfilled revision-1 rows may retain `awaiting_downpayment`/`downpayment_review`; new commercial commitments never create them. Supplier-proof states and `awaiting_payment` remain retired.
+
+Packaging readiness is not a passed pickup quality check. It makes the job available for a rider to accept and travel to the supplier. This handoff change does not alter payment confirmation, payout milestone/proof eligibility, collection caps, or claims/holds.
 
 ## Supplier decline
 
@@ -914,7 +1003,7 @@ The rider is notified and must resubmit all six checks.
 
 `GET /dispatch/:id/location` returns `{ping}` for the current rider only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. Consumers calculate staleness from `at` and `accuracy`.
 
-`GET /ops/riders/locations` returns `{riders:[{riderId,name,orderId,orderTitle,state,lat,lng,accuracy,at}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
+`GET /ops/riders/locations` returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,pickup,dropoff}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. `vehicleType` is the rider profile's `motorcycle | car | van | truck | bicycle` and `plateNumber` its plate, both `null` when no profile exists, so the map can draw the vehicle the rider actually drives. `pickup` and `dropoff` are the order's snapshot points as `{lat,lng,label}` or `null`; a collected order reports the GRIDGO Office point as `dropoff`, the same substitution `publicOrderFor` applies, so the map can draw the remaining leg of the trip. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
 
 ## Delivery and issue window
 
@@ -939,6 +1028,14 @@ POST /dispatch/:id/delivery
 ```
 
 The hours snapshot comes from the one global setting. Request processing and the bounded periodic worker expire elapsed windows transactionally; worker scheduling is defined in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope). A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed`; supplier principal was already released at delivery unless an active hold prevented it.
+
+The window has a second ending. The owning client may confirm the order arrived with no problems:
+
+```http
+POST /orders/:id/confirm
+```
+
+It performs the same completion the expiry sweep performs -- `completed`, a timeline entry in the client's name, and the retention share released when the rider's evidence already covers it -- only now rather than at expiry. It answers `200 { order }`, `409 issue_window_not_open` outside the window, and `409 issue_open` while a report or payout hold is active on the order; a client cannot both report a problem and call the job clean.
 
 ## Persistence contract
 

@@ -38,7 +38,8 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 - Orders snapshot client dropoff, assigned supplier pickup, distance band, delivery fee, and accepted price.
 - The service fee is seeded at 1,000 bps on the supplier subtotal and snapshotted with the accepted quote; delivery is a separate pass-through.
 - Generalized online installments, component allocations, and supplier payout milestones have independent relational records.
-- Supplier payout never exceeds confirmed supplier-principal collection: 25% or 50% terms release that initial share at production, while 0% waits and the remaining principal releases at fulfilment.
+- Supplier payout never exceeds confirmed supplier-principal collection and is paid across four proof-gated stages (printing 50%, packaging 15%, delivered 25%, retention 10%) that Operations releases after reviewing the Proof of Fulfilment; nothing releases on a state change alone.
+- Packaging readiness is a signal, not a checklist: the supplier marks the job packed, riders are offered it, and the supplier and rider run the six pickup checks together at the counter before the package leaves.
 - Claims hold payout. Client issues during the global issue window create an automatic claim hold.
 - Rider pickup requires all six checks; failures create an Operations escalation.
 - Delivery requires file-backed photo or signature evidence and opens the issue window.

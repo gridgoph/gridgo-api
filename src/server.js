@@ -70,6 +70,16 @@ import {
   routeRiderProfile,
 } from "./rider-profile-routes.js";
 import { routeOrderMatch } from "./order-match-routes.js";
+import {
+  isPrivatePayoutAccountRoute,
+  opsPayoutAccountProjection,
+  routePayoutAccount,
+} from "./payout-account.js";
+import {
+  bindPayoutReceipt,
+  paymentReferenceValue,
+  resolvePayoutReceipt,
+} from "./payout-receipt.js";
 import { MatchError, matchShop } from "./order-match.js";
 import { defaultShopSchedule, projectFinish } from "./availability.js";
 import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
@@ -128,9 +138,12 @@ import {
   resolveCategoryCode,
 } from "./taxonomy.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
+import { gridgoOfficePoint } from "./gridgo-office.js";
+import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
   calculateOrderMoney,
   carriedToOffice,
+  confirmIssueWindow,
   createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
@@ -195,6 +208,8 @@ const enqueueDeviceMutation = (mutation) => database.transaction(mutation, { loc
 const notificationEvents = createNotificationEvents();
 const realtimeTransport = createRealtimeTransport({database,loadStore,events:notificationEvents,connectionString:process.env.DATABASE_URL});
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
+// Longest a single notification stream stays open before the client must reconnect with a fresh token.
+const NOTIFICATION_STREAM_MAX_MS = Number(process.env.NOTIFICATION_STREAM_MAX_MS || 10 * 60_000);
 let storageInitializing = true;
 
 async function save(store) {
@@ -688,6 +703,12 @@ function supplierProfileProjection(store, userId) {
     pickupAvailable: profile.pickupAvailable,
     updatedAt: profile.updatedAt,
   };
+}
+
+/** A finite snapshot point, or null when the order has no usable coordinates. */
+function mapPointOrNull(point) {
+  if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return null;
+  return { lat: point.lat, lng: point.lng, label: point.label ?? null };
 }
 
 function riderProfileProjection(store, userId) {
@@ -1203,24 +1224,6 @@ function supplierTermsFor(store, supplierId) {
   return (store.supplierPaymentTerms || []).find((terms) => terms.supplierId === supplierId) || null;
 }
 
-/** Peso, as a person writes it. Minor units in, one figure out. */
-function formatMinorPhp(amountMinor) {
-  const pesos = Math.trunc(Math.abs(amountMinor) / 100);
-  const centavos = String(Math.abs(amountMinor) % 100).padStart(2, "0");
-  const sign = amountMinor < 0 ? "-" : "";
-  return `${sign}\u20b1${pesos.toLocaleString("en-PH")}.${centavos}`;
-}
-
-/** What the shop calls each stage. Never the platform's own code. */
-function payoutStageLabel(code) {
-  return ({
-    printing: "Printing",
-    packaging_qc: "Packing and quality check",
-    delivered: "Delivered",
-    retention: "Retention",
-  })[code] || "Payout";
-}
-
 function paymentCodeForRoute(code) {
   return ({ downpayment: "initial", balance: "final_online" })[code] || code;
 }
@@ -1573,7 +1576,10 @@ const TRANSITIONS = {
   awaiting_downpayment: {},
   downpayment_review: {},
   payment_authorized: { production: ["supplier"] },
-  production: { supplier_self_qc: ["supplier"] },
+  production: {
+    ready_for_dispatch: ["supplier"], // packed; supplier and rider check together at pickup
+    supplier_self_qc: ["supplier"], // compatibility for older clients and portal workflows
+  },
   supplier_self_qc: { ready_for_dispatch: ["supplier"] },
   ready_for_dispatch: { rider_assigned: ["rider", "ops_admin", "super_admin"] },
   rider_assigned: {},
@@ -1978,7 +1984,7 @@ async function handleRequest(req, res) {
       || pathname.startsWith("/me/supplier-services")
       || pathname.startsWith("/me/catalog-items")
       || pathname.startsWith("/me/catalog-option-groups");
-    if (!user && (privateCatalogRoute || isPrivateRiderProfileRoute(pathname))) {
+    if (!user && (privateCatalogRoute || isPrivateRiderProfileRoute(pathname) || isPrivatePayoutAccountRoute(pathname))) {
       return send(res, 401, {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
@@ -2015,6 +2021,20 @@ async function handleRequest(req, res) {
     if (riderProfileResponse) {
       if (riderProfileResponse.mutated) await save(store);
       return send(res, riderProfileResponse.status, riderProfileResponse.body);
+    }
+
+    const payoutAccountResponse = await routePayoutAccount({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      now,
+      audit,
+    });
+    if (payoutAccountResponse) {
+      if (payoutAccountResponse.mutated) await save(store);
+      return send(res, payoutAccountResponse.status, payoutAccountResponse.body);
     }
 
     const accountProfileResponse = await routeAccountProfile({
@@ -2522,8 +2542,16 @@ async function handleRequest(req, res) {
         }
       }
 
+      // The bearer was verified when this stream opened. Clerk session tokens
+      // live about a minute, so ending the stream at token expiry made every
+      // dashboard and handset reconnect once a minute, and anything committed
+      // in that gap arrived late. Membership, role, and order access are
+      // re-checked against the committed store on every frame instead, and the
+      // stream is bounded by NOTIFICATION_STREAM_MAX_MS so a revoked session
+      // still has to present a fresh token to reconnect.
+      const openedAt = Date.now();
       const heartbeat = setInterval(() => {
-        if (req.gridgoVerifiedClaims?.claims?.exp && Date.now() >= req.gridgoVerifiedClaims.claims.exp * 1000) { res.end(); return; }
+        if (Date.now() - openedAt >= NOTIFICATION_STREAM_MAX_MS) { res.end(); return; }
         res.write(`: heartbeat ${now()}\n\n`);
       }, NOTIFICATION_HEARTBEAT_MS);
       heartbeat.unref();
@@ -2937,6 +2965,33 @@ async function handleRequest(req, res) {
         userId: target.id,
         verificationDocuments: verificationDocumentsFor(store, target),
       });
+    }
+
+    // Where a shop wants its payouts sent. Private to that shop and the
+    // release desk; the plate bytes come from GET /files/:id/download-url.
+    if (req.method === "GET" && /^\/users\/[^/]+\/payout-account$/.test(pathname)) {
+      const uid = pathname.split("/")[2];
+      const target = store.users.find((candidate) => candidate.id === uid);
+      if (!target) {
+        return send(res, 404, {
+          error: "user_not_found",
+          message: "That supplier account no longer exists. Refresh the account list and try again.",
+        });
+      }
+      const ownsSupplierProfile = user.role === "supplier" && user.id === target.id;
+      if (!isOps(user) && !ownsSupplierProfile) {
+        return send(res, 403, {
+          error: "forbidden",
+          message: "A payout account is private. Open your own payout account or ask Operations for access.",
+        });
+      }
+      if (!identityHasMembership(target, "supplier") && target.role !== "supplier") {
+        return send(res, 400, {
+          error: "payout_account_requires_supplier",
+          message: "Payout accounts apply only to supplier accounts. Choose a supplier profile.",
+        });
+      }
+      return send(res, 200, { userId: target.id, payoutAccount: opsPayoutAccountProjection(store, target.id) });
     }
 
     // Supplier shop correction. Orders retain their pickup and money snapshots.
@@ -3983,6 +4038,40 @@ async function handleRequest(req, res) {
       return send(res, 201, { issue, claim });
     }
 
+    /*
+      The client saying the delivery is fine. Ends the issue window now rather
+      than on the clock -- the same completion the expiry sweep performs, with
+      the client's name on the timeline. Refused while a report is open.
+    */
+    if (req.method === "POST" && /^\/orders\/[^/]+\/confirm$/.test(pathname)) {
+      if (user.role !== "client") return send(res, 403, { error: "forbidden" });
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((o) => o.id === orderId);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.clientId !== user.id) return send(res, 403, { error: "forbidden" });
+      const ts = now();
+      try {
+        confirmIssueWindow(store, order, user, ts);
+      } catch (error) {
+        if (error?.name === "OperationalError") {
+          return send(res, error.status, { error: error.code, message: error.message, ...error.details });
+        }
+        throw error;
+      }
+      audit(store, {
+        actor: user,
+        action: "order.confirm_delivery",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { state: order.state },
+        reason: "Client confirmed the order arrived with no problems",
+      });
+      queueOrderInvalidate(store, order, ["orders", "claims"]);
+      await save(store);
+      return send(res, 200, { order: publicOrder(order, user, store) });
+    }
+
     if (req.method === "GET" && /^\/issues\/[^/]+$/.test(pathname)) {
       const iid = pathname.split("/")[2];
       const issue = (store.issues || []).find((i) => i.id === iid);
@@ -4162,14 +4251,22 @@ async function handleRequest(req, res) {
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const body = await readBody(req);
+      // The wallet receipt and its reference are read before the share moves,
+      // so a refused screenshot never leaves a released share with no proof.
+      const reference = paymentReferenceValue(body.reference);
+      const receipt = resolvePayoutReceipt(store, body.receiptFileId, user);
       const releasedAt = now();
       const milestone = releaseMilestone(order, milestoneCode, user, releasedAt, store);
+      if (receipt) bindPayoutReceipt(order, milestone, receipt);
+      if (reference) milestone.reference = reference;
       order.updatedAt = releasedAt;
       order.timeline.push({
         at: releasedAt,
         state: order.state,
         by: user.id,
-        note: `${milestoneCode} supplier payout milestone released`,
+        note: reference
+          ? `${milestoneCode} supplier payout milestone released, reference ${reference}`
+          : `${milestoneCode} supplier payout milestone released`,
         milestoneCode,
       });
       audit(store, {
@@ -4178,7 +4275,12 @@ async function handleRequest(req, res) {
         entityType: "order",
         entityId: order.id,
         orderId: order.id,
-        detail: { milestoneCode, amountMinor: milestone.amountMinor },
+        detail: {
+          milestoneCode,
+          amountMinor: milestone.amountMinor,
+          reference: reference || null,
+          receiptFileId: receipt?.fileId || null,
+        },
         reason: body.note || null,
       });
       /*
@@ -4197,7 +4299,9 @@ async function handleRequest(req, res) {
           appRole: "supplier",
           orderId: order.id,
           title: `${formatMinorPhp(milestone.amountMinor)} released`,
-          body: `${payoutStageLabel(milestoneCode)} was recorded as released. Open the payout ledger for the recorded details.`,
+          body: reference
+            ? `${payoutStageLabel(milestoneCode)} was sent, reference ${reference}. Open the payout ledger for the receipt.`
+            : `${payoutStageLabel(milestoneCode)} was recorded as released. Open the payout ledger for the recorded details.`,
           read: false,
           at: releasedAt,
         });
@@ -4267,7 +4371,24 @@ async function handleRequest(req, res) {
           message: "Enter the GCash, Maya, or e-wallet payment reference so Operations can confirm it.",
         });
       }
+      let proofFile = null;
+      if (body.proofFileId != null) {
+        if (typeof body.proofFileId !== "string" || !body.proofFileId.trim()) {
+          return send(res, 400, { error: "payment_proof_invalid", message: "Choose an uploaded payment receipt." });
+        }
+        proofFile = store.files.find((file) => file.fileId === body.proofFileId && file.ownerId === user.id);
+        if (!proofFile) return send(res, 404, { error: "file_not_found", message: "Upload your own payment receipt and try again." });
+        if (proofFile.purpose !== "payment_proof") return send(res, 400, { error: "payment_proof_invalid", message: "Use a payment receipt upload for this installment." });
+        if (proofFile.state !== "ready") return send(res, 409, { error: "file_not_ready", message: "Wait for the receipt upload to finish and try again." });
+      }
       const submittedAt = now();
+      if (proofFile) {
+        const field = `payment:${installmentCode}:proof`;
+        if (!(proofFile.references || []).some((ref) => ref.type === "order" && ref.id === order.id && ref.field === field)) {
+          proofFile.references = [...(proofFile.references || []), { type: "order", id: order.id, field }];
+        }
+        installment.proofFileId = proofFile.fileId;
+      }
       installment.method = "qr_manual";
       installment.status = "pending_confirmation";
       installment.reference = reference;
@@ -4337,6 +4458,7 @@ async function handleRequest(req, res) {
       const rejectedAt = now();
       installment.status = "not_submitted";
       installment.reference = null;
+      installment.proofFileId = null;
       installment.submittedAt = null;
       installment.confirmedAt = null;
       installment.confirmedBy = null;
@@ -4453,9 +4575,16 @@ async function handleRequest(req, res) {
       }
       const riders = [...latestByRider.values()].map(({ order, ping }) => {
         const rider = (store.users || []).find((u) => u.id === order.riderId);
+        const profile = riderProfileProjection(store, order.riderId);
+        // Same destination rule as publicOrderFor: a collected order travels to
+        // the GRIDGO Office counter, never to the address the client shopped with.
+        const dropoff =
+          order.fulfillmentMode === "pickup" ? gridgoOfficePoint() : mapPointOrNull(order.dropoff);
         return {
           riderId: order.riderId,
           name: rider?.name || "Rider",
+          vehicleType: profile?.vehicleType ?? null,
+          plateNumber: profile?.plateNumber ?? null,
           orderId: order.id,
           orderTitle: order.title || null,
           state: order.state,
@@ -4463,6 +4592,8 @@ async function handleRequest(req, res) {
           lng: ping.lng,
           accuracy: ping.accuracy ?? null,
           at: ping.at,
+          pickup: mapPointOrNull(order.pickup),
+          dropoff,
         };
       });
       return send(res, 200, { riders });

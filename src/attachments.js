@@ -19,6 +19,8 @@ const KINDS = new Set([
   "supplier_shop_image",
   "announcement_image",
   "payment_qr",
+  "supplier_payout_qr",
+  "payout_receipt",
   "verification_document",
   "rider_verification_document",
 ]);
@@ -66,6 +68,18 @@ export const PURPOSE_POLICIES = Object.freeze({
   payment_qr: {
     roles: ["ops_admin", "super_admin"],
     maxBytes: 5 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  // A shop's own receiving plate, bound through PATCH /me/payout-account.
+  supplier_payout_qr: {
+    roles: ["supplier"],
+    maxBytes: 5 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  // The wallet receipt Operations keeps after paying a shop, bound at release.
+  payout_receipt: {
+    roles: ["ops_admin", "super_admin"],
+    maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   verification_document: {
@@ -649,6 +663,20 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "The payment QR is the platform wallet plate. It is not attached to an order.",
     );
   }
+  if (purpose === "supplier_payout_qr") {
+    fail(
+      400,
+      "supplier_payout_qr_not_attachable",
+      "A payout QR is saved through PATCH /me/payout-account with its fileId. It is not attached to an order.",
+    );
+  }
+  if (purpose === "payout_receipt") {
+    fail(
+      400,
+      "payout_receipt_not_attachable",
+      "A payout receipt is bound when the share is released: send its fileId as receiptFileId to POST /orders/:id/milestones/:code/release.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1054,6 +1082,9 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
 }
 
 function canReadReference(user, store, reference) {
+  if (reference.type === "supplier_payout_account") {
+    return hasRole(user, "supplier") && reference.id === user.id;
+  }
   if (reference.type === "supplier_catalog_item") {
     const item = (store.catalogItems || []).find((candidate) => candidate.id === reference.id);
     if (!item) return false;
@@ -1091,12 +1122,26 @@ export function authorizeFileRead(user, store, file) {
   }
   if (!user) forbidden();
   if (["ops_admin", "super_admin"].includes(user.role)) return;
-  if (file.purpose === "verification_document") {
+  if (file.purpose === "payment_proof") {
+    if (file.ownerId === user.id) return;
+    forbidden();
+  }
+  if (file.purpose === "verification_document" || file.purpose === "supplier_payout_qr") {
     if (hasRole(user, "supplier") && file.ownerId === user.id) return;
     forbidden();
   }
   if (file.purpose === "rider_verification_document") {
     if (hasRole(user, "rider") && file.ownerId === user.id) return;
+    forbidden();
+  }
+  // The wallet receipt that paid a shop: Operations and that shop only. A
+  // client may read the order's other files, never the money behind it.
+  if (file.purpose === "payout_receipt") {
+    if (
+      user.role === "supplier"
+      && hasApprovedWorkRole(user, "supplier")
+      && (file.references || []).some((reference) => canReadReference(user, store, reference))
+    ) return;
     forbidden();
   }
   if (["supplier", "rider"].includes(user.role)

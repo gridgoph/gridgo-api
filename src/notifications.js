@@ -28,7 +28,31 @@ export function parseNotificationListLimit(value) {
   return Math.min(Math.floor(n), NOTIFICATION_LIST_MAX_LIMIT);
 }
 
-/** Inbox row. Job title/state only — never the hydrated order. */
+const CLIENT_EVENT_STATES = {
+  order_needs_qa: "needs_qa", order_client_correction: "client_correction",
+  order_proof_approval: "proof_approval", supplier_assignment_final_price: "awaiting_checkout",
+  order_in_production: "production", order_shop_qc: "supplier_self_qc",
+  order_ready_for_dispatch: "ready_for_dispatch", order_rider_assigned: "rider_assigned",
+  order_picked_up: "picked_up", order_out_for_delivery: "out_for_delivery",
+  order_ready_for_pickup: "awaiting_collection", order_cancelled: "cancelled",
+};
+
+const FINAL_PAYMENT_ACTION_STATES = new Set([
+  "production", "supplier_self_qc", "ready_for_dispatch", "rider_assigned",
+  "picked_up", "out_for_delivery", "awaiting_collection",
+]);
+
+export function finalPaymentAction(order) {
+  if (!FINAL_PAYMENT_ACTION_STATES.has(order?.state)) return null;
+  const initial = order.payments?.initial ?? order.payments?.downpayment;
+  const final = order.payments?.final_online ?? order.payments?.balance;
+  if (initial?.status !== "confirmed"
+      || !Number.isSafeInteger(final?.amountMinor) || final.amountMinor <= 0
+      || !["not_submitted", "pending_confirmation"].includes(final.status)) return null;
+  return { installment: "final_online", status: final.status === "pending_confirmation" ? "pending_confirmation" : "due", amountMinor: final.amountMinor };
+}
+
+/** Inbox row with current action metadata; stored event copy remains historical. */
 export function publicNotification(notification, order) {
   const item = {
     id: notification.id,
@@ -39,6 +63,7 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (CLIENT_EVENT_STATES[notification.type]) item.eventState = CLIENT_EVENT_STATES[notification.type];
   if (notification.orderId) item.orderId = notification.orderId;
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;
   if (notification.announcementId) item.announcementId = notification.announcementId;
@@ -51,6 +76,10 @@ export function publicNotification(notification, order) {
   if (order?.fulfillmentMode === "pickup" && order.state === "awaiting_collection") {
     const status = order.payments?.final_online?.status;
     item.collectHold = Boolean(status) && status !== "confirmed" && status !== "legacy_confirmed";
+  }
+  if (notification.userId === order?.clientId && (!notification.appRole || notification.appRole === "client")) {
+    const action = finalPaymentAction(order);
+    if (action) item.paymentAction = action;
   }
   return item;
 }

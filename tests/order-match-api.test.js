@@ -259,10 +259,17 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
+  if (measurement) await database.transaction(async () => {
+    const store = await loadStore(database);
+    const item = store.catalogItems.find((row) => row.id === catalogItemId);
+    item.pricingUnit = "per_area";
+    item.measureUnit = "ft";
+    await saveStore(database, store);
+  });
   const instance = await startApi();
   t.after(async () => {
     instance.child.kill("SIGTERM");
@@ -285,10 +292,15 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
     method: "PUT", subject: "clerk_client",
     body: { defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" } },
   });
-  await call(`/me/carts/${cartId}/lines`, {
+  const added = await call(`/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art" },
+    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art", ...(measurement ? { measurement } : {}) },
   });
+  assert.equal(added.status, 201, JSON.stringify(added.body));
+  const withMockup = await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}/mockup`, {
+    method: "PUT", subject: "clerk_client", body: { fileId: "file_mock" },
+  });
+  assert.equal(withMockup.status, 200, JSON.stringify(withMockup.body));
   const checkout = await call(`/me/carts/${cartId}/checkout`, {
     method: "POST", subject: "clerk_client",
     body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-900" } },
@@ -850,4 +862,175 @@ test("a shop-ready delivery is offered even when the remaining balance is unpaid
   const accepted = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
   assert.equal(accepted.body.order.state, "rider_assigned");
+});
+
+test("packaging ready offers the job atomically and joint pickup checks still gate transport", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t);
+  // Other outbox tests lease every due row, so retire this fixture's devices
+  // and their queued pushes after the API exits, including on assertion failure.
+  t.after(async () => {
+    const cleanup = createDatabase({ DATABASE_URL });
+    try {
+      await cleanup.query("DELETE FROM device_tokens WHERE id = ANY($1::text[])", [["device_rider", "device_other", "device_pending", "device_wrong_role"]]);
+    } finally {
+      await cleanup.close();
+    }
+  });
+  const transition = (state, subject = "clerk_supplier_a") => call(`/orders/${orderId}/transition`, {
+    method: "POST", subject, body: { state },
+  });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await transition("supplier_assigned", "clerk_ops");
+  await transition("payment_authorized");
+  await transition("production");
+
+  // A second approved rider gets the same offer; a pending rider and a device
+  // signed into another role must not receive it.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    for (const [suffix, status] of [["other", "approved"], ["pending", "pending"]]) {
+      const userId = `rider_${suffix}`;
+      store.users.push({ id: userId, clerkUserId: `clerk_${userId}`, email: `${userId}@gridgo.test`, name: "Rider", role: "rider", verificationStatus: status, createdAt: AT });
+      store.userRoleMemberships.push({ userId, role: "rider", createdAt: AT });
+      store.approvalCases.push({ id: `case_${userId}`, userId, kind: "rider", status, version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
+    }
+    for (const [deviceId, userId, appRole] of [
+      ["device_rider", "user_rider", "rider"],
+      ["device_other", "rider_other", "rider"],
+      ["device_pending", "rider_pending", "rider"],
+      ["device_wrong_role", "user_rider", "client"],
+    ]) {
+      store.deviceTokens.push({ id: deviceId, userId, appRole, token: `${deviceId}_token`, platform: "android", createdAt: AT, updatedAt: AT });
+    }
+    const file = store.files.find((row) => row.fileId === "file_drop");
+    file.references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+
+  const before = (await loadStore(database)).orders.find((row) => row.id === orderId);
+  const denied = await transition("ready_for_dispatch", "clerk_supplier_b");
+  assert.equal(denied.status, 403);
+  assert.equal((await loadStore(database)).orders.find((row) => row.id === orderId).state, "production");
+  assert.equal((await loadStore(database)).notifications.some((row) => row.orderId === orderId && row.type === "dispatch_available"), false);
+
+  const ready = await transition("ready_for_dispatch");
+  assert.equal(ready.status, 200, JSON.stringify(ready.body));
+  assert.equal(ready.body.order.state, "ready_for_dispatch");
+  const stored = await loadStore(database);
+  const packed = stored.orders.find((row) => row.id === orderId);
+  assert.ok(packed.readyAt);
+  assert.equal(packed.timeline.some((row) => row.state === "supplier_self_qc"), false);
+  assert.equal(stored.orderJobs.find((row) => row.orderId === orderId).state, "ready_for_dispatch");
+  assert.deepEqual(packed.payments, before.payments);
+  assert.deepEqual(packed.payoutMilestones, before.payoutMilestones);
+  const notices = stored.notifications.filter((row) => row.orderId === orderId && row.type === "dispatch_available");
+  assert.deepEqual(notices.map((row) => row.userId).sort(), ["rider_other", "user_rider"]);
+  for (const notice of notices) assert.match(notice.body, /check.*supplier/i);
+  const outbox = await database.query("SELECT device_id FROM notification_push_outbox WHERE notification_id = ANY($1::text[]) ORDER BY device_id", [notices.map((row) => row.id)]);
+  assert.deepEqual(outbox.rows.map((row) => row.device_id), ["device_other", "device_rider"]);
+  assert.equal((await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers.some((row) => row.id === orderId), true);
+  assert.equal((await call("/dispatch/offers", { subject: "clerk_rider_pending" })).status, 403);
+
+  // A retried readiness action cannot create another offer occurrence.
+  assert.equal((await transition("ready_for_dispatch")).status, 409);
+  assert.equal((await loadStore(database)).notifications.filter((row) => row.orderId === orderId && row.type === "dispatch_available").length, 2);
+  const accepted = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
+  assert.equal(accepted.status, 200);
+  assert.equal((await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider_other", body: {} })).status, 409);
+  assert.equal((await call("/dispatch/offers", { subject: "clerk_rider_other" })).body.offers.some((row) => row.id === orderId), false);
+  assert.equal((await transition("picked_up", "clerk_rider")).status, 409);
+  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 409);
+
+  const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"].map((code) => ({ code, passed: true }));
+  const check = (body, subject = "clerk_rider") => call(`/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject, body });
+  assert.equal((await check({ checks }, "clerk_supplier_a")).status, 403);
+  assert.equal((await check({ checks }, "clerk_rider_other")).status, 404);
+  assert.equal((await check({ checks: checks.slice(1) })).status, 400);
+  const failed = await check({
+    checks: checks.map((row) => ({ ...row, passed: row.code !== "packaging_integrity" })),
+    failureNote: "Supplier and rider found torn packaging", evidenceFileIds: ["file_drop"],
+  });
+  assert.equal(failed.status, 200, JSON.stringify(failed.body));
+  assert.equal(failed.body.order.state, "rider_assigned");
+  assert.equal(failed.body.order.pickupChecklist.status, "failed_escalated");
+  assert.equal((await check({ checks })).body.error, "pickup_escalation_open");
+  const resolved = await call(`/escalations/${failed.body.escalation.id}/resolve`, {
+    method: "POST", subject: "clerk_ops", body: { resolution: "Supplier repacked; repeat all six checks together" },
+  });
+  assert.equal(resolved.status, 200);
+  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 409);
+  const passed = await check({ checks });
+  assert.equal(passed.status, 200, JSON.stringify(passed.body));
+  assert.equal(passed.body.order.state, "picked_up");
+  assert.equal(passed.body.order.pickupChecklist.completedBy, "user_rider");
+  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
+});
+
+
+test("final QR receipt survives submission and only Operations clears delivery", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t, { measurement: { width: 2000, height: 3000 } });
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
+  assert.equal((await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops")).status, 200);
+  assert.equal((await transition("supplier_assigned", "clerk_ops")).status, 200);
+  assert.equal((await transition("payment_authorized")).status, 200);
+  assert.equal((await transition("production")).status, 200);
+  assert.equal((await transition("ready_for_dispatch")).status, 200);
+  assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
+  const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"].map((code) => ({ code, passed: true }));
+  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks })).status, 200);
+  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
+  const current = () => call(`/orders/${orderId}`, { subject: "clerk_client" });
+  const submit = (proofFileId, route = "final_online") => post(`/orders/${orderId}/payments/${route}/submit`, "clerk_client", { method: "qr_manual", reference: "FINAL-123", ...(proofFileId === undefined ? {} : { proofFileId }) });
+  const before = (await current()).body.order;
+  assert.deepEqual(before.productionItems[0].measurement, { widthMilli: 2000, heightMilli: 3000, unit: "ft" });
+  assert.equal(before.productionItems[0].mockupFileId, "file_mock");
+  const blocked = await post(`/dispatch/${orderId}/delivery`, "clerk_rider");
+  assert.equal(blocked.body.error, "final_payment_not_confirmed");
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const original = store.files.find((file) => file.fileId === "file_qr");
+    for (const [fileId, ownerId, state] of [["receipt_final", "user_client", "ready"], ["receipt_foreign", "supplier_b", "ready"], ["receipt_pending", "user_client", "pending_upload"]]) {
+      store.files.push({ ...original, fileId, ownerId, state, objectKey: `${fileId}.jpg`, references: [] });
+    }
+    await saveStore(database, store);
+  });
+  for (const [fileId, status] of [["receipt_foreign", 404], ["file_art", 400], ["receipt_pending", 409], ["missing", 404]]) {
+    assert.equal((await submit(fileId)).status, status);
+    assert.deepEqual((await current()).body.order.payments, before.payments);
+  }
+  let response = await submit("receipt_final", "balance");
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.order.state, "out_for_delivery");
+  assert.equal(response.body.order.payments.final_online.proofFileId, "receipt_final");
+  assert.equal(response.body.order.payments.final_online.status, "pending_confirmation");
+  assert.equal(response.body.order.payments.final_online.amountMinor, before.payments.final_online.amountMinor);
+  assert.equal((await submit("receipt_final")).status, 409);
+  for (const subject of ["clerk_supplier_a", "clerk_rider"]) {
+    const projected = (await call(`/orders/${orderId}`, { subject })).body.order;
+    assert.equal(projected.productionItems.length, 1);
+    assert.equal(projected.payments.final_online.proofFileId, undefined);
+    assert.equal((await call("/files/receipt_final", { subject })).status, 403);
+    assert.equal((await call("/files/receipt_final/download-url", { subject })).status, 403);
+    for (const fileId of ["file_art", "file_mock"]) assert.equal((await call(`/files/${fileId}`, { subject })).status, 200);
+  }
+  for (const subject of ["clerk_client", "clerk_ops"]) assert.equal((await call("/files/receipt_final", { subject })).status, 200);
+  const stored = await loadStore(database);
+  assert.deepEqual(stored.files.find((file) => file.fileId === "receipt_final").references, [{ type: "order", id: orderId, field: "payment:final_online:proof" }]);
+  let inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
+  assert.equal(inbox.find((row) => row.type === "order_in_production").eventState, "production");
+  assert.equal(inbox.find((row) => row.type === "order_in_production").paymentAction.status, "pending_confirmation");
+  assert.equal((await post(`/orders/${orderId}/payments/final_online/confirm`, "clerk_client")).status, 403);
+  assert.equal((await post(`/dispatch/${orderId}/delivery`, "clerk_rider")).body.error, "final_payment_not_confirmed");
+  assert.equal((await post(`/orders/${orderId}/payments/final_online/reject`, "clerk_ops", { reason: "Reference unreadable" })).status, 200);
+  assert.equal((await current()).body.order.payments.final_online.proofFileId, null);
+  inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
+  assert.equal(inbox.find((row) => row.type === "order_out_for_delivery").paymentAction.status, "due");
+  // Reference-only legacy clients retain their route contract; OCR never confirms money.
+  assert.equal((await submit(undefined)).status, 200);
+  assert.equal((await post(`/orders/${orderId}/payments/final_online/confirm`, "clerk_ops")).status, 200);
+  assert.equal((await current()).body.order.payments.final_online.status, "confirmed");
+  inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
+  assert.equal(inbox.some((row) => row.paymentAction), false);
+  assert.equal((await loadStore(database)).notifications.filter((row) => row.orderId === orderId && row.type === "rider_delivery_payment_cleared").length, 1);
 });

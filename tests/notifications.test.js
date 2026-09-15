@@ -210,3 +210,26 @@ test("list inbox stamps collect jobs so the phone can tell pickup from a door de
   assert.equal(listed.notifications[0].orderTitle, "Booth backdrops");
   assert.equal(listed.notifications[0].payments, undefined);
 });
+
+
+test("old inbox and SSE events carry current client payment action without rewriting event history", () => {
+  const notification = { id: "old", at: "2026-09-01T00:00:00Z", userId: "client", appRole: "client", type: "order_in_production", title: "In production", body: "The shop started", orderId: "order" };
+  const order = { id: "order", clientId: "client", state: "out_for_delivery", payments: { initial: { status: "confirmed" }, final_online: { status: "not_submitted", amountMinor: 1200 } } };
+  const projected = publicNotification(notification, order);
+  assert.deepEqual(projected.paymentAction, { installment: "final_online", status: "due", amountMinor: 1200 });
+  assert.equal(projected.title, notification.title);
+  assert.equal(projected.body, notification.body);
+  assert.equal(projected.type, notification.type);
+  assert.equal(projected.eventState, "production");
+  assert.equal(projected.orderState, "out_for_delivery");
+  assert.deepEqual(JSON.parse(formatNotificationEvent(notification, order).split("data: ")[1]), projected);
+  order.payments.final_online.status = "pending_confirmation";
+  assert.equal(publicNotification(notification, order).paymentAction.status, "pending_confirmation");
+  assert.equal(publicNotification({ ...notification, userId: "rider", appRole: "rider" }, order).paymentAction, undefined);
+  order.payments.final_online.status = "confirmed";
+  assert.equal(publicNotification(notification, order).paymentAction, undefined);
+  order.payments.final_online.status = "not_submitted";
+  order.state = "cancelled";
+  assert.equal(publicNotification(notification, order).paymentAction, undefined);
+  assert.equal(notification.paymentAction, undefined);
+});

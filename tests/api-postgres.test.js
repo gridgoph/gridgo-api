@@ -147,7 +147,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
-    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_catalog_item_file_formats,
+    supplier_catalog_prep_steps, supplier_catalog_item_photos, supplier_shop_media, supplier_payout_accounts, supplier_catalog_item_file_formats,
     supplier_catalog_options, supplier_catalog_option_groups, supplier_catalog_items,
     supplier_service_file_formats, supplier_service_price_tiers, supplier_services,
     listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
@@ -1466,8 +1466,9 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     for (const subject of ["clerk_ops", "clerk_super"]) {
       const map = await request(instance.api, "/ops/riders/locations", { subject });
       assert.equal(map.status, 200);
-      assert.deepEqual(map.body.riders, [{ riderId: "user_rider", name: "Rider", orderId: lifecycleOrder.id,
-        orderTitle: "API banner", state: "out_for_delivery", lat: 7.07, lng: 125.61, accuracy: 5, at: recordedAt }]);
+      assert.deepEqual(map.body.riders, [{ riderId: "user_rider", name: "Rider", vehicleType: "motorcycle", plateNumber: "GRIDGO-1",
+        orderId: lifecycleOrder.id, orderTitle: "API banner", state: "out_for_delivery", lat: 7.07, lng: 125.61,
+        accuracy: 5, at: recordedAt, pickup: lifecycleOrder.pickup ?? null, dropoff: lifecycleOrder.dropoff ?? null }]);
       evidence.riderMaps[subject] = map;
     }
     const denied = await request(instance.api, "/ops/riders/locations", { subject: "clerk_client" });
