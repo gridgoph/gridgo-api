@@ -46,15 +46,17 @@ Copy `.env.example` to `.env`, replace all template database and Clerk values, t
 docker compose up --build
 ```
 
+Compose interpolates that same `.env`. Host `npm run dev`, `npm start`, migrate, seed, and bootstrap-admin load it with Node `--env-file-if-exists=.env`, so a missing file in the production image is fine and Compose-injected variables still win. The API has no `.env.local`.
+
 Compose starts PostgreSQL 17, runs forward migrations, idempotently seeds reference data, initializes MinIO, and starts the API on `127.0.0.1:18787` by default. PostgreSQL is published only on loopback (`127.0.0.1:55439`) for local tools.
 
-For host-run commands against local compose:
+For host-run commands against local compose (optional `DATABASE_URL` export overrides `.env`):
 
 ```bash
-export DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo
 npm run migrate
 npm run seed
 npm run seed:dev
+npm run dev
 ```
 
 Create a separate test database once, then migrate and test only that database.

@@ -3,7 +3,7 @@
  *
  * The tests truncate and rewrite whatever they are pointed at. `npm test` used
  * to resolve `DATABASE_URL=${DATABASE_URL:-...gridgo_test}`, which reads as a
- * safe default and is not one: an ambient `DATABASE_URL` wins, and `.env.local`
+ * safe default and is not one: an ambient `DATABASE_URL` wins, and `.env`
  * sets that to the development database. Sourcing the local environment before
  * running the suite therefore emptied the development board -- silently, twice,
  * and the resulting lock contention looked like a flaky deadlock rather than a
