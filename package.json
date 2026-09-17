@@ -5,13 +5,13 @@
   "description": "GRIDGO PostgreSQL API for client, supplier, rider, and operations apps",
   "type": "module",
   "scripts": {
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "start": "node --env-file-if-exists=.env src/server.js",
     "test": "DATABASE_URL=${TEST_DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node scripts/assert-test-database.mjs && DATABASE_URL=${TEST_DATABASE_URL:-postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test} node --test --test-concurrency=1 tests/*.test.js",
-    "migrate": "node-pg-migrate up --migrations-dir migrations",
-    "seed": "node src/seed.js",
-    "seed:dev": "node src/seed-dev.js",
-    "bootstrap-admin": "node src/bootstrap-admin.js"
+    "migrate": "node --env-file-if-exists=.env ./node_modules/node-pg-migrate/bin/node-pg-migrate.js up --migrations-dir migrations",
+    "seed": "node --env-file-if-exists=.env src/seed.js",
+    "seed:dev": "node --env-file-if-exists=.env src/seed-dev.js",
+    "bootstrap-admin": "node --env-file-if-exists=.env src/bootstrap-admin.js"
   },
   "engines": {
     "node": ">=20.9.0"
