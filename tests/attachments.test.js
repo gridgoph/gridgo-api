@@ -669,3 +669,43 @@ test("payment receipts stay private to their owner and Operations after order bi
     for (const user of [supplier, rider]) assert.doesNotThrow(() => authorizeFileRead(user, store, file));
   }
 });
+
+test("a handoff signature is a small PNG the assigned rider attaches before the package moves", () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff]);
+  // Rider only: the supplier signs on the rider's phone, so the rider is the uploader.
+  assert.doesNotThrow(() => authorizeFileUpload(rider, "handoff_signature"));
+  expectError(() => authorizeFileUpload(supplier, "handoff_signature"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(client, "handoff_signature"), 403, "forbidden");
+  expectError(() => authorizeFileUpload(ops, "handoff_signature"), 403, "forbidden");
+  // PNG only, and small.
+  assert.equal(validateUpload({ originalFilename: "sign.png", declaredContentType: "image/png", sniffBytes: PNG, size: 2 * 1024 * 1024 }, "handoff_signature"), "image/png");
+  expectError(() => validateUpload({ originalFilename: "sign.jpg", declaredContentType: "image/jpeg", sniffBytes: JPEG, size: 12 }, "handoff_signature"), 415, "purpose_media_type_not_allowed");
+  expectError(() => validateUpload({ originalFilename: "sign.png", declaredContentType: "image/png", sniffBytes: PNG, size: 2 * 1024 * 1024 + 1 }, "handoff_signature"), 413, "file_too_large");
+
+  const file = readyFile("handoff_signature", { ownerId: rider.id, originalFilename: "sign.png", detectedContentType: "image/png" });
+  // Attached like a delivery photo: to the order, by the assigned rider, while
+  // the rider is still at the shop.
+  const atShop = { orders: [order({ state: "rider_assigned" })] };
+  const target = resolveFileTarget(atShop, file.purpose, { orderId: "order-a" }, rider);
+  assert.equal(target.type, "order");
+  assert.doesNotThrow(() => authorizeFileAttach(rider, file, target));
+  expectError(() => authorizeFileAttach({ ...rider, id: "rider-b" }, file, target), 403, "forbidden");
+  expectError(() => authorizeFileAttach({ ...rider, verificationStatus: "pending" }, file, target), 403, "forbidden");
+  for (const state of ["picked_up", "out_for_delivery", "delivered", "ready_for_dispatch"]) {
+    const moved = resolveFileTarget({ orders: [order({ state })] }, file.purpose, { orderId: "order-a" }, rider);
+    expectError(() => authorizeFileAttach(rider, file, moved), 409, "handoff_signature_upload_not_allowed");
+  }
+  assert.equal(attachFileReference(file, target), "handoffSignatureFileIds");
+  assert.deepEqual(target.record.handoffSignatureFileIds, [file.fileId]);
+  assert.deepEqual(file.references, [{ type: "order", id: "order-a", field: "handoffSignatureFileIds" }]);
+
+  // Who may look at the handwriting afterwards: the two parties at the counter
+  // and Operations. Never the client.
+  const store = { orders: [target.record], supplierServices: [] };
+  assert.doesNotThrow(() => authorizeFileRead(rider, store, file));
+  assert.doesNotThrow(() => authorizeFileRead(supplier, store, file));
+  assert.doesNotThrow(() => authorizeFileRead(ops, store, file));
+  expectError(() => authorizeFileRead(client, store, file), 403, "forbidden");
+  expectError(() => authorizeFileRead({ id: "rider-b", role: "rider", verificationStatus: "approved" }, store, file), 403, "forbidden");
+});

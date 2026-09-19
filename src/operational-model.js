@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { opsPayoutAccountProjection } from "./payout-account.js";
 
@@ -14,6 +16,40 @@ export const PICKUP_CHECK_CODES = Object.freeze([
 ]);
 
 export const PICKUP_SIGN_OFF_PROMPT = "GRIDGO partner! Quality check, done! Salamat po!";
+
+/**
+ * What a handoff signature attests, as one stable hash.
+ *
+ * The supplier signs on the rider's phone against six answers. Recording
+ * the digest of exactly those answers beside the signature lets anyone
+ * reading the order later confirm the checklist shown on screen is the one
+ * that was signed for, without trusting either app's rendering of it. The
+ * checks are put in the canonical order first, so two clients that send the
+ * same answers in different orders sign for the same thing.
+ */
+export function checklistDigest(orderId, checks) {
+  const byCode = new Map((checks || []).map((check) => [check?.code, Boolean(check?.passed)]));
+  const canonical = PICKUP_CHECK_CODES.map((code) => ({ code, passed: byCode.get(code) === true }));
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ orderId: String(orderId), checks: canonical }))
+    .digest("hex");
+}
+
+/**
+ * The name of the shop and the person at its counter, for the two roles that
+ * meet there. The rider's phone prefills the signer's name from it; the
+ * supplier app and Operations can show who was expected to sign.
+ */
+export function supplierContactFor(store, supplierId) {
+  if (!store || !supplierId) return null;
+  const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
+  if (!profile) return null;
+  return {
+    shopName: String(profile.shopName || "").trim() || null,
+    contactName: String(profile.contactName || "").trim() || null,
+  };
+}
 
 /*
  The two shapes the word "pickup" has carried.
@@ -696,6 +732,17 @@ export function publicOrderFor(order, user, store = null) {
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
   if (!ops) delete publicRecord.revenueAdjustments;
+  // Who is at the shop counter. The rider needs it to prefill the handoff
+  // signature; the shop and Operations may read back who was named.
+  if ((ops || assignedSupplier || rider) && store) {
+    publicRecord.supplierContact = supplierContactFor(store, order.supplierId);
+  }
+  // The handoff signature is between the shop, the rider and Operations. The
+  // client learns the checks passed from the status; not who signed for it.
+  if (!ops && !assignedSupplier && !rider && publicRecord.pickupChecklist
+      && Object.hasOwn(publicRecord.pickupChecklist, "handoffSignature")) {
+    delete publicRecord.pickupChecklist.handoffSignature;
+  }
 
   /*
    What the shop is paid, under the name its own app asks for.
