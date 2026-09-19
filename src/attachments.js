@@ -14,6 +14,7 @@ const KINDS = new Set([
   "artwork",
   "fulfilment_proof",
   "delivery_photo",
+  "handoff_signature",
   "service_image",
   "catalog_item_photo",
   "supplier_shop_image",
@@ -44,6 +45,14 @@ export const PURPOSE_POLICIES = Object.freeze({
     roles: ["rider"],
     maxBytes: 20 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  // The supplier's signature, drawn on the rider's phone at the counter once
+  // all six pickup checks have passed. A rasterised pad, so PNG only and
+  // small: a 2 MiB signature is a photograph wearing the wrong purpose.
+  handoff_signature: {
+    roles: ["rider"],
+    maxBytes: 2 * 1024 * 1024,
+    contentTypes: ["image/png"],
   },
   service_image: {
     roles: ["supplier"],
@@ -112,6 +121,9 @@ const DELIVERY_PHOTO_STATES = new Set([
   "delivered",
   "issue_window_open",
 ]);
+// A handoff signature can only be taken before the package moves: the
+// pickup checklist that records it is itself refused after `rider_assigned`.
+const HANDOFF_SIGNATURE_STATES = new Set(["rider_assigned"]);
 const FULFILMENT_MILESTONE_ACTOR = Object.freeze({
   printing: "supplier",
   packaging_qc: "supplier",
@@ -912,6 +924,18 @@ export function authorizeFileAttach(user, file, target) {
     }
     return;
   }
+  if (file.purpose === "handoff_signature") {
+    if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
+    if (!HANDOFF_SIGNATURE_STATES.has(record.state)) {
+      fail(
+        409,
+        "handoff_signature_upload_not_allowed",
+        "A handoff signature can be attached only while the rider is at the shop, before the package moves. Refresh the delivery to see its current step.",
+        { state: record.state, allowedStates: [...HANDOFF_SIGNATURE_STATES] },
+      );
+    }
+    return;
+  }
   if (file.purpose === "service_image") {
     if (target?.type !== "supplier_service" || !hasRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     return;
@@ -1007,6 +1031,7 @@ export function attachFileReference(file, target) {
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
     delivery_photo: "deliveryPhotoFileIds",
+    handoff_signature: "handoffSignatureFileIds",
     service_image: "imageFileIds",
     verification_document: "verificationDocumentFileIds",
   };
@@ -1144,6 +1169,9 @@ export function authorizeFileRead(user, store, file) {
     ) return;
     forbidden();
   }
+  // A signature is a person's handwriting. The shop that gave it, the rider
+  // who took it and Operations may read it back; the client never needs to.
+  if (file.purpose === "handoff_signature" && user.role === "client") forbidden();
   if (["supplier", "rider"].includes(user.role)
       && (file.references || []).some((reference) => reference.type === "order")
       && !hasApprovedWorkRole(user, user.role)) forbidden();

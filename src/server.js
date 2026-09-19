@@ -81,6 +81,7 @@ import {
   resolvePayoutReceipt,
 } from "./payout-receipt.js";
 import { MatchError, matchShop } from "./order-match.js";
+import { rankShops, shopScoreboard, supplierReviewsView } from "./shop-reviews.js";
 import { defaultShopSchedule, projectFinish } from "./availability.js";
 import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
 import { privateCatalogItem } from "./supplier-catalog.js";
@@ -137,6 +138,7 @@ import {
   buildCategoryTree,
   resolveCategoryCode,
 } from "./taxonomy.js";
+import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
@@ -151,6 +153,7 @@ import {
   expireIssueWindows,
   isContainedPickup,
   issueWindowExpiresAt,
+  checklistDigest,
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
   publicOrderFor,
@@ -2066,6 +2069,38 @@ async function handleRequest(req, res) {
       });
     }
 
+    /**
+     * What clients said about this shop's work, read back by the shop.
+     *
+     * One row per rated job with the three stars and the note, plus where the
+     * shop stands against every other shop overall and in each category it
+     * has been reviewed in. The client is never named: they were told nobody
+     * would see who left it.
+     */
+    if (req.method === "GET" && pathname === "/me/reviews") {
+      if (user.role !== "supplier") {
+        return send(res, 403, { error: "forbidden", message: "Only a shop can read its own reviews." });
+      }
+      return send(res, 200, supplierReviewsView(store, user.id));
+    }
+
+    /**
+     * The league table Operations reads: every shop ranked by what clients
+     * said, overall or within one category, with the cheapest listing price
+     * in that category beside the stars so price and quality can be read
+     * against each other.
+     */
+    if (req.method === "GET" && pathname === "/admin/shop-rankings") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const categoryCode = String(url.searchParams.get("categoryCode") || "").trim() || null;
+      const board = shopScoreboard(store);
+      if (categoryCode && !board.categories.some((row) => row.code === categoryCode)) {
+        return send(res, 400, { error: "invalid_category_code", code: categoryCode });
+      }
+      const table = rankShops(board, categoryCode);
+      return send(res, 200, { categories: board.categories, ...table });
+    }
+
     const orderMatchResponse = await routeOrderMatch({
       req,
       url,
@@ -3227,6 +3262,14 @@ async function handleRequest(req, res) {
     }
 
     // ---- taxonomy ----
+    // Super Admin delete of a category or print job. Refuses (409) anything a
+    // shop, an order, or the seed still stands on; never cascades.
+    const taxonomyDeleteResponse = await routeTaxonomyDelete({ req, url, store, user, audit });
+    if (taxonomyDeleteResponse) {
+      if (taxonomyDeleteResponse.mutated) await save(store);
+      return send(res, taxonomyDeleteResponse.status, taxonomyDeleteResponse.body);
+    }
+
     if (req.method === "GET" && pathname === "/taxonomy") {
       // categoryTree is derived per request from the flat collections; it is a
       // convenience projection for pickers and is never persisted.
@@ -5336,6 +5379,7 @@ async function handleRequest(req, res) {
           completedBy: user.id,
           escalationId: escalation.id,
           signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+          handoffSignature: null,
         };
         order.updatedAt = checkedAt;
         order.timeline.push({
@@ -5373,6 +5417,44 @@ async function handleRequest(req, res) {
         return send(res, 200, { order: publicOrder(order, user, store), escalation });
       }
 
+      /*
+        Six passes move nothing on their own. Custody changes hands only once
+        the supplier has signed for the handoff on the rider's phone, so the
+        same request has to carry that signature: a client that does not know
+        about it is refused here rather than allowed to take the package on
+        the strength of the checks alone. The signature file is uploaded and
+        attached first (purpose `handoff_signature`); this request names it.
+      */
+      const signature = body.signature && typeof body.signature === "object" ? body.signature : null;
+      const signatureFileId = String(signature?.fileId || "").trim();
+      if (!signatureFileId) {
+        return send(res, 409, {
+          error: "handoff_signature_required",
+          message: "All six checks passed, but the package cannot move until the supplier signs the handoff on the rider's phone. Attach the signature as a handoff_signature file and send its fileId with the checks.",
+        });
+      }
+      const signerName = String(signature.signerName || "").trim();
+      if (signerName.length < 2 || signerName.length > 120) {
+        return send(res, 400, {
+          error: "handoff_signer_name_required",
+          message: "Send the name of the person at the shop who signed, between 2 and 120 characters.",
+        });
+      }
+      if (!attachedReadyOrderFile(store, order, signatureFileId, "handoff_signature", user.id)) {
+        return send(res, 400, {
+          error: "invalid_handoff_signature",
+          message: "Attach the signature to this order as a handoff_signature file before submitting the checks.",
+          fileId: signatureFileId,
+        });
+      }
+      const handoffSignature = {
+        fileId: signatureFileId,
+        signerName,
+        signedAt: checkedAt,
+        riderId: user.id,
+        checklistHash: checklistDigest(order.id, checks),
+      };
+
       order.pickupChecklist = {
         status: "passed",
         checks: structuredClone(checks),
@@ -5382,6 +5464,7 @@ async function handleRequest(req, res) {
         completedBy: user.id,
         escalationId: order.pickupChecklist?.escalationId || null,
         signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+        handoffSignature,
       };
       order.state = "picked_up";
       order.updatedAt = checkedAt;
@@ -5389,7 +5472,16 @@ async function handleRequest(req, res) {
         at: checkedAt,
         state: "picked_up",
         by: user.id,
-        note: "All six pickup checks passed; rider prompted to give the trained verbal sign-off",
+        note: `All six pickup checks passed; ${signerName} signed the handoff on the rider's phone`,
+        fileId: signatureFileId,
+      });
+      audit(store, {
+        actor: user,
+        action: "pickup_checklist.handoff_signed",
+        entityType: "order",
+        entityId: order.id,
+        orderId: order.id,
+        detail: { fileId: signatureFileId, signerName, checklistHash: handoffSignature.checklistHash },
       });
       notifyOrderParties(store, order, { createId: id, at: checkedAt });
       queueOrderInvalidate(store, order, ["orders", "jobs"]);
@@ -5397,6 +5489,7 @@ async function handleRequest(req, res) {
       return send(res, 200, {
         order: publicOrder(order, user, store),
         signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
+        handoffSignature,
       });
     }
 

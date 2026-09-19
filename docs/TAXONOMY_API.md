@@ -242,6 +242,33 @@ Creating a category whose `code` is a retired alias is `409 code_is_alias`.
 
 Audit actions: `taxonomy.subcategory_create`, `taxonomy.subcategory_update`.
 
+### Delete (super_admin)
+
+| Method | Path |
+|---|---|
+| DELETE | `/taxonomy/categories/:idOrCode` |
+| DELETE | `/taxonomy/subcategories/:idOrCode` |
+
+A delete is a hard row delete and is only allowed when nothing stands on the
+entry. It never cascades: shop listings, accreditations, orders, starters and
+legacy aliases are left exactly as they are, and the request is refused instead.
+
+- `409 catalog_entry_shipped` `{kind, code, canRetire}` — the entry is one this
+  build seeds (`defaultTaxonomy()`); `npm run seed` would append it back, and a
+  seeded starter would then fail its foreign key. Hide it (`PATCH active:false`).
+- `409 catalog_entry_in_use` `{kind, code, canRetire, usage}` — `usage` is
+  `{listings, shops: [{supplierId, shopName}], orders, starters}` for a print job,
+  plus `{printJobs, services, aliases}` for a category. Every figure mirrors a
+  PostgreSQL `RESTRICT` or a live reference; `orders` is counted through the
+  listings that were ordered from.
+- `403 forbidden`, `404 category_not_found` / `subcategory_not_found`.
+
+`canRetire` is false once the entry is already `active: false`.
+
+Response: `200 {"ok": true, "deleted": {kind, id, code, name}}`.
+Audit actions: `taxonomy.category_delete`, `taxonomy.subcategory_delete`
+(`detail: {deleted, usage}`). Implementation: `src/taxonomy-delete.js`.
+
 ---
 
 ## 6. PostgreSQL seed

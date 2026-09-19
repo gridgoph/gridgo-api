@@ -228,6 +228,25 @@ function cartLineSubtotal(store, line) {
   }
 }
 
+/**
+ * Refuse a line the pricing engine would refuse, with the engine's own reason.
+ *
+ * `cartLineSubtotal` swallows a refusal into null because a basket being read
+ * must not throw over one line. A basket being written to is different: a
+ * quantity under the shop's minimum, or a measurement the listing does not
+ * take, is the client's to fix now, and letting it in is what produced a line
+ * priced at "—" and a total that was delivery alone. So the write path prices
+ * the line and lets `below_minimum_quantity` and its siblings through.
+ */
+function assertCartLinePriceable(store, item, line) {
+  const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
+  priceCatalogSelection(store, item, {
+    selectedOptions,
+    quantity: line.quantity,
+    measurement: line.measurement || null,
+  });
+}
+
 function publicCartListingStub(store, item, optionIds) {
   const selected = selectedCatalogPrice(store, item, optionIds);
   return {
@@ -873,6 +892,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
     };
+    assertCartLinePriceable(store, item, line);
     if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
@@ -894,6 +914,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart) }, mutated: true };
     }
     const body = record(await readBody(req));
+    const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
     if (Object.hasOwn(body, "quantity")) line.quantity = positiveInteger(body.quantity, "quantity");
     if (Object.hasOwn(body, "optionIds")) {
       if (!Array.isArray(body.optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.", { field: "optionIds" });
@@ -914,6 +935,18 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
+    // Only a change to what the line is priced on is held to the shop's
+    // minimum. Attaching artwork to a line the shop has since put out of reach
+    // is still allowed; the quantity is fixed through the sheet, not here.
+    const repriced = ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field));
+    if (repriced && patchedItem) {
+      try {
+        assertCartLinePriceable(store, patchedItem, line);
+      } catch (error) {
+        Object.assign(line, before);
+        throw error;
+      }
+    }
     line.updatedAt = at;
     updateCart(cart, at);
     return { status: 200, body: { cart: publicCartForLineMutation(store, cart) }, mutated: true };

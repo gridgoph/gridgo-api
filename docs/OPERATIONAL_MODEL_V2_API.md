@@ -92,6 +92,8 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | PATCH | `/taxonomy/materials/:idOrCode` | super | update material |
 | POST | `/taxonomy/finishes` | super | create finish |
 | PATCH | `/taxonomy/finishes/:idOrCode` | super | update finish |
+| DELETE | `/taxonomy/categories/:idOrCode` | super | delete an unused, unseeded category (`409 catalog_entry_in_use` / `catalog_entry_shipped` otherwise; see `docs/TAXONOMY_API.md`) |
+| DELETE | `/taxonomy/subcategories/:idOrCode` | super | delete an unused, unseeded print job (same refusals) |
 | GET | `/supplier-services[?supplierId=&state=]` | supplier own; ops/super any | service catalogue |
 | POST | `/supplier-services` | supplier | create `draft` service |
 | GET/PATCH | `/supplier-services/:id` | owner supplier; ops/super read, limited edit | service detail/edit |
@@ -977,11 +979,59 @@ POST /dispatch/:id/pickup-checklist
 }
 ```
 
-Each code appears exactly once with boolean `passed`. All pass moves to `picked_up` and returns:
+Each code appears exactly once with boolean `passed`.
+
+### Supplier handoff signature
+
+Six passes move nothing on their own. Custody changes hands only once the supplier has signed for the handoff **on the rider's phone**, and the same request carries that signature:
 
 ```json
-{ "signOffPrompt": "GRIDGO partner! Quality check, done! Salamat po!" }
+{
+  "checks": [ "…all six passed…" ],
+  "signature": { "fileId": "file_…", "signerName": "Ana Reyes" }
+}
 ```
+
+The rider first uploads the rasterised pad as a `handoff_signature` PNG (rider-only, 2 MiB, see [STORAGE_API](STORAGE_API.md#purpose-policies)) and attaches it with `{ "orderId" }` — accepted only while the order is `rider_assigned` and the caller is its assigned approved rider. The checklist request then names that file. A file ID can be attached once and is never rebound; a retried checklist may name a file it already attached.
+
+| Refusal | Meaning |
+|---|---|
+| `409 handoff_signature_required` | all six passed but no `signature.fileId` was sent — the order stays `rider_assigned`; an older client cannot take the package on the checks alone |
+| `400 handoff_signer_name_required` | `signerName` missing, or outside 2–120 characters after trimming |
+| `400 invalid_handoff_signature` | `fileId` is not a ready, rider-owned `handoff_signature` file attached to this order |
+| `409 handoff_signature_upload_not_allowed` | (on attach) the order is no longer `rider_assigned` |
+
+With a valid signature the order moves to `picked_up` and the checklist records the attestation. The signature is immutable once recorded: the checklist route is closed after `rider_assigned`, and attaching another signature is refused, so re-signing requires Operations to reopen the pickup through an escalation.
+
+```json
+{
+  "order": {
+    "state": "picked_up",
+    "pickupChecklist": {
+      "status": "passed",
+      "checks": [ "…" ],
+      "completedAt": "2026-09-19T07:24:00.000Z",
+      "completedBy": "user_rider",
+      "signOffPrompt": "GRIDGO partner! Quality check, done! Salamat po!",
+      "handoffSignature": {
+        "fileId": "file_…",
+        "signerName": "Ana Reyes",
+        "signedAt": "2026-09-19T07:24:00.000Z",
+        "riderId": "user_rider",
+        "checklistHash": "sha256 hex of {orderId, checks in canonical order}"
+      }
+    }
+  },
+  "signOffPrompt": "GRIDGO partner! Quality check, done! Salamat po!",
+  "handoffSignature": { "…as above…" }
+}
+```
+
+`pickupChecklist.handoffSignature` is projected to the assigned rider, the assigned supplier and Operations on every order read, so the supplier app and the ops dashboard can show who signed and when; the image itself is fetched with `GET /files/:fileId/download-url` under that purpose's read rule. The client's projection omits the field and may not read the file — the client learns the checks passed from `pickupChecklist.status`, not who signed for the shop. `checklistHash` is `checklistDigest(orderId, checks)` from `src/operational-model.js`; escalated checklists carry `handoffSignature: null`, and checklists recorded before this contract carry no field at all.
+
+To let the rider's phone prefill the signer, orders read by the assigned rider, the assigned supplier or Operations also carry `supplierContact: { shopName, contactName }` from the shop's profile (`null` when the order has no shop profile).
+
+The response still returns the trained spoken line for the rider to close the checkpoint out loud; saying it is not recorded.
 
 Any failure must include `failureNote` and one or more `evidenceFileIds` already attached to the order as rider-owned `delivery_photo` files. The order remains `rider_assigned`; `pickupChecklist.status` becomes `failed_escalated`; an `open` escalation and ops/super notifications are created. Until Operations resolves it, another checklist returns `409 pickup_escalation_open`.
 

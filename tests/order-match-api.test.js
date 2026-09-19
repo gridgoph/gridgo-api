@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
+import { checklistDigest } from "../src/operational-model.js";
 import { seedReferenceData } from "../src/seed.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -152,10 +153,28 @@ async function fixture(database) {
       { fileId: "file_mock", ownerId: "user_client", purpose: "mockup", originalFilename: "mock.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/mock.jpg", references: [], createdAt: AT },
       { fileId: "file_qr", ownerId: "user_client", purpose: "payment_proof", originalFilename: "qr.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/qr.jpg", references: [], createdAt: AT },
       { fileId: "file_drop", ownerId: "user_rider", purpose: "delivery_photo", originalFilename: "drop.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "rider/drop.jpg", references: [], createdAt: AT },
+      { fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [], createdAt: AT },
     );
     await saveStore(database, store);
   });
 }
+
+/**
+ * The supplier's signature, already on the order. Written straight into the
+ * store the way the delivery photo is: what these tests exercise is the
+ * checklist's refusal to move a package without it, not the pad.
+ */
+async function attachHandoffSignature(database, orderId, fileId = "file_sign") {
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const file = store.files.find((candidate) => candidate.fileId === fileId);
+    file.references = [{ type: "order", id: orderId, field: "handoffSignatureFileIds" }];
+    await saveStore(database, store);
+  });
+  return { fileId, signerName: "Ana Reyes" };
+}
+
+const ALL_SIX = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"];
 
 test("client order-match routes persist a single-shop QR checkout and invoice", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
@@ -667,6 +686,49 @@ test("a client rates a finished order once, and only quality reaches matching", 
   // And somebody else's order is not theirs to rate.
   const stranger = await rate({ qualityStars: 5, speedStars: 5, valueStars: 5 }, "clerk_supplier_b");
   assert.equal(stranger.status, 403, JSON.stringify(stranger.body));
+
+  // The shop reads what was said about each job, and where it stands — but
+  // never who said it. The client was told nobody would see who left it.
+  const mine = await call("/me/reviews", { subject: "clerk_supplier_a" });
+  assert.equal(mine.status, 200, JSON.stringify(mine.body));
+  assert.equal(mine.body.summary.count, 1);
+  assert.equal(mine.body.summary.quality, 5);
+  assert.equal(mine.body.summary.speed, 3);
+  assert.equal(mine.body.summary.value, 4);
+  assert.equal(mine.body.summary.overall, 4);
+  assert.equal(mine.body.summary.reviewsUntilMatching, 4);
+  assert.equal(mine.body.ranking.position, 1);
+  assert.equal(mine.body.ranking.of, 1);
+  assert.equal(mine.body.ranking.byCategory[0].categoryCode, "marketing_collateral");
+  assert.equal(mine.body.ranking.byCategory[0].position, 1);
+  assert.equal(mine.body.reviews.length, 1);
+  assert.equal(mine.body.reviews[0].orderId, orderId);
+  assert.equal(mine.body.reviews[0].comment, "Beautiful print, a day late.");
+  assert.equal(mine.body.reviews[0].subcategoryCode, "flyers");
+  assert.equal(Object.hasOwn(mine.body.reviews[0], "clientId"), false);
+
+  // A shop nobody has rated yet is unranked, not last.
+  const theirs = await call("/me/reviews", { subject: "clerk_supplier_b" });
+  assert.equal(theirs.status, 200, JSON.stringify(theirs.body));
+  assert.equal(theirs.body.summary.count, 0);
+  assert.equal(theirs.body.ranking.position, null);
+  assert.equal((await call("/me/reviews", { subject: "clerk_client" })).status, 403);
+
+  // Operations reads the league table, overall and within one category, with
+  // the cheapest listing price in that category beside the stars.
+  assert.equal((await call("/admin/shop-rankings", { subject: "clerk_supplier_a" })).status, 403);
+  const table = await call("/admin/shop-rankings?categoryCode=marketing_collateral", { subject: "clerk_ops" });
+  assert.equal(table.status, 200, JSON.stringify(table.body));
+  assert.equal(table.body.rankedCount, 1);
+  assert.equal(table.body.rows[0].supplierId, "supplier_a");
+  assert.equal(table.body.rows[0].position, 1);
+  assert.equal(table.body.rows[0].fromPriceMinor, 10_000);
+  const unranked = table.body.rows.find((row) => row.supplierId === "supplier_b");
+  assert.equal(unranked.position, null);
+  assert.equal(unranked.count, 0);
+  assert.ok(table.body.categories.some((row) => row.code === "marketing_collateral"));
+  const bogus = await call("/admin/shop-rankings?categoryCode=nope", { subject: "clerk_ops" });
+  assert.equal(bogus.status, 400);
 });
 
 test("each side of an order sees its own price and its own date, and neither sees the other's", async (t) => {
@@ -780,10 +842,8 @@ test("a collected order stops on the counter, and only the counter hands it over
   const checked = await call(`/dispatch/${orderId}/pickup-checklist`, {
     method: "POST", subject: "clerk_rider",
     body: {
-      checks: [
-        "quantity_match", "specification_match", "visible_defects",
-        "packaging_integrity", "documentation", "supplier_sign_off",
-      ].map((code) => ({ code, passed: true })),
+      checks: ALL_SIX.map((code) => ({ code, passed: true })),
+      signature: await attachHandoffSignature(database, orderId),
     },
   });
   assert.equal(checked.status, 200, JSON.stringify(checked.body));
@@ -959,10 +1019,50 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
   });
   assert.equal(resolved.status, 200);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 409);
-  const passed = await check({ checks });
+
+  // Six passes move nothing on their own: custody changes hands only once the
+  // supplier has signed on the rider's phone. A client that never learned
+  // about the signature is refused rather than let through on the checks.
+  const unsigned = await check({ checks });
+  assert.equal(unsigned.status, 409, JSON.stringify(unsigned.body));
+  assert.equal(unsigned.body.error, "handoff_signature_required");
+  assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_rider" })).body.order.state, "rider_assigned");
+  // The signature has to be a file this rider attached to this order first.
+  const unattached = await check({ checks, signature: { fileId: "file_sign", signerName: "Ana Reyes" } });
+  assert.equal(unattached.status, 400, JSON.stringify(unattached.body));
+  assert.equal(unattached.body.error, "invalid_handoff_signature");
+  const signature = await attachHandoffSignature(database, orderId);
+  // A signature nobody is named on proves nothing.
+  const anonymous = await check({ checks, signature: { fileId: signature.fileId, signerName: " " } });
+  assert.equal(anonymous.status, 400, JSON.stringify(anonymous.body));
+  assert.equal(anonymous.body.error, "handoff_signer_name_required");
+  // The rider's own name is prefilled from the shop profile the API projects.
+  const atCounter = (await call(`/orders/${orderId}`, { subject: "clerk_rider" })).body.order;
+  assert.deepEqual(atCounter.supplierContact, { shopName: "supplier_a Shop", contactName: "supplier_a" });
+  assert.equal(atCounter.pickupChecklist.status, "escalation_resolved");
+
+  const passed = await check({ checks, signature });
   assert.equal(passed.status, 200, JSON.stringify(passed.body));
   assert.equal(passed.body.order.state, "picked_up");
   assert.equal(passed.body.order.pickupChecklist.completedBy, "user_rider");
+  const recorded = passed.body.order.pickupChecklist.handoffSignature;
+  assert.equal(recorded.fileId, "file_sign");
+  assert.equal(recorded.signerName, "Ana Reyes");
+  assert.equal(recorded.riderId, "user_rider");
+  assert.equal(recorded.signedAt, passed.body.order.pickupChecklist.completedAt);
+  assert.equal(recorded.checklistHash, checklistDigest(orderId, checks));
+  assert.deepEqual(passed.body.handoffSignature, recorded);
+  assert.match(passed.body.order.timeline.at(-1).note, /Ana Reyes signed the handoff/);
+  // The shop and Operations read the same record off the order they already
+  // fetch; the client is not shown who signed for the shop.
+  assert.deepEqual((await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" })).body.order.pickupChecklist.handoffSignature, recorded);
+  assert.deepEqual((await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.pickupChecklist.handoffSignature, recorded);
+  const clientView = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(clientView.pickupChecklist.status, "passed");
+  assert.equal(Object.hasOwn(clientView.pickupChecklist, "handoffSignature"), false);
+  assert.equal(Object.hasOwn(clientView, "supplierContact"), false);
+  // Signed once. The checklist route is closed behind the package.
+  assert.equal((await check({ checks, signature })).body.error, "pickup_checklist_not_available");
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
 });
 
@@ -977,8 +1077,8 @@ test("final QR receipt survives submission and only Operations clears delivery",
   assert.equal((await transition("production")).status, 200);
   assert.equal((await transition("ready_for_dispatch")).status, 200);
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
-  const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"].map((code) => ({ code, passed: true }));
-  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks })).status, 200);
+  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
+  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) })).status, 200);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
   const current = () => call(`/orders/${orderId}`, { subject: "clerk_client" });
   const submit = (proofFileId, route = "final_online") => post(`/orders/${orderId}/payments/${route}/submit`, "clerk_client", { method: "qr_manual", reference: "FINAL-123", ...(proofFileId === undefined ? {} : { proofFileId }) });

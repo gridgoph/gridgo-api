@@ -32,7 +32,7 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR 75/25 c
 - Match and cart responses must run through `decorateCatalogPhotoUrls` (`src/catalog-photo-urls.js`) the same way catalog does. `publicPhotos` only sets metadata `url` (`/catalog/media/:fileId`); the client needs signed `downloadUrl` on `body.listings` and `body.cart.lines[].listing`. Skipping the decorator is the empty match thumbnail. `POST`/`PATCH`/`DELETE` `/me/carts/:id/lines` return compact listing stubs without photos so add/save does not wait on MinIO signing; `GET /me/carts/:id` stays the full projection.
 - The client service fee is seeded at 1,000 bps on the supplier subtotal; accepted quotes snapshot the rate, amount, fulfillment, and generalized online/direct allocation plan. COD and supplier-proof approval states are retired.
 - Clients receive the item subtotal, service fee, delivery pass-through, total, and their payment plan, but never supplier payout or milestone amounts. All order responses go through the role-aware projection in `src/operational-model.js`.
-- Claims/issue holds block payout. Confirmed supplier-principal collection caps automatic supplier payout. Rider pickup uses the six-check gate.
+- Claims/issue holds block payout. Confirmed supplier-principal collection caps automatic supplier payout. Rider pickup uses the six-check gate, and six passes move nothing on their own: `POST /dispatch/:id/pickup-checklist` needs `signature.fileId` naming a `handoff_signature` file the rider attached, else `409 handoff_signature_required`. Contract, refusal codes and projection rules: `docs/OPERATIONAL_MODEL_V2_API.md#supplier-handoff-signature`. New purposes and order fields ride in `files.purpose` (free text) and `orders.data` jsonb, so this needed no migration.
 - Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it.
 
 ## Geography
@@ -44,6 +44,8 @@ Coordinates use constrained latitude/longitude columns. Current database queries
 ## Taxonomy and supplier services
 
 `docs/TAXONOMY_API.md` is authoritative. The store is flat: references hold category codes and `categoryTree` is derived per request. Retired input aliases still resolve, but supplier service records are not silently rewritten.
+
+A category or subcategory can be deleted (`DELETE /taxonomy/{categories,subcategories}/:idOrCode`, `src/taxonomy-delete.js`) only when nothing stands on it and the build does not seed it; everything else is a `409` with a usage breakdown, never a cascade. The seed appends missing taxonomy rows, so a shipped entry is retired with `active: false`, never deleted.
 
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 

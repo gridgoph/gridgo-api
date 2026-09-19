@@ -448,3 +448,47 @@ test("checkout writes ops needs-QA and payment-submitted rows, not client or sho
   assert.equal(store.notifications.some((row) => row.userId === client.id), false);
   assert.equal(store.notifications.some((row) => row.userId === "supplier_a"), false);
 });
+
+test("a basket refuses a quantity under the listing's minimum instead of holding a line it cannot price", async () => {
+  // PrintZone's lanyard as the deployed board published it on 2026-09-19:
+  // PHP 50.00 each, and the shop does not run fewer than ten. A client added
+  // one, and the basket showed the line at "—" and Items at PHP 0.00 because
+  // the pricer's refusal was swallowed into a null subtotal.
+  const { store, client } = fixture();
+  const lanyard = store.catalogItems.find((row) => row.id === "item_a");
+  lanyard.basePriceMinor = 5_000;
+  lanyard.minimumOrderQuantity = 10;
+  const call = caller(store, client);
+  const created = await call("POST", "/me/carts", { fulfillmentMode: "pickup" });
+  const cartId = created.body.cart.id;
+
+  await assert.rejects(
+    call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 }),
+    (error) => error.status === 409 && error.code === "below_minimum_quantity"
+      && error.details.minimumOrderQuantity === 10,
+  );
+  assert.equal((await call("GET", `/me/carts/${cartId}`)).body.cart.lines.length, 0);
+
+  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 10 });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 50_000);
+  const lineId = added.body.cart.lines[0].id;
+
+  await assert.rejects(
+    call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { quantity: 9 }),
+    (error) => error.status === 409 && error.code === "below_minimum_quantity",
+  );
+  assert.equal((await call("GET", `/me/carts/${cartId}`)).body.cart.lines[0].quantity, 10);
+
+  // Raising the minimum after the fact leaves the line unpriced, and that is
+  // still reported as null rather than invented. Artwork can still be attached
+  // to it; only the pricing inputs are held to the minimum.
+  lanyard.minimumOrderQuantity = 20;
+  const stale = await call("GET", `/me/carts/${cartId}`);
+  assert.equal(stale.body.cart.lines[0].lineSubtotalMinor, null);
+  const withArt = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { artworkFileId: "file_art" });
+  assert.equal(withArt.status, 200);
+  assert.equal(withArt.body.cart.lines[0].artworkFileId, "file_art");
+  const raised = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { quantity: 20 });
+  assert.equal(raised.body.cart.lines[0].lineSubtotalMinor, 100_000);
+});
