@@ -28,7 +28,7 @@ function seededPrinterCap(listing, starter, shopSlug) {
 
 /** Local development shop. Production `npm run seed` never creates this. */
 export const LOVIS_DEV_SHOP = Object.freeze({
-  email: "felyciaaa0220@gmail.com",
+  email: "venvilots@gmail.com",
   shopName: "Lovis Printshop",
   contactName: "Felycia",
   phone: "+639171234567",
@@ -41,7 +41,7 @@ export const LOVIS_DEV_SHOP = Object.freeze({
 
 /** Local development client. Must not be consumed as an extra shop. */
 export const MARK_DEV_CLIENT = Object.freeze({
-  email: "markdavidprado@gmail.com",
+  email: "rnavillotes01455@usep.edu.ph",
   name: "Mark David",
 });
 
@@ -50,7 +50,7 @@ export const MARK_DEV_CLIENT = Object.freeze({
  * Email matches the official Clerk rider the rider app prefills in `__DEV__`.
  */
 export const MARK_DEV_RIDER = Object.freeze({
-  email: "mddprado00290@usep.edu.ph",
+  email: "sgeto509@gmail.com",
   name: "Mark David Prado",
   phone: "+639171234567",
   vehicleType: "motorcycle",

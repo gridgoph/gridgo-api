@@ -36,6 +36,7 @@ import {
   APPROVAL_CASE_STATUSES,
   APPROVAL_DECISIONS,
   approvalDecisionInput,
+  businessApplicationProjection,
   decideApprovalCase,
   supplierApprovalReadiness,
 } from "./approval-cases.js";
@@ -168,6 +169,7 @@ import {
   routeSupportDesk,
   seedSupportDeskAdmin,
 } from "./support-desk.js";
+import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
 import {
   loadDeviceTokenStore,
   loadStore,
@@ -795,6 +797,7 @@ function approvalCaseDetail(store, approvalCase) {
     return {
       ...base,
       clientProfile: clientProfileProjection(store, approvalCase.userId),
+      application: businessApplicationProjection(store, approvalCase),
     };
   }
   if (approvalCase.kind === "rider") {
@@ -2063,6 +2066,19 @@ async function handleRequest(req, res) {
       return send(res, 401, {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    if (isSupportChatRoute(pathname)) {
+      return routeSupportChat({
+        req,
+        res,
+        pathname,
+        url,
+        user,
+        readBody,
+        send,
+        database,
       });
     }
 
@@ -5701,6 +5717,28 @@ const server = http.createServer((req, res) => {
         message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
       });
     });
+    return;
+  }
+  if (mutatesStore && isSupportChatRoute(pathname)) {
+    // Clerk-authenticated, but its own tables and lock — do not hold the
+    // domain mutation lock while someone is typing to Operations.
+    void readBody(req)
+      .then(() => verifyClerkBeforeMutation(req, pathname))
+      .then(() => handleRequest(req, res))
+      .catch((error) => {
+        if (res.headersSent) {
+          res.destroy(error);
+          return;
+        }
+        if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+          sendDomainError(res, error);
+          return;
+        }
+        send(res, 500, {
+          error: "server_error",
+          message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
+        });
+      });
     return;
   }
   if (mutatesStore && isSupportDeskRoute(pathname)) {

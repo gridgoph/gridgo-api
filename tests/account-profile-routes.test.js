@@ -25,6 +25,10 @@ function fixture(overrides = {}) {
       users: [user],
       userRoleMemberships: [{ userId: user.id, role: "client", createdAt: AT }],
       clientAddresses: [],
+      clientProfiles: [],
+      approvalCases: [],
+      approvalCaseEvents: [],
+      notifications: [],
       auditLog: [],
     },
   };
@@ -90,7 +94,7 @@ test("PATCH /me rejects a stale phone version without changing the profile", asy
   assert.equal(context.user.version, 3);
 });
 
-test("POST /me/business-apply is idempotent and reuses client addresses", async () => {
+test("POST /me/business-apply opens a pending case without flipping account type", async () => {
   const context = fixture();
   const body = {
     accountType: "business",
@@ -107,13 +111,16 @@ test("POST /me/business-apply is idempotent and reuses client addresses", async 
   const second = await call(context, "POST", "/me/business-apply", body);
 
   assert.equal(first.status, 200);
-  assert.equal(first.body.user.accountType, "business");
-  assert.equal(first.body.user.orgName, "GRIDGO Business Customer");
-  assert.equal(first.body.user.version, 2);
-  assert.equal(second.body.user.version, 2);
+  assert.equal(first.body.user.accountType, "individual");
+  assert.equal(Object.hasOwn(first.body.user, "orgName"), false);
+  assert.equal(first.body.approvalCase.kind, "business_client");
+  assert.equal(first.body.approvalCase.status, "pending");
+  assert.equal(second.body.approvalCase.id, first.body.approvalCase.id);
+  assert.equal(second.body.user.version, first.body.user.version);
   assert.equal(second.mutated, false);
   assert.equal(context.store.clientAddresses.length, 1);
   assert.equal(context.store.auditLog.length, 1);
+  assert.equal(context.user.accountType, "individual");
 });
 
 test("an individual remains valid without orgName", async () => {
@@ -157,6 +164,8 @@ test("primary client profile edits still respect selected membership isolation",
     accountType: "business", businessName: "Client Business",
   });
   assert.equal(response.status, 200);
-  assert.equal(persisted.orgName, "Client Business");
+  assert.equal(response.body.approvalCase.status, "pending");
+  assert.equal(Object.hasOwn(persisted, "orgName"), false);
+  assert.equal(persisted.accountType, "individual");
   assert.equal(persisted.role, "client");
 });

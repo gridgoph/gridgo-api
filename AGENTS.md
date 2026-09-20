@@ -10,7 +10,7 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 - Every HTTP mutation runs in one transaction with a transaction-scoped advisory lock. Money/order/credit/claim/issue changes, audit rows, and notifications commit atomically.
 - MinIO owns file bytes. PostgreSQL stores metadata, private object keys, and opaque file references only.
 - Fresh `npm run seed` is idempotent reference data only: catalog, taxonomy, zones, settings, formats, starters. It must never create users or operational records and has no destructive reset.
-- Local development only: `npm run seed:dev` (and local compose) additionally seeds three Davao shops against real development Clerk users, including Lovis Printshop for `felyciaaa0220@gmail.com`. Production compose must keep `npm run seed`.
+- Local development only: `npm run seed:dev` (and local compose) additionally seeds three Davao shops against real development Clerk users, including Lovis Printshop for `venvilots@gmail.com`. Production compose must keep `npm run seed`.
 
 ## Clerk-only identity
 
@@ -33,7 +33,7 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR 75/25 c
 - The client service fee is seeded at 1,000 bps on the supplier subtotal; accepted quotes snapshot the rate, amount, fulfillment, and generalized online/direct allocation plan. COD and supplier-proof approval states are retired.
 - Clients receive the item subtotal, service fee, delivery pass-through, total, and their payment plan, but never supplier payout or milestone amounts. All order responses go through the role-aware projection in `src/operational-model.js`.
 - Claims/issue holds block payout. Confirmed supplier-principal collection caps automatic supplier payout. Rider pickup uses the six-check gate.
-- Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it.
+- Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it. `POST /me/business-application` (and legacy `POST /me/business-apply`) opens a pending `business_client` case — do not flip `accountType` until Operations approves it.
 
 ## Geography
 

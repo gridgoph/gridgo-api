@@ -434,14 +434,20 @@ export function enrollRider({ store, clerkUserId, clerkUser, body, idempotencyKe
   return { status: 201, user, membership, riderProfile: profile, approvalCase };
 }
 
+const BUSINESS_ACCOUNT_TYPES = new Set(["business", "organization"]);
+
 export function applyForBusiness({ store, user, body, idempotencyKey, createId, now }) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["businessName", "businessNature"]);
+  rejectUnexpected(body, ["businessName", "businessNature", "accountType"]);
   const fields = {};
   const businessName = nonblank(body.businessName);
   const businessNature = nonblank(body.businessNature);
+  const accountType = body.accountType == null ? "business" : body.accountType;
   if (!businessName) fields.businessName = "is required";
   if (!businessNature) fields.businessNature = "is required";
+  if (!BUSINESS_ACCOUNT_TYPES.has(accountType)) {
+    fields.accountType = "must be business or organization";
+  }
   if (Object.keys(fields).length) invalidApplication(fields);
   if (!(store.userRoleMemberships || []).some(
     (membership) => membership.userId === user.id && membership.role === "client",
@@ -450,24 +456,27 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
       requiredRole: "client",
     });
   }
+  store.approvalCases ||= [];
+  store.approvalCaseEvents ||= [];
+  store.clientProfiles ||= [];
+  store.notifications ||= [];
+  store.auditLog ||= [];
   if (exactRetry(store, { kind: "business_client", user, key: idempotencyKey, body })) {
     return retryResult(store, user, "client", "business_client");
   }
   ensureNoCase(store, user.id, "business_client");
   const at = now();
-  let profile = (store.clientProfiles || []).find((candidate) => candidate.userId === user.id);
+  let profile = store.clientProfiles.find((candidate) => candidate.userId === user.id);
   if (!profile) {
     profile = { userId: user.id, clientKind: "personal", updatedAt: at };
     store.clientProfiles.push(profile);
   }
-  Object.assign(profile, { clientKind: "business", businessName, businessNature, updatedAt: at });
-  if (user.role === "client") {
-    user.accountType = "business";
-    user.orgName = businessName;
-  }
+  // Hold the requested name for review. Do not flip the live account type —
+  // Operations converts the client on approve.
+  Object.assign(profile, { businessName, businessNature, updatedAt: at });
   const approvalCase = addInitialCase(store, {
     user, kind: "business_client", submittedAt: at, key: idempotencyKey, body, createId, at,
-    snapshot: { businessName, businessNature },
+    snapshot: { businessName, businessNature, accountType },
   });
   notifySignupAndInvalidate(store, approvalCase, createId, at);
   return {

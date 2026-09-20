@@ -122,6 +122,56 @@ function fail(status, code, message, details = {}) {
   throw error;
 }
 
+export function latestApplicantSnapshot(store, caseId) {
+  const events = (store.approvalCaseEvents || [])
+    .filter((event) => event.approvalCaseId === caseId && event.actorKind === "applicant")
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const snapshot = events.at(-1)?.snapshot || {};
+  const rest = { ...snapshot };
+  delete rest.requestPayloadHash;
+  return rest;
+}
+
+export function businessApplicationProjection(store, approvalCase) {
+  const snapshot = latestApplicantSnapshot(store, approvalCase.id);
+  const profile = (store.clientProfiles || []).find((candidate) => candidate.userId === approvalCase.userId);
+  const accountType = snapshot.accountType === "organization" ? "organization" : "business";
+  return {
+    businessName: nonblank(snapshot.businessName) || nonblank(profile?.businessName) || null,
+    businessNature: nonblank(snapshot.businessNature) || nonblank(profile?.businessNature) || null,
+    accountType,
+  };
+}
+
+function applyBusinessClientConversion(store, approvalCase, at) {
+  if (approvalCase.kind !== "business_client") return;
+  const application = businessApplicationProjection(store, approvalCase);
+  const user = (store.users || []).find((candidate) => candidate.id === approvalCase.userId);
+  if (user && (user.role === "client" || (store.userRoleMemberships || []).some(
+    (membership) => membership.userId === user.id && membership.role === "client",
+  ))) {
+    user.accountType = application.accountType;
+    if (application.businessName) user.orgName = application.businessName;
+    user.version = (user.version || 1) + 1;
+  }
+  const profile = (store.clientProfiles || []).find((candidate) => candidate.userId === approvalCase.userId);
+  if (profile) {
+    profile.clientKind = "business";
+    if (application.businessName) profile.businessName = application.businessName;
+    if (application.businessNature) profile.businessNature = application.businessNature;
+    profile.updatedAt = at;
+  } else if (application.businessName) {
+    store.clientProfiles ||= [];
+    store.clientProfiles.push({
+      userId: approvalCase.userId,
+      clientKind: "business",
+      businessName: application.businessName,
+      businessNature: application.businessNature,
+      updatedAt: at,
+    });
+  }
+}
+
 function updateLegacyVerification(store, approvalCase, action, actorId, at, reason) {
   if (!new Set(["supplier", "rider"]).has(approvalCase.kind)) return;
   const user = (store.users || []).find((candidate) => candidate.id === approvalCase.userId);
@@ -260,6 +310,9 @@ export function decideApprovalCase({
   const suspendedServiceIds = action === "suspend"
     ? suspendSupplierServices(store, approvalCase, actor.id, at, input.reason)
     : [];
+  if (action === "approve") {
+    applyBusinessClientConversion(store, approvalCase, at);
+  }
   // Restore intentionally changes only the account case. Every service line
   // stays suspended until an approver explicitly reviews its verify route.
   updateLegacyVerification(store, approvalCase, action, actor.id, at, input.reason);

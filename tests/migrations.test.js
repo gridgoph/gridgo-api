@@ -51,6 +51,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "support_admins", "support_tickets",
+      "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
@@ -95,6 +96,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786957200000_tarpaulin_printer_max_width",
     "1786959000000_notification_push_outbox",
     "1786960800000_a_shop_says_where_it_wants_to_be_paid",
+        "1786964400000_authenticated_support_chat",
       ],
     );
 
@@ -230,6 +232,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
          3, false, now(), now(), 0, '{}')
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_threads`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_messages`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_reads`])).rows[0].t, null);
 
     // The shop's payout plate goes first, and with it the only file reference
     // type that pointed at it, so the older constraint can be put back.
