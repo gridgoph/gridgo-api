@@ -4,6 +4,7 @@ import {
   identityHasMembership } from "./authorization-context.js";
 import {
   catalogItemBlockers,
+  clientMoneyMinor,
   createOrderLineSnapshot,
   listingFitsPrinterCap,
   minimumCatalogPrice,
@@ -28,6 +29,7 @@ import {
   validatePreferenceRanking,
 } from "./order-match.js";
 import {
+  notifyClientReceiptReady,
   notifyOpsJobNeedsQa,
   notifyOpsPaymentSubmitted,
 } from "./client-order-notifications.js";
@@ -230,12 +232,15 @@ function cartLineSubtotal(store, line) {
 
 function publicCartListingStub(store, item, optionIds) {
   const selected = selectedCatalogPrice(store, item, optionIds);
+  const fromPriceMinor = minimumCatalogPrice(store, item);
   return {
     id: item.id,
     name: item.name,
     supplierId: item.supplierId,
-    fromPriceMinor: minimumCatalogPrice(store, item),
+    fromPriceMinor,
     effectivePriceMinor: selected.effectiveUnitPriceMinor,
+    clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
+    clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
@@ -277,6 +282,11 @@ function publicCart(store, cart, { compactListings = false } = {}) {
         ? publicCartListingStub(store, item, line.optionIds || [])
         : publicCatalogItem(store, item, { selectedOptionIds: line.optionIds || [] }))
       : null;
+    // Through the pricing engine, not a multiplication: the basket and the
+    // invoice have to agree, and a measured or tiered line does not fit in a
+    // unit price times a quantity. `lineSubtotalMinor` stays the shop figure;
+    // the client reads `clientLineSubtotalMinor`.
+    const lineSubtotalMinor = cartLineSubtotal(store, line);
     return {
       id: line.id,
       supplierId: line.supplierId,
@@ -290,10 +300,8 @@ function publicCart(store, cart, { compactListings = false } = {}) {
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
       listing,
-      // Through the pricing engine, not a multiplication: the basket and the
-      // invoice have to agree, and a measured or tiered line does not fit in a
-      // unit price times a quantity.
-      lineSubtotalMinor: cartLineSubtotal(store, line),
+      lineSubtotalMinor,
+      clientLineSubtotalMinor: clientMoneyMinor(store, lineSubtotalMinor),
     };
   });
   return {
@@ -676,6 +684,7 @@ function checkout(store, user, cart, body, createId, at) {
   });
   notifyOpsJobNeedsQa(store, order, { createId, at });
   notifyOpsPaymentSubmitted(store, order, { createId, at });
+  notifyClientReceiptReady(store, order, { createId, at });
   queueOrderInvalidate(store, order, ["orders"]);
   return { order: publicMatchedOrder(store, order), invoice };
 }

@@ -356,3 +356,27 @@ export function fromPriceMinor({ basePriceMinor, groups = [], volumeTiers = [], 
   if (total < 0n) total = 0n;
   return toNumber(total, "fromPriceMinor");
 }
+
+/**
+ * What the client pays for a shop amount: the shop figure plus GRIDGO's fee.
+ *
+ * Same half-up basis-point rounding as `roundBps` in the operational model
+ * (`(value * rate + 5_000) / 10_000`). Shop, ops, and the supplier preview
+ * keep the supplier amount; only client-facing surfaces read this.
+ *
+ * ₱12.00 (1_200) at 4_500 bps → 1_740. At 1_000 bps → 1_320.
+ */
+export function gridgoAmountMinor(supplierMinor, serviceFeeRateBps) {
+  if (supplierMinor == null) return null;
+  const shop = minor(supplierMinor, "supplierMinor");
+  if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
+    fail(
+      400,
+      "invalid_service_fee_rate",
+      "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
+      { field: "serviceFeeRateBps" },
+    );
+  }
+  const fee = divideRounded(shop * BigInt(serviceFeeRateBps), BPS);
+  return toNumber(shop + fee, "gridgoAmountMinor");
+}

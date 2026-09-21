@@ -88,6 +88,11 @@ const COPY = {
     title: "Your job was cancelled",
     body: "This order is no longer going ahead.",
   },
+  completed: {
+    type: "order_completed",
+    title: "Job complete",
+    body: "Your order is complete and the check window has closed.",
+  },
 };
 
 /**
@@ -135,6 +140,11 @@ const COLLECT_COPY = {
     type: "order_cancelled",
     title: "Your job was cancelled",
     body: "This order is no longer going ahead.",
+  },
+  completed: {
+    type: "order_completed",
+    title: "Job complete",
+    body: "This order was collected at the GRIDGO Office counter and the check window has closed.",
   },
 };
 
@@ -365,11 +375,58 @@ export function ensureClientOrderNotification(store, order, { id, at }) {
   return writeDraft(store, clientNotificationDraft(order), { id, at });
 }
 
+function orderIsRated(store, order) {
+  return (store.shopReviews || []).some((review) => review.orderId === order.id);
+}
+
+/**
+ * Ask the client to rate a finished job, once.
+ *
+ * Separate from the "job complete" row so that row can stay a record and
+ * this one can sit in Needs you. Occurrence is per order, not per state
+ * visit — rating is asked once even if the job later moves to payout_released.
+ */
+export function rateReminderDraft(store, order) {
+  if (!order?.clientId || !order.id) return null;
+  if (order.state !== "completed" && order.state !== "payout_released") return null;
+  if (orderIsRated(store, order)) return null;
+  return {
+    userId: order.clientId,
+    appRole: "client",
+    type: "order_rate_reminder",
+    occurrenceKey: `rate:${order.id}`,
+    orderId: order.id,
+    title: "How did it go?",
+    body: "Rate this job so GRIDGO can send your next one to a shop that did well by you.",
+    read: false,
+  };
+}
+
+/** The acknowledgement receipt is ready to open. Written once at checkout. */
+export function receiptReadyDraft(order) {
+  if (!order?.clientId || !order.id) return null;
+  return {
+    userId: order.clientId,
+    appRole: "client",
+    type: "order_receipt_ready",
+    occurrenceKey: `receipt:${order.id}`,
+    orderId: order.id,
+    title: "Your receipt is ready",
+    body: "Open the receipt to see printing, delivery, the service fee and your payment reference.",
+    read: false,
+  };
+}
+
+export function notifyClientReceiptReady(store, order, { createId, at }) {
+  return writeDraft(store, receiptReadyDraft(order), { id: createId("ntf"), at });
+}
+
 /**
  * Client, shop, and rider inbox rows for this job's current state.
  *
  * One call so a transition cannot remember the client and forget the shop.
- * Each party is still written once per type.
+ * Each party is still written once per type. A finished unrated job also
+ * gets the rating reminder, once.
  */
 export function notifyOrderParties(store, order, { createId, at }) {
   if (typeof createId !== "function" || !at) {
@@ -381,6 +438,11 @@ export function notifyOrderParties(store, order, { createId, at }) {
     at,
   });
   if (client.created) created.push(client.notification);
+  const reminder = writeDraft(store, rateReminderDraft(store, order), {
+    id: createId("ntf"),
+    at,
+  });
+  if (reminder.created) created.push(reminder.notification);
   const shop = writeDraft(store, shopNotificationDraft(order), {
     id: createId("ntf"),
     at,

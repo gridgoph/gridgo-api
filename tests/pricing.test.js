@@ -9,6 +9,7 @@ import {
   asksQuantity,
   billableUnits,
   fromPriceMinor,
+  gridgoAmountMinor,
   measurementKindFor,
   priceLine,
 } from "../src/pricing.js";
@@ -292,4 +293,12 @@ test("the From price falls to the cheapest speed a shop sells", () => {
     }),
     25_000, // Lovis hardbound reads "From PHP 250.00", not PHP 700.00
   );
+});
+
+test("GRIDGO amount is the shop figure plus the fee, in minor units, no floats", () => {
+  // ₱12.00 at 45% is ₱17.40. At 10% it is ₱13.20.
+  assert.equal(gridgoAmountMinor(1_200, 4_500), 1_740);
+  assert.equal(gridgoAmountMinor(1_200, 1_000), 1_320);
+  assert.equal(gridgoAmountMinor(0, 4_500), 0);
+  assert.equal(gridgoAmountMinor(null, 4_500), null);
 });

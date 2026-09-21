@@ -1,5 +1,5 @@
 import { resolveCategoryCode } from "./taxonomy.js";
-import { measurementKindFor, priceLine } from "./pricing.js";
+import { gridgoAmountMinor, measurementKindFor, priceLine } from "./pricing.js";
 
 /** Volume breaks and speeds a listing sells, ordered as the client reads them. */
 function priceTiersFor(store, itemId) {
@@ -445,6 +445,20 @@ export function itemTurnaroundHours(item, service) {
     : service.turnaroundHours;
 }
 
+/**
+ * GRIDGO's client-facing figure for a shop amount.
+ *
+ * Shop / ops / supplier keep `fromPriceMinor` and friends. The client reads
+ * `clientFromPriceMinor` — the same shop number plus the live service fee.
+ * A missing or unset rate is treated as zero so a catalogue without settings
+ * still projects, and never invents a second formula.
+ */
+export function clientMoneyMinor(store, supplierMinor) {
+  if (!Number.isSafeInteger(supplierMinor)) return null;
+  const rate = store.settings?.serviceFeeRateBps ?? 0;
+  return gridgoAmountMinor(supplierMinor, rate);
+}
+
 export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
   if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
@@ -470,6 +484,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
   if (selectedOptionIds !== undefined || !groups.some((group) => group.required)) {
     effectivePriceMinor = selectedCatalogPrice(store, item, selectedOptionIds ?? []).effectiveUnitPriceMinor;
   }
+  const fromPriceMinor = minimumCatalogPrice(store, item);
   return {
     id: item.id,
     supplierId: item.supplierId,
@@ -479,8 +494,10 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     name: item.name,
     description: item.description,
     basePriceMinor: item.basePriceMinor,
-    fromPriceMinor: minimumCatalogPrice(store, item),
+    fromPriceMinor,
     effectivePriceMinor,
+    clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
+    clientEffectivePriceMinor: clientMoneyMinor(store, effectivePriceMinor),
     pricingUnit: item.pricingUnit || "per_unit",
     packageQty: item.packageQty ?? null,
     // What the client has to be asked before this listing can be priced.

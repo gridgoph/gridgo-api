@@ -97,6 +97,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786959000000_notification_push_outbox",
     "1786960800000_a_shop_says_where_it_wants_to_be_paid",
         "1786964400000_authenticated_support_chat",
+        "1786968000000_support_chat_history",
       ],
     );
 
@@ -233,6 +234,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.ok((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_threads`])).rows[0].t);
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_threads`])).rows[0].t, null);
     assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_messages`])).rows[0].t, null);

@@ -167,11 +167,38 @@ export async function findThread(database, id, viewerId) {
 
 export async function findPartyThread(database, userId, role, viewerId) {
   const result = await database.query(
-    `${threadSelect(viewerId)} WHERE t.party_user_id = $2 AND t.party_role = $3`,
+    `${threadSelect(viewerId)}
+     WHERE t.party_user_id = $2 AND t.party_role = $3
+     ORDER BY t.last_message_at DESC NULLS LAST, t.updated_at DESC
+     LIMIT 1`,
     [viewerId, userId, role],
   );
   const row = result.rows[0];
   return row ? mapThread(row, viewerId) : null;
+}
+
+export async function findDraftPartyThread(database, userId, role, viewerId) {
+  const result = await database.query(
+    `${threadSelect(viewerId)}
+     WHERE t.party_user_id = $2 AND t.party_role = $3 AND t.last_message_at IS NULL
+     ORDER BY t.created_at DESC
+     LIMIT 1`,
+    [viewerId, userId, role],
+  );
+  const row = result.rows[0];
+  return row ? mapThread(row, viewerId) : null;
+}
+
+export async function listPartyThreads(database, userId, role, viewerId, { includeDrafts = false } = {}) {
+  const draftClause = includeDrafts ? "" : "AND t.last_message_at IS NOT NULL";
+  const result = await database.query(
+    `${threadSelect(viewerId)}
+     WHERE t.party_user_id = $2 AND t.party_role = $3
+       ${draftClause}
+     ORDER BY t.last_message_at DESC NULLS LAST, t.updated_at DESC`,
+    [viewerId, userId, role],
+  );
+  return result.rows.map((row) => mapThread(row, viewerId));
 }
 
 export async function listThreads(database, viewerId, { role, q, limit } = {}) {
@@ -240,16 +267,39 @@ export async function markThreadRead(database, threadId, userId) {
   );
 }
 
-async function ensurePartyThread(database, userId, role) {
+async function insertPartyThread(database, userId, role) {
   const result = await database.query(
     `INSERT INTO support_chat_threads (party_user_id, party_role)
      VALUES ($1, $2)
-     ON CONFLICT (party_user_id, party_role)
-     DO UPDATE SET updated_at = support_chat_threads.updated_at
      RETURNING id`,
     [userId, role],
   );
   return result.rows[0].id;
+}
+
+export async function openPartyDraft(database, userId, role, viewerId) {
+  const existing = await findDraftPartyThread(database, userId, role, viewerId);
+  if (existing) return existing;
+  const id = await insertPartyThread(database, userId, role);
+  return findThread(database, id, viewerId);
+}
+
+async function resolvePartyThreadId(database, {
+  threadId,
+  createParty,
+  newThread,
+  viewerId,
+}) {
+  if (threadId) return threadId;
+  if (!createParty) return null;
+  const { userId, role } = createParty;
+  if (newThread) {
+    const draft = await openPartyDraft(database, userId, role, viewerId || userId);
+    return draft?.id ?? null;
+  }
+  const latest = await findPartyThread(database, userId, role, viewerId || userId);
+  if (latest) return latest.id;
+  return insertPartyThread(database, userId, role);
 }
 
 export async function postMessage(database, {
@@ -258,11 +308,14 @@ export async function postMessage(database, {
   senderRole,
   body,
   createParty,
+  newThread,
 }) {
-  let id = threadId;
-  if (!id && createParty) {
-    id = await ensurePartyThread(database, createParty.userId, createParty.role);
-  }
+  const id = await resolvePartyThreadId(database, {
+    threadId,
+    createParty,
+    newThread,
+    viewerId: senderUserId,
+  });
   if (!id) return null;
   const inserted = await database.query(
     `INSERT INTO support_chat_messages (thread_id, sender_user_id, sender_role, body)
@@ -318,12 +371,14 @@ function rateLimited(send, res) {
 
 async function partySnapshot(database, user, { markRead = false } = {}) {
   const role = actorRole(user);
-  const thread = await findPartyThread(database, user.id, role, user.id);
-  if (!thread) return { thread: null, messages: [] };
+  const threads = await listPartyThreads(database, user.id, role, user.id);
+  const unreadCount = threads.reduce((sum, row) => sum + Number(row.unreadCount || 0), 0);
+  const thread = threads[0] ?? await findDraftPartyThread(database, user.id, role, user.id);
+  if (!thread) return { threads, thread: null, messages: [], unreadCount };
   if (markRead) await markThreadRead(database, thread.id, user.id);
   const fresh = markRead ? await findThread(database, thread.id, user.id) : thread;
   const messages = await listMessages(database, thread.id, user.id, {});
-  return { thread: fresh, messages };
+  return { threads, thread: fresh, messages, unreadCount };
 }
 
 function openChatStream(req, res, { user, database, lastEventId }) {
@@ -388,10 +443,8 @@ async function replayMissed(database, user, lastEventId, writeEvent) {
   const values = [anchor.rows[0].created_at, lastEventId];
   let scope = "";
   if (isPartyActor(user)) {
-    const own = await findPartyThread(database, user.id, actorRole(user), user.id);
-    if (!own) return;
-    values.push(own.id);
-    scope = `AND t.id = $${values.length}`;
+    values.push(user.id, actorRole(user));
+    scope = `AND t.party_user_id = $${values.length - 1} AND t.party_role = $${values.length}`;
   } else if (!isStaffActor(user)) {
     return;
   }
@@ -490,6 +543,19 @@ export async function routeSupportChat({
     return true;
   }
 
+  if (method === "POST" && path === "/support-chat/me/threads") {
+    if (!isPartyActor(user)) {
+      forbidden(send, res);
+      return true;
+    }
+    const thread = await database.transaction(
+      () => openPartyDraft(database, user.id, actorRole(user), user.id),
+      { lockKey: CHAT_LOCK },
+    );
+    send(res, 200, { thread });
+    return true;
+  }
+
   if (method === "POST" && path === "/support-chat/me/messages") {
     if (!isPartyActor(user)) {
       forbidden(send, res);
@@ -499,17 +565,28 @@ export async function routeSupportChat({
       rateLimited(send, res);
       return true;
     }
-    const parsed = parseMessageBody((await readBody(req)).body);
+    const payload = await readBody(req);
+    const parsed = parseMessageBody(payload.body);
     if (!parsed.ok) {
       invalid(send, res, parsed.message);
       return true;
     }
+    const requestedId = typeof payload.threadId === "string" ? payload.threadId.trim() : "";
+    if (requestedId) {
+      const owned = await findThread(database, requestedId, user.id);
+      if (!owned || !canViewThread(user, owned)) {
+        notFound(send, res);
+        return true;
+      }
+    }
     const posted = await database.transaction(
       () => postMessage(database, {
+        threadId: requestedId || undefined,
         senderUserId: user.id,
         senderRole: actorRole(user),
         body: parsed.body,
         createParty: { userId: user.id, role: actorRole(user) },
+        newThread: payload.newThread === true && !requestedId,
       }),
       { lockKey: CHAT_LOCK },
     );
@@ -523,16 +600,18 @@ export async function routeSupportChat({
       forbidden(send, res);
       return true;
     }
-    const thread = await findPartyThread(database, user.id, actorRole(user), user.id);
-    if (!thread) {
-      send(res, 200, { thread: null });
+    const threads = await listPartyThreads(database, user.id, actorRole(user), user.id);
+    if (!threads.length) {
+      send(res, 200, { thread: null, unreadCount: 0 });
       return true;
     }
-    await database.transaction(
-      () => markThreadRead(database, thread.id, user.id),
-      { lockKey: CHAT_LOCK },
-    );
-    send(res, 200, { thread: await findThread(database, thread.id, user.id) });
+    await database.transaction(async () => {
+      for (const row of threads) {
+        await markThreadRead(database, row.id, user.id);
+      }
+    }, { lockKey: CHAT_LOCK });
+    const fresh = await findThread(database, threads[0].id, user.id);
+    send(res, 200, { thread: fresh, unreadCount: 0 });
     return true;
   }
 

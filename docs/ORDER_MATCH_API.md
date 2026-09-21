@@ -120,7 +120,7 @@ Every cart payload includes one counter location per selected supplier:
 }
 ```
 
-`POST /me/carts/:cartId/lines`, `PATCH /me/carts/:cartId/lines/:lineId`, and `DELETE /me/carts/:cartId/lines/:lineId` keep the standard `{ "cart": ... }` envelope but return compact `line.listing` stubs so add/save/remove do not rebuild or sign every catalog photo. Each stub contains `id`, `name`, `supplierId`, `fromPriceMinor`, `effectivePriceMinor`, and `selectedOptions: [{ id, label }]`; it deliberately omits `photos`. `GET /me/carts/:cartId` continues to return full catalog listing projections. Fulfilment, drop-off, and mockup mutations still return the full projection.
+`POST /me/carts/:cartId/lines`, `PATCH /me/carts/:cartId/lines/:lineId`, and `DELETE /me/carts/:cartId/lines/:lineId` keep the standard `{ "cart": ... }` envelope but return compact `line.listing` stubs so add/save/remove do not rebuild or sign every catalog photo. Each stub contains `id`, `name`, `supplierId`, `fromPriceMinor`, `effectivePriceMinor`, `clientFromPriceMinor`, `clientEffectivePriceMinor`, and `selectedOptions: [{ id, label }]`; it deliberately omits `photos`. Cart lines also carry `lineSubtotalMinor` (shop) and `clientLineSubtotalMinor` (GRIDGO). `GET /me/carts/:cartId` continues to return full catalog listing projections. Fulfilment, drop-off, and mockup mutations still return the full projection.
 
 Set line mockup with `{ "fileId": "file_..." }`. Upload it first with `POST /files`, `purpose=mockup`. The ready file must belong to the client. The same opaque ID is snapshotted onto the order line and becomes readable to Operations and that line's job shop.
 

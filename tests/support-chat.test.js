@@ -191,6 +191,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
   assert.equal(empty.status, 200);
   assert.equal(empty.body.thread, null);
   assert.deepEqual(empty.body.messages, []);
+  assert.deepEqual(empty.body.threads ?? [], []);
 
   const sent = await request(instance.api, "/support-chat/me/messages", {
     method: "POST",
@@ -299,4 +300,35 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "   " },
   });
   assert.equal(blank.status, 400);
+
+  const draft = await request(instance.api, "/support-chat/me/threads", {
+    method: "POST",
+    token: client,
+    role: "client",
+    body: {},
+  });
+  assert.equal(draft.status, 200);
+  assert.notEqual(draft.body.thread.id, sent.body.thread.id);
+  assert.equal(draft.body.thread.lastMessageAt, null);
+
+  const reuse = await request(instance.api, "/support-chat/me/threads", {
+    method: "POST",
+    token: client,
+    role: "client",
+    body: {},
+  });
+  assert.equal(reuse.body.thread.id, draft.body.thread.id);
+
+  const second = await request(instance.api, "/support-chat/me/messages", {
+    method: "POST",
+    token: client,
+    role: "client",
+    body: { body: "This is a new conversation.", threadId: draft.body.thread.id },
+  });
+  assert.equal(second.status, 201);
+  assert.equal(second.body.thread.id, draft.body.thread.id);
+  assert.notEqual(second.body.thread.id, sent.body.thread.id);
+
+  const history = await request(instance.api, "/support-chat/me", { token: client, role: "client" });
+  assert.equal(history.body.threads.length, 2);
 });

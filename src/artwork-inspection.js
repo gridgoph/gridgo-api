@@ -157,19 +157,24 @@ function firstMediaBox(text) {
  * outline also carries `/Count` and a document with a long table of contents
  * would otherwise report more pages than it has. Nested page-tree nodes each
  * carry their own subtotal, so the largest is the root's.
+ *
+ * The count is taken from the node's own dictionary, not a fixed window: a
+ * long `/Kids` array — the shape a 30-page tree actually has — used to push
+ * `/Count` more than 512 bytes from `/Type /Pages`, and we reported nothing.
+ * An indirect `/Count 4 0 R` is not a page count, and treating the object
+ * number as one would be guessing.
  */
 function pageTreeCount(text) {
   let best = null;
   const nodes = /\/Type\s*\/Pages\b/g;
   let node;
   while ((node = nodes.exec(text)) !== null) {
-    // The node's own dictionary, near enough: a page-tree node is small, and a
-    // window keeps a /Count belonging to the next object out of the answer.
-    const window = text.slice(Math.max(0, node.index - 512), node.index + 512);
-    const counted = /\/Count\s+(\d+)/.exec(window);
-    if (!counted) continue;
-    const value = Number(counted[1]);
-    if (Number.isFinite(value) && value > 0 && (best == null || value > best)) best = value;
+    const dict = enclosingDictionary(text, node.index) ?? text.slice(
+      Math.max(0, node.index - 8192),
+      node.index + 8192,
+    );
+    const counted = directPageCount(dict);
+    if (counted != null && (best == null || counted > best)) best = counted;
   }
   if (best != null) return best;
 
@@ -177,6 +182,44 @@ function pageTreeCount(text) {
   // must not match `/Type /Pages`, hence the boundary.
   const leaves = text.match(/\/Type\s*\/Page(?![s\w])/g);
   return leaves?.length ? leaves.length : null;
+}
+
+/** The `<< ... >>` that contains this offset, or null when the file is too broken to pair. */
+function enclosingDictionary(text, at) {
+  let from = at;
+  while (from >= 0) {
+    const start = text.lastIndexOf("<<", from);
+    if (start === -1) return null;
+    const dict = dictionaryFrom(text, start);
+    if (dict && start + dict.length > at) return dict;
+    from = start - 1;
+  }
+  return null;
+}
+
+function dictionaryFrom(text, start) {
+  let depth = 0;
+  for (let i = start; i < text.length - 1; i += 1) {
+    if (text[i] === "<" && text[i + 1] === "<") {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (text[i] === ">" && text[i + 1] === ">") {
+      depth -= 1;
+      i += 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** A `/Count` that is a bare integer, never an indirect reference. */
+function directPageCount(dict) {
+  const counted = /\/Count\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+  if (!counted) return null;
+  const value = Number(counted[1]);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 /** How many compressed streams to inflate before giving up on a large file. */
@@ -220,14 +263,100 @@ function inflatedStreams(bytes) {
         maxOutputLength: MAX_INFLATED_BYTES - total,
       });
       if (!inflated.length) continue;
-      total += inflated.length;
-      out.push(inflated.toString("latin1"));
+      let readable = inflated;
+      try {
+        readable = undoPredictor(inflated, dictionary);
+      } catch {
+        // A predictor we cannot undo is still scanned as inflated bytes.
+        // Guessing a page count from the leftovers is worse than missing it.
+      }
+      if (!readable.length) continue;
+      total += readable.length;
+      out.push(readable.toString("latin1"));
     } catch {
       // A stream that will not inflate tells us nothing and is not an error:
       // the file is still a perfectly good upload.
     }
   }
   return out;
+}
+
+/** A dictionary integer, or null when the name is absent or not a number. */
+function dictInt(dictionary, name) {
+  const match = new RegExp(`/${name}\\s+(\\d+)`).exec(dictionary);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Undo a Flate predictor so object-stream bytes become text again.
+ *
+ * Common producers write `/DecodeParms << /Predictor 12 /Columns N >>`.
+ * Inflating without this leaves a filter byte and a delta on every row, and
+ * `/Count` never appears. A predictor we do not know is left as inflated
+ * bytes — guessing a page count from the leftovers is how a damaged stream
+ * becomes a wrong invoice.
+ */
+function undoPredictor(inflated, dictionary) {
+  const predictor = dictInt(dictionary, "Predictor");
+  if (predictor == null || predictor <= 1) return inflated;
+  const columns = dictInt(dictionary, "Columns") ?? 1;
+  const colors = dictInt(dictionary, "Colors") ?? 1;
+  const bits = dictInt(dictionary, "BitsPerComponent") ?? 8;
+  if (columns < 1 || colors < 1 || bits < 1) return inflated;
+  const rowSize = Math.ceil((columns * colors * bits) / 8);
+  if (rowSize < 1) return inflated;
+  const bpp = Math.max(1, Math.ceil((colors * bits) / 8));
+  if (predictor === 2) return undoTiffPredictor(inflated, rowSize, bpp);
+  if (predictor >= 10 && predictor <= 15) return undoPngPredictor(inflated, rowSize, bpp);
+  return inflated;
+}
+
+function undoTiffPredictor(bytes, rowSize, sampleBytes) {
+  const out = Buffer.from(bytes);
+  for (let i = 0; i < out.length; i += rowSize) {
+    const end = Math.min(i + rowSize, out.length);
+    for (let x = i + sampleBytes; x < end; x += 1) {
+      out[x] = (out[x] + out[x - sampleBytes]) & 0xff;
+    }
+  }
+  return out;
+}
+
+function undoPngPredictor(bytes, rowSize, bpp) {
+  const stride = rowSize + 1;
+  if (bytes.length < stride) return bytes;
+  const rows = Math.floor(bytes.length / stride);
+  const out = Buffer.alloc(rows * rowSize);
+  let prior = Buffer.alloc(rowSize);
+  for (let r = 0; r < rows; r += 1) {
+    const filter = bytes[r * stride];
+    const filt = bytes.subarray(r * stride + 1, r * stride + 1 + rowSize);
+    const recon = Buffer.alloc(rowSize);
+    for (let x = 0; x < rowSize; x += 1) {
+      const left = x >= bpp ? recon[x - bpp] : 0;
+      const up = prior[x];
+      const upLeft = x >= bpp ? prior[x - bpp] : 0;
+      let pred = 0;
+      if (filter === 1) pred = left;
+      else if (filter === 2) pred = up;
+      else if (filter === 3) pred = Math.floor((left + up) / 2);
+      else if (filter === 4) pred = paeth(left, up, upLeft);
+      recon[x] = (filt[x] + pred) & 0xff;
+    }
+    recon.copy(out, r * rowSize);
+    prior = recon;
+  }
+  return out;
+}
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
 }
 
 /** PNG: the pixel dimensions are fixed at the front, the density is a chunk. */

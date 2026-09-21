@@ -139,6 +139,7 @@ import {
   resolveCategoryCode,
 } from "./taxonomy.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
+import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
@@ -1284,7 +1285,19 @@ async function expireElapsedIssueWindows() {
   if (candidate.rowCount === 0) return;
   await enqueueMutation(async () => {
     const store = await load();
-    if (expireIssueWindows(store, now())) await save(store);
+    const pending = new Set(
+      (store.orders || [])
+        .filter((order) => order.state === "issue_window_open")
+        .map((order) => order.id),
+    );
+    const at = now();
+    if (!expireIssueWindows(store, at)) return;
+    for (const order of store.orders || []) {
+      if (order.state === "completed" && pending.has(order.id)) {
+        notifyOrderParties(store, order, { createId: id, at });
+      }
+    }
+    await save(store);
   });
 }
 
@@ -1610,7 +1623,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -2054,6 +2067,19 @@ async function handleRequest(req, res) {
     if (accountProfileResponse) {
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
+    const physicalInvoiceResponse = await routePhysicalInvoice({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      now,
+    });
+    if (physicalInvoiceResponse) {
+      if (physicalInvoiceResponse.mutated) await save(store);
+      return send(res, physicalInvoiceResponse.status, physicalInvoiceResponse.body);
     }
 
     // public catalog for demo convenience
@@ -4074,6 +4100,7 @@ async function handleRequest(req, res) {
         }
         throw error;
       }
+      notifyOrderParties(store, order, { createId: id, at: ts });
       audit(store, {
         actor: user,
         action: "order.confirm_delivery",

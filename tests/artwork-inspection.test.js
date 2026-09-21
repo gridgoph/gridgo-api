@@ -31,6 +31,85 @@ function compressedPdf({ count = 12 } = {}) {
   ]);
 }
 
+/**
+ * A 30-page tree whose `/Kids` array pushes `/Count` far from `/Type /Pages`.
+ *
+ * The old scanner only looked 512 characters either side of the type, which
+ * is shorter than a real Kids list, so a thirty-page document reported
+ * nothing and was billed as one page.
+ */
+function wideKidsPdf({ count = 30 } = {}) {
+  const kids = Array.from({ length: count }, (_, i) => `                    ${10 + i} 0 R`).join("");
+  return Buffer.from(
+    [
+      "%PDF-1.4",
+      "1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj",
+      `2 0 obj<</Type /Pages /Kids [${kids}] /Count ${count} /MediaBox [0 0 595.276 841.89]>>endobj`,
+      "trailer<</Root 1 0 R>>",
+      "%%EOF",
+    ].join("\n"),
+    "latin1",
+  );
+}
+
+/** PNG Up predictor, the usual `/Predictor 12` object-stream shape. */
+function encodePngUp(plain, columns) {
+  const padded = Buffer.alloc(Math.ceil(plain.length / columns) * columns);
+  plain.copy(padded);
+  const rows = [];
+  let prior = Buffer.alloc(columns);
+  for (let i = 0; i < padded.length; i += columns) {
+    const row = padded.subarray(i, i + columns);
+    const out = Buffer.alloc(1 + columns);
+    out[0] = 2;
+    for (let x = 0; x < columns; x += 1) {
+      out[1 + x] = (row[x] - prior[x]) & 0xff;
+    }
+    prior = Buffer.from(row);
+    rows.push(out);
+  }
+  return Buffer.concat(rows);
+}
+
+/**
+ * A page tree inside a predicted Flate stream.
+ *
+ * Inflating alone leaves filter bytes and deltas. Without undoing the
+ * predictor this file has no readable `/Count`, which is how a Word export
+ * used to land as an unread page count.
+ */
+function predictedPdf({ count = 30 } = {}) {
+  const columns = 16;
+  const hidden = Buffer.from(
+    `<</Type /Pages /Count ${count} /MediaBox [0 0 595.276 841.89]>>`,
+    "latin1",
+  );
+  const deflated = zlib.deflateSync(encodePngUp(hidden, columns));
+  const dict =
+    `<</Filter/FlateDecode/DecodeParms<</Predictor 12/Columns ${columns}` +
+    `/Colors 1/BitsPerComponent 8>>/Length ${deflated.length}>>`;
+  return Buffer.concat([
+    Buffer.from(`%PDF-1.5\n4 0 obj${dict}stream\n`, "latin1"),
+    deflated,
+    Buffer.from("\nendstream endobj\ntrailer<<>>\n%%EOF", "latin1"),
+  ]);
+}
+
+/** `/Count` is an indirect reference. The object number is not a page count. */
+function indirectCountPdf() {
+  return Buffer.from(
+    [
+      "%PDF-1.4",
+      "1 0 obj<</Type /Catalog /Pages 2 0 R>>endobj",
+      "2 0 obj<</Type /Pages /Kids [3 0 R] /Count 4 0 R /MediaBox [0 0 595.276 841.89]>>endobj",
+      "4 0 obj\n30\nendobj",
+      "trailer<</Root 1 0 R>>",
+      "%%EOF",
+    ].join("\n"),
+    "latin1",
+  );
+}
+
 function png({ width, height, perMetre = null }) {
   const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const ihdr = Buffer.alloc(25);
@@ -104,6 +183,26 @@ test("a page tree inside a compressed stream is still read", () => {
   const read = inspectArtwork(compressedPdf({ count: 12 }), "application/pdf");
   assert.equal(read.pageCount, 12);
   assert.equal(read.pageSize, "A3");
+});
+
+test("a long Kids array does not hide the page count", () => {
+  const read = inspectArtwork(wideKidsPdf({ count: 30 }), "application/pdf");
+  assert.equal(read.pageCount, 30);
+  assert.equal(read.pageSize, "A4");
+});
+
+test("a predicted object stream still yields its page count", () => {
+  const read = inspectArtwork(predictedPdf({ count: 30 }), "application/pdf");
+  assert.equal(read.pageCount, 30);
+  assert.equal(read.pageSize, "A4");
+});
+
+test("an indirect /Count is not treated as a page count", () => {
+  // Resolving `4 0 R` to 30 would be guessing; reading the object number 4
+  // as the count would be worse. Leave it unread.
+  const read = inspectArtwork(indirectCountPdf(), "application/pdf");
+  assert.equal(read.pageCount, null);
+  assert.equal(read.pageSize, "A4");
 });
 
 test("a PNG at 300 DPI works out to the paper it fills", () => {

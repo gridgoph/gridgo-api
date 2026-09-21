@@ -1850,11 +1850,12 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       headers: {
         Origin: "https://app.gridgo.test",
         "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "content-type,idempotency-key",
+        "Access-Control-Request-Headers": "content-type,idempotency-key,if-match",
       },
     });
     assert.equal(preflight.status, 204);
     assert.match(preflight.headers.get("access-control-allow-headers") || "", /(?:^|,\s*)Idempotency-Key(?:,|$)/i);
+    assert.match(preflight.headers.get("access-control-allow-headers") || "", /(?:^|,\s*)If-Match(?:,|$)/i);
 
     const missingKey = await request(instance.api, "/auth/clerk/enroll/supplier", {
       method: "POST", subject: "clerk_supplier_new", body: supplierBody,
