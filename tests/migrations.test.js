@@ -98,6 +98,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786960800000_a_shop_says_where_it_wants_to_be_paid",
         "1786964400000_authenticated_support_chat",
         "1786968000000_support_chat_history",
+        "1786971600000_a_pending_business_name_rides_on_the_profile",
       ],
     );
 
@@ -233,6 +234,19 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
          3, false, now(), now(), 0, '{}')
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+
+    // A personal profile may hold the name a pending business application asked
+    // for; putting the older rule back is what the step down does.
+    const personalBusinessFieldsCheck = async () => (await client.query(
+      `SELECT 1 FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
+      [schema],
+    )).rowCount;
+    assert.equal(await personalBusinessFieldsCheck(), 0);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal(await personalBusinessFieldsCheck(), 1);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.ok((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_threads`])).rows[0].t);
