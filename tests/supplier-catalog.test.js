@@ -1204,3 +1204,59 @@ test("printerMaxWidthFeet is required on tarpaulin create and forbidden on every
     (error) => error.status === 400 && error.code === "printer_cap_not_applicable",
   );
 });
+
+test("a shop can take a sample off a listing by sending the photos that stay", async () => {
+  const store = fixture();
+  store.files.push({
+    fileId: "photo_two", ownerId: "supplier", purpose: "catalog_item_photo",
+    detectedContentType: "image/jpeg", size: 10, state: "ready",
+    objectKey: "catalog/photo-two.jpg", createdAt: AT,
+    references: [{ type: "supplier_catalog_item", id: "item", field: "photos" }],
+  });
+  store.files[0].references = [{ type: "supplier_catalog_item", id: "item", field: "photos" }];
+  store.catalogItemPhotos.push({ catalogItemId: "item", fileId: "photo_two", sortOrder: 1, createdAt: AT });
+
+  const dropped = await catalogCall(store, {
+    method: "POST",
+    path: "/me/catalog-items/item/photos/reorder",
+    body: { expectedVersion: 3, fileIds: ["photo_two"] },
+  });
+  assert.equal(dropped.status, 200, JSON.stringify(dropped.body));
+  assert.deepEqual(dropped.body.item.photos.map((photo) => photo.fileId), ["photo_two"]);
+  assert.equal(store.catalogItemPhotos.some((photo) => photo.fileId === "photo"), false);
+  assert.equal(
+    (store.files[0].references || []).some((reference) => reference.type === "supplier_catalog_item"),
+    false,
+  );
+});
+
+test("overriding ready-in time can state the soonest and latest hours", async () => {
+  const store = fixture();
+  const saved = await catalogCall(store, {
+    method: "PATCH",
+    path: "/me/catalog-items/item",
+    body: {
+      expectedVersion: 3,
+      turnaroundMode: "override",
+      turnaroundHours: 72,
+      minimumTurnaroundHours: 24,
+    },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.equal(saved.body.item.turnaroundHours, 72);
+  assert.equal(saved.body.item.minimumTurnaroundHours, 24);
+
+  await assert.rejects(
+    () => catalogCall(store, {
+      method: "PATCH",
+      path: "/me/catalog-items/item",
+      body: {
+        expectedVersion: saved.body.item.version,
+        turnaroundMode: "override",
+        turnaroundHours: 24,
+        minimumTurnaroundHours: 72,
+      },
+    }),
+    (error) => error.status === 400 && error.code === "invalid_catalog_item",
+  );
+});

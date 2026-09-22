@@ -99,6 +99,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786964400000_authenticated_support_chat",
         "1786968000000_support_chat_history",
         "1786971600000_a_pending_business_name_rides_on_the_profile",
+        "1786975200000_listing_production_window",
       ],
     );
 
@@ -247,6 +248,14 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     assert.equal(await personalBusinessFieldsCheck(), 0);
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal(await personalBusinessFieldsCheck(), 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    const productionWindowColumns = new Set((await client.query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'supplier_catalog_items'`,
+      [schema],
+    )).rows.map((row) => row.column_name));
+    assert.equal(productionWindowColumns.has("minimum_turnaround_hours"), false);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.ok((await client.query("SELECT to_regclass($1) AS t", [`${schema}.support_chat_threads`])).rows[0].t);

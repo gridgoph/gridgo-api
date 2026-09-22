@@ -76,7 +76,9 @@ Response (additive):
 
 `total` is the filtered count (same predicates as the page, no rank). `GET /catalog/shops` does not accept `q` in this slice.
 
-`POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `printerMaxWidthFeet?`. A starter is copied into catalog rows at create time and is never referenced after.
+`POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `minimumTurnaroundHours?`, `printerMaxWidthFeet?`. A starter is copied into catalog rows at create time and is never referenced after. `minimumTurnaroundHours` is the soonest the listing can be ready; `turnaroundHours` is the promised ready-in. On inherit both are null. A soonest later than the promise is `400 invalid_catalog_item`.
+
+`POST /me/catalog-items/:id/photos/reorder` takes `fileIds` of the samples that stay, in board order. A shorter list drops the missing photos and unreferences those files. Every sent id must already be on the listing; an unknown id is `409 catalog_item_stale`.
 
 ### Printer max width (`printerMaxWidthFeet`)
 

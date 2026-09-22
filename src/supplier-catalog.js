@@ -513,6 +513,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
     turnaroundHours: itemTurnaroundHours(item, service),
+    minimumTurnaroundHours: item.minimumTurnaroundHours ?? null,
     rush: service.rushEnabled ? {
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
@@ -1111,6 +1112,7 @@ export function privateCatalogItem(store, item) {
     speedTiers: speedTiersFor(store, item.id),
     turnaroundMode: item.turnaroundMode || "inherit",
     turnaroundHours: item.turnaroundHours ?? null,
+    minimumTurnaroundHours: item.minimumTurnaroundHours ?? null,
     fileFormatMode: item.fileFormatMode || "inherit",
     acceptedFormats: effectiveAcceptedFormats(store, item),
     active: item.active !== false,
