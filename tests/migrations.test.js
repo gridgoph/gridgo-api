@@ -98,7 +98,6 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     "1786960800000_a_shop_says_where_it_wants_to_be_paid",
         "1786964400000_authenticated_support_chat",
         "1786968000000_support_chat_history",
-        "1786971600000_a_pending_business_name_rides_on_the_profile",
         "1786975200000_listing_production_window",
       ],
     );
@@ -236,18 +235,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
-    // A personal profile may hold the name a pending business application asked
-    // for; putting the older rule back is what the step down does.
-    const personalBusinessFieldsCheck = async () => (await client.query(
+    // The personal-profile rule is never dropped: a pending application lives on
+    // its approval case, so nothing needs business fields on a personal row.
+    assert.equal((await client.query(
       `SELECT 1 FROM pg_constraint c
          JOIN pg_class t ON t.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
-    )).rowCount;
-    assert.equal(await personalBusinessFieldsCheck(), 0);
-    await runner(migrationOptions(schema, "down", 1, client));
-    assert.equal(await personalBusinessFieldsCheck(), 1);
+    )).rowCount, 1);
 
     await runner(migrationOptions(schema, "down", 1, client));
     const productionWindowColumns = new Set((await client.query(

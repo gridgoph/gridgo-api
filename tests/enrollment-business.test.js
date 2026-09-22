@@ -49,7 +49,10 @@ test("applyForBusiness opens a pending case and leaves the account personal", ()
   assert.equal(context.user.accountType, "individual");
   assert.equal(Object.hasOwn(context.user, "orgName"), false);
   assert.equal(result.clientProfile.clientKind, "personal");
-  assert.equal(result.clientProfile.businessName, "Bautista Trading");
+  // The requested name is held on the application event, never on the still
+  // personal profile, so a rejected application leaves nothing behind.
+  assert.equal(result.clientProfile.businessName ?? null, null);
+  assert.equal(context.store.approvalCaseEvents[0].snapshot.businessName, "Bautista Trading");
   assert.equal(context.store.approvalCaseEvents[0].snapshot.accountType, "organization");
 });
 

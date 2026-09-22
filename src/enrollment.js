@@ -471,9 +471,19 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
     profile = { userId: user.id, clientKind: "personal", updatedAt: at };
     store.clientProfiles.push(profile);
   }
-  // Hold the requested name for review. Do not flip the live account type —
-  // Operations converts the client on approve.
-  Object.assign(profile, { businessName, businessNature, updatedAt: at });
+  /*
+   The requested name is held on the application, not on the profile.
+
+   A personal profile that may not carry business fields is an invariant worth
+   keeping, because nothing clears those fields when an application is rejected
+   or abandoned: written here, a name nobody approved would sit on the profile
+   indefinitely and read back through `/auth/me` as though it were real.
+
+   Nothing is lost by leaving it off. The applicant event below snapshots the
+   same values, `businessApplicationProjection` reads that snapshot first, and
+   the approval copies them onto the profile when Operations converts the
+   client.
+  */
   const approvalCase = addInitialCase(store, {
     user, kind: "business_client", submittedAt: at, key: idempotencyKey, body, createId, at,
     snapshot: { businessName, businessNature, accountType },

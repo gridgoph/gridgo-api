@@ -2032,7 +2032,9 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(business.status, 201, JSON.stringify(business.body));
     assert.deepEqual(business.body.membership, { role: "client" });
     assert.equal(business.body.clientProfile.clientKind, "personal");
-    assert.equal(business.body.clientProfile.businessName, "Davao Events Co.");
+    // The requested name lives on the application until Operations approves it;
+    // a personal profile still carries no business fields.
+    assert.equal(business.body.clientProfile.businessName ?? null, null);
     assert.equal(business.body.approvalCase.kind, "business_client");
     assert.equal(business.body.approvalCase.status, "pending");
     assert.equal(business.body.capabilities.placePersonalOrders, true);
