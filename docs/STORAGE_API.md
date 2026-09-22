@@ -99,6 +99,7 @@ Parents contain IDs only:
 | `artwork` | `order.artworkFileIds: string[]` |
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
+| `handoff_signature` | `order.handoffSignatureFileIds: string[]`; the one the checklist was signed against is `order.pickupChecklist.handoffSignature.fileId` |
 | `service_image` | `supplierService.imageFileIds: string[]` |
 | `catalog_item_photo` | listing photo rows on `supplier_catalog_item` (`sortOrder` 0–7, optional `altText`) |
 | `supplier_shop_image` | shop media slot `logo` or `cover` |
@@ -122,6 +123,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
+| `handoff_signature` | rider | PNG | 2 MiB (`2097152`) |
 | `service_image` | supplier | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `catalog_item_photo` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `supplier_shop_image` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
@@ -136,7 +138,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -207,6 +209,7 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
 | `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | legacy commitments only: assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
+| `handoff_signature` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned` only, else `409 handoff_signature_upload_not_allowed`. Named by `signature.fileId` on `POST /dispatch/:id/pickup-checklist` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
 | `verification_document` | `{ "documentType": "business_permit" }` or `{ "documentType": "sample_work", "replaceFileId": "..." }` | caller is a supplier; target is always derived from the token and cannot be supplied |
 | `rider_verification_document` | `{ "riderDocumentType": "drivers_license", "expiresOn": "2028-06-30" }` | caller is the rider owner; licence requires a future expiry, while `or_cr` and `selfie` omit it |
@@ -249,7 +252,7 @@ curl -fsS -X POST "$API/files/$RIDER_LICENSE_FILE_ID/attach" -H "Authorization: 
 
 ## GET /files/:fileId — metadata
 
-Auth for ordinary purposes: `ops_admin`, `super_admin`, file owner, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super. When acting as supplier/rider, an order-referenced file additionally requires current approval, even for its uploader. Explicit [actor role selection](OPERATIONAL_MODEL_V2_API.md#selecting-an-actor-role) applies to file authorization and returned parent projections throughout upload/attach transactions.
+Auth for ordinary purposes: `ops_admin`, `super_admin`, file owner, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super. A `handoff_signature` is additionally never readable by the order's client — it is a person's handwriting, and the client has no part in the counter handoff. When acting as supplier/rider, an order-referenced file additionally requires current approval, even for its uploader. Explicit [actor role selection](OPERATIONAL_MODEL_V2_API.md#selecting-an-actor-role) applies to file authorization and returned parent projections throughout upload/attach transactions.
 
 Auth for `verification_document` is intentionally stricter and never inherits order/service visibility: only the supplier owner, `ops_admin`, or `super_admin` may read metadata or request a download URL. Another supplier, client, and rider always receive `403 forbidden`, even if a malformed legacy reference points at one of their orders/services. Supplier document lists use `GET /users/:id/verification-documents` as specified in `docs/OPERATIONAL_MODEL_V2_API.md`.
 

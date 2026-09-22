@@ -173,3 +173,54 @@ GET /orders/:orderId/invoice
 Returns `{ invoice }` with immutable line snapshots, one delivery line per job, item subtotal, visible service fee, delivery total, grand total, and 75/25 QR plan.
 
 Common errors are `invalid_preference_ranking`, `dropoff_required`, `match_not_found`, `cart_not_found`, `cart_checked_out`, `cart_empty`, `catalog_item_stale`, `file_not_ready`, and `payment_method_not_allowed`.
+
+## Reviews read back
+
+`POST /orders/:id/review` is written up under checkout. Two readers turn those rows into something a person can use (`src/shop-reviews.js`).
+
+### `GET /me/reviews` (supplier)
+
+The shop's own reviews, newest first, with where it stands. The client is never named.
+
+```json
+{
+  "summary": { "count": 7, "quality": 4.71, "speed": 4.14, "value": 4.43, "overall": 4.43,
+               "onTime": { "count": 7, "rate": 0.86 }, "reviewsUntilMatching": 0 },
+  "ranking": {
+    "position": 2, "of": 9,
+    "byCategory": [
+      { "categoryCode": "marketing_collateral", "categoryName": "Marketing collateral",
+        "position": 1, "of": 6, "count": 5, "quality": 4.8, "speed": 4.2, "value": 4.6, "overall": 4.53 }
+    ]
+  },
+  "reviews": [
+    { "id": "rev_…", "orderId": "ord_…", "createdAt": "…",
+      "qualityStars": 5, "speedStars": 3, "valueStars": 4, "comment": "Beautiful print, a day late.",
+      "categoryCode": "marketing_collateral", "categoryName": "Marketing collateral",
+      "subcategoryCode": "flyers", "subcategoryName": "Flyers", "itemName": "A5 flyers" }
+  ]
+}
+```
+
+- `overall` is the plain mean of the three star averages; `position` ranks shops by it, ties broken by review count. A shop with no reviews has `position: null`.
+- `reviewsUntilMatching` counts down to `MIN_REVIEWS_FOR_RATING`; below it, matching scores the shop on listing completeness rather than stars.
+- Any role other than `supplier` gets 403.
+
+### `GET /admin/shop-rankings?categoryCode=` (ops_admin, super_admin)
+
+Every shop, ranked. Without `categoryCode` the table is overall; with one, only reviews of work in that category count and `fromPriceMinor` is the shop's cheapest listing there.
+
+```json
+{
+  "categories": [{ "code": "marketing_collateral", "name": "Marketing collateral" }],
+  "categoryCode": "marketing_collateral",
+  "rankedCount": 6,
+  "rows": [
+    { "supplierId": "supplier_a", "shopName": "Lovis Print", "position": 1, "count": 5,
+      "quality": 4.8, "speed": 4.2, "value": 4.6, "overall": 4.53,
+      "onTime": { "count": 7, "rate": 0.86 }, "fromPriceMinor": 10000 }
+  ]
+}
+```
+
+Unranked shops (`count: 0`, `position: null`) follow the ranked ones, alphabetically. An unknown category is `400 invalid_category_code`.

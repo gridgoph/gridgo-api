@@ -1429,7 +1429,14 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal((await request(instance.api, `/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} })).status, 200);
     const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"]
       .map((code) => ({ code, passed: true }));
-    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks } })).status, 200);
+    // The supplier's signature on the rider's phone, written straight into the
+    // store: the transition is what is under test here, not the pad.
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.files.push({ fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [{ type: "order", id: orderId, field: "handoffSignatureFileIds" }], createdAt: AT });
+      await saveStore(database, store);
+    });
+    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks, signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" } })).status, 200);
 
     const released = await request(instance.api, "/orders/ord_payout/milestones/printing/release", { method: "POST", subject: "clerk_ops", body: {} });
