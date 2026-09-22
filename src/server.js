@@ -2079,6 +2079,7 @@ async function handleRequest(req, res) {
       user,
       readBody,
       now,
+      audit,
     });
     if (physicalInvoiceResponse) {
       if (physicalInvoiceResponse.mutated) await save(store);

@@ -77,7 +77,7 @@ export function isPhysicalInvoiceRoute(method, pathname) {
  * One request per order. The figures stay on the digital receipt; this is
  * only where to send a paper copy.
  */
-export async function routePhysicalInvoice({ req, url, store, user, readBody, now }) {
+export async function routePhysicalInvoice({ req, url, store, user, readBody, now, audit }) {
   const { pathname } = url;
   if (!isPhysicalInvoiceRoute(req.method, pathname)) return null;
 
@@ -110,5 +110,25 @@ export async function routePhysicalInvoice({ req, url, store, user, readBody, no
   };
   order.physicalInvoiceRequest = request;
   order.updatedAt = request.requestedAt;
+  /*
+   A paper invoice is a promise somebody at GRIDGO has to keep, so it is
+   recorded as a change to the order rather than as a field that quietly
+   appeared. The detail names the office, because "a physical invoice was
+   requested" without a destination tells the desk nothing it can act on.
+  */
+  if (typeof audit === "function") {
+    audit(store, {
+      actor: user,
+      action: "order.physical_invoice_requested",
+      entityType: "order",
+      entityId: order.id,
+      orderId: order.id,
+      detail: {
+        contactPerson: request.contactPerson,
+        officeAddress: request.officeAddress,
+        operatingHours: request.operatingHours,
+      },
+    });
+  }
   return { status: 201, body: { request: publicRequest(order) }, mutated: true };
 }
