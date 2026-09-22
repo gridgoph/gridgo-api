@@ -6,6 +6,7 @@ import {
   clientNotificationDraft,
   ensureClientOrderNotification,
   notifyClientPaymentRejected,
+  notifyClientReceiptReady,
   notifyOpsIssueReported,
   notifyOpsJobNeedsQa,
   notifyOpsOrderProgress,
@@ -13,6 +14,7 @@ import {
   notifyOpsSignupSubmitted,
   notifyOrderParties,
   notifyShopPayoutHeld,
+  rateReminderDraft,
   riderNotificationDrafts,
   shopNotificationDraft,
   writeDraft,
@@ -467,4 +469,38 @@ test("production through delivery prompts final QR proof once due and explains r
   const collecting = { id: "order", clientId: "client", state: "awaiting_collection", fulfillmentMode: "pickup", payments: { final_online: { status: "pending_confirmation" } } };
   assert.doesNotMatch(clientNotificationDraft(collecting).title, /settle/i);
   assert.match(clientNotificationDraft(collecting).body, /awaiting Operations confirmation/i);
+});
+
+test("a finished unrated job writes a complete row and a rating reminder", () => {
+  const store = { notifications: [], shopReviews: [] };
+  const order = { id: "ord_1", clientId: "user_c", state: "completed" };
+  assert.equal(clientNotificationDraft(order).type, "order_completed");
+  assert.equal(rateReminderDraft(store, order).type, "order_rate_reminder");
+  let n = 0;
+  const first = notifyOrderParties(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
+  assert.deepEqual(first.created.map((row) => row.type).sort(), [
+    "order_completed",
+    "order_rate_reminder",
+  ]);
+  const second = notifyOrderParties(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
+  assert.equal(second.created.length, 0);
+});
+
+test("an already rated job is not asked again", () => {
+  const order = { id: "ord_1", clientId: "user_c", state: "payout_released" };
+  assert.equal(
+    rateReminderDraft({ shopReviews: [{ orderId: "ord_1" }] }, order),
+    null,
+  );
+});
+
+test("checkout writes a receipt-ready row once", () => {
+  const store = { notifications: [] };
+  const order = { id: "ord_1", clientId: "user_c", state: "initial_payment_review" };
+  let n = 0;
+  const first = notifyClientReceiptReady(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
+  assert.equal(first.created, true);
+  assert.equal(first.notification.type, "order_receipt_ready");
+  const second = notifyClientReceiptReady(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
+  assert.equal(second.created, false);
 });

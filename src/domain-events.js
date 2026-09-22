@@ -284,6 +284,27 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         occurrence,
         "supplier",
       );
+    /*
+     A paper invoice is the one thing on an order nobody at GRIDGO does unless
+     they are told. The client fills in an office and stops there; no state
+     moves, no shop is involved, and without a row on the desk the request
+     sits in jsonb until somebody happens to open the order.
+
+     Written once, when the request first appears, and carrying the office in
+     the body so the desk can act on it from the inbox.
+    */
+    if (order.physicalInvoiceRequest && !old?.physicalInvoiceRequest) {
+      const paper = order.physicalInvoiceRequest;
+      notifyAdmins(
+        "ops_physical_invoice_requested",
+        `Physical invoice requested · ${order.id}`,
+        order,
+        `${occurrence}:physical_invoice:${paper.requestedAt || at}`,
+        {
+          body: `${paper.contactPerson} · ${paper.officeAddress} · ${paper.operatingHours}`,
+        },
+      );
+    }
     if (!old && order.state !== "draft")
       notify(
         order.clientId,

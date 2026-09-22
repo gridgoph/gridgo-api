@@ -51,6 +51,7 @@ services:
         condition: service_completed_successfully
     restart: "no"
     networks:
+      - default
       - gridgo-storage
 
   minio-bind-check:

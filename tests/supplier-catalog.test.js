@@ -21,6 +21,7 @@ import {
   publicSupplierShop,
   selectedCatalogPrice,
 } from "../src/supplier-catalog.js";
+import { gridgoAmountMinor } from "../src/pricing.js";
 import { routeSupplierCatalog } from "../src/catalog-routes.js";
 import { UNOPENED_FILE_MESSAGE } from "../src/file-formats.js";
 import { defaultAcceptedFileFormats } from "../src/reference-data.js";
@@ -210,6 +211,48 @@ test("from price uses cheapest required specs and ignores add-ons until selected
   assert.equal(item.subcategoryCode, "tarpaulins_outdoor_banners");
   assert.equal(item.optionGroups[1].kind, "addon");
   assert.deepEqual(item.prepSteps, []);
+});
+
+test("public catalog projection adds GRIDGO client prices without changing shop amounts", async () => {
+  const store = fixture();
+  store.settings = { serviceFeeRateBps: 4_500, issueWindowHours: 24, deliveryFeeBands: [] };
+  store.catalogItems[0].basePriceMinor = 1_200;
+  store.catalogOptions.find((option) => option.id === "a3").priceModifierMinor = 0;
+  store.catalogOptions.find((option) => option.id === "a4").priceModifierMinor = 500;
+  store.catalogOptions.find((option) => option.id === "grommet").priceModifierMinor = 200;
+
+  const item = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(item.fromPriceMinor, 1_200);
+  assert.equal(item.clientFromPriceMinor, 1_740);
+  assert.equal(item.effectivePriceMinor, null);
+  assert.equal(item.clientEffectivePriceMinor, null);
+
+  const selected = publicCatalogItem(store, store.catalogItems[0], { selectedOptionIds: ["a4"] });
+  assert.equal(selected.effectivePriceMinor, 1_700);
+  assert.equal(selected.clientEffectivePriceMinor, gridgoAmountMinor(1_700, 4_500));
+
+  store.settings.serviceFeeRateBps = 1_000;
+  const cheaper = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(cheaper.fromPriceMinor, 1_200);
+  assert.equal(cheaper.clientFromPriceMinor, 1_320);
+
+  const shop = privateCatalogItem(store, store.catalogItems[0]);
+  assert.equal(shop.basePriceMinor, 1_200);
+  assert.equal(Object.hasOwn(shop, "clientFromPriceMinor"), false);
+
+  const routed = await routeSupplierCatalog({
+    req: { method: "GET", headers: {} },
+    url: new URL("http://127.0.0.1/catalog/items/item"),
+    store,
+    user: null,
+    readBody: async () => ({}),
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+  assert.equal(routed.status, 200);
+  assert.equal(routed.body.item.fromPriceMinor, 1_200);
+  assert.equal(routed.body.item.clientFromPriceMinor, 1_320);
 });
 
 test("pending suppliers stay private while approved complete catalog items publish", () => {
@@ -1159,5 +1202,61 @@ test("printerMaxWidthFeet is required on tarpaulin create and forbidden on every
       body: { expectedVersion: flyer.body.item.version, printerMaxWidthFeet: 7 },
     }),
     (error) => error.status === 400 && error.code === "printer_cap_not_applicable",
+  );
+});
+
+test("a shop can take a sample off a listing by sending the photos that stay", async () => {
+  const store = fixture();
+  store.files.push({
+    fileId: "photo_two", ownerId: "supplier", purpose: "catalog_item_photo",
+    detectedContentType: "image/jpeg", size: 10, state: "ready",
+    objectKey: "catalog/photo-two.jpg", createdAt: AT,
+    references: [{ type: "supplier_catalog_item", id: "item", field: "photos" }],
+  });
+  store.files[0].references = [{ type: "supplier_catalog_item", id: "item", field: "photos" }];
+  store.catalogItemPhotos.push({ catalogItemId: "item", fileId: "photo_two", sortOrder: 1, createdAt: AT });
+
+  const dropped = await catalogCall(store, {
+    method: "POST",
+    path: "/me/catalog-items/item/photos/reorder",
+    body: { expectedVersion: 3, fileIds: ["photo_two"] },
+  });
+  assert.equal(dropped.status, 200, JSON.stringify(dropped.body));
+  assert.deepEqual(dropped.body.item.photos.map((photo) => photo.fileId), ["photo_two"]);
+  assert.equal(store.catalogItemPhotos.some((photo) => photo.fileId === "photo"), false);
+  assert.equal(
+    (store.files[0].references || []).some((reference) => reference.type === "supplier_catalog_item"),
+    false,
+  );
+});
+
+test("overriding ready-in time can state the soonest and latest hours", async () => {
+  const store = fixture();
+  const saved = await catalogCall(store, {
+    method: "PATCH",
+    path: "/me/catalog-items/item",
+    body: {
+      expectedVersion: 3,
+      turnaroundMode: "override",
+      turnaroundHours: 72,
+      minimumTurnaroundHours: 24,
+    },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.equal(saved.body.item.turnaroundHours, 72);
+  assert.equal(saved.body.item.minimumTurnaroundHours, 24);
+
+  await assert.rejects(
+    () => catalogCall(store, {
+      method: "PATCH",
+      path: "/me/catalog-items/item",
+      body: {
+        expectedVersion: saved.body.item.version,
+        turnaroundMode: "override",
+        turnaroundHours: 24,
+        minimumTurnaroundHours: 72,
+      },
+    }),
+    (error) => error.status === 400 && error.code === "invalid_catalog_item",
   );
 });

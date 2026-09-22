@@ -35,6 +35,7 @@ const CLIENT_EVENT_STATES = {
   order_ready_for_dispatch: "ready_for_dispatch", order_rider_assigned: "rider_assigned",
   order_picked_up: "picked_up", order_out_for_delivery: "out_for_delivery",
   order_ready_for_pickup: "awaiting_collection", order_cancelled: "cancelled",
+  order_completed: "completed",
 };
 
 const FINAL_PAYMENT_ACTION_STATES = new Set([

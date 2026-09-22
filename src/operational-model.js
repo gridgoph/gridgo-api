@@ -868,6 +868,20 @@ export function publicOrderFor(order, user, store = null) {
     else delete publicRecord.dropoff;
   }
 
+  /*
+   Where to courier a paper invoice is the client's own address book.
+
+   The request names a person, an office and the hours somebody is there to
+   receive a document. That is the client's correspondent, not a fact about
+   the job: no shop prints it and no rider carries it, so neither has a reason
+   to read it, and a deny-list projection that forgets to say so hands the
+   client's office contact to every party on the order.
+
+   Operations is who acts on it, so Operations and the client who asked keep
+   it; everybody else reads the order without it.
+  */
+  if (!ops && !owningClient) delete publicRecord.physicalInvoiceRequest;
+
   if (!ops && !owningClient) {
     for (const installment of [publicRecord.payments, publicRecord.acceptedQuote?.payments].flatMap((payments) => Object.values(payments || {}))) {
       if (!installment || typeof installment !== "object") continue;

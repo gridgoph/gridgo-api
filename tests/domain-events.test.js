@@ -469,3 +469,36 @@ for (const state of ["submitted", "needs_qa", "cancelled", "client_correction"])
     }
   });
 }
+test("a physical-invoice request lands in the Operations inbox with the order and the office", () => {
+  const before = fixture(),
+    s = structuredClone(before);
+  s.orders[0].physicalInvoiceRequest = {
+    contactPerson: "Ana Reyes",
+    officeAddress: "7th floor, 12 J.P. Laurel Ave, Davao City",
+    operatingHours: "Mon–Fri 9am–5pm",
+    requestedAt: "2026-09-08T01:00:00Z",
+  };
+  s.orders[0].updatedAt = "now";
+  deriveDomainEvents(s, before, options);
+  const rows = s.notifications.filter((n) => n.type === "ops_physical_invoice_requested");
+  assert.deepEqual(
+    rows.map((n) => `${n.userId}:${n.appRole}`).sort(),
+    ["ops:ops_admin", "super:super_admin"],
+  );
+  for (const row of rows) {
+    assert.equal(row.orderId, "o");
+    assert.match(row.title, /o/);
+    assert.match(row.body, /Ana Reyes/);
+    assert.match(row.body, /J\.P\. Laurel Ave/);
+  }
+  // Only when it first appears: a later change elsewhere on the order must not
+  // ask the desk to courier the same invoice twice.
+  const after = structuredClone(s);
+  after.orders[0].state = "production";
+  after.orders[0].updatedAt = "later";
+  deriveDomainEvents(after, s, options);
+  assert.equal(
+    after.notifications.filter((n) => n.type === "ops_physical_invoice_requested").length,
+    2,
+  );
+});

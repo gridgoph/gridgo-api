@@ -11,7 +11,7 @@ Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `
 - `GET /accepted-file-formats?q=` returns the platform registry a listing may tick (`code`, `displayName`, `inputKind`, `extensions`, `mimeTypes`, `aliases`, `uploadable`). `uploadable` is true only for file types `POST /files` purpose=artwork can sniff (JPEG, PNG, WebP, PDF, Photoshop). 3MF/STL stay in the registry with `uploadable: false`. Optional `q` (1–40 characters) adds `resolution`: `matched` ticks that code, `link_only` / `unknown` tell the shop to tick Any other https link. A shop cannot invent a code.
 - `GET /catalog/shops?categoryCode=&cursor=` lists approved shops that currently have at least one complete active item under a live service.
 - `GET /catalog/shops/:supplierId` returns the shop, live service lines, and complete active items.
-- `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
+- `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. `fromPriceMinor` / `effectivePriceMinor` stay the shop amounts. Client-facing GRIDGO amounts (shop + live `serviceFeeRateBps`) are additive: `clientFromPriceMinor`, `clientEffectivePriceMinor`. Supplier `/me/catalog-items` is unchanged. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
 - `GET /catalog/media/:fileId` returns metadata for a photo or shop image that is already public.
 
 A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item is active, it has a ready photo, every option group has an active option, the effective accepted-format set is nonempty, and a `tarpaulins_outdoor_banners` listing has `printerMaxWidthFeet`.
@@ -76,7 +76,9 @@ Response (additive):
 
 `total` is the filtered count (same predicates as the page, no rank). `GET /catalog/shops` does not accept `q` in this slice.
 
-`POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `printerMaxWidthFeet?`. A starter is copied into catalog rows at create time and is never referenced after.
+`POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `minimumTurnaroundHours?`, `printerMaxWidthFeet?`. A starter is copied into catalog rows at create time and is never referenced after. `minimumTurnaroundHours` is the soonest the listing can be ready; `turnaroundHours` is the promised ready-in. On inherit both are null. A soonest later than the promise is `400 invalid_catalog_item`.
+
+`POST /me/catalog-items/:id/photos/reorder` takes `fileIds` of the samples that stay, in board order. A shorter list drops the missing photos and unreferences those files. Every sent id must already be on the listing; an unknown id is `409 catalog_item_stale`.
 
 ### Printer max width (`printerMaxWidthFeet`)
 

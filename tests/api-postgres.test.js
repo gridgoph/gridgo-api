@@ -528,11 +528,13 @@ test("client account profile routes persist versioned edits and an idempotent bu
       method: "POST", subject: "clerk_client", body: application,
     });
     assert.equal(business.status, 200, JSON.stringify(business.body));
-    assert.equal(business.body.user.accountType, "business");
-    assert.equal(business.body.user.orgName, "GRIDGO Business Customer");
-    assert.equal(business.body.user.version, 3);
+    assert.equal(business.body.user.accountType, "individual");
+    assert.equal(Object.hasOwn(business.body.user, "orgName"), false);
+    assert.equal(business.body.approvalCase.kind, "business_client");
+    assert.equal(business.body.approvalCase.status, "pending");
     assert.equal(retry.status, 200, JSON.stringify(retry.body));
-    assert.equal(retry.body.user.version, 3);
+    assert.equal(retry.body.approvalCase.id, business.body.approvalCase.id);
+    assert.equal(retry.body.user.accountType, "individual");
 
     const individual = await request(instance.api, "/me", {
       method: "PATCH",
@@ -546,9 +548,14 @@ test("client account profile routes persist versioned edits and an idempotent bu
     const persisted = await loadStore(database);
     const account = persisted.users.find(({ id }) => id === "user_client");
     assert.equal(account.name, "Ana Client");
-    assert.equal(account.version, 3);
-    assert.equal(account.accountType, "business");
-    assert.equal(account.orgName, "GRIDGO Business Customer");
+    assert.equal(account.accountType, "individual");
+    assert.equal(Object.hasOwn(account, "orgName"), false);
+    assert.equal(
+      persisted.approvalCases.some(
+        (approvalCase) => approvalCase.userId === account.id && approvalCase.kind === "business_client",
+      ),
+      true,
+    );
     assert.equal(persisted.clientAddresses.filter(({ clientId }) => clientId === account.id).length, 1);
   } finally {
     instance.child.kill("SIGTERM");
@@ -1850,11 +1857,12 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       headers: {
         Origin: "https://app.gridgo.test",
         "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "content-type,idempotency-key",
+        "Access-Control-Request-Headers": "content-type,idempotency-key,if-match",
       },
     });
     assert.equal(preflight.status, 204);
     assert.match(preflight.headers.get("access-control-allow-headers") || "", /(?:^|,\s*)Idempotency-Key(?:,|$)/i);
+    assert.match(preflight.headers.get("access-control-allow-headers") || "", /(?:^|,\s*)If-Match(?:,|$)/i);
 
     const missingKey = await request(instance.api, "/auth/clerk/enroll/supplier", {
       method: "POST", subject: "clerk_supplier_new", body: supplierBody,
@@ -2023,11 +2031,19 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     });
     assert.equal(business.status, 201, JSON.stringify(business.body));
     assert.deepEqual(business.body.membership, { role: "client" });
-    assert.equal(business.body.clientProfile.clientKind, "business");
+    assert.equal(business.body.clientProfile.clientKind, "personal");
+    // The requested name lives on the application until Operations approves it;
+    // a personal profile still carries no business fields.
+    assert.equal(business.body.clientProfile.businessName ?? null, null);
     assert.equal(business.body.approvalCase.kind, "business_client");
     assert.equal(business.body.approvalCase.status, "pending");
     assert.equal(business.body.capabilities.placePersonalOrders, true);
     assert.equal(business.body.capabilities.placeBusinessOrders, false);
+    const pendingAccount = await request(instance.api, "/me", { subject: "clerk_promote" });
+    assert.equal(pendingAccount.status, 200, JSON.stringify(pendingAccount.body));
+    assert.equal(pendingAccount.body.user.accountType, "individual");
+    assert.equal(pendingAccount.body.approvalCase.id, business.body.approvalCase.id);
+    assert.equal(pendingAccount.body.approvalCase.status, "pending");
     const businessRetry = await request(instance.api, "/me/business-application", {
       method: "POST", subject: "clerk_promote", body: businessBody,
       headers: { "Idempotency-Key": businessKey },
@@ -2040,6 +2056,25 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     });
     assert.equal(businessInjection.status, 400, JSON.stringify(businessInjection.body));
     assert.equal(businessInjection.body.error, "unexpected_field");
+
+    const approvedBusiness = await request(
+      instance.api,
+      `/approval-cases/${business.body.approvalCase.id}/approve`,
+      {
+        method: "POST",
+        subject: "clerk_ops",
+        body: {
+          expectedVersion: business.body.approvalCase.version,
+          requestId: "approve-promote-business",
+        },
+      },
+    );
+    assert.equal(approvedBusiness.status, 200, JSON.stringify(approvedBusiness.body));
+    const converted = await request(instance.api, "/me", { subject: "clerk_promote" });
+    assert.equal(converted.status, 200, JSON.stringify(converted.body));
+    assert.equal(converted.body.user.accountType, "business");
+    assert.equal(converted.body.user.orgName, "Davao Events Co.");
+    assert.equal(converted.body.approvalCase.status, "approved");
 
     const riderKey = "55555555-5555-4555-8555-555555555555";
     const rider = await request(instance.api, "/auth/clerk/enroll/rider", {

@@ -36,6 +36,7 @@ import {
   APPROVAL_CASE_STATUSES,
   APPROVAL_DECISIONS,
   approvalDecisionInput,
+  businessApplicationProjection,
   decideApprovalCase,
   supplierApprovalReadiness,
 } from "./approval-cases.js";
@@ -140,6 +141,7 @@ import {
 } from "./taxonomy.js";
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
+import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
@@ -171,6 +173,7 @@ import {
   routeSupportDesk,
   seedSupportDeskAdmin,
 } from "./support-desk.js";
+import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
 import {
   loadDeviceTokenStore,
   loadStore,
@@ -798,6 +801,7 @@ function approvalCaseDetail(store, approvalCase) {
     return {
       ...base,
       clientProfile: clientProfileProjection(store, approvalCase.userId),
+      application: businessApplicationProjection(store, approvalCase),
     };
   }
   if (approvalCase.kind === "rider") {
@@ -1284,7 +1288,19 @@ async function expireElapsedIssueWindows() {
   if (candidate.rowCount === 0) return;
   await enqueueMutation(async () => {
     const store = await load();
-    if (expireIssueWindows(store, now())) await save(store);
+    const pending = new Set(
+      (store.orders || [])
+        .filter((order) => order.state === "issue_window_open")
+        .map((order) => order.id),
+    );
+    const at = now();
+    if (!expireIssueWindows(store, at)) return;
+    for (const order of store.orders || []) {
+      if (order.state === "completed" && pending.has(order.id)) {
+        notifyOrderParties(store, order, { createId: id, at });
+      }
+    }
+    await save(store);
   });
 }
 
@@ -1610,7 +1626,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -2056,6 +2072,20 @@ async function handleRequest(req, res) {
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
     }
 
+    const physicalInvoiceResponse = await routePhysicalInvoice({
+      req,
+      url,
+      store,
+      user,
+      readBody,
+      now,
+      audit,
+    });
+    if (physicalInvoiceResponse) {
+      if (physicalInvoiceResponse.mutated) await save(store);
+      return send(res, physicalInvoiceResponse.status, physicalInvoiceResponse.body);
+    }
+
     // public catalog for demo convenience
     if (req.method === "GET" && pathname === "/catalog") {
       return send(res, 200, { catalog: store.catalog });
@@ -2066,6 +2096,19 @@ async function handleRequest(req, res) {
       return send(res, 401, {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
+      });
+    }
+
+    if (isSupportChatRoute(pathname)) {
+      return routeSupportChat({
+        req,
+        res,
+        pathname,
+        url,
+        user,
+        readBody,
+        send,
+        database,
       });
     }
 
@@ -4101,6 +4144,7 @@ async function handleRequest(req, res) {
         }
         throw error;
       }
+      notifyOrderParties(store, order, { createId: id, at: ts });
       audit(store, {
         actor: user,
         action: "order.confirm_delivery",
@@ -5794,6 +5838,28 @@ const server = http.createServer((req, res) => {
         message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
       });
     });
+    return;
+  }
+  if (mutatesStore && isSupportChatRoute(pathname)) {
+    // Clerk-authenticated, but its own tables and lock — do not hold the
+    // domain mutation lock while someone is typing to Operations.
+    void readBody(req)
+      .then(() => verifyClerkBeforeMutation(req, pathname))
+      .then(() => handleRequest(req, res))
+      .catch((error) => {
+        if (res.headersSent) {
+          res.destroy(error);
+          return;
+        }
+        if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+          sendDomainError(res, error);
+          return;
+        }
+        send(res, 500, {
+          error: "server_error",
+          message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
+        });
+      });
     return;
   }
   if (mutatesStore && isSupportDeskRoute(pathname)) {
