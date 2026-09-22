@@ -163,6 +163,46 @@ test("a client collects at GRIDGO's office and is never given the shop's address
   }
 });
 
+test("a physical-invoice request reaches only the client who asked and Operations", () => {
+  const order = {
+    id: "ord-paper",
+    clientId: "client-a",
+    supplierId: "supplier-a",
+    riderId: "rider-a",
+    state: "production",
+    physicalInvoiceRequest: {
+      contactPerson: "Ana Reyes",
+      officeAddress: "7th floor, 12 J.P. Laurel Ave, Davao City",
+      operatingHours: "Mon\u2013Fri 9am\u20135pm",
+      requestedAt: AT,
+    },
+  };
+
+  for (const reader of [
+    { id: "supplier-a", role: "supplier" },
+    { id: "rider-a", role: "rider" },
+    { id: "other-client", role: "client" },
+  ]) {
+    assert.equal(
+      "physicalInvoiceRequest" in publicOrderFor(order, reader),
+      false,
+      `${reader.role} ${reader.id} must not read the client's office contact`,
+    );
+  }
+
+  for (const reader of [
+    { id: "client-a", role: "client" },
+    { id: "ops-a", role: "ops_admin" },
+    { id: "super-a", role: "super_admin" },
+  ]) {
+    assert.equal(
+      publicOrderFor(order, reader).physicalInvoiceRequest.officeAddress,
+      "7th floor, 12 J.P. Laurel Ave, Davao City",
+      `${reader.role} ${reader.id} must still read the request`,
+    );
+  }
+});
+
 test("role-aware projections expose client fee lines and truthful supplier settlement", () => {
   const money = plan();
   const schedule = createPaymentSchedule(money);

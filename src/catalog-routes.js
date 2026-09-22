@@ -286,10 +286,22 @@ function pricingFields(body, current = {}) {
   else if (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
     fail(400, "invalid_catalog_item", "turnaroundHours is required when overriding ready-in time.", { field: "turnaroundHours" });
   }
+  let minimumTurnaroundHours = current.minimumTurnaroundHours ?? null;
+  if (Object.hasOwn(body, "minimumTurnaroundHours")) {
+    minimumTurnaroundHours = body.minimumTurnaroundHours == null
+      ? null
+      : integer(body.minimumTurnaroundHours, "minimumTurnaroundHours", { min: 1 });
+  }
+  if (turnaroundMode === "inherit") minimumTurnaroundHours = null;
+  else if (minimumTurnaroundHours != null && turnaroundHours != null && minimumTurnaroundHours > turnaroundHours) {
+    fail(400, "invalid_catalog_item", "The soonest ready-in cannot be later than the promised time.", {
+      field: "minimumTurnaroundHours",
+    });
+  }
   return {
     pricingUnit, packageQty, measureUnit,
     minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
-    turnaroundMode, turnaroundHours,
+    turnaroundMode, turnaroundHours, minimumTurnaroundHours,
   };
 }
 
@@ -892,12 +904,23 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const body = catalogRecord(await readBody(req));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
     const fileIds = Array.isArray(body.fileIds) ? body.fileIds.map(String) : null;
-    if (!fileIds) fail(400, "invalid_catalog_item", "fileIds must list every current photo.", { field: "fileIds" });
+    if (!fileIds) fail(400, "invalid_catalog_item", "fileIds must list the samples that stay on this listing.", { field: "fileIds" });
     const current = (store.catalogItemPhotos || []).filter((photo) => photo.catalogItemId === item.id);
-    if (fileIds.length !== current.length || new Set(fileIds).size !== fileIds.length
-        || current.some((photo) => !fileIds.includes(photo.fileId))) {
+    if (new Set(fileIds).size !== fileIds.length || fileIds.some((fileId) => !current.some((photo) => photo.fileId === fileId))) {
       fail(409, "catalog_item_stale", "The photo set changed. Refresh it before reordering.");
     }
+    const dropped = current.filter((photo) => !fileIds.includes(photo.fileId));
+    for (const photo of dropped) {
+      const file = (store.files || []).find((candidate) => candidate.fileId === photo.fileId);
+      if (file) {
+        file.references = (file.references || []).filter(
+          (reference) => !(reference.type === "supplier_catalog_item" && reference.id === item.id),
+        );
+      }
+    }
+    store.catalogItemPhotos = (store.catalogItemPhotos || []).filter(
+      (photo) => photo.catalogItemId !== item.id || fileIds.includes(photo.fileId),
+    );
     for (const [sortOrder, fileId] of fileIds.entries()) {
       const photo = current.find((candidate) => candidate.fileId === fileId);
       photo.sortOrder = sortOrder;

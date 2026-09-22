@@ -1,4 +1,5 @@
-import { identityHasMembership } from "./authorization-context.js";
+import { approvalCaseSummary, identityHasMembership } from "./authorization-context.js";
+import { applyForBusiness } from "./enrollment.js";
 import { philippineMobileNumber } from "./phone.js";
 
 const BUSINESS_ACCOUNT_TYPES = new Set(["business", "organization"]);
@@ -121,6 +122,19 @@ function publicAccount(user, publicUser) {
   return projected;
 }
 
+function businessApplicationFor(store, userId) {
+  return (store.approvalCases || []).find(
+    (candidate) => candidate.userId === userId && candidate.kind === "business_client",
+  ) || null;
+}
+
+function accountBody(user, publicUser, store) {
+  return {
+    user: publicAccount(user, publicUser),
+    approvalCase: approvalCaseSummary(businessApplicationFor(store, user.id)),
+  };
+}
+
 function bumpVersion(user) {
   user.version = (user.version || 1) + 1;
 }
@@ -163,10 +177,14 @@ export function isAccountProfileRoute(method, pathname) {
 }
 
 /**
- * Client Account contract (the user envelope is always `{ "user": ... }`):
+ * Client Account contract (the envelope is `{ "user", "approvalCase" }`):
  * GET /me
  * PATCH /me { "expectedVersion": 1, "name"?: "Ana", "phone"?: "09171234567", "orgName"?: "Acme" }
- * POST /me/business-apply { "accountType"?: "business"|"organization", "businessName": "Acme", "contactName"?: "Ana", "contactPhone"?: "09171234567", "address"?: { "label": "Office", "addressLine": "123 Rizal St", "point": { "lat": 7.07, "lng": 125.61 }, "isDefault"?: true } }
+ * POST /me/business-apply { "accountType"?: "business"|"organization", "businessName": "Acme", "businessNature"?: "Events", "contactName"?: "Ana", "contactPhone"?: "09171234567", "address"?: { "label": "Office", "addressLine": "123 Rizal St", "point": { "lat": 7.07, "lng": 125.61 }, "isDefault"?: true } }
+ *
+ * The apply route opens a pending `business_client` case. It does not flip
+ * `accountType` — Operations does that on approve. Canonical clients should
+ * post `POST /me/business-application` instead.
  */
 export async function routeAccountProfile({ req, url, store, user, readBody, createId, now, audit, publicUser }) {
   const { pathname } = url;
@@ -174,7 +192,7 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
   requireClient(store, user);
 
   if (req.method === "GET") {
-    return { status: 200, body: { user: publicAccount(user, publicUser) }, mutated: false };
+    return { status: 200, body: accountBody(user, publicUser, store), mutated: false };
   }
 
   if (req.method === "PATCH") {
@@ -218,11 +236,11 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
         detail: { fields: ["name", "phone", "orgName"].filter((field) => Object.hasOwn(body, field)) },
       });
     }
-    return { status: 200, body: { user: publicAccount(user, publicUser) }, mutated: true };
+    return { status: 200, body: accountBody(user, publicUser, store), mutated: true };
   }
 
   const body = record(await readBody(req));
-  rejectUnexpected(body, ["accountType", "businessName", "contactName", "contactPhone", "phone", "address"]);
+  rejectUnexpected(body, ["accountType", "businessName", "businessNature", "contactName", "contactPhone", "phone", "address"]);
   if (Object.hasOwn(body, "contactPhone") && Object.hasOwn(body, "phone")) {
     fail(400, "invalid_account_profile", "Send contactPhone only once.", { field: "contactPhone" });
   }
@@ -233,6 +251,9 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
     });
   }
   const businessName = text(body.businessName, "businessName", 160);
+  const businessNature = Object.hasOwn(body, "businessNature")
+    ? text(body.businessNature, "businessNature", 240)
+    : "Not specified";
   const contactName = Object.hasOwn(body, "contactName")
     ? text(body.contactName, "contactName", 120)
     : user.name;
@@ -256,14 +277,6 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
   const address = body.address == null ? null : addressInput(body.address);
 
   let changed = false;
-  if (user.accountType !== accountType) {
-    user.accountType = accountType;
-    changed = true;
-  }
-  if (user.orgName !== businessName) {
-    user.orgName = businessName;
-    changed = true;
-  }
   if (contactName !== user.name || user.profileNameManaged !== true) {
     changed = updateName(user, contactName) || changed;
   }
@@ -274,21 +287,33 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
   const at = now();
   const addressResult = address ? addAddress(store, user, address, createId, at) : null;
   if (addressResult?.created) changed = true;
-  if (changed) {
-    bumpVersion(user);
-    if (typeof audit === "function") {
-      audit(store, {
-        actor: user,
-        action: "client_account.business_apply",
-        entityType: "user",
-        entityId: user.id,
-        detail: { accountType, addressAdded: Boolean(addressResult?.created) },
-      });
-    }
+  if (changed) bumpVersion(user);
+
+  const application = applyForBusiness({
+    store,
+    user,
+    body: { businessName, businessNature, accountType },
+    idempotencyKey: `legacy-apply:${user.id}`,
+    createId,
+    now,
+  });
+  const opened = application.status === 201;
+  if (opened && typeof audit === "function") {
+    audit(store, {
+      actor: user,
+      action: "client_account.business_apply",
+      entityType: "user",
+      entityId: user.id,
+      detail: {
+        accountType,
+        addressAdded: Boolean(addressResult?.created),
+        approvalCaseId: application.approvalCase?.id ?? null,
+      },
+    });
   }
   return {
     status: 200,
-    body: { user: publicAccount(user, publicUser) },
-    mutated: changed,
+    body: accountBody(user, publicUser, store),
+    mutated: changed || opened,
   };
 }

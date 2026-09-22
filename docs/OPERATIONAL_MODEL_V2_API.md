@@ -120,6 +120,8 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/issues/:id` | related client/supplier/ops/super | issue detail |
 | POST | `/orders/:id/issues` | owning client, within window | issue + automatic payout-hold claim |
 | POST | `/orders/:id/confirm` | owning client, within window, no open issue | client confirms the order arrived fine; closes the window now as `completed` |
+| GET | `/orders/:id/physical-invoice` | owning client | the paper-invoice request on this order, else `404 physical_invoice_not_found` |
+| POST | `/orders/:id/physical-invoice` | owning client | [request a paper invoice](#physical-invoice-request); one per order |
 | POST | `/issues/:id/resolve` | ops/super | resolve/dismiss, optionally release claim |
 | GET | `/escalations[?status=&orderId=]` | ops/super | pickup escalations |
 | POST | `/escalations/:id/resolve` | ops/super | instruction/resolution; rider must recheck |
@@ -779,6 +781,8 @@ For the rounding vector `supplierSubtotalMinor = 99999`, a 1,000-bps service fee
 
 All order-returning endpoints use this projection.
 
+`physicalInvoiceRequest` is read only by the owning client and by Operations/Super Admin. Suppliers and riders never receive it: nobody prints or carries the paper copy, so the client's office contact is not theirs to have.
+
 Operations revenue cards expose `billedMinor`, `collectedMinor`, `recognizedMinor`, `adjustedMinor`, and `refundedMinor` separately. Adjustment and refund values retain their signed stored amounts; both contribute to recognized revenue only after fulfilment.
 
 ## Digital payment plans and allocations
@@ -1046,6 +1050,17 @@ POST /escalations/:id/resolve
 ```
 
 The rider is notified and must resubmit all six checks.
+
+## Physical invoice request
+
+`POST /orders/:id/physical-invoice` takes `{contactPerson, officeAddress, operatingHours}` from the owning client and answers `201 {request}` with `orderId` and `requestedAt`. Fields are trimmed and bounded at 80/240/80 characters; anything else is `400 invalid_physical_invoice` naming the field. Another client's order is `403 forbidden`, and a second request on the same order is `409 physical_invoice_already_requested`.
+
+The request rides in `orders.data` jsonb, so it needed no migration. It is not a state change: no transition fires and no money moves. What it does produce is a record and an instruction:
+
+- an audit row `order.physical_invoice_requested` against the order, whose `detail` carries the contact, office and hours;
+- a durable inbox row `ops_physical_invoice_requested` to every current `ops_admin` and `super_admin` membership, titled with the order id and carrying the office in its body, written once when the request first appears.
+
+Operations acts on the inbox row. Without it the request would sit in jsonb unread, because nothing else in the lifecycle asks anybody to courier a document.
 
 ## Rider location
 

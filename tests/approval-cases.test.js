@@ -210,6 +210,67 @@ test("supplier approve, suspend, and restore preserve explicit service review", 
   assert.equal(store.supplierServices[0].state, "suspended");
 });
 
+test("approving a business-client case flips account type only then", () => {
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_${sequence += 1}`;
+  const store = {
+    users: [{ id: "client", role: "client", accountType: "individual", version: 1 }],
+    userRoleMemberships: [{ userId: "client", role: "client", createdAt: AT }],
+    clientProfiles: [{
+      userId: "client",
+      clientKind: "personal",
+      businessName: "Bautista Trading",
+      businessNature: "Events",
+      updatedAt: AT,
+    }],
+    approvalCases: [{
+      id: "case_business",
+      userId: "client",
+      kind: "business_client",
+      status: "pending",
+      version: 1,
+      applicationRevision: 1,
+      submittedAt: AT,
+      createdAt: AT,
+      updatedAt: AT,
+    }],
+    approvalCaseEvents: [{
+      id: "ace_apply",
+      approvalCaseId: "case_business",
+      applicationRevision: 1,
+      toStatus: "pending",
+      actorUserId: "client",
+      actorKind: "applicant",
+      requestId: "enrollment:business_client:client:key",
+      snapshot: {
+        businessName: "Bautista Trading",
+        businessNature: "Events",
+        accountType: "organization",
+      },
+      createdAt: AT,
+    }],
+    notifications: [],
+    auditLog: [],
+  };
+
+  decideApprovalCase({
+    store,
+    caseId: "case_business",
+    action: "approve",
+    input: { expectedVersion: 1, requestId: "request_business_approve", reason: null },
+    actor: { id: "ops", role: "ops_admin" },
+    actorRole: "ops_admin",
+    at: AT,
+    createId,
+  });
+
+  assert.equal(store.approvalCases[0].status, "approved");
+  assert.equal(store.users[0].accountType, "organization");
+  assert.equal(store.users[0].orgName, "Bautista Trading");
+  assert.equal(store.users[0].version, 2);
+  assert.equal(store.clientProfiles[0].clientKind, "business");
+});
+
 test("approve still notifies only the applicant after ops signup rows exist", () => {
   const store = supplierStore();
   store.userRoleMemberships.push(

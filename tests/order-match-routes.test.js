@@ -176,8 +176,12 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
     "the client's promise cannot fall before the shop's own date",
   );
   assert.deepEqual(store.jobQaChecklist, []);
-  // No ops/admin memberships in this fixture, so checkout has nobody to inbox.
-  assert.deepEqual(store.notifications, []);
+  // No ops/admin memberships in this fixture. The client still gets the
+  // acknowledgement that their receipt is ready.
+  assert.deepEqual(
+    store.notifications.map((row) => `${row.userId}:${row.type}`),
+    [`${client.id}:order_receipt_ready`],
+  );
 
   const invoice = await call("GET", `/orders/${checkedOut.body.order.id}/invoice`);
   assert.equal(invoice.status, 200);
@@ -245,10 +249,13 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     supplierId: "supplier_a",
     fromPriceMinor: 12_500,
     effectivePriceMinor: 12_500,
+    clientFromPriceMinor: 13_750,
+    clientEffectivePriceMinor: 13_750,
     printerMaxWidthFeet: null,
     selectedOptions: [{ id: "option_item_a_matte", label: "Matte" }],
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 25_000);
+  assert.equal(added.body.cart.lines[0].clientLineSubtotalMinor, 27_500);
   assert.equal(Object.hasOwn(added.body.cart.lines[1].listing, "photos"), false);
 
   const canonical = (await call("GET", `/me/carts/${cartId}`)).body.cart;
@@ -413,7 +420,58 @@ test("a document priced by the page bills pages times copies", async () => {
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 9_000);
 });
 
-test("checkout writes ops needs-QA and payment-submitted rows, not client or shop inbox", async () => {
+test("attaching a detected page count then changing copies prices pages times copies", async () => {
+  const { store, client } = fixture();
+  const booklet = store.catalogItems.find((row) => row.id === "item_a");
+  booklet.name = "supplier_a Booklet";
+  booklet.pricingUnit = "per_page";
+  booklet.basePriceMinor = 300;
+
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+
+  // The listing screen's default: one page, two copies, ₱3 each — ₱6, which
+  // is the invoice a 30-page PDF used to produce until the file's own count
+  // was written onto the line.
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 2,
+    measurement: { pages: 1 },
+  });
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 600);
+  const lineId = added.body.cart.lines[0].id;
+
+  const attached = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
+    artworkFileId: "file_art",
+    measurement: { pages: 30 },
+  });
+  assert.equal(attached.status, 200);
+  assert.equal(attached.body.cart.lines[0].artworkFileId, "file_art");
+  assert.equal(attached.body.cart.lines[0].quantity, 2);
+  assert.deepEqual(attached.body.cart.lines[0].measurement, { pages: 30 });
+  assert.equal(attached.body.cart.lines[0].lineSubtotalMinor, 18_000);
+
+  const edited = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
+    measurement: { pages: 10 },
+  });
+  assert.deepEqual(edited.body.cart.lines[0].measurement, { pages: 10 });
+  assert.equal(edited.body.cart.lines[0].quantity, 2);
+  assert.equal(edited.body.cart.lines[0].lineSubtotalMinor, 6_000);
+
+  await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
+    measurement: { pages: 30 },
+  });
+
+  // Checkout's stepper is copies. A quantity-only PATCH must not replace or
+  // drop the page count the file already put on the line.
+  const copies = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
+    quantity: 3,
+  });
+  assert.equal(copies.body.cart.lines[0].quantity, 3);
+  assert.deepEqual(copies.body.cart.lines[0].measurement, { pages: 30 });
+  assert.equal(copies.body.cart.lines[0].lineSubtotalMinor, 27_000);
+});
+
+test("checkout writes ops needs-QA, payment-submitted, and the client receipt-ready row", async () => {
   const { store, client } = fixture();
   store.users.push(
     { id: "user_ops", role: "ops_admin", email: "ops@gridgo.test" },
@@ -441,12 +499,52 @@ test("checkout writes ops needs-QA and payment-submitted rows, not client or sho
     [
       "user_admin:ops_job_needs_qa",
       "user_admin:ops_payment_submitted",
+      "user_client:order_receipt_ready",
       "user_ops:ops_job_needs_qa",
       "user_ops:ops_payment_submitted",
     ],
   );
-  assert.equal(store.notifications.some((row) => row.userId === client.id), false);
   assert.equal(store.notifications.some((row) => row.userId === "supplier_a"), false);
+});
+
+test("match and cart client projections include GRIDGO amounts beside shop amounts", async () => {
+  const { store, client } = fixture();
+  store.settings.serviceFeeRateBps = 4_500;
+  store.catalogItems.find((row) => row.id === "item_a").basePriceMinor = 1_200;
+  const call = caller(store, client);
+
+  const address = await call("POST", "/me/addresses", {
+    label: "Home", addressLine: "Bajada, Davao City",
+    point: { lat: 7.0731, lng: 125.6128 },
+  });
+  const match = await call("POST", "/me/matches", {
+    subcategoryCode: "flyers", addressId: address.body.address.id,
+  });
+  const listing = match.body.listings.find((row) => row.id === "item_a");
+  assert.equal(listing.fromPriceMinor, 1_200);
+  assert.equal(listing.clientFromPriceMinor, 1_740);
+
+  store.settings.serviceFeeRateBps = 1_000;
+  const cheaper = await call("POST", "/me/matches", {
+    subcategoryCode: "flyers", addressId: address.body.address.id,
+  });
+  assert.equal(cheaper.body.listings.find((row) => row.id === "item_a").clientFromPriceMinor, 1_320);
+
+  store.settings.serviceFeeRateBps = 4_500;
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 1,
+  });
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 1_200);
+  assert.equal(added.body.cart.lines[0].clientLineSubtotalMinor, 1_740);
+  assert.equal(added.body.cart.lines[0].listing.fromPriceMinor, 1_200);
+  assert.equal(added.body.cart.lines[0].listing.clientFromPriceMinor, 1_740);
+
+  const full = (await call("GET", `/me/carts/${cartId}`)).body.cart;
+  assert.equal(full.lines[0].lineSubtotalMinor, 1_200);
+  assert.equal(full.lines[0].clientLineSubtotalMinor, 1_740);
+  assert.equal(full.lines[0].listing.fromPriceMinor, 1_200);
+  assert.equal(full.lines[0].listing.clientFromPriceMinor, 1_740);
 });
 
 test("a basket refuses a quantity under the listing's minimum instead of holding a line it cannot price", async () => {
