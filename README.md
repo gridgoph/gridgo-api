@@ -71,7 +71,7 @@ DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm test
 
 `npm run seed` creates only catalog, taxonomy, zones, file-format registry, listing starters, and global operational settings. It never creates users or operational records and has no destructive reset mode.
 
-Local compose and `npm run seed:dev` seed three approved Davao fixture shops from existing development Clerk users. **Lovis Printshop** remains fixed to `venvilots@gmail.com`; two other real Clerk email identities receive local-only Davao Quickprint and Matina Creative Hub fixtures. All three publish Flyers plus another listing for matching and same-shop bundling. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
+Local compose and `npm run seed:dev` seed three approved Davao fixture shops from existing development Clerk users. **Lovis Printshop** remains fixed to `felyciaaa0220@gmail.com`; two other real Clerk email identities receive local-only Davao Quickprint and Matina Creative Hub fixtures. All three publish Flyers plus another listing for matching and same-shop bundling. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
 
 ## Health
 
