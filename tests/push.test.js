@@ -15,6 +15,8 @@ import {
   createPushDeliveryOrDisable,
   deviceTokensFor,
   fcmRequestBody,
+  PRODUCTION_NUDGE_CHANNEL_ID,
+  PRODUCTION_NUDGE_SOUND,
   announcementImageOrigin,
   isFcmFetchableImageUrl,
   isFcmTokenShaped,
@@ -383,11 +385,36 @@ test("a notification with no type or order still produces a readable lock-screen
 });
 
 test("the FCM request body pins the Android channel the apps must create", () => {
-  const body = fcmRequestBody(pushMessageFor({ id: "ntf_3", title: "T", body: "B", at: AT }), "device-token");
+  const message = pushMessageFor({ id: "ntf_3", type: "shop_job_may_start", title: "T", body: "B", at: AT });
+  const body = fcmRequestBody(message, "device-token");
   assert.equal(body.message.token, "device-token");
   assert.equal(body.message.android.notification.channel_id, ANDROID_NOTIFICATION_CHANNEL_ID);
+  assert.equal(body.message.apns.payload.aps.sound, "default");
   assert.equal(body.message.android.priority, "high");
   assert.equal(body.message.apns.headers["apns-priority"], "10");
+  assert.equal(message.title, "GRIDGO update");
+});
+
+test("a production inactivity reminder names its own channel and sound", () => {
+  const message = pushMessageFor({
+    id: "ntf_nudge",
+    type: "shop_production_inactive",
+    orderId: "ord_1",
+    title: "Update this job on the press",
+    body: "Nothing has moved on this job for a while.",
+    at: AT,
+  });
+  assert.equal(message.title, "GRIDGO update");
+  assert.equal(message.body, "Open GRIDGO for the latest update.");
+  assert.deepEqual(message.data, {
+    notificationId: "ntf_nudge",
+    type: "shop_production_inactive",
+    orderId: "ord_1",
+    at: AT,
+  });
+  const body = fcmRequestBody(message, "device-token");
+  assert.equal(body.message.android.notification.channel_id, PRODUCTION_NUDGE_CHANNEL_ID);
+  assert.equal(body.message.apns.payload.aps.sound, PRODUCTION_NUDGE_SOUND);
 });
 
 test("an announcement message carries a routing type and nothing else", () => {

@@ -15,7 +15,7 @@ export function apnsPayload(message) {
   return {
     aps: {
       alert: { title: message.title, body: message.body },
-      sound: "default",
+      sound: message.sound || "default",
     },
     ...message.data,
   };
