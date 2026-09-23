@@ -32,6 +32,23 @@ const SEND_TIMEOUT_MS = 10_000;
  */
 export const ANDROID_NOTIFICATION_CHANNEL_ID = "gridgo_default";
 
+/**
+ * Supplier production-inactivity reminders only. Every other type stays on
+ * `gridgo_default` with the system sound. The supplier app creates this
+ * channel; client and rider apps do not.
+ */
+export const PRODUCTION_NUDGE_CHANNEL_ID = "gridgo_production_nudge";
+export const PRODUCTION_NUDGE_SOUND = "notification_alert.mp3";
+
+const PRODUCTION_NUDGE_TYPES = new Set(["shop_production_inactive", "ops_production_inactive"]);
+
+export function pushPresentation(notification) {
+  if (PRODUCTION_NUDGE_TYPES.has(notification?.type)) {
+    return { androidChannelId: PRODUCTION_NUDGE_CHANNEL_ID, sound: PRODUCTION_NUDGE_SOUND };
+  }
+  return { androidChannelId: ANDROID_NOTIFICATION_CHANNEL_ID, sound: "default" };
+}
+
 export const DEVICE_PLATFORMS = ["android", "ios", "web"];
 
 /**
@@ -479,10 +496,13 @@ export function pushMessageFor(notification, env = process.env) {
     if (!PUSH_DATA_FIELDS.includes(key) || data[key] === "") delete data[key];
   }
   const image = resolveFcmImageUrl(notification.imageUrl, env);
+  const presentation = pushPresentation(notification);
   return {
     title: notification.type === "announcement" ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
     body: notification.type === "announcement" ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",
     data,
+    androidChannelId: presentation.androidChannelId,
+    sound: presentation.sound,
     ...(image ? { image } : {}),
   };
 }
@@ -531,8 +551,10 @@ export function assertStrangerSafeMessage(message) {
 
 export function fcmRequestBody(message, token) {
   const notification = { title: message.title, body: message.body };
-  const androidNotification = { channel_id: ANDROID_NOTIFICATION_CHANNEL_ID };
-  const aps = { sound: "default" };
+  const androidNotification = {
+    channel_id: message.androidChannelId || ANDROID_NOTIFICATION_CHANNEL_ID,
+  };
+  const aps = { sound: message.sound || "default" };
   const apns = {
     headers: { "apns-priority": "10" },
     payload: { aps },

@@ -119,10 +119,23 @@ export function roundBps(valueMinor, rateBps) {
   return result;
 }
 
+/** How long a shop may stay silent on a watched production job, and how often GRIDGO says so. */
+export function defaultProductionNudge() {
+  return {
+    enabled: true,
+    afterValue: 4,
+    afterUnit: "hours",
+    repeatValue: 4,
+    repeatUnit: "hours",
+    maxCount: 3,
+  };
+}
+
 export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
     issueWindowHours: 24,
+    productionNudge: defaultProductionNudge(),
     deliveryFeeBands: [
       { maxDistanceMeters: 4_999, feeMinor: 2_500 },
       { maxDistanceMeters: 10_000, feeMinor: 5_000 },
@@ -190,7 +203,63 @@ export function validateOperationalSettings(settings) {
     }
     previous = maximum;
   }
+  if (settings?.productionNudge !== undefined) validateProductionNudge(settings.productionNudge);
   return true;
+}
+
+function validateProductionNudge(nudge) {
+  if (!nudge || typeof nudge !== "object" || Array.isArray(nudge)) {
+    fail(
+      400,
+      "invalid_production_nudge",
+      "productionNudge must be an object with enabled, a wait, a repeat, and a stop count.",
+      { field: "productionNudge" },
+    );
+  }
+  if (typeof nudge.enabled !== "boolean") {
+    fail(
+      400,
+      "invalid_production_nudge",
+      "productionNudge.enabled must be a JSON boolean.",
+      { field: "productionNudge.enabled" },
+    );
+  }
+  validateNudgeUnit(nudge.afterUnit, "productionNudge.afterUnit");
+  validateNudgeUnit(nudge.repeatUnit, "productionNudge.repeatUnit");
+  validateNudgeSpan(nudge.afterValue, nudge.afterUnit, "productionNudge.afterValue");
+  validateNudgeSpan(nudge.repeatValue, nudge.repeatUnit, "productionNudge.repeatValue");
+  if (!Number.isInteger(nudge.maxCount) || nudge.maxCount < 1 || nudge.maxCount > 10) {
+    fail(
+      400,
+      "invalid_production_nudge",
+      "productionNudge.maxCount must be a whole number from 1 to 10, including the first reminder.",
+      { field: "productionNudge.maxCount" },
+    );
+  }
+}
+
+function validateNudgeUnit(unit, field) {
+  if (unit !== "hours" && unit !== "days") {
+    fail(
+      400,
+      "invalid_production_nudge",
+      `${field} must be "hours" or "days".`,
+      { field },
+    );
+  }
+}
+
+function validateNudgeSpan(value, unit, field) {
+  const max = unit === "days" ? 30 : 720;
+  const unitLabel = unit === "days" ? "days" : "hours";
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    fail(
+      400,
+      "invalid_production_nudge",
+      `${field} must be a whole number from 1 to ${max} ${unitLabel}.`,
+      { field },
+    );
+  }
 }
 
 function radians(degrees) {

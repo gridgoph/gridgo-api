@@ -8,6 +8,7 @@ import {
   createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
+  defaultProductionNudge,
   expireIssueWindows,
   moneyReportingForOrder,
   publicOrderFor,
@@ -45,6 +46,28 @@ test("requires service-fee settings to use an actual integer", () => {
       "invalid_service_fee_rate",
     );
   }
+});
+
+test("production reminders reject a zero wait, 31 days, 11 repeats, and a numeric string", () => {
+  const base = defaultProductionNudge();
+  for (const productionNudge of [
+    { ...base, afterValue: 0 },
+    { ...base, afterValue: 31, afterUnit: "days" },
+    { ...base, maxCount: 11 },
+    { ...base, afterValue: "4" },
+    { ...base, enabled: "true" },
+    { ...base, afterUnit: "weeks" },
+  ]) {
+    expectDomainError(
+      () => validateOperationalSettings({ ...defaultOperationalSettings(), productionNudge }),
+      400,
+      "invalid_production_nudge",
+    );
+  }
+  assert.equal(
+    validateOperationalSettings({ ...defaultOperationalSettings(), productionNudge: { ...base, afterValue: 2, afterUnit: "days", repeatValue: 12, repeatUnit: "hours", maxCount: 5 } }),
+    true,
+  );
 });
 
 test("requires delivery fee settings to use actual safe integers", () => {

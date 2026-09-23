@@ -488,6 +488,7 @@ Example FCM v1 message for an eligible device:
 - Domain push copy follows the privacy policy in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope); fetch the inbox for the detailed message. Announcements retain their public broadcast copy.
 - `data` values are always strings, and the keys are exactly `notificationId`, `type`, `orderId`, `at`. Keys with no value are omitted — a notification with no order carries no `orderId`. Route on `type` and `orderId`; fetch the order and re-read `GET /notifications` after opening, because the push carries no order state.
 - **Android apps must create the notification channel `gridgo_default`** before requesting a token. A message naming a channel the app has not created is downgraded or dropped on Android 8+.
+- **`shop_production_inactive` and `ops_production_inactive` are the only types that name a different channel and sound.** Their FCM `android.notification.channel_id` is `gridgo_production_nudge` and their APNs `aps.sound` is `notification_alert.mp3`. The supplier app creates that channel and bundles the file. Every other type, including `shop_job_may_start`, stays on `gridgo_default` with `aps.sound: "default"`. Client and rider apps do not create the production channel. Lock-screen title and body stay the generic domain copy above; the detailed shop sentences live in the inbox.
 - `type` is the same discriminator as on the notification record: `supplier_assignment_final_price`, `pickup_check_escalation`, `pickup_escalation_resolved`, and any later value. Treat unknown types as "open the notification list".
 
 **No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Domain title/body copy is also generic under the realtime privacy policy.
@@ -657,6 +658,14 @@ Default `GET /settings` response:
   "settings": {
     "serviceFeeRateBps": 1000,
     "issueWindowHours": 24,
+    "productionNudge": {
+      "enabled": true,
+      "afterValue": 4,
+      "afterUnit": "hours",
+      "repeatValue": 4,
+      "repeatUnit": "hours",
+      "maxCount": 3
+    },
     "deliveryFeeBands": [
       { "maxDistanceMeters": 4999, "feeMinor": 2500 },
       { "maxDistanceMeters": 10000, "feeMinor": 5000 },
@@ -701,6 +710,19 @@ PATCH /settings
 ```
 
 The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an actual JSON integer from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
+
+`productionNudge` is the live cadence for a shop that has not made the next production move. Desk (Operational settings, both `/ops/settings` and `/admin/settings`) edits one object on this same route:
+
+| Field | Rule |
+|---|---|
+| `enabled` | JSON boolean. `false` writes no new reminders; existing inbox rows stay. |
+| `afterValue` + `afterUnit` | First reminder. Unit is `"hours"` (1–720) or `"days"` (1–30). |
+| `repeatValue` + `repeatUnit` | Each later reminder. Units may differ from the first wait. Same bounds. |
+| `maxCount` | Whole number 1–10, including the first reminder. The last one also writes `ops_production_inactive` for each Operations and Super Admin membership. |
+
+The stored object keeps value and unit. The sweep converts days to hours (`value * 24`) when it reads. A later change does not rewrite occurrence keys or old inbox rows; the next tick uses the new policy. Omitted on PATCH, the previous object is kept. Absent on an older row, GET returns the defaults above.
+
+Desk fields, in order: an Enabled toggle; “First reminder after” (number and Hours/Days); “Then remind every” (number and Hours/Days); “Stop after” (1–10, caption “Including the first reminder.”); and “In force right now”, one sentence from the saved object. A shop cannot set this.
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. `GET` returns the caller's terms to a supplier; Operations/Super Admin may select a supplier with `?supplierId=`. Supplier-only `PATCH` accepts any subset of `deliveryDownpaymentRateBps`, `pickupFullOnlineEnabled`, `pickupDownpaymentStoreEnabled`, and `pickupDownpaymentRateBps`, and returns `{ "terms": SupplierPaymentTerms }`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`, while disabling that mode clears its rate to `null`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 

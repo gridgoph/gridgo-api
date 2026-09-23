@@ -27,6 +27,10 @@ test("APNs uses native device tokens and minimal data with signed provider JWT",
       notificationId: "n",
     },
   );
+  assert.equal(
+    apnsPayload({ title: "t", body: "b", sound: "notification_alert.mp3", data: { type: "shop_production_inactive" } }).aps.sound,
+    "notification_alert.mp3",
+  );
 });
 test("missing APNs credentials remain explicitly disabled", () => {
   const d = createApnsDelivery({});
