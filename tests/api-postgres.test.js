@@ -1514,6 +1514,22 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
       method: "qr_manual",
       caption: "QR Ph",
     });
+    assert.equal(current.body.settings.productionNudge.enabled, true);
+    assert.equal(current.body.settings.productionNudge.afterValue, 4);
+    assert.equal(current.body.settings.productionNudge.afterUnit, "hours");
+
+    const badNudge = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: {
+        expectedVersion: current.body.version,
+        productionNudge: { ...current.body.settings.productionNudge, afterValue: "4" },
+        reason: "String wait",
+      },
+    });
+    assert.equal(badNudge.status, 400);
+    assert.equal(badNudge.body.error, "invalid_production_nudge");
+    assert.equal(badNudge.body.field, "productionNudge.afterValue");
 
     const noReason = await request(instance.api, "/settings", {
       method: "PATCH",

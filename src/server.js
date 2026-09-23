@@ -143,6 +143,7 @@ import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
+import { applyProductionNudges, continueAfterStepFailure } from "./production-inactivity.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
   calculateOrderMoney,
@@ -151,6 +152,7 @@ import {
   createPaymentSchedule,
   createPayoutMilestones,
   defaultOperationalSettings,
+  defaultProductionNudge,
   estimatePriceRange,
   expireIssueWindows,
   isContainedPickup,
@@ -479,7 +481,11 @@ function publicOperationalSettings(settings, store = null) {
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
-  return { ...rest, paymentQr };
+  return {
+    ...rest,
+    productionNudge: rest.productionNudge ?? defaultProductionNudge(),
+    paymentQr,
+  };
 }
 
 /**
@@ -1302,6 +1308,19 @@ async function expireElapsedIssueWindows() {
     }
     await save(store);
   });
+}
+
+async function sweepProductionInactivity() {
+  try {
+    await enqueueMutation(async () => {
+      const store = await load();
+      const created = applyProductionNudges(store, { at: now(), createId: id, limit: 100 });
+      if (created.length === 0) return;
+      await save(store);
+    });
+  } catch (error) {
+    console.warn(`production inactivity sweep failed: ${error?.code || "unavailable"}`);
+  }
 }
 
 /*
@@ -2822,6 +2841,7 @@ async function handleRequest(req, res) {
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
+        productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
       };
       validateOperationalSettings(next);
       next.deliveryFeeBands = next.deliveryFeeBands.map((band) => ({
@@ -5943,9 +5963,13 @@ let lifecycleBusy = false;
 async function runLifecycleWork() {
   if (lifecycleBusy) return;
   lifecycleBusy = true;
-  try { await expireElapsedIssueWindows(); await drainPushOutbox(); }
-  catch(error) { console.warn(`lifecycle worker failed: ${error?.code || 'unavailable'}`); }
-  finally { lifecycleBusy = false; }
+  try {
+    await continueAfterStepFailure([
+      expireElapsedIssueWindows,
+      sweepProductionInactivity,
+      drainPushOutbox,
+    ]);
+  } finally { lifecycleBusy = false; }
 }
 // Migrations and the reference seed are explicit operator steps. Boot never
 // creates schema or data; it refuses before listening when PostgreSQL is not ready.
