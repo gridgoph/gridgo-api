@@ -9,6 +9,7 @@ import {
   createPayoutMilestones,
   defaultOperationalSettings,
   defaultProductionNudge,
+  deliverySplit,
   expireIssueWindows,
   moneyReportingForOrder,
   publicOrderFor,
@@ -280,7 +281,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(opsOrder.platformRevenue.collectedMinor, 10_000);
   assert.equal(opsOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
   assert.deepEqual(moneyReportingForOrder(order).platformRevenue, {
-    billedMinor: 10_000,
+    billedMinor: 10_375,
     collectedMinor: 10_000,
     recognizedMinor: 0,
     adjustedMinor: 0,
@@ -293,7 +294,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     { kind: "refund", amountMinor: -2_000 },
   ];
   assert.deepEqual(moneyReportingForOrder(adjusted).platformRevenue, {
-    billedMinor: 10_000,
+    billedMinor: 10_375,
     collectedMinor: 10_000,
     recognizedMinor: 7_000,
     adjustedMinor: -1_000,
@@ -589,4 +590,89 @@ test("production line visibility follows jobs ahead of legacy primary party ids"
     assert.deepEqual(publicOrderFor(order, { role, id: `${role}-${key}` }, store).productionItems.map((line) => line.id), [`line-${key}`]);
   }
   assert.equal(publicOrderFor(order, { role: "client", id: "client" }, store).productionItems.length, 2);
+});
+
+test("delivery split snapshots the rider rate and rounds half-up with an exact remainder", () => {
+  for (const [feeMinor, rate, payout, share] of [
+    [2500, 8500, 2125, 375], [10, 8500, 9, 1], [3, 8500, 3, 0],
+    [0, 8500, 0, 0], [99, 0, 0, 99], [99, 10000, 99, 0],
+  ]) {
+    const settings = { ...defaultOperationalSettings(), riderCommissionBps: rate,
+      deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }] };
+    const money = plan({ settings });
+    settings.riderCommissionBps = 1000;
+    assert.equal(money.riderCommissionBps, rate);
+    assert.equal(money.riderPayoutMinor, payout);
+    assert.equal(money.platformDeliveryShareMinor, share);
+    assert.equal(money.riderPayoutMinor + money.platformDeliveryShareMinor, feeMinor);
+  }
+  assert.equal(plan().riderCommissionBps, 8500);
+});
+
+test("rider commission setting rejects coerced and out-of-range rates", () => {
+  for (const riderCommissionBps of [null, "8500", -1, 10001, 85.5, true]) {
+    expectDomainError(() => validateOperationalSettings({ ...defaultOperationalSettings(), riderCommissionBps }),
+      400, "invalid_rider_commission_rate");
+  }
+});
+
+test("dispatch and ops expose delivery earnings while client and supplier omit the split", () => {
+  const order = { id: "split", clientId: "client", supplierId: "supplier", ...plan() };
+  for (const role of ["rider", "ops_admin", "super_admin"]) {
+    const projected = publicOrderFor(order, { id: role, role });
+    assert.equal(projected.riderPayoutMinor, 2125);
+    assert.equal(projected.platformDeliveryShareMinor, 375);
+    assert.equal(projected.riderCommissionBps, 8500);
+  }
+  for (const role of ["client", "supplier"]) {
+    const projected = publicOrderFor(order, { id: role, role });
+    assert.equal(projected.riderPayoutMinor, undefined);
+    assert.equal(projected.platformDeliveryShareMinor, undefined);
+    assert.equal(projected.riderCommissionBps, undefined);
+    assert.equal(projected.deliveryFeeMinor, 2500);
+  }
+});
+
+test("finance counts GRIDGO delivery revenue only from confirmed collection", () => {
+  const order = { ...plan(), ...createPaymentSchedule(plan()), commercialCommittedAt: AT, state: "delivered" };
+  assert.equal(moneyReportingForOrder(order).platformRevenue.billedMinor, 10375);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 0);
+  order.payments.final_online.status = "confirmed";
+  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 375);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 375);
+  assert.equal(moneyReportingForOrder(order).deliverySettlement.riderPayoutMinor, 2125);
+  // The 75/25 plan collects delivery in both installments. Round cumulatively:
+  // 8 paid centavos at 85% -> 7 rider, 1 platform; all 10 -> 9 rider, 1 platform.
+  Object.assign(order, { deliveryFeeMinor: 10, riderCommissionBps: 8500, paymentAllocations: [
+    { paymentCode: "initial", component: "delivery_pass_through", amountMinor: 8 },
+    { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: 2 },
+  ] });
+  order.payments.initial.status = "confirmed";
+  order.payments.final_online.status = "not_submitted";
+  assert.equal(moneyReportingForOrder(order).deliverySettlement.platformCollectedMinor, 1);
+  order.payments.final_online.status = "confirmed";
+  const full = moneyReportingForOrder(order).deliverySettlement;
+  assert.equal(full.platformCollectedMinor, 1);
+  assert.equal(full.riderCollectedMinor, 9);
+});
+
+test("delivery split stays exact at the largest API-safe amount", () => {
+  assert.deepEqual(deliverySplit(Number.MAX_SAFE_INTEGER, 8500), {
+    riderCommissionBps: 8500, riderPayoutMinor: 7656119366529842, platformDeliveryShareMinor: 1351079888211149,
+  });
+});
+
+
+test("finance includes the final service-fee allocation of a 75/25 checkout", () => {
+  const order = { ...plan(), commercialCommittedAt: AT, state: "delivered",
+    payments: { initial: { status: "confirmed" }, final_online: { status: "not_submitted" } },
+    paymentAllocations: [
+      { paymentCode: "initial", component: "service_fee", amountMinor: 7500 },
+      { paymentCode: "final_online", component: "service_fee", amountMinor: 2500 },
+    ],
+  };
+  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 7500);
+  order.payments.final_online.status = "confirmed";
+  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 10000);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 10000);
 });

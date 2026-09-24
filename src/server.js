@@ -483,6 +483,7 @@ function publicOperationalSettings(settings, store = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     paymentQr,
   };
@@ -2838,6 +2839,8 @@ async function handleRequest(req, res) {
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
       const next = {
         ...store.settings,
+        riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
+          ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
@@ -5058,7 +5061,7 @@ async function handleRequest(req, res) {
           order.dropoff = order.requestedDropoff ? structuredClone(order.requestedDropoff) : order.dropoff;
           for (const field of [
             "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor",
-            "deliveryDistanceMeters", "deliveryFeeMinor", "totalMinor", "fulfillmentMode",
+            "deliveryDistanceMeters", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode",
             "paymentPlan", "supplierDownpaymentRateBps", "initialSupplierPrincipalMinor",
             "supplierRemainderMinor", "initialOnlineMinor", "finalOnlineMinor", "onlineDueMinor",
             "directStoreDueMinor", "supplierPlatformPayoutMinor", "supplierEarningsMinor",
