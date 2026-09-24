@@ -73,7 +73,7 @@ function fixture() {
   return { store, client };
 }
 
-function caller(store, user) {
+function caller(store, user, at = AT) {
   let sequence = 0;
   return async (method, pathname, body) => routeOrderMatch({
     req: { method },
@@ -82,9 +82,116 @@ function caller(store, user) {
     user,
     readBody: async () => body || {},
     id: (prefix) => `${prefix}_${++sequence}`,
-    now: () => AT,
+    now: () => at,
   });
 }
+
+for (const queued of [false, true]) {
+  test(`Friday ready-time agrees across match, cart and checkout (queued=${queued})`, async (t) => {
+    const { store, client } = fixture();
+    const at = "2026-09-25T08:00:00.000Z"; // Friday 16:00 in Davao.
+    const call = caller(store, client, at);
+    store.settings.promiseAllowanceMinutes = 60;
+    Object.assign(store.supplierServices[0], { turnaroundHours: 3, standardTurnaroundHours: 3 });
+    store.supplierProfiles[0].schedule = {
+      utcOffsetMinutes: 480,
+      week: [1, 2, 3, 4, 5].map((weekday) => ({ weekday, opensMinute: 480, closesMinute: 1080 })),
+      closures: [],
+    };
+    if (queued) {
+      // The listing overrides a slower service; every path must use the listing.
+      Object.assign(store.supplierServices[0], { turnaroundHours: 12, standardTurnaroundHours: 12 });
+      Object.assign(store.catalogItems[0], { turnaroundMode: "override", turnaroundHours: 3 });
+      store.orderJobs.push({ id: "ahead_job", orderId: "ahead_order", supplierId: "supplier_a", state: "production", estimatedHours: 3 });
+      store.orders.push(
+        { id: "ahead_order", supplierId: "supplier_a", state: "production", estimatedHours: 3 },
+        { id: "legacy_order", supplierId: "supplier_a", state: "production", estimatedHours: 1 },
+        { id: "finished_order", supplierId: "supplier_a", state: "completed", estimatedHours: 100 },
+      );
+    }
+    const match = await call("POST", "/me/matches", {
+      subcategoryCode: "flyers", excludedSupplierIds: ["supplier_b"],
+    });
+    const expected = queued ? "2026-09-28T06:00:00.000Z" : "2026-09-28T02:00:00.000Z";
+    assert.equal(match.body.promiseBy, expected);
+    assert.equal(match.body.queue.jobsAhead, queued ? 2 : 0);
+    const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+    const added = await call("POST", `/me/carts/${cartId}/lines`, {
+      catalogItemId: "item_a", optionIds: [], quantity: 1,
+    });
+    const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
+    const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
+      payment: { method: "qr_manual", proofFileId: "file_qr", reference: "FRIDAY-READY" },
+    });
+    await t.test("checkout saves the match promise", () => {
+      const order = store.orders.find((row) => row.id === checkedOut.body.order.id);
+      assert.equal(order.promiseBy, expected);
+      assert.equal(checkedOut.body.order.readyBy, expected);
+    });
+    await t.test("full and compact cart lines expose the match promise", () => {
+      assert.equal(cart.lines[0].promiseBy, expected);
+      assert.equal(added.body.cart.lines[0].promiseBy, expected);
+    });
+  });
+}
+
+test("cart promise uses quantity capacity, closures, and the current request time", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client, "2026-09-25T08:00:00.000Z");
+  store.settings.promiseAllowanceMinutes = 0;
+  Object.assign(store.supplierServices[0], { standardTurnaroundHours: 3, capacityDaily: 100 });
+  store.supplierProfiles[0].schedule = {
+    utcOffsetMinutes: 480,
+    week: [1, 2, 3, 4, 5].map((weekday) => ({ weekday, opensMinute: 480, closesMinute: 1080 })),
+    closures: [{ startDay: "2026-09-28", endDay: "2026-09-28" }],
+  };
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  const added = await call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "item_a", optionIds: [], quantity: 200,
+  });
+  const expected = "2026-09-29T10:00:00.000Z"; // End of the second open day.
+  assert.equal(added.body.cart.lines[0].promiseBy, expected);
+  const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "CAPACITY-READY" },
+  });
+  assert.equal(store.orders.find((row) => row.id === checkedOut.body.order.id).promiseBy, expected);
+  const later = caller(store, client, "2026-09-30T00:00:00.000Z");
+  const refreshed = (await later("GET", `/me/carts/${cartId}`)).body.cart.lines[0];
+  assert.ok(Date.parse(refreshed.promiseBy) > Date.parse(expected));
+  assert.equal(store.orders.find((row) => row.id === checkedOut.body.order.id).promiseBy, expected);
+});
+
+test("cart promise is explicitly null when its listing or calendar is unavailable", async (t) => {
+  for (const [name, invalidate] of [
+    ["missing listing", (store) => { store.catalogItems = []; }],
+    ["missing service", (store) => { store.supplierServices = []; }],
+    ["closed shop", (store) => { store.supplierProfiles[0].isClosed = true; }],
+    ["missing shop", (store) => { store.supplierProfiles = []; }],
+    ["invalid calendar", (store) => { store.supplierProfiles[0].schedule = { week: [] }; }],
+    ["no opening within a year", (store) => {
+      store.supplierProfiles[0].schedule = {
+        utcOffsetMinutes: 480,
+        week: [{ weekday: 1, opensMinute: 480, closesMinute: 1080 }],
+        closures: [{ startDay: "2026-01-01", endDay: "2028-01-01" }],
+      };
+    }],
+  ]) {
+    await t.test(name, async () => {
+      const { store, client } = fixture();
+      const call = caller(store, client);
+      const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+      const added = await call("POST", `/me/carts/${cartId}/lines`, {
+        catalogItemId: "item_a", optionIds: [], quantity: 1,
+      });
+      assert.ok(added.body.cart.lines[0].promiseBy);
+      invalidate(store);
+      assert.equal((await call("GET", `/me/carts/${cartId}`)).body.cart.lines[0].promiseBy, null);
+      const lineId = added.body.cart.lines[0].id;
+      const patched = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { structuredSpec: {} });
+      assert.equal(patched.body.cart.lines[0].promiseBy, null);
+    });
+  }
+});
 
 test("preferences, addresses, matching, cart checkout, invoice, and mockup use the client contract", async () => {
   const { store, client } = fixture();
@@ -146,6 +253,17 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   });
 
   assert.equal(checkedOut.status, 201);
+  const committed = store.orders.find((order) => order.id === checkedOut.body.order.id);
+  assert.equal(committed.riderCommissionBps, 8500);
+  assert.equal(committed.riderPayoutMinor, 2125);
+  assert.equal(committed.platformDeliveryShareMinor, 375);
+  assert.equal(store.orderJobs[0].riderCommissionBps, 8500);
+  assert.equal(store.orderJobs[0].riderPayoutMinor, 2125);
+  store.settings.riderCommissionBps = 7000;
+  assert.equal(committed.riderPayoutMinor, 2125);
+  assert.equal(checkedOut.body.order.riderPayoutMinor, undefined);
+  assert.equal(checkedOut.body.order.jobs[0].riderPayoutMinor, undefined);
+
   // Money first: Operations confirms the transfer before anything is checked.
   assert.equal(checkedOut.body.order.state, "initial_payment_review");
   assert.ok(checkedOut.body.order.readyBy, "the client is given a promised date at checkout");

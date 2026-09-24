@@ -119,6 +119,14 @@ export function roundBps(valueMinor, rateBps) {
   return result;
 }
 
+/** The rider rounds half-up; GRIDGO owns exactly the remaining centavos. */
+export function deliverySplit(deliveryFeeMinor, riderCommissionBps) {
+  const fee = finiteMinor(deliveryFeeMinor, "deliveryFeeMinor");
+  const rate = finiteBps(riderCommissionBps, "riderCommissionBps");
+  const riderPayoutMinor = roundBps(fee, rate);
+  return { riderCommissionBps: rate, riderPayoutMinor, platformDeliveryShareMinor: fee - riderPayoutMinor };
+}
+
 /** How long a shop may stay silent on a watched production job, and how often GRIDGO says so. */
 export function defaultProductionNudge() {
   return {
@@ -134,6 +142,7 @@ export function defaultProductionNudge() {
 export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
+    riderCommissionBps: 8_500,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     deliveryFeeBands: [
@@ -153,6 +162,13 @@ export function validateOperationalSettings(settings) {
       "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
       { field: "serviceFeeRateBps" },
     );
+  }
+  const riderCommissionBps = settings?.riderCommissionBps;
+  if (riderCommissionBps !== undefined && (!Number.isInteger(riderCommissionBps)
+      || riderCommissionBps < 0 || riderCommissionBps > 10_000)) {
+    fail(400, "invalid_rider_commission_rate",
+      "Set the rider share to a whole number from 0 to 10,000 basis points.",
+      { field: "riderCommissionBps" });
   }
   const issueWindowHours = settings?.issueWindowHours;
   if (!Number.isInteger(issueWindowHours) || issueWindowHours < 1 || issueWindowHours > 720) {
@@ -361,6 +377,7 @@ export function calculateOrderMoney({
     subtotalMinor: supplierSubtotal,
     serviceFeeRateBps,
     serviceFeeMinor,
+    ...deliverySplit(deliveryFeeMinor, settings.riderCommissionBps ?? 8_500),
     deliveryDistanceMeters: resolvedDistance,
     deliveryFeeMinor,
     totalMinor,
@@ -382,7 +399,7 @@ function componentLine(component, amountMinor) {
   const labels = {
     supplier_principal: "Supplier principal",
     service_fee: "GRIDGO service fee",
-    delivery_pass_through: "Delivery pass-through",
+    delivery_pass_through: "Delivery fee",
   };
   return { component, label: labels[component], amountMinor };
 }
@@ -509,12 +526,15 @@ export function moneyReportingForOrder(order) {
   const releasedThroughPlatformMinor = (order.payoutMilestones || [])
     .filter((milestone) => milestone.status === "released")
     .reduce((sum, milestone) => sum + finiteMinor(milestone.amountMinor, "milestone.amountMinor"), 0);
-  const initialConfirmed = order.payments?.initial?.status === "confirmed";
-  const serviceFeeCollectedMinor = initialConfirmed
-    ? (order.paymentAllocations || [])
-      .filter((allocation) => allocation.paymentCode === "initial" && allocation.component === "service_fee")
-      .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0)
-    : 0;
+  const collectedComponent = (component) => (order.paymentAllocations || [])
+    .filter((allocation) => allocation.component === component
+      && order.payments?.[allocation.paymentCode]?.status === "confirmed")
+    .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
+  const serviceFeeCollectedMinor = collectedComponent("service_fee");
+  const split = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000);
+  const deliveryCollectedMinor = collectedComponent("delivery_pass_through");
+  const collectedSplit = deliverySplit(deliveryCollectedMinor, split.riderCommissionBps);
+  const platformCollectedMinor = serviceFeeCollectedMinor + collectedSplit.platformDeliveryShareMinor;
   const adjustedMinor = (order.revenueAdjustments || [])
     .filter((adjustment) => adjustment.kind === "adjustment")
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
@@ -543,10 +563,17 @@ export function moneyReportingForOrder(order) {
         (order.supplierSubtotalMinor || 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
       ),
     },
+    deliverySettlement: {
+      deliveryFeeMinor: order.deliveryFeeMinor ?? 0,
+      ...split,
+      collectedMinor: deliveryCollectedMinor,
+      riderCollectedMinor: collectedSplit.riderPayoutMinor,
+      platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
+    },
     platformRevenue: {
-      billedMinor: order.commercialCommittedAt ? order.serviceFeeMinor : 0,
-      collectedMinor: serviceFeeCollectedMinor,
-      recognizedMinor: handedOver ? Math.max(0, serviceFeeCollectedMinor + adjustedMinor + refundedMinor) : 0,
+      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor : 0,
+      collectedMinor: platformCollectedMinor,
+      recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
       adjustedMinor,
       refundedMinor,
     },
@@ -800,6 +827,14 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  if (ops || rider) {
+    if (order.deliveryFeeMinor != null) Object.assign(publicRecord,
+      deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000));
+  } else {
+    for (const field of ["riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor"]) {
+      delete publicRecord[field];
+    }
+  }
   if (!ops) delete publicRecord.revenueAdjustments;
   // Who is at the shop counter. The rider needs it to prefill the handoff
   // signature; the shop and Operations may read back who was named.
@@ -862,6 +897,7 @@ export function publicOrderFor(order, user, store = null) {
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;
     publicRecord.platformRevenue = reporting.platformRevenue;
+    publicRecord.deliverySettlement = reporting.deliverySettlement;
   }
   // The release desk pays a shop by scanning its own receiving QR, so the
   // account rides with every order Operations reads. Never for anyone else.
