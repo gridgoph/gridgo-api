@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 
-import { clerkClientProfile } from "./auth.js";
 import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { validateReply, validateTicket } from "./support-validate.js";
 
@@ -225,13 +224,29 @@ export function deskAllowedEmails(env = process.env) {
 }
 
 /**
+ * The Clerk user's primary email, only when Clerk has verified it.
+ *
+ * `clerkClientProfile` falls back to the first listed address, which can be
+ * one the account merely added and never confirmed. That is fine for a
+ * display name and wrong for an allowlist.
+ */
+export function verifiedPrimaryEmail(clerkUser) {
+  const emails = Array.isArray(clerkUser?.emailAddresses) ? clerkUser.emailAddresses : [];
+  const primary = clerkUser?.primaryEmailAddress
+    || emails.find((entry) => entry && entry.id === clerkUser?.primaryEmailAddressId);
+  if (primary?.verification?.status !== "verified") return "";
+  return String(primary.emailAddress || "").trim().toLowerCase();
+}
+
+/**
  * Desk access is a verified Clerk session whose primary email is on
  * SUPPORT_DESK_ALLOWED_EMAILS. A signed Clerk token for any other GRIDGO
  * account is not enough.
  *
- * A verified token may carry `email`. When it does not, the Clerk user
- * profile is loaded. The email claim is trusted only because verifyClerk
- * already checked the signature.
+ * A verified token may carry `email` (a session-token template mapping
+ * `{{user.primary_email_address}}`). When it does not, the Clerk user is
+ * loaded and only a verified primary address counts. The email claim is
+ * trusted only because verifyClerk already checked the signature.
  */
 export async function deskOperatorFromRequest(req, { env = process.env, verifyClerk, loadClerkUser }) {
   const allowed = deskAllowedEmails(env);
@@ -254,7 +269,7 @@ export async function deskOperatorFromRequest(req, { env = process.env, verifyCl
   if (!email) {
     try {
       const user = await loadClerkUser(verified.claims.sub);
-      email = clerkClientProfile(user).email;
+      email = verifiedPrimaryEmail(user);
     } catch {
       return {
         status: 503,

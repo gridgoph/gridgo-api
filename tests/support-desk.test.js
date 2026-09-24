@@ -8,6 +8,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
+import { deskOperatorFromRequest, verifiedPrimaryEmail } from "../src/support-desk.js";
 import { escapeHtml, toHtmlParagraphs } from "../src/support-html.js";
 import { buildReplyEmail, createSupportMailer, emailConfigured } from "../src/support-mail.js";
 import { clientKey, tooManyRequests } from "../src/support-rate-limit.js";
@@ -252,6 +253,49 @@ test("emailConfigured is a boolean from EMAIL_* and never returns the password",
   assert.equal(emailConfigured({}), false);
   assert.equal(emailConfigured({ EMAIL_USER: "a@b.c", EMAIL_PASSWORD: "secret" }), true);
   assert.equal(JSON.stringify(emailConfigured({ EMAIL_USER: "a@b.c", EMAIL_PASSWORD: "secret" })).includes("secret"), false);
+});
+
+function clerkUser(address, status, { primary = true } = {}) {
+  const entry = { id: "idn_1", emailAddress: address, verification: { status } };
+  return { primaryEmailAddressId: primary ? "idn_1" : null, emailAddresses: [entry] };
+}
+
+test("verifiedPrimaryEmail ignores an unverified or non-primary address", () => {
+  assert.equal(verifiedPrimaryEmail(clerkUser("GridGo26@Gmail.com", "verified")), DESK_EMAIL);
+  assert.equal(verifiedPrimaryEmail(clerkUser(DESK_EMAIL, "unverified")), "");
+  assert.equal(verifiedPrimaryEmail(clerkUser(DESK_EMAIL, "verified", { primary: false })), "");
+  assert.equal(verifiedPrimaryEmail(null), "");
+});
+
+test("the desk gate needs an allowlisted email that Clerk has verified", async () => {
+  const env = { SUPPORT_DESK_ALLOWED_EMAILS: ` ${DESK_EMAIL.toUpperCase()} , other@example.com` };
+  const req = (token) => ({ headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const verifyClerk = async (token) => (token === "bad" ? { claims: null } : { claims: { sub: `user_${token}` } });
+  const users = {
+    user_desk: clerkUser(DESK_EMAIL, "verified"),
+    user_pending: clerkUser(DESK_EMAIL, "unverified"),
+    user_ops: clerkUser("ops@gridgo.test", "verified"),
+  };
+  const loadClerkUser = async (id) => {
+    if (id === "user_down") throw new Error("Clerk is down");
+    return users[id];
+  };
+  const gate = (token, overrides = {}) =>
+    deskOperatorFromRequest(req(token), { env, verifyClerk, loadClerkUser, ...overrides });
+
+  assert.deepEqual(await gate("desk"), { admin: { email: DESK_EMAIL, clerkUserId: "user_desk" } });
+  assert.equal((await gate("pending")).status, 403);
+  assert.equal((await gate("ops")).status, 403);
+  assert.equal((await gate("bad")).status, 401);
+  assert.equal((await gate(null)).status, 401);
+  const down = await gate("down");
+  assert.equal(down.status, 503);
+  assert.equal(down.error, "clerk_unavailable");
+  const claimed = await gate("x", { verifyClerk: async () => ({ claims: { sub: "user_x", email: DESK_EMAIL } }) });
+  assert.equal(claimed.admin.email, DESK_EMAIL);
+  const unconfigured = await gate("desk", { env: {} });
+  assert.equal(unconfigured.status, 503);
+  assert.equal(unconfigured.error, "desk_unconfigured");
 });
 
 test("public submit, desk login, rate limit, mail, and CORS origin handling", { skip: !DATABASE_URL }, async () => {
