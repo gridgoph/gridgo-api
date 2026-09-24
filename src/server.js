@@ -176,6 +176,7 @@ import {
   seedSupportDeskAdmin,
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
+import { issueReportsPathname, routeIssueReports } from "./issue-reports.js";
 import {
   loadDeviceTokenStore,
   loadStore,
@@ -1679,6 +1680,17 @@ async function handleRequest(req, res) {
       send,
       database,
       mailer: supportMailer,
+    })) {
+      return;
+    }
+    if (await routeIssueReports({
+      req,
+      res,
+      pathname,
+      url,
+      send,
+      database,
+      storage: objectStorage,
     })) {
       return;
     }
@@ -5841,6 +5853,12 @@ const server = http.createServer((req, res) => {
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
     (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
   if (isSelfQueuedFileMutation) {
+    void handleRequest(req, res);
+    return;
+  }
+  if (mutatesStore && issueReportsPathname(pathname)) {
+    // Public issue reports carry base64 screenshots well past the 1 MiB JSON
+    // cap, so the route reads its own body and commits under its own lock.
     void handleRequest(req, res);
     return;
   }

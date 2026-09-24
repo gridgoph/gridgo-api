@@ -100,6 +100,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786968000000_support_chat_history",
         "1786975200000_listing_production_window",
         "1786978800000_rider_delivery_commission",
+        "1786982400000_public_issue_reports",
       ],
     );
 
@@ -245,6 +246,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.issue_reports`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.issue_report_screenshots`])).rows[0].t, null);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
@@ -774,7 +779,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 1, client));
+    await runner(migrationOptions(schema, "down", 2, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)

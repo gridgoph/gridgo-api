@@ -79,6 +79,7 @@ Uploads spool to `$PWD/.tmp/uploads`; the image must keep it writable by uid 100
 - Plain `node:http`; approved direct dependencies are `pg`, `node-pg-migrate`, `minio`, `@clerk/backend`, and `nodemailer`.
 - Authorization on every non-public route; errors use `{ error: "snake_case" }`.
 - Public landing support tickets live in `support_admins` / `support_tickets` (`src/support-desk.js`). They use `DATABASE_URL` through `database.query` / transactions, not a second Pool. Desk login is username/password hashed at boot from `SUPPORT_DESK_*`; session tokens use `SUPPORT_DESK_JWT_SECRET` (not Clerk). Gmail replies are optional via `EMAIL_USER` / `EMAIL_PASSWORD`.
+- Public issue reports from the landing `/report` page live in `issue_reports` / `issue_report_screenshots` (`src/issue-reports.js`, contract `docs/ISSUE_REPORTS_API.md`). Filing is public; reading and marking use the support desk token.
 - Do not add JSON persistence, a JSON importer, local auth fallback, seeded users, or file blobs in PostgreSQL.
 - For local live-data experiments, use an isolated database and free high API port. Never target another lane or use broad process-kill commands.
 
