@@ -176,7 +176,12 @@ import {
   seedSupportDeskAdmin,
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
-import { issueReportsPathname, routeIssueReports } from "./issue-reports.js";
+import {
+  isStaffIssueReportsRoute,
+  issueReportsPathname,
+  routeIssueReports,
+  routeStaffIssueReports,
+} from "./issue-reports.js";
 import {
   loadDeviceTokenStore,
   loadStore,
@@ -2129,6 +2134,21 @@ async function handleRequest(req, res) {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
       });
+    }
+
+    if (isStaffIssueReportsRoute(pathname)) {
+      await routeStaffIssueReports({
+        req,
+        res,
+        pathname,
+        url,
+        user,
+        readBody,
+        send,
+        database,
+        storage: objectStorage,
+      });
+      return;
     }
 
     if (isSupportChatRoute(pathname)) {
@@ -5881,9 +5901,10 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (mutatesStore && isSupportChatRoute(pathname)) {
+  if (mutatesStore && (isSupportChatRoute(pathname) || isStaffIssueReportsRoute(pathname))) {
     // Clerk-authenticated, but its own tables and lock — do not hold the
-    // domain mutation lock while someone is typing to Operations.
+    // domain mutation lock while someone is typing to Operations (or marking
+    // an issue report).
     void readBody(req)
       .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(() => handleRequest(req, res))

@@ -27,6 +27,10 @@ Every path is also served under `/api`.
 `201` returns `{ id, createdAt, screenshots }` (the number stored). Screenshots go to MinIO under
 `issue_reports/YYYY/MM/DD/<reportId>-<n>.<ext>` before the rows commit; if either fails the stored objects are removed.
 
+## Read and mark reports (dashboard: Operations and Super Admin)
+
+The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin` or `super_admin` membership may use `GET /ops/issue-reports`, `GET /ops/issue-reports/:id` and `PATCH /ops/issue-reports/:id`, which behave exactly like the desk routes below; anyone else gets `403 forbidden`.
+
 ## Read and mark reports (support desk)
 
 Sign in with `POST /admin/login` (`SUPPORT_DESK_USERNAME` / `SUPPORT_DESK_PASSWORD`) and send the token as `Authorization: Bearer <token>`.
@@ -35,5 +39,5 @@ Sign in with `POST /admin/login` (`SUPPORT_DESK_USERNAME` / `SUPPORT_DESK_PASSWO
 - `GET /issue-reports/:id` returns one report.
 - `PATCH /issue-reports/:id` with `{ "status": "published", "publishedIn": "09-24-2026" }` marks it handled. `publishedIn` is kept only for `published`.
 
-Each report is `{ id, issue, category, status, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
+The list response is `{ reports, counts: { new, published, dismissed } }`. Each report is `{ id, issue, category, status, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
 Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL_SECONDS`, default 5 minutes), so download them right after listing.

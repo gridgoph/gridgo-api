@@ -9,6 +9,7 @@
  */
 import crypto from "node:crypto";
 
+import { identityHasMembership } from "./authorization-context.js";
 import { readBearer, verifyAdminToken } from "./support-desk.js";
 import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { asTrimmedString } from "./support-validate.js";
@@ -274,6 +275,62 @@ export async function updateIssueReport(database, id, { status, publishedIn }) {
   return (result.rowCount ?? 0) > 0;
 }
 
+async function reportCounts(database) {
+  const result = await database.query("SELECT status, count(*)::int AS n FROM issue_reports GROUP BY status");
+  const counts = Object.fromEntries(ISSUE_STATUSES.map((status) => [status, 0]));
+  for (const row of result.rows) counts[row.status] = row.n;
+  return counts;
+}
+
+/**
+ * List, read and mark reports under `base`. Shared by the support desk
+ * (`/issue-reports`) and signed-in Operations / Super Admin (`/ops/issue-reports`);
+ * the caller has already decided who may reach it.
+ */
+async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch }) {
+  if (method === "GET" && path === base) {
+    const status = url?.searchParams.get("status") || null;
+    if (status && !ISSUE_STATUSES.includes(status)) {
+      throw new ReportError(400, "invalid_request", `status must be one of: ${ISSUE_STATUSES.join(", ")}.`);
+    }
+    const sinceRaw = url?.searchParams.get("since") || null;
+    if (sinceRaw && Number.isNaN(Date.parse(sinceRaw))) {
+      throw new ReportError(400, "invalid_request", "since must be an ISO date or timestamp.");
+    }
+    const limitRaw = Number(url?.searchParams.get("limit") || 200);
+    const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 200;
+    const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit });
+    send(res, 200, { reports, counts: await reportCounts(database) });
+    return true;
+  }
+
+  const itemMatch = path.startsWith(`${base}/`) ? /^([^/]+)$/.exec(path.slice(base.length + 1)) : null;
+  if (!itemMatch || (method !== "GET" && method !== "PATCH")) return false;
+  const id = itemMatch[1];
+  const notFound = new ReportError(404, "issue_report_not_found", `Issue report ${id} was not found.`);
+  if (!UUID_RE.test(id)) throw notFound;
+  if (method === "PATCH") {
+    const body = await readPatch();
+    const status = asTrimmedString(body?.status);
+    if (!ISSUE_STATUSES.includes(status)) {
+      throw new ReportError(400, "invalid_request", `status must be one of: ${ISSUE_STATUSES.join(", ")}.`);
+    }
+    const publishedIn = asTrimmedString(body?.publishedIn) || null;
+    if (publishedIn && publishedIn.length > 200) {
+      throw new ReportError(400, "invalid_request", "publishedIn must be 200 characters or fewer.");
+    }
+    const updated = await database.transaction(
+      () => updateIssueReport(database, id, { status, publishedIn: status === "published" ? publishedIn : null }),
+      { lockKey: ISSUE_LOCK },
+    );
+    if (!updated) throw notFound;
+  }
+  const report = await findIssueReport(database, storage, id);
+  if (!report) throw notFound;
+  send(res, 200, report);
+  return true;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function deskAdmin(req, env) {
@@ -305,53 +362,48 @@ export async function routeIssueReports({ req, res, pathname, url, send, databas
       return true;
     }
 
-    const itemMatch = /^\/issue-reports\/([^/]+)$/.exec(path);
-    if ((method === "GET" && (path === "/issue-reports" || itemMatch)) || (method === "PATCH" && itemMatch)) {
+    if (method === "GET" || method === "PATCH") {
       if (!deskAdmin(req, env)) throw new ReportError(401, "unauthorized", "Sign in with the support desk account.");
     }
-
-    if (method === "GET" && path === "/issue-reports") {
-      const status = url?.searchParams.get("status") || null;
-      if (status && !ISSUE_STATUSES.includes(status)) {
-        throw new ReportError(400, "invalid_request", `status must be one of: ${ISSUE_STATUSES.join(", ")}.`);
-      }
-      const sinceRaw = url?.searchParams.get("since") || null;
-      if (sinceRaw && Number.isNaN(Date.parse(sinceRaw))) {
-        throw new ReportError(400, "invalid_request", "since must be an ISO date or timestamp.");
-      }
-      const limitRaw = Number(url?.searchParams.get("limit") || 200);
-      const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 200;
-      send(res, 200, { reports: await listIssueReports(database, storage, { status, since: sinceRaw, limit }) });
-      return true;
-    }
-
-    if (itemMatch && (method === "GET" || method === "PATCH")) {
-      const id = itemMatch[1];
-      const notFound = new ReportError(404, "issue_report_not_found", `Issue report ${id} was not found.`);
-      if (!UUID_RE.test(id)) throw notFound;
-      if (method === "PATCH") {
-        const body = await readJsonBody(req, 64 * 1024);
-        const status = asTrimmedString(body?.status);
-        if (!ISSUE_STATUSES.includes(status)) {
-          throw new ReportError(400, "invalid_request", `status must be one of: ${ISSUE_STATUSES.join(", ")}.`);
-        }
-        const publishedIn = asTrimmedString(body?.publishedIn) || null;
-        if (publishedIn && publishedIn.length > 200) {
-          throw new ReportError(400, "invalid_request", "publishedIn must be 200 characters or fewer.");
-        }
-        const updated = await database.transaction(
-          () => updateIssueReport(database, id, { status, publishedIn: status === "published" ? publishedIn : null }),
-          { lockKey: ISSUE_LOCK },
-        );
-        if (!updated) throw notFound;
-      }
-      const report = await findIssueReport(database, storage, id);
-      if (!report) throw notFound;
-      send(res, 200, report);
-      return true;
-    }
+    if (await reviewIssueReports({
+      method, path, base: "/issue-reports", url, res, send, database, storage,
+      readPatch: () => readJsonBody(req, 64 * 1024),
+    })) return true;
 
     throw new ReportError(404, "not_found", `No ${method} route for ${pathname}.`);
+  } catch (error) {
+    if (error instanceof ReportError || (error?.status && error?.code)) {
+      send(res, error.status, { error: error.code, message: error.message });
+      return true;
+    }
+    throw error;
+  }
+}
+
+const STAFF_BASE = "/ops/issue-reports";
+
+export function isStaffIssueReportsRoute(pathname) {
+  const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  return path === STAFF_BASE || /^\/ops\/issue-reports\/[^/]+$/.test(path);
+}
+
+/**
+ * Operations and Super Admin read the same reports from the dashboard with their
+ * Clerk session. Runs after authentication; `readBody` is the server's parsed body.
+ */
+export async function routeStaffIssueReports({ req, res, pathname, url, user, readBody, send, database, storage }) {
+  if (!isStaffIssueReportsRoute(pathname)) return false;
+  const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  try {
+    if (!user) throw new ReportError(401, "unauthorized", "Sign in to GRIDGO to read issue reports.");
+    if (!(identityHasMembership(user, "ops_admin") || identityHasMembership(user, "super_admin"))) {
+      throw new ReportError(403, "forbidden", "Only Operations and Super Admin can read issue reports.");
+    }
+    if (await reviewIssueReports({
+      method: req.method, path, base: STAFF_BASE, url, res, send, database, storage,
+      readPatch: () => readBody(req),
+    })) return true;
+    throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
   } catch (error) {
     if (error instanceof ReportError || (error?.status && error?.code)) {
       send(res, error.status, { error: error.code, message: error.message });
