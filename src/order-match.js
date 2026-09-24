@@ -229,10 +229,29 @@ function allowanceMinutesFrom(settings) {
   return Number.isSafeInteger(declared) && declared >= 0 ? declared : DEFAULT_ALLOWANCE_MINUTES;
 }
 
+/** One queue/calendar projection for matching, cart previews, and checkout. */
+export function projectShopFinish(store, { supplierId, turnaroundHours, units, now }) {
+  const hours = Number.isSafeInteger(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
+  const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
+  const queue = queueMinutesFor(store, supplierId, hours);
+  const capacityDaily = (store.supplierServices || [])
+    .filter((row) => row.supplierId === supplierId && row.state === "live")
+    .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
+  const projection = projectFinish({
+    schedule: scheduleFor(profile),
+    now,
+    queueMinutes: queue.minutes,
+    turnaroundMinutes: hours * 60,
+    units: Number.isSafeInteger(units) && units > 0 ? units : null,
+    capacityDaily: capacityDaily > 0 ? capacityDaily : null,
+    allowanceMinutes: allowanceMinutesFrom(store.settings),
+  });
+  return { projection, queue };
+}
+
 function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units, widthRequest }) {
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
-  const allowanceMinutes = allowanceMinutesFrom(store.settings);
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {
     if (item.subcategoryCode !== subcategoryCode) continue;
@@ -259,21 +278,11 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
       .map((item) => item.turnaroundHours)
       .filter((hours) => Number.isSafeInteger(hours) && hours > 0);
     const turnaroundHours = turnarounds.length ? Math.min(...turnarounds) : 24;
-    const queue = queueMinutesFor(store, supplierId, turnaroundHours);
-    const capacityDaily = (store.supplierServices || [])
-      .filter((row) => row.supplierId === supplierId && row.state === "live")
-      .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
-
-    const projection = projectFinish({
-      schedule: scheduleFor(profile),
+    const { projection, queue } = projectShopFinish(store, {
+      supplierId,
+      turnaroundHours,
       now,
-      queueMinutes: queue.minutes,
-      turnaroundMinutes: turnaroundHours * 60,
-      // Quantity is not known until a listing is configured, so capacity cannot
-      // bite here. The exact check runs again once the client sets it.
-      units: Number.isSafeInteger(units) && units > 0 ? units : null,
-      capacityDaily: capacityDaily > 0 ? capacityDaily : null,
-      allowanceMinutes,
+      units,
     });
 
     const row = {

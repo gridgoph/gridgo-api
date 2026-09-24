@@ -6,6 +6,7 @@ import {
   catalogItemBlockers,
   clientMoneyMinor,
   createOrderLineSnapshot,
+  itemTurnaroundHours,
   listingFitsPrinterCap,
   minimumCatalogPrice,
   projectedPrinterMaxWidthFeet,
@@ -20,12 +21,13 @@ import {
   distanceMetersBetween,
   roundBps,
 } from "./operational-model.js";
-import { defaultShopSchedule, projectFinish } from "./availability.js";
+import { AvailabilityError } from "./availability.js";
 import {
   MatchError,
   deadlineDays,
   matchShop,
   multiplyMinor,
+  projectShopFinish,
   validatePreferenceRanking,
 } from "./order-match.js";
 import {
@@ -286,11 +288,30 @@ function cartShops(store, lines) {
   });
 }
 
-function publicCartForLineMutation(store, cart) {
-  return publicCart(store, cart, { compactListings: true });
+function cartLinePromiseBy(store, line, item, at) {
+  const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
+  if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
+      || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
+  const service = (store.supplierServices || []).find((row) => row.id === item.supplierServiceId);
+  try {
+    return projectShopFinish(store, {
+      supplierId: line.supplierId,
+      turnaroundHours: itemTurnaroundHours(item, service),
+      units: line.quantity,
+      now: at,
+    }).projection.promiseBy;
+  } catch (error) {
+    // An unavailable calendar must not prevent the client from repairing a cart.
+    if (error instanceof AvailabilityError) return null;
+    throw error;
+  }
 }
 
-function publicCart(store, cart, { compactListings = false } = {}) {
+function publicCartForLineMutation(store, cart, at) {
+  return publicCart(store, cart, at, { compactListings: true });
+}
+
+function publicCart(store, cart, at, { compactListings = false } = {}) {
   const lines = (store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
     .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
@@ -319,6 +340,7 @@ function publicCart(store, cart, { compactListings = false } = {}) {
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
       listing,
+      promiseBy: cartLinePromiseBy(store, line, item, at),
       lineSubtotalMinor,
       clientLineSubtotalMinor: clientMoneyMinor(store, lineSubtotalMinor),
     };
@@ -568,24 +590,15 @@ function checkout(store, user, cart, body, createId, at) {
     snapshots.push(...jobSnapshots);
   }
 
-  // The shop, and the two dates. Both are fixed here rather than at the match:
-  // the match was priced on a listing nobody had configured yet, and the real
-  // quantity is only known now.
+  // Snapshot the same queue/calendar projection used by matching and the cart,
+  // before adding this order's own jobs to the committed queue.
   const [job] = jobs;
-  const shopProfile = (store.supplierProfiles || []).find((row) => row.userId === job.supplierId);
   const orderedUnits = snapshots.reduce((total, row) => total + Number(row.lineItem.quantity || 0), 0);
-  const capacityDaily = (store.supplierServices || [])
-    .filter((row) => row.supplierId === job.supplierId && row.state === "live")
-    .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
-  const projection = projectFinish({
-    schedule: shopProfile?.schedule || defaultShopSchedule(),
+  const { projection } = projectShopFinish(store, {
+    supplierId: job.supplierId,
+    turnaroundHours: job.estimatedHours,
     now: at,
-    turnaroundMinutes: Math.max(1, job.estimatedHours) * 60,
-    units: orderedUnits > 0 ? orderedUnits : null,
-    capacityDaily: capacityDaily > 0 ? capacityDaily : null,
-    allowanceMinutes: Number.isSafeInteger(store.settings?.promiseAllowanceMinutes)
-      ? store.settings.promiseAllowanceMinutes
-      : 600,
+    units: orderedUnits,
   });
   order.supplierId = job.supplierId;
   order.pickup = { ...job.pickup };
@@ -824,19 +837,19 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     Object.assign(cart, fulfillmentInput(body, cart));
     store.carts ||= [];
     store.carts.push(cart);
-    return { status: 201, body: { cart: publicCart(store, cart) }, mutated: true };
+    return { status: 201, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
 
   const cartMatch = /^\/me\/carts\/([^/]+)$/.exec(pathname);
   if (cartMatch && req.method === "GET") {
     const cart = ownCart(store, user, decodeURIComponent(cartMatch[1]));
-    return { status: 200, body: { cart: publicCart(store, cart) }, mutated: false };
+    return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: false };
   }
   if (cartMatch && req.method === "PATCH") {
     const cart = ownCart(store, user, decodeURIComponent(cartMatch[1]), { draft: true });
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
     updateCart(cart, now());
-    return { status: 200, body: { cart: publicCart(store, cart) }, mutated: true };
+    return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
 
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);
@@ -849,7 +862,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
     updateCart(cart, now());
-    return { status: 200, body: { cart: publicCart(store, cart) }, mutated: true };
+    return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "dropoffs" && req.method === "PUT") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
@@ -865,7 +878,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       }
     }
     updateCart(cart, now());
-    return { status: 200, body: { cart: publicCart(store, cart) }, mutated: true };
+    return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
 
   const linesMatch = /^\/me\/carts\/([^/]+)\/lines$/.exec(pathname);
@@ -907,7 +920,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     store.cartLines ||= [];
     store.cartLines.push(line);
     updateCart(cart, at);
-    return { status: 201, body: { cart: publicCartForLineMutation(store, cart) }, mutated: true };
+    return { status: 201, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }
 
   const lineMatch = /^\/me\/carts\/([^/]+)\/lines\/([^/]+)$/.exec(pathname);
@@ -920,7 +933,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (req.method === "DELETE") {
       store.cartLines = store.cartLines.filter((row) => row !== line);
       updateCart(cart, at);
-      return { status: 200, body: { cart: publicCartForLineMutation(store, cart) }, mutated: true };
+      return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
     const body = record(await readBody(req));
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
@@ -958,7 +971,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     }
     line.updatedAt = at;
     updateCart(cart, at);
-    return { status: 200, body: { cart: publicCartForLineMutation(store, cart) }, mutated: true };
+    return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }
 
   const mockupMatch = /^\/me\/carts\/([^/]+)\/lines\/([^/]+)\/mockup$/.exec(pathname);
@@ -970,7 +983,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     line.mockupFileId = fileFor(store, user, text(body.fileId, "fileId", 120), "mockup", "fileId").fileId;
     line.updatedAt = now();
     updateCart(cart, line.updatedAt);
-    return { status: 200, body: { cart: publicCart(store, cart) }, mutated: true };
+    return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
 
   return null;
