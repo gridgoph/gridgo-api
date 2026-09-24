@@ -10,7 +10,7 @@
 import crypto from "node:crypto";
 
 import { readBearer, verifyAdminToken } from "./support-desk.js";
-import { clientKey, tooManyRequests } from "./support-rate-limit.js";
+import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { asTrimmedString } from "./support-validate.js";
 
 export const ISSUE_MAX_LENGTH = 5000;
@@ -21,6 +21,10 @@ export const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 // Base64 grows bytes by 4/3; leave room for the text and JSON framing.
 export const MAX_REPORT_BODY_BYTES = Math.ceil((MAX_SCREENSHOTS * MAX_SCREENSHOT_BYTES * 4) / 3) + 64 * 1024;
 const ISSUE_LOCK = "gridgo-issue-reports";
+// Site-wide ceilings over the last 24 hours, so no sender (or set of senders)
+// can fill MinIO. Override with ISSUE_REPORTS_DAILY_LIMIT / ISSUE_REPORTS_DAILY_BYTES.
+export const DEFAULT_DAILY_REPORTS = 200;
+export const DEFAULT_DAILY_BYTES = 1024 * 1024 * 1024;
 const EXTENSIONS = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
 
 export function issueReportsPathname(pathname) {
@@ -135,6 +139,38 @@ export function readJsonBody(req, maxBytes = MAX_REPORT_BODY_BYTES) {
 
 function asIso(value) {
   return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function positiveIntegerEnv(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function dailyCapacity(env = process.env) {
+  return {
+    reports: positiveIntegerEnv(env.ISSUE_REPORTS_DAILY_LIMIT, DEFAULT_DAILY_REPORTS),
+    bytes: positiveIntegerEnv(env.ISSUE_REPORTS_DAILY_BYTES, DEFAULT_DAILY_BYTES),
+  };
+}
+
+/** Refuse a report that would take the last 24 hours past either ceiling. */
+export async function assertDailyCapacity(database, incomingBytes, env = process.env) {
+  const capacity = dailyCapacity(env);
+  const result = await database.query(
+    `SELECT
+       (SELECT count(*)::bigint FROM issue_reports WHERE created_at > now() - interval '24 hours') AS reports,
+       (SELECT coalesce(sum(size_bytes), 0)::bigint FROM issue_report_screenshots
+         WHERE created_at > now() - interval '24 hours') AS bytes`,
+  );
+  const reports = Number(result.rows[0].reports);
+  const bytes = Number(result.rows[0].bytes);
+  if (reports + 1 > capacity.reports || bytes + incomingBytes > capacity.bytes) {
+    throw new ReportError(
+      429,
+      "report_capacity_reached",
+      "GRIDGO has received a lot of reports today. Please try again tomorrow.",
+    );
+  }
 }
 
 export async function createIssueReport(database, storage, input, { now = new Date() } = {}) {
@@ -256,12 +292,14 @@ export async function routeIssueReports({ req, res, pathname, url, send, databas
   const method = req.method;
   try {
     if (method === "POST" && path === "/issue-reports") {
-      const ipKey = clientKey(req.socket?.remoteAddress, req.headers["x-forwarded-for"]);
+      const ipKey = requestClientKey(req);
       if (tooManyRequests(`issue-report:${ipKey}`, 10, 10 * 60 * 1000)) {
         throw new ReportError(429, "too_many_requests", "Too many reports from this connection. Wait a few minutes and try again.");
       }
       const parsed = validateIssueReport(await readJsonBody(req));
       if (!parsed.ok) throw new ReportError(parsed.status ?? 400, parsed.code ?? "invalid_request", parsed.message);
+      const incomingBytes = parsed.value.screenshots.reduce((sum, shot) => sum + shot.bytes.length, 0);
+      await assertDailyCapacity(database, incomingBytes, env);
       const report = await createIssueReport(database, storage, parsed.value);
       send(res, 201, report);
       return true;
