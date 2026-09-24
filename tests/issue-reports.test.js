@@ -10,6 +10,7 @@ import {
   validateIssueReport,
 } from "../src/issue-reports.js";
 import { signAdminToken } from "../src/support-desk.js";
+import { requestClientKey } from "../src/support-rate-limit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const DESK_ENV = { SUPPORT_DESK_JWT_SECRET: "issue-report-test-secret" };
@@ -71,7 +72,7 @@ function fakeStorage() {
   };
 }
 
-async function startRouter(database, storage) {
+async function startRouter(database, storage, env = DESK_ENV) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const send = (response, status, body) => {
@@ -80,7 +81,7 @@ async function startRouter(database, storage) {
     };
     try {
       const handled = await routeIssueReports({
-        req, res, pathname: url.pathname, url, send, database, storage, env: DESK_ENV,
+        req, res, pathname: url.pathname, url, send, database, storage, env,
       });
       if (!handled) send(res, 404, { error: "not_found" });
     } catch (error) {
@@ -91,13 +92,14 @@ async function startRouter(database, storage) {
   return { server, base: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function call(base, pathname, { method = "GET", body, token, forwardedFor } = {}) {
+async function call(base, pathname, { method = "GET", body, token, forwardedFor, cfIp } = {}) {
   const response = await fetch(`${base}${pathname}`, {
     method,
     headers: {
       ...(body == null ? {} : { "Content-Type": "application/json" }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(forwardedFor ? { "X-Forwarded-For": forwardedFor } : {}),
+      ...(cfIp ? { "CF-Connecting-IP": cfIp } : {}),
     },
     ...(body == null ? {} : { body: JSON.stringify(body) }),
   });
@@ -191,4 +193,48 @@ test("a storage failure leaves no report row and no stray object", { skip: !DATA
   assert.equal(response.body.error, "minio_unavailable");
   assert.equal(storage.objects.size, 0);
   assert.equal((await database.query("SELECT count(*)::int AS n FROM issue_reports")).rows[0].n, 0);
+});
+
+test("requestClientKey trusts a well-formed CF-Connecting-IP and falls back otherwise", () => {
+  const req = (headers) => ({ headers, socket: { remoteAddress: "172.18.0.5" } });
+  assert.equal(requestClientKey(req({ "cf-connecting-ip": "203.0.113.7", "x-forwarded-for": "172.18.0.2" })), "203.0.113.7");
+  assert.equal(requestClientKey(req({ "cf-connecting-ip": "2001:db8::1" })), "2001:db8::1");
+  assert.equal(requestClientKey(req({ "cf-connecting-ip": "not-an-ip", "x-forwarded-for": "172.18.0.2" })), "172.18.0.2");
+  assert.equal(requestClientKey(req({})), "172.18.0.5");
+});
+
+test("one sender is limited, and the site-wide daily caps hold across senders", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const capped = { ...DESK_ENV, ISSUE_REPORTS_DAILY_LIMIT: "12", ISSUE_REPORTS_DAILY_BYTES: String(PNG.length * 2) };
+  const { server, base } = await startRouter(database, storage, capped);
+  t.after(async () => {
+    server.close();
+    await database.query("TRUNCATE issue_reports CASCADE").catch(() => {});
+    await database.close?.();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+
+  const sender = `192.0.2.${(process.pid % 200) + 1}`;
+  for (let i = 0; i < 10; i += 1) {
+    const ok = await call(base, "/issue-reports", { method: "POST", cfIp: sender, forwardedFor: `10.0.0.${i}`, body: { issue: `spam ${i}` } });
+    assert.equal(ok.status, 201, "a spoofed X-Forwarded-For must not reset the sender");
+  }
+  const limited = await call(base, "/issue-reports", { method: "POST", cfIp: sender, body: { issue: "one too many" } });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error, "too_many_requests");
+
+  const shot = PNG.toString("base64");
+  const other = (n) => `198.18.${process.pid % 200}.${n}`;
+  assert.equal((await call(base, "/issue-reports", { method: "POST", cfIp: other(1), body: { issue: "a", screenshots: [shot] } })).status, 201);
+  const overBytes = await call(base, "/issue-reports", { method: "POST", cfIp: other(2), body: { issue: "b", screenshots: [shot, shot] } });
+  assert.equal(overBytes.status, 429);
+  assert.equal(overBytes.body.error, "report_capacity_reached");
+  assert.equal(storage.objects.size, 1, "a refused report stores nothing");
+
+  assert.equal((await call(base, "/issue-reports", { method: "POST", cfIp: other(3), body: { issue: "c" } })).status, 201);
+  const overCount = await call(base, "/issue-reports", { method: "POST", cfIp: other(4), body: { issue: "d" } });
+  assert.equal(overCount.status, 429);
+  assert.equal(overCount.body.error, "report_capacity_reached");
+  assert.equal((await database.query("SELECT count(*)::int AS n FROM issue_reports")).rows[0].n, 12);
 });

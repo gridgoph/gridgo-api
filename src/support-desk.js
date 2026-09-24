@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 
-import { clientKey, tooManyRequests } from "./support-rate-limit.js";
+import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { validateLogin, validateReply, validateTicket } from "./support-validate.js";
 
 const scrypt = promisify(crypto.scrypt);
@@ -247,7 +247,7 @@ export async function routeSupportDesk({
   if (!path) return false;
 
   const method = req.method;
-  const ipKey = clientKey(req.socket?.remoteAddress, req.headers["x-forwarded-for"]);
+  const ipKey = requestClientKey(req);
 
   if (method === "POST" && path === "/support-tickets") {
     if (tooManyRequests(`ticket:${ipKey}`, 5, 10 * 60 * 1000)) {
