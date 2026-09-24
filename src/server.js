@@ -1699,6 +1699,8 @@ async function handleRequest(req, res) {
       send,
       database,
       storage: objectStorage,
+      verifyClerk: (token) => verifyClerkClaims(token, AUTH),
+      loadClerkUser: (clerkUserId) => clerkBackend.users.getUser(clerkUserId),
     })) {
       return;
     }

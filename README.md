@@ -96,7 +96,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, public support-ticket submit, the support desk login, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (`POST /admin/login`, ticket list/reply/delete) uses its own HMAC JWT from `SUPPORT_DESK_JWT_SECRET`, not Clerk.
+All routes except `/health`, `/catalog`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`).
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
@@ -107,6 +107,6 @@ All routes except `/health`, `/catalog`, public support-ticket submit, the suppo
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`
-- Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; desk `POST /admin/login`, `GET /admin/me`, list/get/reply/delete under `/support-tickets` and the same paths under `/api`
+- Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
 
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.

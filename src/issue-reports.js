@@ -1,7 +1,7 @@
 /**
  * Public issue reports: the landing site's /report form files one, and the
- * support desk login reads them back so the reports site can be written from
- * them. Contract: docs/ISSUE_REPORTS_API.md.
+ * support desk (a Clerk session on SUPPORT_DESK_ALLOWED_EMAILS) reads them
+ * back so the reports site can be written from them. Contract: docs/ISSUE_REPORTS_API.md.
  *
  * Screenshots arrive as base64 in one JSON body so a report and its images land
  * together; the page downsizes them before sending. Bytes go to MinIO first and
@@ -10,7 +10,7 @@
 import crypto from "node:crypto";
 
 import { identityHasMembership } from "./authorization-context.js";
-import { readBearer, verifyAdminToken } from "./support-desk.js";
+import { deskOperatorFromRequest } from "./support-desk.js";
 import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { asTrimmedString } from "./support-validate.js";
 
@@ -333,17 +333,9 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function deskAdmin(req, env) {
-  const token = readBearer(req.headers.authorization);
-  if (!token) return null;
-  try {
-    return verifyAdminToken(token, env);
-  } catch {
-    return null;
-  }
-}
-
-export async function routeIssueReports({ req, res, pathname, url, send, database, storage, env = process.env }) {
+export async function routeIssueReports({
+  req, res, pathname, url, send, database, storage, env = process.env, verifyClerk, loadClerkUser,
+}) {
   const path = issueReportsPathname(pathname);
   if (!path) return false;
   const method = req.method;
@@ -363,7 +355,8 @@ export async function routeIssueReports({ req, res, pathname, url, send, databas
     }
 
     if (method === "GET" || method === "PATCH") {
-      if (!deskAdmin(req, env)) throw new ReportError(401, "unauthorized", "Sign in with the support desk account.");
+      const desk = await deskOperatorFromRequest(req, { env, verifyClerk, loadClerkUser });
+      if (!desk.admin) throw new ReportError(desk.status, desk.error, desk.message);
     }
     if (await reviewIssueReports({
       method, path, base: "/issue-reports", url, res, send, database, storage,
