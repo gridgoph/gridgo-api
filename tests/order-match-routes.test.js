@@ -146,6 +146,17 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   });
 
   assert.equal(checkedOut.status, 201);
+  const committed = store.orders.find((order) => order.id === checkedOut.body.order.id);
+  assert.equal(committed.riderCommissionBps, 8500);
+  assert.equal(committed.riderPayoutMinor, 2125);
+  assert.equal(committed.platformDeliveryShareMinor, 375);
+  assert.equal(store.orderJobs[0].riderCommissionBps, 8500);
+  assert.equal(store.orderJobs[0].riderPayoutMinor, 2125);
+  store.settings.riderCommissionBps = 7000;
+  assert.equal(committed.riderPayoutMinor, 2125);
+  assert.equal(checkedOut.body.order.riderPayoutMinor, undefined);
+  assert.equal(checkedOut.body.order.jobs[0].riderPayoutMinor, undefined);
+
   // Money first: Operations confirms the transfer before anything is checked.
   assert.equal(checkedOut.body.order.state, "initial_payment_review");
   assert.ok(checkedOut.body.order.readyBy, "the client is given a promised date at checkout");

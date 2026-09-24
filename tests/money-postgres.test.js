@@ -147,7 +147,17 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
     { paymentCode: "initial", component: "supplier_principal", amountMinor: 25_000 },
   ]);
 
+  assert.equal(delivery.riderCommissionBps, 8500);
+  assert.equal(delivery.riderPayoutMinor, 2125);
+  assert.equal(delivery.platformDeliveryShareMinor, 375);
+  assert.deepEqual((await database.query(`SELECT rider_payout_minor, platform_delivery_share_minor
+    FROM orders WHERE id = 'delivery_rounding'`)).rows[0], {
+    rider_payout_minor: 2125, platform_delivery_share_minor: 375,
+  });
+  persisted.settings.riderCommissionBps = 7000;
   const snapshotted = {
+    riderRate: delivery.riderCommissionBps,
+    riderPayout: delivery.riderPayoutMinor,
     rate: delivery.serviceFeeRateBps,
     fee: delivery.serviceFeeMinor,
     total: delivery.totalMinor,
@@ -157,11 +167,21 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
   await database.transaction(() => saveStore(database, persisted));
   const afterSettingChange = (await loadStore(database)).orders.find((order) => order.id === delivery.id);
   assert.deepEqual({
+    riderRate: afterSettingChange.riderCommissionBps,
+    riderPayout: afterSettingChange.riderPayoutMinor,
     rate: afterSettingChange.serviceFeeRateBps,
     fee: afterSettingChange.serviceFeeMinor,
     total: afterSettingChange.totalMinor,
   }, snapshotted);
 
+  await assert.rejects(
+    database.query("UPDATE orders SET rider_commission_bps = 7000 WHERE id = 'delivery_rounding'"),
+    (error) => error.code === "23514" && error.constraint === "orders_delivery_snapshot_immutable",
+  );
+  await assert.rejects(
+    database.query("UPDATE orders SET rider_payout_minor = 2500 WHERE id = 'delivery_rounding'"),
+    (error) => error.code === "428C9",
+  );
   await assert.rejects(
     database.query("UPDATE orders SET service_fee_minor = service_fee_minor + 1 WHERE id = 'delivery_rounding'"),
     (error) => error.code === "23514" && error.constraint === "orders_committed_snapshot_immutable",

@@ -47,6 +47,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     id: "ord_match", clientId: "user_client", supplierId: null, riderId: null, state: "needs_qa",
     supplierSubtotalMinor: 10000, subtotalMinor: 10000, serviceFeeRateBps: 1000,
     serviceFeeMinor: 1000, deliveryFeeMinor: 2500, totalMinor: 13500,
+    riderCommissionBps: 8500, riderPayoutMinor: 2125, platformDeliveryShareMinor: 375,
     moneyModelVersion: 2, payoutHold: false,
     dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
     payments: { initial: { amountMinor: 10125, method: "qr_manual", status: "pending_confirmation", reference: "QR-123", proofFileId: "file_qr" } },
@@ -65,6 +66,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     pickup: { lat: 7.064, lng: 125.6085, label: "Shop" },
     dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
     supplierSubtotalMinor: 10000, deliveryDistanceMeters: 1111, deliveryFeeMinor: 2500,
+    riderCommissionBps: 8500, riderPayoutMinor: 2125, platformDeliveryShareMinor: 375,
     estimatedHours: 24, scheduledFor: "2026-08-25T02:00:00.000Z", createdAt: AT, updatedAt: AT,
   }];
   store.files = [
@@ -126,6 +128,7 @@ test("relational store round-trips typed money, relationships, and composite rou
     id: "ord_one", clientId: "user_client", supplierId: "user_supplier", riderId: "user_rider",
     productId: "prod_banner", state: "issue_window_open", zone: "davao_central",
     supplierSubtotalMinor: 100000, subtotalMinor: 100000, serviceFeeRateBps: 1000, serviceFeeMinor: 10000,
+    riderCommissionBps: 8500, riderPayoutMinor: 4250, platformDeliveryShareMinor: 750,
     deliveryFeeMinor: 5000, totalMinor: 115000, fulfillmentMode: "delivery", paymentPlan: "delivery_online",
     quoteVersion: 1, supplierDownpaymentRateBps: null, onlineDueMinor: 115000, directStoreDueMinor: 0,
     supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion: 1,

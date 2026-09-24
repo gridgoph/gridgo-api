@@ -17,6 +17,7 @@ import {
 import {
   createPayoutMilestones,
   deliveryFeeForDistance,
+  deliverySplit,
   distanceMetersBetween,
   roundBps,
 } from "./operational-model.js";
@@ -561,6 +562,7 @@ function checkout(store, user, cart, body, createId, at) {
       fulfillmentMode: cart.fulfillmentMode, pickup: { ...profile.shop },
       ...(jobDropoff ? { dropoff: jobDropoff } : {}),
       supplierSubtotalMinor, deliveryDistanceMeters: distance, deliveryFeeMinor,
+      ...deliverySplit(deliveryFeeMinor, store.settings.riderCommissionBps ?? 8_500),
       estimatedHours, ...(cart.scheduledFor ? { scheduledFor: cart.scheduledFor } : {}),
       createdAt: at, updatedAt: at,
     };
@@ -605,6 +607,7 @@ function checkout(store, user, cart, body, createId, at) {
     subtotalMinor: itemSubtotalMinor,
     serviceFeeMinor,
     deliveryFeeMinor: deliveryTotalMinor,
+    ...deliverySplit(deliveryTotalMinor, store.settings.riderCommissionBps ?? 8_500),
     totalMinor,
     onlineDueMinor: totalMinor,
     supplierPlatformPayoutMinor: itemSubtotalMinor,

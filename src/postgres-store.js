@@ -1,3 +1,5 @@
+import { deliverySplit } from "./operational-model.js";
+
 const BASELINE = Symbol("postgresStoreBaseline");
 
 function without(record, keys) {
@@ -63,10 +65,10 @@ const TABLES = [
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
-  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
-  { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
+  { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
   { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
@@ -405,6 +407,7 @@ function rowsFromStore(store) {
       subtotal_minor: money(order.subtotalMinor, "order.subtotalMinor"),
       service_fee_rate_bps: order.serviceFeeRateBps ?? null,
       service_fee_minor: money(order.serviceFeeMinor, "order.serviceFeeMinor"),
+      rider_commission_bps: order.riderCommissionBps ?? 10_000,
       delivery_fee_minor: money(order.deliveryFeeMinor, "order.deliveryFeeMinor"), total_minor: money(order.totalMinor, "order.totalMinor"),
       fulfillment_mode: order.fulfillmentMode ?? null, payment_plan: order.paymentPlan ?? null,
       quote_version: order.quoteVersion ?? null, supplier_downpayment_rate_bps: order.supplierDownpaymentRateBps ?? null,
@@ -422,7 +425,7 @@ function rowsFromStore(store) {
       cancelled_at: order.cancelledAt ?? null, cancelled_by: order.cancelledBy ?? null,
       cancellation_reason: order.cancellationReason ?? null,
       created_at: order.createdAt, updated_at: order.updatedAt, position,
-      data: without(order, ["readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
+      data: without(order, ["readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
     });
     for (const [paymentPosition, code] of ["initial", "final_online"].entries()) {
       const payment = order.payments?.[code];
@@ -506,6 +509,7 @@ function rowsFromStore(store) {
       dropoff_label: job.dropoff?.label ?? null,
       supplier_subtotal_minor: money(job.supplierSubtotalMinor, "orderJob.supplierSubtotalMinor"),
       delivery_distance_meters: job.deliveryDistanceMeters ?? 0,
+      rider_commission_bps: job.riderCommissionBps ?? 10_000,
       delivery_fee_minor: money(job.deliveryFeeMinor, "orderJob.deliveryFeeMinor"),
       estimated_hours: job.estimatedHours,
       scheduled_for: job.scheduledFor ?? null,
@@ -862,6 +866,7 @@ export async function loadStore(database) {
       supplierSubtotalMinor: row.supplier_subtotal_minor,
       deliveryDistanceMeters: row.delivery_distance_meters,
       deliveryFeeMinor: row.delivery_fee_minor,
+      ...(row.delivery_fee_minor == null ? {} : deliverySplit(row.delivery_fee_minor, row.rider_commission_bps)),
       estimatedHours: row.estimated_hours,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -948,6 +953,7 @@ export async function loadStore(database) {
       serviceFeeRateBps: row.service_fee_rate_bps,
       serviceFeeMinor: row.service_fee_minor,
       deliveryFeeMinor: row.delivery_fee_minor,
+      ...(row.delivery_fee_minor == null ? {} : deliverySplit(row.delivery_fee_minor, row.rider_commission_bps)),
       totalMinor: row.total_minor,
       fulfillmentMode: row.fulfillment_mode,
       paymentPlan: row.payment_plan,

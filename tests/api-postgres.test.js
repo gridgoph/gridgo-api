@@ -1518,6 +1518,22 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(current.body.settings.productionNudge.afterValue, 4);
     assert.equal(current.body.settings.productionNudge.afterUnit, "hours");
 
+    assert.equal(current.body.settings.riderCommissionBps, 8500);
+    for (const riderCommissionBps of [null, "8500", 8500.5, -1, 10001]) {
+      const invalid = await request(instance.api, "/settings", {
+        method: "PATCH", subject: "clerk_ops",
+        body: { expectedVersion: current.body.version, riderCommissionBps, reason: "Invalid rider rate" },
+      });
+      assert.equal(invalid.status, 400);
+      assert.equal(invalid.body.error, "invalid_rider_commission_rate");
+    }
+    for (const subject of ["clerk_rider", "clerk_client", "clerk_supplier"]) {
+      const denied = await request(instance.api, "/settings", {
+        method: "PATCH", subject,
+        body: { expectedVersion: current.body.version, riderCommissionBps: 7000, reason: "Forbidden rate" },
+      });
+      assert.equal(denied.status, 403);
+    }
     const badNudge = await request(instance.api, "/settings", {
       method: "PATCH",
       subject: "clerk_ops",
@@ -1575,6 +1591,24 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(updated.status, 200, JSON.stringify(updated.body));
     assert.equal(updated.body.version, current.body.version + 1);
     assert.equal(updated.body.settings.serviceFeeRateBps, 1250);
+    let version = updated.body.version;
+    for (const [subject, riderCommissionBps] of [["clerk_ops", 7000], ["clerk_super", 8500]]) {
+      const changed = await request(instance.api, "/settings", {
+        method: "PATCH", subject,
+        body: { expectedVersion: version, riderCommissionBps, reason: "Rider rate update" },
+      });
+      assert.equal(changed.status, 200, JSON.stringify(changed.body));
+      assert.equal(changed.body.settings.riderCommissionBps, riderCommissionBps);
+      assert.equal(changed.body.version, version + 1);
+      const staleRate = await request(instance.api, "/settings", {
+        method: "PATCH", subject,
+        body: { expectedVersion: version, riderCommissionBps: 6000, reason: "Stale rate" },
+      });
+      assert.equal(staleRate.status, 409);
+      assert.equal(staleRate.body.error, "settings_version_conflict");
+      version = changed.body.version;
+    }
+
 
     const defaults = await request(instance.api, "/supplier-payment-terms", { subject: "clerk_supplier" });
     assert.equal(defaults.status, 200, JSON.stringify(defaults.body));
@@ -3284,6 +3318,58 @@ test("payment HTTP confirmation emits one QA transition and no repeated delivery
       assert.equal(s.notifications.filter((n) => n.orderId === "ord_payout" && n.type === "ops_payment_confirmed" && n.userId === userId && n.appRole === appRole).length, 2);
     }
     assert.equal(s.notifications.filter((n) => n.type === "rider_delivery_payment_cleared").length, 1);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("rider dispatch earnings and Ops finance keep their rate across a settings edit", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = structuredClone(store.orders.find((row) => row.id === "ord_payout"));
+    Object.assign(order, { id: "ord_rider_split", state: "ready_for_dispatch", riderId: null,
+      riderCommissionBps: 8500, riderPayoutMinor: 2125, platformDeliveryShareMinor: 375 });
+    store.orders.push(order);
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const settings = await request(instance.api, "/settings", { subject: "clerk_ops" });
+    const updated = await request(instance.api, "/settings", {
+      method: "PATCH", subject: "clerk_ops",
+      body: { expectedVersion: settings.body.version, riderCommissionBps: 7000, reason: "Future rider jobs" },
+    });
+    assert.equal(updated.status, 200);
+    const offers = await request(instance.api, "/dispatch/offers", { subject: "clerk_rider" });
+    const offer = offers.body.offers.find((row) => row.id === "ord_rider_split");
+    assert.equal(offer.riderCommissionBps, 8500);
+    assert.equal(offer.riderPayoutMinor, 2125);
+    assert.equal(offer.platformDeliveryShareMinor, 375);
+    const accepted = await request(instance.api, "/dispatch/ord_rider_split/accept", {
+      method: "POST", subject: "clerk_rider", body: {},
+    });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    assert.equal(accepted.body.order.riderPayoutMinor, 2125);
+    const earnings = await request(instance.api, "/orders", { subject: "clerk_rider" });
+    assert.equal(earnings.body.orders.find((row) => row.id === offer.id).riderPayoutMinor, 2125);
+    for (const subject of ["clerk_ops", "clerk_super"]) {
+      const finance = await request(instance.api, `/orders/${offer.id}`, { subject });
+      assert.equal(finance.body.order.deliverySettlement.riderPayoutMinor, 2125);
+      assert.equal(finance.body.order.platformRevenue.billedMinor, 10375);
+    }
+    for (const subject of ["clerk_client", "clerk_supplier"]) {
+      const response = await request(instance.api, `/orders/${offer.id}`, { subject });
+      assert.equal(response.status, 200);
+      assert.equal(response.body.order.riderCommissionBps, undefined);
+      assert.equal(response.body.order.riderPayoutMinor, undefined);
+      assert.equal(response.body.order.platformDeliveryShareMinor, undefined);
+      assert.equal(response.body.order.deliverySettlement, undefined);
+      assert.equal(response.body.order.deliveryFeeMinor, 2500);
+    }
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
