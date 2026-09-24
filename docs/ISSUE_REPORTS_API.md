@@ -21,7 +21,8 @@ Every path is also served under `/api`.
 - `category` is optional: `bug` (bug, issue or concern), `feature` (feature or change request), or `other`.
 - `screenshots` is optional: up to 6 base64 strings (a `data:` prefix is fine), each at most 8 MB decoded.
   The type is read from the bytes; only PNG, JPEG, WebP and GIF are kept (no SVG).
-- 10 reports per connection per 10 minutes, then `429 too_many_requests`.
+- 10 reports per sender per 10 minutes, then `429 too_many_requests`. The sender is Cloudflare's `CF-Connecting-IP` (the edge proxy replaces `X-Forwarded-For`).
+- Site-wide over the last 24 hours: at most `ISSUE_REPORTS_DAILY_LIMIT` reports (default 200) and `ISSUE_REPORTS_DAILY_BYTES` of screenshots (default 1 GiB), then `429 report_capacity_reached`.
 
 `201` returns `{ id, createdAt, screenshots }` (the number stored). Screenshots go to MinIO under
 `issue_reports/YYYY/MM/DD/<reportId>-<n>.<ext>` before the rows commit; if either fails the stored objects are removed.
