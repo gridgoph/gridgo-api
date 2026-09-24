@@ -48,6 +48,23 @@ test("requires service-fee settings to use an actual integer", () => {
   }
 });
 
+test("requires the client service-fee row visibility to be a JSON boolean when set", () => {
+  assert.equal(defaultOperationalSettings().serviceFeeVisibleToClient, true);
+  const { serviceFeeVisibleToClient: _omitted, ...withoutVisibility } = defaultOperationalSettings();
+  assert.equal(validateOperationalSettings(withoutVisibility), true);
+  for (const serviceFeeVisibleToClient of ["true", 1, null]) {
+    expectDomainError(
+      () => validateOperationalSettings({ ...defaultOperationalSettings(), serviceFeeVisibleToClient }),
+      400,
+      "invalid_service_fee_visibility",
+    );
+  }
+  assert.equal(
+    validateOperationalSettings({ ...defaultOperationalSettings(), serviceFeeVisibleToClient: false }),
+    true,
+  );
+});
+
 test("production reminders reject a zero wait, 31 days, 11 repeats, and a numeric string", () => {
   const base = defaultProductionNudge();
   for (const productionNudge of [
@@ -204,6 +221,7 @@ test("a physical-invoice request reaches only the client who asked and Operation
       officeAddress: "7th floor, 12 J.P. Laurel Ave, Davao City",
       operatingHours: "Mon\u2013Fri 9am\u20135pm",
       requestedAt: AT,
+      promisedDeliveryAt: "2026-09-21T02:00:00.000Z",
     },
   };
 
@@ -224,10 +242,16 @@ test("a physical-invoice request reaches only the client who asked and Operation
     { id: "ops-a", role: "ops_admin" },
     { id: "super-a", role: "super_admin" },
   ]) {
+    const projected = publicOrderFor(order, reader).physicalInvoiceRequest;
     assert.equal(
-      publicOrderFor(order, reader).physicalInvoiceRequest.officeAddress,
+      projected.officeAddress,
       "7th floor, 12 J.P. Laurel Ave, Davao City",
       `${reader.role} ${reader.id} must still read the request`,
+    );
+    assert.equal(
+      projected.promisedDeliveryAt,
+      "2026-09-21T02:00:00.000Z",
+      `${reader.role} ${reader.id} must still read the promised delivery`,
     );
   }
 });

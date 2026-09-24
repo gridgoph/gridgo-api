@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 
+import { clerkClientProfile } from "./auth.js";
 import { clientKey, tooManyRequests } from "./support-rate-limit.js";
-import { validateLogin, validateReply, validateTicket } from "./support-validate.js";
+import { validateReply, validateTicket } from "./support-validate.js";
 
 const scrypt = promisify(crypto.scrypt);
 const SCRYPT_N = 16384;
@@ -214,16 +215,62 @@ export async function deleteTicket(database, id) {
   return (result.rowCount ?? 0) > 0;
 }
 
-function deskAdminFromRequest(req, env) {
-  const token = readBearer(req.headers.authorization);
+export function deskAllowedEmails(env = process.env) {
+  return new Set(
+    String(env.SUPPORT_DESK_ALLOWED_EMAILS || "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Desk access is a verified Clerk session whose primary email is on
+ * SUPPORT_DESK_ALLOWED_EMAILS. A signed Clerk token for any other GRIDGO
+ * account is not enough.
+ *
+ * A verified token may carry `email`. When it does not, the Clerk user
+ * profile is loaded. The email claim is trusted only because verifyClerk
+ * already checked the signature.
+ */
+export async function deskOperatorFromRequest(req, { env = process.env, verifyClerk, loadClerkUser }) {
+  const allowed = deskAllowedEmails(env);
+  if (allowed.size === 0) {
+    return {
+      status: 503,
+      error: "desk_unconfigured",
+      message: "Support desk access is not configured.",
+    };
+  }
+  const token = readBearer(req.headers.authorization) || "";
   if (!token) {
-    return { status: 401, error: "unauthorized", message: "Sign in required." };
+    return { status: 401, error: "unauthorized", message: "Sign in with Clerk, then retry." };
   }
-  try {
-    return { admin: verifyAdminToken(token, env) };
-  } catch {
-    return { status: 401, error: "unauthorized", message: "Session expired. Sign in again." };
+  const verified = await verifyClerk(token);
+  if (!verified?.claims?.sub) {
+    return { status: 401, error: "unauthorized", message: "Sign in with Clerk, then retry." };
   }
+  let email = String(verified.claims.email || "").trim().toLowerCase();
+  if (!email) {
+    try {
+      const user = await loadClerkUser(verified.claims.sub);
+      email = clerkClientProfile(user).email;
+    } catch {
+      return {
+        status: 503,
+        error: "clerk_unavailable",
+        message: "Could not confirm the Clerk account.",
+      };
+    }
+  }
+  if (!allowed.has(email)) {
+    return {
+      status: 403,
+      error: "forbidden",
+      message: "This desk is limited to the GRIDGO support account.",
+    };
+  }
+  return { admin: { email, clerkUserId: verified.claims.sub } };
 }
 
 function ticketNotFound(id) {
@@ -242,6 +289,8 @@ export async function routeSupportDesk({
   database,
   mailer,
   env = process.env,
+  verifyClerk,
+  loadClerkUser,
 }) {
   const path = supportDeskPathname(pathname);
   if (!path) return false;
@@ -271,46 +320,29 @@ export async function routeSupportDesk({
   }
 
   if (method === "POST" && path === "/admin/login") {
-    const parsed = validateLogin(await readBody(req));
-    if (!parsed.ok) {
-      send(res, 400, { error: "invalid_request", message: parsed.message });
-      return true;
-    }
-    if (tooManyRequests(`login:${ipKey}`, 8, 15 * 60 * 1000)) {
-      send(res, 429, {
-        error: "too_many_requests",
-        message: "Too many sign-in attempts. Try again later.",
-      });
-      return true;
-    }
-    const admin = await authenticateAdmin(database, parsed.username, parsed.password);
-    if (!admin) {
-      send(res, 401, { error: "invalid_credentials", message: "Invalid username or password." });
-      return true;
-    }
-    if (!deskJwtSecret(env)) {
-      send(res, 503, {
-        error: "desk_unconfigured",
-        message: "Support desk sessions are not configured.",
-      });
-      return true;
-    }
-    send(res, 200, { token: signAdminToken(admin, env), username: admin.username });
+    send(res, 404, {
+      error: "not_found",
+      message: "Desk password sign-in has been removed. Sign in with Clerk.",
+    });
     return true;
   }
 
+  async function requireDeskOperator() {
+    return deskOperatorFromRequest(req, { env, verifyClerk, loadClerkUser });
+  }
+
   if (method === "GET" && path === "/admin/me") {
-    const auth = deskAdminFromRequest(req, env);
+    const auth = await requireDeskOperator();
     if (!auth.admin) {
       send(res, auth.status, { error: auth.error, message: auth.message });
       return true;
     }
-    send(res, 200, { username: auth.admin.username });
+    send(res, 200, { email: auth.admin.email });
     return true;
   }
 
   if (method === "GET" && path === "/support-tickets") {
-    const auth = deskAdminFromRequest(req, env);
+    const auth = await requireDeskOperator();
     if (!auth.admin) {
       send(res, auth.status, { error: auth.error, message: auth.message });
       return true;
@@ -323,7 +355,7 @@ export async function routeSupportDesk({
   const replyMatch = /^\/support-tickets\/([^/]+)\/reply$/.exec(path);
 
   if (method === "GET" && ticketMatch) {
-    const auth = deskAdminFromRequest(req, env);
+    const auth = await requireDeskOperator();
     if (!auth.admin) {
       send(res, auth.status, { error: auth.error, message: auth.message });
       return true;
@@ -338,7 +370,7 @@ export async function routeSupportDesk({
   }
 
   if (method === "PATCH" && replyMatch) {
-    const auth = deskAdminFromRequest(req, env);
+    const auth = await requireDeskOperator();
     if (!auth.admin) {
       send(res, auth.status, { error: auth.error, message: auth.message });
       return true;
@@ -370,7 +402,7 @@ export async function routeSupportDesk({
   }
 
   if (method === "DELETE" && ticketMatch) {
-    const auth = deskAdminFromRequest(req, env);
+    const auth = await requireDeskOperator();
     if (!auth.admin) {
       send(res, auth.status, { error: auth.error, message: auth.message });
       return true;

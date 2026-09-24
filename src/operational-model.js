@@ -134,6 +134,8 @@ export function defaultProductionNudge() {
 export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
+    /** Names the fee on client checkout. The pesos stay inside Printing either way. */
+    serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     deliveryFeeBands: [
@@ -152,6 +154,17 @@ export function validateOperationalSettings(settings) {
       "invalid_service_fee_rate",
       "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
       { field: "serviceFeeRateBps" },
+    );
+  }
+  if (
+    settings?.serviceFeeVisibleToClient !== undefined &&
+    typeof settings.serviceFeeVisibleToClient !== "boolean"
+  ) {
+    fail(
+      400,
+      "invalid_service_fee_visibility",
+      "serviceFeeVisibleToClient must be a JSON boolean.",
+      { field: "serviceFeeVisibleToClient" },
     );
   }
   const issueWindowHours = settings?.issueWindowHours;

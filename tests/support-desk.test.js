@@ -8,7 +8,6 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
-import { hashPassword } from "../src/support-desk.js";
 import { escapeHtml, toHtmlParagraphs } from "../src/support-html.js";
 import { buildReplyEmail, createSupportMailer, emailConfigured } from "../src/support-mail.js";
 import { clientKey, tooManyRequests } from "../src/support-rate-limit.js";
@@ -26,11 +25,14 @@ const DESK_PASSWORD = "desk-password-for-tests";
 const DESK_JWT_SECRET = "support-desk-jwt-secret-for-tests-not-clerk";
 const LANDING_ORIGIN = "https://gridgo.talasora.com";
 
-function clerkToken(subject) {
+const DESK_EMAIL = "gridgo26@gmail.com";
+
+function clerkToken(subject, email) {
   const current = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "gridgo-test-key" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({
     iss: ISSUER, sub: subject, sid: `sess_${subject}`, azp: AUTHORIZED_PARTY,
+    ...(email ? { email } : {}),
     iat: current - 5, nbf: current - 5, exp: current + 300,
   })).toString("base64url");
   const input = `${header}.${payload}`;
@@ -67,6 +69,7 @@ async function startApi(extraEnv = {}) {
       SUPPORT_DESK_USERNAME: DESK_USER,
       SUPPORT_DESK_PASSWORD: DESK_PASSWORD,
       SUPPORT_DESK_JWT_SECRET: DESK_JWT_SECRET,
+      SUPPORT_DESK_ALLOWED_EMAILS: DESK_EMAIL,
       EMAIL_USER: "",
       EMAIL_PASSWORD: "",
       GRIDGO_SUPPORT_MAIL_CAPTURE: "",
@@ -327,28 +330,23 @@ test("public submit, desk login, rate limit, mail, and CORS origin handling", { 
     const unauthList = await request(instance.api, "/api/support-tickets");
     assert.equal(unauthList.status, 401);
 
-    const clerkList = await request(instance.api, "/support-tickets", { token: clerkToken("clerk_ops") });
-    assert.equal(clerkList.status, 401);
-
-    const badLogin = await request(instance.api, "/api/admin/login", {
-      method: "POST",
-      body: { username: DESK_USER, password: "wrong-password" },
+    const otherAccount = await request(instance.api, "/support-tickets", {
+      token: clerkToken("clerk_ops", "ops@example.com"),
     });
-    assert.equal(badLogin.status, 401);
-    assert.equal(badLogin.body.error, "invalid_credentials");
+    assert.equal(otherAccount.status, 403);
+    assert.equal(otherAccount.body.error, "forbidden");
 
-    const login = await request(instance.api, "/api/admin/login", {
+    const removedLogin = await request(instance.api, "/api/admin/login", {
       method: "POST",
       body: { username: DESK_USER, password: DESK_PASSWORD },
     });
-    assert.equal(login.status, 200, JSON.stringify(login.body));
-    assert.equal(login.body.username, DESK_USER);
-    assert.equal(typeof login.body.token, "string");
-    const deskToken = login.body.token;
+    assert.equal(removedLogin.status, 404);
+
+    const deskToken = clerkToken("clerk_desk", DESK_EMAIL);
 
     const me = await request(instance.api, "/api/admin/me", { token: deskToken });
     assert.equal(me.status, 200);
-    assert.deepEqual(me.body, { username: DESK_USER });
+    assert.deepEqual(me.body, { email: DESK_EMAIL });
 
     const listed = await request(instance.api, "/api/support-tickets", { token: deskToken });
     assert.equal(listed.status, 200);
@@ -383,23 +381,6 @@ test("public submit, desk login, rate limit, mail, and CORS origin handling", { 
     const missingTicket = await request(instance.api, `/api/support-tickets/${other.id}`, { token: deskToken });
     assert.equal(missingTicket.status, 404);
 
-    const envPasswordRejected = await database.query(
-      "SELECT username, password_hash FROM support_admins WHERE username = $1",
-      [DESK_USER],
-    );
-    assert.equal(envPasswordRejected.rowCount, 1);
-    const rotatedHash = await hashPassword("rotated-desk-password");
-    await database.query("UPDATE support_admins SET password_hash = $2 WHERE username = $1", [DESK_USER, rotatedHash]);
-    const staleEnvLogin = await request(instance.api, "/admin/login", {
-      method: "POST",
-      body: { username: DESK_USER, password: DESK_PASSWORD },
-    });
-    assert.equal(staleEnvLogin.status, 401);
-    const rotatedLogin = await request(instance.api, "/admin/login", {
-      method: "POST",
-      body: { username: DESK_USER, password: "rotated-desk-password" },
-    });
-    assert.equal(rotatedLogin.status, 200, JSON.stringify(rotatedLogin.body));
   } finally {
     await stopApi(instance);
     await fs.rm(capturePath, { force: true });
@@ -425,15 +406,11 @@ test("unconfigured mail still saves the reply", { skip: !DATABASE_URL }, async (
     });
     assert.equal(created.status, 201, JSON.stringify(created.body));
 
-    const login = await request(instance.api, "/admin/login", {
-      method: "POST",
-      body: { username: DESK_USER, password: DESK_PASSWORD },
-    });
-    assert.equal(login.status, 200, JSON.stringify(login.body));
+    const deskToken = clerkToken("clerk_desk", DESK_EMAIL);
 
     const replied = await request(instance.api, `/support-tickets/${created.body.id}/reply`, {
       method: "PATCH",
-      token: login.body.token,
+      token: deskToken,
       body: { replyMessage: "Attached the invoice." },
     });
     assert.equal(replied.status, 200, JSON.stringify(replied.body));

@@ -483,6 +483,7 @@ function publicOperationalSettings(settings, store = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     paymentQr,
   };
@@ -1678,6 +1679,8 @@ async function handleRequest(req, res) {
       send,
       database,
       mailer: supportMailer,
+      verifyClerk: (token) => verifyClerkClaims(token, AUTH),
+      loadClerkUser: (clerkUserId) => clerkBackend.users.getUser(clerkUserId),
     })) {
       return;
     }
@@ -2839,6 +2842,8 @@ async function handleRequest(req, res) {
       const next = {
         ...store.settings,
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
+        serviceFeeVisibleToClient:
+          body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
