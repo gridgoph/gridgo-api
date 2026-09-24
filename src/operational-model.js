@@ -238,21 +238,29 @@ function validateProductionNudge(nudge) {
   }
 }
 
+const NUDGE_SPAN = {
+  seconds: { max: 3600, label: "seconds" },
+  minutes: { max: 1440, label: "minutes" },
+  hours: { max: 720, label: "hours" },
+  days: { max: 30, label: "days" },
+};
+
 function validateNudgeUnit(unit, field) {
-  if (unit !== "hours" && unit !== "days") {
+  if (!Object.hasOwn(NUDGE_SPAN, unit)) {
     fail(
       400,
       "invalid_production_nudge",
-      `${field} must be "hours" or "days".`,
+      `${field} must be "seconds", "minutes", "hours", or "days".`,
       { field },
     );
   }
 }
 
 function validateNudgeSpan(value, unit, field) {
-  const max = unit === "days" ? 30 : 720;
-  const unitLabel = unit === "days" ? "days" : "hours";
-  if (!Number.isInteger(value) || value < 1 || value > max) {
+  const span = NUDGE_SPAN[unit];
+  if (!span || !Number.isInteger(value) || value < 1 || value > span.max) {
+    const max = span?.max ?? 720;
+    const unitLabel = span?.label ?? "hours";
     fail(
       400,
       "invalid_production_nudge",

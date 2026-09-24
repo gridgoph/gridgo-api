@@ -57,6 +57,8 @@ test("production reminders reject a zero wait, 31 days, 11 repeats, and a numeri
     { ...base, afterValue: "4" },
     { ...base, enabled: "true" },
     { ...base, afterUnit: "weeks" },
+    { ...base, afterValue: 3601, afterUnit: "seconds" },
+    { ...base, repeatValue: 0, repeatUnit: "minutes" },
   ]) {
     expectDomainError(
       () => validateOperationalSettings({ ...defaultOperationalSettings(), productionNudge }),
@@ -66,6 +68,10 @@ test("production reminders reject a zero wait, 31 days, 11 repeats, and a numeri
   }
   assert.equal(
     validateOperationalSettings({ ...defaultOperationalSettings(), productionNudge: { ...base, afterValue: 2, afterUnit: "days", repeatValue: 12, repeatUnit: "hours", maxCount: 5 } }),
+    true,
+  );
+  assert.equal(
+    validateOperationalSettings({ ...defaultOperationalSettings(), productionNudge: { ...base, afterValue: 30, afterUnit: "seconds", repeatValue: 1, repeatUnit: "minutes" } }),
     true,
   );
 });

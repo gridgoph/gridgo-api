@@ -716,13 +716,13 @@ The patch is an audited compare-and-swap: `expectedVersion` must match `GET /set
 | Field | Rule |
 |---|---|
 | `enabled` | JSON boolean. `false` writes no new reminders; existing inbox rows stay. |
-| `afterValue` + `afterUnit` | First reminder. Unit is `"hours"` (1–720) or `"days"` (1–30). |
+| `afterValue` + `afterUnit` | First reminder. Unit is `"seconds"` (1–3600), `"minutes"` (1–1440), `"hours"` (1–720), or `"days"` (1–30). Seconds and minutes exist so Desk can check the reminder without waiting hours. |
 | `repeatValue` + `repeatUnit` | Each later reminder. Units may differ from the first wait. Same bounds. |
 | `maxCount` | Whole number 1–10, including the first reminder. The last one also writes `ops_production_inactive` for each Operations and Super Admin membership. |
 
-The stored object keeps value and unit. The sweep converts days to hours (`value * 24`) when it reads. A later change does not rewrite occurrence keys or old inbox rows; the next tick uses the new policy. Omitted on PATCH, the previous object is kept. Absent on an older row, GET returns the defaults above.
+The stored object keeps value and unit. The sweep converts to a duration when it reads: seconds stay seconds, minutes are `value * 60` seconds, hours are `value * 3600` seconds, and days are `value * 24` hours. A later change does not rewrite occurrence keys or old inbox rows; the next tick uses the new policy. Omitted on PATCH, the previous object is kept. Absent on an older row, GET returns the defaults above.
 
-Desk fields, in order: an Enabled toggle; “First reminder after” (number and Hours/Days); “Then remind every” (number and Hours/Days); “Stop after” (1–10, caption “Including the first reminder.”); and “In force right now”, one sentence from the saved object. A shop cannot set this.
+Desk fields, in order: an Enabled toggle; “First reminder after” (number and Seconds/Minutes/Hours/Days); “Then remind every” (number and Seconds/Minutes/Hours/Days); “Stop after” (1–10, caption “Including the first reminder.”); and “In force right now”, one sentence from the saved object. A shop cannot set this.
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. `GET` returns the caller's terms to a supplier; Operations/Super Admin may select a supplier with `?supplierId=`. Supplier-only `PATCH` accepts any subset of `deliveryDownpaymentRateBps`, `pickupFullOnlineEnabled`, `pickupDownpaymentStoreEnabled`, and `pickupDownpaymentRateBps`, and returns `{ "terms": SupplierPaymentTerms }`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`, while disabling that mode clears its rate to `null`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
