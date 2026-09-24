@@ -657,6 +657,7 @@ Default `GET /settings` response:
   "version": 4,
   "settings": {
     "serviceFeeRateBps": 1000,
+    "riderCommissionBps": 8500,
     "issueWindowHours": 24,
     "productionNudge": {
       "enabled": true,
@@ -709,7 +710,7 @@ PATCH /settings
 }
 ```
 
-The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` is an actual JSON integer from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
+The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` and `riderCommissionBps` are actual JSON integers from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
 
 `productionNudge` is the live cadence for a shop that has not made the next production move. Desk (Operational settings, both `/ops/settings` and `/admin/settings`) edits one object on this same route:
 
@@ -725,6 +726,14 @@ The stored object keeps value and unit. The sweep converts to a duration when it
 Desk fields, in order: an Enabled toggle; “First reminder after” (number and Seconds/Minutes/Hours/Days); “Then remind every” (number and Seconds/Minutes/Hours/Days); “Stop after” (1–10, caption “Including the first reminder.”); and “In force right now”, one sentence from the saved object. A shop cannot set this.
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. `GET` returns the caller's terms to a supplier; Operations/Super Admin may select a supplier with `?supplierId=`. Supplier-only `PATCH` accepts any subset of `deliveryDownpaymentRateBps`, `pickupFullOnlineEnabled`, `pickupDownpaymentStoreEnabled`, and `pickupDownpaymentRateBps`, and returns `{ "terms": SupplierPaymentTerms }`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`, while disabling that mode clears its rate to `null`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
+
+## Client ready-time promises
+
+Every public cart line includes `promiseBy: string | null`, including `GET /me/carts/:id` and compact line-mutation responses. The string is an ISO 8601 UTC timestamp, for example `"2026-09-28T06:00:00.000Z"`. It is the projected client ready time for that listing and quantity at request time, including active work already queued at the shop, the listing's effective turnaround (inherited or overridden), daily capacity, the shop's working hours and closures, and GRIDGO's promise allowance. It is `null` when the listing/shop is unavailable or its calendar cannot produce a projection. Clients should show an unavailable estimate for `null`, rather than deriving a ready time from raw turnaround hours.
+
+Matching, cart previews, and checkout share `projectShopFinish` in `src/order-match.js`. For the same listing, quantity, queue, calendar, settings, and instant, they produce the same `promiseBy`. Matching initially uses the fastest eligible listing for the requested subcategory before the client configures quantity; selecting a slower listing or a capacity-limited quantity can move the preview later. Each cart line is projected individually; checkout uses the basket's maximum turnaround and total quantity for its shop job.
+
+Cart promises are live estimates, not reservations: elapsed time or changes to the shop's queue/calendar can move them. Checkout recomputes before adding its own job to the queue and snapshots `orders.promiseBy`; subsequent cart refreshes do not change that saved promise. The checkout response exposes this client promise as `order.readyBy`. The separate stored `orders.readyBy` is the shop's unpadded deadline and must not be exposed to the client. See [Client order match API](ORDER_MATCH_API.md) for the full match/cart contract.
 
 ## Price estimate and exact money
 
@@ -778,6 +787,27 @@ Acceptance snapshots the service-fee setting and every money/fulfillment field, 
 
 Task G defines and validates both pickup financial shapes, but pickup commercial commitment remains contained until Task H owns handover. Selecting either pickup plan currently returns `409 pickup_fulfillment_not_available`; it does not create a payable pickup order or expose that order to rider dispatch.
 
+### Rider delivery split
+
+`riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Operations and Super Admin edit it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
+
+Quote acceptance and cart checkout snapshot the setting when the delivery fee is set. Each order and its checkout job store the rate; later settings, assignment, or state changes do not reprice it. Migration `1786978800000` preserves all pre-existing orders/jobs at `10000` (their original full rider pass-through), while seeding `8500` for new commitments. A permitted quote supersession creates a new commercial commitment with the then-current rate. Zero-fee pickup jobs have zero rider payout and zero GRIDGO delivery share.
+
+The following top-level fields are on rider and Operations/Super Admin order projections, including `GET /dispatch/offers` (`offers[]`), dispatch mutation responses (`order`), and `GET /orders` / `GET /orders/:id`. The rider app should sum `riderPayoutMinor` for its completed-delivery earnings view; `deliveryFeeMinor` remains the gross client charge. These amounts describe entitlement, not a recorded bank transfer; this contract adds no rider withdrawal or payout-release endpoint.
+
+| Field | Meaning | Example (minor units) |
+|---|---|---:|
+| `deliveryFeeMinor` | Gross delivery fee charged to client | 2500 |
+| `riderCommissionBps` | Immutable rider share rate | 8500 |
+| `riderPayoutMinor` | `floor((deliveryFeeMinor * riderCommissionBps + 5000) / 10000)` | 2125 |
+| `platformDeliveryShareMinor` | `deliveryFeeMinor - riderPayoutMinor` | 375 |
+
+Rider rounding is half-up; GRIDGO gets the exact remainder. For a fee of `10` minor units at `8500` bps, the rider receives `9` and GRIDGO `1`. PostgreSQL generated `BIGINT` columns compute the same split with exact numeric arithmetic, and database triggers protect the rate snapshots. Client and supplier projections omit the three internal split fields. Client totals and invoices continue to show the gross delivery charge.
+
+Ops order/finance projections additionally include `deliverySettlement`: the four fields above plus `collectedMinor` (confirmed gross delivery collections), `riderCollectedMinor`, and `platformCollectedMinor`. Collection is summed across confirmed payment allocations before applying the snapshot rate and half-up rounding, so installment rounding never adds an extra centavo. `platformRevenue.billedMinor` now includes service fee plus GRIDGO's delivery share; `collectedMinor` includes confirmed service-fee allocations plus the collected GRIDGO delivery share. `recognizedMinor` follows the existing delivered-state and adjustment/refund rules on this combined amount. Supplier principal, collection caps, and payout milestones are unchanged.
+
+The persisted payment allocation component `delivery_pass_through` remains the compatibility name for **gross delivery collection**, including both shares. It is not rider earnings. Keeping that collection shape preserves payment-sum and supplier-principal SQL invariants; ownership is represented by the separate order/job split columns.
+
 ### Worked example
 
 | Field | Minor units | Peso meaning | Client receives field? |
@@ -792,14 +822,14 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 
 `round_bps(x,bps) = floor((x*bps+5000)/10000)`. Application calculations use `BigInt`, PostgreSQL constraints recompute the formula with exact `numeric`, and the HTTP boundary rejects results outside the JavaScript safe-integer range. The service fee and initial supplier principal are rounded independently; the supplier remainder is subtraction, so it receives every principal-rounding cent. Delivery never enters the fee base, and the full service fee is allocated to the initial payment.
 
-For the rounding vector `supplierSubtotalMinor = 99999`, a 1,000-bps service fee is `10000` and a 2,500-bps initial supplier principal is `25000`; the supplier remainder is therefore `74999`. With the `2500` delivery pass-through, the initial online installment is `35000`, the final online installment is `77499`, and the client total is `112499`.
+For the rounding vector `supplierSubtotalMinor = 99999`, a 1,000-bps service fee is `10000` and a 2,500-bps initial supplier principal is `25000`; the supplier remainder is therefore `74999`. With the `2500` delivery fee, the initial online installment is `35000`, the final online installment is `77499`, and the client total is `112499`.
 
 ### Visibility authorization
 
 - Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and payout milestone codes/status; never platform supplier-payout amounts.
 - Assigned supplier: its full supplier subtotal, zero-deduction settlement card, and milestone amounts; never client payment references. For pickup-at-store plans, the card reports the amount due separately and keeps received-at-store at zero until a later lifecycle owns an explicit receipt signal.
-- Rider: client-safe order totals; no supplier payout, allocation, milestone, or client-reference details.
-- Operations/Super Admin: full client totals, allocations, supplier settlement, service-fee revenue fields, and milestone amounts.
+- Rider: client-safe order totals and the snapshotted delivery split above; no supplier payout, allocation, milestone, or client-reference details.
+- Operations/Super Admin: full client totals, allocations, supplier settlement, combined service-fee/delivery-share revenue fields, and milestone amounts.
 
 All order-returning endpoints use this projection.
 

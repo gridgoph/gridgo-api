@@ -99,6 +99,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786964400000_authenticated_support_chat",
         "1786968000000_support_chat_history",
         "1786975200000_listing_production_window",
+        "1786978800000_rider_delivery_commission",
+        "1786982400000_public_issue_reports",
       ],
     );
 
@@ -245,6 +247,13 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.issue_reports`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.issue_report_screenshots`])).rows[0].t, null);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='orders' AND column_name='rider_commission_bps'`, [schema])).rowCount, 0);
     await runner(migrationOptions(schema, "down", 1, client));
     const productionWindowColumns = new Set((await client.query(
       `SELECT column_name FROM information_schema.columns
@@ -764,5 +773,52 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
       `),
       (error) => error.code === "23514" && error.constraint === "file_references_reference_type_check",
     );
+  });
+});
+
+test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner(migrationOptions(schema, "up", undefined, client));
+    await runner(migrationOptions(schema, "down", 2, client));
+    await client.query(`
+      INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
+      INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
+        VALUES ('client', 'clerk_client', 'client@test.invalid', 'Client', 'client', 'individual', now(), 0);
+      INSERT INTO users (id, clerk_user_id, email, name, role, verification_status, created_at, position)
+        VALUES ('shop', 'clerk_shop', 'shop@test.invalid', 'Shop', 'supplier', 'approved', now(), 1);
+      INSERT INTO orders (id, client_id, state, delivery_fee_minor, created_at, updated_at, position)
+        VALUES ('old_order', 'client', 'draft', 2500, now(), now(), 0);
+      INSERT INTO order_jobs (id, order_id, supplier_id, state, fulfillment_mode,
+        pickup_lat, pickup_lng, pickup_label, dropoff_lat, dropoff_lng, dropoff_label,
+        supplier_subtotal_minor, delivery_fee_minor, estimated_hours, created_at, updated_at)
+        VALUES ('old_job', 'old_order', 'shop', 'needs_qa', 'delivery',
+          7, 125, 'Shop', 7, 125, 'Home', 10000, 2500, 24, now(), now());
+    `);
+    await runner(migrationOptions(schema, "up", 1, client));
+    assert.deepEqual((await client.query("SELECT version, settings FROM platform_settings")).rows[0], {
+      version: 7, settings: { serviceFeeRateBps: 750, riderCommissionBps: 8500 },
+    });
+    for (const table of ["orders", "order_jobs"]) {
+      const row = (await client.query(`SELECT rider_commission_bps, rider_payout_minor::text,
+        platform_delivery_share_minor::text FROM ${table}`)).rows[0];
+      assert.deepEqual(row, { rider_commission_bps: 10000, rider_payout_minor: "2500", platform_delivery_share_minor: "0" });
+    }
+    await assert.rejects(client.query("UPDATE order_jobs SET rider_commission_bps = 8500"),
+      (error) => error.constraint === "order_jobs_delivery_snapshot_immutable");
+    await assert.rejects(client.query("UPDATE order_jobs SET delivery_fee_minor = 3000"),
+      (error) => error.constraint === "order_jobs_delivery_snapshot_immutable");
+    for (const [fee, rate, rider, platform] of [
+      [10, 8500, '9', '1'], [3, 8500, '3', '0'], [0, 8500, '0', '0'],
+      [99, 0, '0', '99'], [99, 10000, '99', '0'],
+      [9007199254740991, 8500, '7656119366529842', '1351079888211149'],
+    ]) {
+      await client.query("UPDATE orders SET delivery_fee_minor=$1, rider_commission_bps=$2", [fee, rate]);
+      assert.deepEqual((await client.query(`SELECT rider_payout_minor::text, platform_delivery_share_minor::text,
+        (rider_payout_minor + platform_delivery_share_minor = delivery_fee_minor) AS conserved FROM orders`)).rows[0],
+        { rider_payout_minor: rider, platform_delivery_share_minor: platform, conserved: true });
+    }
+    await assert.rejects(client.query("UPDATE orders SET rider_commission_bps = 10001"), (error) => error.code === "23514");
+    await assert.rejects(client.query("UPDATE orders SET rider_commission_bps = NULL"), (error) => error.code === "23502");
+    await assert.rejects(client.query("UPDATE orders SET rider_payout_minor = 123"), (error) => error.code === "428C9");
   });
 });

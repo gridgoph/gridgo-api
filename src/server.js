@@ -177,6 +177,12 @@ import {
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
 import {
+  isStaffIssueReportsRoute,
+  issueReportsPathname,
+  routeIssueReports,
+  routeStaffIssueReports,
+} from "./issue-reports.js";
+import {
   loadDeviceTokenStore,
   loadStore,
   originalNotificationIds,
@@ -483,6 +489,7 @@ function publicOperationalSettings(settings, store = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     paymentQr,
@@ -1684,6 +1691,17 @@ async function handleRequest(req, res) {
     })) {
       return;
     }
+    if (await routeIssueReports({
+      req,
+      res,
+      pathname,
+      url,
+      send,
+      database,
+      storage: objectStorage,
+    })) {
+      return;
+    }
 
     // ---- push registration before there is an account ----
     //
@@ -2119,6 +2137,21 @@ async function handleRequest(req, res) {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
       });
+    }
+
+    if (isStaffIssueReportsRoute(pathname)) {
+      await routeStaffIssueReports({
+        req,
+        res,
+        pathname,
+        url,
+        user,
+        readBody,
+        send,
+        database,
+        storage: objectStorage,
+      });
+      return;
     }
 
     if (isSupportChatRoute(pathname)) {
@@ -2841,6 +2874,8 @@ async function handleRequest(req, res) {
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
       const next = {
         ...store.settings,
+        riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
+          ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
@@ -5063,7 +5098,7 @@ async function handleRequest(req, res) {
           order.dropoff = order.requestedDropoff ? structuredClone(order.requestedDropoff) : order.dropoff;
           for (const field of [
             "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor",
-            "deliveryDistanceMeters", "deliveryFeeMinor", "totalMinor", "fulfillmentMode",
+            "deliveryDistanceMeters", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode",
             "paymentPlan", "supplierDownpaymentRateBps", "initialSupplierPrincipalMinor",
             "supplierRemainderMinor", "initialOnlineMinor", "finalOnlineMinor", "onlineDueMinor",
             "directStoreDueMinor", "supplierPlatformPayoutMinor", "supplierEarningsMinor",
@@ -5846,6 +5881,12 @@ const server = http.createServer((req, res) => {
     void handleRequest(req, res);
     return;
   }
+  if (mutatesStore && issueReportsPathname(pathname)) {
+    // Public issue reports carry base64 screenshots well past the 1 MiB JSON
+    // cap, so the route reads its own body and commits under its own lock.
+    void handleRequest(req, res);
+    return;
+  }
   if (req.method === "POST" && pathname === "/webhooks/clerk") {
     // Raw body and Svix headers are the credential. The generic mutation
     // path would parse JSON first and demand a Clerk session JWT.
@@ -5865,9 +5906,10 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (mutatesStore && isSupportChatRoute(pathname)) {
+  if (mutatesStore && (isSupportChatRoute(pathname) || isStaffIssueReportsRoute(pathname))) {
     // Clerk-authenticated, but its own tables and lock — do not hold the
-    // domain mutation lock while someone is typing to Operations.
+    // domain mutation lock while someone is typing to Operations (or marking
+    // an issue report).
     void readBody(req)
       .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(() => handleRequest(req, res))

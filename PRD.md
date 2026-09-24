@@ -36,7 +36,7 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 ## Orders, money, and fulfilment
 
 - Orders snapshot client dropoff, assigned supplier pickup, distance band, delivery fee, and accepted price.
-- The service fee is seeded at 1,000 bps on the supplier subtotal and snapshotted with the accepted quote; delivery is a separate pass-through.
+- The service fee is seeded at 1,000 bps on the supplier subtotal and snapshotted with the accepted quote; delivery is a separate charge split between the rider and GRIDGO at the snapshotted rider rate.
 - Generalized online installments, component allocations, and supplier payout milestones have independent relational records.
 - Supplier payout never exceeds confirmed supplier-principal collection and is paid across four proof-gated stages (printing 50%, packaging 15%, delivered 25%, retention 10%) that Operations releases after reviewing the Proof of Fulfilment; nothing releases on a state change alone.
 - Packaging readiness is a signal, not a checklist: the supplier marks the job packed, riders are offered it, and the supplier and rider run the six pickup checks together at the counter before the package leaves.
