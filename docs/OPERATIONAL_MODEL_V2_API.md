@@ -726,6 +726,14 @@ Desk fields, in order: an Enabled toggle; “First reminder after” (number and
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. `GET` returns the caller's terms to a supplier; Operations/Super Admin may select a supplier with `?supplierId=`. Supplier-only `PATCH` accepts any subset of `deliveryDownpaymentRateBps`, `pickupFullOnlineEnabled`, `pickupDownpaymentStoreEnabled`, and `pickupDownpaymentRateBps`, and returns `{ "terms": SupplierPaymentTerms }`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`, while disabling that mode clears its rate to `null`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
+## Client ready-time promises
+
+Every public cart line includes `promiseBy: string | null`, including `GET /me/carts/:id` and compact line-mutation responses. The string is an ISO 8601 UTC timestamp, for example `"2026-09-28T06:00:00.000Z"`. It is the projected client ready time for that listing and quantity at request time, including active work already queued at the shop, the listing's effective turnaround (inherited or overridden), daily capacity, the shop's working hours and closures, and GRIDGO's promise allowance. It is `null` when the listing/shop is unavailable or its calendar cannot produce a projection. Clients should show an unavailable estimate for `null`, rather than deriving a ready time from raw turnaround hours.
+
+Matching, cart previews, and checkout share `projectShopFinish` in `src/order-match.js`. For the same listing, quantity, queue, calendar, settings, and instant, they produce the same `promiseBy`. Matching initially uses the fastest eligible listing for the requested subcategory before the client configures quantity; selecting a slower listing or a capacity-limited quantity can move the preview later. Each cart line is projected individually; checkout uses the basket's maximum turnaround and total quantity for its shop job.
+
+Cart promises are live estimates, not reservations: elapsed time or changes to the shop's queue/calendar can move them. Checkout recomputes before adding its own job to the queue and snapshots `orders.promiseBy`; subsequent cart refreshes do not change that saved promise. The checkout response exposes this client promise as `order.readyBy`. The separate stored `orders.readyBy` is the shop's unpadded deadline and must not be exposed to the client. See [Client order match API](ORDER_MATCH_API.md) for the full match/cart contract.
+
 ## Price estimate and exact money
 
 At `POST /orders`, `priceRange` is a client-safe supplier-subtotal estimate:
