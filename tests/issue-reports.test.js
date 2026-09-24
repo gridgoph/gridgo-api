@@ -5,7 +5,9 @@ import http from "node:http";
 import { createDatabase } from "../src/database.js";
 import {
   MAX_SCREENSHOTS,
+  isStaffIssueReportsRoute,
   routeIssueReports,
+  routeStaffIssueReports,
   sniffImageType,
   validateIssueReport,
 } from "../src/issue-reports.js";
@@ -237,4 +239,59 @@ test("one sender is limited, and the site-wide daily caps hold across senders", 
   assert.equal(overCount.status, 429);
   assert.equal(overCount.body.error, "report_capacity_reached");
   assert.equal((await database.query("SELECT count(*)::int AS n FROM issue_reports")).rows[0].n, 12);
+});
+
+test("Operations and Super Admin read and mark reports with their session; other roles cannot", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const users = { ops: { id: "u_ops", role: "ops_admin" }, super: { id: "u_super", role: "super_admin" }, client: { id: "u_client", role: "client" } };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const send = (response, status, body) => {
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(body));
+    };
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const parsed = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    const handled = await routeStaffIssueReports({
+      req, res, pathname: url.pathname, url, user: users[req.headers["x-test-user"]] ?? null,
+      readBody: async () => parsed, send, database, storage,
+    });
+    if (!handled) send(res, 404, { error: "not_found" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    server.close();
+    await database.query("TRUNCATE issue_reports CASCADE").catch(() => {});
+    await database.close?.();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+  const staffCall = (who, pathname, init = {}) => fetch(`${base}${pathname}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(who ? { "X-Test-User": who } : {}) },
+  }).then(async (response) => ({ status: response.status, body: await response.json() }));
+
+  assert.equal(isStaffIssueReportsRoute("/api/ops/issue-reports"), true);
+  assert.equal(isStaffIssueReportsRoute("/ops/issue-reports/abc/extra"), false);
+
+  const { createIssueReport } = await import("../src/issue-reports.js");
+  const filed = await createIssueReport(database, storage, { issue: "Rider map is blank", category: "bug", screenshots: [] });
+
+  assert.equal((await staffCall(null, "/ops/issue-reports")).status, 401);
+  assert.equal((await staffCall("client", "/ops/issue-reports")).status, 403);
+
+  const listed = await staffCall("ops", "/api/ops/issue-reports?status=new");
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.counts, { new: 1, published: 0, dismissed: 0 });
+  assert.equal(listed.body.reports[0].issue, "Rider map is blank");
+
+  const dismissed = await staffCall("super", `/ops/issue-reports/${filed.id}`, {
+    method: "PATCH", body: JSON.stringify({ status: "dismissed" }),
+  });
+  assert.equal(dismissed.status, 200);
+  assert.equal(dismissed.body.status, "dismissed");
+  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, published: 0, dismissed: 1 });
+  assert.equal((await staffCall("client", `/ops/issue-reports/${filed.id}`, { method: "PATCH", body: JSON.stringify({ status: "new" }) })).status, 403);
 });
