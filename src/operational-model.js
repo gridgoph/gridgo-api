@@ -74,6 +74,44 @@ export function carriedToOffice(order) {
   return order?.fulfillmentMode === "pickup" && !isContainedPickup(order);
 }
 
+/*
+ How much of an order-match checkout the client pays up front.
+
+ The captain moved new orders to 100 percent on 2026-09-25 (gridgo-api#66):
+ one QR transfer, one confirmation, and no balance to chase at the door or the
+ counter. 75 stays selectable so the business can go back to 75/25 without a
+ release. Each order snapshots the value at checkout, so changing the setting
+ never touches an order already placed. Orders placed before the snapshot
+ existed were all 75/25.
+*/
+export const DOWNPAYMENT_PERCENTS = Object.freeze([75, 100]);
+export const DEFAULT_DOWNPAYMENT_PERCENT = 100;
+const LEGACY_ORDER_MATCH_DOWNPAYMENT_PERCENT = 75;
+
+/** The live setting; a settings row written before the field existed reads as 100. */
+export function downpaymentPercentSetting(settings) {
+  return settings?.downpaymentPercent ?? DEFAULT_DOWNPAYMENT_PERCENT;
+}
+
+/** The split this order was placed under, or null for an order with no checkout split. */
+export function orderDownpaymentPercent(order) {
+  if (Number.isInteger(order?.downpaymentPercent)) return order.downpaymentPercent;
+  return order?.paymentPlan === "order_match_qr_75_25" ? LEGACY_ORDER_MATCH_DOWNPAYMENT_PERCENT : null;
+}
+
+/*
+ An installment nobody owes anything on any more.
+
+ `not_required` is the balance of a 100 percent order: there is nothing left to
+ pay, so every gate that waits on the balance lets it through. It carries no
+ payment allocations, so it never adds collected principal of its own.
+*/
+const SETTLED_PAYMENT_STATUSES = new Set(["confirmed", "not_required"]);
+
+export function paymentSettled(payment) {
+  return SETTLED_PAYMENT_STATUSES.has(payment?.status);
+}
+
 export class OperationalError extends Error {
   constructor(status, code, message, details = {}) {
     super(message);
@@ -143,6 +181,7 @@ export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
     riderCommissionBps: 8_500,
+    downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
@@ -182,6 +221,12 @@ export function validateOperationalSettings(settings) {
     fail(400, "invalid_rider_commission_rate",
       "Set the rider share to a whole number from 0 to 10,000 basis points.",
       { field: "riderCommissionBps" });
+  }
+  const downpaymentPercent = settings?.downpaymentPercent;
+  if (downpaymentPercent !== undefined && !DOWNPAYMENT_PERCENTS.includes(downpaymentPercent)) {
+    fail(400, "invalid_downpayment_percent",
+      "Set the checkout downpayment to 75 or 100 percent.",
+      { field: "downpaymentPercent", allowed: [...DOWNPAYMENT_PERCENTS] });
   }
   const issueWindowHours = settings?.issueWindowHours;
   if (!Number.isInteger(issueWindowHours) || issueWindowHours < 1 || issueWindowHours > 720) {
@@ -842,6 +887,9 @@ export function publicOrderFor(order, user, store = null) {
   // Every client order screen reads this as an array. Seeded queue jobs and
   // older rows never stored one; omitting it crashes the order page.
   if (!Array.isArray(publicRecord.timeline)) publicRecord.timeline = [];
+  // A checkout order placed before the split was snapshotted was 75/25.
+  const downpaymentPercent = orderDownpaymentPercent(order);
+  if (downpaymentPercent != null) publicRecord.downpaymentPercent = downpaymentPercent;
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);

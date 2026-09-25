@@ -619,7 +619,7 @@ Every announcement is written to the platform audit log (`announcement.broadcast
 
 Order reads include `productionItems` for the owning client, Operations, and assigned supplier/rider. Each item exposes `id`, `itemName`, `quantity`, `pricingUnit`, `packageQty`, `structuredSpec` (size/material/finish), selected `options` (`groupName`, `label`), `artworkFileId`, and `mockupFileId`. Supplier/rider items follow assigned job IDs; legacy primary-party fallback applies only when no jobs exist. Prices and payment receipts are excluded. `measurement` is null or contains whole `pages`, and/or `widthMilli`, `heightMilli`, `lengthMilli` in thousandths of its `unit`. New snapshots preserve the listing unit; historical snapshots without it return null rather than guessing from a changed listing.
 
-`POST /orders/:id/payments/:installment/submit` accepts `{method:"qr_manual",reference,proofFileId?}`. Canonical installment keys are `initial` and `final_online`; route aliases `downpayment` and `balance` remain supported. When supplied, `proofFileId` must identify the caller's ready `payment_proof` upload. Submission atomically binds that receipt to the order and installment, and changes payment status to `pending_confirmation`. Reference-only legacy submissions remain accepted. Receipt metadata and signed downloads are private to the owner and Operations; supplier/rider order reads omit receipt IDs. Rejection clears the installment's active receipt while retaining its private reference for review history. Receipt OCR never confirms payment: only Operations confirmation clears the existing handover/collection gate.
+`POST /orders/:id/payments/:installment/submit` accepts `{method:"qr_manual",reference,proofFileId?}`. Canonical installment keys are `initial` and `final_online`; route aliases `downpayment` and `balance` remain supported. When supplied, `proofFileId` must identify the caller's ready `payment_proof` upload. Submission atomically binds that receipt to the order and installment, and changes payment status to `pending_confirmation`. Reference-only legacy submissions remain accepted. Receipt metadata and signed downloads are private to the owner and Operations; supplier/rider order reads omit receipt IDs. Rejection clears the installment's active receipt while retaining its private reference for review history. Receipt OCR never confirms payment: only Operations confirmation clears the existing handover/collection gate. A balance with status `not_required` (an order paid in full up front) cannot be submitted, confirmed or rejected: `409 balance_not_required`.
 
 ## Notifications
 
@@ -714,6 +714,7 @@ Default `GET /settings` response:
     "serviceFeeRateBps": 1000,
     "serviceFeeVisibleToClient": true,
     "riderCommissionBps": 8500,
+    "downpaymentPercent": 100,
     "issueWindowHours": 24,
     "productionNudge": {
       "enabled": true,
@@ -769,6 +770,8 @@ PATCH /settings
 The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` and `riderCommissionBps` are actual JSON integers from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
 
 `serviceFeeVisibleToClient` (JSON boolean, default `true`; anything else is `400 invalid_service_fee_visibility`) only decides whether client checkout names the `Service fee · N%` row. It never changes money: the fee is still charged and still inside the client's Printing amount. Omitted on PATCH, the current value is kept; absent on an older row, GET returns `true`.
+
+`downpaymentPercent` is the share of an order-match checkout the client pays up front: `100` (default) or `75`. Anything else, including strings and `null`, is `400 invalid_downpayment_percent` with `field: "downpaymentPercent"`. It decides new checkouts only; see [Upfront checkout](#upfront-checkout). Omitted on PATCH, the current value is kept; absent on an older row, GET returns `100`.
 
 `productionNudge` is the live cadence for a shop that has not made the next production move. Desk (Operational settings, both `/ops/settings` and `/admin/settings`) edits one object on this same route:
 
@@ -946,7 +949,22 @@ Order payment shape:
 }
 ```
 
-Statuses: `not_submitted | pending_confirmation | confirmed`.
+Statuses: `not_submitted | pending_confirmation | confirmed | not_required`. `not_required` is the zero-peso balance of an order paid in full up front (below). Clients must treat an unknown status gracefully rather than as an error.
+
+### Upfront checkout
+
+The captain decided on 2026-09-25 (gridgo-api#66) that new orders are paid **100% up front**. The split is the Operations/Super Admin setting `downpaymentPercent` (`100` default, or `75`) on `PATCH /settings` with the usual `expectedVersion` handshake, so the business can return to 75/25 without a release.
+
+- Cart checkout snapshots the setting on the order as `downpaymentPercent`, like the rider delivery split. The setting changing later never changes an order already placed.
+- At `100`: `downpaymentMinor = totalMinor` and `balanceMinor = 0`. `payments.initial` carries the whole total (label `Full payment`), and `payments.final_online` stays in the installment list at `amountMinor: 0`, `status: "not_required"` (label `No balance`). All payment allocations sit on `initial`.
+- At `75`: the 75/25 split exactly as before — `downpaymentMinor` is `round_bps(totalMinor, 7500)`, the balance is the remainder with status `not_submitted`, and each component is allocated 75/25.
+- Nobody can submit, confirm or reject a `not_required` balance: `POST /orders/:id/payments/{final_online|balance}/{submit|confirm|reject}` answers `409 balance_not_required`.
+- Every gate that waits on the balance treats `not_required` as settled: rider delivery completion, the counter hand-over (`POST /orders/:id/collection`), the counter collect-hold flag, and the client's `paymentAction`. Payout caps need no special case: all supplier principal is allocated to the one confirmed payment, so it covers every stage.
+- Confirming the initial payment of an upfront order sets `paymentStatus: "paid"` (a 75/25 order still reads `initial_payment_confirmed` until its balance is confirmed).
+- Order reads gain top-level `downpaymentPercent`. The checkout response's `paymentPlan` carries `downpaymentPercent`, `downpaymentMinor`, `balanceMinor`, `downpaymentStatus` and `balanceStatus`; the invoice's `paymentPlan` carries `downpaymentPercent`, `downpaymentMinor` and `balanceMinor`.
+- Orders placed on 75/25 before the snapshot existed have no stored `downpaymentPercent`; reads report `75` for them and they keep their balance step unchanged. `paymentPlan` stays `order_match_qr_75_25` for every order-match checkout: it names the plan, and `downpaymentPercent` is the split.
+
+Migration `1786996800000` adds `not_required` to the `order_payments.status` check. Its `down` refuses while any `not_required` row exists.
 
 Client submission:
 
@@ -972,7 +990,7 @@ POST /orders/:id/payments/final_online/confirm
 { "note": "Reference matched Operations wallet" }
 ```
 
-Only Operations/Super Admin. Confirmation sets `status: "confirmed"`, actor/timestamp, and `confirmationSource: "manual_ops"`. Initial confirmation changes the order to `payment_authorized`; final-online confirmation marks online collection paid. Delivery is blocked until final online payment is confirmed.
+Only Operations/Super Admin. Confirmation sets `status: "confirmed"`, actor/timestamp, and `confirmationSource: "manual_ops"`. Initial confirmation changes the order to `payment_authorized`; final-online confirmation marks online collection paid. Delivery is blocked until final online payment is confirmed or `not_required`.
 
 Manual rejection:
 
@@ -998,6 +1016,7 @@ Exact rejection errors:
 | 404 | `order_not_found` | no order has that ID. |
 | 409 | `payment_not_pending` | installment has no submitted payment awaiting review; refresh before acting. |
 | 409 | `payment_already_confirmed` | installment is `confirmed`; accepted money cannot be reversed through this route and needs manual reconciliation. |
+| 409 | `balance_not_required` | the order was paid in full up front; its balance has nothing to pay. Also returned by submit and confirm. |
 
 ## Supplier payout milestones
 

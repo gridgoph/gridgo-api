@@ -162,6 +162,8 @@ import {
   isContainedPickup,
   issueWindowExpiresAt,
   checklistDigest,
+  downpaymentPercentSetting,
+  paymentSettled,
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
   publicOrderFor,
@@ -525,6 +527,7 @@ function publicOperationalSettings(settings, store = null) {
   return {
     ...rest,
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
+    downpaymentPercent: downpaymentPercentSetting(rest),
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     paymentQr,
@@ -1304,6 +1307,22 @@ function paymentCodeForRoute(code) {
   return ({ downpayment: "initial", balance: "final_online" })[code] || code;
 }
 
+/*
+ A 100 percent order has no balance to pay, so there is nothing for the client
+ to submit or for Operations to confirm or reject. Refused the same way from
+ every side rather than letting a zero-peso payment be invented.
+*/
+function balanceNotRequired(res, order, installmentCode) {
+  if (order.payments?.[installmentCode]?.status !== "not_required") return false;
+  send(res, 409, {
+    error: "balance_not_required",
+    message: "This order was paid in full up front, so it has no balance to pay.",
+    installment: installmentCode,
+    status: "not_required",
+  });
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Default platform data used by route validation and the explicit reference seed.
 // ---------------------------------------------------------------------------
@@ -1401,7 +1420,7 @@ function deliveryBalanceSettled(order) {
   if (carriedToOffice(order)) return true;
   const balance = order?.payments?.final_online;
   if (!balance) return true;
-  return balance.status === "confirmed";
+  return paymentSettled(balance);
 }
 
 function syncJobsWithOrder(store, order, at) {
@@ -2947,6 +2966,9 @@ async function handleRequest(req, res) {
         ...store.settings,
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
           ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
+        // New checkouts only: every order keeps the split it was placed under.
+        downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
+          ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
@@ -4546,6 +4568,7 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order || order.clientId !== user.id) return send(res, 404, { error: "order_not_found" });
+      if (balanceNotRequired(res, order, installmentCode)) return;
       if (body.method !== "qr_manual") {
         return send(res, 400, {
           error: "payment_method_not_allowed",
@@ -4656,6 +4679,7 @@ async function handleRequest(req, res) {
       const installmentCode = paymentCodeForRoute(parts[4]);
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      if (balanceNotRequired(res, order, installmentCode)) return;
       const installment = order.payments?.[installmentCode];
       if (installment?.status === "confirmed") {
         return send(res, 409, {
@@ -4729,6 +4753,7 @@ async function handleRequest(req, res) {
       const installmentCode = paymentCodeForRoute(parts[4]);
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      if (balanceNotRequired(res, order, installmentCode)) return;
       const installment = order.payments?.[installmentCode];
       if (!installment || installment.status !== "pending_confirmation") {
         return send(res, 409, {
@@ -4751,7 +4776,9 @@ async function handleRequest(req, res) {
         // Older orders were quoted and approved long before payment, so for
         // them a confirmed payment really is the last gate.
         order.state = order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
-        order.paymentStatus = "initial_payment_confirmed";
+        // Paid up front, the one confirmation settles the whole order.
+        order.paymentStatus = order.payments?.final_online?.status === "not_required"
+          ? "paid" : "initial_payment_confirmed";
       } else {
         order.paymentStatus = "paid";
       }
@@ -5740,7 +5767,7 @@ async function handleRequest(req, res) {
        waiting on something no one present can do, and the job can never move
        again. The gate moves to the counter, where the client actually is.
       */
-      if (!carriedToOffice(order) && order.payments?.final_online?.status !== "confirmed") {
+      if (!carriedToOffice(order) && !paymentSettled(order.payments?.final_online)) {
         return send(res, 409, {
           error: "final_payment_not_confirmed",
           message: "Operations must confirm the client's final online payment before the rider completes delivery.",
@@ -5838,7 +5865,7 @@ async function handleRequest(req, res) {
           state: order.state,
         });
       }
-      if (order.payments?.final_online?.status !== "confirmed") {
+      if (!paymentSettled(order.payments?.final_online)) {
         return send(res, 409, {
           error: "final_payment_not_confirmed",
           message: "Confirm the client's remaining balance before releasing this order at the counter.",

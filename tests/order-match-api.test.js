@@ -279,10 +279,17 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
+  // New orders are paid in full up front; a test about the balance step asks
+  // for the 75/25 split the business can still switch back to.
+  if (downpaymentPercent) await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.settings.downpaymentPercent = downpaymentPercent;
+    await saveStore(database, store);
+  });
   if (measurement) await database.transaction(async () => {
     const store = await loadStore(database);
     const item = store.catalogItems.find((row) => row.id === catalogItemId);
@@ -493,7 +500,7 @@ test("a declined job moves to a shop that can still make the date, at no more co
  * not a check, so the release refuses without one.
  */
 test("the shop is paid across four stages, each on a photograph somebody looked at", async (t) => {
-  const { call, database, orderId } = await placedOrder(t);
+  const { call, database, orderId } = await placedOrder(t, { downpaymentPercent: 75 });
   const ops = (path, body) => call(path, { method: "POST", subject: "clerk_ops", body: body || {} });
   const transition = (state, subject, body = {}) => call(
     `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
@@ -826,7 +833,7 @@ test("a collected order runs the whole journey, because a rider takes it to the 
  * the package was still on our shelf.
  */
 test("a collected order stops on the counter, and only the counter hands it over", { skip: !DATABASE_URL }, async (t) => {
-  const { call, database, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
+  const { call, database, orderId } = await placedOrder(t, { fulfillmentMode: "pickup", downpaymentPercent: 75 });
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
   for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
@@ -1069,7 +1076,7 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
 
 
 test("final QR receipt survives submission and only Operations clears delivery", { skip: !DATABASE_URL }, async (t) => {
-  const { call, database, orderId } = await placedOrder(t, { measurement: { width: 2000, height: 3000 } });
+  const { call, database, orderId } = await placedOrder(t, { measurement: { width: 2000, height: 3000 }, downpaymentPercent: 75 });
   const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
   const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
   assert.equal((await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops")).status, 200);
@@ -1134,4 +1141,250 @@ test("final QR receipt survives submission and only Operations clears delivery",
   inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
   assert.equal(inbox.some((row) => row.paymentAction), false);
   assert.equal((await loadStore(database)).notifications.filter((row) => row.orderId === orderId && row.type === "rider_delivery_payment_cleared").length, 1);
+});
+
+/**
+ * 100 percent upfront checkout (gridgo-api#66).
+ *
+ * One transfer and one confirmation carry the whole order: nothing is left to
+ * owe at the door or the counter, the balance routes refuse because there is
+ * no balance, and the shop's four stages are covered by that one payment.
+ */
+test("a paid-up-front order runs from one confirmation to a fully released payout", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t);
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
+  const orderNow = async (subject = "clerk_ops") => (await call(`/orders/${orderId}`, { subject })).body.order;
+  const release = (code) => post(`/orders/${orderId}/milestones/${code}/release`, "clerk_ops");
+  const attachProof = async (code) => {
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const milestone = store.orders.find((row) => row.id === orderId).payoutMilestones.find((row) => row.code === code);
+      milestone.pofFileIds = [`file_pof_${code}`];
+      milestone.status = "pof_attached";
+      await saveStore(database, store);
+    });
+  };
+
+  const placed = await orderNow("clerk_client");
+  assert.equal(placed.downpaymentPercent, 100);
+  assert.equal(placed.payments.initial.amountMinor, placed.totalMinor);
+  assert.equal(placed.payments.initial.label, "Full payment");
+  assert.equal(placed.payments.final_online.amountMinor, 0);
+  assert.equal(placed.payments.final_online.status, "not_required");
+  const invoice = (await call(`/orders/${orderId}/invoice`, { subject: "clerk_client" })).body.invoice;
+  assert.deepEqual(invoice.paymentPlan, { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: placed.totalMinor, balanceMinor: 0 });
+
+  // Nobody can submit, confirm or reject a balance that does not exist, by
+  // either route name.
+  for (const route of ["final_online", "balance"]) {
+    for (const [action, subject] of [["submit", "clerk_client"], ["confirm", "clerk_ops"], ["reject", "clerk_ops"]]) {
+      const refused = await post(`/orders/${orderId}/payments/${route}/${action}`, subject, { method: "qr_manual", reference: "QR-BAL", reason: "x" });
+      assert.equal(refused.status, 409, `${route}/${action}: ${JSON.stringify(refused.body)}`);
+      assert.equal(refused.body.error, "balance_not_required");
+    }
+  }
+
+  const confirmed = await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops");
+  assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+  assert.equal(confirmed.body.order.paymentStatus, "paid");
+  assert.equal(confirmed.body.order.payments.final_online.status, "not_required");
+
+  for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized"], ["production"]]) {
+    const moved = await transition(state, subject);
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+  await attachProof("printing");
+  assert.equal((await release("printing")).status, 200);
+  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+    const moved = await transition(state);
+    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+  }
+  await attachProof("packaging_qc");
+  assert.equal((await release("packaging_qc")).status, 200);
+
+  // The client is never asked for a balance along the way.
+  const inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
+  assert.equal(inbox.some((row) => row.paymentAction), false);
+
+  assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
+  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
+  const checked = await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) });
+  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+
+  // The door does not wait on a balance: it was paid at checkout.
+  const delivered = await post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop" });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.order.state, "issue_window_open");
+
+  // The collected principal already covers every stage.
+  await attachProof("delivered");
+  const deliveredRelease = await release("delivered");
+  assert.equal(deliveredRelease.status, 200, JSON.stringify(deliveredRelease.body));
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find((row) => row.id === orderId).state = "completed";
+    await saveStore(database, store);
+  });
+  await attachProof("retention");
+  assert.equal((await release("retention")).status, 200);
+
+  const settled = await orderNow();
+  assert.equal(settled.payoutMilestones.every((row) => row.status === "released"), true);
+  assert.equal(
+    settled.payoutMilestones.reduce((total, row) => total + row.amountMinor, 0),
+    settled.supplierSubtotalMinor,
+    "the shop ends up with exactly its own price",
+  );
+});
+
+/**
+ * An order placed on 75/25 before the change carries no `downpaymentPercent`.
+ * It reads as 75 and keeps its balance step at the door, exactly as before.
+ */
+test("a legacy 75/25 order still needs its balance before delivery", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t, { downpaymentPercent: 75 });
+  // Back to the business default, and the record back to its pre-snapshot shape.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    delete store.settings.downpaymentPercent;
+    delete store.orders.find((row) => row.id === orderId).downpaymentPercent;
+    await saveStore(database, store);
+  });
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
+
+  const placed = (await call(`/orders/${orderId}`, { subject: "clerk_client" })).body.order;
+  assert.equal(placed.downpaymentPercent, 75);
+  assert.equal(placed.payments.final_online.status, "not_submitted");
+  assert.equal(placed.payments.initial.amountMinor + placed.payments.final_online.amountMinor, placed.totalMinor);
+  assert.ok(placed.payments.final_online.amountMinor > 0);
+  const invoice = (await call(`/orders/${orderId}/invoice`, { subject: "clerk_client" })).body.invoice;
+  assert.equal(invoice.paymentPlan.downpaymentPercent, 75);
+
+  const confirmed = await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops");
+  assert.equal(confirmed.body.order.paymentStatus, "initial_payment_confirmed");
+  for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized"], ["production"], ["ready_for_dispatch"]]) {
+    assert.equal((await transition(state, subject)).status, 200, state);
+  }
+  assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
+  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
+  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) })).status, 200);
+  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+  const deliver = () => post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop" });
+
+  const blocked = await deliver();
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.error, "final_payment_not_confirmed");
+  const submitted = await post(`/orders/${orderId}/payments/balance/submit`, "clerk_client", { method: "qr_manual", reference: "QR-BAL" });
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
+  assert.equal((await post(`/orders/${orderId}/payments/balance/confirm`, "clerk_ops")).status, 200);
+  const delivered = await deliver();
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.order.paymentStatus, "paid");
+});
+
+/**
+ * The split is an Operations setting on the existing versioned handshake. It
+ * decides new checkouts only; every order keeps the split it was placed under.
+ */
+test("the downpayment setting switches new checkouts between 75 and 100 and validates", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  // A settings row written before the field existed reads as 100.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    delete store.settings.downpaymentPercent;
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+  });
+  const call = (pathname, options = {}) => request(instance.api, pathname, options);
+  const patch = (body, subject = "clerk_ops") => call("/settings", { method: "PATCH", subject, body });
+
+  let current = await call("/settings", { subject: "clerk_client" });
+  assert.equal(current.status, 200);
+  assert.equal(current.body.settings.downpaymentPercent, 100);
+  const version = current.body.version;
+
+  assert.equal((await patch({ expectedVersion: version, reason: "Back to 75/25", downpaymentPercent: 75 }, "clerk_client")).status, 403);
+  for (const bad of [50, 0, "75", 75.5, null]) {
+    const invalid = await patch({ expectedVersion: version, reason: "Try", downpaymentPercent: bad });
+    assert.equal(invalid.status, 400, `${JSON.stringify(bad)}: ${JSON.stringify(invalid.body)}`);
+    assert.equal(invalid.body.error, "invalid_downpayment_percent");
+  }
+  const stale = await patch({ expectedVersion: version - 1, reason: "Back to 75/25", downpaymentPercent: 75 });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error, "settings_version_conflict");
+
+  // Another change leaves the split where it is.
+  const unrelated = await patch({ expectedVersion: version, reason: "Longer window", issueWindowHours: 48 });
+  assert.equal(unrelated.status, 200, JSON.stringify(unrelated.body));
+  assert.equal(unrelated.body.settings.downpaymentPercent, 100);
+
+  const toSeventyFive = await patch({ expectedVersion: unrelated.body.version, reason: "Back to 75/25", downpaymentPercent: 75 });
+  assert.equal(toSeventyFive.status, 200, JSON.stringify(toSeventyFive.body));
+  assert.equal(toSeventyFive.body.settings.downpaymentPercent, 75);
+  current = await call("/settings", { subject: "clerk_client" });
+  assert.equal(current.body.settings.downpaymentPercent, 75);
+
+  const checkoutOne = async (reference, proofFileId = "file_qr") => {
+    const cart = await call("/me/carts", {
+      method: "POST", subject: "clerk_client",
+      body: { fulfillmentMode: "delivery", defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" } },
+    });
+    const cartId = cart.body.cart.id;
+    const added = await call(`/me/carts/${cartId}/lines`, {
+      method: "POST", subject: "clerk_client",
+      body: { catalogItemId: "item_supplier_a", optionIds: [], quantity: 1, artworkFileId: "file_art" },
+    });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    const checkout = await call(`/me/carts/${cartId}/checkout`, {
+      method: "POST", subject: "clerk_client",
+      body: { payment: { method: "qr_manual", proofFileId, reference } },
+    });
+    assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+    return checkout.body.order;
+  };
+
+  const seventyFive = await checkoutOne("QR-75");
+  assert.equal(seventyFive.downpaymentPercent, 75);
+  assert.equal(seventyFive.paymentPlan.balanceStatus, "not_submitted");
+  assert.ok(seventyFive.paymentPlan.balanceMinor > 0);
+
+  const toHundred = await patch({ expectedVersion: toSeventyFive.body.version, reason: "Full payment", downpaymentPercent: 100 });
+  assert.equal(toHundred.status, 200, JSON.stringify(toHundred.body));
+  // Switching back never rewrites the order already placed on 75/25.
+  const kept = (await call(`/orders/${seventyFive.id}`, { subject: "clerk_client" })).body.order;
+  assert.equal(kept.downpaymentPercent, 75);
+  assert.equal(kept.payments.final_online.amountMinor, seventyFive.paymentPlan.balanceMinor);
+  assert.equal(kept.payments.final_online.status, "not_submitted");
+
+  // The earlier checkout's proof is bound to that order, so upload another.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const original = store.files.find((file) => file.fileId === "file_qr");
+    store.files.push({ ...original, fileId: "file_qr_two", objectKey: "client/qr-two.jpg", references: [] });
+    await saveStore(database, store);
+  });
+  const hundred = await checkoutOne("QR-100", "file_qr_two");
+  assert.equal(hundred.downpaymentPercent, 100);
+  assert.equal(hundred.paymentPlan.downpaymentMinor, hundred.totalMinor);
+  assert.equal(hundred.paymentPlan.balanceMinor, 0);
+  assert.equal(hundred.paymentPlan.balanceStatus, "not_required");
 });
