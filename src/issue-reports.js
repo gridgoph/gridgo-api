@@ -13,10 +13,15 @@ import { identityHasMembership } from "./authorization-context.js";
 import { deskOperatorFromRequest } from "./support-desk.js";
 import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { asTrimmedString } from "./support-validate.js";
+import { firstmateRefusal } from "./tracker.js";
 
 export const ISSUE_MAX_LENGTH = 5000;
 export const ISSUE_CATEGORIES = Object.freeze(["bug", "feature", "other"]);
-export const ISSUE_STATUSES = Object.freeze(["new", "published", "dismissed"]);
+export const ISSUE_STATUSES = Object.freeze(["new", "tracked", "published", "dismissed"]);
+// Statuses that keep the tracker issue link; `new` and `dismissed` clear it.
+const LINKED_STATUSES = Object.freeze(["tracked", "published"]);
+// The GitHub tracker issue a report became. Firstmate files it; GRIDGO only stores the link.
+export const TRACKER_ISSUE_URL_RE = /^https:\/\/github\.com\/gridgoph\/[A-Za-z0-9._-]+\/issues\/[1-9][0-9]*$/;
 export const MAX_SCREENSHOTS = 6;
 export const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 // Base64 grows bytes by 4/3; leave room for the text and JSON framing.
@@ -242,13 +247,14 @@ async function projectReports(database, storage, rows) {
     category: row.category,
     status: row.status,
     publishedIn: row.published_in,
+    trackerIssueUrl: row.tracker_issue_url,
     createdAt: asIso(row.created_at),
     updatedAt: asIso(row.updated_at),
     screenshots: byReport.get(row.id) ?? [],
   }));
 }
 
-const REPORT_COLUMNS = "id, issue, category, status, published_in, created_at, updated_at";
+const REPORT_COLUMNS = "id, issue, category, status, published_in, tracker_issue_url, created_at, updated_at";
 
 export async function listIssueReports(database, storage, { status = null, since = null, limit = 200 } = {}) {
   const result = await database.query(
@@ -267,10 +273,18 @@ export async function findIssueReport(database, storage, id) {
   return report ?? null;
 }
 
-export async function updateIssueReport(database, id, { status, publishedIn }) {
+/**
+ * `trackerIssueUrl` undefined keeps the stored link; the caller has already
+ * cleared it (null) for a status that does not keep one.
+ */
+export async function updateIssueReport(database, id, { status, publishedIn, trackerIssueUrl }) {
   const result = await database.query(
-    `UPDATE issue_reports SET status = $2, published_in = $3, updated_at = now() WHERE id = $1 RETURNING id`,
-    [id, status, publishedIn],
+    `UPDATE issue_reports
+     SET status = $2, published_in = $3,
+         tracker_issue_url = CASE WHEN $4::boolean THEN tracker_issue_url ELSE $5 END,
+         updated_at = now()
+     WHERE id = $1 RETURNING id`,
+    [id, status, publishedIn, trackerIssueUrl === undefined, trackerIssueUrl ?? null],
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -282,10 +296,31 @@ async function reportCounts(database) {
   return counts;
 }
 
+/** Omitted keeps the stored link, null or "" clears it, anything else must be a tracker issue URL. */
+function trackerIssueUrlInput(body) {
+  if (!body || !Object.hasOwn(body, "trackerIssueUrl")) return undefined;
+  const value = body.trackerIssueUrl;
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new ReportError(400, "invalid_request", "trackerIssueUrl must be a GitHub tracker issue URL or null.");
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!TRACKER_ISSUE_URL_RE.test(trimmed)) {
+    throw new ReportError(
+      400,
+      "invalid_request",
+      "trackerIssueUrl must look like https://github.com/gridgoph/<repo>/issues/<number>.",
+    );
+  }
+  return trimmed;
+}
+
 /**
  * List, read and mark reports under `base`. Shared by the support desk
- * (`/issue-reports`) and signed-in Operations / Super Admin (`/ops/issue-reports`);
- * the caller has already decided who may reach it.
+ * (`/issue-reports`), signed-in Operations / Super Admin (`/ops/issue-reports`)
+ * and firstmate's service token (`/firstmate/issue-reports`); the caller has
+ * already decided who may reach it.
  */
 async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch }) {
   if (method === "GET" && path === base) {
@@ -319,8 +354,15 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
     if (publishedIn && publishedIn.length > 200) {
       throw new ReportError(400, "invalid_request", "publishedIn must be 200 characters or fewer.");
     }
+    // Validated even when the status is about to clear it, so a bad link is never silently dropped.
+    const linkInput = trackerIssueUrlInput(body);
+    const trackerIssueUrl = LINKED_STATUSES.includes(status) ? linkInput : null;
     const updated = await database.transaction(
-      () => updateIssueReport(database, id, { status, publishedIn: status === "published" ? publishedIn : null }),
+      () => updateIssueReport(database, id, {
+        status,
+        publishedIn: status === "published" ? publishedIn : null,
+        trackerIssueUrl,
+      }),
       { lockKey: ISSUE_LOCK },
     );
     if (!updated) throw notFound;
@@ -395,6 +437,42 @@ export async function routeStaffIssueReports({ req, res, pathname, url, user, re
     if (await reviewIssueReports({
       method: req.method, path, base: STAFF_BASE, url, res, send, database, storage,
       readPatch: () => readBody(req),
+    })) return true;
+    throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
+  } catch (error) {
+    if (error instanceof ReportError || (error?.status && error?.code)) {
+      send(res, error.status, { error: error.code, message: error.message });
+      return true;
+    }
+    throw error;
+  }
+}
+
+const FIRSTMATE_BASE = "/firstmate/issue-reports";
+
+export function isFirstmateIssueReportsRoute(pathname) {
+  const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  return path === FIRSTMATE_BASE || /^\/firstmate\/issue-reports\/[^/]+$/.test(path);
+}
+
+/**
+ * firstmate reads new reports and links them to the GitHub tracker issues it
+ * files, with FIRSTMATE_TRACKER_TOKEN as a Bearer credential. Invisible (404)
+ * while that token is unset. Nothing here talks to GitHub.
+ */
+export async function routeFirstmateIssueReports({ req, res, pathname, url, send, database, storage, env = process.env }) {
+  if (!isFirstmateIssueReportsRoute(pathname)) return false;
+  const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  try {
+    const refusal = firstmateRefusal(req, String(env.FIRSTMATE_TRACKER_TOKEN || "").trim());
+    if (refusal?.status === 404) {
+      send(res, 404, { error: "not_found", path: pathname });
+      return true;
+    }
+    if (refusal) throw new ReportError(refusal.status, refusal.error, refusal.message);
+    if (await reviewIssueReports({
+      method: req.method, path, base: FIRSTMATE_BASE, url, res, send, database, storage,
+      readPatch: () => readJsonBody(req, 64 * 1024),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
   } catch (error) {

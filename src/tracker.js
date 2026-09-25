@@ -382,6 +382,20 @@ function sameSecret(presented, expected) {
   return crypto.timingSafeEqual(digest(presented), digest(expected));
 }
 
+/**
+ * Why a firstmate service-token request is refused, or null when it may pass.
+ * An unset token hides the routes (404); a missing or wrong one is 401.
+ * Shared with the issue-report firstmate routes.
+ */
+export function firstmateRefusal(req, expectedToken) {
+  if (!expectedToken) return { status: 404, error: "not_found" };
+  const presented = bearer(req);
+  if (!presented || !sameSecret(presented, expectedToken)) {
+    return { status: 401, error: "unauthorized", message: "Send the firstmate tracker token as a Bearer credential." };
+  }
+  return null;
+}
+
 function segment(value) {
   try {
     return decodeURIComponent(value);
@@ -690,14 +704,12 @@ export function createTracker({
   async function routeFirstmate({ req, res, pathname, url, send }) {
     if (!isFirstmateTrackerRoute(pathname)) return false;
     try {
-      if (!config.firstmateToken) {
+      const refusal = firstmateRefusal(req, config.firstmateToken);
+      if (refusal?.status === 404) {
         send(res, 404, { error: "not_found", path: pathname });
         return true;
       }
-      const presented = bearer(req);
-      if (!presented || !sameSecret(presented, config.firstmateToken)) {
-        throw new TrackerError(401, "unauthorized", "Send the firstmate tracker token as a Bearer credential.");
-      }
+      if (refusal) throw new TrackerError(refusal.status, refusal.error, refusal.message);
       if (req.method === "GET" && pathname === FIRSTMATE_BASE) {
         const unprocessed = url?.searchParams.get("unprocessed") === "1";
         const decisions = await decisionsFor(unprocessed ? "WHERE d.processed_at IS NULL" : "");

@@ -103,6 +103,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786982400000_public_issue_reports",
         "1786986000000_device_token_checks",
         "1786989600000_super_admin_tracker_decisions",
+        "1786993200000_issue_report_tracker_link",
       ],
     );
 
@@ -239,6 +240,20 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
+    // An issue report can be tracked on a GitHub tracker issue, named only by a gridgoph issue URL.
+    const tracked = (await client.query(`
+      INSERT INTO issue_reports (issue, status, tracker_issue_url)
+      VALUES ('Linked', 'tracked', 'https://github.com/gridgoph/gridgo-api/issues/7') RETURNING id
+    `)).rows[0].id;
+    await assert.rejects(
+      client.query(`INSERT INTO issue_reports (issue, tracker_issue_url) VALUES ('Bad link', 'https://github.com/other/gridgo-api/issues/7')`),
+      /issue_reports_tracker_issue_url_check/,
+    );
+    await assert.rejects(
+      client.query(`INSERT INTO issue_reports (issue, status) VALUES ('Bad status', 'open')`),
+      /issue_reports_status_check/,
+    );
+
     // The personal-profile rule is never dropped: a pending application lives on
     // its approval case, so nothing needs business fields on a personal row.
     assert.equal((await client.query(
@@ -248,6 +263,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='issue_reports' AND column_name='tracker_issue_url'`, [schema])).rowCount, 0);
+    assert.equal((await client.query("SELECT status FROM issue_reports WHERE id = $1", [tracked])).rows[0].status, "new");
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.tracker_decisions`])).rows[0].t, null);
@@ -788,7 +808,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 4, client));
+    await runner(migrationOptions(schema, "down", 5, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)

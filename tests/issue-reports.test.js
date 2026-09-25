@@ -1,11 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import http from "node:http";
+import net from "node:net";
+import path from "node:path";
+import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 import {
   MAX_SCREENSHOTS,
+  createIssueReport,
+  isFirstmateIssueReportsRoute,
   isStaffIssueReportsRoute,
+  routeFirstmateIssueReports,
   routeIssueReports,
   routeStaffIssueReports,
   sniffImageType,
@@ -162,12 +169,23 @@ test("a public report with screenshots is stored and read back by the desk", { s
   assert.deepEqual(report.screenshots.map((shot) => shot.contentType), ["image/png", "image/jpeg"]);
   assert.match(report.screenshots[0].url, /^https:\/\/files\.example\/issue_reports\//);
 
+  assert.equal(report.trackerIssueUrl, null);
+
+  const tracked = await call(base, `/issue-reports/${report.id}`, {
+    method: "PATCH", token, body: { status: "tracked", trackerIssueUrl: "https://github.com/gridgoph/gridgo-api/issues/94" },
+  });
+  assert.equal(tracked.status, 200);
+  assert.equal(tracked.body.status, "tracked");
+  assert.equal(tracked.body.trackerIssueUrl, "https://github.com/gridgoph/gridgo-api/issues/94");
+  assert.equal((await call(base, "/issue-reports?status=tracked", { token })).body.reports.length, 1);
+
   const published = await call(base, `/issue-reports/${report.id}`, {
     method: "PATCH", token, body: { status: "published", publishedIn: "09-24-2026" },
   });
   assert.equal(published.status, 200);
   assert.equal(published.body.status, "published");
   assert.equal(published.body.publishedIn, "09-24-2026");
+  assert.equal(published.body.trackerIssueUrl, "https://github.com/gridgoph/gridgo-api/issues/94", "published keeps the link");
   assert.equal((await call(base, "/issue-reports?status=new", { token })).body.reports.length, 0);
   assert.equal((await call(base, "/issue-reports/00000000-0000-4000-8000-000000000000", { token })).status, 404);
   assert.equal((await call(base, "/issue-reports/not-a-uuid", { token })).status, 404);
@@ -291,7 +309,6 @@ test("Operations and Super Admin read and mark reports with their session; other
   assert.equal(isStaffIssueReportsRoute("/api/ops/issue-reports"), true);
   assert.equal(isStaffIssueReportsRoute("/ops/issue-reports/abc/extra"), false);
 
-  const { createIssueReport } = await import("../src/issue-reports.js");
   const filed = await createIssueReport(database, storage, { issue: "Rider map is blank", category: "bug", screenshots: [] });
 
   assert.equal((await staffCall(null, "/ops/issue-reports")).status, 401);
@@ -299,14 +316,261 @@ test("Operations and Super Admin read and mark reports with their session; other
 
   const listed = await staffCall("ops", "/api/ops/issue-reports?status=new");
   assert.equal(listed.status, 200);
-  assert.deepEqual(listed.body.counts, { new: 1, published: 0, dismissed: 0 });
+  assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0 });
   assert.equal(listed.body.reports[0].issue, "Rider map is blank");
+  assert.equal(listed.body.reports[0].trackerIssueUrl, null);
+
+  const patch = (who, body) => staffCall(who, `/ops/issue-reports/${filed.id}`, { method: "PATCH", body: JSON.stringify(body) });
+  for (const trackerIssueUrl of [
+    "https://github.com/someone-else/gridgo-api/issues/1",
+    "http://github.com/gridgoph/gridgo-api/issues/1",
+    "https://github.com/gridgoph/gridgo-api/pull/1",
+    "https://github.com/gridgoph/gridgo-api/issues/0",
+    "https://github.com/gridgoph/gridgo-api/issues/1#issuecomment-2",
+    "https://github.com/gridgoph/gridgo-api/issues/1/extra",
+    42,
+  ]) {
+    const refused = await patch("ops", { status: "tracked", trackerIssueUrl });
+    assert.equal(refused.status, 400, String(trackerIssueUrl));
+    assert.equal(refused.body.error, "invalid_request");
+  }
+  const badDismiss = await patch("ops", { status: "dismissed", trackerIssueUrl: "https://example.com/1" });
+  assert.equal(badDismiss.status, 400, "a bad link is refused, not silently dropped");
+  assert.equal((await staffCall("ops", `/ops/issue-reports/${filed.id}`)).body.status, "new", "a refused PATCH changes nothing");
+
+  const link = "https://github.com/gridgoph/gridgo-web/issues/12";
+  const tracked = await patch("ops", { status: "tracked", trackerIssueUrl: ` ${link} ` });
+  assert.equal(tracked.status, 200);
+  assert.equal(tracked.body.status, "tracked");
+  assert.equal(tracked.body.trackerIssueUrl, link);
+  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 1, published: 0, dismissed: 0 });
+  assert.equal((await staffCall("ops", "/ops/issue-reports?status=tracked")).body.reports[0].trackerIssueUrl, link);
+  const republished = await patch("super", { status: "published", publishedIn: "09-25-2026" });
+  assert.equal(republished.body.trackerIssueUrl, link, "omitting the link keeps it");
+  assert.equal((await patch("ops", { status: "tracked", trackerIssueUrl: null })).body.trackerIssueUrl, null, "null clears it");
+  await patch("ops", { status: "tracked", trackerIssueUrl: link });
+  const reopened = await patch("ops", { status: "new", trackerIssueUrl: link });
+  assert.equal(reopened.body.status, "new");
+  assert.equal(reopened.body.trackerIssueUrl, null, "new clears the link");
+  await patch("ops", { status: "tracked", trackerIssueUrl: link });
 
   const dismissed = await staffCall("super", `/ops/issue-reports/${filed.id}`, {
     method: "PATCH", body: JSON.stringify({ status: "dismissed" }),
   });
   assert.equal(dismissed.status, 200);
   assert.equal(dismissed.body.status, "dismissed");
-  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, published: 0, dismissed: 1 });
+  assert.equal(dismissed.body.trackerIssueUrl, null, "dismissed clears the link");
+  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 0, published: 0, dismissed: 1 });
   assert.equal((await staffCall("client", `/ops/issue-reports/${filed.id}`, { method: "PATCH", body: JSON.stringify({ status: "new" }) })).status, 403);
+});
+
+const FIRSTMATE_TOKEN = "firstmate-issue-token";
+
+test("firstmate reads new reports with signed screenshots and links them with its service token", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  let env = {};
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const send = (response, status, body) => {
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(body));
+    };
+    const handled = await routeFirstmateIssueReports({ req, res, pathname: url.pathname, url, send, database, storage, env });
+    if (!handled) send(res, 404, { error: "unrouted" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    server.close();
+    await database.query("TRUNCATE issue_reports CASCADE").catch(() => {});
+    await database.close?.();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+
+  assert.equal(isFirstmateIssueReportsRoute("/firstmate/issue-reports"), true);
+  assert.equal(isFirstmateIssueReportsRoute("/api/firstmate/issue-reports/abc"), true);
+  assert.equal(isFirstmateIssueReportsRoute("/firstmate/issue-reports/abc/extra"), false);
+  assert.equal(isFirstmateIssueReportsRoute("/firstmate/tracker/decisions"), false);
+
+  const older = await createIssueReport(database, storage, { issue: "Old report", category: null, screenshots: [] }, { now: new Date("2026-09-20T00:00:00Z") });
+  await database.query("UPDATE issue_reports SET created_at = '2026-09-20T00:00:00Z' WHERE id = $1", [older.id]);
+  const filed = await createIssueReport(database, storage, {
+    issue: "Checkout spins forever",
+    category: "bug",
+    screenshots: [{ bytes: PNG, contentType: "image/png" }, { bytes: JPEG, contentType: "image/jpeg" }],
+  });
+
+  // Unset token: the routes do not exist, whatever is presented.
+  const hidden = await call(base, "/firstmate/issue-reports?status=new", { token: "anything" });
+  assert.equal(hidden.status, 404);
+  assert.equal(hidden.body.error, "not_found");
+  assert.equal((await call(base, `/firstmate/issue-reports/${filed.id}`, { method: "PATCH", token: "anything", body: { status: "tracked" } })).status, 404);
+
+  env = { FIRSTMATE_TRACKER_TOKEN: FIRSTMATE_TOKEN };
+  for (const token of [undefined, "wrong", `${FIRSTMATE_TOKEN}x`, DESK_TOKEN]) {
+    const refused = await call(base, "/firstmate/issue-reports", { token });
+    assert.equal(refused.status, 401, String(token));
+    assert.equal(refused.body.error, "unauthorized");
+  }
+  assert.equal((await call(base, `/firstmate/issue-reports/${filed.id}`, { method: "PATCH", token: "wrong", body: { status: "tracked" } })).status, 401);
+
+  const listed = await call(base, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.counts, { new: 2, tracked: 0, published: 0, dismissed: 0 });
+  assert.deepEqual(listed.body.reports.map((report) => report.issue), ["Checkout spins forever", "Old report"]);
+  const [report] = listed.body.reports;
+  assert.equal(report.trackerIssueUrl, null);
+  assert.deepEqual(report.screenshots.map((shot) => shot.contentType), ["image/png", "image/jpeg"]);
+  for (const shot of report.screenshots) {
+    assert.match(shot.url, /^https:\/\/files\.example\/issue_reports\/.+\?sig=1$/);
+    assert.equal(shot.expiresAt, "2026-09-24T00:05:00.000Z");
+  }
+  const recent = await call(base, "/api/firstmate/issue-reports?status=new&since=2026-09-21&limit=5", { token: FIRSTMATE_TOKEN });
+  assert.deepEqual(recent.body.reports.map((entry) => entry.id), [filed.id]);
+  assert.equal((await call(base, "/firstmate/issue-reports?status=new&limit=1", { token: FIRSTMATE_TOKEN })).body.reports.length, 1);
+  assert.equal((await call(base, "/firstmate/issue-reports?status=open", { token: FIRSTMATE_TOKEN })).status, 400);
+
+  const one = await call(base, `/firstmate/issue-reports/${filed.id}`, { token: FIRSTMATE_TOKEN });
+  assert.equal(one.status, 200);
+  assert.equal(one.body.screenshots.length, 2);
+  assert.equal((await call(base, "/firstmate/issue-reports/00000000-0000-4000-8000-000000000000", { token: FIRSTMATE_TOKEN })).status, 404);
+
+  const refusedLink = await call(base, `/firstmate/issue-reports/${filed.id}`, {
+    method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "tracked", trackerIssueUrl: "https://github.com/gridgoph/gridgo-api/issues/abc" },
+  });
+  assert.equal(refusedLink.status, 400);
+  assert.equal(refusedLink.body.error, "invalid_request");
+
+  const link = "https://github.com/gridgoph/gridgo-api/issues/95";
+  const tracked = await call(base, `/firstmate/issue-reports/${filed.id}`, {
+    method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "tracked", trackerIssueUrl: link },
+  });
+  assert.equal(tracked.status, 200);
+  assert.equal(tracked.body.status, "tracked");
+  assert.equal(tracked.body.trackerIssueUrl, link);
+  assert.equal(tracked.body.screenshots.length, 2);
+  const published = await call(base, `/firstmate/issue-reports/${filed.id}`, {
+    method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "published", publishedIn: "09-25-2026" },
+  });
+  assert.equal(published.body.trackerIssueUrl, link);
+  assert.equal(published.body.publishedIn, "09-25-2026");
+  const dismissed = await call(base, `/firstmate/issue-reports/${older.id}`, {
+    method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "dismissed", trackerIssueUrl: link },
+  });
+  assert.equal(dismissed.body.trackerIssueUrl, null);
+  assert.deepEqual(
+    (await call(base, "/firstmate/issue-reports", { token: FIRSTMATE_TOKEN })).body.counts,
+    { new: 0, tracked: 0, published: 1, dismissed: 1 },
+  );
+});
+
+const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+
+async function startApi(extraEnv) {
+  const port = await freePort();
+  const api = `http://127.0.0.1:${port}`;
+  const { publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: path.resolve("."),
+    env: {
+      ...process.env,
+      DATABASE_URL,
+      CLERK_SECRET_KEY: "test-only-placeholder",
+      CLERK_ISSUER: ISSUER,
+      CLERK_AUTHORIZED_PARTIES: "http://localhost:19006",
+      CLERK_JWT_KEY: publicKey.export({ type: "spki", format: "pem" }),
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      GRIDGO_LIFECYCLE_INTERVAL_MS: "3600000",
+      GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: "0",
+      GITHUB_TRACKER_TOKEN: "",
+      GITHUB_TRACKER_REPOS: "",
+      FIRSTMATE_TRACKER_TOKEN: "",
+      MINIO_PUBLIC_URL: "http://minio.test:9000",
+      ...extraEnv,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (child.exitCode != null) throw new Error(`API exited before health:\n${output}`);
+    try {
+      if ((await fetch(`${api}/health`)).ok) return { api, child };
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  child.kill("SIGTERM");
+  throw new Error(`API did not become healthy:\n${output}`);
+}
+
+async function stopApi(instance) {
+  if (!instance || instance.child.exitCode != null) return;
+  instance.child.kill("SIGTERM");
+  await new Promise((resolve) => instance.child.once("exit", resolve));
+}
+
+test("the running API serves the firstmate issue-report routes only with FIRSTMATE_TRACKER_TOKEN", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(async () => {
+    await database.query("TRUNCATE issue_reports CASCADE").catch(() => {});
+    await database.close?.();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+  const filed = await createIssueReport(database, fakeStorage(), {
+    issue: "Rider app freezes on pickup", category: "bug", screenshots: [{ bytes: PNG, contentType: "image/png" }],
+  });
+
+  let instance = await startApi({});
+  try {
+    const hidden = await call(instance.api, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
+    assert.equal(hidden.status, 404);
+    const hiddenPatch = await call(instance.api, `/firstmate/issue-reports/${filed.id}`, {
+      method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "tracked" },
+    });
+    assert.equal(hiddenPatch.status, 404);
+  } finally {
+    await stopApi(instance);
+  }
+
+  instance = await startApi({ FIRSTMATE_TRACKER_TOKEN: FIRSTMATE_TOKEN });
+  try {
+    const { api } = instance;
+    assert.equal((await call(api, "/firstmate/issue-reports")).status, 401);
+    assert.equal((await call(api, "/firstmate/issue-reports", { token: "wrong" })).status, 401);
+    assert.equal((await call(api, `/firstmate/issue-reports/${filed.id}`, { method: "PATCH", token: "wrong", body: { status: "tracked" } })).status, 401);
+
+    const listed = await call(api, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0 });
+    const [shot] = listed.body.reports[0].screenshots;
+    assert.match(shot.url, /^http:\/\/minio\.test:9000\/[^/]+\/issue_reports\//);
+    assert.match(shot.url, /X-Amz-Signature=/);
+    assert.ok(shot.expiresAt);
+
+    const link = "https://github.com/gridgoph/gridgo-api/issues/96";
+    const tracked = await call(api, `/firstmate/issue-reports/${filed.id}`, {
+      method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "tracked", trackerIssueUrl: link },
+    });
+    assert.equal(tracked.status, 200, JSON.stringify(tracked.body));
+    assert.equal(tracked.body.trackerIssueUrl, link);
+    const read = await call(api, `/api/firstmate/issue-reports/${filed.id}`, { token: FIRSTMATE_TOKEN });
+    assert.equal(read.body.status, "tracked");
+    assert.equal(read.body.trackerIssueUrl, link);
+  } finally {
+    await stopApi(instance);
+  }
 });
