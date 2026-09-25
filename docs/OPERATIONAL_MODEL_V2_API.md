@@ -132,6 +132,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | pass or escalate all six checks |
 | POST/GET | `/dispatch/:id/location` | POST assigned approved rider; GET related parties/ops/super | [location contract](#rider-location) |
 | GET | `/ops/riders/locations` | ops/super | [active rider map](#rider-location) |
+| GET | `/ops/push/stats` | ops/super | [push reach and delivery](#get-opspushstats) aggregates |
 | POST | `/dispatch/:id/delivery` | assigned rider | file-backed delivery evidence; opens issue window |
 | POST | `/dispatch/:id/proof` | authenticated | retired: always `410 dispatch_proof_route_retired` |
 | GET | `/jobs` | approved supplier | only the caller's assigned supplier jobs |
@@ -345,7 +346,7 @@ Firebase project: **`gridgo-c2ce9`**. FCM apps need its `google-services.json` /
 - **A token belongs to exactly one user.** Registering a token that is already registered to somebody else moves it to the caller and removes the previous owner's claim, which is what a shared handset or a sign-out/sign-in on the same phone produces. Without that move, one person's orders would appear on another person's lock screen.
 - **One user may hold many devices.** Each eligible device can receive a notification; one dead device never suppresses the others.
 - Re-registering the same token under the same account updates the existing record instead of adding a second one. Apps should re-register on every launch and on every provider token refresh; it is idempotent and cheap.
-- The server deletes a registration when the provider identifies a dead or invalid token. An app that finds itself receiving nothing should simply register again.
+- The server deletes a registration when the provider identifies a dead or invalid token, either on a real send or on the stale-token sweep (see [`GET /ops/push/stats`](#get-opspushstats)). An app that finds itself receiving nothing should simply register again.
 - **Registrations are strictly caller-owned.** Ownership is established exactly as it is for `/notifications` — from the bearer token. There is no operations override and no route through which one account can read, move, or delete another account's registrations.
 - **A registration is bound to the account, not to its login address.** The stored record holds `userId`; it never holds an email. Changing an account's Clerk sign-in address leaves the phone registered to the same person, and apps do not need to re-register afterward.
 
@@ -393,7 +394,7 @@ Registering a token that is currently **unclaimed** claims it for the caller: th
 { "devices": [ { "id": "dev_9f2c41a7c8d3", "userId": "user_client", "platform": "android", "appRole": null, "tokenProvider": "fcm", "tokenTail": "a7c8d3f1", "createdAt": "…", "updatedAt": "…" } ] }
 ```
 
-Only the caller's own registrations, always — and never an unclaimed one, which belongs to nobody and is therefore nobody's to list. An account with none receives `{"devices": []}`. There is no route, for any role, that lists or counts unclaimed registrations.
+Only the caller's own registrations, always — and never an unclaimed one, which belongs to nobody and is therefore nobody's to list. An account with none receives `{"devices": []}`. There is no route, for any role, that lists unclaimed registrations; the only count of them is the aggregate on Operations' [`GET /ops/push/stats`](#get-opspushstats).
 
 ### `POST /devices/unregister`
 
@@ -501,6 +502,41 @@ Native APNs sends the same allowed data fields at the payload root alongside `ap
 - A failed push never fails the action that caused it. If a payout releases and FCM is unreachable, the payout still happened, the notification record still exists, and `GET /notifications` still returns it.
 - A dead token is pruned, a transient provider failure is not. A phone that is merely offline or unreachable keeps its registration.
 - There is no delivery receipt and no read receipt. `read` is set only through `PATCH /notifications/:id` or `PATCH /notifications/read-all`; a push does not mark anything read.
+- A push is attempted as soon as the action that created it commits, not on the next lifecycle tick. The tick remains the retry backstop ([Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope)).
+
+### `GET /ops/push/stats`
+
+Authorization: `ops_admin` or `super_admin`; every other role gets `403 {"error":"forbidden"}`. Aggregates only: no token, token tail, device id, user id, or notification id is returned, so it cannot answer "is this phone registered, and to whom?".
+
+```json
+{
+  "generatedAt": "2026-09-25T02:00:00.000Z",
+  "devices": {
+    "total": 5, "claimed": 4, "unclaimed": 1, "seenLast7Days": 3, "seenLast30Days": 4,
+    "byAppRole": [
+      { "appRole": "client", "total": 2, "claimed": 2, "unclaimed": 0, "seenLast7Days": 1, "seenLast30Days": 2 },
+      { "appRole": "rider", "total": 1, "claimed": 1, "unclaimed": 0, "seenLast7Days": 1, "seenLast30Days": 1 },
+      { "appRole": null, "total": 1, "claimed": 0, "unclaimed": 1, "seenLast7Days": 1, "seenLast30Days": 1 }
+    ],
+    "validation": { "checkedLast24h": 1, "neverChecked": 3, "lastCheckFailed": 0, "lastCheckedAt": "2026-09-25T01:00:00.000Z" }
+  },
+  "outbox": {
+    "last24h": {
+      "total": 2,
+      "byStatus": { "pending": 0, "sending": 0, "delivered": 1, "suppressed": 0, "expired": 0, "failed": 1 },
+      "byLastCode": [ { "status": "failed", "code": "UNAVAILABLE", "count": 1 } ]
+    },
+    "last7d": { "total": 3, "byStatus": { "…": 0 }, "byLastCode": [] },
+    "lastDeliveredAt": "2026-09-25T01:59:58.000Z"
+  },
+  "provider": { "provider": "fcm", "status": "available", "sentSinceBoot": true, "…": "same object as /health.push" }
+}
+```
+
+- **Devices.** `byAppRole` groups by the registration's `appRole`; `null` is an unclaimed registration or an app build that registers without one, and sorts last. `seen` is the last registration, which the apps repeat on every launch, so `seenLast30Days` is the realistic reach and `total − seenLast30Days` is idle installs.
+- **Validation** is the stale-token sweep. Once per `GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS` (default one hour; `0` disables) each API process dry-runs FCM registrations not checked in the last 24 hours with `validate_only: true` — nothing reaches a phone — in bursts of 20 one second apart, at most 200 per pass. `UNREGISTERED`, `SENDER_ID_MISMATCH`, bare `404` and a token-field `INVALID_ARGUMENT` delete the registration, exactly as a real send would. Any other refusal keeps it and counts in `lastCheckFailed`; a batch refused entirely ends the pass early. APNs registrations are not swept. Each pass logs one info line `push token validation checked=… pruned=… failed=…`.
+- **Outbox** windows count claimed-device push rows by their latest attempt or status change (`updated_at`). Statuses are those in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope); `byLastCode` is the provider or transport code of the latest attempt (`UNAVAILABLE`, `QUOTA_EXCEEDED`, `transport_error`, `fcm_disabled`, …), largest first. Unclaimed announcement fan-out has no outbox row and is not counted.
+- **Provider** is this process's `/health.push`, repeated so one call answers "is push configured, and has it sent anything since the last deploy?".
 
 ## Platform announcements
 

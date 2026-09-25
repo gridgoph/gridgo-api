@@ -1,6 +1,8 @@
 import { createRealtimeTransport } from "./realtime-transport.js";
 import { createApnsDelivery, routePushDelivery } from "./apns.js";
 import { enqueueNotificationPushes, createOutboxWorker } from "./push-outbox.js";
+import { createTokenValidator } from "./push-token-validation.js";
+import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES } from "./notifications.js";
@@ -225,6 +227,19 @@ const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS |
 // Longest a single notification stream stays open before the client must reconnect with a fresh token.
 const NOTIFICATION_STREAM_MAX_MS = Number(process.env.NOTIFICATION_STREAM_MAX_MS || 10 * 60_000);
 let storageInitializing = true;
+const drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery});
+
+/**
+ * Send freshly committed outbox rows now instead of on the next lifecycle
+ * tick. Never awaited and never rejects: the triggering request has already
+ * committed, and the tick remains the retry backstop. `drainPushOutbox` is
+ * single-flight, so a burst of commits costs one drain plus one re-pass.
+ */
+function kickPushDrain() {
+  drainPushOutbox().catch((error) => {
+    console.warn(`push drain failed reason=${error?.message || "unknown"}`);
+  });
+}
 
 async function save(store) {
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
@@ -233,7 +248,8 @@ async function save(store) {
     (notification) => !previousNotificationIds.has(notification.id),
   );
   await saveStore(database, store);
-  await enqueueNotificationPushes(database,store,createdNotifications);
+  const queuedPushes = await enqueueNotificationPushes(database,store,createdNotifications);
+  if (queuedPushes > 0 && pushDelivery.configured) database.afterCommit(kickPushDrain);
   await realtimeTransport.enqueue(store,createdNotifications);
 }
 
@@ -2154,6 +2170,11 @@ async function handleRequest(req, res) {
         storage: objectStorage,
       });
       return;
+    }
+
+    if (req.method === "GET" && pathname === "/ops/push/stats") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      return send(res, 200, { ...(await pushStats(database)), provider: pushDelivery.health() });
     }
 
     if (isSupportChatRoute(pathname)) {
@@ -6007,7 +6028,13 @@ async function reconcileInterruptedFiles() {
   }
 }
 
-const drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery});
+const validatePushTokens = createTokenValidator({database,delivery:pushDelivery});
+const PUSH_TOKEN_CHECK_INTERVAL_MS = Number(process.env.GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS ?? 3_600_000);
+function runPushTokenValidation() {
+  validatePushTokens().catch((error) => {
+    console.warn(`push token validation failed reason=${error?.message || "unknown"}`);
+  });
+}
 let lifecycleBusy = false;
 async function runLifecycleWork() {
   if (lifecycleBusy) return;
@@ -6030,6 +6057,12 @@ server.listen(PORT, HOST, () => {
   const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));
   lifecycleTimer.unref();
   void runLifecycleWork();
+  // Off the lifecycle tick: a pass paces itself for seconds and must never
+  // hold up issue windows, nudges, or the outbox backstop. `0` disables it.
+  if (PUSH_TOKEN_CHECK_INTERVAL_MS > 0) {
+    setTimeout(runPushTokenValidation, Math.min(60_000, PUSH_TOKEN_CHECK_INTERVAL_MS)).unref();
+    setInterval(runPushTokenValidation, Math.max(60_000, PUSH_TOKEN_CHECK_INTERVAL_MS)).unref();
+  }
   console.log(`gridgo-api listening on http://${HOST}:${PORT}`);
   console.log(`health: http://127.0.0.1:${PORT}/health`);
   objectStorage

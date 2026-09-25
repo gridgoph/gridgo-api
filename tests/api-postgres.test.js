@@ -5,7 +5,8 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import os from "node:os";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 
 import { createDatabase } from "../src/database.js";
 import {
@@ -3385,6 +3386,199 @@ test("rider dispatch earnings and Ops finance keep their rate across a settings 
       assert.equal(response.body.order.platformDeliveryShareMinor, undefined);
       assert.equal(response.body.order.deliverySettlement, undefined);
       assert.equal(response.body.order.deliveryFeeMinor, 2500);
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+/** Stands in for both Google endpoints push uses: OAuth token mint and FCM v1 send. */
+async function startMockFcm() {
+  const sends = [];
+  const server = http.createServer((req, res) => {
+    let text = "";
+    req.on("data", (chunk) => { text += chunk; });
+    req.on("end", () => {
+      res.setHeader("Content-Type", "application/json");
+      if (req.url === "/token") return res.end(JSON.stringify({ access_token: "ya29.mock", expires_in: 3600 }));
+      if (req.url === "/v1/projects/gridgo-test/messages:send") {
+        sends.push({ at: Date.now(), body: JSON.parse(text) });
+        return res.end(JSON.stringify({ name: "projects/gridgo-test/messages/mock" }));
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "gridgo-fcm-"));
+  const file = path.join(dir, "fcm-service-account.json");
+  await writeFile(file, JSON.stringify({
+    project_id: "gridgo-test",
+    client_email: "push-test@gridgo-test.iam.gserviceaccount.com",
+    private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    token_uri: `${origin}/token`,
+  }));
+  return {
+    sends,
+    env: { GRIDGO_FCM_SERVICE_ACCOUNT_FILE: file, GRIDGO_FCM_BASE_URL: origin },
+    close: async () => {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test("a committed notification is pushed right after commit, not on the next lifecycle tick", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const fcm = await startMockFcm();
+  // A one-hour tick: only the post-commit kick can deliver inside this test.
+  const instance = await startApi({
+    ...fcm.env,
+    GRIDGO_LIFECYCLE_INTERVAL_MS: "3600000",
+    GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: "0",
+  });
+  try {
+    const before = (await request(instance.api, "/health")).body.push;
+    assert.equal(before.status, "configured");
+    assert.equal(before.sentSinceBoot, false);
+    assert.deepEqual(before.sinceBoot, { accepted: 0, pruned: 0, failed: 0 });
+
+    const deviceToken = "client-phone:" + "x".repeat(120);
+    const registered = await request(instance.api, "/devices", {
+      method: "POST", subject: "clerk_client", body: { platform: "android", token: deviceToken, appRole: "client" },
+    });
+    assert.equal(registered.status, 201, JSON.stringify(registered.body));
+
+    const sentAt = Date.now();
+    const announced = await request(instance.api, "/announcements", {
+      method: "POST", subject: "clerk_ops", body: { audience: "clients", title: "Hello", body: "Pilot news" },
+    });
+    assert.equal(announced.status, 201, JSON.stringify(announced.body));
+
+    for (let attempt = 0; attempt < 200 && !fcm.sends.length; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(fcm.sends.length, 1, instance.output());
+    const [sent] = fcm.sends;
+    assert.ok(sent.at - sentAt < 5000, `push left ${sent.at - sentAt} ms after the request`);
+    assert.equal(sent.body.message.token, deviceToken);
+    assert.equal(sent.body.validate_only, undefined);
+    assert.equal(sent.body.message.data.type, "announcement");
+    assert.ok(sent.body.message.data.notificationId);
+
+    let row;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      row = (await database.query("SELECT status, attempts FROM notification_push_outbox")).rows[0];
+      if (row?.status === "delivered") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(row, { status: "delivered", attempts: 1 });
+
+    const after = (await request(instance.api, "/health")).body.push;
+    assert.equal(after.status, "available");
+    assert.equal(after.sentSinceBoot, true);
+    assert.deepEqual(after.sinceBoot, { accepted: 1, pruned: 0, failed: 0 });
+
+    const stats = await request(instance.api, "/ops/push/stats", { subject: "clerk_ops" });
+    assert.equal(stats.status, 200);
+    assert.equal(stats.body.outbox.last24h.byStatus.delivered, 1);
+    assert.equal(typeof stats.body.outbox.lastDeliveredAt, "string");
+    assert.equal(stats.body.provider.sentSinceBoot, true);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await fcm.close();
+    await database.close();
+  }
+});
+
+test("push stats are Operations/Super Admin aggregates of reach and outbox outcomes", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const s = await loadStore(database);
+    const device = (id, userId, appRole, updatedAt) => ({
+      id, userId, token: `${id}:` + "t".repeat(80), platform: "android",
+      ...(appRole ? { appRole } : {}), tokenProvider: "fcm", createdAt: updatedAt, updatedAt,
+    });
+    const daysAgo = (days) => new Date(Date.now() - days * 86_400_000).toISOString();
+    s.deviceTokens.push(
+      device("dev_client_new", "user_client", "client", daysAgo(1)),
+      device("dev_client_old", "user_promote", "client", daysAgo(20)),
+      device("dev_rider", "user_rider", "rider", daysAgo(3)),
+      device("dev_supplier_stale", "user_supplier", "supplier", daysAgo(45)),
+      device("dev_unclaimed", null, null, daysAgo(2)),
+    );
+    for (const n of ["n1", "n2", "n3", "n4"])
+      s.notifications.push({ id: `ntf_${n}`, userId: "user_client", type: "general", title: "T", body: "B", at: AT, read: false });
+    await saveStore(database, s);
+  });
+  const instance = await startApi();
+  try {
+    // The fixture's elapsed issue window closes on the first request and queues
+    // real outbox rows; settle that, then keep only the rows this test states.
+    assert.equal((await request(instance.api, "/ops/push/stats")).status, 401);
+    assert.equal((await request(instance.api, "/orders", { subject: "clerk_client" })).status, 200);
+    await database.query("DELETE FROM notification_push_outbox");
+    const outbox = [
+      ["ntf_n1", "delivered", null, "1 hour"],
+      ["ntf_n2", "failed", "UNAVAILABLE", "2 hours"],
+      ["ntf_n3", "pending", "QUOTA_EXCEEDED", "3 days"],
+      ["ntf_n4", "suppressed", "UNREGISTERED", "10 days"],
+    ];
+    for (const [notificationId, status, code, age] of outbox) {
+      await database.query(
+        `INSERT INTO notification_push_outbox(notification_id, device_id, user_id, status, last_code, updated_at)
+         VALUES ($1, 'dev_client_new', 'user_client', $2, $3, now() - $4::interval)`,
+        [notificationId, status, code, age],
+      );
+    }
+    await database.query(
+      "INSERT INTO device_token_checks(device_id, checked_at, last_code) VALUES ('dev_rider', now() - interval '1 hour', NULL), ('dev_client_old', now() - interval '3 days', 'UNAVAILABLE')",
+    );
+    for (const subject of ["clerk_client", "clerk_supplier", "clerk_rider"]) {
+      const refused = await request(instance.api, "/ops/push/stats", { subject });
+      assert.deepEqual([refused.status, refused.body], [403, { error: "forbidden" }], subject);
+    }
+    for (const subject of ["clerk_ops", "clerk_super"]) {
+      const { status, body } = await request(instance.api, "/ops/push/stats", { subject });
+      assert.equal(status, 200, subject);
+      assert.deepEqual(Object.keys(body).sort(), ["devices", "generatedAt", "outbox", "provider"]);
+      const { byAppRole, validation, ...totals } = body.devices;
+      assert.deepEqual(totals, { total: 5, claimed: 4, unclaimed: 1, seenLast7Days: 3, seenLast30Days: 4 });
+      assert.deepEqual(byAppRole, [
+        { appRole: "client", total: 2, claimed: 2, unclaimed: 0, seenLast7Days: 1, seenLast30Days: 2 },
+        { appRole: "rider", total: 1, claimed: 1, unclaimed: 0, seenLast7Days: 1, seenLast30Days: 1 },
+        { appRole: "supplier", total: 1, claimed: 1, unclaimed: 0, seenLast7Days: 0, seenLast30Days: 0 },
+        { appRole: null, total: 1, claimed: 0, unclaimed: 1, seenLast7Days: 1, seenLast30Days: 1 },
+      ]);
+      assert.equal(validation.checkedLast24h, 1);
+      assert.equal(validation.neverChecked, 3);
+      assert.equal(validation.lastCheckFailed, 1);
+      assert.equal(typeof validation.lastCheckedAt, "string");
+      assert.deepEqual(body.outbox.last24h, {
+        total: 2,
+        byStatus: { pending: 0, sending: 0, delivered: 1, suppressed: 0, expired: 0, failed: 1 },
+        byLastCode: [{ status: "failed", code: "UNAVAILABLE", count: 1 }],
+      });
+      assert.deepEqual(body.outbox.last7d, {
+        total: 3,
+        byStatus: { pending: 1, sending: 0, delivered: 1, suppressed: 0, expired: 0, failed: 1 },
+        byLastCode: [
+          { status: "pending", code: "QUOTA_EXCEEDED", count: 1 },
+          { status: "failed", code: "UNAVAILABLE", count: 1 },
+        ],
+      });
+      assert.equal(typeof body.outbox.lastDeliveredAt, "string");
+      assert.equal(body.provider.status, "disabled");
+      assert.equal(body.provider.sentSinceBoot, false);
+      // Aggregates only: no registration, person, or token material.
+      const text = JSON.stringify(body);
+      for (const secret of ["dev_", "user_", "tttt", "ntf_"]) assert.equal(text.includes(secret), false, secret);
     }
   } finally {
     instance.child.kill("SIGTERM");
