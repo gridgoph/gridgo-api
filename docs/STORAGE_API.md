@@ -178,7 +178,7 @@ ARTWORK_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $CLIE
   -F 'purpose=artwork' -F 'file=@./artwork.pdf;type=application/octet-stream' | tee /tmp/artwork-upload.json | jq -r .file.fileId)
 
 POF_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -F 'purpose=fulfilment_proof' -F 'file=@./printing-pof.png;type=image/png' | tee /tmp/pof-upload.json | jq -r .file.fileId)
+  -F 'purpose=fulfilment_proof' -F 'file=@./start-pof.png;type=image/png' | tee /tmp/pof-upload.json | jq -r .file.fileId)
 
 DELIVERY_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $RIDER_TOKEN" \
   -F 'purpose=delivery_photo' -F 'file=@./handoff.jpg;type=image/jpeg' | tee /tmp/delivery-upload.json | jq -r .file.fileId)
@@ -211,7 +211,7 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | Purpose | Body | Required state/ownership |
 |---|---|---|
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
-| `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "printing" }` | legacy commitments only: assigned supplier for `printing`/`packaging_qc`; assigned rider for `delivered`; direct `retention` uploads are invalid |
+| `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "production_started" }` | a stage of the order's own payout plan that takes a file: assigned supplier for `production_started` (plan 2) or `printing`/`packaging_qc` (legacy plan 1); assigned rider for `delivered`. `issue_window` and `retention` take no direct upload |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `handoff_signature` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned` only, else `409 handoff_signature_upload_not_allowed`. Named by `signature.fileId` on `POST /dispatch/:id/pickup-checklist` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
@@ -220,7 +220,7 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 
 Immediately before commit the API revalidates: `state === "ready"`, caller equals `ownerId`, the file has no existing reference, purpose matches the target family, detected MIME is still allowed for that purpose, object key is nonempty, size is positive, domain ownership/state still permits attach, and MinIO `stat` finds the object with the recorded size. A `fileId` attaches once. A file cannot be rebound even if another user knows its ID.
 
-Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. On a legacy commitment, a POF attach changes the selected milestone from `pending_pof` to `pof_attached`; a delivered POF is also linked to `retention`.
+Success: `200 { "file": File, "order": Order }` for order purposes, `200 { "file": File, "supplierService": SupplierService }` for a service image, or `200 { "file": File, "user": PublicUser, "verificationDocuments": File[] }` for a verification document. The returned parent projection already includes the attachment. A POF attach changes the selected milestone from `pending_pof` to `pof_attached`; on a legacy plan-1 order a delivered POF is also linked to `retention`.
 
 A rider-document attach returns `{file,riderDocument,approvalCase}`. Attaching `drivers_license` replaces the prior current licence without deleting it but remains evidence-only; the explicit rider submit endpoint rechecks readiness and sets `submittedAt`. Optional `or_cr` and `selfie` replace only their own current slots.
 
@@ -239,7 +239,7 @@ curl -fsS -X POST "$API/files/$ARTWORK_FILE_ID/attach" -H "Authorization: Bearer
   -H 'Content-Type: application/json' --data '{"orderId":"ord_demo_1"}' | jq
 
 curl -fsS -X POST "$API/files/$POF_FILE_ID/attach" -H "Authorization: Bearer $SUPPLIER_TOKEN" \
-  -H 'Content-Type: application/json' --data '{"orderId":"ord_production","milestoneCode":"printing"}' | jq
+  -H 'Content-Type: application/json' --data '{"orderId":"ord_production","milestoneCode":"production_started"}' | jq
 
 curl -fsS -X POST "$API/files/$DELIVERY_FILE_ID/attach" -H "Authorization: Bearer $RIDER_TOKEN" \
   -H 'Content-Type: application/json' --data '{"orderId":"ord_active_delivery"}' | jq
@@ -322,15 +322,17 @@ delete_pending --MinIO delete + metadata commit--> deleted
 - On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted`.
 - No automatic age-based retention is enabled in this demo. `purpose` and references are durable so a future retention job can apply different policies without guessing from keys.
 
-## Legacy Proof of Fulfilment lifecycle
+## Proof of Fulfilment lifecycle
 
-POF milestone gating applies only to legacy `moneyModelVersion: 1` commitments. Current v2 `initial` and `completion` payouts do not accept POF; they release automatically when their lifecycle and confirmed supplier-principal collection gates are satisfied. For a legacy commitment, upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint.
+Which stages take a Proof of Fulfilment comes from the order's `payoutPlanVersion` (`docs/OPERATIONAL_MODEL_V2_API.md#supplier-payout-milestones`). Upload the bytes, attach the ready file to one milestone, then Operations/Super Admin may release that milestone through the operational-model endpoint. Nothing releases on attach.
 
-| Milestone | Uploader | Attach result |
+| Milestone (plan) | Uploader | Attach result |
 |---|---|---|
-| `printing` | assigned supplier | printing milestone becomes `pof_attached` |
-| `packaging_qc` | assigned supplier | packaging/QC milestone becomes `pof_attached` |
-| `delivered` | assigned rider | delivered and retention milestones become `pof_attached` |
+| `production_started` (2) | assigned supplier | start-of-production milestone becomes `pof_attached` |
+| `delivered` (2) | assigned rider | delivered milestone becomes `pof_attached`; `POST /dispatch/:id/delivery` evidence does the same without a separate upload |
+| `printing` (1) | assigned supplier | printing milestone becomes `pof_attached` |
+| `packaging_qc` (1) | assigned supplier | packaging/QC milestone becomes `pof_attached` |
+| `delivered` (1) | assigned rider | delivered and retention milestones become `pof_attached` |
 
 The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, and `supplier_proof_approved` are never accepted as transitions or valid PostgreSQL order states. Legacy POF compatibility uses `fulfilment_proof` file references only.
 
@@ -346,7 +348,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 400 | `filename_required` | Picker supplied no name; provide a name with a supported extension. |
 | 400 | `attachment_target_required` | Attach body lacks `orderId`, `milestoneCode`, or `supplierServiceId`; send the purpose-specific fields. |
 | 400 | `unexpected_target_field` | Attach JSON includes a field other than the purpose-specific target; remove it. |
-| 400 | `invalid_milestone_code` | POF target is not printing, packaging/QC, or delivered; choose the stage represented by the file. |
+| 400 | `invalid_milestone_code` | POF target is not a file-taking stage of the order's plan (`details.allowed` lists them); choose the stage represented by the file. |
 | 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, or `sample_work`. |
 | 400 | `invalid_rider_document_type` | `riderDocumentType` is missing/unknown; choose `drivers_license`, `or_cr`, or `selfie`. |
 | 400 | `invalid_application` | A driver's-licence expiry is missing, malformed, or not a real calendar date; send `expiresOn` as `YYYY-MM-DD`. |

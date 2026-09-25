@@ -5,6 +5,7 @@ import path from "node:path";
 import { approvalCaseFor, authorizationContextFor, identityHasMembership } from "./authorization-context.js";
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
+import { payoutPlanFor, payoutStageFor } from "./payout-plan.js";
 import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
@@ -131,11 +132,6 @@ const DELIVERY_PHOTO_STATES = new Set([
 // A handoff signature can only be taken before the package moves: the
 // pickup checklist that records it is itself refused after `rider_assigned`.
 const HANDOFF_SIGNATURE_STATES = new Set(["rider_assigned"]);
-const FULFILMENT_MILESTONE_ACTOR = Object.freeze({
-  printing: "supplier",
-  packaging_qc: "supplier",
-  delivered: "rider",
-});
 
 export class AttachmentError extends Error {
   constructor(status, code, message, details = {}) {
@@ -872,13 +868,18 @@ export function resolveFileTarget(store, purpose, body, user = null) {
         { requiredField: "milestoneCode" },
       );
     }
+    // Only the stages somebody files a proof for, in the plan this order was
+    // committed under. The last share waits on the window, not on a file.
     const milestone = (record.payoutMilestones || []).find((item) => item.code === milestoneCode);
-    if (!milestone || milestoneCode === "retention") {
+    const allowed = payoutPlanFor(record).stages.filter((stage) => stage.proofBy).map((stage) => stage.code);
+    if (!milestone || !allowed.includes(milestoneCode)) {
       fail(
         400,
         "invalid_milestone_code",
-        "Choose printing, packaging_qc, or delivered for this Proof of Fulfilment.",
-        { milestoneCode, allowed: Object.keys(FULFILMENT_MILESTONE_ACTOR) },
+        `Choose ${allowed.length > 2
+          ? `${allowed.slice(0, -1).join(", ")}, or ${allowed.at(-1)}`
+          : allowed.join(" or ")} for this Proof of Fulfilment.`,
+        { milestoneCode, allowed },
       );
     }
     return { type: "order", record, milestoneCode };
@@ -922,7 +923,7 @@ export function authorizeFileAttach(user, file, target) {
   }
   if (file.purpose === "fulfilment_proof") {
     if (target?.type !== "order") forbidden();
-    const requiredRole = FULFILMENT_MILESTONE_ACTOR[target.milestoneCode];
+    const requiredRole = payoutStageFor(record, target.milestoneCode)?.proofBy;
     if (!requiredRole || !hasApprovedWorkRole(user, requiredRole)) forbidden();
     if (requiredRole === "supplier" && record.supplierId !== user.id) forbidden();
     if (requiredRole === "rider" && record.riderId !== user.id) forbidden();
