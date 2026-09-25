@@ -58,6 +58,7 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 
 - `save()` is the notification/outbox and realtime enqueue boundary; delivery occurs after commit. Do not send at individual notification append sites. Queue invalidates with `queueInvalidate` / `queueOrderInvalidate` before `save()`; delivery contract: `docs/REALTIME_EVENTS.md`.
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.
+- `save()` kicks the single-flight outbox drain after commit (`kickPushDrain`); the lifecycle tick is only the retry backstop. Reach/delivery aggregates, `/health.push` since-boot fields, and the hourly `validate_only` stale-token sweep (`src/push-token-validation.js`, `device_token_checks`): `docs/OPERATIONAL_MODEL_V2_API.md#get-opspushstats`.
 - One token belongs to one `user.id`. Anonymous registration is hostile input and exposes only a fixed `{ok:true}` body.
 - Unclaimed handsets may receive only `everyone` announcements with `data` exactly `{type:"announcement"}`.
 - Prune `INVALID_ARGUMENT` only when the violation identifies `message.token`.
