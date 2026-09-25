@@ -811,6 +811,8 @@ test("canonical rider decisions enforce readiness after replay handling", { skip
     });
     assert.equal(restored.status, 200, JSON.stringify(restored.body));
     assert.equal(restored.body.approvalCase.status, "approved");
+    assert.deepEqual(restored.body.restoredServiceIds, []);
+    assert.deepEqual(restored.body.suspendedServiceLines, []);
 
     await database.transaction(async () => {
       const store = await loadStore(database);
@@ -1012,6 +1014,120 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(service.approvalSuspensionPreviousState, undefined);
     assert.equal(persisted.supplierServices.find((candidate) => candidate.id === "svc_pending_incomplete").state, "pending_verification");
     assert.equal(persisted.users.find((candidate) => candidate.id === "user_supplier_pending").verificationStatus, "approved");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("a suspended shop is reinstated with the lines that went down with it in one decision", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const banner = store.supplierServices.find((service) => service.id === "svc_banner");
+    store.supplierServices.push(
+      { ...banner, id: "svc_signage" },
+      {
+        ...banner, id: "svc_individual", state: "suspended", suspendedAt: "2026-09-10T00:00:00.000Z",
+        suspendedBy: "user_ops", suspendReason: "Blurry sample photos",
+      },
+      // Suspended through the legacy route before it tagged lines with the case.
+      {
+        ...banner, id: "svc_historic", state: "suspended", suspendedAt: "2026-09-01T00:00:00.000Z",
+        suspendedBy: "user_ops", suspendReason: "supplier_verification_suspended",
+      },
+    );
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    // How Dara Blueprint was suspended on 18 Sep.
+    const legacy = await request(instance.api, "/users/user_supplier/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Unpaid penalty" },
+    });
+    assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
+
+    const queue = await request(instance.api, "/approval-cases?status=suspended&kind=supplier", { subject: "clerk_super" });
+    assert.equal(queue.status, 200, JSON.stringify(queue.body));
+    const listed = queue.body.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
+    assert.equal(listed.status, "suspended");
+    assert.equal(listed.suspensionReason, "Unpaid penalty");
+    assert.equal(listed.decidedBy, "user_ops");
+    assert.equal(listed.decidedByName, "Ops");
+    assert.ok(Date.parse(listed.decidedAt) > Date.parse(AT));
+
+    const detail = await request(instance.api, "/approval-cases/case_supplier", { subject: "clerk_ops" });
+    assert.equal(detail.status, 200, JSON.stringify(detail.body));
+    const lines = Object.fromEntries(detail.body.suspendedServiceLines.map((line) => [line.id, line]));
+    assert.deepEqual(Object.keys(lines).sort(), ["svc_banner", "svc_historic", "svc_individual", "svc_signage"]);
+    assert.equal(lines.svc_banner.suspendedWithAccount, true);
+    assert.equal(lines.svc_banner.suspendReason, "Unpaid penalty");
+    assert.equal(lines.svc_banner.name, "Marketing & Promotional Collateral");
+    assert.ok(lines.svc_banner.suspendedAt);
+    assert.equal(lines.svc_signage.suspendedWithAccount, true);
+    assert.equal(lines.svc_historic.suspendedWithAccount, true);
+    assert.equal(lines.svc_individual.suspendedWithAccount, false);
+    const version = detail.body.approvalCase.version;
+
+    const refused = await request(instance.api, "/approval-cases/case_supplier/restore", {
+      method: "POST", subject: "clerk_super",
+      body: {
+        expectedVersion: version, requestId: "reinstate-refused", note: "Penalty settled",
+        restoreServiceIds: ["svc_banner", "svc_individual", "svc_nowhere"],
+      },
+    });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.equal(refused.body.error, "service_not_restorable");
+    assert.deepEqual(refused.body.serviceIds, ["svc_individual", "svc_nowhere"]);
+
+    const beforeRestore = await loadStore(database);
+    assert.equal(beforeRestore.approvalCases.find((candidate) => candidate.id === "case_supplier").status, "suspended");
+    assert.equal(beforeRestore.supplierServices.find((service) => service.id === "svc_banner").state, "suspended");
+    const noticeIds = new Set(beforeRestore.notifications.map((notice) => notice.id));
+
+    const restored = await request(instance.api, "/approval-cases/case_supplier/restore", {
+      method: "POST", subject: "clerk_super",
+      body: {
+        expectedVersion: version, requestId: "reinstate", note: "Penalty settled",
+        restoreServiceIds: ["svc_banner", "svc_historic"],
+      },
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.equal(restored.body.approvalCase.status, "approved");
+    assert.deepEqual(restored.body.restoredServiceIds, ["svc_banner", "svc_historic"]);
+    assert.deepEqual(restored.body.suspendedServiceLines.map((line) => line.id).sort(), ["svc_individual", "svc_signage"]);
+
+    const persisted = await loadStoreEventually(
+      database,
+      (store) => store.notifications.some((notice) => !noticeIds.has(notice.id) && notice.userId === "user_supplier"),
+    );
+    const state = (id) => persisted.supplierServices.find((service) => service.id === id);
+    for (const id of ["svc_banner", "svc_historic"]) {
+      assert.equal(state(id).state, "live");
+      assert.equal(state(id).suspendReason, null);
+      assert.equal(state(id).suspendedAt, null);
+      assert.equal(state(id).suspendedBy, null);
+    }
+    assert.equal(state("svc_signage").state, "suspended");
+    assert.equal(state("svc_individual").state, "suspended");
+
+    const lineAudits = persisted.auditLog.filter((entry) => entry.action === "service.restore");
+    assert.deepEqual(lineAudits.map((entry) => entry.entityId).sort(), ["svc_banner", "svc_historic"]);
+    for (const entry of lineAudits) {
+      assert.equal(entry.actorId, "user_super");
+      assert.equal(entry.reason, "Penalty settled");
+      assert.equal(entry.detail.approvalCaseId, "case_supplier");
+    }
+
+    const supplierNotices = persisted.notifications.filter(
+      (notice) => !noticeIds.has(notice.id) && notice.userId === "user_supplier",
+    );
+    assert.deepEqual(
+      supplierNotices.map((notice) => `${notice.type}:${notice.title}`),
+      ["approval_restored:Your shop is back on GRIDGO"],
+    );
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));

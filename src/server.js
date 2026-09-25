@@ -40,7 +40,9 @@ import {
   approvalDecisionInput,
   businessApplicationProjection,
   decideApprovalCase,
+  LEGACY_ACCOUNT_SUSPEND_REASON,
   supplierApprovalReadiness,
+  suspendedWithAccount,
 } from "./approval-cases.js";
 import {
   AttachmentError,
@@ -775,11 +777,29 @@ function currentRiderDocuments(store, userId) {
     }));
 }
 
-function approvalCaseForApprover(approvalCase) {
+function approvalCaseForApprover(store, approvalCase) {
+  const decider = approvalCase.decidedBy
+    ? (store.users || []).find((candidate) => candidate.id === approvalCase.decidedBy)
+    : null;
   return {
     ...approvalCaseSummary(approvalCase),
     decidedBy: approvalCase.decidedBy ?? null,
+    decidedByName: decider?.name ?? null,
   };
+}
+
+/** The applicant's suspended lines, flagged when they went down with the account. */
+function suspendedServiceLinesFor(store, approvalCase) {
+  if (approvalCase.kind !== "supplier") return [];
+  return (store.supplierServices || [])
+    .filter((service) => service.supplierId === approvalCase.userId && service.state === "suspended")
+    .map((service) => ({
+      id: service.id,
+      name: resolveCategoryCode(store.taxonomy, service.categoryCode)?.name || service.categoryCode,
+      suspendedAt: service.suspendedAt ?? null,
+      suspendReason: service.suspendReason ?? null,
+      suspendedWithAccount: suspendedWithAccount(store, approvalCase, service),
+    }));
 }
 
 function approvalHistoryFor(store, caseId) {
@@ -823,9 +843,10 @@ function riderDocumentsForApproval(store, userId) {
 function approvalCaseDetail(store, approvalCase) {
   const applicant = (store.users || []).find((candidate) => candidate.id === approvalCase.userId);
   const base = {
-    approvalCase: approvalCaseForApprover(approvalCase),
+    approvalCase: approvalCaseForApprover(store, approvalCase),
     applicant: publicIdentity(applicant),
     history: approvalHistoryFor(store, approvalCase.id),
+    suspendedServiceLines: suspendedServiceLinesFor(store, approvalCase),
   };
   if (approvalCase.kind === "business_client") {
     return {
@@ -908,7 +929,7 @@ function approvalQueue(store, url) {
   return {
     status: 200,
     approvalCases: page.map((approvalCase) => ({
-      ...approvalCaseForApprover(approvalCase),
+      ...approvalCaseForApprover(store, approvalCase),
       applicant: publicIdentity(
         (store.users || []).find((candidate) => candidate.id === approvalCase.userId),
       ),
@@ -1131,6 +1152,7 @@ function syncApprovalCaseWithVerification(store, target, status, actor, reason, 
       createdAt: at,
     });
   }
+  return approvalCase;
 }
 
 /** Plausible Davao City zone anchors (real neighbourhoods). Centre ~7.0731, 125.6128. */
@@ -2293,6 +2315,7 @@ async function handleRequest(req, res) {
         ...approvalCaseDetail(store, outcome.approvalCase),
         publishedServiceIds: outcome.publishedServiceIds,
         suspendedServiceIds: outcome.suspendedServiceIds,
+        restoredServiceIds: outcome.restoredServiceIds,
         replayed: outcome.replayed,
       });
     }
@@ -3310,7 +3333,9 @@ async function handleRequest(req, res) {
       if (target.role === "rider" && body.status === "approved") {
         assertRiderLegacyVerificationReady(store, target.id, now());
       }
-      syncApprovalCaseWithVerification(store, target, body.status, user, body.reason || body.note || null);
+      const approvalCase = syncApprovalCaseWithVerification(
+        store, target, body.status, user, body.reason || body.note || null,
+      );
       target.verificationStatus = body.status;
       target.verificationNote = body.reason || body.note || null;
       if (body.status === "approved") {
@@ -3322,10 +3347,13 @@ async function handleRequest(req, res) {
         if (target.role === "supplier") {
           for (const svc of store.supplierServices || []) {
             if (svc.supplierId === target.id && svc.state === "live") {
+              // Tagged like a canonical account suspension so a restore can bring it back.
+              svc.approvalSuspensionPreviousState = "live";
+              svc.approvalSuspensionCaseId = approvalCase.id;
               svc.state = "suspended";
               svc.suspendedAt = now();
               svc.suspendedBy = user.id;
-              svc.suspendReason = body.reason || "supplier_verification_suspended";
+              svc.suspendReason = body.reason || LEGACY_ACCOUNT_SUSPEND_REASON;
               svc.updatedAt = now();
             }
           }
@@ -3815,6 +3843,9 @@ async function handleRequest(req, res) {
       if (!service) return send(res, 404, { error: "service_not_found" });
       const body = await readBody(req);
       if (!body.reason) return send(res, 400, { error: "reason_required" });
+      // Suspended on its own now, so an account restore no longer brings it back.
+      delete service.approvalSuspensionPreviousState;
+      delete service.approvalSuspensionCaseId;
       service.state = "suspended";
       service.suspendedAt = now();
       service.suspendedBy = user.id;
