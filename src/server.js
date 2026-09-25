@@ -181,8 +181,10 @@ import {
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
 import {
+  isFirstmateIssueReportsRoute,
   isStaffIssueReportsRoute,
   issueReportsPathname,
+  routeFirstmateIssueReports,
   routeIssueReports,
   routeStaffIssueReports,
 } from "./issue-reports.js";
@@ -1759,6 +1761,7 @@ async function handleRequest(req, res) {
     }
     // firstmate's service token, not a Clerk session.
     if (await tracker.routeFirstmate({ req, res, pathname, url, send })) return;
+    if (await routeFirstmateIssueReports({ req, res, pathname, url, send, database, storage: objectStorage })) return;
 
     // ---- push registration before there is an account ----
     //
@@ -5957,9 +5960,9 @@ const server = http.createServer((req, res) => {
     void handleRequest(req, res);
     return;
   }
-  if (mutatesStore && isFirstmateTrackerRoute(pathname)) {
+  if (mutatesStore && (isFirstmateTrackerRoute(pathname) || isFirstmateIssueReportsRoute(pathname))) {
     // The firstmate service token is not a Clerk session; the route commits
-    // under the tracker's own lock.
+    // under its own lock (the tracker's, or the issue reports').
     void handleRequest(req, res);
     return;
   }
