@@ -122,6 +122,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | POST | `/orders/:id/confirm` | owning client, within window, no open issue | client confirms the order arrived fine; closes the window now as `completed` |
 | GET | `/orders/:id/physical-invoice` | owning client | the paper-invoice request on this order, else `404 physical_invoice_not_found` |
 | POST | `/orders/:id/physical-invoice` | owning client | [request a paper invoice](#physical-invoice-request); one per order |
+| PATCH | `/orders/:id/physical-invoice` | ops_admin, super_admin | [promise when the paper invoice arrives](#physical-invoice-request) |
 | POST | `/issues/:id/resolve` | ops/super | resolve/dismiss, optionally release claim |
 | GET | `/escalations[?status=&orderId=]` | ops/super | pickup escalations |
 | POST | `/escalations/:id/resolve` | ops/super | instruction/resolution; rider must recheck |
@@ -657,6 +658,7 @@ Default `GET /settings` response:
   "version": 4,
   "settings": {
     "serviceFeeRateBps": 1000,
+    "serviceFeeVisibleToClient": true,
     "riderCommissionBps": 8500,
     "issueWindowHours": 24,
     "productionNudge": {
@@ -712,18 +714,20 @@ PATCH /settings
 
 The patch is an audited compare-and-swap: `expectedVersion` must match `GET /settings`, `reason` is mandatory, and success increments `version`. `serviceFeeRateBps` and `riderCommissionBps` are actual JSON integers from 0 through 10,000; `issueWindowHours` is an actual JSON integer from 1 through 720. Each `feeMinor` and finite band maximum must also be a JSON safe integer, band maxima increase strictly, and the final maximum is `null`. Numeric strings are rejected rather than coerced. Settings changes affect only future commercial commitments.
 
+`serviceFeeVisibleToClient` (JSON boolean, default `true`; anything else is `400 invalid_service_fee_visibility`) only decides whether client checkout names the `Service fee · N%` row. It never changes money: the fee is still charged and still inside the client's Printing amount. Omitted on PATCH, the current value is kept; absent on an older row, GET returns `true`.
+
 `productionNudge` is the live cadence for a shop that has not made the next production move. Desk (Operational settings, both `/ops/settings` and `/admin/settings`) edits one object on this same route:
 
 | Field | Rule |
 |---|---|
 | `enabled` | JSON boolean. `false` writes no new reminders; existing inbox rows stay. |
-| `afterValue` + `afterUnit` | First reminder. Unit is `"hours"` (1–720) or `"days"` (1–30). |
+| `afterValue` + `afterUnit` | First reminder. Unit is `"seconds"` (1–3600), `"minutes"` (1–1440), `"hours"` (1–720), or `"days"` (1–30). Seconds and minutes exist so Desk can check the reminder without waiting hours. |
 | `repeatValue` + `repeatUnit` | Each later reminder. Units may differ from the first wait. Same bounds. |
 | `maxCount` | Whole number 1–10, including the first reminder. The last one also writes `ops_production_inactive` for each Operations and Super Admin membership. |
 
-The stored object keeps value and unit. The sweep converts days to hours (`value * 24`) when it reads. A later change does not rewrite occurrence keys or old inbox rows; the next tick uses the new policy. Omitted on PATCH, the previous object is kept. Absent on an older row, GET returns the defaults above.
+The stored object keeps value and unit. The sweep converts to a duration when it reads: seconds stay seconds, minutes are `value * 60` seconds, hours are `value * 3600` seconds, and days are `value * 24` hours. A later change does not rewrite occurrence keys or old inbox rows; the next tick uses the new policy. Omitted on PATCH, the previous object is kept. Absent on an older row, GET returns the defaults above.
 
-Desk fields, in order: an Enabled toggle; “First reminder after” (number and Hours/Days); “Then remind every” (number and Hours/Days); “Stop after” (1–10, caption “Including the first reminder.”); and “In force right now”, one sentence from the saved object. A shop cannot set this.
+Desk fields, in order: an Enabled toggle; “First reminder after” (number and Seconds/Minutes/Hours/Days); “Then remind every” (number and Seconds/Minutes/Hours/Days); “Stop after” (1–10, caption “Including the first reminder.”); and “In force right now”, one sentence from the saved object. A shop cannot set this.
 
 Supplier payment timing preferences use `GET|PATCH /supplier-payment-terms`. `GET` returns the caller's terms to a supplier; Operations/Super Admin may select a supplier with `?supplierId=`. Supplier-only `PATCH` accepts any subset of `deliveryDownpaymentRateBps`, `pickupFullOnlineEnabled`, `pickupDownpaymentStoreEnabled`, and `pickupDownpaymentRateBps`, and returns `{ "terms": SupplierPaymentTerms }`. Delivery accepts `deliveryDownpaymentRateBps: 0|2500|5000`. Pickup full-online is independently enabled; pickup downpayment-at-store requires a rate of `2500|5000`, while disabling that mode clears its rate to `null`. When the supplier profile enables pickup, at least one pickup mode must remain enabled. Accepted quotes snapshot these terms.
 
@@ -1113,6 +1117,8 @@ The request rides in `orders.data` jsonb, so it needed no migration. It is not a
 - a durable inbox row `ops_physical_invoice_requested` to every current `ops_admin` and `super_admin` membership, titled with the order id and carrying the office in its body, written once when the request first appears.
 
 Operations acts on the inbox row. Without it the request would sit in jsonb unread, because nothing else in the lifecycle asks anybody to courier a document.
+
+`PATCH /orders/:id/physical-invoice` with `{ "promisedDeliveryAt": "2026-09-21T10:00:00+08:00" }` is Operations/Super Admin only (`401 unauthorized` signed out, `403 forbidden` otherwise). It records when the paper copy will reach the office — not the print job's promised date. The instant must fall Monday–Friday, 08:00 inclusive to 17:00 exclusive, Asia/Manila (UTC+8, no daylight saving), else `400 promise_outside_business_hours`; an unparseable value is `400 invalid_physical_invoice`. The client's `operatingHours` is their own note and is not read as a clock. The stored value is normalized to UTC ISO. No request yet is `404 physical_invoice_not_found`. A later PATCH replaces the promise. Each one writes an audit row `order.physical_invoice_promised` with the instant, bumps `updatedAt` (so authorized views refresh), and answers `200 {request}`, which then carries `promisedDeliveryAt` for the owning client's `GET` too.
 
 ## Rider location
 

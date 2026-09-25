@@ -38,7 +38,7 @@ DATABASE_URL=postgresql://gridgo_api:<url-encoded-password>@gridgo-postgres:5432
 # Clerk Production instance. All are mandatory; never use Development sk_test_ here.
 CLERK_SECRET_KEY=<production sk_live_ secret>
 CLERK_ISSUER=https://<production-instance>.clerk.accounts.dev
-CLERK_AUTHORIZED_PARTIES=https://<production-instance>.clerk.accounts.dev,https://gridgo-dash.talasora.com,<exact mobile parties>
+CLERK_AUTHORIZED_PARTIES=https://<production-instance>.clerk.accounts.dev,https://gridgo-dash.talasora.com,<landing origin for the support desk>,<exact mobile parties>
 # Signing secret for POST /webhooks/clerk (Svix). Required for dashboard name/email edits to reach GRIDGO without a shop opening the app.
 CLERK_WEBHOOK_SIGNING_SECRET=whsec_<production signing secret>
 
@@ -48,12 +48,12 @@ MINIO_SECRET_KEY=<bucket secret>
 
 # Optional public support desk (landing /support). Firstmate installs these
 # after the API merge; they are not required to boot. Never put EMAIL_* in a
-# VITE_* or public payload. SUPPORT_DESK_JWT_SECRET must not be a Clerk secret.
+# VITE_* or public payload. The desk signs in with Clerk: the landing origin
+# must be in CLERK_AUTHORIZED_PARTIES, and only these verified primary emails
+# may read tickets and issue reports (empty = desk answers 503).
 # EMAIL_USER=<gmail address>
 # EMAIL_PASSWORD=<gmail app password>
-# SUPPORT_DESK_USERNAME=<desk username>
-# SUPPORT_DESK_PASSWORD=<desk password, hashed into support_admins at boot>
-# SUPPORT_DESK_JWT_SECRET=<desk session HMAC secret>
+# SUPPORT_DESK_ALLOWED_EMAILS=<comma-separated desk emails>
 ```
 
 `minio.env` is read by MinIO and its initializer:

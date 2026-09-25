@@ -33,7 +33,7 @@ The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin`
 
 ## Read and mark reports (support desk)
 
-Sign in with `POST /admin/login` (`SUPPORT_DESK_USERNAME` / `SUPPORT_DESK_PASSWORD`) and send the token as `Authorization: Bearer <token>`.
+Send a Clerk session token as `Authorization: Bearer <token>`. The account's verified primary email must be on `SUPPORT_DESK_ALLOWED_EMAILS` — the same gate as the ticket desk. Another Clerk account is `403 forbidden`; no or an invalid token is `401 unauthorized`; an empty allowlist is `503 desk_unconfigured`.
 
 - `GET /issue-reports?status=new&since=2026-09-24&limit=200` lists newest first. `status` is `new | published | dismissed`; every filter is optional.
 - `GET /issue-reports/:id` returns one report.

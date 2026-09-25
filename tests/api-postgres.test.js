@@ -1510,6 +1510,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     const current = await request(instance.api, "/settings", { subject: "clerk_ops" });
     assert.equal(current.status, 200);
     assert.equal(current.body.settings.serviceFeeRateBps, 1000);
+    assert.equal(current.body.settings.serviceFeeVisibleToClient, true);
     assert.deepEqual(current.body.settings.paymentQr, {
       method: "qr_manual",
       caption: "QR Ph",
@@ -1591,7 +1592,22 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(updated.status, 200, JSON.stringify(updated.body));
     assert.equal(updated.body.version, current.body.version + 1);
     assert.equal(updated.body.settings.serviceFeeRateBps, 1250);
-    let version = updated.body.version;
+    assert.equal(updated.body.settings.serviceFeeVisibleToClient, true);
+
+    const hidden = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_ops",
+      body: {
+        expectedVersion: updated.body.version,
+        serviceFeeVisibleToClient: false,
+        reason: "Hide the client service-fee row",
+      },
+    });
+    assert.equal(hidden.status, 200, JSON.stringify(hidden.body));
+    assert.equal(hidden.body.settings.serviceFeeVisibleToClient, false);
+    assert.equal(hidden.body.settings.serviceFeeRateBps, 1250);
+
+    let version = hidden.body.version;
     for (const [subject, riderCommissionBps] of [["clerk_ops", 7000], ["clerk_super", 8500]]) {
       const changed = await request(instance.api, "/settings", {
         method: "PATCH", subject,

@@ -490,6 +490,7 @@ function publicOperationalSettings(settings, store = null) {
   return {
     ...rest,
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
+    serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     paymentQr,
   };
@@ -1685,6 +1686,8 @@ async function handleRequest(req, res) {
       send,
       database,
       mailer: supportMailer,
+      verifyClerk: (token) => verifyClerkClaims(token, AUTH),
+      loadClerkUser: (clerkUserId) => clerkBackend.users.getUser(clerkUserId),
     })) {
       return;
     }
@@ -1696,6 +1699,8 @@ async function handleRequest(req, res) {
       send,
       database,
       storage: objectStorage,
+      verifyClerk: (token) => verifyClerkClaims(token, AUTH),
+      loadClerkUser: (clerkUserId) => clerkBackend.users.getUser(clerkUserId),
     })) {
       return;
     }
@@ -2874,6 +2879,8 @@ async function handleRequest(req, res) {
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
           ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
+        serviceFeeVisibleToClient:
+          body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),

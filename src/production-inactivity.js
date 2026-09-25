@@ -30,10 +30,14 @@ const SHOP_COPY = {
   },
 };
 
-function toHours(value, unit) {
+function toDuration(value, unit) {
   const number = Number(value);
-  if (!Number.isFinite(number)) return Number.NaN;
-  return unit === "days" ? number * 24 : number;
+  if (!Number.isInteger(number)) return { hours: Number.NaN, ms: Number.NaN };
+  if (unit === "seconds") return { hours: number / 3600, ms: number * 1000 };
+  if (unit === "minutes") return { hours: number / 60, ms: number * 60 * 1000 };
+  if (unit === "days") return { hours: number * 24, ms: number * 24 * 60 * 60 * 1000 };
+  if (unit === "hours") return { hours: number, ms: number * 60 * 60 * 1000 };
+  return { hours: Number.NaN, ms: Number.NaN };
 }
 
 function laterIso(current, candidate) {
@@ -42,13 +46,17 @@ function laterIso(current, candidate) {
   return Date.parse(candidate) > Date.parse(current) ? candidate : current;
 }
 
-/** Hours the sweep actually waits. Days are converted here; the stored object keeps its unit. */
+/** How long the sweep actually waits. The stored object keeps value and unit. */
 export function productionNudgeHours(settings) {
   const nudge = settings?.productionNudge ?? defaultProductionNudge();
+  const after = toDuration(nudge.afterValue, nudge.afterUnit);
+  const every = toDuration(nudge.repeatValue, nudge.repeatUnit);
   return {
     enabled: nudge.enabled === true,
-    afterHours: toHours(nudge.afterValue, nudge.afterUnit),
-    everyHours: toHours(nudge.repeatValue, nudge.repeatUnit),
+    afterHours: after.hours,
+    everyHours: every.hours,
+    afterMs: after.ms,
+    everyMs: every.ms,
     maxCount: nudge.maxCount,
   };
 }
@@ -109,11 +117,11 @@ export function nextNudgeDueAt(lastShopAt, lastNudgeAt, alreadySentCount, policy
   if (!Number.isInteger(alreadySentCount) || alreadySentCount < 0) return null;
   if (!Number.isInteger(policy.maxCount) || alreadySentCount >= policy.maxCount) return null;
   if (!lastShopAt || Number.isNaN(Date.parse(lastShopAt))) return null;
-  if (!Number.isFinite(policy.afterHours) || !Number.isFinite(policy.everyHours)) return null;
-  const afterMs = policy.afterHours * 60 * 60 * 1000;
+  const afterMs = Number.isFinite(policy.afterMs) ? policy.afterMs : policy.afterHours * 60 * 60 * 1000;
+  const everyMs = Number.isFinite(policy.everyMs) ? policy.everyMs : policy.everyHours * 60 * 60 * 1000;
+  if (!Number.isFinite(afterMs) || !Number.isFinite(everyMs)) return null;
   if (alreadySentCount === 0) return new Date(Date.parse(lastShopAt) + afterMs).toISOString();
   if (!lastNudgeAt || Number.isNaN(Date.parse(lastNudgeAt))) return null;
-  const everyMs = policy.everyHours * 60 * 60 * 1000;
   const repeatAt = Date.parse(lastNudgeAt) + everyMs;
   const resetAt = Date.parse(lastShopAt) + afterMs;
   return new Date(Math.max(repeatAt, resetAt)).toISOString();

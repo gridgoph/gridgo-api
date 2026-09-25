@@ -82,6 +82,31 @@ test("four hours of silence writes one shop reminder and a second tick does not 
   assert.equal(shopRows(snapshot).length, 1);
 });
 
+test("thirty seconds is thirty seconds, not thirty hours", () => {
+  const settings = defaultOperationalSettings();
+  settings.productionNudge = { ...settings.productionNudge, afterValue: 30, afterUnit: "seconds" };
+  const snapshot = store([order()], { settings });
+  assert.equal(sweep(snapshot, new Date(Date.parse(T0) + 29 * 1000).toISOString()).length, 0);
+  assert.equal(sweep(snapshot, new Date(Date.parse(T0) + 30 * 1000).toISOString()).length, 1);
+});
+
+test("one minute is sixty seconds, and a seconds repeat can follow a minutes wait", () => {
+  const settings = defaultOperationalSettings();
+  settings.productionNudge = {
+    ...settings.productionNudge,
+    afterValue: 1,
+    afterUnit: "minutes",
+    repeatValue: 30,
+    repeatUnit: "seconds",
+  };
+  const snapshot = store([order()], { settings });
+  assert.equal(sweep(snapshot, new Date(Date.parse(T0) + 59 * 1000).toISOString()).length, 0);
+  assert.equal(sweep(snapshot, new Date(Date.parse(T0) + 60 * 1000).toISOString()).length, 1);
+  assert.equal(sweep(snapshot, new Date(Date.parse(T0) + 89 * 1000).toISOString()).length, 0);
+  const second = sweep(snapshot, new Date(Date.parse(T0) + 90 * 1000).toISOString());
+  assert.equal(second[0].occurrenceKey, "nudge:ord_1:production:2");
+});
+
 test("a one-day wait is 24 hours, not one hour", () => {
   const settings = defaultOperationalSettings();
   settings.productionNudge = { ...settings.productionNudge, afterValue: 1, afterUnit: "days" };
