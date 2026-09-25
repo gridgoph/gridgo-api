@@ -54,6 +54,15 @@ MINIO_SECRET_KEY=<bucket secret>
 # EMAIL_USER=<gmail address>
 # EMAIL_PASSWORD=<gmail app password>
 # SUPPORT_DESK_ALLOWED_EMAILS=<comma-separated desk emails>
+
+# Optional Super Admin Tracker (docs/TRACKER_API.md). Empty token = the tracker
+# answers 503 tracker_not_configured; nothing else is affected. The GitHub token
+# is fine-grained with Issues read/write on the tracker repos and never reaches
+# a browser. Empty repos = the five gridgoph/gridgo-{api,web,client,supplier,rider}.
+# Empty firstmate token = the /firstmate/tracker routes answer 404.
+GITHUB_TRACKER_TOKEN=
+GITHUB_TRACKER_REPOS=
+FIRSTMATE_TRACKER_TOKEN=
 ```
 
 `minio.env` is read by MinIO and its initializer:

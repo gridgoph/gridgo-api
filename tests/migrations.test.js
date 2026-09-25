@@ -52,7 +52,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
-      "supplier_payout_accounts", "device_token_checks",
+      "supplier_payout_accounts", "device_token_checks", "tracker_decisions",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -102,6 +102,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786978800000_rider_delivery_commission",
         "1786982400000_public_issue_reports",
         "1786986000000_device_token_checks",
+        "1786989600000_super_admin_tracker_decisions",
       ],
     );
 
@@ -247,6 +248,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.tracker_decisions`])).rows[0].t, null);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.device_token_checks`])).rows[0].t, null);
@@ -784,7 +788,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 3, client));
+    await runner(migrationOptions(schema, "down", 4, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
