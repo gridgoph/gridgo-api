@@ -228,7 +228,7 @@ services:
   # Private object storage for artwork, fulfilment proof and identity evidence.
   # ---------------------------------------------------------------------------
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    image: ghcr.io/gridgoph/minio:RELEASE.2025-07-23T15-54-02Z@sha256:ec083fa6b02af8f3f971def273b3ab2f1a102ca0aa74e6b45c0bcb462f0f5cfe
     container_name: gridgo-minio
     restart: unless-stopped
 
@@ -277,7 +277,7 @@ services:
   # only the compose file and its two secret files — there is no checkout on the
   # server to mount from. It matches docker/minio/gridgo-api-policy.json.
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z
+    image: ghcr.io/gridgoph/mc:RELEASE.2025-07-21T05-28-08Z@sha256:e114957171327027e2440679742baff3dfb4acccf883471061b070926dad7342
     container_name: gridgo-api-minio-init
     depends_on:
       minio:

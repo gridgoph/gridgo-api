@@ -70,7 +70,7 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 
 Every merge to the default branch builds/tests/publishes and invokes the restricted deploy command. CI must keep proving the named PostgreSQL volume survives both API replacement and database-container recreation.
 
-MinIO and `mc` images are the pinned `quay.io/minio/...` release tags in compose and CI smoke; Docker Hub `minio/minio` is withdrawn.
+MinIO and `mc` are GRIDGO-built from pinned upstream source (upstream withdrew its images) and published by `.github/workflows/minio-images.yml` as `ghcr.io/gridgoph/{minio,mc}`; compose and CI smoke pin them by tag and digest. Never re-push an existing tag. Details: `docs/STORAGE_API.md#minio-images`.
 
 Uploads spool to `$PWD/.tmp/uploads`; the image must keep it writable by uid 1001. `/health` reports database, storage, push, `commit`, and `builtAt`.
 

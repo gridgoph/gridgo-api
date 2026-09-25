@@ -55,7 +55,7 @@ services:
       - gridgo-storage
 
   minio-bind-check:
-    image: quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z
+    image: ghcr.io/gridgoph/mc:RELEASE.2025-07-21T05-28-08Z@sha256:e114957171327027e2440679742baff3dfb4acccf883471061b070926dad7342
     environment:
       MINIO_BIND_ADDRESS: ${MINIO_BIND_ADDRESS:-127.0.0.1}
     entrypoint: ["/bin/sh", "-ec"]
@@ -72,7 +72,7 @@ services:
     restart: "no"
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z
+    image: ghcr.io/gridgoph/minio:RELEASE.2025-07-23T15-54-02Z@sha256:ec083fa6b02af8f3f971def273b3ab2f1a102ca0aa74e6b45c0bcb462f0f5cfe
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-gridgo_root_4e39b7a1}
@@ -97,7 +97,7 @@ services:
       - gridgo-storage
 
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z
+    image: ghcr.io/gridgoph/mc:RELEASE.2025-07-21T05-28-08Z@sha256:e114957171327027e2440679742baff3dfb4acccf883471061b070926dad7342
     depends_on:
       minio:
         condition: service_healthy
