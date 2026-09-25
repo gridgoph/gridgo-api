@@ -5,6 +5,16 @@ export const APPROVAL_CASE_KINDS = new Set(["business_client", "supplier", "ride
 export const APPROVAL_CASE_STATUSES = new Set(["pending", "approved", "rejected", "suspended"]);
 export const APPROVAL_DECISIONS = new Set(["approve", "reject", "suspend", "restore"]);
 
+/**
+ * The legacy `POST /users/:id/verification` route marks the live lines it
+ * suspends with this reason when the approver gave none.
+ */
+export const LEGACY_ACCOUNT_SUSPEND_REASON = "supplier_verification_suspended";
+
+// Lines the legacy route suspended carry no case tag. Its line writes and its
+// case event come from separate clock reads inside one request.
+const LEGACY_SUSPENSION_MATCH_MS = 5000;
+
 const DECISION_TRANSITIONS = {
   approve: { from: "pending", to: "approved" },
   reject: { from: "pending", to: "rejected" },
@@ -84,7 +94,7 @@ export function approvalDecisionInput(action, body) {
     action === "approve"
       ? ["expectedVersion", "requestId", "note"]
       : action === "restore"
-        ? ["expectedVersion", "requestId", "note"]
+        ? ["expectedVersion", "requestId", "note", "restoreServiceIds"]
         : ["expectedVersion", "requestId", "reason"],
   );
   const unexpected = Object.keys(body || {}).find((key) => !allowed.has(key));
@@ -107,10 +117,19 @@ export function approvalDecisionInput(action, body) {
   if (action === "reject" && !reason) return { error: "reason_required", status: 400 };
   if (action === "suspend" && !reason) return { error: "reason_required", status: 400 };
   if (action === "restore" && !note) return { error: "note_required", status: 400 };
+  let restoreServiceIds = [];
+  if (action === "restore" && body.restoreServiceIds !== undefined) {
+    const ids = body.restoreServiceIds;
+    if (!Array.isArray(ids) || ids.length > 200 || !ids.every((value) => nonblank(value))) {
+      return { error: "invalid_restore_service_ids", status: 400 };
+    }
+    restoreServiceIds = [...new Set(ids.map((value) => value.trim()))];
+  }
   return {
     expectedVersion: body.expectedVersion,
     requestId,
     reason: action === "approve" || action === "restore" ? note : reason,
+    ...(action === "restore" ? { restoreServiceIds } : {}),
   };
 }
 
@@ -187,6 +206,76 @@ function updateLegacyVerification(store, approvalCase, action, actorId, at, reas
   }
 }
 
+function withinLegacyWindow(left, right) {
+  const distance = Math.abs(Date.parse(left) - Date.parse(right));
+  return Number.isFinite(distance) && distance <= LEGACY_SUSPENSION_MATCH_MS;
+}
+
+/**
+ * Whether this line went down with the account rather than on its own.
+ * Canonical and (from now on) legacy account suspensions tag the line with the
+ * case. Older legacy suspensions are recognised by their fixed reason, or by
+ * the same approver, reason, and moment as a suspend/reject event on the case.
+ * A line Operations suspended individually is never one of these.
+ */
+export function suspendedWithAccount(store, approvalCase, service) {
+  if (!approvalCase || approvalCase.kind !== "supplier") return false;
+  if (!service || service.supplierId !== approvalCase.userId || service.state !== "suspended") return false;
+  if (service.approvalSuspensionCaseId) return service.approvalSuspensionCaseId === approvalCase.id;
+  if (service.suspendReason === LEGACY_ACCOUNT_SUSPEND_REASON) return true;
+  const reason = nonblank(service.suspendReason);
+  if (!reason || !service.suspendedAt) return false;
+  return (store.approvalCaseEvents || []).some(
+    (event) =>
+      event.approvalCaseId === approvalCase.id &&
+      event.actorKind === "approver" &&
+      (event.toStatus === "suspended" || event.toStatus === "rejected") &&
+      event.actorUserId === service.suspendedBy &&
+      event.reason === reason &&
+      withinLegacyWindow(event.createdAt, service.suspendedAt),
+  );
+}
+
+function restoreSupplierServices(store, approvalCase, serviceIds, context) {
+  const { actorId, actorRole, at, note, requestId, createId } = context;
+  const restored = [];
+  for (const serviceId of serviceIds) {
+    const service = store.supplierServices.find((candidate) => candidate.id === serviceId);
+    const suspension = {
+      suspendedAt: service.suspendedAt ?? null,
+      suspendedBy: service.suspendedBy ?? null,
+      suspendReason: service.suspendReason ?? null,
+    };
+    const restoredState = service.approvalSuspensionPreviousState || "live";
+    service.state = restoredState;
+    service.suspendedAt = null;
+    service.suspendedBy = null;
+    service.suspendReason = null;
+    delete service.approvalSuspensionPreviousState;
+    delete service.approvalSuspensionCaseId;
+    service.updatedAt = at;
+    store.auditLog.push({
+      id: createId("aud"),
+      at,
+      actorId,
+      actorRole,
+      action: "service.restore",
+      entityType: "supplier_service",
+      entityId: service.id,
+      detail: {
+        approvalCaseId: approvalCase.id,
+        requestId,
+        from: "suspended",
+        to: restoredState,
+        suspension,
+      },
+      reason: note,
+    });
+    restored.push(service.id);
+  }
+  return restored;
+}
+
 function suspendSupplierServices(store, approvalCase, actorId, at, reason) {
   if (approvalCase.kind !== "supplier") return [];
   const suspended = [];
@@ -243,6 +332,7 @@ export function decideApprovalCase({
       event: priorEvent,
       publishedServiceIds: priorEvent.snapshot?.publishedServiceIds || [],
       suspendedServiceIds: priorEvent.snapshot?.suspendedServiceIds || [],
+      restoredServiceIds: priorEvent.snapshot?.restoredServiceIds || [],
       replayed: true,
     };
   }
@@ -292,6 +382,23 @@ export function decideApprovalCase({
   if ((action === "approve" || action === "restore") && approvalCase.kind === "rider") {
     assertRiderApprovalReady(store, approvalCase.userId, at);
   }
+  const restoreServiceIds = action === "restore" ? input.restoreServiceIds || [] : [];
+  const notRestorable = restoreServiceIds.filter(
+    (serviceId) =>
+      !suspendedWithAccount(
+        store,
+        approvalCase,
+        (store.supplierServices || []).find((candidate) => candidate.id === serviceId),
+      ),
+  );
+  if (notRestorable.length > 0) {
+    fail(
+      409,
+      "service_not_restorable",
+      "Only this account's service lines suspended with the account can come back with it.",
+      { serviceIds: notRestorable },
+    );
+  }
 
   const fromStatus = approvalCase.status;
   approvalCase.status = transition.to;
@@ -313,8 +420,17 @@ export function decideApprovalCase({
   if (action === "approve") {
     applyBusinessClientConversion(store, approvalCase, at);
   }
-  // Restore intentionally changes only the account case. Every service line
-  // stays suspended until an approver explicitly reviews its verify route.
+  if (!Array.isArray(store.auditLog)) store.auditLog = [];
+  // Restore brings back only the lines the approver named. Anything else that
+  // is suspended stays down until it is reviewed through its verify route.
+  const restoredServiceIds = restoreSupplierServices(store, approvalCase, restoreServiceIds, {
+    actorId: actor.id,
+    actorRole,
+    at,
+    note: input.reason,
+    requestId: input.requestId,
+    createId,
+  });
   updateLegacyVerification(store, approvalCase, action, actor.id, at, input.reason);
 
   const event = {
@@ -332,13 +448,13 @@ export function decideApprovalCase({
       version: approvalCase.version,
       publishedServiceIds,
       suspendedServiceIds,
+      ...(action === "restore" ? { restoredServiceIds } : {}),
     },
     createdAt: at,
   };
   if (!Array.isArray(store.approvalCaseEvents)) store.approvalCaseEvents = [];
   store.approvalCaseEvents.push(event);
 
-  if (!Array.isArray(store.auditLog)) store.auditLog = [];
   store.auditLog.push({
     id: createId("aud"),
     at,
@@ -354,29 +470,34 @@ export function decideApprovalCase({
       requestId: input.requestId,
       publishedServiceIds,
       suspendedServiceIds,
+      ...(action === "restore" ? { restoredServiceIds } : {}),
     },
     reason: input.reason || null,
   });
 
   if (!Array.isArray(store.notifications)) store.notifications = [];
   const notificationType = `approval_${approvalCase.status === "approved" && action === "restore" ? "restored" : approvalCase.status}`;
-  const title = {
+  const shopBack = restoredServiceIds.length > 0;
+  const title = shopBack ? "Your shop is back on GRIDGO" : {
     approve: "Application approved",
     reject: "Application needs changes",
     suspend: "Account suspended",
     restore: "Account restored",
   }[action];
+  const lines = `${restoredServiceIds.length} service line${restoredServiceIds.length === 1 ? "" : "s"}`;
   store.notifications.push({
     id: createId("ntf"),
     userId: approvalCase.userId,
     type: notificationType,
     title,
-    body: "Open GRIDGO to review your current approval status.",
+    body: shopBack
+      ? `Your account and ${lines} can take new orders again.`
+      : "Open GRIDGO to review your current approval status.",
     approvalCaseId: approvalCase.id,
     domainEventKey: `approval_case:${approvalCase.id}:${input.requestId}`,
     read: false,
     at,
   });
 
-  return { approvalCase, event, publishedServiceIds, suspendedServiceIds, replayed: false };
+  return { approvalCase, event, publishedServiceIds, suspendedServiceIds, restoredServiceIds, replayed: false };
 }

@@ -432,7 +432,14 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           ["live", "suspended"].includes(row.state)
         ) {
           notifyAdmins("ops_service_decision", "Service status changed", null, occurrence);
-          notify(
+          // An account restore that brings lines back already told the shop once.
+          const restoredWithAccount = (store.notifications || []).some(
+            (n) =>
+              routeNotificationIds.has(n.id) &&
+              n.userId === row.supplierId &&
+              n.type === "approval_restored",
+          );
+          if (!restoredWithAccount) notify(
             row.supplierId,
             "supplier_service_decision",
             "Service status changed",
