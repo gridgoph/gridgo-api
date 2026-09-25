@@ -112,7 +112,7 @@ function workerFixture(count) {
       return { rowCount: 1 };
     },
   };
-  return { database, store, completed, pruned, lostLeases, clock: () => at, claims: () => claims };
+  return { database, store, batches, completed, pruned, lostLeases, clock: () => at, claims: () => claims };
 }
 
 test("outbox bounds concurrent sends and drains multiple batches in one invocation", async () => {
@@ -150,7 +150,76 @@ test("outbox bounds concurrent sends and drains multiple batches in one invocati
   assert.equal(new Set(sent).size, 61);
   assert.equal(f.completed.size, 61);
   assert.ok([...f.completed.values()].every((r) => r.status === "delivered"));
+  // Three batches, the empty claim that ends the pass, and one re-pass asked
+  // for by the drain() that landed mid-flight.
+  assert.equal(f.claims(), 5);
+});
+
+test("a drain kicked mid-flight re-passes once and sends rows committed after the last claim", async () => {
+  const { createOutboxWorker } = await import("../src/push-outbox.js");
+  const f = workerFixture(26);
+  // The fixture queues 25 + 1. Hold the last row back: it "commits" only after
+  // the running drain's claim has already come back empty.
+  const lateBatch = f.batches.pop();
+  const claim = f.database.transaction;
+  const kicks = [];
+  let drain;
+  f.database.transaction = async (mutation, options = {}) => {
+    const result = await claim(mutation, options);
+    if (options.lockKey === "gridgo-push-outbox-claim" && !result.rows.length && lateBatch.length) {
+      f.batches.push(lateBatch.splice(0));
+      // The committing request kicks while this drain is still busy.
+      kicks.push(drain());
+    }
+    return result;
+  };
+  const sent = [];
+  let loads = 0;
+  drain = createOutboxWorker({
+    ...f,
+    loadStore: async () => { loads += 1; return f.store; },
+    delivery: { configured: true, send: async (_message, [device]) => {
+      sent.push(device.id);
+      return [{ deviceId: device.id, ok: true }];
+    } },
+  });
+  await drain();
+  await Promise.all(kicks);
+  assert.equal(kicks.length, 1);
+  assert.equal(sent.length, 26);
+  assert.equal(new Set(sent).size, 26, "no row is sent twice");
+  // Batch of 25, empty claim (kick lands), re-pass claims the late row, empty.
   assert.equal(f.claims(), 4);
+  // One store snapshot per claimed batch, never one per row.
+  assert.equal(loads, 2);
+});
+
+test("the store is loaded once per claimed batch, not once per outbox row", async () => {
+  const { createOutboxWorker } = await import("../src/push-outbox.js");
+  const f = workerFixture(61);
+  let loads = 0;
+  const drain = createOutboxWorker({
+    ...f,
+    loadStore: async () => { loads += 1; return f.store; },
+    delivery: { configured: true, send: async (_message, [device]) => [{ deviceId: device.id, ok: true }] },
+  });
+  await drain();
+  assert.equal(f.completed.size, 61);
+  assert.equal(loads, 3);
+});
+
+test("an idle drain() with push unconfigured neither loads the store nor claims", async () => {
+  const { createOutboxWorker } = await import("../src/push-outbox.js");
+  const f = workerFixture(3);
+  let loads = 0;
+  const drain = createOutboxWorker({
+    ...f,
+    loadStore: async () => { loads += 1; return f.store; },
+    delivery: { configured: false, send: async () => assert.fail("must not send") },
+  });
+  await drain();
+  assert.equal(loads, 0);
+  assert.equal(f.claims(), 0);
 });
 
 test("concurrent outbox retries failed sends and rechecks ownership and leases", async () => {

@@ -831,8 +831,18 @@ test("an unreachable Google surfaces as a failed send, not a thrown error", asyn
   assert.equal(push.health().status, "unavailable");
 });
 
+const NEVER_SENT = {
+  bootedAt: AT,
+  sentSinceBoot: false,
+  sinceBoot: { accepted: 0, pruned: 0, failed: 0 },
+  lastAcceptedAt: null,
+  lastFailureAt: null,
+  lastFailureCode: null,
+  lastValidatedAt: null,
+};
+
 test("an unconfigured deployment reports disabled and sends nothing", async () => {
-  const push = createPushDelivery({}, { logger: silentLogger });
+  const push = createPushDelivery({}, { logger: silentLogger, now: () => Date.parse(AT) });
   assert.equal(push.configured, false);
   assert.deepEqual(push.health(), {
     provider: "fcm",
@@ -840,6 +850,7 @@ test("an unconfigured deployment reports disabled and sends nothing", async () =
     status: "disabled",
     detail: null,
     checkedAt: null,
+    ...NEVER_SENT,
   });
   assert.deepEqual(await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
     { id: "dev_1", userId: "user_client", token: "t1" },
@@ -882,21 +893,115 @@ test("health names the Firebase project once a send has succeeded", async () => 
     {
       credentials,
       logger: silentLogger,
+      now: () => Date.parse(AT),
       fetch: async (url) => (url === credentials.tokenUri ? tokenResponse() : fcmResponse(200, {})),
     },
   );
+  // Configured but idle since boot is spelled out, not inferred from a null.
   assert.deepEqual(push.health(), {
     provider: "fcm",
     projectId: "gridgo-test",
     status: "configured",
     detail: null,
     checkedAt: null,
+    ...NEVER_SENT,
   });
 
   await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [{ id: "dev_1", userId: "user_client", token: "t1" }]);
   const health = push.health();
   assert.equal(health.status, "available");
   assert.equal(typeof health.checkedAt, "string");
+  assert.equal(health.sentSinceBoot, true);
+  assert.deepEqual(health.sinceBoot, { accepted: 1, pruned: 0, failed: 0 });
+  assert.equal(health.lastAcceptedAt, AT);
+});
+
+test("health counts rejected and pruned sends since boot and names the last failure code", async () => {
+  const { credentials } = testCredentials();
+  const push = createPushDelivery(
+    {},
+    {
+      credentials,
+      logger: silentLogger,
+      now: () => Date.parse(AT),
+      fetch: async (url, init) => {
+        if (url === credentials.tokenUri) return tokenResponse();
+        const { message } = JSON.parse(init.body);
+        if (message.token === "dead") {
+          return fcmResponse(404, { error: { status: "NOT_FOUND", details: [{ errorCode: "UNREGISTERED" }] } });
+        }
+        return fcmResponse(503, { error: { status: "UNAVAILABLE" } });
+      },
+    },
+  );
+  await push.send(pushMessageFor({ id: "n1", title: "T", body: "B", at: AT }), [
+    { id: "dev_dead", userId: "user_client", token: "dead" },
+    { id: "dev_busy", userId: "user_client", token: "busy" },
+  ]);
+  const health = push.health();
+  assert.equal(health.sentSinceBoot, true);
+  assert.deepEqual(health.sinceBoot, { accepted: 0, pruned: 1, failed: 1 });
+  assert.equal(health.lastAcceptedAt, null);
+  assert.equal(health.lastFailureAt, AT);
+  assert.ok(["UNREGISTERED", "UNAVAILABLE"].includes(health.lastFailureCode));
+});
+
+test("validate_only dry-runs each token, prunes with the send classification, and leaves send health alone", async () => {
+  const { credentials } = testCredentials();
+  const bodies = [];
+  const push = createPushDelivery(
+    {},
+    {
+      credentials,
+      logger: silentLogger,
+      now: () => Date.parse(AT),
+      fetch: async (url, init) => {
+        if (url === credentials.tokenUri) return tokenResponse();
+        const body = JSON.parse(init.body);
+        bodies.push(body);
+        switch (body.message.token) {
+          case "gone":
+            return fcmResponse(404, { error: { status: "NOT_FOUND", details: [{ errorCode: "UNREGISTERED" }] } });
+          case "foreign":
+            return fcmResponse(403, { error: { status: "PERMISSION_DENIED", details: [{ errorCode: "SENDER_ID_MISMATCH" }] } });
+          case "flaky":
+            return fcmResponse(503, { error: { status: "UNAVAILABLE" } });
+          default:
+            return fcmResponse(200, { name: "projects/gridgo-test/messages/fake" });
+        }
+      },
+    },
+  );
+  const message = announcementPushMessage({ title: "GRIDGO", body: "check" });
+  const results = await push.validate(message, [
+    { id: "d_live", userId: null, token: "live" },
+    { id: "d_gone", userId: "user_client", token: "gone" },
+    { id: "d_foreign", userId: null, token: "foreign" },
+    { id: "d_flaky", userId: null, token: "flaky" },
+  ]);
+  assert.deepEqual(results, [
+    { deviceId: "d_live", ok: true, prune: false, code: null },
+    { deviceId: "d_gone", ok: false, prune: true, code: "UNREGISTERED" },
+    { deviceId: "d_foreign", ok: false, prune: true, code: "SENDER_ID_MISMATCH" },
+    { deviceId: "d_flaky", ok: false, prune: false, code: "UNAVAILABLE" },
+  ]);
+  assert.ok(bodies.every((body) => body.validate_only === true));
+  const health = push.health();
+  assert.equal(health.status, "configured");
+  assert.equal(health.sentSinceBoot, false);
+  assert.equal(health.lastValidatedAt, AT);
+  // An unclaimed handset still only ever sees a stranger-safe message.
+  await assert.rejects(
+    push.validate(pushMessageFor({ id: "n1", type: "credit_updated", at: AT }), [{ id: "d_live", userId: null, token: "live" }]),
+    PushAudienceError,
+  );
+});
+
+test("fcmRequestBody sets validate_only only when asked", () => {
+  const message = announcementPushMessage({ title: "GRIDGO", body: "check" });
+  assert.equal("validate_only" in fcmRequestBody(message, "t"), false);
+  assert.equal(fcmRequestBody(message, "t", { validateOnly: true }).validate_only, true);
+  assert.equal(fcmRequestBody(message, "t", { validateOnly: true }).message.token, "t");
 });
 
 test("claimed and anonymous iOS registrations default to FCM and accept explicit APNs", () => {

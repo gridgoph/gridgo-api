@@ -549,7 +549,12 @@ export function assertStrangerSafeMessage(message) {
   }
 }
 
-export function fcmRequestBody(message, token) {
+/**
+ * `validateOnly` asks FCM to run every check on the message and the token
+ * without delivering anything (`validate_only` on `messages:send`). The
+ * stale-token sweep uses it; nothing reaches the handset.
+ */
+export function fcmRequestBody(message, token, { validateOnly = false } = {}) {
   const notification = { title: message.title, body: message.body };
   const androidNotification = {
     channel_id: message.androidChannelId || ANDROID_NOTIFICATION_CHANNEL_ID,
@@ -566,6 +571,7 @@ export function fcmRequestBody(message, token) {
     apns.fcm_options = { image: message.image };
   }
   return {
+    ...(validateOnly ? { validate_only: true } : {}),
     message: {
       token,
       notification,
@@ -765,6 +771,15 @@ function buildPushDelivery(credentials, env, options) {
   const misconfiguration = options.misconfiguration || null;
   let status = configured ? "configured" : misconfiguration ? "misconfigured" : "disabled";
   let checkedAt = null;
+  // In-process counters so `/health` can say "configured, nothing sent since
+  // this process booted" apart from "sends are being accepted". They reset on
+  // every deploy; the durable history is the outbox (`GET /ops/push/stats`).
+  const bootedAt = new Date(clock()).toISOString();
+  const sinceBoot = { accepted: 0, pruned: 0, failed: 0 };
+  let lastAcceptedAt = null;
+  let lastFailureAt = null;
+  let lastFailureCode = null;
+  let lastValidatedAt = null;
   let cachedToken = null;
   let cachedTokenExpiresAtMs = 0;
   let inFlightToken = null;
@@ -782,7 +797,27 @@ function buildPushDelivery(credentials, env, options) {
       // Names the file and the missing field, never a value from inside it.
       detail: misconfiguration,
       checkedAt,
+      bootedAt,
+      sentSinceBoot: sinceBoot.accepted + sinceBoot.pruned + sinceBoot.failed > 0,
+      sinceBoot: { ...sinceBoot },
+      lastAcceptedAt,
+      lastFailureAt,
+      lastFailureCode,
+      lastValidatedAt,
     };
+  }
+
+  function recordSend(result) {
+    const at = new Date(clock()).toISOString();
+    if (result.ok) {
+      sinceBoot.accepted += 1;
+      lastAcceptedAt = at;
+    } else {
+      sinceBoot[result.prune ? "pruned" : "failed"] += 1;
+      lastFailureAt = at;
+      lastFailureCode = result.code || null;
+    }
+    return result;
   }
 
   async function requestAccessToken() {
@@ -834,14 +869,14 @@ function buildPushDelivery(credentials, env, options) {
     return inFlightToken;
   }
 
-  async function postMessage(token, message, bearer) {
+  async function postMessage(token, message, bearer, validateOnly = false) {
     const response = await fetchImpl(`${baseUrl}/v1/projects/${credentials.projectId}/messages:send`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${bearer}`,
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify(fcmRequestBody(message, token)),
+      body: JSON.stringify(fcmRequestBody(message, token, { validateOnly })),
       signal: AbortSignal.timeout(timeoutMs),
     });
     let payload = null;
@@ -853,22 +888,53 @@ function buildPushDelivery(credentials, env, options) {
     return { status: response.status, payload };
   }
 
-  async function sendToDevice(device, message) {
+  async function postWithRefresh(device, message, validateOnly) {
     let bearer = await accessToken();
-    let result = await postMessage(device.token, message, bearer);
+    let result = await postMessage(device.token, message, bearer, validateOnly);
     if (result.status === 401) {
       // The cached token was revoked or clock-skewed out from under us. One
       // forced refresh, then accept the verdict.
       bearer = await accessToken({ forceRefresh: true });
-      result = await postMessage(device.token, message, bearer);
+      result = await postMessage(device.token, message, bearer, validateOnly);
     }
+    return result;
+  }
+
+  async function sendToDevice(device, message) {
+    const result = await postWithRefresh(device, message, false);
     if (result.status >= 200 && result.status < 300) {
       mark("available");
-      return { deviceId: device.id, ok: true, prune: false, code: null };
+      return recordSend({ deviceId: device.id, ok: true, prune: false, code: null });
     }
     const { prune, code } = classifyFcmFailure(result);
     mark(prune ? "available" : "unavailable");
-    return { deviceId: device.id, ok: false, prune, code };
+    return recordSend({ deviceId: device.id, ok: false, prune, code });
+  }
+
+  /**
+   * Dry-run `message` against each device's token (`validate_only`). Same
+   * result shape and prune classification as `send`, but nothing is
+   * delivered and the send status/counters on `/health` are left alone —
+   * only `lastValidatedAt` moves. Never rejects.
+   */
+  async function validate(message, devices) {
+    if (!configured || devices.length === 0) return [];
+    if (devices.some((device) => !isClaimedDevice(device))) assertStrangerSafeMessage(message);
+    const settled = await Promise.allSettled(
+      devices.map(async (device) => {
+        const result = await postWithRefresh(device, message, true);
+        if (result.status >= 200 && result.status < 300) {
+          lastValidatedAt = new Date(clock()).toISOString();
+          return { deviceId: device.id, ok: true, prune: false, code: null };
+        }
+        return { deviceId: device.id, ok: false, ...classifyFcmFailure(result) };
+      }),
+    );
+    return settled.map((outcome, index) =>
+      outcome.status === "fulfilled"
+        ? outcome.value
+        : { deviceId: devices[index].id, ok: false, prune: false, code: "transport_error" },
+    );
   }
 
   /**
@@ -892,9 +958,9 @@ function buildPushDelivery(credentials, env, options) {
       logger.warn?.(
         `push send failed device=${devices[index].id} reason=${outcome.reason?.message || "unknown"}`,
       );
-      return { deviceId: devices[index].id, ok: false, prune: false, code: "transport_error" };
+      return recordSend({ deviceId: devices[index].id, ok: false, prune: false, code: "transport_error" });
     });
   }
 
-  return { configured, projectId: credentials?.projectId || null, accessToken, send, health };
+  return { configured, projectId: credentials?.projectId || null, accessToken, send, validate, health };
 }

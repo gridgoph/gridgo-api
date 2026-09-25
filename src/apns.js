@@ -182,6 +182,13 @@ export function routePushDelivery(fcm, apns) {
   return {
     configured: fcm.configured || apns.configured,
     health: () => ({ ...fcm.health(), apns: apns.health() }),
+    // Only FCM has a dry-run send. APNs registrations are left to the outbox,
+    // which prunes them when a real send is refused.
+    validate: async (message, devices) => {
+      const fcmDevices = devices.filter((device) => (device.tokenProvider || "fcm") === "fcm");
+      if (!fcm.configured || typeof fcm.validate !== "function" || !fcmDevices.length) return [];
+      return fcm.validate(message, fcmDevices);
+    },
     send: async (message, devices) => {
       if (devices.some((device) => !isClaimedDevice(device)))
         assertStrangerSafeMessage(message);
