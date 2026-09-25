@@ -5,6 +5,7 @@ import {
   approvalDecisionInput,
   decideApprovalCase,
   supplierApprovalReadiness,
+  suspendedWithAccount,
 } from "../src/approval-cases.js";
 import { notifyOpsSignupSubmitted } from "../src/client-order-notifications.js";
 
@@ -208,6 +209,215 @@ test("supplier approve, suspend, and restore preserve explicit service review", 
   });
   assert.equal(store.approvalCases[0].status, "approved");
   assert.equal(store.supplierServices[0].state, "suspended");
+  assert.deepEqual(store.approvalCaseEvents.at(-1).snapshot.restoredServiceIds, []);
+  assert.equal(store.notifications.at(-1).title, "Account restored");
+  assert.equal(store.auditLog.some((entry) => entry.action === "service.restore"), false);
+});
+
+const SUSPENDED_AT = "2026-09-18T03:00:00.000Z";
+
+/**
+ * A supplier suspended the way Dara Blueprint was: an approved account taken
+ * down, one line with it, plus lines that must never come back with it.
+ */
+function suspendedSupplierStore() {
+  const store = supplierStore();
+  Object.assign(store.approvalCases[0], {
+    status: "suspended",
+    version: 3,
+    decidedAt: SUSPENDED_AT,
+    decidedBy: "ops",
+    suspensionReason: "Unpaid penalty",
+  });
+  const line = (id, extra) => ({
+    ...store.supplierServices[0],
+    id,
+    state: "suspended",
+    suspendedAt: SUSPENDED_AT,
+    suspendedBy: "ops",
+    ...extra,
+  });
+  store.supplierServices = [
+    line("svc_tagged", {
+      suspendReason: "Unpaid penalty",
+      approvalSuspensionPreviousState: "live",
+      approvalSuspensionCaseId: "case_supplier",
+    }),
+    line("svc_legacy", { suspendReason: "supplier_verification_suspended" }),
+    line("svc_individual", { suspendReason: "Blurry sample photos", suspendedAt: "2026-09-10T00:00:00.000Z" }),
+    { ...store.supplierServices[0], id: "svc_draft", state: "draft" },
+    { ...line("svc_other_supplier", { suspendReason: "supplier_verification_suspended" }), supplierId: "someone_else" },
+  ];
+  return store;
+}
+
+function restoreInput(restoreServiceIds, requestId = "request_restore_lines") {
+  return { expectedVersion: 3, requestId, reason: "Penalty settled", restoreServiceIds };
+}
+
+test("restore input accepts restoreServiceIds only on restore and only as ids", () => {
+  const base = { expectedVersion: 3, requestId: "r", note: "Penalty settled" };
+  assert.deepEqual(approvalDecisionInput("restore", base).restoreServiceIds, []);
+  assert.deepEqual(
+    approvalDecisionInput("restore", { ...base, restoreServiceIds: [" svc_a ", "svc_a", "svc_b"] }).restoreServiceIds,
+    ["svc_a", "svc_b"],
+  );
+  for (const invalid of ["svc_a", [""], [7], null]) {
+    assert.equal(
+      approvalDecisionInput("restore", { ...base, restoreServiceIds: invalid }).error,
+      "invalid_restore_service_ids",
+    );
+  }
+  assert.equal(
+    approvalDecisionInput("suspend", { expectedVersion: 2, requestId: "r", reason: "x", restoreServiceIds: [] }).error,
+    "unexpected_field",
+  );
+});
+
+test("only lines that went down with the account count as suspended with it", () => {
+  const store = suspendedSupplierStore();
+  const approvalCase = store.approvalCases[0];
+  const flagged = Object.fromEntries(
+    store.supplierServices.map((service) => [service.id, suspendedWithAccount(store, approvalCase, service)]),
+  );
+  assert.deepEqual(flagged, {
+    svc_tagged: true,
+    svc_legacy: true,
+    svc_individual: false,
+    svc_draft: false,
+    svc_other_supplier: false,
+  });
+
+  // A legacy suspension that carried a typed reason predates the case tag;
+  // it matches the suspend event written by the same approver in that request.
+  store.supplierServices[2].suspendReason = "Unpaid penalty";
+  store.supplierServices[2].suspendedAt = "2026-09-18T03:00:00.004Z";
+  assert.equal(suspendedWithAccount(store, approvalCase, store.supplierServices[2]), false);
+  store.approvalCaseEvents.push({
+    id: "ace_legacy", approvalCaseId: "case_supplier", fromStatus: "approved", toStatus: "suspended",
+    actorUserId: "ops", actorKind: "approver", reason: "Unpaid penalty", requestId: "acr_legacy",
+    snapshot: {}, createdAt: SUSPENDED_AT,
+  });
+  assert.equal(suspendedWithAccount(store, approvalCase, store.supplierServices[2]), true);
+  store.supplierServices[2].suspendedBy = "another_ops";
+  assert.equal(suspendedWithAccount(store, approvalCase, store.supplierServices[2]), false);
+});
+
+test("restore brings back the named lines in the same decision, audited, with one notice", () => {
+  const store = suspendedSupplierStore();
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_${sequence += 1}`;
+  const outcome = decideApprovalCase({
+    store,
+    caseId: "case_supplier",
+    action: "restore",
+    input: restoreInput(["svc_tagged", "svc_legacy"]),
+    actor: { id: "super" },
+    actorRole: "super_admin",
+    at: AT,
+    createId,
+  });
+  assert.equal(outcome.approvalCase.status, "approved");
+  assert.deepEqual(outcome.restoredServiceIds, ["svc_tagged", "svc_legacy"]);
+  for (const id of ["svc_tagged", "svc_legacy"]) {
+    const service = store.supplierServices.find((candidate) => candidate.id === id);
+    assert.equal(service.state, "live");
+    assert.equal(service.suspendedAt, null);
+    assert.equal(service.suspendedBy, null);
+    assert.equal(service.suspendReason, null);
+    assert.equal(Object.hasOwn(service, "approvalSuspensionCaseId"), false);
+    assert.equal(Object.hasOwn(service, "approvalSuspensionPreviousState"), false);
+    assert.equal(service.updatedAt, AT);
+  }
+  assert.equal(store.supplierServices.find((service) => service.id === "svc_individual").state, "suspended");
+
+  const lineAudits = store.auditLog.filter((entry) => entry.action === "service.restore");
+  assert.deepEqual(lineAudits.map((entry) => entry.entityId), ["svc_tagged", "svc_legacy"]);
+  for (const entry of lineAudits) {
+    assert.equal(entry.entityType, "supplier_service");
+    assert.equal(entry.actorId, "super");
+    assert.equal(entry.actorRole, "super_admin");
+    assert.equal(entry.reason, "Penalty settled");
+    assert.equal(entry.detail.approvalCaseId, "case_supplier");
+    assert.equal(entry.detail.requestId, "request_restore_lines");
+    assert.equal(entry.detail.to, "live");
+    assert.equal(entry.detail.suspension.suspendedAt, SUSPENDED_AT);
+  }
+  const caseAudit = store.auditLog.find((entry) => entry.action === "approval_case.restore");
+  assert.deepEqual(caseAudit.detail.restoredServiceIds, ["svc_tagged", "svc_legacy"]);
+
+  assert.equal(store.notifications.length, 1);
+  assert.equal(store.notifications[0].userId, "supplier");
+  assert.equal(store.notifications[0].type, "approval_restored");
+  assert.equal(store.notifications[0].title, "Your shop is back on GRIDGO");
+
+  const replayed = decideApprovalCase({
+    store,
+    caseId: "case_supplier",
+    action: "restore",
+    input: restoreInput(["svc_tagged", "svc_legacy"]),
+    actor: { id: "super" },
+    actorRole: "super_admin",
+    at: AT,
+    createId,
+  });
+  assert.equal(replayed.replayed, true);
+  assert.deepEqual(replayed.restoredServiceIds, ["svc_tagged", "svc_legacy"]);
+  assert.equal(store.notifications.length, 1);
+});
+
+test("restore refuses any id that did not go down with this account, and changes nothing", () => {
+  for (const [ids, refused] of [
+    [["svc_tagged", "svc_individual"], ["svc_individual"]],
+    [["svc_other_supplier"], ["svc_other_supplier"]],
+    [["svc_draft", "svc_missing", "svc_legacy"], ["svc_draft", "svc_missing"]],
+  ]) {
+    const store = suspendedSupplierStore();
+    const before = JSON.stringify(store);
+    assert.throws(
+      () => decideApprovalCase({
+        store,
+        caseId: "case_supplier",
+        action: "restore",
+        input: restoreInput(ids),
+        actor: { id: "ops" },
+        actorRole: "ops_admin",
+        at: AT,
+        createId: (prefix) => `${prefix}_x`,
+      }),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.equal(error.code, "service_not_restorable");
+        assert.deepEqual(error.details.serviceIds, refused);
+        return true;
+      },
+    );
+    assert.equal(JSON.stringify(store), before);
+  }
+});
+
+test("a non-supplier restore refuses service ids instead of reaching the user's lines", () => {
+  const store = suspendedSupplierStore();
+  store.userRoleMemberships.push({ userId: "supplier", role: "client", createdAt: AT });
+  store.approvalCases.push({
+    id: "case_business", userId: "supplier", kind: "business_client", status: "suspended", version: 3,
+    applicationRevision: 1, submittedAt: AT, createdAt: AT, updatedAt: AT,
+  });
+  assert.throws(
+    () => decideApprovalCase({
+      store,
+      caseId: "case_business",
+      action: "restore",
+      input: restoreInput(["svc_legacy"], "request_business"),
+      actor: { id: "ops" },
+      actorRole: "ops_admin",
+      at: AT,
+      createId: (prefix) => `${prefix}_x`,
+    }),
+    (error) => error.code === "service_not_restorable",
+  );
+  assert.equal(store.approvalCases[1].status, "suspended");
+  assert.equal(store.supplierServices.find((service) => service.id === "svc_legacy").state, "suspended");
 });
 
 test("approving a business-client case flips account type only then", () => {

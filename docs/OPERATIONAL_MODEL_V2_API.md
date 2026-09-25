@@ -42,12 +42,12 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
 | GET | `/auth/me/ops` | `ops_admin` membership | fixed Operations projection |
 | GET | `/auth/me/admin` | `super_admin` membership | fixed Super Admin projection |
-| GET | `/approval-cases?status=&kind=&cursor=` | ops/super | submitted cases ordered oldest first; defaults to pending |
-| GET | `/approval-cases/:caseId` | ops/super | applicant profile, kind-specific review data, readiness, and immutable history |
+| GET | `/approval-cases?status=&kind=&cursor=` | ops/super | submitted cases ordered oldest first; defaults to pending; `status=suspended` lists suspended accounts |
+| GET | `/approval-cases/:caseId` | ops/super | applicant profile, kind-specific review data, readiness, suspended service lines, and immutable history |
 | POST | `/approval-cases/:caseId/approve` | ops/super | pending → approved with expected version and idempotency key |
 | POST | `/approval-cases/:caseId/reject` | ops/super | pending → rejected; reason required |
 | POST | `/approval-cases/:caseId/suspend` | ops/super | approved → suspended; reason required |
-| POST | `/approval-cases/:caseId/restore` | ops/super | suspended → approved; restore note required |
+| POST | `/approval-cases/:caseId/restore` | ops/super | suspended → approved; restore note required; optional `restoreServiceIds` brings named lines back in the same transaction |
 | POST | `/auth/logout` | authenticated | optionally releases this phone back to unclaimed; the client signs out of Clerk |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
@@ -181,6 +181,16 @@ Enrollment-specific errors are `400 idempotency_key_required` for a missing key,
 
 `GET /approval-cases` is shared by Operations and Super Admin. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
 
+List items and `detail.approvalCase` carry `status`, `decidedAt` (for a suspended case, when it was suspended), `decidedBy`, `decidedByName` (the deciding approver's display name, or `null`), `suspensionReason`, and `rejectionReason`.
+
+Every detail carries `suspendedServiceLines: [{ id, name, suspendedAt, suspendReason, suspendedWithAccount }]` — the applicant's currently `suspended` lines, where `name` is the category label. It is always `[]` for rider and business-client cases. `suspendedWithAccount` is `true` only for a line that went down with the account:
+
+- the line is tagged with this case (`data.approvalSuspensionCaseId`), which both the canonical suspend and, from this release, the legacy `POST /users/:id/verification` suspend/reject write; or
+- an untagged line whose `suspendReason` is `supplier_verification_suspended` (the legacy route's reason when the approver typed none); or
+- an untagged line whose approver and trimmed `suspendReason` match a suspend/reject event on this case written within 5 seconds of `suspendedAt` (the legacy route with a typed reason, before it tagged lines).
+
+A line Operations suspended on its own through `/supplier-services/:id/suspend` is never `suspendedWithAccount`; that route now drops any earlier account tag.
+
 Decision bodies are:
 
 ```text
@@ -191,12 +201,20 @@ Decision bodies are:
 { "expectedVersion": 2, "requestId": "approval-uuid", "reason": "required" }
 
 // restore
-{ "expectedVersion": 3, "requestId": "approval-uuid", "note": "required" }
+{ "expectedVersion": 3, "requestId": "approval-uuid", "note": "required", "restoreServiceIds": ["svc_..."] }
 ```
 
 Each committed decision increments `version` and atomically writes the case, immutable event, audit row, and applicant notification. Replaying the winning `requestId` is idempotent; reusing it for a different case or action returns `409 request_id_conflict`. A different stale/racing decision returns `409 approval_already_decided`; a stale version on an otherwise valid transition returns `409 approval_case_stale`; a case whose applicant no longer holds the matching role membership returns `409 approval_case_role_mismatch`.
 
-Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`. Account restore never republishes those lines: Operations must explicitly review each line through `/supplier-services/:id/verify`.
+Initial supplier approval requires a complete shop/contact/location and at least one complete `pending_verification` service line supported by the current schema. All complete pending lines publish to `live` in the approval transaction; incomplete lines remain pending. Failure returns `409 supplier_profile_incomplete` with `missing`. Supplier suspension records each live line's prior state and makes it `suspended`.
+
+Restore changes only the account unless the approver names lines in `restoreServiceIds` (an array of up to 200 non-blank IDs; anything else is `400 invalid_restore_service_ids`; duplicates collapse). Every named line must belong to the case's user and be `suspendedWithAccount` as defined above. If any ID fails that test, the whole decision is refused with `409 service_not_restorable` and `serviceIds` listing each failing ID, and nothing changes. Otherwise, in the same transaction as the case:
+
+- each line returns to its recorded prior state (`live` for a line the legacy route suspended) and loses `suspendedAt`, `suspendedBy`, `suspendReason`, and its account tag;
+- each line gets a `service.restore` audit row (`entityType: "supplier_service"`, `reason` = the restore note, `detail.approvalCaseId`, `detail.requestId`, and the cleared suspension);
+- the supplier gets one `approval_restored` notification titled "Your shop is back on GRIDGO" instead of "Account restored", and no per-line service notice. Operations still get their per-line `ops_service_decision` rows.
+
+Every decision response adds `restoredServiceIds` (always `[]` except for a restore that named lines). The case event snapshot and the `approval_case.restore` audit detail record the same list, and a `requestId` replay returns it. Lines not named stay `suspended` until Operations reviews each one through `/supplier-services/:id/verify`, or the supplier resubmits it.
 
 Rider approval and restore through the canonical `/approval-cases/:id/approve|restore` routes require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
 
