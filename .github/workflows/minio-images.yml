@@ -1,0 +1,139 @@
+name: MinIO images
+
+# Upstream withdrew the MinIO images GRIDGO pinned: the quay.io release tags now
+# return "no such manifest" and Docker Hub denies anonymous pulls. This builds
+# the same releases from the official upstream source (docker/minio-images/) and
+# publishes them to GHCR, where compose and the deploy smoke job pin them by tag
+# and digest.
+#
+# A published tag is never rebuilt: the builds are not bit-for-bit reproducible,
+# so a second push would silently move the tag to different bytes. If the tag
+# already exists the run only verifies it and reports its digest. Moving to a
+# new MinIO release means new tags, never a re-push of an old one.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, main]
+    paths:
+      - .github/workflows/minio-images.yml
+      - docker/minio-images/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minio-images
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: ${{ matrix.name }} ${{ matrix.release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minio
+            release: RELEASE.2025-07-23T15-54-02Z
+            commit: 7ced9663e6a791fef9dc6be798ff24cda9c730ac
+            dockerfile: docker/minio-images/minio.Dockerfile
+          - name: mc
+            release: RELEASE.2025-07-21T05-28-08Z
+            commit: ee72571936f15b0e65dc8b4a231a4dd445e5ccb6
+            dockerfile: docker/minio-images/mc.Dockerfile
+    env:
+      REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:${{ matrix.release }}
+      NAME: ${{ matrix.name }}
+      RELEASE: ${{ matrix.release }}
+      COMMIT: ${{ matrix.commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether the tag is already published
+        id: existing
+        run: |
+          set -euo pipefail
+          REF="${REF,,}"
+          if out="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' 2>&1)"; then
+            digest="$(jq -r .digest <<<"$out")"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+            echo "$REF is already published at ${digest}; it will be verified, not rebuilt."
+          elif grep -qiE 'not found|manifest unknown|name unknown' <<<"$out"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$out" >&2
+            echo "::error::could not tell whether $REF exists"
+            exit 1
+          fi
+
+      - name: Build for verification
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio-images
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: gridgo-${{ matrix.name }}:candidate
+          cache-from: type=gha,scope=minio-images-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=minio-images-${{ matrix.name }}
+
+      - name: Verify candidate reports the pinned release
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm --entrypoint "$NAME" "gridgo-${NAME}:candidate" --version)"
+          echo "$out"
+          grep -qF "version ${RELEASE} (commit-id=${COMMIT})" <<<"$out"
+
+      - name: Publish
+        id: push
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/minio-images
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REF }}
+          cache-from: type=gha,scope=minio-images-${{ matrix.name }}
+
+      - name: Verify the published image and record its digest
+        run: |
+          set -euo pipefail
+          REF="${REF,,}"
+          digest="${PUSHED:-$EXISTING}"
+          [ -n "$digest" ]
+          pinned="${REF}@${digest}"
+          docker pull --platform linux/amd64 "$pinned" >/dev/null
+          revision="$(docker inspect "$pinned" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          [ "$revision" = "$COMMIT" ] || { echo "::error::$pinned is labelled revision '$revision', expected $COMMIT"; exit 1; }
+          out="$(docker run --rm --entrypoint "$NAME" "$pinned" --version)"
+          echo "$out"
+          grep -qF "version ${RELEASE} (commit-id=${COMMIT})" <<<"$out"
+          echo "::notice title=${NAME} image::${pinned}"
+          {
+            echo "### ${NAME}"
+            echo
+            echo "\`${pinned}\`"
+            echo
+            echo '```'
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          PUSHED: ${{ steps.push.outputs.digest }}
+          EXISTING: ${{ steps.existing.outputs.digest }}
