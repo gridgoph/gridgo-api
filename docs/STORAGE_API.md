@@ -107,6 +107,7 @@ Parents contain IDs only:
 | `supplier_payout_qr` | `supplierPayoutAccount.qr.fileId` (private to that shop and Operations; bound through `PATCH /me/payout-account`, never through attach) |
 | `payout_receipt` | `order.payoutReceiptFileIds: string[]` and `payoutMilestone.receiptFileId` (Operations and the assigned shop; bound at `POST /orders/:id/milestones/:code/release`, never through attach) |
 | `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
+| `tracker_decision` | `tracker_decisions.attachment_ids` (Super Admin only; bound by `POST /admin/tracker/:repo/:number/decisions`, never through attach) |
 
 Legacy orders may still return `proofFileIds` containing retired supplier-proof files. They remain readable evidence but the `proof` upload purpose and supplier-proof workflow no longer accept writes.
 
@@ -131,6 +132,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `supplier_payout_qr` | supplier, including pending | JPEG, PNG, WebP | 5 MiB (`5242880`) |
 | `payout_receipt` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
+| `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
 
 Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
 
@@ -197,6 +199,8 @@ PAYMENT_QR_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $O
 `payment_qr` is Operations / Super Admin only (JPEG/PNG/WebP, 5 MiB). It is not attachable to an order. Activate it with `POST /settings/payment-qr`; checkout reads the public `GET /public/payment-qr` path advertised as `settings.paymentQr.imageUrl`.
 
 `payout_receipt` is the wallet screenshot Operations keeps after paying a shop (JPEG/PNG/WebP, 15 MiB). It is not attachable: upload it, then release the share with `receiptFileId` (and an optional `reference`) on `POST /orders/:id/milestones/:code/release`. Binding writes an `order` reference with field `payoutReceiptFileIds`, so the file reads as `file_in_use`; Operations and the assigned shop may read it, a client never can.
+
+`tracker_decision` is evidence a Super Admin attaches to a tracker decision (JPEG/PNG/WebP/PDF, 10 MiB, at most 6 per decision). It is not attachable: upload it, then send its `fileId` in `attachmentIds` to `POST /admin/tracker/:repo/:number/decisions` ([Tracker API](TRACKER_API.md)). Binding writes a `tracker_decision` reference so the file reads as `file_in_use`. Only Super Admin may upload, read, sign or delete it; Operations gets `403`.
 
 `supplier_payout_qr` is the shop's own receiving plate (JPEG/PNG/WebP, 5 MiB), the one Operations scans to release a payout. It is not attachable either: upload it, then send its `fileId` as `qrFileId` to `PATCH /me/payout-account` (see `docs/OPERATIONAL_MODEL_V2_API.md`, "Supplier payout account"). Binding writes a `supplier_payout_account` reference so the file reads as `file_in_use` until the shop replaces or removes it; the replaced plate is retired to `delete_pending` the same way the platform QR is. Only the owning shop and Operations / Super Admin may read the bytes through `GET /files/:id/download-url`.
 
