@@ -11,11 +11,22 @@ import {
   sniffImageType,
   validateIssueReport,
 } from "../src/issue-reports.js";
-import { signAdminToken } from "../src/support-desk.js";
 import { requestClientKey } from "../src/support-rate-limit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
-const DESK_ENV = { SUPPORT_DESK_JWT_SECRET: "issue-report-test-secret" };
+const DESK_ENV = { SUPPORT_DESK_ALLOWED_EMAILS: "gridgo26@gmail.com" };
+// Stand-ins for the server's Clerk checks: the signature is Clerk's job, the
+// allowlist is the desk's.
+const DESK_TOKEN = "desk-session";
+const OTHER_TOKEN = "ops-session";
+async function verifyClerk(token) {
+  if (token === DESK_TOKEN) return { claims: { sub: "user_desk", email: "gridgo26@gmail.com" } };
+  if (token === OTHER_TOKEN) return { claims: { sub: "user_ops", email: "ops@gridgo.test" } };
+  return { claims: null, status: 401 };
+}
+async function loadClerkUser() {
+  throw new Error("the claim carries the email");
+}
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex");
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46]);
 
@@ -83,7 +94,7 @@ async function startRouter(database, storage, env = DESK_ENV) {
     };
     try {
       const handled = await routeIssueReports({
-        req, res, pathname: url.pathname, url, send, database, storage, env,
+        req, res, pathname: url.pathname, url, send, database, storage, env, verifyClerk, loadClerkUser,
       });
       if (!handled) send(res, 404, { error: "not_found" });
     } catch (error) {
@@ -137,7 +148,11 @@ test("a public report with screenshots is stored and read back by the desk", { s
   assert.equal((await call(base, "/issue-reports")).status, 401);
   assert.equal((await call(base, "/issue-reports", { token: "not.a.token" })).status, 401);
 
-  const token = signAdminToken({ id: "desk-1", username: "desk" }, DESK_ENV);
+  const other = await call(base, "/issue-reports", { token: OTHER_TOKEN });
+  assert.equal(other.status, 403);
+  assert.equal(other.body.error, "forbidden");
+
+  const token = DESK_TOKEN;
   const listed = await call(base, "/issue-reports?status=new", { token });
   assert.equal(listed.status, 200);
   assert.equal(listed.body.reports.length, 1);

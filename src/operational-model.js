@@ -143,6 +143,8 @@ export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
     riderCommissionBps: 8_500,
+    /** Names the fee on client checkout. The pesos stay inside Printing either way. */
+    serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     deliveryFeeBands: [
@@ -161,6 +163,17 @@ export function validateOperationalSettings(settings) {
       "invalid_service_fee_rate",
       "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
       { field: "serviceFeeRateBps" },
+    );
+  }
+  if (
+    settings?.serviceFeeVisibleToClient !== undefined &&
+    typeof settings.serviceFeeVisibleToClient !== "boolean"
+  ) {
+    fail(
+      400,
+      "invalid_service_fee_visibility",
+      "serviceFeeVisibleToClient must be a JSON boolean.",
+      { field: "serviceFeeVisibleToClient" },
     );
   }
   const riderCommissionBps = settings?.riderCommissionBps;
@@ -254,21 +267,29 @@ function validateProductionNudge(nudge) {
   }
 }
 
+const NUDGE_SPAN = {
+  seconds: { max: 3600, label: "seconds" },
+  minutes: { max: 1440, label: "minutes" },
+  hours: { max: 720, label: "hours" },
+  days: { max: 30, label: "days" },
+};
+
 function validateNudgeUnit(unit, field) {
-  if (unit !== "hours" && unit !== "days") {
+  if (!Object.hasOwn(NUDGE_SPAN, unit)) {
     fail(
       400,
       "invalid_production_nudge",
-      `${field} must be "hours" or "days".`,
+      `${field} must be "seconds", "minutes", "hours", or "days".`,
       { field },
     );
   }
 }
 
 function validateNudgeSpan(value, unit, field) {
-  const max = unit === "days" ? 30 : 720;
-  const unitLabel = unit === "days" ? "days" : "hours";
-  if (!Number.isInteger(value) || value < 1 || value > max) {
+  const span = NUDGE_SPAN[unit];
+  if (!span || !Number.isInteger(value) || value < 1 || value > span.max) {
+    const max = span?.max ?? 720;
+    const unitLabel = span?.label ?? "hours";
     fail(
       400,
       "invalid_production_nudge",

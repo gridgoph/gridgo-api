@@ -48,6 +48,8 @@ docker compose up --build
 
 Compose interpolates that same `.env`. Host `npm run dev`, `npm start`, migrate, seed, and bootstrap-admin load it with Node `--env-file-if-exists=.env`, so a missing file in the production image is fine and Compose-injected variables still win. The API has no `.env.local`.
 
+The MinIO and `mc` images are GRIDGO's own private GHCR packages ([why](docs/STORAGE_API.md#minio-images)), so run `docker login ghcr.io` once with a GitHub token that has `read:packages` and access to this repository.
+
 Compose starts PostgreSQL 17, runs forward migrations, idempotently seeds reference data, initializes MinIO, and starts the API on `127.0.0.1:18787` by default. PostgreSQL is published only on loopback (`127.0.0.1:55439`) for local tools.
 
 For host-run commands against local compose (optional `DATABASE_URL` export overrides `.env`):
@@ -96,7 +98,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, public support-ticket submit, the support desk login, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (`POST /admin/login`, ticket list/reply/delete) uses its own HMAC JWT from `SUPPORT_DESK_JWT_SECRET`, not Clerk.
+All routes except `/health`, `/catalog`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`).
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
@@ -107,6 +109,6 @@ All routes except `/health`, `/catalog`, public support-ticket submit, the suppo
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`
-- Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; desk `POST /admin/login`, `GET /admin/me`, list/get/reply/delete under `/support-tickets` and the same paths under `/api`
+- Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
 
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.
