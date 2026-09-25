@@ -160,17 +160,20 @@ itemSubtotalMinor = sum line amounts
 serviceFeeMinor = round(itemSubtotalMinor × snapshotted serviceFeeRateBps / 10,000)
 deliveryFeeMinor = sum job delivery fees
 totalMinor = itemSubtotalMinor + serviceFeeMinor + deliveryFeeMinor
-downpaymentMinor = rounded 75% of totalMinor
+downpaymentPercent = settings.downpaymentPercent at checkout (100 by default, or 75)
+downpaymentMinor = round_bps(totalMinor, downpaymentPercent × 100)
 balanceMinor = totalMinor - downpaymentMinor
 ```
 
-Success is `201` with `{ order, invoice }`. The order is `needs_qa`; initial QR payment is `pending_confirmation`; the 25% balance is `not_submitted`. Jobs are not notified until a later Operations approval slice. Client projections contain job shop/queue/fulfillment and client totals but never supplier payouts or milestones.
+New orders are paid in full up front: at `100`, `downpaymentMinor = totalMinor`, `balanceMinor = 0`, and the balance installment is `not_required`, which every balance gate treats as settled and which cannot be submitted, confirmed or rejected (`409 balance_not_required`). At `75` the order has a 25% balance exactly as before. The split is snapshotted per order; contract: `docs/OPERATIONAL_MODEL_V2_API.md#upfront-checkout`.
+
+Success is `201` with `{ order, invoice }`. The order is `initial_payment_review`; initial QR payment is `pending_confirmation`; the balance is `not_required` (100%) or `not_submitted` (75/25). `order.downpaymentPercent` and `order.paymentPlan` (`method`, `downpaymentPercent`, `downpaymentMinor`, `balanceMinor`, `downpaymentStatus`, `balanceStatus`) describe the split. Jobs are not notified until a later Operations approval slice. Client projections contain job shop/queue/fulfillment and client totals but never supplier payouts or milestones.
 
 ```text
 GET /orders/:orderId/invoice
 ```
 
-Returns `{ invoice }` with immutable line snapshots, one delivery line per job, item subtotal, visible service fee, delivery total, grand total, and 75/25 QR plan.
+Returns `{ invoice }` with immutable line snapshots, one delivery line per job, item subtotal, visible service fee, delivery total, grand total, and the QR plan `{ method, downpaymentPercent, downpaymentMinor, balanceMinor }`. Invoices issued before the split was snapshotted report `downpaymentPercent: 75`.
 
 Common errors are `invalid_preference_ranking`, `dropoff_required`, `match_not_found`, `cart_not_found`, `cart_checked_out`, `cart_empty`, `catalog_item_stale`, `file_not_ready`, and `payment_method_not_allowed`.
 

@@ -104,6 +104,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786986000000_device_token_checks",
         "1786989600000_super_admin_tracker_decisions",
         "1786993200000_issue_report_tracker_link",
+        "1786996800000_balance_not_required",
       ],
     );
 
@@ -240,6 +241,17 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     `);
     await client.query("SET CONSTRAINTS ALL IMMEDIATE");
 
+    // A 100 percent checkout keeps its balance installment at zero, not required.
+    await client.query(`
+      INSERT INTO order_payments (order_id, code, amount_minor, method, status, position, data)
+      VALUES ('order_match_plan', 'initial', 35500, 'qr_manual', 'confirmed', 0, '{}'),
+             ('order_match_plan', 'final_online', 0, 'qr_manual', 'not_required', 1, '{}')
+    `);
+    await assert.rejects(
+      client.query(`UPDATE order_payments SET status = 'waived' WHERE order_id = 'order_match_plan' AND code = 'final_online'`),
+      /order_payments_status_check/,
+    );
+
     // An issue report can be tracked on a GitHub tracker issue, named only by a gridgoph issue URL.
     const tracked = (await client.query(`
       INSERT INTO issue_reports (issue, status, tracker_issue_url)
@@ -263,6 +275,23 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverting cannot quietly turn a paid-up-front balance into one owed.
+    // The runner leaves its own failed transaction open, so hold it in one of ours.
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /paid in full up front/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM order_payments WHERE order_id = 'order_match_plan'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    await client.query(`
+      INSERT INTO order_payments (order_id, code, amount_minor, method, status, position, data)
+      VALUES ('order_match_plan', 'initial', 35500, 'qr_manual', 'confirmed', 0, '{}')
+    `);
+    await assert.rejects(
+      client.query(`UPDATE order_payments SET status = 'not_required' WHERE order_id = 'order_match_plan'`),
+      /order_payments_status_check/,
+    );
+    await client.query("DELETE FROM order_payments WHERE order_id = 'order_match_plan'");
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
@@ -808,7 +837,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 5, client));
+    await runner(migrationOptions(schema, "down", 6, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)

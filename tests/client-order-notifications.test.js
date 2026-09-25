@@ -69,6 +69,16 @@ test("a collected job never tells the client it is out for delivery", () => {
   });
   assert.match(hold.title, /settle/i);
   assert.match(hold.body, /remaining balance/i);
+
+  const paidUpFront = clientNotificationDraft({
+    id: "ord_1",
+    clientId: "user_c",
+    state: "awaiting_collection",
+    fulfillmentMode: "pickup",
+    payments: { final_online: { status: "not_required", amountMinor: 0 } },
+  });
+  assert.equal(paidUpFront.type, "order_ready_for_pickup");
+  assert.doesNotMatch(paidUpFront.title, /settle/i);
 });
 
 test("ensure writes once per order and type", () => {

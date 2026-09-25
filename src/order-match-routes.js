@@ -20,6 +20,8 @@ import {
   deliveryFeeForDistance,
   deliverySplit,
   distanceMetersBetween,
+  downpaymentPercentSetting,
+  orderDownpaymentPercent,
   roundBps,
 } from "./operational-model.js";
 import { AvailabilityError } from "./availability.js";
@@ -451,11 +453,14 @@ function publicMatchedOrder(store, order) {
     // The promised date, never the shop's own. A client who can see both can
     // see the allowance.
     readyBy: order.promiseBy ?? null,
+    downpaymentPercent: orderDownpaymentPercent(order),
     paymentPlan: {
       method: "qr_manual",
+      downpaymentPercent: orderDownpaymentPercent(order),
       downpaymentMinor: order.payments.initial.amountMinor,
       balanceMinor: order.payments.final_online.amountMinor,
       downpaymentStatus: order.payments.initial.status,
+      balanceStatus: order.payments.final_online.status,
     },
     jobs,
     invoiceNumber: order.invoiceNumber,
@@ -480,6 +485,9 @@ function checkout(store, user, cart, body, createId, at) {
     .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
   if (cartLines.length === 0) fail(409, "cart_empty", "Add at least one listing before checkout.");
   const orderId = createId("ord");
+  // Snapshotted here, like the rider delivery split: the setting moving later
+  // never changes what this client owes.
+  const downpaymentPercent = downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
     clientId: user.id,
@@ -498,12 +506,15 @@ function checkout(store, user, cart, body, createId, at) {
     deliveryFeeMinor: 0,
     totalMinor: 0,
     fulfillmentMode: cart.fulfillmentMode,
+    // The order-match QR plan. The name predates 100 percent checkout; the
+    // split this order was placed under is `downpaymentPercent`.
     paymentPlan: "order_match_qr_75_25",
+    downpaymentPercent,
     quoteVersion: 1,
-    // Two payout stages of the shop's own price: 75 percent when it starts, the
-    // rest on delivery proof. Both are capped against supplier principal the
-    // client has actually paid, so the platform never releases its own money.
-    supplierDownpaymentRateBps: 7_500,
+    // The share of the shop's own price the first payment carries. Payout
+    // stages are capped against supplier principal the client has actually
+    // paid, so the platform never releases its own money.
+    supplierDownpaymentRateBps: downpaymentPercent * 100,
     onlineDueMinor: 0,
     directStoreDueMinor: 0,
     supplierPlatformPayoutMinor: 0,
@@ -613,8 +624,10 @@ function checkout(store, user, cart, body, createId, at) {
   const deliveryTotalMinor = addMinor(jobs.map((job) => job.deliveryFeeMinor), "order.deliveryFeeMinor");
   const serviceFeeMinor = roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
-  const downpaymentMinor = roundBps(totalMinor, 7500);
+  const downpaymentRateBps = downpaymentPercent * 100;
+  const downpaymentMinor = roundBps(totalMinor, downpaymentRateBps);
   const balanceMinor = totalMinor - downpaymentMinor;
+  const upfront = balanceMinor === 0;
   Object.assign(order, {
     supplierSubtotalMinor: itemSubtotalMinor,
     subtotalMinor: itemSubtotalMinor,
@@ -627,11 +640,15 @@ function checkout(store, user, cart, body, createId, at) {
     payments: {
       initial: {
         amountMinor: downpaymentMinor, method: "qr_manual", status: "pending_confirmation",
-        label: "75% downpayment", reference, proofFileId: proof.fileId, submittedAt: at,
+        label: upfront ? "Full payment" : `${downpaymentPercent}% downpayment`,
+        reference, proofFileId: proof.fileId, submittedAt: at,
       },
+      // Kept on a paid-up-front order so the installment list has one shape;
+      // `not_required` settles every gate that waits on the balance.
       final_online: {
-        amountMinor: balanceMinor, method: "qr_manual", status: "not_submitted",
-        label: "25% balance", reference: null, proofFileId: null, submittedAt: null,
+        amountMinor: balanceMinor, method: "qr_manual", status: upfront ? "not_required" : "not_submitted",
+        label: upfront ? "No balance" : `${100 - downpaymentPercent}% balance`,
+        reference: null, proofFileId: null, submittedAt: null,
       },
     },
   });
@@ -641,7 +658,7 @@ function checkout(store, user, cart, body, createId, at) {
 
    Each instalment settles the same proportion of every component, rather than
    clearing the fee and delivery out of the downpayment first. Both are honest
-   allocations, but only this one leaves the downpayment covering 75 percent of
+   allocations, but only this one leaves the downpayment covering its share of
    the shop's own price -- settling the fee first leaves it short, and the first
    payout stage is then refused as uncollected on every single order.
 
@@ -649,8 +666,8 @@ function checkout(store, user, cart, body, createId, at) {
    releases are capped against; giving it the odd centavo can only ever be in
    the shop's favour.
   */
-  const initialFeeMinor = roundBps(serviceFeeMinor, 7_500);
-  const initialDeliveryMinor = roundBps(deliveryTotalMinor, 7_500);
+  const initialFeeMinor = roundBps(serviceFeeMinor, downpaymentRateBps);
+  const initialDeliveryMinor = roundBps(deliveryTotalMinor, downpaymentRateBps);
   const initialPrincipalMinor = downpaymentMinor - initialFeeMinor - initialDeliveryMinor;
   order.paymentAllocations = [
     { paymentCode: "initial", component: "supplier_principal", amountMinor: initialPrincipalMinor },
@@ -704,7 +721,7 @@ function checkout(store, user, cart, body, createId, at) {
     deliveryLines: jobs.map((job) => ({ jobId: job.id, shopName: publicSupplierShop(store, job.supplierId)?.shopName || "Shop", amountMinor: job.deliveryFeeMinor })),
     deliveryFeeMinor: deliveryTotalMinor,
     totalMinor,
-    paymentPlan: { method: "qr_manual", downpaymentMinor, balanceMinor },
+    paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor, balanceMinor },
   };
   store.orderInvoices.push({ orderId, invoiceNumber: order.invoiceNumber, issuedAt: at, snapshot: invoice });
   cart.state = "checked_out";
@@ -744,7 +761,12 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (order.clientId !== user.id && !privileged) fail(403, "forbidden", "That invoice belongs to another client.");
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === orderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    return { status: 200, body: { invoice: structuredClone(invoice.snapshot) }, mutated: false };
+    const snapshot = structuredClone(invoice.snapshot);
+    // Invoices issued before the snapshot carried the split were all 75/25.
+    if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
+      snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
+    }
+    return { status: 200, body: { invoice: snapshot }, mutated: false };
   }
 
   requireClient(user);

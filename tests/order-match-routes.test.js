@@ -271,12 +271,29 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   assert.equal(checkedOut.body.order.serviceFeeMinor, 3_000);
   assert.equal(checkedOut.body.order.deliveryFeeMinor, 2_500); // one shop, one delivery
   assert.equal(checkedOut.body.order.totalMinor, 35_500);
+  // Paid in full up front: one transfer, and no balance left to owe.
+  assert.equal(checkedOut.body.order.downpaymentPercent, 100);
   assert.deepEqual(checkedOut.body.order.paymentPlan, {
     method: "qr_manual",
-    downpaymentMinor: 26_625,
-    balanceMinor: 8_875,
+    downpaymentPercent: 100,
+    downpaymentMinor: 35_500,
+    balanceMinor: 0,
     downpaymentStatus: "pending_confirmation",
+    balanceStatus: "not_required",
   });
+  assert.equal(committed.downpaymentPercent, 100);
+  assert.equal(committed.supplierDownpaymentRateBps, 10_000);
+  assert.equal(committed.payments.final_online.status, "not_required");
+  // Every peso of the shop's price rides on the one payment.
+  assert.deepEqual(
+    committed.paymentAllocations.map((row) => `${row.paymentCode}:${row.component}:${row.amountMinor}`),
+    ["initial:supplier_principal:30000", "initial:service_fee:3000", "initial:delivery_pass_through:2500"],
+  );
+  // The split is the order's own, like the rider share: the setting moving
+  // afterwards never changes what this client owes.
+  store.settings.downpaymentPercent = 75;
+  assert.equal(committed.payments.initial.amountMinor, 35_500);
+  delete store.settings.downpaymentPercent;
   assert.equal(checkedOut.body.order.jobs.length, 1);
   assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.deliveryFeeMinor), [2_500]);
   // A delivered job gives the client no origin pin: the shop's coordinates are
@@ -304,8 +321,43 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   const invoice = await call("GET", `/orders/${checkedOut.body.order.id}/invoice`);
   assert.equal(invoice.status, 200);
   assert.equal(invoice.body.invoice.totalMinor, 35_500);
+  assert.deepEqual(invoice.body.invoice.paymentPlan, { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: 35_500, balanceMinor: 0 });
   assert.equal(invoice.body.invoice.deliveryLines.length, 1);
   assert.equal(invoice.body.invoice.lines.find((line) => line.id === lineId).mockupFileId, "file_mock");
+});
+
+test("with the setting at 75, checkout snapshots a 75/25 split and a balance to pay", async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  const call = caller(store, client);
+  const created = await call("POST", "/me/carts", {
+    fulfillmentMode: "delivery",
+    defaultDropoff: { lat: 7.0731, lng: 125.6128, label: "Home" },
+  });
+  const cartId = created.body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a2", optionIds: [], quantity: 1 });
+  const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" },
+  });
+  assert.equal(checkedOut.status, 201);
+  assert.deepEqual(checkedOut.body.order.paymentPlan, {
+    method: "qr_manual",
+    downpaymentPercent: 75,
+    downpaymentMinor: 26_625,
+    balanceMinor: 8_875,
+    downpaymentStatus: "pending_confirmation",
+    balanceStatus: "not_submitted",
+  });
+  const committed = store.orders.find((order) => order.id === checkedOut.body.order.id);
+  assert.equal(committed.supplierDownpaymentRateBps, 7_500);
+  assert.equal(committed.payments.initial.label, "75% downpayment");
+  assert.equal(committed.payments.final_online.label, "25% balance");
+  assert.equal(
+    committed.paymentAllocations.filter((row) => row.component === "supplier_principal")
+      .reduce((total, row) => total + row.amountMinor, 0),
+    30_000,
+  );
 });
 
 test("a collected order is collected at GRIDGO's office, whoever printed it", async () => {

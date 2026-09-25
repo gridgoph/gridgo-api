@@ -1,4 +1,4 @@
-import { isContainedPickup } from "./operational-model.js";
+import { isContainedPickup, paymentSettled } from "./operational-model.js";
 export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
@@ -75,8 +75,8 @@ export function publicNotification(notification, order) {
     item.fulfillmentMode = order.fulfillmentMode;
   }
   if (order?.fulfillmentMode === "pickup" && order.state === "awaiting_collection") {
-    const status = order.payments?.final_online?.status;
-    item.collectHold = Boolean(status) && status !== "confirmed" && status !== "legacy_confirmed";
+    const final = order.payments?.final_online;
+    item.collectHold = Boolean(final?.status) && !paymentSettled(final) && final.status !== "legacy_confirmed";
   }
   if (notification.userId === order?.clientId && (!notification.appRole || notification.appRole === "client")) {
     const action = finalPaymentAction(order);

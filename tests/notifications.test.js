@@ -209,6 +209,10 @@ test("list inbox stamps collect jobs so the phone can tell pickup from a door de
   assert.equal(listed.notifications[0].collectHold, true);
   assert.equal(listed.notifications[0].orderTitle, "Booth backdrops");
   assert.equal(listed.notifications[0].payments, undefined);
+
+  // Paid in full up front: nothing is held at the counter.
+  store.orders[0].payments.final_online = { status: "not_required", amountMinor: 0 };
+  assert.equal(listInbox(store, "client").notifications[0].collectHold, false);
 });
 
 
@@ -228,6 +232,7 @@ test("old inbox and SSE events carry current client payment action without rewri
   assert.equal(publicNotification({ ...notification, userId: "rider", appRole: "rider" }, order).paymentAction, undefined);
   order.payments.final_online.status = "confirmed";
   assert.equal(publicNotification(notification, order).paymentAction, undefined);
+  assert.equal(publicNotification(notification, { ...order, payments: { initial: { status: "confirmed" }, final_online: { status: "not_required", amountMinor: 0 } } }).paymentAction, undefined);
   order.payments.final_online.status = "not_submitted";
   order.state = "cancelled";
   assert.equal(publicNotification(notification, order).paymentAction, undefined);

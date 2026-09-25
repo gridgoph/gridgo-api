@@ -1,4 +1,4 @@
-import { isContainedPickup } from "./operational-model.js";
+import { isContainedPickup, paymentSettled } from "./operational-model.js";
 import { privilegedAdminMemberships, eligibleRiderIds, finalPaymentAction } from "./notifications.js";
 
 /**
@@ -153,8 +153,8 @@ function collectionPending(order) {
 }
 
 function collectionOwed(order) {
-  const status = (order?.payments?.final_online ?? order?.payments?.balance)?.status;
-  return Boolean(status) && status !== "confirmed" && status !== "legacy_confirmed";
+  const final = order?.payments?.final_online ?? order?.payments?.balance;
+  return Boolean(final?.status) && !paymentSettled(final) && final.status !== "legacy_confirmed";
 }
 
 function resolveCopy(entry, order) {
