@@ -15,6 +15,9 @@ types.setTypeParser(20, (value) => {
 types.setTypeParser(1184, (value) => new Date(value).toISOString());
 types.setTypeParser(1082, (value) => value);
 
+/** The advisory lock every credentialed platform mutation serializes on. */
+export const DOMAIN_MUTATION_LOCK = "gridgo-domain-mutation";
+
 function configurationError(message) {
   return new Error(`${message} Set DATABASE_URL to a PostgreSQL connection string and restart.`);
 }
@@ -57,7 +60,7 @@ export function createDatabase(env = process.env) {
     return (active?.client || pool).query(text, values);
   }
 
-  async function transaction(fn, { lockKey = "gridgo-domain-mutation" } = {}) {
+  async function transaction(fn, { lockKey = DOMAIN_MUTATION_LOCK } = {}) {
     const active = current();
     if (active?.readOnly) throw new Error("Cannot start a write transaction inside a read-only database snapshot");
     if (active) return fn();

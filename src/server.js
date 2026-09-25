@@ -187,6 +187,11 @@ import {
   routeStaffIssueReports,
 } from "./issue-reports.js";
 import {
+  createTracker,
+  isAdminTrackerRoute,
+  isFirstmateTrackerRoute,
+} from "./tracker.js";
+import {
   loadDeviceTokenStore,
   loadStore,
   originalNotificationIds,
@@ -216,6 +221,16 @@ const objectStorage = createObjectStorage(process.env);
 // the gap is loud rather than silent.
 const pushDelivery = routePushDelivery(createPushDeliveryOrDisable(process.env),createApnsDelivery(process.env));
 const supportMailer = createSupportMailer(process.env);
+// Super Admin Tracker over GitHub. Optional: without GITHUB_TRACKER_TOKEN its
+// routes answer 503 tracker_not_configured and nothing else changes.
+const tracker = createTracker({
+  env: process.env,
+  database,
+  storage: objectStorage,
+  load: () => load(),
+  save: (store) => save(store),
+  audit: (store, entry) => audit(store, entry),
+});
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
@@ -1742,6 +1757,8 @@ async function handleRequest(req, res) {
     })) {
       return;
     }
+    // firstmate's service token, not a Clerk session.
+    if (await tracker.routeFirstmate({ req, res, pathname, url, send })) return;
 
     // ---- push registration before there is an account ----
     //
@@ -2191,6 +2208,11 @@ async function handleRequest(req, res) {
         database,
         storage: objectStorage,
       });
+      return;
+    }
+
+    if (isAdminTrackerRoute(pathname)) {
+      await tracker.routeAdmin({ req, res, pathname, url, user, readBody, send });
       return;
     }
 
@@ -5935,6 +5957,12 @@ const server = http.createServer((req, res) => {
     void handleRequest(req, res);
     return;
   }
+  if (mutatesStore && isFirstmateTrackerRoute(pathname)) {
+    // The firstmate service token is not a Clerk session; the route commits
+    // under the tracker's own lock.
+    void handleRequest(req, res);
+    return;
+  }
   if (mutatesStore && issueReportsPathname(pathname)) {
     // Public issue reports carry base64 screenshots well past the 1 MiB JSON
     // cap, so the route reads its own body and commits under its own lock.
@@ -5960,10 +5988,11 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (mutatesStore && (isSupportChatRoute(pathname) || isStaffIssueReportsRoute(pathname))) {
+  if (mutatesStore && (isSupportChatRoute(pathname) || isStaffIssueReportsRoute(pathname) || isAdminTrackerRoute(pathname))) {
     // Clerk-authenticated, but its own tables and lock — do not hold the
     // domain mutation lock while someone is typing to Operations (or marking
-    // an issue report).
+    // an issue report, or while GitHub answers a tracker write; the tracker
+    // takes the domain lock itself only for its final audit commit).
     void readBody(req)
       .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(() => handleRequest(req, res))

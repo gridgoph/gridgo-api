@@ -101,6 +101,13 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 20 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
   },
+  // Evidence a Super Admin attaches to a tracker decision. Super Admin only,
+  // uploaded and read; bound by POST /admin/tracker/:repo/:number/decisions.
+  tracker_decision: {
+    roles: ["super_admin"],
+    maxBytes: 10 * 1024 * 1024,
+    contentTypes: [...CONTENT_TYPES],
+  },
 });
 export const RIDER_DOCUMENT_TYPES = Object.freeze(["drivers_license", "or_cr", "selfie"]);
 const RIDER_DOCUMENT_TYPE_SET = new Set(RIDER_DOCUMENT_TYPES);
@@ -574,6 +581,8 @@ export function markFileDeletePending(file, user, at) {
   if (["verification_document", "rider_verification_document"].includes(file.purpose)) {
     const ownerRole = file.purpose === "verification_document" ? "supplier" : "rider";
     if (!user || !hasRole(user, ownerRole) || user.id !== file.ownerId) forbidden();
+  } else if (file.purpose === "tracker_decision") {
+    if (!user || !hasRole(user, "super_admin") || user.id !== file.ownerId) forbidden();
   } else if (!user || (user.id !== file.ownerId && !["ops_admin", "super_admin"].includes(user.role))) {
     forbidden();
   }
@@ -687,6 +696,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       400,
       "payout_receipt_not_attachable",
       "A payout receipt is bound when the share is released: send its fileId as receiptFileId to POST /orders/:id/milestones/:code/release.",
+    );
+  }
+  if (purpose === "tracker_decision") {
+    fail(
+      400,
+      "tracker_decision_not_attachable",
+      "A tracker attachment is bound when the decision is saved: send its fileId in attachmentIds to POST /admin/tracker/:repo/:number/decisions.",
     );
   }
   if (!KINDS.has(purpose)) {
@@ -1146,6 +1162,11 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
+  // Tracker evidence is the Super Admin's alone; Operations never reads it.
+  if (file.purpose === "tracker_decision") {
+    if (hasRole(user, "super_admin")) return;
+    forbidden();
+  }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === "payment_proof") {
     if (file.ownerId === user.id) return;

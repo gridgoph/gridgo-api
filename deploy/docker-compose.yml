@@ -132,6 +132,10 @@ services:
     expose:
       - "8787"
 
+    # Secrets, and the optional tracker settings (GITHUB_TRACKER_TOKEN,
+    # GITHUB_TRACKER_REPOS, FIRSTMATE_TRACKER_TOKEN), live only in this file
+    # and pass through from it. Never add them under `environment:` — a value
+    # there, even an empty one, overrides the env_file. docs/DEPLOYMENT.md §2.
     env_file:
       - ./gridgo-api.env
 
