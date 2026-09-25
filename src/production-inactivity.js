@@ -13,7 +13,7 @@ import { privilegedAdminMemberships } from "./notifications.js";
 import { activePayoutHold, defaultProductionNudge } from "./operational-model.js";
 
 const WATCHED_STATES = new Set(["payment_authorized", "production", "supplier_self_qc"]);
-const SHOP_PROOF_CODES = new Set(["printing", "packaging_qc"]);
+const SHOP_PROOF_CODES = new Set(["production_started", "printing", "packaging_qc"]);
 
 const SHOP_COPY = {
   payment_authorized: {
@@ -134,12 +134,15 @@ export function nudgeOccurrenceKey(order, n) {
 function proofWord(order) {
   if (order.state !== "production" && order.state !== "supplier_self_qc") return null;
   const milestones = order.payoutMilestones || [];
-  for (const code of ["printing", "packaging_qc"]) {
+  // Escrow-plan orders have one shop proof; legacy four-stage orders two.
+  for (const [code, word] of [
+    ["production_started", "start-of-production"], ["printing", "printing"], ["packaging_qc", "packaging"],
+  ]) {
     const milestone = milestones.find((item) => item.code === code);
     if (!milestone) continue;
     if (milestone.status === "released" || milestone.status === "pof_attached") continue;
     if (Array.isArray(milestone.pofFileIds) && milestone.pofFileIds.length > 0) continue;
-    return code === "packaging_qc" ? "packaging" : "printing";
+    return word;
   }
   return null;
 }

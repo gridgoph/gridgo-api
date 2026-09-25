@@ -1530,15 +1530,16 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
       assert.equal(transitioned.status, 200, `${JSON.stringify(transitioned.body)}\n${instance.output()}`);
       if (state === "production") {
-        // Four stages of the shop's own price, and starting the press pays
-        // nobody: every one of them waits for a photograph and a person.
+        // The escrow split of the shop's own price, snapshotted when the quote
+        // was accepted, and starting the press pays nobody: every stage waits
+        // for its proof and a person.
+        assert.equal(transitioned.body.order.payoutPlanVersion, 2);
         assert.deepEqual(
           transitioned.body.order.payoutMilestones.map(({ code, amountMinor, status }) => ({ code, amountMinor, status })),
           [
-            { code: "printing", amountMinor: 60000, status: "pending_pof" },
-            { code: "packaging_qc", amountMinor: 18000, status: "pending_pof" },
-            { code: "delivered", amountMinor: 30000, status: "pending_pof" },
-            { code: "retention", amountMinor: 12000, status: "pending_pof" },
+            { code: "production_started", amountMinor: 48000, status: "pending_pof" },
+            { code: "delivered", amountMinor: 42000, status: "pending_pof" },
+            { code: "issue_window", amountMinor: 30000, status: "pending_pof" },
           ],
         );
       }

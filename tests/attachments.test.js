@@ -659,6 +659,44 @@ test("delivered POF belongs to the rider and also gates retention", () => {
 });
 
 
+test("an escrow-plan order takes the shop's start-of-production proof and the rider's delivered proof only", () => {
+  const escrow = () => order({
+    state: "production",
+    payoutPlanVersion: 2,
+    payoutMilestones: [
+      { code: "production_started", status: "pending_pof", pofFileIds: [] },
+      { code: "delivered", status: "pending_pof", pofFileIds: [] },
+      { code: "issue_window", status: "pending_pof", pofFileIds: [] },
+    ],
+  });
+  const store = { orders: [escrow()], supplierServices: [] };
+  const shopProof = readyFile("fulfilment_proof", { ownerId: supplier.id, fileId: "file-started" });
+  const started = resolveFileTarget(store, shopProof.purpose, { orderId: "order-a", milestoneCode: "production_started" });
+  assert.doesNotThrow(() => authorizeFileAttach(supplier, shopProof, started));
+  expectError(() => authorizeFileAttach(rider, { ...shopProof, ownerId: rider.id }, started), 403, "forbidden");
+  attachFileReference(shopProof, started);
+  const milestone = started.record.payoutMilestones.find((item) => item.code === "production_started");
+  assert.equal(milestone.status, "pof_attached");
+  assert.deepEqual(milestone.pofFileIds, [shopProof.fileId]);
+
+  const delivered = resolveFileTarget(store, "fulfilment_proof", { orderId: "order-a", milestoneCode: "delivered" });
+  assert.doesNotThrow(() => authorizeFileAttach(rider, readyFile("fulfilment_proof", { ownerId: rider.id }), delivered));
+
+  // The last share waits on the window, not a file, and the legacy stage
+  // codes are not this order's.
+  for (const milestoneCode of ["issue_window", "printing", "packaging_qc", "retention"]) {
+    assert.throws(
+      () => resolveFileTarget(store, "fulfilment_proof", { orderId: "order-a", milestoneCode }),
+      (error) => {
+        assert.equal(error.status, 400);
+        assert.equal(error.code, "invalid_milestone_code");
+        assert.deepEqual(error.details.allowed, ["production_started", "delivered"]);
+        return true;
+      },
+    );
+  }
+});
+
 test("payment receipts stay private to their owner and Operations after order binding", () => {
   const store = { orders: [order()] };
   const receipt = readyFile("payment_proof", { ownerId: client.id, references: [{ type: "order", id: "order-a", field: "payment:final_online:proof" }] });

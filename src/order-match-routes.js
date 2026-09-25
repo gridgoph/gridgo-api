@@ -16,7 +16,7 @@ import {
   selectedCatalogPrice,
 } from "./supplier-catalog.js";
 import {
-  createPayoutMilestones,
+  snapshotPayoutPlan,
   deliveryFeeForDistance,
   deliverySplit,
   distanceMetersBetween,
@@ -678,11 +678,8 @@ function checkout(store, user, cart, body, createId, at) {
     { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: deliveryTotalMinor - initialDeliveryMinor },
   ].filter((allocation) => allocation.amountMinor > 0);
 
-  order.payoutMilestones = createPayoutMilestones({
-    supplierPlatformPayoutMinor: itemSubtotalMinor,
-    supplierSubtotalMinor: itemSubtotalMinor,
-    supplierDownpaymentRateBps: order.supplierDownpaymentRateBps,
-  });
+  // The shop's escrow stages, from its own price and never the client's total.
+  snapshotPayoutPlan(order, { supplierPlatformPayoutMinor: itemSubtotalMinor });
 
   order.invoiceNumber = invoiceNumber(orderId, at);
 

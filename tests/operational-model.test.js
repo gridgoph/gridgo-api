@@ -14,10 +14,12 @@ import {
   moneyReportingForOrder,
   publicOrderFor,
   PAYOUT_STAGES,
+  recordDeliveryProof,
   releaseMilestone,
   roundBps,
   validateOperationalSettings,
 } from "../src/operational-model.js";
+import { CURRENT_PAYOUT_PLAN_VERSION, PAYOUT_PLANS } from "../src/payout-plan.js";
 
 const AT = "2026-08-10T12:00:00.000Z";
 
@@ -268,6 +270,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     commercialCommittedAt: AT,
     ...money,
     ...schedule,
+    payoutPlanVersion: 2,
     payoutMilestones: createPayoutMilestones(money),
     acceptedQuote: {
       payments: structuredClone(schedule.payments),
@@ -296,10 +299,16 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(supplierOrder.supplierSubtotalMinor, 100_000);
   assert.equal(supplierOrder.supplierSettlement.gridgoDeductionsMinor, 0);
   assert.equal(supplierOrder.supplierSettlement.totalSupplierEarningsMinor, 100_000);
-  // The first stage is printing at half the shop's own price, whatever share of
-  // it the client happened to pay up front.
-  assert.equal(supplierOrder.payoutMilestones[0].code, "printing");
-  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 50_000);
+  // The first stage is start of production at 40 percent of the shop's own
+  // price, whatever share of it the client happened to pay up front.
+  assert.equal(supplierOrder.payoutPlanVersion, 2);
+  assert.equal(supplierOrder.payoutMilestones[0].code, "production_started");
+  assert.equal(supplierOrder.payoutMilestones[0].label, "Start of production");
+  assert.equal(supplierOrder.payoutMilestones[0].releaseRequires, "shop_proof");
+  assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 40_000);
+  // The client reads the same plan, in words, without the shop's money.
+  assert.equal(clientOrder.payoutPlanVersion, 2);
+  assert.deepEqual(clientOrder.payoutMilestones.map((m) => m.label), ["Start of production", "Delivered", "Issue window closed"]);
   assert.equal(supplierOrder.supplierSettlement.collectedSupplierPrincipalMinor, 25_000);
   assert.equal(supplierOrder.supplierSettlement.protectedPaymentMinor, 25_000);
   assert.equal("reference" in supplierOrder.payments.initial, false);
@@ -336,6 +345,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal("initialSupplierPrincipalMinor" in riderOrder, false);
   assert.equal("supplierRemainderMinor" in riderOrder, false);
   assert.equal("payoutMilestones" in riderOrder, false);
+  assert.equal("payoutPlanVersion" in riderOrder, false);
   assert.equal("quoteHistory" in riderOrder, false);
   assert.equal("componentLines" in riderOrder.payments.initial, false);
   assert.equal("supplierPrincipalRateBps" in riderOrder.payments.initial, false);
@@ -367,26 +377,50 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   });
 });
 
-test("four stages, summing to exactly what the shop is owed", () => {
+test("each plan sums to exactly what the shop is owed", () => {
   // A stray centavo in the shares would either shortchange the shop or have
   // GRIDGO pay out more than it holds, and both are silent.
-  for (const supplierSubtotalMinor of [100_000, 99_999, 1, 7, 123_457]) {
-    const money = plan({ supplierSubtotalMinor });
-    const milestones = createPayoutMilestones(money);
-    assert.deepEqual(milestones.map((m) => m.code), PAYOUT_STAGES.map((s) => s.code));
-    assert.deepEqual(milestones.map((m) => m.sharePercent), [50, 15, 25, 10]);
-    assert.equal(
-      milestones.reduce((sum, m) => sum + m.amountMinor, 0),
-      money.supplierPlatformPayoutMinor,
-    );
-    for (const milestone of milestones) assert.ok(milestone.amountMinor >= 0);
+  for (const [version, shares] of [[1, [50, 15, 25, 10]], [2, [40, 35, 25]]]) {
+    for (const supplierSubtotalMinor of [100_000, 99_999, 1, 7, 30, 123_457]) {
+      const money = plan({ supplierSubtotalMinor });
+      const milestones = createPayoutMilestones(money, { version });
+      assert.deepEqual(milestones.map((m) => m.code), PAYOUT_PLANS[version].stages.map((stage) => stage.code));
+      assert.deepEqual(milestones.map((m) => m.sharePercent), shares);
+      assert.equal(
+        milestones.reduce((sum, m) => sum + m.amountMinor, 0),
+        money.supplierPlatformPayoutMinor,
+      );
+      for (const milestone of milestones) assert.ok(milestone.amountMinor >= 0);
+    }
+  }
+  // New commitments take the escrow split.
+  assert.equal(CURRENT_PAYOUT_PLAN_VERSION, 2);
+  assert.deepEqual(PAYOUT_STAGES.map((stage) => stage.code), ["production_started", "delivered", "issue_window"]);
+  assert.deepEqual(createPayoutMilestones(plan()).map((m) => m.code), ["production_started", "delivered", "issue_window"]);
+});
+
+test("the escrow split rounds each share half-up and leaves the remainder to the last", () => {
+  const amounts = (payout) => createPayoutMilestones({ supplierPlatformPayoutMinor: payout }).map((m) => m.amountMinor);
+  // 30 x 35% is 10.5: half-up is 11, where banker's rounding would say 10.
+  assert.deepEqual(amounts(30), [12, 11, 7]);
+  // 99,999 x 40% is 39,999.6 and x 35% is 34,999.65; the last takes 25,000.
+  assert.deepEqual(amounts(99_999), [40_000, 35_000, 24_999]);
+  assert.deepEqual(amounts(1), [0, 0, 1]);
+  assert.deepEqual(amounts(0), [0, 0, 0]);
+  for (let payout = 0; payout <= 2_000; payout += 1) {
+    const [first, second, last] = amounts(payout);
+    assert.equal(first, roundBps(payout, 4_000));
+    assert.equal(second, roundBps(payout, 3_500));
+    assert.equal(first + second + last, payout, `payout ${payout}`);
+    assert.ok(last >= 0);
   }
 });
 
-test("nothing releases itself, and nothing releases without a photograph", () => {
+test("a legacy four-stage order: nothing releases itself, and nothing without a photograph", () => {
   const money = plan({ supplierDownpaymentRateBps: 5_000 });
   const schedule = createPaymentSchedule(money);
   schedule.payments.initial.status = "confirmed";
+  // No stored plan version: placed before the escrow split.
   const order = {
     id: "ord-stages",
     fulfillmentMode: "delivery",
@@ -394,7 +428,7 @@ test("nothing releases itself, and nothing releases without a photograph", () =>
     payoutHold: false,
     ...money,
     ...schedule,
-    payoutMilestones: createPayoutMilestones(money),
+    payoutMilestones: createPayoutMilestones(money, { version: 1 }),
   };
   const ops = { id: "user_ops", role: "ops_admin" };
 
@@ -419,7 +453,7 @@ test("nothing releases itself, and nothing releases without a photograph", () =>
   assert.equal(releaseMilestone(order, "packaging_qc", ops, AT, { claims: [] }).status, "released");
 });
 
-test("a stage is never released ahead of the money the client actually sent", () => {
+test("a legacy stage is never released ahead of the money the client actually sent", () => {
   // The older four-stage code never checked this, which is how it could have
   // GRIDGO funding the gap out of its own pocket.
   const money = plan({ supplierDownpaymentRateBps: 5_000 });
@@ -432,7 +466,7 @@ test("a stage is never released ahead of the money the client actually sent", ()
     payoutHold: false,
     ...money,
     ...schedule,
-    payoutMilestones: createPayoutMilestones(money),
+    payoutMilestones: createPayoutMilestones(money, { version: 1 }),
   };
   const ops = { id: "user_ops", role: "ops_admin" };
   for (const milestone of order.payoutMilestones) milestone.pofFileIds = ["file_proof"];
@@ -459,6 +493,98 @@ test("a stage is never released ahead of the money the client actually sent", ()
     order.payoutMilestones.reduce((sum, m) => sum + m.amountMinor, 0),
     money.supplierPlatformPayoutMinor,
   );
+});
+
+test("the escrow split releases each stage on its own proof, and never ahead of the money", () => {
+  const money = plan({ supplierDownpaymentRateBps: 5_000 });
+  const schedule = createPaymentSchedule(money);
+  schedule.payments.initial.status = "confirmed";
+  const order = {
+    id: "ord-escrow",
+    fulfillmentMode: "delivery",
+    state: "production",
+    payoutHold: false,
+    ...money,
+    ...schedule,
+    payoutPlanVersion: 2,
+    payoutMilestones: createPayoutMilestones(money),
+  };
+  const ops = { id: "user_ops", role: "ops_admin" };
+  const store = { claims: [] };
+
+  expectDomainError(() => releaseMilestone(order, "production_started", ops, AT, store), 409, "pof_required");
+  expectDomainError(() => releaseMilestone(order, "delivered", ops, AT, store), 409, "pof_required");
+  // The last share has no file to wait on, only the window.
+  expectDomainError(() => releaseMilestone(order, "issue_window", ops, AT, store), 409, "issue_window_open");
+  // Nobody outside Operations and Super Admin pays a shop.
+  for (const role of ["supplier", "client", "rider"]) {
+    expectDomainError(() => releaseMilestone(order, "production_started", { id: role, role }, AT, store), 403, "forbidden");
+  }
+  // Legacy stage codes are not this order's to release.
+  expectDomainError(() => releaseMilestone(order, "printing", ops, AT, store), 404, "milestone_not_found");
+
+  order.payoutMilestones[0].pofFileIds = ["file_start"];
+  assert.equal(releaseMilestone(order, "production_started", ops, AT, store).status, "released");
+
+  // The rider's delivery evidence is the delivered proof on this plan.
+  recordDeliveryProof(order, "file_drop");
+  assert.equal(order.payoutMilestones[1].status, "pof_attached");
+  assert.deepEqual(order.payoutMilestones[1].pofFileIds, ["file_drop"]);
+  expectDomainError(() => releaseMilestone(order, "delivered", ops, AT, store), 409, "delivery_required");
+
+  // Half the shop's price collected covers the 40 percent, not 75.
+  order.state = "issue_window_open";
+  expectDomainError(() => releaseMilestone(order, "delivered", ops, AT, store), 409, "supplier_principal_not_collected");
+  order.payments.final_online.status = "confirmed";
+
+  // A claim holds every remaining stage.
+  const held = { claims: [{ orderId: order.id, status: "payout_held" }] };
+  expectDomainError(() => releaseMilestone(order, "delivered", ops, AT, held), 409, "payout_held");
+  order.state = "completed";
+  expectDomainError(() => releaseMilestone(order, "issue_window", ops, AT, held), 409, "payout_held");
+
+  assert.equal(releaseMilestone(order, "delivered", ops, AT, store).status, "released");
+  assert.equal(releaseMilestone(order, "issue_window", ops, AT, store).status, "released");
+  assert.equal(
+    order.payoutMilestones.reduce((sum, m) => sum + m.amountMinor, 0),
+    money.supplierPlatformPayoutMinor,
+  );
+});
+
+test("closing the window pays nobody on the escrow split, and still releases legacy retention", () => {
+  const money = plan();
+  const windowOpen = (overrides) => ({
+    clientId: "client-a",
+    state: "issue_window_open",
+    fulfillmentMode: "delivery",
+    payoutHold: false,
+    issueWindowExpiresAt: "2026-08-10T11:59:59.000Z",
+    timeline: [],
+    ...money,
+    payments: { initial: { status: "confirmed" }, final_online: { status: "confirmed" } },
+    paymentAllocations: [
+      { paymentCode: "initial", component: "supplier_principal", amountMinor: money.supplierSubtotalMinor },
+    ],
+    ...overrides,
+  });
+  const escrow = windowOpen({ id: "ord-escrow-window", payoutPlanVersion: 2, payoutMilestones: createPayoutMilestones(money) });
+  const legacy = windowOpen({ id: "ord-legacy-window", payoutMilestones: createPayoutMilestones(money, { version: 1 }) });
+  for (const milestone of legacy.payoutMilestones) milestone.pofFileIds = ["file_drop"];
+  const store = { claims: [], issues: [], settings: defaultOperationalSettings(), orders: [escrow, legacy] };
+
+  // The client's "everything is fine" closes the window on an escrow order ...
+  confirmIssueWindow(store, escrow, { id: "client-a", role: "client" }, AT);
+  assert.equal(escrow.state, "completed");
+  assert.equal(escrow.payoutMilestones.some((m) => m.status === "released"), false);
+  // ... and the clock closes the legacy one, releasing its retention as sold.
+  assert.equal(expireIssueWindows(store, AT), true);
+  assert.equal(legacy.state, "completed");
+  assert.equal(legacy.payoutMilestones.find((m) => m.code === "retention").status, "released");
+
+  // A legacy order never takes the rider's evidence as its delivered proof.
+  const untouched = { payoutMilestones: createPayoutMilestones(money, { version: 1 }) };
+  recordDeliveryProof(untouched, "file_drop");
+  assert.equal(untouched.payoutMilestones.find((m) => m.code === "delivered").status, "pending_pof");
 });
 
 test("elapsed global issue window completes an already settled order", () => {

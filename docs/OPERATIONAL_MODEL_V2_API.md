@@ -1020,18 +1020,42 @@ Exact rejection errors:
 
 ## Supplier payout milestones
 
+A shop is paid across proof-gated stages, every one a share of the shop's own cost (`supplierPriceMinor`, less anything the client paid the shop directly: `supplierPlatformPayoutMinor`) and never of the client's total, service fee, or delivery fee. Each order snapshots the plan it was committed under as `payoutPlanVersion`, like `downpaymentPercent` and the rider split; changing the current plan never reshapes an order already placed. The shares live in one place, `src/payout-plan.js`, mirrored per version by the database invariant.
+
+**Plan 2, the escrow split** (every order committed from 25 Sep 2026; gridgo-api#68, #73):
+
+| Position | `code` | `label` | `sharePercent` | `releaseRequires` | Releasable when |
+|---:|---|---|---:|---|---|
+| 1 | `production_started` | Start of production | 40 | `shop_proof` | the assigned shop attached its start-of-production Proof of Fulfilment and the order is in `production` or later |
+| 2 | `delivered` | Delivered | 35 | `delivery_proof` | the client has the job (`delivered`, `issue_window_open`, `completed`, `payout_released`) with delivery proof. The rider's `POST /dispatch/:id/delivery` evidence is recorded as this proof automatically; the rider may also attach a `fulfilment_proof` to it |
+| 3 | `issue_window` | Issue window closed | 25 | `issue_window_closed` | the complaint window has closed (`completed` or `payout_released`) -- the timer ended or the client confirmed the job fine -- with no active claim. It has no file of its own |
+
+**Plan 1, legacy four stages** (every order committed earlier, including every row that predates the column): `printing` 50% (`shop_proof`), `packaging_qc` 15% (`shop_proof`, job packed and ready for a rider), `delivered` 25% (`delivery_proof`, a rider-attached `fulfilment_proof`), `retention` 10% (`issue_window_closed`, inherits the delivered proof). These orders release exactly as before, including the system release of `retention` when the window closes with proof attached.
+
+Amounts round half-up per stage and the last stage takes the remainder, so the stages sum exactly to `supplierPlatformPayoutMinor`. Statuses are `pending_pof | pof_attached | released`.
+
+**Who pays.** Only Operations and Super Admin release money (gridgo-web#58). On plan 2 nothing releases on its own: not a state change, not the window timer, and not the client's `POST /orders/:id/confirm`, which only closes the complaint window and makes the last share releasable.
+
+### Order JSON
+
+Every order projection that carries stages carries the plan with it, so a screen renders whatever stages the order has, in array order, instead of a hard-coded list of four codes:
+
 ```json
 {
+  "payoutPlanVersion": 2,
   "payoutMilestones": [
-    { "code": "printing", "sharePercent": 50, "amountMinor": 50000, "status": "pending_pof", "pofFileIds": [] },
-    { "code": "packaging_qc", "sharePercent": 15, "amountMinor": 15000, "status": "pending_pof", "pofFileIds": [] },
-    { "code": "delivered", "sharePercent": 25, "amountMinor": 25000, "status": "pending_pof", "pofFileIds": [] },
-    { "code": "retention", "sharePercent": 10, "amountMinor": 10000, "status": "pending_pof", "pofFileIds": [] }
+    { "code": "production_started", "label": "Start of production", "sharePercent": 40, "amountMinor": 40000, "releaseRequires": "shop_proof", "status": "released", "pofFileIds": ["file_a"], "releasedAt": "2026-09-26T02:00:00.000Z", "releasedBy": "user_ops" },
+    { "code": "delivered", "label": "Delivered", "sharePercent": 35, "amountMinor": 35000, "releaseRequires": "delivery_proof", "status": "pof_attached", "pofFileIds": ["file_b"], "releasedAt": null, "releasedBy": null },
+    { "code": "issue_window", "label": "Issue window closed", "sharePercent": 25, "amountMinor": 25000, "releaseRequires": "issue_window_closed", "status": "pending_pof", "pofFileIds": [], "releasedAt": null, "releasedBy": null }
   ]
 }
 ```
 
-A shop is paid across four stages of the supplier subtotal (never the client total with the service fee): `printing` 50%, `packaging_qc` 15%, `delivered` 25%, and `retention` 10%, with `retention` absorbing rounding so the four sum exactly. Statuses are `pending_pof | pof_attached | released`. Nothing releases on a state change alone: the shop attaches a Proof of Fulfilment for `printing` and `packaging_qc`, the rider's delivery evidence serves `delivered` and is inherited by `retention`, and Operations releases each share once it has looked at the proof. `packaging_qc` means the job is packed and ready for a rider; the joint supplier/rider quality check happens at pickup and is recorded by the pickup checklist, not by this milestone. `retention` releases automatically when the issue window closes with proof attached.
+- `payoutPlanVersion`: `1` (legacy four stages) or `2` (escrow split); `null` until a commitment creates the stages.
+- `label`: the shop-facing name. Render it rather than mapping `code` yourself; a future plan adds codes without a screen change.
+- `releaseRequires`: `shop_proof | delivery_proof | issue_window_closed`, what the release desk is waiting on.
+- `sharePercent` and `amountMinor` are the stored snapshot. On plan 2 the `issue_window` stage stays `pending_pof` until released; it never needs a file.
+- Visibility is unchanged: Operations/Super Admin and the assigned shop see amounts; the owning client sees codes, labels, percentages and statuses without `amountMinor`, `reference`, or `receiptFileId`; riders receive neither `payoutMilestones` nor `payoutPlanVersion`.
 
 Release:
 
@@ -1049,7 +1073,7 @@ POST /orders/:id/milestones/:code/release
 
 `note`, `reference`, and `receiptFileId` are all optional. `reference` is the wallet's own reference number (trimmed, up to 80 characters; `400 invalid_payout_reference` beyond that). `receiptFileId` binds the caller's own ready `payout_receipt` upload (`docs/STORAGE_API.md`) to the share; anything else is `400 invalid_payout_receipt`, and a receipt already bound elsewhere is `409 file_already_attached`. Both are validated before the share moves. The released milestone then carries `reference` and `receiptFileId`, the order lists the file in `payoutReceiptFileIds`, the audit row records both, and the shop's `shop_payout_released` notification quotes the reference. Clients never receive either field.
 
-Only Operations/Super Admin. A share without proof is `409 pof_required`; a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before delivery is `409 delivery_required`, `retention` before the window closes is `409 issue_window_open`); insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold is `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
+Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release in any order their own gates allow; in practice that is plan order. A share that waits on a file and has none is `409 pof_required` (`production_started`, `delivered`; legacy `printing`, `packaging_qc`, `delivered`, `retention`); a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before the client has the job is `409 delivery_required`; `issue_window` or `retention` before the window closes is `409 issue_window_open`); a code the order does not carry is `404 milestone_not_found`; insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold blocks every remaining stage with `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
 
 ## Order states and transitions
 
@@ -1213,7 +1237,7 @@ POST /dispatch/:id/delivery
 { "evidenceFileId": "file_123", "evidenceType": "photo" }
 ```
 
-`evidenceType` is `photo | signature`; signature is allowed when the camera cannot be used. The assigned rider, passed checklist/active transport, confirmed digital balance, and attached ready evidence are required. Success stores `deliveryEvidence`, appends delivered history, automatically releases eligible remaining supplier principal, then opens:
+`evidenceType` is `photo | signature`; signature is allowed when the camera cannot be used. The assigned rider, passed checklist/active transport, confirmed digital balance, and attached ready evidence are required. Success stores `deliveryEvidence`, records it as the plan-2 `delivered` stage's proof (`pof_attached`, nothing released), appends delivered history, then opens:
 
 ```json
 {
@@ -1223,7 +1247,7 @@ POST /dispatch/:id/delivery
 }
 ```
 
-The hours snapshot comes from the one global setting. Request processing and the bounded periodic worker expire elapsed windows transactionally; worker scheduling is defined in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope). A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed`; supplier principal was already released at delivery unless an active hold prevented it.
+The hours snapshot comes from the one global setting. Request processing and the bounded periodic worker expire elapsed windows transactionally; worker scheduling is defined in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope). A timely client issue auto-creates a held claim; a late issue returns `409 issue_window_closed`. With no active hold, expiry sets `completed`, which makes the plan-2 `issue_window` share releasable by Operations; it releases nothing itself (a legacy order's `retention` still releases here).
 
 The window has a second ending. The owning client may confirm the order arrived with no problems:
 
@@ -1231,7 +1255,7 @@ The window has a second ending. The owning client may confirm the order arrived 
 POST /orders/:id/confirm
 ```
 
-It performs the same completion the expiry sweep performs -- `completed`, a timeline entry in the client's name, and the retention share released when the rider's evidence already covers it -- only now rather than at expiry. It answers `200 { order }`, `409 issue_window_not_open` outside the window, and `409 issue_open` while a report or payout hold is active on the order; a client cannot both report a problem and call the job clean.
+It performs the same completion the expiry sweep performs -- `completed` and a timeline entry in the client's name -- only now rather than at expiry. It pays nobody: on a plan-2 order the `issue_window` share becomes releasable by Operations or Super Admin; only a legacy order still has its `retention` released here when the rider's evidence already covers it. It answers `200 { order }`, `409 issue_window_not_open` outside the window, and `409 issue_open` while a report or payout hold is active on the order; a client cannot both report a problem and call the job clean.
 
 ## Persistence contract
 

@@ -154,7 +154,7 @@ import {
   carriedToOffice,
   confirmIssueWindow,
   createPaymentSchedule,
-  createPayoutMilestones,
+  snapshotPayoutPlan,
   defaultOperationalSettings,
   defaultProductionNudge,
   estimatePriceRange,
@@ -167,6 +167,7 @@ import {
   PICKUP_CHECK_CODES,
   PICKUP_SIGN_OFF_PROMPT,
   publicOrderFor,
+  recordDeliveryProof,
   releaseMilestone,
   validateOperationalSettings,
 } from "./operational-model.js";
@@ -5366,7 +5367,7 @@ async function handleRequest(req, res) {
           order.riderId = null;
         }
         order.priceRange.deliveryFeeStatus = "final";
-        order.payoutMilestones = createPayoutMilestones(order);
+        snapshotPayoutPlan(order);
         order.state = "awaiting_initial_payment";
         order.updatedAt = committedAt;
         order.timeline.push({
@@ -5805,6 +5806,7 @@ async function handleRequest(req, res) {
         riderId: user.id,
         recordedAt: deliveredAt,
       };
+      recordDeliveryProof(order, evidenceFileId);
       if (carriedToOffice(order)) {
         order.state = "awaiting_collection";
         order.awaitingCollectionAt = deliveredAt;

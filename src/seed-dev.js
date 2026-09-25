@@ -6,6 +6,7 @@ import { authConfiguration, clerkClientProfile, createClerkBackend } from "./aut
 import { createDatabase } from "./database.js";
 import { createObjectStorage } from "./object-storage.js";
 import { createPayoutMilestones } from "./operational-model.js";
+import { CURRENT_PAYOUT_PLAN_VERSION } from "./payout-plan.js";
 import { loadStore, saveStore } from "./postgres-store.js";
 import { notifyOrderParties } from "./client-order-notifications.js";
 import { seedReferenceData } from "./seed.js";
@@ -1464,28 +1465,26 @@ const DEV_QUEUE = [
 ];
 
 /*
- Where each stage of a seeded job has got to.
+ Where each stage of a seeded job has got to, under the escrow plan every new
+ order is placed on (40/35/25 of the shop's own price).
 
  Written back from the state rather than forward from nothing: a job on the
- press has its printing photo filed and released, a packed one has both, and a
- collected one is waiting on the counter with its delivered share still owed.
- Retention is never released here, because no seeded job has sat out a full
- issue window.
+ press has its start-of-production photo filed and released, and a collected
+ one is waiting on the counter with its delivered share still owed. The last
+ share is never released here, because no seeded job has sat out a full issue
+ window.
 */
 function seedPayoutStages(subtotalMinor, state, paymentStage, at) {
   const released = new Set();
   const proven = new Set();
-  const printed = ["production", "supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
-  const packed = ["supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
-  if (printed.includes(state)) proven.add("printing");
-  if (packed.includes(state)) proven.add("packaging_qc");
-  // Only what the client's money actually covers. The first stage is half the
-  // shop's price and the downpayment is three quarters of the whole order, so
-  // printing clears on the downpayment and packing waits for the balance.
-  if (paymentStage !== "submitted" && proven.has("printing")) released.add("printing");
-  if (paymentStage === "settled" && proven.has("packaging_qc")) released.add("packaging_qc");
+  const started = ["production", "supplier_self_qc", "ready_for_dispatch", "out_for_delivery", "awaiting_collection"];
+  if (started.includes(state)) proven.add("production_started");
+  // Only what the client's money actually covers. The first stage is 40
+  // percent of the shop's price and the downpayment is three quarters of the
+  // whole order, so it clears on the downpayment.
+  if (paymentStage !== "submitted" && proven.has("production_started")) released.add("production_started");
 
-  return createPayoutMilestones({ supplierPlatformPayoutMinor: subtotalMinor }).map((milestone) => {
+  return createPayoutMilestones({ supplierPlatformPayoutMinor: subtotalMinor }, { version: CURRENT_PAYOUT_PLAN_VERSION }).map((milestone) => {
     if (released.has(milestone.code)) {
       return {
         ...milestone,
@@ -1670,13 +1669,14 @@ async function seedDevelopmentQueue(database, clientId, now) {
           },
         },
         /*
-         The four stages a shop is paid across, at the point this job has
-         actually reached.
+         The stages a shop is paid across, at the point this job has actually
+         reached, under the plan they were split by.
 
          Without them the shop's money screen opens empty on every seeded job,
          which is the one screen a shop checks daily -- and a demo that shows a
          shop nothing about its own earnings teaches it the app has none.
         */
+        payoutPlanVersion: CURRENT_PAYOUT_PLAN_VERSION,
         payoutMilestones: seedPayoutStages(itemSubtotalMinor, entry.state, stage, at),
         createdAt: at,
         updatedAt: at,

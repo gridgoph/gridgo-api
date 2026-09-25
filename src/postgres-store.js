@@ -65,7 +65,7 @@ const TABLES = [
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
-  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
@@ -414,6 +414,8 @@ function rowsFromStore(store) {
       online_due_minor: money(order.onlineDueMinor, "order.onlineDueMinor"), direct_store_due_minor: money(order.directStoreDueMinor, "order.directStoreDueMinor"),
       supplier_platform_payout_minor: money(order.supplierPlatformPayoutMinor, "order.supplierPlatformPayoutMinor"),
       commercial_committed_at: order.commercialCommittedAt ?? null, money_model_version: order.moneyModelVersion ?? 1,
+      // An order with no stored plan was committed under the four-stage plan.
+      payout_plan_version: order.payoutPlanVersion ?? 1,
       payout_hold: Boolean(order.payoutHold), pickup_lat: order.pickup?.lat ?? null, pickup_lng: order.pickup?.lng ?? null,
       pickup_label: order.pickup?.label ?? null, dropoff_lat: order.dropoff?.lat ?? null, dropoff_lng: order.dropoff?.lng ?? null,
       dropoff_label: order.dropoff?.label ?? null, issue_window_opened_at: order.issueWindowOpenedAt ?? null,
@@ -425,7 +427,7 @@ function rowsFromStore(store) {
       cancelled_at: order.cancelledAt ?? null, cancelled_by: order.cancelledBy ?? null,
       cancellation_reason: order.cancellationReason ?? null,
       created_at: order.createdAt, updated_at: order.updatedAt, position,
-      data: without(order, ["readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
+      data: without(order, ["readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutPlanVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
     });
     for (const [paymentPosition, code] of ["initial", "final_online"].entries()) {
       const payment = order.payments?.[code];
@@ -964,6 +966,7 @@ export async function loadStore(database) {
       supplierPlatformPayoutMinor: row.supplier_platform_payout_minor,
       commercialCommittedAt: row.commercial_committed_at,
       moneyModelVersion: row.money_model_version,
+      payoutPlanVersion: row.payout_plan_version,
       payoutHold: row.payout_hold,
       pickup: row.pickup_lat == null ? null : { lat: row.pickup_lat, lng: row.pickup_lng, label: row.pickup_label },
       dropoff: row.dropoff_lat == null ? null : { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label },
