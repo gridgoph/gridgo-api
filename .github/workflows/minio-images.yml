@@ -14,7 +14,7 @@ name: MinIO images
 on:
   workflow_dispatch:
   push:
-    branches: [dev, main]
+    branches: [dev, main, fm/gg-minio-images] # TEMP: drop fm/ before merge
     paths:
       - .github/workflows/minio-images.yml
       - docker/minio-images/**
