@@ -14,7 +14,7 @@ name: MinIO images
 on:
   workflow_dispatch:
   push:
-    branches: [dev, main, fm/gg-minio-images] # TEMP: drop fm/ before merge
+    branches: [dev, main]
     paths:
       - .github/workflows/minio-images.yml
       - docker/minio-images/**
@@ -46,7 +46,8 @@ jobs:
             commit: ee72571936f15b0e65dc8b4a231a4dd445e5ccb6
             dockerfile: docker/minio-images/mc.Dockerfile
     env:
-      REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:${{ matrix.release }}
+      # Registry tags are case-sensitive; never lowercase the release tag.
+      REF: ghcr.io/gridgoph/${{ matrix.name }}:${{ matrix.release }}
       NAME: ${{ matrix.name }}
       RELEASE: ${{ matrix.release }}
       COMMIT: ${{ matrix.commit }}
@@ -64,7 +65,6 @@ jobs:
         id: existing
         run: |
           set -euo pipefail
-          REF="${REF,,}"
           if out="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' 2>&1)"; then
             digest="$(jq -r .digest <<<"$out")"
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -114,7 +114,6 @@ jobs:
       - name: Verify the published image and record its digest
         run: |
           set -euo pipefail
-          REF="${REF,,}"
           digest="${PUSHED:-$EXISTING}"
           [ -n "$digest" ]
           pinned="${REF}@${digest}"

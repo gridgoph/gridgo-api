@@ -389,7 +389,20 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 | Assume object put + database commit are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
 | Delete referenced evidence on uploader request | Prohibited for every purpose except `rider_verification_document` (`409 file_in_use`). A rider deleting their own evidence invalidates the backing rider-document rows in the same transaction instead of orphaning them. |
 | API uses root credentials | Prohibited; Compose provisions a separate bucket-policy API user. Root credentials are init/console only. |
-| Floating MinIO image | Prohibited; both `quay.io/minio/minio` and `quay.io/minio/mc` use pinned release tags. Docker Hub `minio/minio` is withdrawn. |
+| Floating MinIO image | Prohibited; compose and CI smoke pin GRIDGO's own `ghcr.io/gridgoph/minio` and `ghcr.io/gridgoph/mc` by release tag **and** digest. See [MinIO images](#minio-images). |
+
+## MinIO images
+
+Upstream withdrew the MinIO images GRIDGO used to pin: `quay.io/minio/minio` and `quay.io/minio/mc` release tags return "no such manifest", and Docker Hub `minio/minio` / `minio/mc` deny anonymous pulls. GRIDGO therefore builds the same releases itself from the official AGPL-3.0 source and publishes them as private GHCR packages linked to this repository (same access as `ghcr.io/gridgoph/gridgo-api`):
+
+| Image | Upstream source | Pinned reference |
+| --- | --- | --- |
+| MinIO server | `github.com/minio/minio` tag `RELEASE.2025-07-23T15-54-02Z`, commit `7ced9663e6a791fef9dc6be798ff24cda9c730ac` | `ghcr.io/gridgoph/minio:RELEASE.2025-07-23T15-54-02Z@sha256:ec083fa6b02af8f3f971def273b3ab2f1a102ca0aa74e6b45c0bcb462f0f5cfe` |
+| mc | `github.com/minio/mc` tag `RELEASE.2025-07-21T05-28-08Z`, commit `ee72571936f15b0e65dc8b4a231a4dd445e5ccb6` | `ghcr.io/gridgoph/mc:RELEASE.2025-07-21T05-28-08Z@sha256:e114957171327027e2440679742baff3dfb4acccf883471061b070926dad7342` |
+
+- Build definitions are `docker/minio-images/{minio,mc}.Dockerfile`; `.github/workflows/minio-images.yml` builds, version-checks, and publishes them (linux/amd64 and linux/arm64). Each build clones the tag, refuses to continue unless it resolves to the pinned commit, uses the go.mod `toolchain` with `GOTOOLCHAIN=local` and `CGO_ENABLED=0`, and stamps upstream's own release ldflags, so `minio --version` / `mc --version` report the exact release and commit. OCI labels carry the upstream source URL, commit, release, and license.
+- The server image keeps the upstream entrypoint, `curl` (compose healthchecks use it), `/data`, and root as its user, because existing `gridgo_minio_data` volumes were written by the root-run upstream image. The `mc` image keeps `/bin/sh` for the compose/CI init scripts and runs as uid 10001.
+- A published tag is never re-pushed; the workflow only re-verifies an existing tag and reports its digest. Moving to a new MinIO release means new Dockerfile pins, a new tag, and updating every digest reference (both compose files, the deploy smoke job, and this table) together.
 
 ## PostgreSQL reconciliation
 

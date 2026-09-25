@@ -89,7 +89,7 @@ Firstmate supplies production values and performs these steps during the cutover
 
 1. Copy the reviewed `deploy/docker-compose.yml` to `~/gridgo/api/docker-compose.yml`. A merge does not copy it.
 2. Install the four secret files above with correct ownership/mode.
-3. Pull the reviewed image and PostgreSQL 17 image.
+3. Pull the reviewed image and PostgreSQL 17 image. The MinIO and `mc` images are GRIDGO's own private `ghcr.io/gridgoph/{minio,mc}` packages pinned by digest (`docs/STORAGE_API.md#minio-images`); they need the same GHCR login as the API image.
 4. Start only PostgreSQL and wait for its healthcheck.
 5. Run all ordered forward migrations.
 6. Run the idempotent reference seed.
