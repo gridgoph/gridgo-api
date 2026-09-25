@@ -2,6 +2,14 @@ import crypto from "node:crypto";
 
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { opsPayoutAccountProjection } from "./payout-account.js";
+import {
+  CURRENT_PAYOUT_PLAN_VERSION,
+  LEGACY_PAYOUT_PLAN_VERSION,
+  PAYOUT_PLANS,
+  payoutPlanVersionOf,
+  payoutStageFor,
+  payoutStageLabel,
+} from "./payout-plan.js";
 
 const BPS_DENOMINATOR = 10_000n;
 const BPS_HALF = 5_000n;
@@ -538,29 +546,26 @@ export function estimatePriceRange({ supplierSubtotalCandidatesMinor }) {
 }
 
 /*
- The four stages a shop is paid across.
+ The stages a shop is paid across.
 
- Not one payment at the end: a shop that has printed the run and packed it has
- done most of the work, and waiting for a rider to finish before any of it
- arrives is what makes a small press fund GRIDGO's float. The shares are the
- captain's, against the shop's own price.
+ Not one payment at the end: a shop that has started the run has committed its
+ material, and waiting for a rider to finish before any of it arrives is what
+ makes a small press fund GRIDGO's float. The shares are the captain's, against
+ the shop's own price, and live in `src/payout-plan.js`.
 
- The last stage takes the rounding remainder so the four always sum to exactly
- what the shop is owed. It is the smallest of them and the last to move, so a
- stray centavo there can never overpay an earlier release.
+ The last stage takes the rounding remainder so the stages always sum to
+ exactly what the shop is owed. It is the last to move, so a stray centavo
+ there can never overpay an earlier release.
 */
-export const PAYOUT_STAGES = Object.freeze([
-  Object.freeze({ code: "printing", shareBps: 5_000 }),
-  Object.freeze({ code: "packaging_qc", shareBps: 1_500 }),
-  Object.freeze({ code: "delivered", shareBps: 2_500 }),
-  Object.freeze({ code: "retention", shareBps: 1_000 }),
-]);
+export const PAYOUT_STAGES = PAYOUT_PLANS[CURRENT_PAYOUT_PLAN_VERSION].stages;
 
-export function createPayoutMilestones(money) {
+export function createPayoutMilestones(money, { version = CURRENT_PAYOUT_PLAN_VERSION } = {}) {
+  const plan = PAYOUT_PLANS[version];
+  if (!plan) throw new TypeError(`unknown payout plan version ${version}`);
   const payoutBase = finiteMinor(money?.supplierPlatformPayoutMinor, "supplierPlatformPayoutMinor");
   let allocated = 0;
-  return PAYOUT_STAGES.map((stage, index) => {
-    const last = index === PAYOUT_STAGES.length - 1;
+  return plan.stages.map((stage, index) => {
+    const last = index === plan.stages.length - 1;
     const amountMinor = last ? payoutBase - allocated : roundBps(payoutBase, stage.shareBps);
     allocated += amountMinor;
     return {
@@ -573,6 +578,36 @@ export function createPayoutMilestones(money) {
       releasedBy: null,
     };
   });
+}
+
+/**
+ * Snapshot the current payout plan onto an order being committed.
+ *
+ * The version and the stages move together: the database refuses stages that
+ * do not match the version stored beside them.
+ */
+export function snapshotPayoutPlan(order, money = order) {
+  order.payoutPlanVersion = CURRENT_PAYOUT_PLAN_VERSION;
+  order.payoutMilestones = createPayoutMilestones(money, { version: CURRENT_PAYOUT_PLAN_VERSION });
+  return order.payoutMilestones;
+}
+
+/*
+ The rider's delivery evidence is the escrow plan's delivery proof.
+
+ Recording delivery already demands a ready photo or signature the rider
+ attached; asking the rider to file the same picture a second time as a Proof
+ of Fulfilment only leaves the delivered share waiting on a step nobody takes.
+ Legacy four-stage orders keep their own rule: the rider files the delivered
+ proof and retention inherits it.
+*/
+export function recordDeliveryProof(order, fileId) {
+  if (payoutPlanVersionOf(order) === LEGACY_PAYOUT_PLAN_VERSION || !fileId) return;
+  const delivered = (order.payoutMilestones || []).find((item) => item.code === "delivered");
+  if (!delivered) return;
+  if (!Array.isArray(delivered.pofFileIds)) delivered.pofFileIds = [];
+  if (!delivered.pofFileIds.includes(fileId)) delivered.pofFileIds.push(fileId);
+  if (delivered.status === "pending_pof") delivered.status = "pof_attached";
 }
 
 export function collectedSupplierPrincipalMinor(order) {
@@ -667,38 +702,11 @@ export function activePayoutHold(store, order) {
  job even ours to pay on, is a claim holding it, is there anything to look at,
  has the work this stage names actually happened, and has the client's money
  arrived to cover it.
-*/
-const STAGE_GATES = Object.freeze({
-  printing: Object.freeze({
-    states: Object.freeze([
-      "production", "supplier_self_qc", "ready_for_dispatch", "rider_assigned",
-      "picked_up", "out_for_delivery", "awaiting_collection", "delivered",
-      "issue_window_open", "completed", "payout_released",
-    ]),
-    code: "milestone_not_reached",
-    message: "The shop has not started this job yet. Printing is released once production is under way.",
-  }),
-  packaging_qc: Object.freeze({
-    states: Object.freeze([
-      "supplier_self_qc", "ready_for_dispatch", "rider_assigned", "picked_up",
-      "out_for_delivery", "awaiting_collection", "delivered", "issue_window_open",
-      "completed", "payout_released",
-    ]),
-    code: "milestone_not_reached",
-    message: "The job is not packed and ready for a rider yet. Packaging is released once it is.",
-  }),
-  delivered: Object.freeze({
-    states: Object.freeze(["delivered", "issue_window_open", "completed", "payout_released"]),
-    code: "delivery_required",
-    message: "The client does not have this job yet. Record delivery or the counter hand-over first.",
-  }),
-  retention: Object.freeze({
-    states: Object.freeze(["completed", "payout_released"]),
-    code: "issue_window_open",
-    message: "The client can still report a problem with this order. Retention is released once that window closes.",
-  }),
-});
 
+ Which stages exist, which of them wait on a proof, and where each may be
+ released all come from the plan the order was committed under
+ (`src/payout-plan.js`), so a legacy four-stage order keeps its own rules.
+*/
 export function releaseMilestone(order, code, actor, at, store = null) {
   if (!actor || !["ops_admin", "super_admin", "system"].includes(actor.role)) {
     fail(403, "forbidden", "Only Operations or Super Admin can release a supplier payout milestone.");
@@ -728,7 +736,11 @@ export function releaseMilestone(order, code, actor, at, store = null) {
       { milestoneCode: code },
     );
   }
-  if (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0) {
+  const stage = payoutStageFor(order, code);
+  if (!stage) {
+    fail(409, "unknown_milestone", "That payout stage is not one this platform releases.", { milestoneCode: code });
+  }
+  if (stage.requiresProof && (!Array.isArray(milestone.pofFileIds) || milestone.pofFileIds.length === 0)) {
     fail(
       409,
       "pof_required",
@@ -736,12 +748,8 @@ export function releaseMilestone(order, code, actor, at, store = null) {
       { milestoneCode: code },
     );
   }
-  const gate = STAGE_GATES[code];
-  if (!gate) {
-    fail(409, "unknown_milestone", "That payout stage is not one this platform releases.", { milestoneCode: code });
-  }
-  if (!gate.states.includes(order.state)) {
-    fail(409, gate.code, gate.message, { milestoneCode: code, state: order.state });
+  if (!stage.states.includes(order.state)) {
+    fail(409, stage.refusal.code, stage.refusal.message, { milestoneCode: code, state: order.state });
   }
 
   /*
@@ -890,6 +898,26 @@ export function publicOrderFor(order, user, store = null) {
   // A checkout order placed before the split was snapshotted was 75/25.
   const downpaymentPercent = orderDownpaymentPercent(order);
   if (downpaymentPercent != null) publicRecord.downpaymentPercent = downpaymentPercent;
+  /*
+   Which payout plan the order was committed under, and every stage in words.
+
+   Orders placed before the escrow split keep four stages and newer ones have
+   three, so a screen renders whatever stages the order carries -- in their
+   order, with their label and what each waits on -- instead of a list of codes
+   it had to know in advance. Null until a commitment creates the stages.
+  */
+  const milestones = Array.isArray(publicRecord.payoutMilestones) ? publicRecord.payoutMilestones : [];
+  publicRecord.payoutPlanVersion = milestones.length ? payoutPlanVersionOf(order) : null;
+  if (milestones.length) {
+    publicRecord.payoutMilestones = milestones.map((milestone) => {
+      const stage = payoutStageFor(order, milestone.code);
+      return {
+        ...milestone,
+        label: stage?.label ?? payoutStageLabel(milestone.code),
+        releaseRequires: stage?.releaseRequires ?? null,
+      };
+    });
+  }
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
@@ -975,6 +1003,7 @@ export function publicOrderFor(order, user, store = null) {
   }
   if (rider) {
     delete publicRecord.payoutMilestones;
+    delete publicRecord.payoutPlanVersion;
     delete publicRecord.quoteHistory;
     delete publicRecord.supplierDownpaymentRateBps;
     delete publicRecord.initialSupplierPrincipalMinor;
@@ -1078,14 +1107,18 @@ export function issueWindowExpiresAt(openedAt, issueWindowHours) {
 /*
  Closing the issue window is one transition with two triggers: the clock, and
  the client saying the order arrived fine. Both end the same way -- the order
- completes and the retention share the rider's evidence already covers is
- released -- so both go through here, and only the timeline note says which.
+ completes -- so both go through here, and only the timeline note says which.
+
+ Closing the window pays nobody on an escrow-plan order: its last share now
+ waits for Operations or Super Admin (gridgo-web#58). Only a legacy four-stage
+ order still has its retention released here, exactly as it was sold.
 */
 function closeIssueWindow(store, order, at, { by, note }) {
   order.state = "completed";
   order.updatedAt = at;
   if (!Array.isArray(order.timeline)) order.timeline = [];
   order.timeline.push({ at, state: "completed", by, note });
+  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION) return;
   const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
   if (retention?.pofFileIds?.length) {
     releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);
@@ -1121,11 +1154,12 @@ export function expireIssueWindows(store, at, {limit = 100} = {}) {
  The client confirming the order arrived with no problems.
 
  It is the issue window's other ending. Rather than sit out the clock, the
- owning client says the job is fine, the window closes now, and the shop's
- retention is released today instead of tomorrow. The refusals are the two
- things the clock would also have waited on: the window has to be open, and
- nothing can be holding the payout -- a client with an open report cannot
- also call the job clean.
+ owning client says the job is fine and the window closes now. It pays nobody:
+ the shop's last share becomes releasable by Operations, and only a legacy
+ four-stage order still has its retention released on the spot. The refusals
+ are the two things the clock would also have waited on: the window has to be
+ open, and nothing can be holding the payout -- a client with an open report
+ cannot also call the job clean.
 */
 export function confirmIssueWindow(store, order, actor, at) {
   if (order.state !== "issue_window_open") {

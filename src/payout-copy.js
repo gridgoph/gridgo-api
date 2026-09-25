@@ -15,11 +15,4 @@ export function formatMinorPhp(amountMinor) {
 }
 
 /** What the shop calls each stage. Never the platform's own code. */
-export function payoutStageLabel(code) {
-  return ({
-    printing: "Printing",
-    packaging_qc: "Packaging",
-    delivered: "Delivered",
-    retention: "Retention",
-  })[code] || "Payout";
-}
+export { payoutStageLabel } from "./payout-plan.js";

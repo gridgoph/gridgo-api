@@ -48,7 +48,8 @@ function committedOrder(id, options) {
     payoutHold: false,
     pickup: SHOP,
     dropoff: options.fulfillmentMode === "delivery" ? DROPOFF : null,
-    payoutMilestones: createPayoutMilestones(money),
+    payoutPlanVersion: options.payoutPlanVersion ?? 2,
+    payoutMilestones: createPayoutMilestones(money, { version: options.payoutPlanVersion ?? 2 }),
     timeline: [],
     createdAt: AT,
     updatedAt: AT,
@@ -101,6 +102,14 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       paymentPlan: "pickup_downpayment_store",
       supplierDownpaymentRateBps: 2_500,
     }),
+    // Placed before the escrow split: four stages under plan 1.
+    committedOrder("legacy_four_stage", {
+      supplierSubtotalMinor: 99_999,
+      fulfillmentMode: "pickup",
+      paymentPlan: "pickup_full_online",
+      supplierDownpaymentRateBps: 10_000,
+      payoutPlanVersion: 1,
+    }),
     {
       id: "uncommitted_target",
       clientId: "money_client",
@@ -137,6 +146,19 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       finalOnlineMinor: 77_499,
       totalMinor: 112_499,
     },
+  );
+  // Each order keeps the plan it was committed under, split the way the
+  // database recomputes it: half-up per stage, the remainder on the last.
+  assert.equal(delivery.payoutPlanVersion, 2);
+  assert.deepEqual(
+    delivery.payoutMilestones.map(({ code, amountMinor }) => [code, amountMinor]),
+    [["production_started", 40_000], ["delivered", 35_000], ["issue_window", 24_999]],
+  );
+  const legacy = persisted.orders.find((order) => order.id === "legacy_four_stage");
+  assert.equal(legacy.payoutPlanVersion, 1);
+  assert.deepEqual(
+    legacy.payoutMilestones.map(({ code, amountMinor }) => [code, amountMinor]),
+    [["printing", 50_000], ["packaging_qc", 15_000], ["delivered", 25_000], ["retention", 9_999]],
   );
   assert.deepEqual(persisted.orders.find((order) => order.id === "pickup_full").paymentAllocations, [
     { paymentCode: "initial", component: "service_fee", amountMinor: 10_000 },
@@ -190,6 +212,36 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
     database.query("UPDATE orders SET money_model_version = 1 WHERE id = 'delivery_rounding'"),
     (error) => error.code === "23514" && error.constraint === "orders_committed_snapshot_immutable",
   );
+  // The payout plan is part of the commitment: an order cannot be moved onto
+  // another plan after the fact.
+  await assert.rejects(
+    database.query("UPDATE orders SET payout_plan_version = 1 WHERE id = 'delivery_rounding'"),
+    (error) => error.code === "23514" && error.constraint === "orders_committed_snapshot_immutable",
+  );
+  // A split that still sums to the payout but moves a centavo between stages
+  // is refused under either plan.
+  for (const [orderId, first, last] of [
+    ["delivery_rounding", "production_started", "issue_window"],
+    ["legacy_four_stage", "printing", "retention"],
+  ]) {
+    await assert.rejects(
+      database.query(`
+        UPDATE payout_milestones
+           SET amount_minor = amount_minor + CASE code WHEN $2 THEN 1 WHEN $3 THEN -1 ELSE 0 END
+         WHERE order_id = $1
+      `, [orderId, first, last]),
+      (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
+      orderId,
+    );
+  }
+  // And one plan's stages are never valid under the other's version.
+  await assert.rejects(
+    database.query(`
+      UPDATE payout_milestones SET code = 'production_started'
+       WHERE order_id = 'legacy_four_stage' AND code = 'printing'
+    `),
+    (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
+  );
   await assert.rejects(
     database.query(`
       UPDATE order_payment_allocations
@@ -214,7 +266,7 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       UPDATE payout_milestones
          SET order_id = 'uncommitted_target'
        WHERE order_id = 'delivery_rounding'
-         AND code = 'printing'
+         AND code = 'production_started'
     `),
     (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
   );

@@ -131,7 +131,7 @@ test("relational store round-trips typed money, relationships, and composite rou
     riderCommissionBps: 8500, riderPayoutMinor: 4250, platformDeliveryShareMinor: 750,
     deliveryFeeMinor: 5000, totalMinor: 115000, fulfillmentMode: "delivery", paymentPlan: "delivery_online",
     quoteVersion: 1, supplierDownpaymentRateBps: null, onlineDueMinor: 115000, directStoreDueMinor: 0,
-    supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion: 1,
+    supplierPlatformPayoutMinor: 100000, commercialCommittedAt: AT, moneyModelVersion: 1, payoutPlanVersion: 1,
     initialOnlineMinor: 86250, finalOnlineMinor: 28750,
     payoutHold: true, pickup: { lat: 7.064, lng: 125.6085, label: "Davao shop" },
     dropoff: { lat: 7.0731, lng: 125.6128, label: "Client address" },

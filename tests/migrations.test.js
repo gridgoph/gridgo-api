@@ -105,6 +105,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786989600000_super_admin_tracker_decisions",
         "1786993200000_issue_report_tracker_link",
         "1786996800000_balance_not_required",
+        "1787000400000_escrow_payout_plan",
       ],
     );
 
@@ -275,6 +276,24 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // An order with no plan of its own was sold under the four-stage payout
+    // plan, and the escrow plan cannot be reverted while an order is on it.
+    assert.equal((await client.query(
+      "SELECT payout_plan_version FROM orders WHERE id = 'order_match_plan'",
+    )).rows[0].payout_plan_version, 1);
+    await assert.rejects(
+      client.query("UPDATE orders SET payout_plan_version = 3 WHERE id = 'order_match_plan'"),
+      /orders_payout_plan_version_check/,
+    );
+    await client.query("UPDATE orders SET payout_plan_version = 2 WHERE id = 'order_match_plan'");
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /escrow payout plan exist/);
+    await client.query("ROLLBACK");
+    await client.query("UPDATE orders SET payout_plan_version = 1 WHERE id = 'order_match_plan'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='orders' AND column_name='payout_plan_version'`, [schema])).rowCount, 0);
 
     // Reverting cannot quietly turn a paid-up-front balance into one owed.
     // The runner leaves its own failed transaction open, so hold it in one of ours.
@@ -837,7 +856,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 6, client));
+    await runner(migrationOptions(schema, "down", 7, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)

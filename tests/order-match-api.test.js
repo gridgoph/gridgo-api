@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
-import { checklistDigest } from "../src/operational-model.js";
+import { checklistDigest, createPayoutMilestones } from "../src/operational-model.js";
 import { seedReferenceData } from "../src/seed.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -175,6 +175,58 @@ async function attachHandoffSignature(database, orderId, fileId = "file_sign") {
 }
 
 const ALL_SIX = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"];
+
+/*
+ An order placed before the escrow split, as the migration left it: plan 1 and
+ its four stages. The plan is part of the commitment and the database refuses
+ to change it afterwards, so the fixture lifts that one guard for this write.
+*/
+async function asFourStageOrder(database, orderId) {
+  await database.transaction(async () => {
+    await database.query("ALTER TABLE orders DISABLE TRIGGER orders_committed_money_immutable_trigger");
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === orderId);
+    order.payoutPlanVersion = 1;
+    order.payoutMilestones = createPayoutMilestones(order, { version: 1 });
+    await saveStore(database, store);
+    // Run the deferred checks now: a table with pending trigger events cannot
+    // be altered, and the four stages must pass them anyway.
+    await database.query("SET CONSTRAINTS ALL IMMEDIATE");
+    await database.query("ALTER TABLE orders ENABLE TRIGGER orders_committed_money_immutable_trigger");
+  });
+}
+
+// A Proof of Fulfilment written straight into the record: what these tests
+// exercise is the release policy, not the camera.
+async function attachProofDirectly(database, orderId, code) {
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const milestone = store.orders.find((row) => row.id === orderId).payoutMilestones.find((row) => row.code === code);
+    milestone.pofFileIds = [`file_pof_${code}`];
+    milestone.status = "pof_attached";
+    await saveStore(database, store);
+  });
+}
+
+// From a job packed and ready to the client's door: the rider takes it, runs
+// the six checks with the shop's signature, and records the drop-off photo.
+async function dispatchAndDeliver({ call, database, orderId }) {
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
+  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
+  const checked = await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) });
+  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "out_for_delivery" })).status, 200);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+  const delivered = await post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop" });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.order.state, "issue_window_open");
+  return delivered.body.order;
+}
 
 test("client order-match routes persist a single-shop QR checkout and invoice", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
@@ -493,14 +545,15 @@ test("a declined job moves to a shop that can still make the date, at no more co
 });
 
 /**
- * The shop is paid across the work, and never ahead of the money.
+ * An order placed before the escrow split is paid exactly as it was sold.
  *
  * Four stages, none of which fires on its own: a shop is paid when somebody at
  * GRIDGO has looked at what it produced. A photograph nobody opens is a file,
  * not a check, so the release refuses without one.
  */
-test("the shop is paid across four stages, each on a photograph somebody looked at", async (t) => {
+test("a legacy four-stage order is paid across its four stages, each on a photograph somebody looked at", async (t) => {
   const { call, database, orderId } = await placedOrder(t, { downpaymentPercent: 75 });
+  await asFourStageOrder(database, orderId);
   const ops = (path, body) => call(path, { method: "POST", subject: "clerk_ops", body: body || {} });
   const transition = (state, subject, body = {}) => call(
     `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
@@ -522,11 +575,13 @@ test("the shop is paid across four stages, each on a photograph somebody looked 
   };
 
   const placed = await orderNow();
+  assert.equal(placed.payoutPlanVersion, 1);
   assert.deepEqual(
     placed.payoutMilestones.map((row) => row.code),
     ["printing", "packaging_qc", "delivered", "retention"],
   );
   assert.deepEqual(placed.payoutMilestones.map((row) => row.sharePercent), [50, 15, 25, 10]);
+  assert.deepEqual(placed.payoutMilestones.map((row) => row.label), ["Printing", "Packaging", "Delivered", "Retention"]);
   assert.equal(
     placed.payoutMilestones.reduce((total, row) => total + row.amountMinor, 0),
     placed.supplierSubtotalMinor,
@@ -618,6 +673,177 @@ test("the shop is paid across four stages, each on a photograph somebody looked 
     settled.supplierSubtotalMinor,
     "the shop ends up with exactly its own price",
   );
+});
+
+/**
+ * The captain's escrow split (gridgo-api#68, #73): 40 percent of the shop's own
+ * cost when production starts, 35 on delivery, 25 once the complaint window
+ * has closed. Only Operations or Super Admin release a share; the client's
+ * "everything is fine" closes the window and pays nobody (gridgo-web#58).
+ */
+test("a new order pays the shop 40/35/25 of its own cost, each stage only after its proof", async (t) => {
+  const { call, database, orderId } = await placedOrder(t);
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
+  const release = (code, subject = "clerk_ops") => post(`/orders/${orderId}/milestones/${code}/release`, subject);
+  const orderNow = async (subject = "clerk_ops") => (await call(`/orders/${orderId}`, { subject })).body.order;
+  const stageNow = async (code) => (await orderNow()).payoutMilestones.find((row) => row.code === code);
+  const refusedWith = async (code, error) => {
+    const refused = await release(code);
+    assert.equal(refused.status, 409, `${code}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error, error, code);
+  };
+
+  const placed = await orderNow();
+  assert.equal(placed.payoutPlanVersion, 2);
+  assert.deepEqual(
+    placed.payoutMilestones.map((row) => [row.code, row.label, row.sharePercent, row.releaseRequires]),
+    [
+      ["production_started", "Start of production", 40, "shop_proof"],
+      ["delivered", "Delivered", 35, "delivery_proof"],
+      ["issue_window", "Issue window closed", 25, "issue_window_closed"],
+    ],
+  );
+  // Every share is of the shop's own cost, never of what the client paid.
+  const cost = placed.supplierPriceMinor;
+  assert.ok(placed.totalMinor > cost, "the client's total carries the fee and delivery on top");
+  assert.deepEqual(
+    placed.payoutMilestones.map((row) => row.amountMinor),
+    [(cost * 40) / 100, (cost * 35) / 100, (cost * 25) / 100],
+  );
+  // The database recomputes the same split: moving a centavo between stages
+  // is refused even though the total still matches.
+  await assert.rejects(
+    database.query(`
+      UPDATE payout_milestones
+         SET amount_minor = amount_minor + CASE code WHEN 'production_started' THEN 1 WHEN 'issue_window' THEN -1 ELSE 0 END
+       WHERE order_id = $1
+    `, [orderId]),
+    (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
+  );
+  // The client sees the plan and its stages, never what the shop is paid.
+  const clientView = await orderNow("clerk_client");
+  assert.equal(clientView.payoutPlanVersion, 2);
+  assert.deepEqual(clientView.payoutMilestones.map((row) => row.code), ["production_started", "delivered", "issue_window"]);
+  assert.equal(clientView.payoutMilestones.some((row) => "amountMinor" in row), false);
+
+  await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops");
+  assert.equal((await transition("supplier_assigned", "clerk_ops")).status, 200);
+  assert.equal((await transition("payment_authorized")).status, 200);
+
+  // Start of production: nothing to release until the shop's proof exists.
+  await refusedWith("production_started", "pof_required");
+  assert.equal((await transition("production")).status, 200);
+  await refusedWith("production_started", "pof_required");
+  await attachProofDirectly(database, orderId, "production_started");
+  for (const subject of ["clerk_supplier_a", "clerk_client"]) {
+    const denied = await release("production_started", subject);
+    assert.equal(denied.status, 403, `${subject}: ${JSON.stringify(denied.body)}`);
+  }
+  const first = await release("production_started");
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.milestone.status, "released");
+  assert.equal(first.body.milestone.amountMinor, (cost * 40) / 100);
+
+  // Delivered: no delivery proof exists while the job is still at the shop.
+  await refusedWith("delivered", "pof_required");
+  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+    assert.equal((await transition(state)).status, 200, state);
+  }
+  await refusedWith("delivered", "pof_required");
+  await dispatchAndDeliver({ call, database, orderId });
+
+  // The rider's drop-off photo stands as the delivered proof, and moves no money.
+  const proven = await stageNow("delivered");
+  assert.equal(proven.status, "pof_attached");
+  assert.deepEqual(proven.pofFileIds, ["file_drop"]);
+
+  // The last share waits for the window to close, and never needs a file.
+  await refusedWith("issue_window", "issue_window_open");
+  const second = await release("delivered");
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.milestone.amountMinor, (cost * 35) / 100);
+  await refusedWith("issue_window", "issue_window_open");
+
+  // The client's "everything is fine" closes the window and pays nobody.
+  const fine = await post(`/orders/${orderId}/confirm`, "clerk_client");
+  assert.equal(fine.status, 200, JSON.stringify(fine.body));
+  assert.equal(fine.body.order.state, "completed");
+  assert.equal((await stageNow("issue_window")).status, "pending_pof");
+
+  const last = await release("issue_window");
+  assert.equal(last.status, 200, JSON.stringify(last.body));
+  assert.equal(last.body.milestone.amountMinor, (cost * 25) / 100);
+
+  const settled = await orderNow();
+  assert.deepEqual(settled.payoutMilestones.map((row) => row.status), ["released", "released", "released"]);
+  assert.equal(settled.payoutMilestones.reduce((total, row) => total + row.amountMinor, 0), cost);
+  assert.equal((await transition("payout_released", "clerk_ops")).status, 200);
+});
+
+test("a claim holds every remaining share, and the last one waits out the clock", async (t) => {
+  const { call, database, orderId } = await placedOrder(t);
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
+  const release = (code) => post(`/orders/${orderId}/milestones/${code}/release`, "clerk_ops");
+  const orderNow = async () => (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
+  const refusedWith = async (code, error) => {
+    const refused = await release(code);
+    assert.equal(refused.status, 409, `${code}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error, error, code);
+  };
+  const raiseClaim = async (reason) => {
+    const raised = await post("/claims", "clerk_ops", { orderId, reason });
+    assert.equal(raised.status, 201, JSON.stringify(raised.body));
+    return raised.body.claim.id;
+  };
+  const releaseClaim = async (claimId) => {
+    const cleared = await post(`/claims/${claimId}/release`, "clerk_ops", { reason: "Reprinted and accepted" });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  };
+
+  await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops");
+  for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized"], ["production"]]) {
+    assert.equal((await transition(state, subject)).status, 200, state);
+  }
+  await attachProofDirectly(database, orderId, "production_started");
+  assert.equal((await release("production_started")).status, 200);
+  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+    assert.equal((await transition(state)).status, 200, state);
+  }
+  await dispatchAndDeliver({ call, database, orderId });
+
+  // A claim during the window holds both shares still owed, and the client
+  // cannot call the job clean around it.
+  const during = await raiseClaim("Client reports smudged print");
+  await refusedWith("delivered", "payout_held");
+  await refusedWith("issue_window", "payout_held");
+  const fine = await post(`/orders/${orderId}/confirm`, "clerk_client");
+  assert.equal(fine.status, 409, JSON.stringify(fine.body));
+  await releaseClaim(during);
+  assert.equal((await release("delivered")).status, 200);
+  await refusedWith("issue_window", "issue_window_open");
+
+  // The clock ends the window, and pays nobody.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find((row) => row.id === orderId).issueWindowExpiresAt = "2026-01-01T00:00:00.000Z";
+    await saveStore(database, store);
+  });
+  const expired = await orderNow();
+  assert.equal(expired.state, "completed");
+  assert.equal(expired.payoutMilestones.find((row) => row.code === "issue_window").status, "pending_pof");
+
+  // A claim after the window still holds the last share.
+  const after = await raiseClaim("Client found a miscount after the window");
+  await refusedWith("issue_window", "payout_held");
+  await releaseClaim(after);
+  const last = await release("issue_window");
+  assert.equal(last.status, 200, JSON.stringify(last.body));
+
+  const settled = await orderNow();
+  assert.equal(settled.payoutMilestones.every((row) => row.status === "released"), true);
+  assert.equal(settled.payoutMilestones.reduce((total, row) => total + row.amountMinor, 0), settled.supplierPriceMinor);
 });
 
 test("a client rates a finished order once, and only quality reaches matching", async (t) => {
@@ -1148,7 +1374,7 @@ test("final QR receipt survives submission and only Operations clears delivery",
  *
  * One transfer and one confirmation carry the whole order: nothing is left to
  * owe at the door or the counter, the balance routes refuse because there is
- * no balance, and the shop's four stages are covered by that one payment.
+ * no balance, and the shop's three stages are covered by that one payment.
  */
 test("a paid-up-front order runs from one confirmation to a fully released payout", { skip: !DATABASE_URL }, async (t) => {
   const { call, database, orderId } = await placedOrder(t);
@@ -1156,15 +1382,6 @@ test("a paid-up-front order runs from one confirmation to a fully released payou
   const transition = (state, subject = "clerk_supplier_a") => post(`/orders/${orderId}/transition`, subject, { state });
   const orderNow = async (subject = "clerk_ops") => (await call(`/orders/${orderId}`, { subject })).body.order;
   const release = (code) => post(`/orders/${orderId}/milestones/${code}/release`, "clerk_ops");
-  const attachProof = async (code) => {
-    await database.transaction(async () => {
-      const store = await loadStore(database);
-      const milestone = store.orders.find((row) => row.id === orderId).payoutMilestones.find((row) => row.code === code);
-      milestone.pofFileIds = [`file_pof_${code}`];
-      milestone.status = "pof_attached";
-      await saveStore(database, store);
-    });
-  };
 
   const placed = await orderNow("clerk_client");
   assert.equal(placed.downpaymentPercent, 100);
@@ -1194,37 +1411,22 @@ test("a paid-up-front order runs from one confirmation to a fully released payou
     const moved = await transition(state, subject);
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
   }
-  await attachProof("printing");
-  assert.equal((await release("printing")).status, 200);
+  await attachProofDirectly(database, orderId, "production_started");
+  assert.equal((await release("production_started")).status, 200);
   for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
     const moved = await transition(state);
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
   }
-  await attachProof("packaging_qc");
-  assert.equal((await release("packaging_qc")).status, 200);
 
   // The client is never asked for a balance along the way.
   const inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
   assert.equal(inbox.some((row) => row.paymentAction), false);
 
-  assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
-  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  const checked = await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) });
-  assert.equal(checked.status, 200, JSON.stringify(checked.body));
-  assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
-  await database.transaction(async () => {
-    const store = await loadStore(database);
-    store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
-    await saveStore(database, store);
-  });
-
   // The door does not wait on a balance: it was paid at checkout.
-  const delivered = await post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop" });
-  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
-  assert.equal(delivered.body.order.state, "issue_window_open");
+  await dispatchAndDeliver({ call, database, orderId });
 
-  // The collected principal already covers every stage.
-  await attachProof("delivered");
+  // The collected principal already covers every stage, and the rider's
+  // drop-off photo is the delivered proof.
   const deliveredRelease = await release("delivered");
   assert.equal(deliveredRelease.status, 200, JSON.stringify(deliveredRelease.body));
   await database.transaction(async () => {
@@ -1232,8 +1434,7 @@ test("a paid-up-front order runs from one confirmation to a fully released payou
     store.orders.find((row) => row.id === orderId).state = "completed";
     await saveStore(database, store);
   });
-  await attachProof("retention");
-  assert.equal((await release("retention")).status, 200);
+  assert.equal((await release("issue_window")).status, 200);
 
   const settled = await orderNow();
   assert.equal(settled.payoutMilestones.every((row) => row.status === "released"), true);
