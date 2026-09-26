@@ -32,7 +32,7 @@ function rowKey(row, columns) {
 
 const TABLES = [
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
-  { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
+  { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
@@ -152,6 +152,7 @@ function rowsFromStore(store) {
   rows.platform_settings.push({ singleton: true, version: store.version || 3, settings: store.settings || {} });
 
   for (const [position, user] of (store.users || []).entries()) {
+    const accountHeld = user.accountStatus === "suspended" || user.accountStatus === "removed";
     rows.users.push({
       id: user.id,
       clerk_user_id: user.clerkUserId,
@@ -162,13 +163,17 @@ function rowsFromStore(store) {
       account_type: user.role === "client" ? (user.accountType || "individual") : null,
       org_name: user.orgName ?? null,
       verification_status: user.verificationStatus ?? null,
+      account_status: accountHeld ? user.accountStatus : "active",
+      account_status_reason: accountHeld ? (user.accountStatusReason ?? null) : null,
+      account_status_at: accountHeld ? (user.accountStatusAt ?? null) : null,
+      account_status_by: accountHeld ? (user.accountStatusBy ?? null) : null,
       shop_lat: user.shop?.lat ?? null,
       shop_lng: user.shop?.lng ?? null,
       shop_label: user.shop?.label ?? null,
       version: user.version || 1,
       created_at: user.createdAt,
       position,
-      data: without(user, ["id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "shop", "version", "createdAt"]),
+      data: without(user, ["id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "accountStatus", "accountStatusReason", "accountStatusAt", "accountStatusBy", "shop", "version", "createdAt"]),
     });
   }
   for (const membership of (store.userRoleMemberships || [])) {
@@ -676,6 +681,16 @@ export async function loadStore(database) {
   store.users = ordered(loaded.users).map((row) => {
     const item = { ...row.data, id: row.id, clerkUserId: row.clerk_user_id, email: row.email, name: row.name, role: row.role, version: row.version || 1, createdAt: row.created_at };
     present(item, "phone", row.phone); present(item, "accountType", row.account_type); present(item, "orgName", row.org_name); present(item, "verificationStatus", row.verification_status);
+    const accountStatus = row.account_status === "suspended" || row.account_status === "removed" ? row.account_status : "active";
+    delete item.accountStatusReason;
+    delete item.accountStatusAt;
+    delete item.accountStatusBy;
+    item.accountStatus = accountStatus;
+    if (accountStatus !== "active") {
+      present(item, "accountStatusReason", row.account_status_reason);
+      present(item, "accountStatusAt", row.account_status_at);
+      present(item, "accountStatusBy", row.account_status_by);
+    }
     if (row.shop_lat != null) item.shop = { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label };
     return item;
   });

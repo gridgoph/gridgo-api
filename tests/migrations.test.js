@@ -106,6 +106,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1786993200000_issue_report_tracker_link",
         "1786996800000_balance_not_required",
         "1787000400000_escrow_payout_plan",
+        "1787004000000_an_account_can_be_suspended_or_removed",
       ],
     );
 
@@ -129,6 +130,14 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
          'Multi Role Shop', 'client', 'individual', 7.0731, 125.6128,
          'Bajada, Davao City', now(), 0, '{}')
     `);
+    assert.equal(
+      (await client.query("SELECT account_status, account_status_reason FROM users WHERE id = 'multi_role_shop'")).rows[0].account_status,
+      "active",
+    );
+    assert.equal(
+      (await client.query("SELECT account_status_reason FROM users WHERE id = 'multi_role_shop'")).rows[0].account_status_reason,
+      null,
+    );
     await assert.rejects(
       client.query(`
         INSERT INTO users
@@ -331,6 +340,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='orders' AND column_name='rider_commission_bps'`, [schema])).rowCount, 0);
+    await runner(migrationOptions(schema, "down", 1, client));
+    const accountColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    for (const column of ["account_status", "account_status_reason", "account_status_at", "account_status_by"]) {
+      assert.equal(accountColumns.has(column), false, `${column} should be removed with the account-status migration`);
+    }
+
     await runner(migrationOptions(schema, "down", 1, client));
     const productionWindowColumns = new Set((await client.query(
       `SELECT column_name FROM information_schema.columns

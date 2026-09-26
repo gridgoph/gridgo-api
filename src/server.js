@@ -701,6 +701,12 @@ function publicUser(u) {
   // verification projection. publicUser is reused in catalogue and matching responses.
   delete rest.verificationDocumentFileIds;
   delete rest.profileNameManaged;
+  // Account standing is for the signed-in person and the Roles directory.
+  // publicUser is also embedded in catalogue and matching payloads.
+  delete rest.accountStatus;
+  delete rest.accountStatusReason;
+  delete rest.accountStatusAt;
+  delete rest.accountStatusBy;
   // Clients always expose an authoritative accountType (never undefined for consumers).
   // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
   if (u.role === "client") {
@@ -711,6 +717,63 @@ function publicUser(u) {
     delete rest.version;
   }
   return rest;
+}
+
+const LAST_SUPER_ADMIN_DENIAL = {
+  error: "last_super_admin",
+  message: "GRIDGO must keep at least one Super Admin. Promote another user to super_admin before changing this account's role.",
+};
+
+function accountStateFields(user) {
+  const status = user?.accountStatus === "suspended" || user?.accountStatus === "removed"
+    ? user.accountStatus
+    : "active";
+  return {
+    accountStatus: status,
+    accountStatusReason: status === "active" ? null : (user.accountStatusReason ?? null),
+    accountStatusAt: status === "active" ? null : (user.accountStatusAt ?? null),
+  };
+}
+
+function userWithAccountState(user) {
+  const projected = publicUser(user);
+  if (!projected) return projected;
+  return { ...projected, ...accountStateFields(user) };
+}
+
+function accountHoldDenial(user) {
+  const fields = accountStateFields(user);
+  if (fields.accountStatus === "active") return null;
+  if (fields.accountStatus === "suspended") {
+    return {
+      error: "account_suspended",
+      message: "This account is suspended.",
+      reason: fields.accountStatusReason ?? "",
+    };
+  }
+  return {
+    error: "account_removed",
+    message: "This account has been removed.",
+    reason: fields.accountStatusReason ?? "",
+  };
+}
+
+function targetIsSuperAdmin(store, target) {
+  return target?.role === "super_admin" || (store.userRoleMemberships || []).some(
+    (membership) => membership.userId === target.id && membership.role === "super_admin",
+  );
+}
+
+/** Active means the membership can still open GRIDGO. A held Super Admin cannot. */
+function otherActiveSuperAdmin(store, targetId) {
+  const seen = new Set();
+  for (const membership of store.userRoleMemberships || []) {
+    if (membership.role !== "super_admin" || membership.userId === targetId || seen.has(membership.userId)) continue;
+    seen.add(membership.userId);
+    const person = (store.users || []).find((candidate) => candidate.id === membership.userId);
+    if (person && accountStateFields(person).accountStatus === "active") return true;
+  }
+  return false;
 }
 
 /** Directory filters select authoritative memberships, retaining their role profile. */
@@ -962,7 +1025,7 @@ function approvalQueue(store, url) {
 function fixedAuthProjection(store, auth, role) {
   const context = auth.authorization;
   const membership = membershipSummary(membershipFor(context, role));
-  const base = { user: publicIdentity(auth.user), membership };
+  const base = { user: { ...publicIdentity(auth.user), ...accountStateFields(auth.user) }, membership };
   if (role === "client") {
     const approvalCase = approvalCaseFor(context, "business_client");
     const approved = approvalCase?.status === "approved";
@@ -1940,7 +2003,7 @@ async function handleRequest(req, res) {
         const supplierProfile = (store.supplierProfiles || []).find(p=>p.userId===user.id);
         user = {...user,role:requestedRole,...(['supplier','rider'].includes(requestedRole)?{verificationStatus:approval?.status || 'unverified'}:{}),...(requestedRole==='supplier' && supplierProfile?{supplierName:supplierProfile.shopName,shop:supplierProfile.shop}:{})};
       }
-      const projected = publicUser(user);
+      const projected = userWithAccountState(user);
       if ((store.userRoleMemberships || []).some(
         (membership) => membership.userId === user.id && membership.role === "rider",
       )) {
@@ -2095,6 +2158,8 @@ async function handleRequest(req, res) {
       ? url.searchParams.get("role") : undefined;
     const eventRole = notificationRoleQuery || req.headers['x-gridgo-role'] || undefined;
     if (user) {
+      const held = accountHoldDenial(user);
+      if (held) return send(res, 403, held);
       if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
       const inferredRole = !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
         : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
@@ -3158,8 +3223,8 @@ async function handleRequest(req, res) {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const role = url.searchParams.get("role");
       const list = role
-        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => publicUser(roleDirectoryUser(store, u, role)))
-        : store.users.map(publicUser);
+        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => userWithAccountState(roleDirectoryUser(store, u, role)))
+        : store.users.map(userWithAccountState);
       return send(res, 200, { users: list });
     }
 
@@ -3302,10 +3367,7 @@ async function handleRequest(req, res) {
           (membership) => membership.role === "super_admin" && membership.userId !== target.id,
         )
       ) {
-        return send(res, 409, {
-          error: "last_super_admin",
-          message: "GRIDGO must keep at least one Super Admin. Promote another user to super_admin before changing this account's role.",
-        });
+        return send(res, 409, LAST_SUPER_ADMIN_DENIAL);
       }
       if (prev !== body.role) {
         store.userRoleMemberships = store.userRoleMemberships.filter(
@@ -3361,6 +3423,70 @@ async function handleRequest(req, res) {
       });
       await save(store);
       return send(res, 200, verificationUserResponse(store, target));
+    }
+
+    // Super Admin account standing. Soft suspend/remove: the row, memberships,
+    // orders, and Clerk user stay. Accreditation is a different field.
+    if (req.method === "PATCH" && /^\/users\/[^/]+\/account$/.test(pathname)) {
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      const uid = pathname.split("/")[2];
+      const target = store.users.find((candidate) => candidate.id === uid);
+      if (!target) return send(res, 404, { error: "user_not_found" });
+      const body = await readBody(req);
+      const allowedStatus = ["active", "suspended", "removed"];
+      if (!allowedStatus.includes(body.status)) {
+        return send(res, 400, {
+          error: "invalid_account_status",
+          message: "Account status must be active, suspended, or removed.",
+          allowed: allowedStatus,
+        });
+      }
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (!reason) {
+        return send(res, 400, {
+          error: "reason_required",
+          message: "Enter a reason. GRIDGO stores it on the account and the audit log.",
+        });
+      }
+      if (
+        body.status !== "active"
+        && targetIsSuperAdmin(store, target)
+        && !otherActiveSuperAdmin(store, target.id)
+      ) {
+        return send(res, 409, LAST_SUPER_ADMIN_DENIAL);
+      }
+      if (target.id === user.id) {
+        return send(res, 409, {
+          error: "self_account",
+          message: "You cannot change your own account status. Ask another Super Admin.",
+        });
+      }
+      const at = now();
+      if (body.status === "active") {
+        target.accountStatus = "active";
+        delete target.accountStatusReason;
+        delete target.accountStatusAt;
+        delete target.accountStatusBy;
+      } else {
+        target.accountStatus = body.status;
+        target.accountStatusReason = reason;
+        target.accountStatusAt = at;
+        target.accountStatusBy = user.id;
+      }
+      audit(store, {
+        actor: user,
+        action: body.status === "suspended"
+          ? "user.account_suspend"
+          : body.status === "removed"
+            ? "user.account_remove"
+            : "user.account_restore",
+        entityType: "user",
+        entityId: target.id,
+        detail: { status: body.status },
+        reason,
+      });
+      await save(store);
+      return send(res, 200, { user: userWithAccountState(target) });
     }
 
     // Supplier / rider verification (ops + super)
