@@ -109,9 +109,9 @@ test("relational store round-trips typed money, relationships, and composite rou
   await clear(database);
   const store = emptyStore();
   store.users = [
-    { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", phone: "+63900", role: "client", accountType: "individual", version: 1, createdAt: AT },
-    { id: "user_supplier", clerkUserId: "clerk_supplier", email: "supplier@gridgo.test", name: "Supplier", role: "supplier", supplierName: "Print Shop", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, version: 1, createdAt: AT },
-    { id: "user_rider", clerkUserId: "clerk_rider", email: "rider@gridgo.test", name: "Rider", role: "rider", verificationStatus: "approved", version: 1, createdAt: AT },
+    { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", phone: "+63900", role: "client", accountType: "individual", accountStatus: "active", version: 1, createdAt: AT },
+    { id: "user_supplier", clerkUserId: "clerk_supplier", email: "supplier@gridgo.test", name: "Supplier", role: "supplier", supplierName: "Print Shop", verificationStatus: "approved", accountStatus: "active", shop: { lat: 7.064, lng: 125.6085, label: "Davao shop" }, version: 1, createdAt: AT },
+    { id: "user_rider", clerkUserId: "clerk_rider", email: "rider@gridgo.test", name: "Rider", role: "rider", verificationStatus: "approved", accountStatus: "active", version: 1, createdAt: AT },
   ];
   store.catalog = [{ id: "prod_banner", name: "Banner", family: "banner", basePriceMinor: 45000, unit: "sqm" }];
   store.taxonomy = {

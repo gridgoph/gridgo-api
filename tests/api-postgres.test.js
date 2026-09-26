@@ -3703,3 +3703,178 @@ test("push stats are Operations/Super Admin aggregates of reach and outbox outco
     await database.close();
   }
 });
+
+test("account suspend, remove, and restore are audited and separate from accreditation", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const ordersBefore = await request(instance.api, "/orders", { subject: "clerk_client" });
+    assert.equal(ordersBefore.status, 200, JSON.stringify(ordersBefore.body));
+
+    const opsDenied = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "suspended", reason: "Not allowed" },
+    });
+    assert.equal(opsDenied.status, 403);
+    assert.equal(opsDenied.body.error, "forbidden");
+
+    for (const reason of [undefined, "   "]) {
+      const missing = await request(instance.api, "/users/user_client/account", {
+        method: "PATCH", subject: "clerk_super", body: { status: "suspended", ...(reason == null ? {} : { reason }) },
+      });
+      assert.equal(missing.status, 400, JSON.stringify(missing.body));
+      assert.equal(missing.body.error, "reason_required");
+      assert.match(missing.body.message, /reason/i);
+    }
+    const restoreWithoutReason = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "active", reason: "" },
+    });
+    assert.equal(restoreWithoutReason.status, 400);
+    assert.equal(restoreWithoutReason.body.error, "reason_required");
+
+    const invalid = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "banned", reason: "No such status" },
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, "invalid_account_status");
+
+    const missingUser = await request(instance.api, "/users/user_missing/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "suspended", reason: "Nobody" },
+    });
+    assert.equal(missingUser.status, 404);
+    assert.equal(missingUser.body.error, "user_not_found");
+
+    const riderHold = await request(instance.api, "/users/user_rider/verification", {
+      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Licence review" },
+    });
+    assert.equal(riderHold.status, 200, JSON.stringify(riderHold.body));
+    assert.equal(riderHold.body.user.verificationStatus, "suspended");
+    const riderMe = await request(instance.api, "/auth/me", { subject: "clerk_rider" });
+    assert.equal(riderMe.status, 200);
+    assert.equal(riderMe.body.user.accountStatus, "active");
+    assert.equal(riderMe.body.user.accountStatusReason, null);
+    const offers = await request(instance.api, "/dispatch/offers", { subject: "clerk_rider" });
+    assert.equal(offers.status, 403);
+    assert.equal(offers.body.error, "forbidden");
+
+    const caseSuspend = await request(instance.api, "/approval-cases/case_supplier/suspend", {
+      method: "POST", subject: "clerk_ops",
+      body: { expectedVersion: 1, requestId: "accredit-suspend", reason: "Shop documents" },
+    });
+    assert.equal(caseSuspend.status, 200, JSON.stringify(caseSuspend.body));
+    assert.equal(caseSuspend.body.approvalCase.status, "suspended");
+    const supplierJobs = await request(instance.api, "/jobs", { subject: "clerk_supplier" });
+    assert.equal(supplierJobs.status, 403);
+    assert.equal(supplierJobs.body.error, "forbidden");
+    const supplierBefore = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+    assert.equal(supplierBefore.status, 200);
+    assert.equal(supplierBefore.body.user.accountStatus, "active");
+
+    const promoted = await request(instance.api, "/users/user_ops/role", {
+      method: "PATCH", subject: "clerk_super", body: { role: "super_admin", reason: "second administrator" },
+    });
+    assert.equal(promoted.status, 200, JSON.stringify(promoted.body));
+    const self = await request(instance.api, "/users/user_ops/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "suspended", reason: "I am leaving" },
+    });
+    assert.equal(self.status, 409);
+    assert.equal(self.body.error, "self_account");
+
+    const suspended = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "suspended", reason: "  Missed a payment  " },
+    });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+    assert.equal(suspended.body.user.accountStatus, "suspended");
+    assert.equal(suspended.body.user.accountStatusReason, "Missed a payment");
+    const blocked = await request(instance.api, "/orders", { subject: "clerk_client" });
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.error, "account_suspended");
+    assert.equal(blocked.body.reason, "Missed a payment");
+    const me = await request(instance.api, "/auth/me", { subject: "clerk_client" });
+    assert.equal(me.status, 200);
+    assert.equal(me.body.user.accountStatus, "suspended");
+    assert.equal(me.body.user.accountStatusReason, "Missed a payment");
+    const clientProjection = await request(instance.api, "/auth/me/client", { subject: "clerk_client" });
+    assert.equal(clientProjection.status, 200);
+    assert.equal(clientProjection.body.user.accountStatusReason, "Missed a payment");
+    const directory = await request(instance.api, "/users", { subject: "clerk_super" });
+    const listed = directory.body.users.find((user) => user.id === "user_client");
+    assert.equal(listed.accountStatus, "suspended");
+    assert.equal(listed.accountStatusReason, "Missed a payment");
+    const verificationProjection = await request(instance.api, "/users/user_client", { subject: "clerk_super" });
+    assert.equal(verificationProjection.status, 200);
+    assert.equal(Object.hasOwn(verificationProjection.body.user, "accountStatusReason"), false);
+
+    const removed = await request(instance.api, "/users/user_supplier/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "removed", reason: "Closed the shop" },
+    });
+    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    assert.equal(removed.body.user.accountStatus, "removed");
+    const removedJobs = await request(instance.api, "/jobs", { subject: "clerk_supplier" });
+    assert.equal(removedJobs.status, 403);
+    assert.equal(removedJobs.body.error, "account_removed");
+    assert.equal(removedJobs.body.reason, "Closed the shop");
+    const supplierMe = await request(instance.api, "/auth/me", { subject: "clerk_supplier" });
+    assert.equal(supplierMe.status, 200);
+    assert.equal(supplierMe.body.user.accountStatusReason, "Closed the shop");
+
+    const persisted = await loadStoreEventually(
+      database,
+      (store) => store.users.some((user) => user.id === "user_client" && user.accountStatus === "suspended")
+        && store.auditLog.some((entry) => entry.action === "user.account_remove"),
+    );
+    const client = persisted.users.find((user) => user.id === "user_client");
+    const supplier = persisted.users.find((user) => user.id === "user_supplier");
+    assert.equal(client.accountStatusReason, "Missed a payment");
+    assert.equal(client.accountStatusBy, "user_super");
+    assert.ok(client.accountStatusAt);
+    assert.equal(supplier.clerkUserId, "clerk_supplier");
+    assert.equal(supplier.accountStatus, "removed");
+    assert.equal(persisted.userRoleMemberships.some((membership) => membership.userId === "user_supplier"), true);
+    for (const [action, entityId, reason] of [
+      ["user.account_suspend", "user_client", "Missed a payment"],
+      ["user.account_remove", "user_supplier", "Closed the shop"],
+    ]) {
+      const entry = persisted.auditLog.find((candidate) => candidate.action === action && candidate.entityId === entityId);
+      assert.ok(entry, action);
+      assert.equal(entry.entityType, "user");
+      assert.equal(entry.reason, reason);
+    }
+
+    const restored = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "active", reason: "Payment landed" },
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.equal(restored.body.user.accountStatus, "active");
+    assert.equal(restored.body.user.accountStatusReason, null);
+    const ordersAfter = await request(instance.api, "/orders", { subject: "clerk_client" });
+    assert.equal(ordersAfter.status, 200, JSON.stringify(ordersAfter.body));
+    const afterRestore = await loadStoreEventually(
+      database,
+      (store) => store.auditLog.some((entry) => entry.action === "user.account_restore" && entry.reason === "Payment landed"),
+    );
+    const restoredClient = afterRestore.users.find((user) => user.id === "user_client");
+    assert.equal(restoredClient.accountStatus, "active");
+    assert.equal(restoredClient.accountStatusReason, undefined);
+    assert.equal(restoredClient.accountStatusAt, undefined);
+    assert.equal(restoredClient.accountStatusBy, undefined);
+
+    const heldAdmin = await request(instance.api, "/users/user_ops/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "suspended", reason: "Away from the desk" },
+    });
+    assert.equal(heldAdmin.status, 200, JSON.stringify(heldAdmin.body));
+    const lastAdmin = await request(instance.api, "/users/user_super/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "removed", reason: "Stepping down" },
+    });
+    assert.equal(lastAdmin.status, 409);
+    assert.equal(lastAdmin.body.error, "last_super_admin");
+    assert.equal(
+      lastAdmin.body.message,
+      "GRIDGO must keep at least one Super Admin. Promote another user to super_admin before changing this account's role.",
+    );
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});

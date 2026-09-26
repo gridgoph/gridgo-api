@@ -330,6 +330,7 @@ export async function activateClerkClientProfile({
     name: profile.name || profile.email.split("@")[0],
     role: "client",
     accountType: "individual",
+    accountStatus: "active",
     createdAt: now(),
   };
   if (profile.phone) user.phone = profile.phone;
