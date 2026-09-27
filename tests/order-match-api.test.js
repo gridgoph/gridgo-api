@@ -177,6 +177,12 @@ async function attachHandoffSignature(database, orderId, fileId = "file_sign") {
   return { fileId, signerName: "Ana Reyes" };
 }
 
+async function matchingCounts(database, orderId) {
+  const store = await loadStore(database);
+  return store.orderLineItems.filter((line) => line.orderId === orderId)
+    .map((line) => ({ lineItemId: line.id, countedQuantity: line.quantity }));
+}
+
 const ALL_SIX = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"];
 
 /*
@@ -217,7 +223,7 @@ async function dispatchAndDeliver({ call, database, orderId }) {
   const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  const checked = await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) });
+  const checked = await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, counts: await matchingCounts(database, orderId), signature: await attachHandoffSignature(database, orderId) });
   assert.equal(checked.status, 200, JSON.stringify(checked.body));
   assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "out_for_delivery" })).status, 200);
   await database.transaction(async () => {
@@ -1080,6 +1086,7 @@ test("a collected order stops on the counter, and only the counter hands it over
     method: "POST", subject: "clerk_rider",
     body: {
       checks: ALL_SIX.map((code) => ({ code, passed: true })),
+      counts: await matchingCounts(database, orderId),
       signature: await attachHandoffSignature(database, orderId),
     },
   });
@@ -1239,7 +1246,8 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 409);
 
   const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"].map((code) => ({ code, passed: true }));
-  const check = (body, subject = "clerk_rider") => call(`/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject, body });
+  const counts = await matchingCounts(database, orderId);
+  const check = (body, subject = "clerk_rider") => call(`/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject, body: { counts, ...body } });
   assert.equal((await check({ checks }, "clerk_supplier_a")).status, 403);
   assert.equal((await check({ checks }, "clerk_rider_other")).status, 404);
   assert.equal((await check({ checks: checks.slice(1) })).status, 400);
@@ -1287,7 +1295,7 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
   assert.equal(recorded.signerName, "Ana Reyes");
   assert.equal(recorded.riderId, "user_rider");
   assert.equal(recorded.signedAt, passed.body.order.pickupChecklist.completedAt);
-  assert.equal(recorded.checklistHash, checklistDigest(orderId, checks));
+  assert.equal(recorded.checklistHash, checklistDigest(orderId, checks, passed.body.order.pickupChecklist.counts));
   assert.deepEqual(passed.body.handoffSignature, recorded);
   assert.match(passed.body.order.timeline.at(-1).note, /Ana Reyes signed the handoff/);
   // The shop and Operations read the same record off the order they already
@@ -1304,6 +1312,111 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
 });
 
 
+// Counter tests use the real checkout, state machine, PostgreSQL and inbox.
+async function counterOrder(t) {
+  const context = await placedOrder(t);
+  const { call, database, orderId } = context;
+  const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
+  assert.equal((await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops")).status, 200);
+  for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized", "clerk_supplier_a"], ["production", "clerk_supplier_a"], ["ready_for_dispatch", "clerk_supplier_a"]]) {
+    assert.equal((await post(`/orders/${orderId}/transition`, subject, { state })).status, 200);
+  }
+  assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({ id: "user_super", clerkUserId: "clerk_super", email: "super@gridgo.test", name: "Super", role: "super_admin", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "user_super", role: "super_admin", createdAt: AT });
+    store.files.find((row) => row.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
+    await saveStore(database, store);
+  });
+  const line = (await loadStore(database)).orderLineItems.find((row) => row.orderId === orderId);
+  return {
+    ...context, post,
+    checks: ALL_SIX.map((code) => ({ code, passed: true })),
+    counts: [{ lineItemId: line.id, countedQuantity: 1 }],
+    check: (body) => post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", body),
+  };
+}
+
+test("counter pickup refuses missing or malformed counts before custody changes", { skip: !DATABASE_URL }, async (t) => {
+  const { check, checks, counts, call, orderId, database } = await counterOrder(t);
+  const signature = await attachHandoffSignature(database, orderId);
+  for (const invalid of [undefined, null, [], [counts[0], counts[0]], [{ lineItemId: "other", countedQuantity: 1 }],
+    ...[-1, 1.5, "1", null, Number.MAX_SAFE_INTEGER + 1].map((countedQuantity) => [{ ...counts[0], countedQuantity }])]) {
+    const result = await check({ checks, counts: invalid, signature });
+    assert.equal(result.status, 400, JSON.stringify(result.body));
+    assert.equal(result.body.error, "invalid_pickup_counts");
+  }
+  assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.state, "rider_assigned");
+});
+
+test("counter shortages override a claimed quantity pass and preserve evidence for both admin roles", { skip: !DATABASE_URL }, async (t) => {
+  const { check, checks, counts, call, post, orderId, database } = await counterOrder(t);
+  const before = (await loadStore(database)).orders.find((row) => row.id === orderId);
+  const signature = await attachHandoffSignature(database, orderId);
+  const shortCounts = [{ ...counts[0], countedQuantity: 0, expectedQuantity: 0 }];
+  const noEvidence = await check({ checks, counts: shortCounts, signature });
+  assert.equal(noEvidence.status, 400);
+  assert.equal(noEvidence.body.error, "checklist_evidence_required");
+  const invalidEvidence = await check({ checks, counts: shortCounts, failureNote: "Missing", evidenceFileIds: ["file_art"] });
+  assert.equal(invalidEvidence.body.error, "invalid_checklist_evidence");
+  const failed = await check({ checks, counts: shortCounts, signature, failureNote: "One flyer is missing", evidenceFileIds: ["file_drop"] });
+  assert.equal(failed.status, 200, JSON.stringify(failed.body));
+  assert.equal(failed.body.order.state, "rider_assigned");
+  const record = failed.body.order.pickupChecklist;
+  assert.equal(record.status, "failed_escalated");
+  assert.deepEqual(record.counts, [{ lineItemId: counts[0].lineItemId, expectedQuantity: 1, countedQuantity: 0 }]);
+  assert.equal(record.completedBy, "user_rider");
+  assert.ok(Number.isFinite(Date.parse(record.completedAt)));
+  assert.deepEqual(record.checks, checks.map((row) => ({ ...row, passed: row.code !== "quantity_match" })));
+  assert.equal(record.handoffSignature, null);
+  for (const subject of ["clerk_ops", "clerk_super", "clerk_supplier_a"]) {
+    assert.deepEqual((await call(`/orders/${orderId}`, { subject })).body.order.pickupChecklist, record);
+  }
+  const stored = await loadStore(database);
+  assert.deepEqual(stored.orders.find((row) => row.id === orderId).pickupChecklist, record);
+  const escalation = stored.escalations.find((row) => row.id === record.escalationId);
+  assert.deepEqual(escalation.counts, record.counts);
+  assert.deepEqual(escalation.checks, record.checks);
+  for (const [userId, type] of [["user_ops", "pickup_check_escalation"], ["user_super", "pickup_check_escalation"], ["supplier_a", "shop_pickup_issue_changed"]]) {
+    const notices = stored.notifications.filter((row) => row.orderId === orderId && row.userId === userId && row.type === type);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0].body, /One flyer is missing/);
+    assert.match(notices[0].body, /quantity_match/);
+  }
+  assert.equal((await check({ checks, counts, signature })).body.error, "pickup_escalation_open");
+  assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "picked_up" })).status, 409);
+  assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "out_for_delivery" })).status, 409);
+  assert.equal((await post(`/escalations/${record.escalationId}/resolve`, "clerk_super", { resolution: "Shop replaced the missing flyer; recount" })).status, 200);
+  const passed = await check({ checks, counts, signature });
+  assert.equal(passed.status, 200, JSON.stringify(passed.body));
+  assert.equal(passed.body.order.state, "picked_up");
+  assert.deepEqual(passed.body.order.pickupChecklist.counts, [{ lineItemId: counts[0].lineItemId, expectedQuantity: 1, countedQuantity: 1 }]);
+  for (const subject of ["clerk_ops", "clerk_super"]) {
+    const read = await call(`/orders/${orderId}`, { subject });
+    assert.deepEqual(read.body.order.pickupChecklist, passed.body.order.pickupChecklist);
+    assert.deepEqual(read.body.order.pickupCountItems, [{ lineItemId: counts[0].lineItemId, itemName: "supplier_a Flyers", expectedQuantity: 1 }]);
+  }
+  const after = (await loadStore(database)).orders.find((row) => row.id === orderId);
+  assert.deepEqual(after.payoutMilestones, before.payoutMilestones);
+  assert.deepEqual(after.payments, before.payments);
+  assert.equal(after.payoutPlanVersion, 2);
+  assert.deepEqual((await call(`/escalations?orderId=${orderId}`, { subject: "clerk_ops" })).body.escalations[0].counts, record.counts);
+});
+
+test("counter quality failures with an exact count tell the shop what to fix", { skip: !DATABASE_URL }, async (t) => {
+  const { check, checks, counts, call, orderId, database } = await counterOrder(t);
+  const failed = await check({ checks: checks.map((row) => ({ ...row, passed: row.code !== "visible_defects" })), counts,
+    failureNote: "Replace the smeared print", evidenceFileIds: ["file_drop"] });
+  assert.equal(failed.status, 200, JSON.stringify(failed.body));
+  assert.equal(failed.body.order.state, "rider_assigned");
+  assert.deepEqual(failed.body.order.pickupChecklist.counts, [{ lineItemId: counts[0].lineItemId, expectedQuantity: 1, countedQuantity: 1 }]);
+  const notices = (await loadStore(database)).notifications.filter((row) => row.orderId === orderId && row.type === "shop_pickup_issue_changed");
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].body, /visible_defects.*Replace the smeared print/);
+  assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_super" })).body.order.pickupChecklist.checks.find((row) => row.code === "visible_defects").passed, false);
+});
+
 test("final QR receipt survives submission and only Operations clears delivery", { skip: !DATABASE_URL }, async (t) => {
   const { call, database, orderId } = await placedOrder(t, { measurement: { width: 2000, height: 3000 }, downpaymentPercent: 75 });
   const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
@@ -1315,7 +1428,7 @@ test("final QR receipt survives submission and only Operations clears delivery",
   assert.equal((await transition("ready_for_dispatch")).status, 200);
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) })).status, 200);
+  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, counts: await matchingCounts(database, orderId), signature: await attachHandoffSignature(database, orderId) })).status, 200);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
   const current = () => call(`/orders/${orderId}`, { subject: "clerk_client" });
   const submit = (proofFileId, route = "final_online") => post(`/orders/${orderId}/payments/${route}/submit`, "clerk_client", { method: "qr_manual", reference: "FINAL-123", ...(proofFileId === undefined ? {} : { proofFileId }) });
@@ -1479,7 +1592,7 @@ test("a legacy 75/25 order still needs its balance before delivery", { skip: !DA
   }
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, signature: await attachHandoffSignature(database, orderId) })).status, 200);
+  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, counts: await matchingCounts(database, orderId), signature: await attachHandoffSignature(database, orderId) })).status, 200);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
   await database.transaction(async () => {
     const store = await loadStore(database);

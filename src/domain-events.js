@@ -490,10 +490,13 @@ export function deriveDomainEvents(store, before, { createId, at }) {
           notify(
             order?.supplierId,
             "shop_pickup_issue_changed",
-            "Pickup issue status changed",
+            row.status === "open" ? "Fix the failed pickup check before handoff" : "Pickup issue status changed",
             order,
             occurrence,
             "supplier",
+            row.status === "open" ? {
+              body: `${(row.failedCheckCodes || []).join(", ")}: ${row.failureNote || "Review the pickup checklist"}. Fix these items with Operations before the rider repeats the checks and count.`,
+            } : {},
           );
         }
         if (table === "issues") {

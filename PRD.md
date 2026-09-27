@@ -41,7 +41,7 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 - Supplier payout never exceeds confirmed supplier-principal collection and is paid across proof-gated stages of the shop's own cost, snapshotted per order: start of production 40%, delivered 35%, issue window closed 25% (orders placed before 25 Sep 2026 keep printing 50%, packaging 15%, delivered 25%, retention 10%). Only Operations or Super Admin release a stage, after reviewing its proof; nothing releases on a state change, the window timer, or the client's confirmation.
 - Packaging readiness is a signal, not a checklist: the supplier marks the job packed, riders are offered it, and the supplier and rider run the six pickup checks together at the counter before the package leaves.
 - Claims hold payout. Client issues during the global issue window create an automatic claim hold.
-- Rider pickup requires all six checks; failures create an Operations escalation.
+- Rider pickup requires exact counter counts against ordered pieces and all six checks; failures create an Operations escalation and tell the shop what to fix.
 - Delivery requires file-backed photo or signature evidence and opens the issue window.
 - Order/payment/payout/credit/claim/issue changes commit atomically with audit and notification records.
 
