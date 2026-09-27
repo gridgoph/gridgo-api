@@ -86,6 +86,23 @@ function caller(store, user, at = AT) {
   });
 }
 
+test("a removed shop is not matched until its account is restored", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const shop = store.users.find((row) => row.id === "supplier_a");
+  const match = () => call("POST", "/me/matches", { subcategoryCode: "flyers" });
+  assert.equal((await match()).body.shop.supplierId, "supplier_a");
+
+  shop.accountStatus = "removed";
+  const held = await match();
+  assert.equal(held.status, 200);
+  assert.equal(held.body.shop.supplierId, "supplier_b");
+  assert.ok(held.body.listings.every((row) => row.supplierId !== "supplier_a"));
+
+  shop.accountStatus = "active";
+  assert.equal((await match()).body.shop.supplierId, "supplier_a");
+});
+
 for (const queued of [false, true]) {
   test(`Friday ready-time agrees across match, cart and checkout (queued=${queued})`, async (t) => {
     const { store, client } = fixture();

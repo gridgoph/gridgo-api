@@ -54,6 +54,7 @@ export async function bootstrapAdministrator({
       clerkUserId,
       email: profile.email,
       name: profile.name || profile.email.split("@")[0],
+      accountStatus: "active",
       createdAt: at,
     };
     administrator.role = "super_admin";
