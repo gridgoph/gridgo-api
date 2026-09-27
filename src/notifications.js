@@ -287,6 +287,8 @@ export function hasRole(store, userId, role) {
 export function approvedRole(store, userId, role) {
   if (!hasRole(store, userId, role)) return false;
   if (!['supplier', 'rider'].includes(role)) return true;
+  const user = (store.users || []).find(u => u.id === userId);
+  if ((user?.accountStatus ?? 'active') !== 'active') return false;
   const approval = (store.approvalCases || []).find(c => c.userId === userId && c.kind === role);
   // Explicit migration-era fallback only where a case is absent.
   return approval ? approval.status === 'approved' : (store.users || []).some(u => u.id === userId && u.role === role && u.verificationStatus === 'approved');

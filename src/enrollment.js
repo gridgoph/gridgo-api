@@ -172,6 +172,7 @@ function resolveOrCreateIdentity({ store, clerkUserId, clerkUser, role, applicat
     email: profile.email,
     name: profile.name || profile.email.split("@")[0],
     role,
+    accountStatus: "active",
     verificationStatus: "pending",
     createdAt: at,
   };

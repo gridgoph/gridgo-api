@@ -189,6 +189,7 @@ function normalizedInverse(value, best) {
 }
 
 function approvedOpenSuppliers(store) {
+  const accountStatuses = new Map((store.users || []).map((user) => [user.id, user.accountStatus]));
   const members = new Set(
     (store.userRoleMemberships || [])
       .filter((row) => row.role === "supplier")
@@ -201,6 +202,7 @@ function approvedOpenSuppliers(store) {
   );
   const profiles = new Map();
   for (const profile of (store.supplierProfiles || [])) {
+    if ((accountStatuses.get(profile.userId) ?? "active") !== "active") continue;
     if (profile.isClosed === true || !profile.shop) continue;
     if (!members.has(profile.userId) || !approved.has(profile.userId)) continue;
     profiles.set(profile.userId, profile);
