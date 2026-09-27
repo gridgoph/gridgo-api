@@ -286,6 +286,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    await runner(migrationOptions(schema, "down", 1, client));
+    const accountColumns = new Set((await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users'",
+      [schema],
+    )).rows.map((row) => row.column_name));
+    for (const column of ["account_status", "account_status_reason", "account_status_at", "account_status_by"]) {
+      assert.equal(accountColumns.has(column), false, `${column} should be removed with the account-status migration`);
+    }
+
     // An order with no plan of its own was sold under the four-stage payout
     // plan, and the escrow plan cannot be reverted while an order is on it.
     assert.equal((await client.query(
@@ -340,15 +349,6 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='orders' AND column_name='rider_commission_bps'`, [schema])).rowCount, 0);
-    await runner(migrationOptions(schema, "down", 1, client));
-    const accountColumns = new Set((await client.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'users'",
-      [schema],
-    )).rows.map((row) => row.column_name));
-    for (const column of ["account_status", "account_status_reason", "account_status_at", "account_status_by"]) {
-      assert.equal(accountColumns.has(column), false, `${column} should be removed with the account-status migration`);
-    }
-
     await runner(migrationOptions(schema, "down", 1, client));
     const productionWindowColumns = new Set((await client.query(
       `SELECT column_name FROM information_schema.columns
@@ -874,7 +874,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 7, client));
+    await runner(migrationOptions(schema, "down", 8, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
