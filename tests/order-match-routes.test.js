@@ -2,7 +2,7 @@ import { publicOrderFor } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { routeOrderMatch } from "../src/order-match-routes.js";
+import { routeOrderMatch, prepareCartArtworkLinks } from "../src/order-match-routes.js";
 import { defaultTaxonomy } from "../src/taxonomy.js";
 
 const AT = "2026-08-24T01:00:00.000Z";
@@ -849,4 +849,53 @@ test("production links follow job scope for shops and riders, and all lines for 
     if (count === 1) assert.deepEqual(projected.productionItems[0].artworkLinks, DESIGN_LINKS);
     if (count < 2) assert.equal(JSON.stringify(projected).includes("private-b"), false);
   }
+});
+
+test('Drive, Dropbox and WeTransfer codes survive cart patch and checkout with listing enforcement', async () => {
+  const { store, client } = fixture();
+  const links = [
+    { formatCode: 'google_drive', url: 'https://drive.google.com/file/d/ABC/view' },
+    { formatCode: 'dropbox', url: 'https://www.dropbox.com/s/ABC/file.pdf' },
+    { formatCode: 'we_transfer', url: 'https://we.tl/t-ABC' },
+  ];
+  for (const link of links) {
+    store.acceptedFileFormats.push({ code: link.formatCode, inputKind: 'url', active: true });
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: link.formatCode });
+  }
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  const added = await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkLinks: links });
+  assert.deepEqual(added.body.cart.lines[0].artworkLinks, links);
+  const patched = await call('PATCH', `/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { artworkLinks: links });
+  assert.deepEqual(patched.body.cart.lines[0].artworkLinks, links);
+  const placed = await call('POST', `/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'PROVIDER-LINKS' } });
+  assert.equal(placed.status, 201);
+  assert.deepEqual(store.orderLineItems[0].artworkLinks, links);
+  assert.deepEqual(store.orderInvoices[0].snapshot.lines[0].artworkLinks, links);
+});
+
+test('short-link preflight resolves only owned client cart writes and route revalidates after it', async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  const body = { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkLinks: [{ formatCode: 'canva_link', url: 'https://canva.link/demo' }] };
+  const pathname = `/me/carts/${cartId}/lines`;
+  let checks = 0;
+  const checker = async () => { checks++; return { url: 'https://www.canva.com/design/ABC/view', formatCode: 'canva_link' }; };
+  const prepare = (user, method = 'POST', path = pathname, value = structuredClone(body)) => prepareCartArtworkLinks({ req: { method }, pathname: path, store, user, body: value, checker });
+  await assert.rejects(prepare(null), { code: 'membership_required' });
+  await assert.rejects(prepare({ id: 'other', role: 'client' }), { code: 'forbidden' });
+  assert.equal(checks, 0);
+  const normalized = structuredClone(body);
+  await prepare(client, 'POST', pathname, normalized);
+  assert.deepEqual(normalized.artworkLinks, [{ formatCode: 'canva_link', url: 'https://www.canva.com/design/ABC/view' }]);
+  const added = await call('POST', pathname, normalized);
+  assert.deepEqual(added.body.cart.lines[0].artworkLinks, normalized.artworkLinks);
+  const patch = { artworkLinks: structuredClone(body.artworkLinks) };
+  const linePath = `${pathname}/${added.body.cart.lines[0].id}`;
+  await prepare(client, 'PATCH', linePath, patch);
+  assert.deepEqual((await call('PATCH', linePath, patch)).body.cart.lines[0].artworkLinks, normalized.artworkLinks);
+  store.supplierServiceFileFormats = [];
+  await assert.rejects(call('PATCH', linePath, patch), { code: 'artwork_link_format_not_accepted' });
 });

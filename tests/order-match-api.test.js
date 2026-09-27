@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import net from "node:net";
+import http from "node:http";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -39,10 +41,10 @@ async function freePort() {
   });
 }
 
-async function startApi() {
+async function startApi({ preload, extraEnv = {} } = {}) {
   const port = await freePort();
   const api = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["src/server.js"], {
+  const child = spawn(process.execPath, [...(preload ? ["--import", preload] : []), "src/server.js"], {
     cwd: path.resolve("."),
     env: {
       ...process.env,
@@ -55,6 +57,7 @@ async function startApi() {
       PORT: String(port),
       GRIDGO_BUILD_SHA: "order-match-api-test",
       GRIDGO_BUILD_TIME: AT,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1621,13 +1624,17 @@ test("design links persist through PostgreSQL checkout and remain scoped to artw
   await database.transaction(async () => {
     const store = await loadStore(database);
     const listing = store.catalogItems.find((item) => item.id === "item_supplier_a");
-    store.supplierServiceFileFormats.push({ supplierServiceId: listing.supplierServiceId, formatCode: "canva_link" });
+    for (const formatCode of ["canva_link", "google_drive", "dropbox", "we_transfer"]) store.supplierServiceFileFormats.push({ supplierServiceId: listing.supplierServiceId, formatCode });
     await saveStore(database, store);
   });
   const instance = await startApi();
   t.after(async () => { instance.child.kill("SIGTERM"); await new Promise((resolve) => instance.child.once("exit", resolve)); });
   const call = (pathname, options = {}) => request(instance.api, pathname, { subject: "clerk_client", ...options });
-  const artworkLinks = [{ formatCode: "canva_link", url: "https://www.canva.com/design/ABC/edit" }];
+  const artworkLinks = [
+    { formatCode: "google_drive", url: "https://drive.google.com/file/d/ABC/view" },
+    { formatCode: "dropbox", url: "https://www.dropbox.com/s/ABC/artwork.pdf" },
+    { formatCode: "we_transfer", url: "https://we.tl/t-ABC" },
+  ];
   const cartId = (await call("/me/carts", { method: "POST", body: { fulfillmentMode: "pickup" } })).body.cart.id;
   const add = await call(`/me/carts/${cartId}/lines`, { method: "POST", body: { catalogItemId: "item_supplier_a", optionIds: [], quantity: 1, artworkLinks } });
   assert.equal(add.status, 201, JSON.stringify(add.body) + instance.output());
@@ -1647,4 +1654,57 @@ test("design links persist through PostgreSQL checkout and remain scoped to artw
   assert.equal(JSON.stringify(foreign.body).includes("canva.com"), false);
   assert.deepEqual((await call(`/orders/${orderId}/invoice`)).body.invoice.lines[0].artworkLinks, artworkLinks);
   await assert.rejects(database.query("UPDATE order_line_items SET artwork_links = '[]' WHERE order_id = $1", [orderId]), { code: "23514" });
+});
+
+test('HTTP short links check and persist canonical artwork outside the domain mutation lock', { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: 'canva_link' });
+    await saveStore(database, store);
+  });
+  const fixtures = JSON.parse(readFileSync(new URL('./fixtures/artwork-links/responses.json', import.meta.url)));
+  const html = readFileSync(new URL('./fixtures/artwork-links/canva-public.html', import.meta.url));
+  let reachedProvider;
+  let releaseProvider;
+  const providerReached = new Promise((resolve) => { reachedProvider = resolve; });
+  const providerReleased = new Promise((resolve) => { releaseProvider = resolve; });
+  let hold = false;
+  const provider = http.createServer(async (req, res) => {
+    if (hold) { reachedProvider(); await providerReleased; }
+    const response = req.headers.host === 'canva.link' ? fixtures.short : fixtures.public;
+    res.writeHead(response.status, response.headers);
+    res.end(req.headers.host === 'canva.link' ? '' : html);
+  });
+  await new Promise((resolve) => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { releaseProvider(); provider.closeAllConnections(); return new Promise((resolve) => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise((resolve) => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const short = { formatCode: 'canva_link', url: 'https://canva.link/demo' };
+  const checked = await call('/artwork/link-check', { method: 'POST', body: short });
+  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  assert.equal(checked.body.access, 'public_view');
+  assert.equal(checked.body.url, fixtures.public.url);
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  hold = true;
+  const adding = call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkLinks: [short] } });
+  await Promise.race([providerReached, adding.then((result) => { throw new Error(`Cart returned before resolving its short link: ${JSON.stringify(result)}`); })]);
+  try {
+    const lock = await database.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', ['gridgo-domain-mutation']);
+    assert.equal(lock.rows[0].acquired, true, 'provider round trip must not hold the domain lock');
+  } finally { releaseProvider(); }
+  const added = await adding;
+  assert.equal(added.status, 201, JSON.stringify(added.body) + instance.output());
+  const canonical = [{ formatCode: 'canva_link', url: fixtures.public.url }];
+  assert.deepEqual(added.body.cart.lines[0].artworkLinks, canonical);
+  const patched = await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { method: 'PATCH', body: { artworkLinks: [{ ...short, formatCode: 'other_link' }] } });
+  assert.equal(patched.status, 200, JSON.stringify(patched.body));
+  assert.deepEqual(patched.body.cart.lines[0].artworkLinks, canonical);
+  const placed = await call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'CANVA-SHORT' } } });
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  assert.deepEqual(placed.body.invoice.lines[0].artworkLinks, canonical);
+  assert.deepEqual((await loadStore(database)).orderLineItems[0].artworkLinks, canonical);
 });
