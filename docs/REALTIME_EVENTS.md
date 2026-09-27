@@ -56,7 +56,7 @@ User action acknowledgements remain durable inbox records but use silent inbox i
 | 26 | Offer available | Current approved membership riders, same contained-pickup eligibility exclusion as accept/offers; durable single offer occurrence. |
 | 27 | Assigned/accepted | Existing role-specific client/shop/winner notices and board refresh; office-client safe copy preserved. |
 | 28 | Offer withdrawn/lost | Every prior eligible rider gets minimal dispatch removal; no winner/customer details or losing-rider personal notification. |
-| 29 | Pickup failure | Existing Ops escalation notice plus assigned supplier safe issue notice; blocked-order views refresh. |
+| 29 | Pickup failure | Ops/Super Admin escalation notice plus assigned supplier issue notice with failed check codes and the rider’s correction note; quality failures and count mismatches both block pickup and refresh order views. |
 | 30 | Pickup resolved | Existing rider resolution retained once; supplier resume notice; order/escalation refresh; repeat-check gates retained. |
 | 31 | Picked up | Existing supplier/client role-specific milestone; office-transfer copy retained; rider actor silent. |
 | 32 | Out for delivery | Existing delivery/office-transfer distinction; related order/job/dispatch refresh. |

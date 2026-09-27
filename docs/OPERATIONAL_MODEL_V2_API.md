@@ -129,7 +129,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/audit` | ops/super | platform audit with existing filters |
 | GET | `/dispatch/offers` | approved rider/ops/super | available/assigned dispatches |
 | POST | `/dispatch/:id/accept` | approved rider | assign self to ready dispatch |
-| POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | pass or escalate all six checks |
+| POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | record counts and pass or escalate all six checks |
 | POST/GET | `/dispatch/:id/location` | POST assigned approved rider; GET related parties/ops/super | [location contract](#rider-location) |
 | GET | `/ops/riders/locations` | ops/super | [active rider map](#rider-location) |
 | GET | `/ops/push/stats` | ops/super | [push reach and delivery](#get-opspushstats) aggregates |
@@ -1134,11 +1134,29 @@ POST /dispatch/:id/pickup-checklist
     { "code": "packaging_integrity", "passed": true },
     { "code": "documentation", "passed": true },
     { "code": "supplier_sign_off", "passed": true }
-  ]
+  ],
+  "counts": [{ "lineItemId": "cline_…", "countedQuantity": 100 }]
 }
 ```
 
 Each code appears exactly once with boolean `passed`.
+
+### Counter count
+
+`GET /orders/:id` (and the existing order projections, including dispatch offers) supplies `pickupCountItems: [{lineItemId, itemName, expectedQuantity}]` to riders, the assigned supplier and Operations/Super Admin. These are the quantities to count at the counter, derived from immutable order-line snapshots, never current catalog settings:
+
+- Ordinary lines use the ordered `quantity` (copies/items). Pages, area and length describe one copy and do not multiply the count.
+- `per_package` lines use `quantity × packageQtySnapshot` pieces. For example, two packs of 100 require a count of 200.
+- An older order without line items uses its stored `quantity`, with `lineItemId: null`.
+- An absent/invalid quantity or package size, or an unsafe integer product, returns `pickupCountItems: null`. Submission then refuses with `409 pickup_count_unavailable`; Operations must review the order rather than the rider inventing a target.
+
+Every checklist submission must send `counts: [{lineItemId, countedQuantity}]`, exactly one row per projected item. `countedQuantity` must be a JSON safe integer ≥ 0; missing/duplicate/unknown lines and malformed counts return `400 invalid_pickup_counts`. An older app that omits counts can no longer complete pickup. The server supplies `expectedQuantity`; a caller cannot override it.
+
+A mismatch on **any** line (short or excess) forces the stored `quantity_match` result to `false`, even if the rider sent `true`. Surplus on another line cannot hide a shortage. An explicit failed check remains failed even when counts match. A mismatch requires the same note and attached photo as any other failed check; it never transfers custody.
+
+Both passing and escalated orders persist `pickupChecklist.counts: [{lineItemId, expectedQuantity, countedQuantity}]` alongside `checks`, `completedAt` (server time), and `completedBy` (assigned rider user ID). These fields are available on authorized order reads, including Operations and Super Admin. `pickupChecklist` is the latest attempt; failed attempts also retain `checks` and `counts` on their escalation records, returned by `GET /escalations?orderId=:id`, even after resolution and a successful recheck. Existing historical records may omit counts; render them as not recorded, never as zero. Count/check records use the existing JSONB composites and require no migration.
+
+A counter submission never releases a payout, attaches milestone proof, or changes any payout shares.
 
 ### Supplier handoff signature
 
@@ -1147,6 +1165,7 @@ Six passes move nothing on their own. Custody changes hands only once the suppli
 ```json
 {
   "checks": [ "…all six passed…" ],
+  "counts": [{ "lineItemId": "cline_…", "countedQuantity": 100 }],
   "signature": { "fileId": "file_…", "signerName": "Ana Reyes" }
 }
 ```
@@ -1169,6 +1188,7 @@ With a valid signature the order moves to `picked_up` and the checklist records 
     "pickupChecklist": {
       "status": "passed",
       "checks": [ "…" ],
+      "counts": [{ "lineItemId": "cline_…", "expectedQuantity": 100, "countedQuantity": 100 }],
       "completedAt": "2026-09-19T07:24:00.000Z",
       "completedBy": "user_rider",
       "signOffPrompt": "GRIDGO partner! Quality check, done! Salamat po!",
@@ -1177,7 +1197,7 @@ With a valid signature the order moves to `picked_up` and the checklist records 
         "signerName": "Ana Reyes",
         "signedAt": "2026-09-19T07:24:00.000Z",
         "riderId": "user_rider",
-        "checklistHash": "sha256 hex of {orderId, checks in canonical order}"
+        "checklistHash": "sha256 hex of {orderId, checks in canonical order, counts sorted by lineItemId}"
       }
     }
   },
@@ -1186,13 +1206,13 @@ With a valid signature the order moves to `picked_up` and the checklist records 
 }
 ```
 
-`pickupChecklist.handoffSignature` is projected to the assigned rider, the assigned supplier and Operations on every order read, so the supplier app and the ops dashboard can show who signed and when; the image itself is fetched with `GET /files/:fileId/download-url` under that purpose's read rule. The client's projection omits the field and may not read the file — the client learns the checks passed from `pickupChecklist.status`, not who signed for the shop. `checklistHash` is `checklistDigest(orderId, checks)` from `src/operational-model.js`; escalated checklists carry `handoffSignature: null`, and checklists recorded before this contract carry no field at all.
+`pickupChecklist.handoffSignature` is projected to the assigned rider, the assigned supplier and Operations on every order read, so the supplier app and the ops dashboard can show who signed and when; the image itself is fetched with `GET /files/:fileId/download-url` under that purpose's read rule. The client's projection omits the field and may not read the file — the client learns the checks passed from `pickupChecklist.status`, not who signed for the shop. `checklistHash` is `checklistDigest(orderId, checks, counts)` from `src/operational-model.js`; pre-count signatures retain the original two-argument digest; escalated checklists carry `handoffSignature: null`, and checklists recorded before this contract carry no field at all.
 
 To let the rider's phone prefill the signer, orders read by the assigned rider, the assigned supplier or Operations also carry `supplierContact: { shopName, contactName }` from the shop's profile (`null` when the order has no shop profile).
 
 The response still returns the trained spoken line for the rider to close the checkpoint out loud; saying it is not recorded.
 
-Any failure must include `failureNote` and one or more `evidenceFileIds` already attached to the order as rider-owned `delivery_photo` files. The order remains `rider_assigned`; `pickupChecklist.status` becomes `failed_escalated`; an `open` escalation and ops/super notifications are created. Until Operations resolves it, another checklist returns `409 pickup_escalation_open`.
+Any failure must include `failureNote` and one or more `evidenceFileIds` already attached to the order as rider-owned `delivery_photo` files. The order remains `rider_assigned`; `pickupChecklist.status` becomes `failed_escalated`; an `open` escalation and ops/super `pickup_check_escalation` notifications are created. The assigned shop receives one `shop_pickup_issue_changed` inbox notification naming the failed check codes, the rider’s note, and the instruction to fix the items with Operations before rechecking. Until Operations resolves it, another checklist returns `409 pickup_escalation_open`.
 
 Operations resolves with:
 
@@ -1204,7 +1224,7 @@ POST /escalations/:id/resolve
 { "resolution": "Supplier replaced the affected batch; repeat all six checks." }
 ```
 
-The rider is notified and must resubmit all six checks.
+The rider is notified and must resubmit all six checks and fresh counts. Resolution itself never permits transport. A successful repeat still requires the supplier handoff signature.
 
 ## Physical invoice request
 

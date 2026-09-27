@@ -28,20 +28,41 @@ export const PICKUP_SIGN_OFF_PROMPT = "GRIDGO partner! Quality check, done! Sala
 /**
  * What a handoff signature attests, as one stable hash.
  *
- * The supplier signs on the rider's phone against six answers. Recording
+ * The supplier signs on the rider's phone against six answers and the counts. Recording
  * the digest of exactly those answers beside the signature lets anyone
  * reading the order later confirm the checklist shown on screen is the one
  * that was signed for, without trusting either app's rendering of it. The
  * checks are put in the canonical order first, so two clients that send the
  * same answers in different orders sign for the same thing.
  */
-export function checklistDigest(orderId, checks) {
+export function checklistDigest(orderId, checks, counts) {
   const byCode = new Map((checks || []).map((check) => [check?.code, Boolean(check?.passed)]));
   const canonical = PICKUP_CHECK_CODES.map((code) => ({ code, passed: byCode.get(code) === true }));
+  // Omitted counts retain the digest of signatures recorded before counter counts.
+  const attestation = { orderId: String(orderId), checks: canonical };
+  if (counts) attestation.counts = counts.map(({ lineItemId, expectedQuantity, countedQuantity }) =>
+    ({ lineItemId, expectedQuantity, countedQuantity }))
+    .sort((a, b) => String(a.lineItemId).localeCompare(String(b.lineItemId)));
   return crypto
     .createHash("sha256")
-    .update(JSON.stringify({ orderId: String(orderId), checks: canonical }))
+    .update(JSON.stringify(attestation))
     .digest("hex");
+}
+
+/** Counter pieces use committed quantities, never today's listing or rider input.
+ * Pages/area/length describe one copy; only packages multiply piece quantity.
+ * Null means the old snapshot cannot establish a safe expected count.
+ */
+export function pickupCountItemsFor(store, order) {
+  const lines = (store?.orderLineItems || []).filter((line) => line.orderId === order.id)
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.id).localeCompare(String(b.id)));
+  const items = lines.length ? lines.map((line) => {
+    const multiplier = line.pricingUnitSnapshot === "per_package" ? line.packageQtySnapshot : 1;
+    const expectedQuantity = Number.isSafeInteger(line.quantity) && Number.isSafeInteger(multiplier)
+      && line.quantity > 0 && multiplier > 0 ? line.quantity * multiplier : null;
+    return { lineItemId: line.id, itemName: line.itemNameSnapshot || "", expectedQuantity };
+  }) : [{ lineItemId: null, itemName: order.title || "", expectedQuantity: order.quantity }];
+  return items.every((item) => Number.isSafeInteger(item.expectedQuantity) && item.expectedQuantity > 0) ? items : null;
 }
 
 /**
@@ -938,6 +959,7 @@ export function publicOrderFor(order, user, store = null) {
   // signature; the shop and Operations may read back who was named.
   if ((ops || assignedSupplier || rider) && store) {
     publicRecord.supplierContact = supplierContactFor(store, order.supplierId);
+    publicRecord.pickupCountItems = pickupCountItemsFor(store, order);
   }
   // The handoff signature is between the shop, the rider and Operations. The
   // client learns the checks passed from the status; not who signed for it.
