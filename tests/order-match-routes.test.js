@@ -1,3 +1,4 @@
+import { publicOrderFor } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -776,4 +777,76 @@ test("a basket refuses a quantity under the listing's minimum instead of holding
   assert.equal(withArt.body.cart.lines[0].artworkFileId, "file_art");
   const raised = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { quantity: 20 });
   assert.equal(raised.body.cart.lines[0].lineSubtotalMinor, 100_000);
+});
+
+const DESIGN_LINKS = [{ formatCode: "canva_link", url: "https://www.canva.com/design/ABC/edit" }];
+function enableDesignLinks(store) {
+  store.acceptedFileFormats.push({ code: "canva_link", inputKind: "url", active: true }, { code: "other_link", inputKind: "url", active: true });
+  store.supplierServiceFileFormats.push({ supplierServiceId: "service_supplier_a", formatCode: "canva_link" });
+}
+
+test("cart artwork links survive add, partial patch and checkout into scoped artwork projections", async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkLinks: DESIGN_LINKS });
+  const line = added.body.cart.lines[0];
+  assert.deepEqual(line.artworkLinks, DESIGN_LINKS);
+  const patched = await call("PATCH", `/me/carts/${cartId}/lines/${line.id}`, { quantity: 2 });
+  assert.deepEqual(patched.body.cart.lines[0].artworkLinks, DESIGN_LINKS);
+  const checkout = await call("POST", `/me/carts/${cartId}/checkout`, { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "LINK-CHECKOUT" } });
+  assert.equal(checkout.status, 201);
+  assert.deepEqual(store.orderLineItems[0].artworkLinks, DESIGN_LINKS);
+  assert.deepEqual(publicOrderFor(store.orders[0], client, store).productionItems[0].artworkLinks, DESIGN_LINKS);
+  assert.deepEqual(store.orderInvoices[0].snapshot.lines[0].artworkLinks, DESIGN_LINKS);
+});
+
+test("artwork links enforce effective URL formats, shape and HTTPS on add/patch/checkout", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  const add = (artworkLinks) => call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkLinks });
+  await assert.rejects(add(DESIGN_LINKS), { code: "artwork_link_format_not_accepted" });
+  enableDesignLinks(store);
+  for (const links of [null, {}, [null], Array(4).fill(DESIGN_LINKS[0]), [{ formatCode: "pdf", url: "https://example.com" }], [{ formatCode: "canva_link", url: "https://canva.com.evil.test/design/a/edit" }], [{ formatCode: "canva_link", url: "http://canva.com/design/a/edit" }], [{ formatCode: "canva_link", url: `https://canva.com/${"a".repeat(2000)}` }], [{ formatCode: "canva_link", url: "https://user:password@canva.com/design/a/edit" }]]) {
+    await assert.rejects(add(links), { code: "invalid_artwork_links" });
+  }
+  const lineId = (await add(DESIGN_LINKS)).body.cart.lines[0].id;
+  await assert.rejects(call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { artworkLinks: [{ formatCode: "other_link", url: "https://example.com/design" }] }), { code: "artwork_link_format_not_accepted" });
+  const cleared = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { artworkLinks: [] });
+  assert.deepEqual(cleared.body.cart.lines[0].artworkLinks, []);
+  await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { artworkLinks: DESIGN_LINKS });
+  store.supplierServiceFileFormats = store.supplierServiceFileFormats.filter((f) => f.formatCode !== "canva_link");
+  await assert.rejects(call("POST", `/me/carts/${cartId}/checkout`, { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "STALE-LINK" } }), { code: "artwork_link_format_not_accepted" });
+});
+
+test("listing overrides and inactive formats cannot inherit permission to accept artwork links", async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  const item = store.catalogItems.find((row) => row.id === "item_a");
+  item.fileFormatMode = "override";
+  store.catalogItemFileFormats.push({ catalogItemId: item.id, formatCode: "pdf" });
+  const add = () => call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: item.id, optionIds: [], quantity: 1, artworkLinks: DESIGN_LINKS });
+  await assert.rejects(add(), { code: "artwork_link_format_not_accepted" });
+  store.catalogItemFileFormats.push({ catalogItemId: item.id, formatCode: "canva_link" });
+  assert.equal((await add()).status, 201);
+  store.acceptedFileFormats.find((f) => f.code === "canva_link").active = false;
+  await assert.rejects(add(), { code: "artwork_link_format_not_accepted" });
+});
+
+test("production links follow job scope for shops and riders, and all lines for client and Operations", () => {
+  const order = { id: "order", clientId: "client" };
+  const store = {
+    orderJobs: [{ id: "a", orderId: "order", supplierId: "shop_a", riderId: "rider_a" }, { id: "b", orderId: "order", supplierId: "shop_b", riderId: "rider_b" }],
+    orderLineItems: [{ id: "line_a", jobId: "a", orderId: "order", artworkLinks: DESIGN_LINKS }, { id: "line_b", jobId: "b", orderId: "order", artworkLinks: [{ formatCode: "other_link", url: "https://example.com/private-b" }] }],
+  };
+  for (const [role, id, count] of [["client", "client", 2], ["ops_admin", "ops", 2], ["super_admin", "super", 2], ["supplier", "shop_a", 1], ["rider", "rider_a", 1], ["supplier", "unrelated", 0], ["client", "other_client", 0]]) {
+    const projected = publicOrderFor(order, { id, role }, store);
+    assert.equal(projected.productionItems.length, count);
+    if (count === 1) assert.deepEqual(projected.productionItems[0].artworkLinks, DESIGN_LINKS);
+    if (count < 2) assert.equal(JSON.stringify(projected).includes("private-b"), false);
+  }
 });
