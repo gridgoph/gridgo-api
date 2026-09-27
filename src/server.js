@@ -1,3 +1,4 @@
+import { routeArtworkLinkCheck, hasShortArtworkLinks } from "./artwork-links.js";
 import { createRealtimeTransport } from "./realtime-transport.js";
 import { createApnsDelivery, routePushDelivery } from "./apns.js";
 import { enqueueNotificationPushes, createOutboxWorker } from "./push-outbox.js";
@@ -74,7 +75,7 @@ import {
   isPrivateRiderProfileRoute,
   routeRiderProfile,
 } from "./rider-profile-routes.js";
-import { routeOrderMatch } from "./order-match-routes.js";
+import { routeOrderMatch, isCartArtworkWrite, prepareCartArtworkLinks } from "./order-match-routes.js";
 import {
   isPrivatePayoutAccountRoute,
   opsPayoutAccountProjection,
@@ -2354,6 +2355,9 @@ async function handleRequest(req, res) {
       const table = rankShops(board, categoryCode);
       return send(res, 200, { categories: board.categories, ...table });
     }
+
+    const artworkLinkResponse = await routeArtworkLinkCheck({ req, url, user, readBody });
+    if (artworkLinkResponse) return send(res, artworkLinkResponse.status, artworkLinkResponse.body);
 
     const orderMatchResponse = await routeOrderMatch({
       req,
@@ -6112,6 +6116,11 @@ const server = http.createServer((req, res) => {
     (req.method === "POST" && pathname === "/files") ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
     (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
+  // Read-only despite POST: never hold the domain lock during outbound checks.
+  if (req.method === "POST" && pathname === "/artwork/link-check") {
+    void handleRequest(req, res);
+    return;
+  }
   if (isSelfQueuedFileMutation) {
     void handleRequest(req, res);
     return;
@@ -6201,11 +6210,22 @@ const server = http.createServer((req, res) => {
     // device-token transaction inside handleRequest.
     void readBody(req)
       .then(() => verifyClerkBeforeMutation(req, pathname))
-      .then((verified) =>
-        verified?.claims?.sub
-          ? enqueueMutation(() => handleRequest(req, res))
-          : handleRequest(req, res),
-      )
+      .then(async (verified) => {
+        if (!verified?.claims?.sub) return handleRequest(req, res);
+        if (isCartArtworkWrite(req.method, pathname)) {
+          const body = await readBody(req);
+          if (hasShortArtworkLinks(body?.artworkLinks)) {
+            const store = await load();
+            const auth = await authenticateRequest(req, store);
+            if (auth.user && !accountHoldDenial(auth.user)) {
+              const role = req.headers["x-gridgo-role"];
+              const user = selectActorRole(store, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
+              await prepareCartArtworkLinks({ req, pathname, store, user, body });
+            }
+          }
+        }
+        return enqueueMutation(() => handleRequest(req, res));
+      })
       .catch((error) => {
         if (res.headersSent) {
           res.destroy(error);

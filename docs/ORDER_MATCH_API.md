@@ -100,11 +100,90 @@ Add-line body:
   "quantity": 100,
   "structuredSpec": { "size": "A5" },
   "artworkFileId": "file_...",
+  "artworkLinks": [{ "formatCode": "canva_link", "url": "https://www.canva.com/design/ABC/edit" }],
   "dropoff": { "lat": 7.0731, "lng": 125.6128, "label": "Recipient" }
 }
 ```
 
-PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+
+### Artwork design links
+
+Both add-line and patch-line requests accept `artworkLinks`, independently of `artworkFileId`:
+
+```json
+{
+  "artworkLinks": [
+    { "formatCode": "canva_link", "url": "https://www.canva.com/design/ABC/edit" },
+    { "formatCode": "google_drive", "url": "https://drive.google.com/file/d/ABC/view" }
+  ]
+}
+```
+
+The array has at most **3** entries. Each entry has `formatCode: "canva_link" | "google_drive" | "dropbox" | "we_transfer" | "other_link"` and a string `url` of at most **2,000 characters**. Stored URLs must be absolute HTTPS URLs without credentials, whitespace, control characters, or backslashes. Provider codes require the matching domain; lookalike domains do not qualify:
+
+| Code | Input hosts |
+| --- | --- |
+| `canva_link` | `canva.com` and subdomains; `canva.link` short links |
+| `google_drive` | `drive.google.com`, `docs.google.com` |
+| `dropbox` | `dropbox.com`, `dropboxusercontent.com` and their subdomains |
+| `we_transfer` | `wetransfer.com` and subdomains; `we.tl` |
+| `other_link` | Any otherwise-valid URL (including these providers for compatibility) |
+
+Canva short links are resolved through the same SSRF-safe checker before the cart mutation transaction, then stored as `canva_link` with the resolved HTTPS `canva.com/design/.../view` or `/edit` URL, including any sharing-token segment and query. This also applies when an older client sends a `canva.link` URL as `other_link`. The listing must therefore accept `canva_link`. A short link without a resolved HTTPS Canva design returns `400 artwork_link_unresolved`; paste the full design URL instead. This resolution shares the checker's per-user rate budget. Direct links need no provider round trip during cart writes. Canonicalization is not a grant of public access: a resolved private or unavailable design still requires the client's check UX.
+
+The listing's effective, active `acceptedFormats` must contain that exact code with `inputKind: "url"`. Listing overrides replace inherited service formats. These rules run on add, patch, and checkout, including a format withdrawn since the line was added.
+
+Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid. Invalid shape/URL returns `400 { "error": "invalid_artwork_links", "message": "..." }`; an unaccepted format returns `400 { "error": "artwork_link_format_not_accepted", "message": "..." }`.
+
+Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
+
+### POST `/artwork/link-check`
+
+Requires a Clerk session with a GRIDGO **client membership**. This is a read-only check despite using POST. Request:
+
+```json
+{
+  "url": "https://www.canva.com/design/ABC/view",
+  "formatCode": "canva_link"
+}
+```
+
+`formatCode` is `canva_link | google_drive | dropbox | we_transfer | other_link`, with the same domain and length validation as storage. The checker accepts HTTP or HTTPS, including redirects; **storage accepts HTTPS only**. A valid check returns HTTP **200** with exactly:
+
+```json
+{
+  "ok": true,
+  "reachable": true,
+  "httpStatus": 200,
+  "provider": "canva",
+  "access": "public_view",
+  "message": "Anyone with the link can view this Canva design. Edit permission is not verified.",
+  "url": "https://www.canva.com/design/ABC/view",
+  "formatCode": "canva_link"
+}
+```
+
+- `ok`: boolean; true only when public access has supporting evidence (`public_view` or `public_edit`), not merely because an HTTP server answered.
+- `reachable`: boolean; whether any HTTP response was received. A 404/login/403 can be reachable without being usable.
+- `httpStatus`: last received HTTP status number, or `null` if no response arrived.
+- `provider`: `canva | google_drive | dropbox | we_transfer | figma | other`, based on exact domain boundaries. Canva short links are classified from their resolved destination.
+- `access`: `public_view | public_edit | sign_in_required | not_found | unknown`.
+- `message`: plain explanatory string for display. Do not branch on its wording.
+- `url`, `formatCode`: additive normalized link fields. A `canva.link` resolving to a Canva design returns its full design URL and `canva_link`; otherwise the input is retained. A login redirect never replaces the design URL with the login page. Clients can save these fields directly, subject to listing acceptance and HTTPS storage rules. Drive links may now use `google_drive` when the listing accepts it; `other_link` remains compatible when that exact code is accepted.
+
+The checker sends HEAD, then GET for a success needing content inspection or a HEAD refusal (403/405/501). It uses one **5-second total deadline** including DNS, at most **3 redirects total**, an **8 KiB header limit**, and a **64 KiB response-body limit**. On overflow it retains only the first 64 KiB for evidence, then destroys the response. Every hop and the GET fallback resolve DNS, refuse any non-public address in the results, and pin the checked address into the socket lookup. Private, loopback, link-local, metadata, multicast, reserved, and IPv4-mapped/transition IPv6 destinations are refused. Credentials and non-HTTP(S) schemes are refused on redirects too. Canva.com requests send a fixed browser user agent and `Accept: text/html`, because the original checker user agent receives a 200 “Unsupported client” page. Other hosts keep `GRIDGO-Artwork-Link-Check/1.0`. No request sends session headers/cookies or executes JavaScript.
+
+Access evidence is deliberately conservative:
+
+- Recognizable leading PDF/PNG/JPEG/WebP bytes with the matching Content-Type served successfully without authentication (including files larger than the cap) support `public_view` and “Anyone with the link can view this artwork.” A Content-Type header alone does not.
+- 401, a fetched login/sign-in URL, or an HTML password input gives `sign_in_required`; 404/410 gives `not_found`.
+- A Canva `/design/<id>[/<share-token>]/view` or `/edit` response with status 200 and the captured viewer bootstrap identifying that same design supports `public_view`, including when this evidence is within the retained 64 KiB prefix of a larger page. `/edit` plus viewer evidence establishes viewing only; this implementation never claims `public_edit`.
+- Unsupported-client pages, generic HTML shells, mismatched design IDs, bot challenges/403, timeouts, DNS/transport failures, excess redirects, and capped bodies without recognizable evidence remain `unknown`. A status of 200, title, or Open Graph metadata alone is insufficient. No provider account is used. The captured response and fixture provenance are in `tests/fixtures/artwork-links/README.md`.
+
+Clients should check each entered link, show the message, and ask for a corrected sharing link or an upload when it cannot be verified. `unknown` must not be displayed as verified. The result is advisory and transient: it is not stored as a permission grant, and checkout does not refetch links or require a previous check token. Backend persistence validates URL shape and listing compatibility, resolving only short Canva URLs before cart writes; the client owns its progression UX.
+
+Errors use the standard `{ "error": "snake_case", "message": "..." }` envelope: `401 unauthorized`, `403 forbidden`, `400 invalid_artwork_link`, `400 unsafe_artwork_url`, and `429 artwork_link_rate_limited`. Each user may attempt **10 checks per rolling minute per API process**, including invalid/unsafe requests; unauthenticated and wrong-role requests cannot consume another user's budget. Short-link resolution during cart add/patch uses this same budget (one attempt per short link). Retry after a minute. The limiter is process-local and resets on restart, matching the existing API limiter infrastructure.
 
 Every cart payload includes one counter location per selected supplier:
 
