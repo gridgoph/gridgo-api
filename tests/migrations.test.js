@@ -108,6 +108,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1787000400000_escrow_payout_plan",
         "1787004000000_an_account_can_be_suspended_or_removed",
         "1787007600000_artwork_links",
+        "1787011200000_artwork_link_provider_formats",
       ],
     );
 
@@ -286,6 +287,12 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    for (const formatCode of ["google_drive", "dropbox", "we_transfer"]) {
+      assert.equal((await client.query("SELECT valid_artwork_links($1::jsonb) AS valid", [JSON.stringify([{ formatCode, url: "https://example.com/artwork" }])])).rows[0].valid, true);
+    }
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT valid_artwork_links($1::jsonb) AS valid", [JSON.stringify([{ formatCode: "google_drive", url: "https://drive.google.com/file/d/ABC/view" }])])).rows[0].valid, false);
 
     for (const value of [null, {}, [{ formatCode: "pdf", url: "https://example.com" }], Array(4).fill({ formatCode: "other_link", url: "https://example.com" })]) {
       assert.equal((await client.query("SELECT valid_artwork_links($1::jsonb) AS valid", [JSON.stringify(value)])).rows[0].valid, false);
@@ -884,7 +891,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 9, client));
+    await runner(migrationOptions(schema, "down", 10, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)

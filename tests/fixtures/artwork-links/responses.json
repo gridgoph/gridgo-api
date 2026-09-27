@@ -1,0 +1,62 @@
+{
+  "public": {
+    "url": "https://www.canva.com/design/DAF9RMb6BGM/kJN60E_r3FOTSq0z0tCGcQ/view",
+    "status": 200,
+    "headers": {
+      "content-type": "text/html;charset=utf-8"
+    },
+    "bodyFile": "canva-public.html"
+  },
+  "loginRedirect": {
+    "status": 302,
+    "headers": {
+      "location": "https://www.canva.com/login?redirect=%2Fdesign%2FPRIVATE%2Fedit"
+    }
+  },
+  "login": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "body": "<!DOCTYPE html><html><title>Log in - Canva</title><form><input type=\"password\"></form></html>"
+  },
+  "challenge": {
+    "status": 403,
+    "headers": {
+      "content-type": "text/html",
+      "cf-mitigated": "challenge"
+    },
+    "body": "<!DOCTYPE html><html><title>Canva</title><script>window.__STATUS_PAGE_CONFIG__ = {};</script></html>"
+  },
+  "missing": {
+    "status": 404,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "body": "<!DOCTYPE html><html><title>Not found</title></html>"
+  },
+  "short": {
+    "status": 302,
+    "headers": {
+      "location": "https://www.canva.com/design/DAF9RMb6BGM/kJN60E_r3FOTSq0z0tCGcQ/view"
+    }
+  },
+  "files": [
+    {
+      "type": "image/png",
+      "hex": "89504e470d0a1a0a"
+    },
+    {
+      "type": "image/jpeg",
+      "hex": "ffd8ffe000104a4649460001"
+    },
+    {
+      "type": "application/pdf",
+      "hex": "255044462d312e370a"
+    },
+    {
+      "type": "image/webp",
+      "hex": "524946460000010057454250"
+    }
+  ]
+}

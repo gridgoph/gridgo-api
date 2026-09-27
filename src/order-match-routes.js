@@ -1,4 +1,4 @@
-import { validateArtworkLinks } from "./artwork-links.js";
+import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
 import {
@@ -748,6 +748,29 @@ export function isOrderMatchRoute(method, pathname) {
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
+}
+
+export function isCartArtworkWrite(method, pathname) {
+  return method === "POST" && /^\/me\/carts\/[^/]+\/lines$/.test(pathname)
+    || method === "PATCH" && /^\/me\/carts\/[^/]+\/lines\/[^/]+$/.test(pathname);
+}
+
+// Server calls this before opening the mutation transaction. The actual route
+// repeats authorization and format validation against its locked store snapshot.
+export async function prepareCartArtworkLinks({ req, pathname, store, user, body, checker }) {
+  if (!isCartArtworkWrite(req.method, pathname) || !hasShortArtworkLinks(body?.artworkLinks)) return;
+  requireClient(user);
+  const parts = pathname.split("/");
+  const cart = ownCart(store, user, decodeURIComponent(parts[3]), { draft: true });
+  let itemId = body.catalogItemId;
+  if (req.method === "PATCH") {
+    const line = (store.cartLines || []).find((row) => row.cartId === cart.id && row.id === decodeURIComponent(parts[5]));
+    if (!line) fail(404, "cart_line_not_found", "That cart line no longer exists.");
+    itemId = line.catalogItemId;
+  }
+  const item = (store.catalogItems || []).find((row) => row.id === itemId);
+  body.artworkLinks = await resolveArtworkLinks(body.artworkLinks, item ? publicCatalogItem(store, item)?.acceptedFormats : [],
+    checker || ((link) => checkArtworkLinkForUser(user.id, link)));
 }
 
 export async function routeOrderMatch({ req, url, store, user, readBody, id, now }) {
