@@ -3704,6 +3704,93 @@ test("push stats are Operations/Super Admin aggregates of reach and outbox outco
   }
 });
 
+test("a suspended shop is not an assignment candidate until restored", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  try {
+    const created = await request(instance.api, "/orders", {
+      method: "POST", subject: "clerk_client",
+      body: { productId: "prod_tarpaulin", title: "Account standing assignment", quantity: 1,
+        size: "2m x 3m", material: "13oz tarpaulin", finish: "hemmed",
+        address: "Bajada", zone: "davao_central", submit: true },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const orderId = created.body.order.id;
+    for (const state of ["needs_qa", "approved_for_matching"]) {
+      const result = await request(instance.api, `/orders/${orderId}/transition`, {
+        method: "POST", subject: "clerk_ops", body: { state },
+      });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+    }
+    const candidates = async () => {
+      const result = await request(instance.api, `/orders/${orderId}/eligible-suppliers`, { subject: "clerk_ops" });
+      assert.equal(result.status, 200);
+      return result.body.candidates.filter((row) => row.eligible).map((row) => row.supplier.id);
+    };
+    assert.ok((await candidates()).includes("user_supplier"));
+    const held = await request(instance.api, "/users/user_supplier/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "suspended", reason: "Account review" },
+    });
+    assert.equal(held.status, 200);
+    assert.ok(!(await candidates()).includes("user_supplier"));
+    const assigned = await request(instance.api, `/orders/${orderId}/transition`, {
+      method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned", supplierId: "user_supplier" },
+    });
+    assert.equal(assigned.status, 409);
+    assert.equal(assigned.body.error, "supplier_not_approved");
+    const restored = await request(instance.api, "/users/user_supplier/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "active", reason: "Review complete" },
+    });
+    assert.equal(restored.status, 200);
+    assert.ok((await candidates()).includes("user_supplier"));
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("a suspended rider gets no dispatch offer while active riders do", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find((row) => row.id === "ord_payout").state = "supplier_self_qc";
+    store.users.push({ id: "rider_active", clerkUserId: "clerk_rider_active", email: "active@gridgo.test",
+      name: "Active Rider", role: "rider", accountStatus: "active", verificationStatus: "approved", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "rider_active", role: "rider", createdAt: AT });
+    store.approvalCases.push({ id: "case_rider_active", userId: "rider_active", kind: "rider",
+      status: "approved", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const held = await request(instance.api, "/users/user_rider/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "suspended", reason: "Account review" },
+    });
+    assert.equal(held.status, 200);
+    const ready = await request(instance.api, "/orders/ord_payout/transition", {
+      method: "POST", subject: "clerk_supplier", body: { state: "ready_for_dispatch" },
+    });
+    assert.equal(ready.status, 200, JSON.stringify(ready.body));
+    const stored = await loadStoreEventually(database, (store) => store.orders.some(
+      (row) => row.id === "ord_payout" && row.state === "ready_for_dispatch",
+    ));
+    const offers = stored.notifications.filter((row) => row.orderId === "ord_payout" && row.type === "dispatch_available");
+    assert.deepEqual(offers.map((row) => row.userId), ["rider_active"]);
+    const assigned = await request(instance.api, "/orders/ord_payout/transition", {
+      method: "POST", subject: "clerk_ops", body: { state: "rider_assigned", riderId: "user_rider" },
+    });
+    assert.equal(assigned.status, 409);
+    assert.equal(assigned.body.error, "rider_not_approved");
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("account suspend, remove, and restore are audited and separate from accreditation", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);

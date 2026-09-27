@@ -1613,7 +1613,8 @@ function serviceCoversOrder(service, order, product, taxonomy) {
 
 function eligibleSuppliersForOrder(store, order) {
   const product = (store.catalog || []).find((p) => p.id === order.productId);
-  const suppliers = (store.users || []).filter((u) => hasRole(store, u.id, "supplier"))
+  const suppliers = (store.users || []).filter((u) => hasRole(store, u.id, "supplier")
+    && (u.accountStatus ?? "active") === "active")
     .map((u) => roleDirectoryUser(store, u, "supplier"));
   const results = [];
 
