@@ -1,3 +1,4 @@
+import { validateArtworkLinks } from "./artwork-links.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
 import {
@@ -339,6 +340,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       measurement: line.measurement ? { ...line.measurement } : null,
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
+      artworkLinks: structuredClone(line.artworkLinks || []),
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
@@ -544,6 +546,7 @@ function checkout(store, user, cart, body, createId, at) {
       fail(409, "catalog_item_stale", "A cart listing changed or is no longer public. Refresh the cart before checkout.", { lineId: line.id });
     }
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
+    validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (line.artworkFileId) fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
     if (line.mockupFileId) fileFor(store, user, line.mockupFileId, "mockup", "mockupFileId");
     if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
@@ -583,6 +586,7 @@ function checkout(store, user, cart, body, createId, at) {
         sortOrder: line.sortOrder,
       }, createId);
       snapshot.lineItem.jobId = jobId;
+      snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
       if (line.dropoff) snapshot.lineItem.dropoff = { ...line.dropoff };
@@ -709,6 +713,7 @@ function checkout(store, user, cart, body, createId, at) {
       unitPriceMinor: lineItem.effectiveUnitPriceMinor,
       amountMinor: lineItem.lineSubtotalMinor,
       artworkFileId: cartLine.artworkFileId ?? null,
+      artworkLinks: structuredClone(lineItem.artworkLinks || []),
       mockupFileId: cartLine.mockupFileId ?? null,
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
     })),
@@ -937,6 +942,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       createdAt: at, updatedAt: at,
     };
     assertCartLinePriceable(store, item, line);
+    if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
     if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
@@ -978,6 +984,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+    if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach

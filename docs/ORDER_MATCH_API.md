@@ -100,11 +100,74 @@ Add-line body:
   "quantity": 100,
   "structuredSpec": { "size": "A5" },
   "artworkFileId": "file_...",
+  "artworkLinks": [{ "formatCode": "canva_link", "url": "https://www.canva.com/design/ABC/edit" }],
   "dropoff": { "lat": 7.0731, "lng": 125.6128, "label": "Recipient" }
 }
 ```
 
-PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+
+### Artwork design links
+
+Both add-line and patch-line requests accept `artworkLinks`, independently of `artworkFileId`:
+
+```json
+{
+  "artworkLinks": [
+    { "formatCode": "canva_link", "url": "https://www.canva.com/design/ABC/edit" },
+    { "formatCode": "other_link", "url": "https://drive.google.com/file/d/ABC/view" }
+  ]
+}
+```
+
+The array has at most **3** entries. Each entry has `formatCode: "canva_link" | "other_link"` and a string `url` of at most **2,000 characters**. Stored URLs must be absolute HTTPS URLs without credentials, whitespace, control characters, or backslashes. `canva_link` must use `canva.com` or a subdomain of it; lookalike domains do not qualify. The listing's effective, active `acceptedFormats` must contain that exact code with `inputKind: "url"`. Listing overrides replace inherited service formats. These rules run on add, patch, and checkout, including a format withdrawn since the line was added.
+
+Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid. Invalid shape/URL returns `400 { "error": "invalid_artwork_links", "message": "..." }`; an unaccepted format returns `400 { "error": "artwork_link_format_not_accepted", "message": "..." }`.
+
+Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
+
+### POST `/artwork/link-check`
+
+Requires a Clerk session with a GRIDGO **client membership**. This is a read-only check despite using POST. Request:
+
+```json
+{
+  "url": "https://www.canva.com/design/ABC/edit",
+  "formatCode": "canva_link"
+}
+```
+
+`formatCode` is `canva_link | other_link`, with the same domain and length validation as storage. The checker accepts HTTP or HTTPS, including redirects; **storage accepts HTTPS only**. A valid check returns HTTP **200** with exactly:
+
+```json
+{
+  "ok": false,
+  "reachable": true,
+  "httpStatus": 200,
+  "provider": "canva",
+  "access": "unknown",
+  "message": "This is a Canva edit link, but edit permission cannot be verified without signing in. Check its sharing settings."
+}
+```
+
+- `ok`: boolean; true only when public access has supporting evidence (`public_view` or `public_edit`), not merely because an HTTP server answered.
+- `reachable`: boolean; whether any HTTP response was received. A 404/login/403 can be reachable without being usable.
+- `httpStatus`: last received HTTP status number, or `null` if no response arrived.
+- `provider`: `canva | google_drive | dropbox | figma | other`, based on the original URL's exact domain boundary.
+- `access`: `public_view | public_edit | sign_in_required | not_found | unknown`.
+- `message`: plain explanatory string for display. Do not branch on its wording.
+
+The checker sends HEAD, then GET for a success needing content inspection or a HEAD refusal (403/405/501). It uses one **5-second total deadline** including DNS, at most **3 redirects total**, an **8 KiB header limit**, and a **64 KiB response-body limit**. Every hop and the GET fallback resolve DNS, refuse any non-public address in the results, and pin the checked address into the socket lookup. Private, loopback, link-local, metadata, multicast, reserved, and IPv4-mapped/transition IPv6 destinations are refused. Credentials and non-HTTP(S) schemes are refused on redirects too. It sends the fixed `GRIDGO-Artwork-Link-Check/1.0` user agent, no session headers/cookies, and executes no JavaScript.
+
+Access evidence is deliberately conservative:
+
+- Recognizable PDF/PNG/JPEG/WebP bytes served successfully without authentication within the cap support `public_view` and “Anyone with the link can view this artwork.” A Content-Type header alone does not.
+- 401, a fetched login/sign-in URL, or an HTML password input gives `sign_in_required`; 404/410 gives `not_found`.
+- A Canva `/design/<id>/view` URL or a 200 HTML shell alone does **not** prove public viewing. `/design/<id>/edit` identifies an edit link but does **not** prove permission. HTML shells, bot challenges/403, timeouts, DNS/transport failures, excess redirects, and oversized bodies return `unknown` with a plain message. No provider account is used; this implementation never claims `public_edit`.
+
+Clients should check each entered link, show the message, and ask for a corrected sharing link or an upload when it cannot be verified. `unknown` must not be displayed as verified. The result is advisory and transient: it is not stored as a permission grant, and checkout does not refetch links or require a previous check token. Backend persistence validates URL shape and listing compatibility; the client owns its progression UX.
+
+Errors use the standard `{ "error": "snake_case", "message": "..." }` envelope: `401 unauthorized`, `403 forbidden`, `400 invalid_artwork_link`, `400 unsafe_artwork_url`, and `429 artwork_link_rate_limited`. Each user may attempt **10 checks per rolling minute per API process**, including invalid/unsafe requests; unauthenticated and wrong-role requests cannot consume another user's budget. Retry after a minute. The limiter is process-local and resets on restart, matching the existing API limiter infrastructure.
 
 Every cart payload includes one counter location per selected supplier:
 

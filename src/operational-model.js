@@ -869,6 +869,7 @@ function productionItemsFor(store, order, user) {
           .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
           .map((option) => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })),
         artworkFileId: line.artworkFileId || null, mockupFileId: line.mockupFileId || null,
+        artworkLinks: structuredClone(line.artworkLinks || []),
       };
     });
 }

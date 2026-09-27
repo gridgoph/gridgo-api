@@ -1589,3 +1589,62 @@ test("the downpayment setting switches new checkouts between 75 and 100 and vali
   assert.equal(hundred.paymentPlan.balanceMinor, 0);
   assert.equal(hundred.paymentPlan.balanceStatus, "not_required");
 });
+
+test("artwork link-check authenticates clients, rejects SSRF and limits each user", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise((resolve) => instance.child.once("exit", resolve)); });
+  const check = (body, subject = "clerk_client") => request(instance.api, "/artwork/link-check", { method: "POST", subject, body });
+  assert.equal((await check({ url: "https://localhost", formatCode: "other_link" }, null)).status, 401);
+  assert.equal((await check({ url: "https://localhost", formatCode: "other_link" }, "clerk_supplier_a")).status, 403);
+  for (const url of ["https://localhost", "https://10.1.2.3", "https://169.254.169.254/latest/meta-data", "https://[::1]"]) {
+    const result = await check({ url, formatCode: "other_link" });
+    assert.equal(result.status, 400);
+    assert.equal(result.body.error, "unsafe_artwork_url");
+  }
+  const invalid = await check({ url: "https://example.com", formatCode: "canva_link" });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.error, "invalid_artwork_link");
+  // Rejected checks consume the same budget, without making outbound requests.
+  let last;
+  for (let i = 0; i < 10; i++) last = await check({ url: "https://127.0.0.1", formatCode: "other_link" });
+  assert.equal(last.status, 429);
+  assert.equal(last.body.error, "artwork_link_rate_limited");
+});
+
+test("design links persist through PostgreSQL checkout and remain scoped to artwork readers", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const listing = store.catalogItems.find((item) => item.id === "item_supplier_a");
+    store.supplierServiceFileFormats.push({ supplierServiceId: listing.supplierServiceId, formatCode: "canva_link" });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise((resolve) => instance.child.once("exit", resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: "clerk_client", ...options });
+  const artworkLinks = [{ formatCode: "canva_link", url: "https://www.canva.com/design/ABC/edit" }];
+  const cartId = (await call("/me/carts", { method: "POST", body: { fulfillmentMode: "pickup" } })).body.cart.id;
+  const add = await call(`/me/carts/${cartId}/lines`, { method: "POST", body: { catalogItemId: "item_supplier_a", optionIds: [], quantity: 1, artworkLinks } });
+  assert.equal(add.status, 201, JSON.stringify(add.body) + instance.output());
+  assert.deepEqual((await call(`/me/carts/${cartId}`)).body.cart.lines[0].artworkLinks, artworkLinks);
+  const placed = await call(`/me/carts/${cartId}/checkout`, { method: "POST", body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "DESIGN-LINK" } } });
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  const orderId = placed.body.order.id;
+  const reloaded = await loadStore(database);
+  assert.deepEqual(reloaded.orderLineItems.find((line) => line.orderId === orderId).artworkLinks, artworkLinks);
+  for (const subject of ["clerk_client", "clerk_supplier_a", "clerk_ops"]) {
+    const result = await call(`/orders/${orderId}`, { subject });
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.deepEqual(result.body.order.productionItems[0].artworkLinks, artworkLinks);
+  }
+  const foreign = await call(`/orders/${orderId}`, { subject: "clerk_supplier_b" });
+  assert.equal(foreign.status, 403);
+  assert.equal(JSON.stringify(foreign.body).includes("canva.com"), false);
+  assert.deepEqual((await call(`/orders/${orderId}/invoice`)).body.invoice.lines[0].artworkLinks, artworkLinks);
+  await assert.rejects(database.query("UPDATE order_line_items SET artwork_links = '[]' WHERE order_id = $1", [orderId]), { code: "23514" });
+});
