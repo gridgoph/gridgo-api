@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   OperationalError,
   calculateOrderMoney,
+  checklistDigest,
   confirmIssueWindow,
   createPaymentSchedule,
   createPayoutMilestones,
@@ -831,4 +832,36 @@ test("finance includes the final service-fee allocation of a 75/25 checkout", ()
   order.payments.final_online.status = "confirmed";
   assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 10000);
   assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 10000);
+});
+
+
+test("counter quantities come from ordered snapshots, including pieces in packages and legacy orders", () => {
+  const order = { id: "order_count", supplierId: "shop", riderId: "rider", quantity: 999 };
+  const store = { orderLineItems: [
+    { id: "packs", orderId: order.id, quantity: 2, pricingUnitSnapshot: "per_package", packageQtySnapshot: 100, itemNameSnapshot: "Flyers", sortOrder: 0 },
+    { id: "copies", orderId: order.id, quantity: 3, pricingUnitSnapshot: "per_page", measurement: { pages: 48 }, itemNameSnapshot: "Thesis", sortOrder: 1 },
+    { id: "foreign", orderId: "another_order", quantity: 1000 },
+  ] };
+  for (const user of [{ id: "rider", role: "rider" }, { id: "shop", role: "supplier" }, { role: "ops_admin" }, { role: "super_admin" }]) {
+    assert.deepEqual(publicOrderFor(order, user, store).pickupCountItems, [
+      { lineItemId: "packs", itemName: "Flyers", expectedQuantity: 200 },
+      { lineItemId: "copies", itemName: "Thesis", expectedQuantity: 3 },
+    ]);
+  }
+  assert.deepEqual(publicOrderFor({ id: "legacy", quantity: 5, title: "Banner" }, { role: "ops_admin" }, {}).pickupCountItems,
+    [{ lineItemId: null, itemName: "Banner", expectedQuantity: 5 }]);
+  assert.equal(publicOrderFor({ id: "unknown" }, { role: "ops_admin" }, {}).pickupCountItems, null);
+  store.orderLineItems[0].packageQtySnapshot = null;
+  assert.equal(publicOrderFor(order, { role: "ops_admin" }, store).pickupCountItems, null);
+  store.orderLineItems[0].packageQtySnapshot = Number.MAX_SAFE_INTEGER;
+  assert.equal(publicOrderFor(order, { role: "ops_admin" }, store).pickupCountItems, null);
+});
+
+test("handoff digest binds the recorded counts as well as checks and preserves legacy hashes", () => {
+  const checks = [{ code: "quantity_match", passed: true }];
+  const counts = [{ lineItemId: "a", expectedQuantity: 2, countedQuantity: 2 }, { lineItemId: "b", expectedQuantity: 1, countedQuantity: 1 }];
+  assert.notEqual(checklistDigest("order", checks, counts), checklistDigest("order", checks));
+  assert.equal(checklistDigest("order", checks, counts), checklistDigest("order", checks, [...counts].reverse()));
+  assert.notEqual(checklistDigest("order", checks, counts), checklistDigest("order", checks, [{ ...counts[0], countedQuantity: 1 }, counts[1]]));
+  assert.equal(checklistDigest("order", checks), checklistDigest("order", checks, undefined));
 });

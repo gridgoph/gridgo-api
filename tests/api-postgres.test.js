@@ -1554,7 +1554,7 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       store.files.push({ fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [{ type: "order", id: orderId, field: "handoffSignatureFileIds" }], createdAt: AT });
       await saveStore(database, store);
     });
-    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks, signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
+    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks, counts: [{ lineItemId: null, countedQuantity: 1 }], signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" } })).status, 200);
 
     const released = await request(instance.api, "/orders/ord_payout/milestones/printing/release", { method: "POST", subject: "clerk_ops", body: {} });

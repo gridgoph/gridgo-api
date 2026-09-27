@@ -163,6 +163,7 @@ import {
   isContainedPickup,
   issueWindowExpiresAt,
   checklistDigest,
+  pickupCountItemsFor,
   downpaymentPercentSetting,
   paymentSettled,
   PICKUP_CHECK_CODES,
@@ -5660,7 +5661,7 @@ async function handleRequest(req, res) {
         });
       }
       const body = await readBody(req);
-      const checks = Array.isArray(body.checks) ? body.checks : [];
+      let checks = Array.isArray(body.checks) ? body.checks : [];
       const expected = new Set(PICKUP_CHECK_CODES);
       const received = new Set(checks.map((item) => item?.code));
       const valid =
@@ -5674,6 +5675,29 @@ async function handleRequest(req, res) {
           requiredCheckCodes: PICKUP_CHECK_CODES,
         });
       }
+      const countItems = pickupCountItemsFor(store, order);
+      if (!countItems) return send(res, 409, {
+        error: "pickup_count_unavailable",
+        message: "The order snapshot has no valid expected count. Ask Operations to review it before pickup.",
+      });
+      const submittedCounts = Array.isArray(body.counts) ? body.counts : [];
+      const countIds = new Set(submittedCounts.map((item) => item?.lineItemId));
+      if (submittedCounts.length !== countItems.length || countIds.size !== countItems.length
+          || !submittedCounts.every((item) => item && countItems.some((expected) => expected.lineItemId === item.lineItemId)
+            && Number.isSafeInteger(item.countedQuantity) && item.countedQuantity >= 0)) {
+        return send(res, 400, {
+          error: "invalid_pickup_counts",
+          message: "Record a nonnegative integer countedQuantity for every pickupCountItems lineItemId exactly once.",
+        });
+      }
+      const counts = countItems.map(({ lineItemId, expectedQuantity }) => ({
+        lineItemId, expectedQuantity,
+        countedQuantity: submittedCounts.find((item) => item.lineItemId === lineItemId).countedQuantity,
+      }));
+      const quantityMismatch = counts.some((item) => item.countedQuantity !== item.expectedQuantity);
+      // A checked box cannot override the pieces actually counted. Preserve
+      // an explicit quantity failure even if its numbers happen to match.
+      checks = checks.map(({ code, passed }) => ({ code, passed: passed && !(code === "quantity_match" && quantityMismatch) }));
       const failedCheckCodes = checks.filter((item) => !item.passed).map((item) => item.code);
       const checkedAt = now();
       if (failedCheckCodes.length) {
@@ -5704,6 +5728,8 @@ async function handleRequest(req, res) {
           riderId: user.id,
           supplierId: order.supplierId,
           failedCheckCodes,
+          checks: structuredClone(checks),
+          counts,
           evidenceFileIds,
           failureNote,
           createdAt: checkedAt,
@@ -5715,6 +5741,7 @@ async function handleRequest(req, res) {
         order.pickupChecklist = {
           status: "failed_escalated",
           checks: structuredClone(checks),
+          counts,
           evidenceFileIds,
           failureNote,
           completedAt: checkedAt,
@@ -5739,7 +5766,7 @@ async function handleRequest(req, res) {
             type: "pickup_check_escalation",
             orderId: order.id,
             title: "Pickup blocked by a failed quality check",
-            body: `${failureNote} The rider is waiting for Operations instruction.`,
+            body: `${failedCheckCodes.join(", ")}: ${failureNote} The rider is waiting for Operations instruction.`,
             read: false,
             at: checkedAt,
           });
@@ -5750,7 +5777,7 @@ async function handleRequest(req, res) {
           entityType: "escalation",
           entityId: escalation.id,
           orderId: order.id,
-          detail: { failedCheckCodes, evidenceFileIds },
+          detail: { failedCheckCodes, counts, evidenceFileIds },
           reason: failureNote,
         });
         queueInvalidate(store, { resource: "escalations", id: escalation.id, riderId: user.id });
@@ -5794,12 +5821,13 @@ async function handleRequest(req, res) {
         signerName,
         signedAt: checkedAt,
         riderId: user.id,
-        checklistHash: checklistDigest(order.id, checks),
+        checklistHash: checklistDigest(order.id, checks, counts),
       };
 
       order.pickupChecklist = {
         status: "passed",
         checks: structuredClone(checks),
+        counts,
         evidenceFileIds: [],
         failureNote: null,
         completedAt: checkedAt,
@@ -5823,7 +5851,7 @@ async function handleRequest(req, res) {
         entityType: "order",
         entityId: order.id,
         orderId: order.id,
-        detail: { fileId: signatureFileId, signerName, checklistHash: handoffSignature.checklistHash },
+        detail: { fileId: signatureFileId, signerName, counts, checklistHash: handoffSignature.checklistHash },
       });
       notifyOrderParties(store, order, { createId: id, at: checkedAt });
       queueOrderInvalidate(store, order, ["orders", "jobs"]);
