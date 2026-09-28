@@ -903,6 +903,23 @@ function productionItemsFor(store, order, user) {
     });
 }
 
+function clientCorrectionFor(order) {
+  let previousState;
+  let correction = null;
+  for (const entry of Array.isArray(order.timeline) ? order.timeline : []) {
+    if (!entry?.state || entry.milestoneCode || entry.state === previousState) continue;
+    if (entry.state === "client_correction") {
+      // Only this edge is Operations-written. A client can also reject a
+      // proof; repeated-state claim/proof/payout notes are never a reason.
+      correction = previousState === "needs_qa" && typeof entry.note === "string" && entry.note.trim()
+        ? { reason: entry.note, requestedAt: typeof entry.at === "string" ? entry.at : null }
+        : null;
+    }
+    previousState = entry.state;
+  }
+  return correction;
+}
+
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
@@ -954,6 +971,10 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  // Derive from the existing history, including pre-field orders. Never trust
+  // an arbitrary orders.data field or expose this projection to another party.
+  delete publicRecord.correction;
+  if (owningClient) publicRecord.correction = clientCorrectionFor(order);
   // Same related parties as artwork; signing rechecks file authorization.
   delete publicRecord.productionProgress;
   if (ops || owningClient || assignedSupplier || (rider && order.riderId === user.id)) {

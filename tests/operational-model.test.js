@@ -893,6 +893,57 @@ test("client and rider order history contains only plain progress, never interna
   assert.deepEqual(publicOrderFor(order, { id: "shop", role: "supplier" }).timeline, order.timeline);
 });
 
+test("only the owning client gets the latest Operations correction, separate from sanitized history", () => {
+  const reason = "Bleed is missing on all four edges";
+  const order = {
+    id: "correction-order", clientId: "client", supplierId: "shop", riderId: "rider", state: "client_correction",
+    correction: { reason: "untrusted stored projection", internal: "secret" },
+    timeline: [
+      { at: "1", state: "needs_qa", note: "Internal QA note" },
+      { at: "2", state: "client_correction", by: "ops", note: "First correction" },
+      { at: "3", state: "needs_qa", by: "client", note: "Resubmitted" },
+      { at: "4", state: "client_correction", by: "super", note: reason, internal: "secret" },
+      { at: "5", state: "client_correction", note: "Payout held: internal claim reason" },
+      { at: "6", state: "client_correction", milestoneCode: "printing", note: "Internal milestone" },
+    ],
+  };
+  const original = structuredClone(order);
+  for (const state of ["client_correction", "submitted", "needs_qa", "production", "completed"]) {
+    const result = publicOrderFor({ ...order, state }, { id: "client", role: "client" });
+    assert.deepEqual(result.correction, { reason, requestedAt: "4" });
+    assert.equal(result.timeline.at(-1).note, "Artwork needs a change");
+    assert.doesNotMatch(JSON.stringify(result), /internal|payout|milestone|untrusted/i);
+  }
+  for (const reader of [
+    { id: "stranger", role: "client" }, { id: "shop", role: "supplier" },
+    { id: "rider", role: "rider" }, { id: "ops", role: "ops_admin" }, null,
+  ]) {
+    const result = publicOrderFor(order, reader);
+    assert.equal(Object.hasOwn(result, "correction"), false);
+    if (reader?.role === "supplier" || reader?.role === "ops_admin") {
+      assert.deepEqual(result.timeline, order.timeline, "existing raw history access is unchanged");
+    } else {
+      assert.equal(JSON.stringify(result).includes(reason), false);
+    }
+  }
+  assert.deepEqual(order, original);
+});
+
+test("legacy correction history handles missing reasons and never substitutes unrelated notes", () => {
+  const project = (timeline) => publicOrderFor(
+    { id: "legacy", clientId: "client", state: "client_correction", timeline },
+    { id: "client", role: "client" },
+  ).correction;
+  const qa = { state: "needs_qa" };
+  const correction = { state: "client_correction", note: "Please add bleed" };
+  assert.deepEqual(project([qa, correction]), { reason: "Please add bleed", requestedAt: null });
+  for (const timeline of [undefined, null, [], [correction], [qa, { ...correction, note: undefined }],
+    [qa, { ...correction, note: "  " }], [qa, { ...correction, note: { internal: "secret" } }],
+    [qa, correction, { state: "needs_qa" }, { state: "client_correction" }],
+    [qa, correction, { state: "proof_approval" }, { ...correction, note: "Client rejected proof" }],
+  ]) assert.equal(project(timeline), null);
+});
+
 test("production photos use ready attached supplier images, including legacy proofs, not PDF or delivery evidence", () => {
   const order = { id: "ord", clientId: "client", supplierId: "shop", state: "production", timeline: [] };
   const file = (fileId, changes = {}) => ({ fileId, ownerId: "shop", state: "ready", purpose: "fulfilment_proof", detectedContentType: "image/jpeg", objectKey: `private/${fileId}`, readyAt: "now", references: [{ type: "order", id: "ord", milestoneCode: "printing" }], ...changes });
