@@ -117,6 +117,45 @@ function canvaPublicPage(url, response, html) {
     && /text\/html/i.test(response.headers["content-type"] || "")
     && html.includes(`"page":{"X":"VIEWER","Bj":{"A":{"A":"${designId}"`);
 }
+function driveFileId(url) {
+  if (hostOf(url) === "drive.google.com") {
+    return /^\/file\/d\/([a-zA-Z0-9_-]+)\/(?:view|preview)\/?$/.exec(url.pathname)?.[1]
+      || (url.pathname === "/uc" ? url.searchParams.get("id") : null);
+  }
+  return hostOf(url) === "drive.usercontent.google.com" && url.pathname === "/download"
+    ? url.searchParams.get("id") : null;
+}
+function pageMarkup(html) {
+  // An unterminated script at the body cap is still script, not visible copy.
+  return html.replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, " ");
+}
+function visiblePageText(html) {
+  return pageMarkup(html).replace(/<[^>]*>/g, " ").replace(/&(?:#39|apos|#x27);|’/gi, "'")
+    .replace(/&(?:nbsp|#160);/gi, " ").replace(/\s+/g, " ");
+}
+function drivePageAccess(url, html) {
+  const id = driveFileId(url);
+  if (!id || hostOf(url) !== "drive.google.com") return null;
+  // Captured anonymous Drive viewer config. Bind it to this file, not just a
+  // generic title/OG tag; config appears before itemJson and within the cap.
+  const config = /window\.viewerData\s*=\s*\{config:\s*\{([^}]+)\}/.exec(html)?.[1];
+  if (config?.includes(`'id': '${id}'`)) {
+    if (/'isItemTrashed':\s*true\b/.test(config)) return "not_found";
+    if (/'isItemTrashed':\s*false\b/.test(config)) return "public_view";
+  }
+  const text = visiblePageText(html);
+  if (/\b(?:you need (?:access|permission)|you must sign in to access this content)\b/i.test(text)) return "sign_in_required";
+  if (/\b(?:the file you have requested does not exist|file (?:has been|was) deleted)\b/i.test(text)) return "not_found";
+  return null;
+}
+function canvaMissingPage(url, html) {
+  if (!canvaDesignId(url)) return false;
+  // Inspect rendered error copy, never script translations or design data.
+  html = pageMarkup(html);
+  const text = visiblePageText(html);
+  return /\b(?:this|the) design (?:does(?:n't| not) exist|(?:has been|was) deleted|could(?:n't| not) be found)\b/i.test(text)
+    || /<(?:title|h[1-6])\b[^>]*>\s*(?:page|design) not found(?:\s*[-–—]\s*Canva)?\s*<\//i.test(html);
+}
 function loginUrl(url) {
   return hostOf(url) === "accounts.google.com" || /(?:^|\/)(?:login|log-in|signin|sign-in|signup|sign-up)(?:\/|$)/i.test(url.pathname);
 }
@@ -203,7 +242,9 @@ export function createArtworkLinkChecker({
       timer = setTimeout(() => { controller.abort(); reject(new Error("link_timeout")); }, timeoutMs);
     });
     const run = async () => {
-      let method = "HEAD";
+      // Drive needs body evidence. Avoid spending the same deadline on HEAD
+      // at both /uc and its usercontent redirect before fetching any bytes.
+      let method = driveFileId(url) ? "GET" : "HEAD";
       let redirects = 0;
       let sawLogin = false;
       while (true) {
@@ -215,11 +256,19 @@ export function createArtworkLinkChecker({
         if (shortCanva && canvaDesignId(url)) { canonicalUrl = url.href; provider = "canva"; }
         else if (shortCanva && !canonicalUrl) provider = providerFor(url);
         sawLogin ||= loginUrl(url);
+        if (response.headers["cf-mitigated"] === "challenge") return verdict(true, status, "unknown", "The provider challenged the link check. Open it yourself to check sharing access.");
         if (REDIRECTS.has(status)) {
           if (!response.headers.location || redirects >= 3) return verdict(reachable, status, "unknown", "The link has too many redirects or an incomplete redirect. Try a direct sharing link.");
           let next;
           try { next = new URL(response.headers.location, url).href; } catch { return verdict(reachable, status, "unknown", "The link returned an invalid redirect."); }
           url = parseUrl(next);
+          // A Google sign-in redirect is already conclusive. Validate its DNS
+          // like every other hop, but do not spend the budget fetching login.
+          if (provider === "google_drive" && hostOf(url) === "accounts.google.com") {
+            await addressFor(url);
+            controller.signal.throwIfAborted();
+            return verdict(true, status, "sign_in_required", "This link requires sign-in. Enable public link sharing or upload the artwork.");
+          }
           redirects++;
           continue;
         }
@@ -235,6 +284,12 @@ export function createArtworkLinkChecker({
         }
         if (canvaPublicPage(url, response, html)) {
           return verdict(true, status, "public_view", "Anyone with the link can view this Canva design. Edit permission is not verified.");
+        }
+        if (/text\/html/i.test(response.headers["content-type"] || "")) {
+          const driveAccess = drivePageAccess(url, html);
+          if (driveAccess === "sign_in_required") return verdict(true, status, driveAccess, "This file requires access. Enable public link sharing or upload the artwork.");
+          if (driveAccess === "not_found" || canvaMissingPage(url, html)) return verdict(true, status, "not_found", "That design could not be found. Check the sharing link.");
+          if (status === 200 && driveAccess === "public_view") return verdict(true, status, driveAccess, "Anyone with the link can view this Google Drive file. Edit permission is not verified.");
         }
         if (response.capped) return verdict(true, status, "unknown", "The page is too large to check safely. Open it yourself to check sharing access.");
         const canvaEdit = provider === "canva" && /^\/design\/[^/]+\/edit\/?$/i.test(url.pathname);

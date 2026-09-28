@@ -1,0 +1,74 @@
+{
+  "public": {
+    "url": "https://drive.google.com/file/d/1p_QOQ3CgMKiava0lRAP9exkZP9sNm5Fw/view",
+    "status": 200,
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    },
+    "bodyFile": "drive-public.html"
+  },
+  "downloadRedirect": {
+    "url": "https://drive.google.com/uc?export=view&id=1p_QOQ3CgMKiava0lRAP9exkZP9sNm5Fw",
+    "status": 303,
+    "headers": {
+      "location": "https://drive.usercontent.google.com/download?id=1p_QOQ3CgMKiava0lRAP9exkZP9sNm5Fw&export=view"
+    }
+  },
+  "download": {
+    "status": 200,
+    "headers": {
+      "content-type": "image/png"
+    },
+    "bodyFile": "drive-png-prefix.bin"
+  },
+  "private": {
+    "url": "https://drive.google.com/file/d/1ALFYwrnCMmF2OURQWQDoaaSQuKDs25oD/view?hl=en",
+    "status": 401,
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    },
+    "bodyFile": "drive-private.html"
+  },
+  "privateDownloadRedirect": {
+    "url": "https://drive.google.com/uc?export=view&id=1ALFYwrnCMmF2OURQWQDoaaSQuKDs25oD",
+    "status": 303,
+    "headers": {
+      "location": "https://drive.usercontent.google.com/download?id=1ALFYwrnCMmF2OURQWQDoaaSQuKDs25oD&export=view"
+    }
+  },
+  "privateLoginRedirect": {
+    "status": 302,
+    "headers": {
+      "location": "https://accounts.google.com/ServiceLogin?service=wise&passive=1209600&continue=https://drive.usercontent.google.com/download?export%3Dview%26id%3D1ALFYwrnCMmF2OURQWQDoaaSQuKDs25oD&followup=https://drive.usercontent.google.com/download?export%3Dview%26id%3D1ALFYwrnCMmF2OURQWQDoaaSQuKDs25oD"
+    }
+  },
+  "missing": {
+    "url": "https://drive.google.com/file/d/GRIDGONonexistentFile108/view",
+    "status": 404,
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    },
+    "body": "<title>Hindi Nahanap ang Page</title>"
+  },
+  "accessPage": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "body": "<html><h1>You need access</h1><p>Request access, or switch to an account with access.</p></html>"
+  },
+  "deletedPage": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "body": "<html><p>Sorry, the file you have requested does not exist.</p></html>"
+  },
+  "canvaMissingPage": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "body": "<html><title>Page not found \u2013 Canva</title><h1>This design doesn't exist</h1></html>"
+  }
+}
