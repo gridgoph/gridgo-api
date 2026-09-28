@@ -1530,6 +1530,14 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
       assert.equal(transitioned.status, 200, `${JSON.stringify(transitioned.body)}\n${instance.output()}`);
       if (state === "production") {
+        await database.transaction(async () => {
+          const store = await loadStore(database);
+          store.files.push({ fileId: "file_start_progress", ownerId: "user_supplier", purpose: "fulfilment_proof",
+            originalFilename: "start.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
+            size: 100, state: "ready", objectKey: "proof/start.jpg", createdAt: AT, readyAt: AT,
+            references: [{ type: "order", id: orderId, field: "fulfilmentProofFileIds", milestoneCode: "production_started" }] });
+          await saveStore(database, store);
+        });
         // The escrow split of the shop's own price, snapshotted when the quote
         // was accepted, and starting the press pays nobody: every stage waits
         // for its proof and a person.
@@ -1930,10 +1938,10 @@ async function startMockClerkApi(usersBySubject) {
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function startMockObjectStorage() {
+async function startMockObjectStorage({ size } = {}) {
   const server = http.createServer((req, res) => {
     if (req.method === "HEAD") {
-      res.writeHead(200);
+      res.writeHead(200, size == null ? {} : { "Content-Length": size });
       res.end();
       return;
     }
@@ -3962,6 +3970,117 @@ test("account suspend, remove, and restore are audited and separate from accredi
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("production photo gate covers both packing paths and audited Operations correction", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === "ord_payout");
+    order.state = "production";
+    // An existing PDF proof is valid payout evidence but is not a progress photo.
+    store.files.find((row) => row.fileId === "file_pof").detectedContentType = "application/pdf";
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+      const refused = await request(instance.api, "/orders/ord_payout/transition", {
+        method: "POST", subject: "clerk_supplier", body: { state, reason: "pretend override", productionProgress: { photos: ["fake"] } },
+      });
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.equal(refused.body.error, "production_photo_required");
+    }
+    assert.equal((await loadStore(database)).orders.find((row) => row.id === "ord_payout").state, "production");
+    const missingReason = await request(instance.api, "/orders/ord_payout/transition", {
+      method: "POST", subject: "clerk_ops", body: { state: "ready_for_dispatch" },
+    });
+    assert.equal(missingReason.status, 400);
+    assert.equal(missingReason.body.error, "production_override_reason_required");
+    const corrected = await request(instance.api, "/orders/ord_payout/transition", {
+      method: "POST", subject: "clerk_ops", body: { state: "ready_for_dispatch", reason: "Verified finished legacy job at the counter" },
+    });
+    assert.equal(corrected.status, 200, JSON.stringify(corrected.body));
+    const saved = await loadStore(database);
+    assert.ok(saved.auditLog.some((entry) => entry.action === "order.production_override" && entry.orderId === "ord_payout" && entry.reason === "Verified finished legacy job at the counter" && entry.detail.photoMissing === true));
+    const client = await request(instance.api, "/orders/ord_payout", { subject: "clerk_client" });
+    assert.equal(client.body.order.productionProgress.status, "waiting_for_photo");
+    assert.doesNotMatch(JSON.stringify(client.body.order.timeline), /override|legacy|payout|milestone/);
+    // Existing legacy image proofs count without rewriting the order or its payout plan.
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.orders.find((row) => row.id === "ord_payout").state = "production";
+      store.files.find((row) => row.fileId === "file_pof").detectedContentType = "image/jpeg";
+      await saveStore(database, store);
+    });
+    for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+      const passed = await request(instance.api, "/orders/ord_payout/transition", { method: "POST", subject: "clerk_supplier", body: { state } });
+      assert.equal(passed.status, 200, JSON.stringify(passed.body));
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("progress photos attach privately and every client order response signs a safe gallery", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === "ord_payout");
+    order.state = "production";
+    order.timeline = [
+      { at: AT, state: "production", note: "In production" },
+      { at: AT, state: "production", note: "Proof of Fulfilment attached for production_started", milestoneCode: "production_started" },
+      { at: AT, state: "production", note: "production_started supplier payout milestone released", milestoneCode: "production_started" },
+    ];
+    store.files.push({ ...structuredClone(store.files.find((row) => row.fileId === "file_pof")), fileId: "file_progress", objectKey: "production_photo/photo.jpg", purpose: "production_photo", references: [] });
+    await saveStore(database, store);
+  });
+  const storage = await startMockObjectStorage({ size: 100 });
+  const instance = await startApi({ MINIO_ENDPOINT: storage.url, MINIO_PUBLIC_URL: storage.url });
+  try {
+    const wrongOwner = await request(instance.api, "/files/file_progress/attach", { method: "POST", subject: "clerk_client", body: { orderId: "ord_payout" } });
+    assert.equal(wrongOwner.status, 403);
+    const attached = await request(instance.api, "/files/file_progress/attach", { method: "POST", subject: "clerk_supplier", body: { orderId: "ord_payout" } });
+    assert.equal(attached.status, 200, JSON.stringify(attached.body));
+    assert.ok(attached.body.order.productionProgress.photos.some((photo) => photo.fileId === "file_progress"));
+    for (const pathname of ["/orders", "/orders/ord_payout"]) {
+      const response = await request(instance.api, pathname, { subject: "clerk_client" });
+      assert.equal(response.status, 200);
+      const order = response.body.order || response.body.orders.find((row) => row.id === "ord_payout");
+      assert.doesNotMatch(JSON.stringify(order.timeline), /payout|milestone|production_started|fulfilment/i);
+      assert.equal(order.payoutMilestones, undefined);
+      assert.equal(order.productionProgress.status, "photos_available");
+      assert.equal(order.productionProgress.photos.length, 2);
+      for (const photo of order.productionProgress.photos) {
+        assert.match(photo.downloadUrl, /X-Amz-Signature=/);
+        assert.ok(Date.parse(photo.downloadUrlExpiresAt) > Date.now());
+        assert.deepEqual(Object.keys(photo).sort(), ["at", "contentType", "downloadUrl", "downloadUrlExpiresAt", "fileId"]);
+      }
+    }
+    const metadata = await request(instance.api, "/files/file_pof", { subject: "clerk_client" });
+    assert.equal(metadata.status, 200);
+    assert.doesNotMatch(JSON.stringify(metadata.body), /milestone|printing|fulfilment/i);
+    assert.equal((await request(instance.api, "/files/file_progress/download-url", { subject: "clerk_client" })).status, 200);
+    for (const pathname of ["/orders/ord_payout", "/files/file_progress", "/files/file_progress/download-url"]) {
+      assert.equal((await request(instance.api, pathname, { subject: "clerk_promote" })).status, 403);
+    }
+    // The unrelated rider's offer projection must not sign private artwork-equivalent photos.
+    const ready = await request(instance.api, "/orders/ord_payout/transition", { method: "POST", subject: "clerk_supplier", body: { state: "ready_for_dispatch" } });
+    assert.equal(ready.status, 200);
+    const offers = await request(instance.api, "/dispatch/offers", { subject: "clerk_rider" });
+    assert.equal(offers.body.offers.find((row) => row.id === "ord_payout").productionProgress, undefined);
+    assert.equal((await request(instance.api, "/files/file_progress/download-url", { subject: "clerk_rider" })).status, 403);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await new Promise((resolve) => storage.server.close(resolve));
     await database.close();
   }
 });

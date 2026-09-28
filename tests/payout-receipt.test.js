@@ -127,7 +127,6 @@ test("binding puts the receipt on the share and the order, and the right people 
   assert.equal(forShop.payoutMilestones[0].receiptFileId, "rcpt_one");
   assert.equal(forShop.payoutMilestones[0].reference, "GCASH-123");
   const forClient = publicOrderFor(order, actor(store, "client"), store);
-  assert.equal("receiptFileId" in forClient.payoutMilestones[0], false);
-  assert.equal("reference" in forClient.payoutMilestones[0], false);
+  assert.equal("payoutMilestones" in forClient, false);
   assert.equal("payoutReceiptFileIds" in forClient, false);
 });

@@ -1,3 +1,4 @@
+import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
 import { routeArtworkLinkCheck, hasShortArtworkLinks } from "./artwork-links.js";
@@ -1521,8 +1522,14 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
   return referenced ? file : null;
 }
 
-function publicOrder(order, user, orderStore) {
-  return publicOrderFor(order, user, orderStore);
+async function publicOrder(order, user, orderStore) {
+  const record = publicOrderFor(order, user, orderStore);
+  await signProductionPhotos(record, {
+    findFile: (fileId) => findFile(orderStore, fileId),
+    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
+    presignGet: (key) => objectStorage.presignGet(key),
+  });
+  return record;
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -1766,10 +1773,10 @@ const TRANSITIONS = {
   downpayment_review: {},
   payment_authorized: { production: ["supplier"], cancelled: ["ops_admin", "super_admin"] },
   production: {
-    ready_for_dispatch: ["supplier"], // packed; supplier and rider check together at pickup
-    supplier_self_qc: ["supplier"], // compatibility for older clients and portal workflows
+    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // packed; supplier and rider check together at pickup
+    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // compatibility for older clients and portal workflows
   },
-  supplier_self_qc: { ready_for_dispatch: ["supplier"] },
+  supplier_self_qc: { ready_for_dispatch: ["supplier", "ops_admin", "super_admin"] },
   ready_for_dispatch: { rider_assigned: ["rider", "ops_admin", "super_admin"] },
   rider_assigned: {},
   picked_up: { out_for_delivery: ["rider"] },
@@ -2606,7 +2613,7 @@ async function handleRequest(req, res) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
       if (file.purpose.startsWith("refund_")) res.setHeader("Cache-Control", "private, no-store, max-age=0");
-      return send(res, 200, { file: publicFile(file) });
+      return send(res, 200, { file: publicFile(file, user) });
     }
 
     if (req.method === "GET" && /^\/files\/[^/]+\/download-url$/.test(pathname)) {
@@ -2706,8 +2713,9 @@ async function handleRequest(req, res) {
               milestoneCode: latestTarget.milestoneCode,
             });
           }
+          queueOrderInvalidate(latestStore, latestTarget.record, ["orders", "jobs"]);
           await save(latestStore);
-          return send(res, 200, { file: publicFile(latestFile), order: publicOrder(latestTarget.record, latestUser, latestStore) });
+          return send(res, 200, { file: publicFile(latestFile, latestUser), order: await publicOrder(latestTarget.record, latestUser, latestStore) });
         }
         if (latestTarget.type === "user") {
           await save(latestStore);
@@ -4482,7 +4490,7 @@ async function handleRequest(req, res) {
       });
       queueOrderInvalidate(store, order, ["orders", "claims"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     if (req.method === "GET" && /^\/issues\/[^/]+$/.test(pathname)) {
@@ -4633,7 +4641,7 @@ async function handleRequest(req, res) {
       });
       if (order) queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
-      return send(res, 200, { escalation, order: publicOrder(order, user, store) });
+      return send(res, 200, { escalation, order: await publicOrder(order, user, store) });
     }
 
     // ---- audit trail ----
@@ -4721,7 +4729,7 @@ async function handleRequest(req, res) {
       }
       queueOrderInvalidate(store, order, ["payouts"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store), milestone });
+      return send(res, 200, { order: await publicOrder(order, user, store), milestone });
     }
 
     // ---- manual QR installment payments ----
@@ -4834,7 +4842,7 @@ async function handleRequest(req, res) {
       notifyOpsPaymentSubmitted(store, order, { createId: id, at: submittedAt });
       queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/reject$/.test(pathname)) {
@@ -4908,7 +4916,7 @@ async function handleRequest(req, res) {
       notifyClientPaymentRejected(store, order, { createId: id, at: rejectedAt, reason });
       queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\/(initial|final_online|downpayment|balance)\/confirm$/.test(pathname)) {
@@ -4971,7 +4979,7 @@ async function handleRequest(req, res) {
         reason: body.note || null,
       });
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     // ---- orders list / create ----
@@ -5018,7 +5026,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: ordersFor(user, store).map((order) => publicOrder(order, user, store)) });
+      return send(res, 200, { orders: await Promise.all(ordersFor(user, store).map((order) => publicOrder(order, user, store))) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -5030,7 +5038,7 @@ async function handleRequest(req, res) {
         if (!order) return send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
-        return send(res, 200, { order: publicOrder(order, user, store) });
+        return send(res, 200, { order: await publicOrder(order, user, store) });
       }
     }
 
@@ -5126,7 +5134,7 @@ async function handleRequest(req, res) {
       };
       store.orders.unshift(order);
       await save(store);
-      return send(res, 201, { order: publicOrder(order, user, store) });
+      return send(res, 201, { order: await publicOrder(order, user, store) });
     }
 
     /**
@@ -5324,6 +5332,25 @@ async function handleRequest(req, res) {
           message: "This order is assigned to another account. Open one of your own orders before taking this action.",
         });
       }
+      if (["supplier_self_qc", "ready_for_dispatch"].includes(next)) {
+        const photoMissing = productionPhotoFiles(store, order).length === 0;
+        if (["ops_admin", "super_admin"].includes(user.role)) {
+          const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+          if (!reason) return send(res, 400, {
+            error: "production_override_reason_required",
+            message: "Explain why Operations is correcting this production step.",
+          });
+          audit(store, {
+            actor: user, action: "order.production_override", entityType: "order", entityId: order.id,
+            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing },
+          });
+        } else if (photoMissing) {
+          return send(res, 409, {
+            error: "production_photo_required",
+            message: "Attach at least one production progress photo before marking this job packed or ready for dispatch. A start-of-production photo counts.",
+          });
+        }
+      }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
         const hold = activePayoutHold(store, order.id);
@@ -5452,7 +5479,7 @@ async function handleRequest(req, res) {
         }
         queueOrderInvalidate(store, order, ["orders", "jobs"]);
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user, store) });
+        return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       if (next === "awaiting_initial_payment") {
         if (user.role !== "client" || order.clientId !== user.id) {
@@ -5555,7 +5582,7 @@ async function handleRequest(req, res) {
           },
         });
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user, store) });
+        return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
         order.supplierId = body.supplierId;
@@ -5610,7 +5637,7 @@ async function handleRequest(req, res) {
         next === "ready_for_dispatch" ? ["orders", "jobs", "dispatch"] : ["orders", "jobs"],
       );
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     // ---- dispatch (rider) ----
@@ -5633,7 +5660,7 @@ async function handleRequest(req, res) {
           && (o.state === "ready_for_dispatch"
             || (o.state === "rider_assigned" && o.riderId === user.id)),
       );
-      return send(res, 200, { offers: offers.map((order) => publicOrder(order, user, store)) });
+      return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
@@ -5661,7 +5688,7 @@ async function handleRequest(req, res) {
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       queueOrderInvalidate(store, order, ["dispatch", "orders", "jobs"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
@@ -5815,7 +5842,7 @@ async function handleRequest(req, res) {
         queueInvalidate(store, { resource: "escalations", id: escalation.id, riderId: user.id });
         queueOrderInvalidate(store, order, ["orders"]);
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user, store), escalation });
+        return send(res, 200, { order: await publicOrder(order, user, store), escalation });
       }
 
       /*
@@ -5889,7 +5916,7 @@ async function handleRequest(req, res) {
       queueOrderInvalidate(store, order, ["orders", "jobs"]);
       await save(store);
       return send(res, 200, {
-        order: publicOrder(order, user, store),
+        order: await publicOrder(order, user, store),
         signOffPrompt: PICKUP_SIGN_OFF_PROMPT,
         handoffSignature,
       });
@@ -6012,7 +6039,7 @@ async function handleRequest(req, res) {
         notifyOrderParties(store, order, { createId: id, at: deliveredAt });
         queueOrderInvalidate(store, order, ["orders", "jobs"]);
         await save(store);
-        return send(res, 200, { order: publicOrder(order, user, store) });
+        return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       order.state = "delivered";
       order.timeline.push({
@@ -6035,7 +6062,7 @@ async function handleRequest(req, res) {
       notifyOrderParties(store, order, { createId: id, at: deliveredAt });
       queueOrderInvalidate(store, order, ["orders", "jobs"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     /*
@@ -6102,7 +6129,7 @@ async function handleRequest(req, res) {
       });
       queueOrderInvalidate(store, order, ["orders"]);
       await save(store);
-      return send(res, 200, { order: publicOrder(order, user, store) });
+      return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/proof$/.test(pathname)) {
@@ -6116,9 +6143,9 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && pathname === "/jobs") {
       if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
-        jobs: store.orders
+        jobs: await Promise.all(store.orders
           .filter((o) => o.supplierId === user.id)
-          .map((order) => publicOrder(order, user, store)),
+          .map((order) => publicOrder(order, user, store))),
       });
     }
 
