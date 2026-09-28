@@ -1,3 +1,5 @@
+import { routeRefunds } from "./refunds.js";
+import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
 import { routeArtworkLinkCheck, hasShortArtworkLinks } from "./artwork-links.js";
 import { createRealtimeTransport } from "./realtime-transport.js";
 import { createApnsDelivery, routePushDelivery } from "./apns.js";
@@ -1748,7 +1750,7 @@ const TRANSITIONS = {
     approved_for_matching: ["client"],
     client_correction: ["client"],
   },
-  approved_for_matching: { supplier_assigned: ["ops_admin", "super_admin"] },
+  approved_for_matching: { supplier_assigned: ["ops_admin", "super_admin"], cancelled: ["ops_admin", "super_admin"] },
   supplier_assigned: {
     supplier_accepted: ["supplier"], // legacy quote path
     approved_for_matching: ["supplier"], // legacy decline -> rematch
@@ -1762,7 +1764,7 @@ const TRANSITIONS = {
   awaiting_initial_payment: { supplier_accepted: ["supplier"] },
   awaiting_downpayment: {},
   downpayment_review: {},
-  payment_authorized: { production: ["supplier"] },
+  payment_authorized: { production: ["supplier"], cancelled: ["ops_admin", "super_admin"] },
   production: {
     ready_for_dispatch: ["supplier"], // packed; supplier and rider check together at pickup
     supplier_self_qc: ["supplier"], // compatibility for older clients and portal workflows
@@ -1776,7 +1778,7 @@ const TRANSITIONS = {
   // once the client has settled what is left.
   awaiting_collection: { delivered: ["ops_admin", "super_admin"] },
   delivered: { issue_window_open: ["system", "ops_admin", "super_admin", "client", "rider"] },
-  issue_window_open: {}, // request-driven expiry completes; no actor may close it early
+  issue_window_open: {}, // expiry or explicit client confirmation; refund/claim holds block both
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
@@ -2170,7 +2172,7 @@ async function handleRequest(req, res) {
       // Actor projection is never written into users.role. Other legacy user-field
       // writes still target the actual row through this proxy.
       user = selectActorRole(store, user, selectedRole, { restrictMemberships: Boolean(eventRole) });
-      if (/^\/(orders|jobs|dispatch|payouts|claims|issues|escalations)(\/|$)/.test(pathname)) {
+      if (/^\/(orders|jobs|dispatch|payouts|claims|issues|escalations|refund-requests)(\/|$)/.test(pathname)) {
         if (!hasRole(store,user.id,selectedRole) || (['supplier','rider'].includes(selectedRole) && !approvedRole(store,user.id,selectedRole))) return send(res,403,{error:'forbidden'});
       }
     }
@@ -2360,6 +2362,30 @@ async function handleRequest(req, res) {
     const artworkLinkResponse = await routeArtworkLinkCheck({ req, url, user, readBody });
     if (artworkLinkResponse) return send(res, artworkLinkResponse.status, artworkLinkResponse.body);
 
+    if (pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
+    const refundResponse = await routeRefunds({ req, url, store, user, readBody, now, id, audit });
+    if (refundResponse) {
+      if (refundResponse.mutated) await save(store);
+      return send(res, refundResponse.status, refundResponse.body);
+    }
+    // Intake and production serialize under the domain lock. A released claim
+    // never releases this independent work stop or a terminal settlement.
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const refundGuard = pathname.match(/^\/(?:orders|dispatch)\/([^/]+)\/(.+)$/);
+      if (refundGuard && !["issues", "physical-invoice"].includes(refundGuard[2])) {
+        const guardedOrder = store.orders.find((order) => order.id === refundGuard[1]);
+        if (guardedOrder && (refundHold(store, guardedOrder) || refundSettlementFor(store, guardedOrder))
+          && !canAccessOrder(store, user.id, guardedOrder, { role: user.role, offer: true })) {
+          return send(res, 403, { error: "forbidden" });
+        }
+        const reconcileBalance = /^payments\/(final_online|balance)\/(confirm|reject)$/.test(refundGuard[2])
+          && guardedOrder && refundHold(store, guardedOrder) && !refundSettlementFor(store, guardedOrder);
+        if (guardedOrder && !reconcileBalance) assertRefundWorkAllowed(store, guardedOrder);
+      }
+    }
+
     const orderMatchResponse = await routeOrderMatch({
       req,
       url,
@@ -2539,6 +2565,7 @@ async function handleRequest(req, res) {
             body: fs.createReadStream(file.tempPath),
             contentType: detectedContentType,
             size: file.size,
+            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose),
           });
         } catch (error) {
           await compensatePendingFile(fileId, objectKey);
@@ -2578,6 +2605,7 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
+      if (file.purpose.startsWith("refund_")) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       return send(res, 200, { file: publicFile(file) });
     }
 
@@ -2592,7 +2620,9 @@ async function handleRequest(req, res) {
           "The stored object size does not match its file record. Upload the file again before using it.",
         );
       }
-      const signed = await objectStorage.presignGet(file.objectKey);
+      const privateFinancial = file.purpose.startsWith("refund_");
+      if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
       return send(res, 200, { fileId: file.fileId, ...signed });
     }
 
@@ -2603,6 +2633,7 @@ async function handleRequest(req, res) {
       authorizeFileAttachOwner(user, file);
       const target = resolveFileTarget(store, file.purpose, body, user);
       authorizeFileAttach(user, file, target);
+      if (target.type === "order") assertRefundWorkAllowed(store, target.record);
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
         throw new AttachmentError(
@@ -2624,6 +2655,7 @@ async function handleRequest(req, res) {
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
+        if (latestTarget.type === "order") assertRefundWorkAllowed(latestStore, latestTarget.record);
         if (latestTarget.type === "supplier_catalog_item") {
           const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
           await save(latestStore);

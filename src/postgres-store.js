@@ -1,3 +1,4 @@
+import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
 import { deliverySplit } from "./operational-model.js";
 
 const BASELINE = Symbol("postgresStoreBaseline");
@@ -76,6 +77,7 @@ const TABLES = [
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
   { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
+  ...refundTableDefinitions,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
@@ -137,6 +139,13 @@ export function emptyStore() {
     files: [],
     riderDocuments: [],
     credits: {},
+    refundRequests: [],
+    refundSettlements: [],
+    refundSupplierPayouts: [],
+    refundAttempts: [],
+    refundPayments: [],
+    refundEvents: [],
+    refundCommands: [],
     claims: [],
     issues: [],
     auditLog: [],
@@ -610,6 +619,7 @@ function rowsFromStore(store) {
   for (const [position, ping] of (store.locationPings || []).entries()) rows.location_pings.push({ id: ping.id, order_id: ping.orderId, rider_id: ping.riderId, lat: ping.lat, lng: ping.lng, accuracy_meters: ping.accuracy ?? null, at: ping.at, position, data: without(ping, ["id", "orderId", "riderId", "lat", "lng", "accuracy", "at"]) });
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
   for (const [position, item] of (store.deviceTokens || []).entries()) rows.device_tokens.push(deviceTokenRow(item, position));
+  writeRefundRows(store, rows);
   return rows;
 }
 
@@ -1032,6 +1042,7 @@ export async function loadStore(database) {
     ledger.get(row.user_id).push({ ...row.data, id: row.id, amountMinor: row.amount_minor, balanceAfterMinor: row.balance_after_minor, at: row.created_at });
   }
   for (const row of loaded.credit_accounts) store.credits[row.user_id] = { ...row.data, balanceMinor: row.balance_minor, ledger: ledger.get(row.user_id) || [] };
+  readRefundRows(store, loaded);
   store.claims = ordered(loaded.claims).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.issues = ordered(loaded.issues).map((row) => { const item = { ...row.data, id: row.id, orderId: row.order_id, clientId: row.client_id, kind: row.kind, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }; present(item, "claimId", row.claim_id); return item; });
   store.auditLog = ordered(loaded.audit_log).map((row) => ({ ...row.data, id: row.id, at: row.at, actorId: row.actor_id, actorRole: row.actor_role, action: row.action, entityType: row.entity_type, entityId: row.entity_id, orderId: row.order_id }));

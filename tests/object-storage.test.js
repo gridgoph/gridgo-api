@@ -119,3 +119,15 @@ test("rejects unsafe presign TTL configuration", () => {
     /30 through 900/,
   );
 });
+
+test("refund bytes and signed downloads forbid private financial caching", async () => {
+  const calls = [];
+  const storage = createObjectStorage(env, clients({
+    internalClient: { putObject: async (...args) => { calls.push(args); return { etag: 'test' }; } },
+    publicClient: { presignedGetObject: async (...args) => { calls.push(args); return 'http://signed.invalid/private'; } },
+  }));
+  await storage.putObject({ key: 'refund/plate', body: Buffer.from('png'), size: 3, contentType: 'image/png', privateFinancial: true });
+  await storage.presignGet('refund/plate', { privateFinancial: true });
+  assert.equal(calls[0][4]['Cache-Control'], 'private, no-store, max-age=0');
+  assert.equal(calls[1][3]['response-cache-control'], 'private, no-store, max-age=0');
+});

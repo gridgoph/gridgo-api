@@ -86,9 +86,10 @@ export function createObjectStorage(env = process.env, options = {}) {
     }
   }
 
-  async function putObject({ key, body, contentType, size }) {
+  async function putObject({ key, body, contentType, size, privateFinancial = false }) {
     try {
-      const result = await internalClient.putObject(bucket, key, body, size, { "Content-Type": contentType });
+      const result = await internalClient.putObject(bucket, key, body, size, { "Content-Type": contentType,
+        ...(privateFinancial ? { "Cache-Control": "private, no-store, max-age=0" } : {}) });
       mark("available");
       return { key, etag: result?.etag || result?.ETag || null };
     } catch {
@@ -138,10 +139,12 @@ export function createObjectStorage(env = process.env, options = {}) {
     }
   }
 
-  async function presignGet(key) {
+  async function presignGet(key, { privateFinancial = false } = {}) {
     try {
       // Signing must happen against the device-visible origin. Rewriting this URL later invalidates SigV4.
-      const url = await publicClient.presignedGetObject(bucket, key, ttlSeconds);
+      const url = privateFinancial
+        ? await publicClient.presignedGetObject(bucket, key, ttlSeconds, { "response-cache-control": "private, no-store, max-age=0" })
+        : await publicClient.presignedGetObject(bucket, key, ttlSeconds);
       mark("available");
       return { url, expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(), expiresInSeconds: ttlSeconds };
     } catch {

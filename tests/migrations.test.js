@@ -53,6 +53,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "order_jobs", "order_invoices", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions",
+      "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
     const legacyColumns = new Set((await client.query(
@@ -109,6 +110,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1787004000000_an_account_can_be_suspended_or_removed",
         "1787007600000_artwork_links",
         "1787011200000_artwork_link_provider_formats",
+        "1790553600000_client_refunds",
       ],
     );
 
@@ -287,6 +289,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Empty refund schema can be reversed; any financial history refuses down.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS name", [`${schema}.refund_requests`])).rows[0].name, null);
 
     for (const formatCode of ["google_drive", "dropbox", "we_transfer"]) {
       assert.equal((await client.query("SELECT valid_artwork_links($1::jsonb) AS valid", [JSON.stringify([{ formatCode, url: "https://example.com/artwork" }])])).rows[0].valid, true);
@@ -891,7 +897,9 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 10, client));
+    const { count } = (await client.query(`SELECT count(*)::integer AS count FROM pgmigrations
+      WHERE name >= '1786978800000_rider_delivery_commission'`)).rows[0];
+    await runner(migrationOptions(schema, "down", count, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 7, '{"serviceFeeRateBps":750}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
