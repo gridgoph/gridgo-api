@@ -1095,7 +1095,7 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `supplier_assigned` | `approved_for_matching` | assigned supplier | decline/rematch |
 | `supplier_assigned` | `awaiting_checkout` | assigned approved supplier | request says `supplier_accepted`; creates the next final quote version |
 | `awaiting_checkout` | `awaiting_initial_payment` | owning client | accepts exact quote version and snapshots money/fulfillment |
-| `payment_authorized` | `production` | assigned supplier | after confirmed initial payment; automatically releases an eligible 25%/50% initial supplier payout |
+| `payment_authorized` | `production` | assigned supplier | after confirmed initial payment and no refund hold; supplier stages still require their explicit release route |
 | `production` | `ready_for_dispatch` | assigned supplier | packaging ready; offers and notifications go to approved riders; joint pickup QC still required |
 | `production` | `supplier_self_qc` | assigned supplier | legacy client/portal compatibility; new supplier flow skips this step |
 | `supplier_self_qc` | `ready_for_dispatch` | assigned supplier | legacy work can advance to the same rider handoff |
@@ -1109,7 +1109,7 @@ Endpoint-owned steps:
 - `initial_payment_review -> payment_authorized`: Operations/Super Admin confirms initial payment.
 - `rider_assigned -> picked_up`: the assigned rider completes all six pickup checks together with the supplier before taking the package; no direct transition bypass. Failed checks require evidence and an Operations escalation; after resolution, repeat all six checks.
 - `picked_up|out_for_delivery -> delivered -> issue_window_open`: delivery evidence route atomically records delivery and opens window; no direct transition bypass.
-- `issue_window_open -> completed`: system only, when `issueWindowExpiresAt` has elapsed and no active hold. No actor can close it early.
+- `issue_window_open -> completed`: expiry when `issueWindowExpiresAt` has elapsed and no active hold, or the owning client's explicit early `/orders/:id/confirm`. A timely refund request independently blocks both. A reviewed post-handover refund settlement completes with a separate refund disposition; see [Client refunds](REFUNDS_API.md).
 
 Backfilled revision-1 rows may retain `awaiting_downpayment`/`downpayment_review`; new commercial commitments never create them. Supplier-proof states and `awaiting_payment` remain retired.
 
@@ -1284,3 +1284,9 @@ It performs the same completion the expiry sweep performs -- `completed` and a t
 PostgreSQL is the only persistence system. Versioned forward migrations create the schema; startup never creates or repairs tables. Order transitions, payment and payout movements, credits, claims, and issue handling run inside database transactions guarded against concurrent lost updates.
 
 Fresh seed creates only reference data: taxonomy, catalog, zones, and settings. It creates no users, orders, sessions, devices, or operational records. Files remain private object-storage objects; PostgreSQL stores only file metadata and opaque relationships.
+
+## Client refunds
+
+The [Client refunds contract](REFUNDS_API.md) defines the durable request/review/settlement/manual-payment ledger, exact route shapes, privacy, available-funds ceilings, filing deadline, reconciliation and screen follow-ups. `POST /orders/:id/refund-requests` immediately stops work and payouts; accepted-but-unstarted and no-replacement orders are eligible for full verified-collection refunds. Operations can also cancel `payment_authorized` and `approved_for_matching` orders with a reason through the ordinary transition route; cancellation itself sends no money.
+
+Settlements supersede unpaid original milestones without changing their amounts or marking them paid. The separate `supplierSettlementPayouts` array appears alongside milestones for the owning supplier and Operations, with a manual exact-amount release using shop QR, reference and receipt. Refunds never recover an already released stage or rider earnings, never redeem Pilot Credits as cash, and never clear independent claims.

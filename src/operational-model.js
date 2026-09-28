@@ -1,3 +1,4 @@
+import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
 
 import { gridgoOfficePoint } from "./gridgo-office.js";
@@ -644,8 +645,11 @@ export function collectedSupplierPrincipalMinor(order) {
     .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
 }
 
-export function moneyReportingForOrder(order) {
-  const releasedThroughPlatformMinor = (order.payoutMilestones || [])
+export function moneyReportingForOrder(order, store = null) {
+  const settlement = refundSettlementFor(store, order);
+  const refundedPrincipalMinor = (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
+    .reduce((sum, row) => sum + row.principalMinor, 0);
+  const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order)]
     .filter((milestone) => milestone.status === "released")
     .reduce((sum, milestone) => sum + finiteMinor(milestone.amountMinor, "milestone.amountMinor"), 0);
   const collectedComponent = (component) => (order.paymentAllocations || [])
@@ -668,7 +672,7 @@ export function moneyReportingForOrder(order) {
   const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
   const protectedPaymentMinor = Math.max(
     0,
-    Math.min(order.supplierPlatformPayoutMinor || 0, collectedPrincipalMinor) - releasedThroughPlatformMinor,
+    Math.min(settlement?.shopEntitlementMinor ?? order.supplierPlatformPayoutMinor ?? 0, collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
   );
   return {
     supplierSettlement: {
@@ -678,11 +682,11 @@ export function moneyReportingForOrder(order) {
       collectedSupplierPrincipalMinor: collectedPrincipalMinor,
       protectedPaymentMinor,
       gridgoDeductionsMinor: 0,
-      totalSupplierEarningsMinor: order.supplierSubtotalMinor,
+      totalSupplierEarningsMinor: settlement?.shopEntitlementMinor ?? order.supplierSubtotalMinor,
       supplierReleasedMinor: releasedThroughPlatformMinor,
       supplierOutstandingMinor: Math.max(
         0,
-        (order.supplierSubtotalMinor || 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
+        (settlement?.shopEntitlementMinor ?? order.supplierSubtotalMinor ?? 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
       ),
     },
     deliverySettlement: {
@@ -704,7 +708,7 @@ export function moneyReportingForOrder(order) {
 
 export function activePayoutHold(store, order) {
   return Boolean(
-    order.payoutHold ||
+    refundHold(store, order) || order.payoutHold ||
       (store?.claims || []).some(
         (claim) => claim.orderId === order.id && ["open", "payout_held"].includes(claim.status),
       ),
@@ -737,6 +741,9 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
   }
   if (milestone.status === "released") return milestone;
+  if (refundSettlementFor(store, order)) {
+    fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
+  }
 
   // The older meaning of "pickup", where the job never left the shop and its
   // handover was never finished. A collected job travels to the office and is
@@ -940,7 +947,7 @@ export function publicOrderFor(order, user, store = null) {
       };
     });
   }
-  const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order) : null;
+  const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order, store) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
@@ -1021,6 +1028,26 @@ export function publicOrderFor(order, user, store = null) {
   }
   // The release desk pays a shop by scanning its own receiving QR, so the
   // account rides with every order Operations reads. Never for anyone else.
+  if (store) {
+    const settlement = refundSettlementFor(store, order);
+    publicRecord.refundHold = refundHold(store, order);
+    publicRecord.refundDisposition = settlement?.disposition || null;
+    publicRecord.unpaidBalanceCancelled = Boolean(settlement?.disposition === "cancelled");
+    if (ops || assignedSupplier) publicRecord.supplierSettlementPayouts = supplierRefundPayouts(store, order);
+    if ((ops || rider) && settlement) publicRecord.refundDeliverySettlement = {
+      riderEntitlementMinor: settlement.riderEntitlementMinor, settlementId: settlement.id,
+    };
+    if (ops) {
+      const settlements = (store.refundSettlements || []).filter((row) => row.orderId === order.id);
+      const payments = (store.refundPayments || []).filter((row) => settlements.some((s) => s.requestId === row.requestId));
+      publicRecord.refundFinance = {
+        approvedMinor: settlements.reduce((sum, row) => sum + row.totalMinor, 0),
+        paidMinor: payments.reduce((sum, row) => sum + row.amountMinor, 0),
+        refundedPrincipalMinor: settlements.reduce((sum, row) => sum + row.principalMinor, 0),
+      };
+      publicRecord.refundFinance.reservedMinor = publicRecord.refundFinance.approvedMinor - publicRecord.refundFinance.paidMinor;
+    }
+  }
   if (ops && store && order.supplierId) {
     publicRecord.supplierPayoutAccount = opsPayoutAccountProjection(store, order.supplierId);
   }
