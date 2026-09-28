@@ -747,3 +747,22 @@ test("a handoff signature is a small PNG the assigned rider attaches before the 
   expectError(() => authorizeFileRead(client, store, file), 403, "forbidden");
   expectError(() => authorizeFileRead({ id: "rider-b", role: "rider", verificationStatus: "approved" }, store, file), 403, "forbidden");
 });
+
+test("production photos are supplier-owned images attached to assigned production work", () => {
+  authorizeFileUpload(supplier, "production_photo");
+  for (const actor of [client, rider, ops]) expectError(() => authorizeFileUpload(actor, "production_photo"), 403, "forbidden");
+  expectError(() => validateUpload({ originalFilename: "proof.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-1.7\n"), size: 20 }, "production_photo"), 415, "purpose_media_type_not_allowed");
+  const record = order({ state: "production" });
+  const file = readyFile("production_photo");
+  const store = { orders: [record], files: [file] };
+  const target = resolveFileTarget(store, file.purpose, { orderId: record.id }, supplier);
+  authorizeFileAttach(supplier, file, target);
+  expectError(() => authorizeFileAttach({ ...supplier, verificationStatus: "suspended" }, file, target), 403, "forbidden");
+  expectError(() => authorizeFileAttach(supplier, file, { ...target, record: { ...record, supplierId: otherSupplier.id } }), 403, "forbidden");
+  expectError(() => authorizeFileAttach(supplier, file, { ...target, record: { ...record, state: "ready_for_dispatch" } }), 409, "production_photo_upload_not_allowed");
+  attachFileReference(file, target);
+  assert.deepEqual(record.productionPhotoFileIds, [file.fileId]);
+  for (const actor of [client, supplier, rider, ops]) authorizeFileRead(actor, store, file);
+  expectError(() => authorizeFileRead(otherClient, store, file), 403, "forbidden");
+  expectError(() => markFileDeletePending(file, supplier, "now"), 409, "file_in_use");
+});

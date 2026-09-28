@@ -97,6 +97,7 @@ Parents contain IDs only:
 | Purpose | Parent reference field |
 |---|---|
 | `artwork` | `order.artworkFileIds: string[]` |
+| `production_photo` | `order.productionPhotoFileIds: string[]`; plain progress only |
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `handoff_signature` | `order.handoffSignatureFileIds: string[]`; the one the checklist was signed against is `order.pickupChecklist.handoffSignature.fileId` |
@@ -125,6 +126,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `artwork` | client | JPEG, PNG, WebP, PDF, Photoshop (`image/vnd.adobe.photoshop`, magic `8BPS`) | 200 MiB (`209715200`) |
 | `mockup` | client | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
+| `production_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `handoff_signature` | rider | PNG | 2 MiB (`2097152`) |
@@ -146,7 +148,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, supplier `production_photo`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -217,6 +219,7 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 | Purpose | Body | Required state/ownership |
 |---|---|---|
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
+| `production_photo` | `{ "orderId": "..." }` | assigned approved supplier, while order is `production` or `supplier_self_qc`; otherwise `409 production_photo_upload_not_allowed` |
 | `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "production_started" }` | a stage of the order's own payout plan that takes a file: assigned supplier for `production_started` (plan 2) or `printing`/`packaging_qc` (legacy plan 1); assigned rider for `delivered`. `issue_window` and `retention` take no direct upload |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `handoff_signature` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned` only, else `409 handoff_signature_upload_not_allowed`. Named by `signature.fileId` on `POST /dispatch/:id/pickup-checklist` |
@@ -425,3 +428,7 @@ Versioned migrations create file metadata and reference tables; there is no JSON
 The [refund contract](REFUNDS_API.md#files-privacy-and-retention) owns QR/evidence/receipt binding and retention rules. Refund purposes bind through refund routes, never `/files/:id/attach`. `refund_qr` is owned and supplied by the client; `refund_receipt` is uploaded by the operator and becomes readable by that refund's client after binding. Neither is readable by shops, riders, other clients, public media, or the support desk. Bound old QR revisions remain pinned evidence. Financial image object metadata, signed-response overrides and API metadata/signing responses use `private, no-store, max-age=0`; infrastructure must preserve this through the proxy.
 
 The separately authorized shop settlement payout uses existing `payout_receipt` privacy (owning supplier plus ops/super), with mandatory reference and receipt on `/refund-requests/:id/supplier-payout`. All wallet screenshots are **transfer evidence**, not official receipts.
+
+## Production photo visibility
+
+Progress images use the same private read gate as artwork. The client gallery and packing refusal contract are [Production progress photos](OPERATIONAL_MODEL_V2_API.md#production-progress-photos). A start-of-production image counts, including legacy shop image proofs; PDFs do not. Client/rider file metadata strips internal reference fields and calls legacy fulfilment evidence `order_photo`. Attached evidence cannot be deleted.

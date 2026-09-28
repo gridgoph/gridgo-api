@@ -289,7 +289,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
 
   const clientOrder = publicOrderFor(order, { id: "client-a", role: "client" });
   assert.equal("supplierSubtotalMinor" in clientOrder, false);
-  assert.equal(clientOrder.payoutMilestones.some((milestone) => "amountMinor" in milestone), false);
+  assert.equal("payoutMilestones" in clientOrder, false);
   assert.equal(clientOrder.payments.initial.amountMinor, 35_000);
   assert.equal(clientOrder.subtotalMinor, 100_000);
   assert.equal(clientOrder.serviceFeeMinor, 10_000);
@@ -307,9 +307,8 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(supplierOrder.payoutMilestones[0].label, "Start of production");
   assert.equal(supplierOrder.payoutMilestones[0].releaseRequires, "shop_proof");
   assert.equal(supplierOrder.payoutMilestones[0].amountMinor, 40_000);
-  // The client reads the same plan, in words, without the shop's money.
-  assert.equal(clientOrder.payoutPlanVersion, 2);
-  assert.deepEqual(clientOrder.payoutMilestones.map((m) => m.label), ["Start of production", "Delivered", "Issue window closed"]);
+  // Shop stages and their internal codes are private.
+  assert.equal("payoutPlanVersion" in clientOrder, false);
   assert.equal(supplierOrder.supplierSettlement.collectedSupplierPrincipalMinor, 25_000);
   assert.equal(supplierOrder.supplierSettlement.protectedPaymentMinor, 25_000);
   assert.equal("reference" in supplierOrder.payments.initial, false);
@@ -864,4 +863,97 @@ test("handoff digest binds the recorded counts as well as checks and preserves l
   assert.equal(checklistDigest("order", checks, counts), checklistDigest("order", checks, [...counts].reverse()));
   assert.notEqual(checklistDigest("order", checks, counts), checklistDigest("order", checks, [{ ...counts[0], countedQuantity: 1 }, counts[1]]));
   assert.equal(checklistDigest("order", checks), checklistDigest("order", checks, undefined));
+});
+
+test("client and rider order history contains only plain progress, never internal proof or shop money", () => {
+  const order = {
+    id: "ord-history", clientId: "client", supplierId: "shop", riderId: "rider", state: "payout_released",
+    payoutPlanVersion: 2, payoutHold: true, fulfilmentProofFileIds: ["proof"],
+    payoutMilestones: [{ code: "production_started", status: "released", pofFileIds: ["proof"] }],
+    timeline: [
+      { at: "1", state: "production", by: "shop", note: "In production" },
+      { at: "2", state: "production", note: "Proof of Fulfilment attached for production_started", milestoneCode: "production_started", fileId: "proof" },
+      { at: "3", state: "production", note: "production_started supplier payout milestone released", milestoneCode: "production_started" },
+      { at: "4", state: "ready_for_dispatch", note: "Packaging ready; packaging_qc internal event", internal: "secret" },
+      { at: "5", state: "completed", note: "retention released" },
+      { at: "6", state: "payout_released", note: "Shop paid" },
+    ],
+  };
+  for (const role of ["client", "rider"]) {
+    const result = publicOrderFor(order, { id: role, role });
+    assert.doesNotMatch(JSON.stringify(result), /payout|milestone|production_started|packaging_qc|retention|internal|fulfilment/i);
+    assert.deepEqual(result.timeline, [
+      { at: "1", state: "production", note: "In production" },
+      { at: "4", state: "ready_for_dispatch", note: "Ready for dispatch" },
+      { at: "5", state: "completed", note: "Order completed" },
+    ]);
+    assert.equal(result.state, "completed");
+  }
+  assert.deepEqual(publicOrderFor(order, { id: "ops", role: "ops_admin" }).timeline, order.timeline);
+  assert.deepEqual(publicOrderFor(order, { id: "shop", role: "supplier" }).timeline, order.timeline);
+});
+
+test("only the owning client gets the latest Operations correction, separate from sanitized history", () => {
+  const reason = "Bleed is missing on all four edges";
+  const order = {
+    id: "correction-order", clientId: "client", supplierId: "shop", riderId: "rider", state: "client_correction",
+    correction: { reason: "untrusted stored projection", internal: "secret" },
+    timeline: [
+      { at: "1", state: "needs_qa", note: "Internal QA note" },
+      { at: "2", state: "client_correction", by: "ops", note: "First correction" },
+      { at: "3", state: "needs_qa", by: "client", note: "Resubmitted" },
+      { at: "4", state: "client_correction", by: "super", note: reason, internal: "secret" },
+      { at: "5", state: "client_correction", note: "Payout held: internal claim reason" },
+      { at: "6", state: "client_correction", milestoneCode: "printing", note: "Internal milestone" },
+    ],
+  };
+  const original = structuredClone(order);
+  for (const state of ["client_correction", "submitted", "needs_qa", "production", "completed"]) {
+    const result = publicOrderFor({ ...order, state }, { id: "client", role: "client" });
+    assert.deepEqual(result.correction, { reason, requestedAt: "4" });
+    assert.equal(result.timeline.at(-1).note, "Artwork needs a change");
+    assert.doesNotMatch(JSON.stringify(result), /internal|payout|milestone|untrusted/i);
+  }
+  for (const reader of [
+    { id: "stranger", role: "client" }, { id: "shop", role: "supplier" },
+    { id: "rider", role: "rider" }, { id: "ops", role: "ops_admin" }, null,
+  ]) {
+    const result = publicOrderFor(order, reader);
+    assert.equal(Object.hasOwn(result, "correction"), false);
+    if (reader?.role === "supplier" || reader?.role === "ops_admin") {
+      assert.deepEqual(result.timeline, order.timeline, "existing raw history access is unchanged");
+    } else {
+      assert.equal(JSON.stringify(result).includes(reason), false);
+    }
+  }
+  assert.deepEqual(order, original);
+});
+
+test("legacy correction history handles missing reasons and never substitutes unrelated notes", () => {
+  const project = (timeline) => publicOrderFor(
+    { id: "legacy", clientId: "client", state: "client_correction", timeline },
+    { id: "client", role: "client" },
+  ).correction;
+  const qa = { state: "needs_qa" };
+  const correction = { state: "client_correction", note: "Please add bleed" };
+  assert.deepEqual(project([qa, correction]), { reason: "Please add bleed", requestedAt: null });
+  for (const timeline of [undefined, null, [], [correction], [qa, { ...correction, note: undefined }],
+    [qa, { ...correction, note: "  " }], [qa, { ...correction, note: { internal: "secret" } }],
+    [qa, correction, { state: "needs_qa" }, { state: "client_correction" }],
+    [qa, correction, { state: "proof_approval" }, { ...correction, note: "Client rejected proof" }],
+  ]) assert.equal(project(timeline), null);
+});
+
+test("production photos use ready attached supplier images, including legacy proofs, not PDF or delivery evidence", () => {
+  const order = { id: "ord", clientId: "client", supplierId: "shop", state: "production", timeline: [] };
+  const file = (fileId, changes = {}) => ({ fileId, ownerId: "shop", state: "ready", purpose: "fulfilment_proof", detectedContentType: "image/jpeg", objectKey: `private/${fileId}`, readyAt: "now", references: [{ type: "order", id: "ord", milestoneCode: "printing" }], ...changes });
+  const store = { files: [file("legacy"), file("start", { references: [{ type: "order", id: "ord", milestoneCode: "production_started" }] }), file("pdf", { detectedContentType: "application/pdf" }), file("pending", { state: "pending_upload" }), file("other", { ownerId: "other-shop" }), file("unattached", { references: [] }), file("delivery", { references: [{ type: "order", id: "ord", milestoneCode: "delivered" }] })] };
+  const result = publicOrderFor(order, { id: "client", role: "client" }, store);
+  assert.deepEqual(result.productionProgress, { status: "photos_available", photos: [
+    { fileId: "legacy", contentType: "image/jpeg", at: "now" },
+    { fileId: "start", contentType: "image/jpeg", at: "now" },
+  ] });
+  assert.deepEqual(publicOrderFor(order, { id: "client", role: "client" }, { files: [] }).productionProgress,
+    { status: "waiting_for_photo", photos: [] });
+  assert.equal(publicOrderFor(order, { id: "stranger", role: "client" }, store).productionProgress, undefined);
 });

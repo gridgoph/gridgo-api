@@ -14,6 +14,7 @@ export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
 const KINDS = new Set([
   "artwork",
   "fulfilment_proof",
+  "production_photo",
   "delivery_photo",
   "handoff_signature",
   "service_image",
@@ -42,6 +43,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
+  production_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
     roles: ["rider"],
@@ -642,11 +644,11 @@ export function markFileDeleted(file, at) {
   return file;
 }
 
-export function publicFile(file) {
+export function publicFile(file, user = null) {
   if (!file) return null;
   return {
     fileId: file.fileId,
-    purpose: file.purpose,
+    purpose: file.purpose === "fulfilment_proof" && ["client", "rider"].includes(user?.role) ? "order_photo" : file.purpose,
     originalFilename: file.originalFilename,
     declaredContentType: file.declaredContentType,
     detectedContentType: file.detectedContentType,
@@ -657,7 +659,10 @@ export function publicFile(file) {
     readyAt: file.readyAt,
     deleteRequestedAt: file.deleteRequestedAt,
     deletedAt: file.deletedAt,
-    references: (file.references || []).map((reference) => ({ ...reference })),
+    references: (file.references || []).map((reference) =>
+      ["client", "rider"].includes(user?.role)
+        ? { type: reference.type, id: reference.id }
+        : { ...reference }),
     // Only present when the file said something about itself, so a client can
     // tell "we read 210 x 297 mm" from "we could not tell".
     ...(file.detected ? { detected: { ...file.detected } } : {}),
@@ -924,6 +929,13 @@ function hasApprovedWorkRole(user, role) {
 export function authorizeFileAttach(user, file, target) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
+  if (file.purpose === "production_photo") {
+    if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
+    if (!["production", "supplier_self_qc"].includes(record.state)) {
+      fail(409, "production_photo_upload_not_allowed", "Attach progress photos while the job is in production or being packed.");
+    }
+    return;
+  }
   if (file.purpose === "artwork") {
     if (target?.type !== "order" || !hasRole(user, "client") || record.clientId !== user.id) forbidden();
     return;
@@ -1054,6 +1066,7 @@ export function attachFileReference(file, target) {
   const map = {
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
+    production_photo: "productionPhotoFileIds",
     delivery_photo: "deliveryPhotoFileIds",
     handoff_signature: "handoffSignatureFileIds",
     service_image: "imageFileIds",
