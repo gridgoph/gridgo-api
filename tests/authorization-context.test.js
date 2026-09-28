@@ -48,7 +48,7 @@ test("file reauthentication preserves selected client authorization and order pr
   assert.deepEqual(response.artworkFileIds, ["artwork"]);
   assert.equal(Object.hasOwn(response, "supplierPlatformPayoutMinor"), false);
   assert.equal(Object.hasOwn(response, "supplierSubtotalMinor"), false);
-  assert.ok(response.payoutMilestones.every((m) => !Object.hasOwn(m, "amountMinor")));
+  assert.equal(Object.hasOwn(response, "payoutMilestones"), false);
   latestActor.name = "Updated";
   assert.equal(reauthenticated.name, "Updated");
   assert.equal(reauthenticated.role, "super_admin");

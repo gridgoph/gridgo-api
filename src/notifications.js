@@ -70,7 +70,10 @@ export function publicNotification(notification, order) {
   if (notification.announcementId) item.announcementId = notification.announcementId;
   if (notification.approvalCaseId) item.approvalCaseId = notification.approvalCaseId;
   if (order?.title) item.orderTitle = order.title;
-  if (order?.state) item.orderState = order.state;
+  if (order?.state) {
+    const privateShopEvent = ["supplier", "ops_admin", "super_admin"].includes(notification.appRole);
+    item.orderState = order.state === "payout_released" && !privateShopEvent ? "completed" : order.state;
+  }
   if (order?.fulfillmentMode === "pickup" || order?.fulfillmentMode === "delivery") {
     item.fulfillmentMode = order.fulfillmentMode;
   }

@@ -889,7 +889,7 @@ For the rounding vector `supplierSubtotalMinor = 99999`, a 1,000-bps service fee
 
 ### Visibility authorization
 
-- Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and payout milestone codes/status; never platform supplier-payout amounts.
+- Client: items subtotal, service fee, delivery, total, accepted plan/installments, its submitted references, and plain progress history; no shop payout fields, stage codes/status, or internal proof events.
 - Assigned supplier: its full supplier subtotal, zero-deduction settlement card, and milestone amounts; never client payment references. For pickup-at-store plans, the card reports the amount due separately and keeps received-at-store at zero until a later lifecycle owns an explicit receipt signal.
 - Rider: client-safe order totals and the snapshotted delivery split above; no supplier payout, allocation, milestone, or client-reference details.
 - Operations/Super Admin: full client totals, allocations, supplier settlement, combined service-fee/delivery-share revenue fields, and milestone amounts.
@@ -1057,7 +1057,7 @@ Every order projection that carries stages carries the plan with it, so a screen
 - `label`: the shop-facing name. Render it rather than mapping `code` yourself; a future plan adds codes without a screen change.
 - `releaseRequires`: `shop_proof | delivery_proof | issue_window_closed`, what the release desk is waiting on.
 - `sharePercent` and `amountMinor` are the stored snapshot. On plan 2 the `issue_window` stage stays `pending_pof` until released; it never needs a file.
-- Visibility is unchanged: Operations/Super Admin and the assigned shop see amounts; the owning client sees codes, labels, percentages and statuses without `amountMinor`, `reference`, or `receiptFileId`; riders receive neither `payoutMilestones` nor `payoutPlanVersion`.
+- Operations/Super Admin and the assigned shop see the payout plan, amounts, references and receipts. Clients and riders receive neither `payoutMilestones` nor `payoutPlanVersion`; progress is exposed separately through plain history and `productionProgress`.
 
 Release:
 
@@ -1076,6 +1076,39 @@ POST /orders/:id/milestones/:code/release
 `note`, `reference`, and `receiptFileId` are all optional. `reference` is the wallet's own reference number (trimmed, up to 80 characters; `400 invalid_payout_reference` beyond that). `receiptFileId` binds the caller's own ready `payout_receipt` upload (`docs/STORAGE_API.md`) to the share; anything else is `400 invalid_payout_receipt`, and a receipt already bound elsewhere is `409 file_already_attached`. Both are validated before the share moves. The released milestone then carries `reference` and `receiptFileId`, the order lists the file in `payoutReceiptFileIds`, the audit row records both, and the shop's `shop_payout_released` notification quotes the reference. Clients never receive either field.
 
 Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release in any order their own gates allow; in practice that is plan order. A share that waits on a file and has none is `409 pof_required` (`production_started`, `delivered`; legacy `printing`, `packaging_qc`, `delivered`, `retention`); a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before the client has the job is `409 delivery_required`; `issue_window` or `retention` before the window closes is `409 issue_window_open`); a code the order does not carry is `404 milestone_not_found`; insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold blocks every remaining stage with `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
+
+## Production progress photos
+
+`POST /orders/:id/transition` refuses a supplier moving `production -> supplier_self_qc`, `production -> ready_for_dispatch`, or `supplier_self_qc -> ready_for_dispatch` with `409 production_photo_required` until the job has at least one **ready, attached JPEG/PNG/WebP owned by its assigned supplier**. Body flags, unattached uploads, pending/deleted files, PDFs, another shop's files, artwork, and rider delivery evidence do not count.
+
+One photo is sufficient: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
+
+Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
+
+Order list/detail and order mutation responses expose this additive projection to the owning client, assigned supplier/rider and Operations/Super Admin:
+
+```json
+{
+  "productionProgress": {
+    "status": "photos_available",
+    "photos": [{
+      "fileId": "file_opaque",
+      "contentType": "image/jpeg",
+      "at": "2026-09-28T08:00:00.000Z",
+      "downloadUrl": "https://storage.example/private-signed-url",
+      "downloadUrlExpiresAt": "2026-09-28T08:05:00.000Z"
+    }]
+  }
+}
+```
+
+With no qualifying image, the response is `{ "status": "waiting_for_photo", "photos": [] }`. The client should display **Waiting for a progress photo** during production and subsequent steps until evidence exists, even after a staff correction. A gallery row exposes no uploader, private key, filename, payout stage or proof code. Signed links use the same authorization and TTL as artwork; unrelated clients and unassigned riders browsing dispatch offers receive none. If signing fails, the photo identity remains and the app can retry `GET /files/:fileId/download-url`. Attaching evidence queues order/job invalidations before commit.
+
+### Plain order history
+
+Client and rider `timeline` entries contain only `{ at, state, note }` for allowlisted progress states, with plain server-owned wording (for example **In production**, **Checking and packing your order**, **Ready for dispatch**). Repeated-state entries, proof attachments, payout releases and arbitrary internal note/metadata fields are omitted; raw history is retained for the assigned supplier and Operations. This applies to historical rows as well as new events. `payoutMilestones`, `payoutPlanVersion`, `payoutHold` and raw proof/progress file-ID arrays are absent from client/rider orders; use `productionProgress` for the gallery. Their internal terminal `payout_released` state is projected as `completed`, including notification order-state metadata. Rider delivery earnings remain visible to the rider.
+
+File metadata reads by clients/riders omit internal reference fields and expose legacy `fulfilment_proof` as `purpose: "order_photo"`; supplier/Operations proof metadata remains unchanged. Order progress notifications already use fixed client wording, and shop/Operations payout notifications remain role-scoped. The audit and claim-history endpoints remain staff-only. Refund history keeps the separate client refund contract and omits supplier-payment events.
 
 ## Order states and transitions
 
@@ -1096,9 +1129,9 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `supplier_assigned` | `awaiting_checkout` | assigned approved supplier | request says `supplier_accepted`; creates the next final quote version |
 | `awaiting_checkout` | `awaiting_initial_payment` | owning client | accepts exact quote version and snapshots money/fulfillment |
 | `payment_authorized` | `production` | assigned supplier | after confirmed initial payment and no refund hold; supplier stages still require their explicit release route |
-| `production` | `ready_for_dispatch` | assigned supplier | packaging ready; offers and notifications go to approved riders; joint pickup QC still required |
-| `production` | `supplier_self_qc` | assigned supplier | legacy client/portal compatibility; new supplier flow skips this step |
-| `supplier_self_qc` | `ready_for_dispatch` | assigned supplier | legacy work can advance to the same rider handoff |
+| `production` | `ready_for_dispatch` | assigned supplier; ops/super correction | production photo required for supplier; offers and notifications go to approved riders; joint pickup QC still required |
+| `production` | `supplier_self_qc` | assigned supplier; ops/super correction | production photo required for supplier; legacy client/portal compatibility; new supplier flow skips this step |
+| `supplier_self_qc` | `ready_for_dispatch` | assigned supplier; ops/super correction | production photo required for supplier; legacy work can advance to the same rider handoff |
 | `ready_for_dispatch` | `rider_assigned` | approved rider/ops/super | normally dispatch accept; rider must be approved |
 | `picked_up` | `out_for_delivery` | assigned rider | checklist already passed |
 | `completed` | `payout_released` | ops/super | only when all milestones released/no hold |

@@ -238,3 +238,12 @@ test("old inbox and SSE events carry current client payment action without rewri
   assert.equal(publicNotification(notification, order).paymentAction, undefined);
   assert.equal(notification.paymentAction, undefined);
 });
+
+test("client and rider notification event state does not disclose the shop payout step", () => {
+  const order = { id: "order", clientId: "client", riderId: "rider", state: "payout_released" };
+  for (const role of ["client", "rider"]) {
+    const result = publicNotification({ id: "notice", userId: role, appRole: role, orderId: "order", type: "order_completed", title: "Order completed", body: "Thank you" }, order);
+    assert.equal(result.orderState, "completed");
+    assert.doesNotMatch(JSON.stringify(result), /payout|milestone/);
+  }
+});

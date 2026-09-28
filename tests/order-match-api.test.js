@@ -210,9 +210,26 @@ async function asFourStageOrder(database, orderId) {
 async function attachProofDirectly(database, orderId, code) {
   await database.transaction(async () => {
     const store = await loadStore(database);
-    const milestone = store.orders.find((row) => row.id === orderId).payoutMilestones.find((row) => row.code === code);
+    const order = store.orders.find((row) => row.id === orderId);
+    const milestone = order.payoutMilestones.find((row) => row.code === code);
+    store.files.push({ fileId: `file_pof_${code}`, ownerId: ["delivered", "retention"].includes(code) ? "user_rider" : order.supplierId,
+      purpose: "fulfilment_proof", originalFilename: "progress.jpg", detectedContentType: "image/jpeg",
+      declaredContentType: "image/jpeg", size: 100, state: "ready", objectKey: `proof/${code}.jpg`, createdAt: AT, readyAt: AT,
+      references: [{ type: "order", id: orderId, field: "fulfilmentProofFileIds", milestoneCode: code }] });
     milestone.pofFileIds = [`file_pof_${code}`];
     milestone.status = "pof_attached";
+    await saveStore(database, store);
+  });
+}
+
+async function attachProgressPhoto(database, orderId) {
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === orderId);
+    store.files.push({ fileId: `progress_${orderId}`, ownerId: order.supplierId,
+      purpose: "production_photo", originalFilename: "progress.jpg", detectedContentType: "image/jpeg",
+      declaredContentType: "image/jpeg", size: 100, state: "ready", objectKey: `progress/${orderId}.jpg`, createdAt: AT, readyAt: AT,
+      references: [{ type: "order", id: orderId, field: "productionPhotoFileIds" }] });
     await saveStore(database, store);
   });
 }
@@ -572,16 +589,7 @@ test("a legacy four-stage order is paid across its four stages, each on a photog
 
   // The proof, written straight into the record rather than photographed: what
   // is under test is the release policy, not the camera.
-  const attachProof = async (code) => {
-    await database.transaction(async () => {
-      const store = await loadStore(database);
-      const order = store.orders.find((row) => row.id === orderId);
-      const milestone = order.payoutMilestones.find((row) => row.code === code);
-      milestone.pofFileIds = [`file_pof_${code}`];
-      milestone.status = "pof_attached";
-      await saveStore(database, store);
-    });
-  };
+  const attachProof = (code) => attachProofDirectly(database, orderId, code);
 
   const placed = await orderNow();
   assert.equal(placed.payoutPlanVersion, 1);
@@ -730,11 +738,10 @@ test("a new order pays the shop 40/35/25 of its own cost, each stage only after 
     `, [orderId]),
     (error) => error.code === "23514" && error.constraint === "payout_milestones_amount_check",
   );
-  // The client sees the plan and its stages, never what the shop is paid.
+  // The client sees progress separately; the shop payout plan is private.
   const clientView = await orderNow("clerk_client");
-  assert.equal(clientView.payoutPlanVersion, 2);
-  assert.deepEqual(clientView.payoutMilestones.map((row) => row.code), ["production_started", "delivered", "issue_window"]);
-  assert.equal(clientView.payoutMilestones.some((row) => "amountMinor" in row), false);
+  assert.equal("payoutPlanVersion" in clientView, false);
+  assert.equal("payoutMilestones" in clientView, false);
 
   await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops");
   assert.equal((await transition("supplier_assigned", "clerk_ops")).status, 200);
@@ -856,7 +863,7 @@ test("a claim holds every remaining share, and the last one waits out the clock"
 });
 
 test("a client rates a finished order once, and only quality reaches matching", async (t) => {
-  const { call, orderId } = await placedOrder(t);
+  const { call, database, orderId } = await placedOrder(t);
   const rate = (body, subject = "clerk_client") => call(
     `/orders/${orderId}/review`, { method: "POST", subject, body },
   );
@@ -878,6 +885,7 @@ test("a client rates a finished order once, and only quality reaches matching", 
   ]) {
     const moved = await call(`/orders/${orderId}/transition`, { method: "POST", subject, body: { state } });
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+    if (state === "production") await attachProgressPhoto(database, orderId);
   }
 
   // Finishing the work stamps when the shop was actually done, so its on-time
@@ -1009,7 +1017,7 @@ test("a collected order runs the whole journey, because a rider takes it to the 
   // that shipped is collecting at GRIDGO Office, which a rider delivers to.
   // Held apart by fulfilment mode alone, the second was refused the moment its
   // shop pressed start — and the shop was told GRIDGO was unreachable.
-  const { call, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
+  const { call, database, orderId } = await placedOrder(t, { fulfillmentMode: "pickup" });
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
 
@@ -1030,6 +1038,7 @@ test("a collected order runs the whole journey, because a rider takes it to the 
   assert.equal(started.status, 200, JSON.stringify(started.body));
   assert.equal(started.body.order.state, "production");
 
+  await attachProgressPhoto(database, orderId);
   // Through to staged for a rider.
   for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
     const moved = await call(`/orders/${orderId}/transition`, {
@@ -1076,6 +1085,7 @@ test("a collected order stops on the counter, and only the counter hands it over
       method: "POST", subject: "clerk_supplier_a", body: { state },
     });
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
+    if (state === "production") await attachProgressPhoto(database, orderId);
   }
 
   // The balance is not settled, and it does not stop the carrying. Nothing is
@@ -1153,11 +1163,13 @@ test("a collected order stops on the counter, and only the counter hands it over
  * the shop while Rider showed an empty board.
  */
 test("a shop-ready delivery is offered even when the remaining balance is unpaid", { skip: !DATABASE_URL }, async (t) => {
-  const { call, orderId } = await placedOrder(t);
+  const { call, database, orderId } = await placedOrder(t);
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
   for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
-    await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier_a", body: { state } });
+    const moved = await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier_a", body: { state } });
+    assert.equal(moved.status, 200, JSON.stringify(moved.body));
+    if (state === "production") await attachProgressPhoto(database, orderId);
   }
 
   const offered = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
@@ -1217,6 +1229,10 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
   assert.equal((await loadStore(database)).orders.find((row) => row.id === orderId).state, "production");
   assert.equal((await loadStore(database)).notifications.some((row) => row.orderId === orderId && row.type === "dispatch_available"), false);
 
+  const missingPhoto = await transition("ready_for_dispatch");
+  assert.equal(missingPhoto.status, 409);
+  assert.equal(missingPhoto.body.error, "production_photo_required");
+  await attachProgressPhoto(database, orderId);
   const ready = await transition("ready_for_dispatch");
   assert.equal(ready.status, 200, JSON.stringify(ready.body));
   assert.equal(ready.body.order.state, "ready_for_dispatch");
@@ -1297,7 +1313,7 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
   assert.equal(recorded.signedAt, passed.body.order.pickupChecklist.completedAt);
   assert.equal(recorded.checklistHash, checklistDigest(orderId, checks, passed.body.order.pickupChecklist.counts));
   assert.deepEqual(passed.body.handoffSignature, recorded);
-  assert.match(passed.body.order.timeline.at(-1).note, /Ana Reyes signed the handoff/);
+  assert.equal(passed.body.order.timeline.at(-1).note, "Picked up from the shop");
   // The shop and Operations read the same record off the order they already
   // fetch; the client is not shown who signed for the shop.
   assert.deepEqual((await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" })).body.order.pickupChecklist.handoffSignature, recorded);
@@ -1320,6 +1336,7 @@ async function counterOrder(t) {
   assert.equal((await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops")).status, 200);
   for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized", "clerk_supplier_a"], ["production", "clerk_supplier_a"], ["ready_for_dispatch", "clerk_supplier_a"]]) {
     assert.equal((await post(`/orders/${orderId}/transition`, subject, { state })).status, 200);
+    if (state === "production") await attachProgressPhoto(database, orderId);
   }
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   await database.transaction(async () => {
@@ -1425,6 +1442,7 @@ test("final QR receipt survives submission and only Operations clears delivery",
   assert.equal((await transition("supplier_assigned", "clerk_ops")).status, 200);
   assert.equal((await transition("payment_authorized")).status, 200);
   assert.equal((await transition("production")).status, 200);
+  await attachProgressPhoto(database, orderId);
   assert.equal((await transition("ready_for_dispatch")).status, 200);
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   const checks = ALL_SIX.map((code) => ({ code, passed: true }));
@@ -1589,6 +1607,7 @@ test("a legacy 75/25 order still needs its balance before delivery", { skip: !DA
   assert.equal(confirmed.body.order.paymentStatus, "initial_payment_confirmed");
   for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized"], ["production"], ["ready_for_dispatch"]]) {
     assert.equal((await transition(state, subject)).status, 200, state);
+    if (state === "production") await attachProgressPhoto(database, orderId);
   }
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   const checks = ALL_SIX.map((code) => ({ code, passed: true }));
