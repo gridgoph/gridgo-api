@@ -445,6 +445,13 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi" });
     assert.equal(failed.status, 200, JSON.stringify(failed.body));
     assert.equal(await stateOf(), "client_correction");
+    const corrected = await call(`/orders/${orderId}`, { subject: "clerk_client" });
+    assert.deepEqual(corrected.body.order.correction, {
+      reason: "Artwork is 72dpi", requestedAt: failed.body.order.updatedAt,
+    });
+    assert.equal(corrected.body.order.timeline.at(-1).note, "Artwork needs a change");
+    const clientOrders = await call("/orders", { subject: "clerk_client" });
+    assert.deepEqual(clientOrders.body.orders.find((row) => row.id === orderId).correction, corrected.body.order.correction);
     const held = await call(`/orders/${orderId}`, { subject: "clerk_ops" });
     assert.equal(held.body.order.payments.initial.status, "confirmed", "a correction must not undo a confirmed payment");
 
@@ -452,6 +459,7 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     // the order again.
     const resubmitted = await transition("needs_qa", "clerk_client");
     assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
+    assert.deepEqual(resubmitted.body.order.correction, corrected.body.order.correction);
 
     // Passing quality control hands it to the shop that was matched before the
     // client paid. No supplier id is sent: there is nothing left to assign.
@@ -464,6 +472,7 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     assert.equal(jobs.status, 200, JSON.stringify(jobs.body));
     assert.equal(jobs.body.jobs.length, 1);
     assert.equal(jobs.body.jobs[0].id, orderId);
+    assert.equal(Object.hasOwn(jobs.body.jobs[0], "correction"), false);
 
     // Another shop's job is still not its business.
     const nosy = await call("/jobs", { subject: "clerk_supplier_b" });
