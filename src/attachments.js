@@ -22,6 +22,7 @@ const KINDS = new Set([
   "announcement_image",
   "payment_qr",
   "supplier_payout_qr",
+  "refund_qr", "refund_receipt", "refund_evidence",
   "payout_receipt",
   "verification_document",
   "rider_verification_document",
@@ -81,6 +82,9 @@ export const PURPOSE_POLICIES = Object.freeze({
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   // A shop's own receiving plate, bound through PATCH /me/payout-account.
+  refund_qr: { roles: ["client"], maxBytes: 5 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
+  refund_receipt: { roles: ["ops_admin", "super_admin"], maxBytes: 15 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
+  refund_evidence: { roles: ["client", "ops_admin", "super_admin"], maxBytes: 15 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   supplier_payout_qr: {
     roles: ["supplier"],
     maxBytes: 5 * 1024 * 1024,
@@ -666,6 +670,9 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
+  if (["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose)) {
+    fail(409, "refund_file_not_attachable", "Bind this file through the refund request routes.");
+  }
   if (purpose === "announcement_image") {
     fail(
       400,
@@ -1169,6 +1176,12 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
+    if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
+      || (file.references || []).some((ref) => ref.type === "refund_request"
+        && (store.refundRequests || []).some((row) => row.id === ref.id && row.clientId === user.id)))) return;
+    forbidden();
+  }
   if (file.purpose === "payment_proof") {
     if (file.ownerId === user.id) return;
     forbidden();

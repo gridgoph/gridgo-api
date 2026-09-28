@@ -105,6 +105,9 @@ Parents contain IDs only:
 | `supplier_shop_image` | shop media slot `logo` or `cover` |
 | `verification_document` | `supplier.verificationDocumentFileIds: string[]` (private; never part of `PublicUser`) |
 | `supplier_payout_qr` | `supplierPayoutAccount.qr.fileId` (private to that shop and Operations; bound through `PATCH /me/payout-account`, never through attach) |
+| `refund_qr` | refund destination plate; owning client and ops/super only |
+| `refund_evidence` | refund request evidence; owning client and ops/super only |
+| `refund_receipt` | client-refund wallet transfer evidence; owning client and ops/super only |
 | `payout_receipt` | `order.payoutReceiptFileIds: string[]` and `payoutMilestone.receiptFileId` (Operations and the assigned shop; bound at `POST /orders/:id/milestones/:code/release`, never through attach) |
 | `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 | `tracker_decision` | `tracker_decisions.attachment_ids` (Super Admin only; bound by `POST /admin/tracker/:repo/:number/decisions`, never through attach) |
@@ -131,6 +134,9 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `supplier_payout_qr` | supplier, including pending | JPEG, PNG, WebP | 5 MiB (`5242880`) |
 | `payout_receipt` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
+| `refund_qr` | client | JPEG, PNG, WebP | 5 MiB (`5242880`) |
+| `refund_evidence` | client/ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
+| `refund_receipt` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
 
@@ -413,3 +419,9 @@ Upstream withdrew the MinIO images GRIDGO used to pin: `quay.io/minio/minio` and
 ## PostgreSQL reconciliation
 
 Versioned migrations create file metadata and reference tables; there is no JSON import or load-time structural migration. On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted` in a transaction.
+
+## Private refund files
+
+The [refund contract](REFUNDS_API.md#files-privacy-and-retention) owns QR/evidence/receipt binding and retention rules. Refund purposes bind through refund routes, never `/files/:id/attach`. `refund_qr` is owned and supplied by the client; `refund_receipt` is uploaded by the operator and becomes readable by that refund's client after binding. Neither is readable by shops, riders, other clients, public media, or the support desk. Bound old QR revisions remain pinned evidence. Financial image object metadata, signed-response overrides and API metadata/signing responses use `private, no-store, max-age=0`; infrastructure must preserve this through the proxy.
+
+The separately authorized shop settlement payout uses existing `payout_receipt` privacy (owning supplier plus ops/super), with mandatory reference and receipt on `/refund-requests/:id/supplier-payout`. All wallet screenshots are **transfer evidence**, not official receipts.
