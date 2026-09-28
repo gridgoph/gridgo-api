@@ -250,3 +250,146 @@ test('Canva evidence beyond the 64 KiB prefix is never inspected', async (t) => 
   const { checker } = await mockChecker(t, (_req, res) => serveFixture(res, fixtures.public, Buffer.concat([Buffer.alloc(65_536, 32), publicHtml])));
   assert.equal((await checker({ url: fixtures.public.url, formatCode: 'canva_link' })).access, 'unknown');
 });
+
+const driveFixtures = JSON.parse(readFileSync(new URL('./fixtures/artwork-links/drive-responses.json', import.meta.url)));
+const driveHtml = readFileSync(new URL('./fixtures/artwork-links/drive-public.html', import.meta.url));
+function serveDriveFixture(res, fixture, body) {
+  serveFixture(res, fixture, body ?? (fixture.bodyFile
+    ? readFileSync(new URL(`./fixtures/artwork-links/${fixture.bodyFile}`, import.meta.url)) : undefined));
+}
+
+test('captured anonymous Drive viewer proves the requested file is public within the body cap', async (t) => {
+  const { checker, seen } = await mockChecker(t, (_req, res) => {
+    // Keep the evidence near its real offset; discard everything beyond 64 KiB.
+    serveDriveFixture(res, driveFixtures.public, Buffer.concat([Buffer.alloc(57_000, 32), driveHtml, Buffer.alloc(90_000, 32)]));
+  });
+  for (const formatCode of ['google_drive', 'other_link']) {
+    for (const suffix of ['view', 'preview']) {
+      const url = driveFixtures.public.url.replace(/view$/, suffix);
+      const result = await checker({ url, formatCode });
+      assert.equal(result.access, 'public_view');
+      assert.equal(result.provider, 'google_drive');
+      assert.equal(result.ok, true);
+      assert.equal(result.url, url);
+      assert.equal(result.formatCode, formatCode);
+    }
+  }
+  assert.ok(seen.every((r) => r.method === 'GET' && !r.headers.cookie && !r.headers.authorization));
+});
+
+test('Drive metadata alone, a wrong file, lookalike hosts, and evidence outside the cap remain unknown', async (t) => {
+  for (const [url, body, status] of [
+    [driveFixtures.public.url, driveHtml.toString().replace(/<script>[\s\S]*?<\/script>/, ''), 200],
+    [driveFixtures.public.url.replace('/d/', '/d/WRONG'), driveHtml, 200],
+    [driveFixtures.public.url.replace('drive.google.com', 'drive.google.com.evil.example'), driveHtml, 200],
+    [driveFixtures.public.url, Buffer.concat([Buffer.alloc(65_536, 32), driveHtml]), 200],
+    [driveFixtures.public.url, driveHtml, 403],
+    [driveFixtures.public.url, '<html><title>Google Drive</title></html>', 200],
+  ]) {
+    const { checker } = await mockChecker(t, (_req, res) => serveDriveFixture(res, { ...driveFixtures.public, status }, body));
+    assert.equal((await checker({ url, formatCode: 'other_link' })).access, 'unknown');
+  }
+});
+
+test('captured Drive uc redirect reaches anonymous PNG with GET and retains provider/input', async (t) => {
+  const { checker, seen } = await mockChecker(t, (req, res) => {
+    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.downloadRedirect : driveFixtures.download);
+  });
+  const link = { url: driveFixtures.downloadRedirect.url, formatCode: 'google_drive' };
+  const result = await checker(link);
+  assert.equal(result.access, 'public_view');
+  assert.equal(result.provider, 'google_drive');
+  assert.equal(result.url, link.url);
+  assert.deepEqual(seen.map((r) => [r.method, r.headers.host]), [['GET', 'drive.google.com'], ['GET', 'drive.usercontent.google.com']]);
+});
+
+test('Drive skips slow HEAD responses without extending the shared deadline', async (t) => {
+  const { checker, seen } = await mockChecker(t, (req, res) => {
+    // HEAD did not provide access evidence and could consume the entire budget.
+    if (req.method === 'HEAD') return;
+    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.downloadRedirect : driveFixtures.download);
+  }, { timeoutMs: 100 });
+  assert.equal((await checker({ url: driveFixtures.downloadRedirect.url, formatCode: 'google_drive' })).access, 'public_view');
+  assert.equal(seen.length, 2);
+});
+
+test('captured private Drive file and download login redirect require sharing changes', async (t) => {
+  const privatePage = await mockChecker(t, (_req, res) => serveDriveFixture(res, driveFixtures.private));
+  assert.equal((await privatePage.checker({ url: driveFixtures.private.url, formatCode: 'google_drive' })).access, 'sign_in_required');
+  const { checker, seen } = await mockChecker(t, (req, res) => {
+    assert.notEqual(req.headers.host, 'accounts.google.com', 'login need not be fetched');
+    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.privateDownloadRedirect : driveFixtures.privateLoginRedirect);
+  });
+  const result = await checker({ url: driveFixtures.privateDownloadRedirect.url, formatCode: 'google_drive' });
+  assert.equal(result.access, 'sign_in_required');
+  assert.equal(result.url, driveFixtures.privateDownloadRedirect.url);
+  assert.equal(seen.length, 2);
+});
+
+test('Drive access, deleted, 404, and trashed-file pages are conclusive', async (t) => {
+  for (const [fixture, body, access] of [
+    [driveFixtures.accessPage, undefined, 'sign_in_required'],
+    [driveFixtures.deletedPage, undefined, 'not_found'],
+    [driveFixtures.missing, undefined, 'not_found'],
+    [driveFixtures.public, driveHtml.toString().replace(/'isItemTrashed':\s*false/, "'isItemTrashed': true"), 'not_found'],
+  ]) {
+    const { checker } = await mockChecker(t, (_req, res) => serveDriveFixture(res, fixture, body));
+    assert.equal((await checker({ url: driveFixtures.public.url, formatCode: 'google_drive' })).access, access);
+  }
+});
+
+test('Drive redirects retain per-hop DNS validation, pinning, redirect/header/body caps and timeout', async (t) => {
+  for (const badHost of ['drive.usercontent.google.com', 'accounts.google.com']) {
+    const lookups = [];
+    const { checker, seen } = await mockChecker(t, (req, res) => serveDriveFixture(res,
+      req.headers.host === 'drive.google.com' ? driveFixtures.privateDownloadRedirect : driveFixtures.privateLoginRedirect), {
+      lookup: async (host) => {
+        lookups.push(host);
+        return [{ address: host === badHost ? '10.0.0.1' : '93.184.216.34', family: 4 }];
+      },
+    });
+    await assert.rejects(checker({ url: driveFixtures.privateDownloadRedirect.url, formatCode: 'google_drive' }), { code: 'unsafe_artwork_url' });
+    assert.ok(lookups.includes(badHost));
+    assert.ok(seen.every((r) => r.headers.host !== badHost));
+  }
+  const loop = await mockChecker(t, (_req, res) => serveDriveFixture(res, driveFixtures.downloadRedirect));
+  assert.equal((await loop.checker({ url: driveFixtures.downloadRedirect.url, formatCode: 'google_drive' })).access, 'unknown');
+  assert.equal(loop.seen.length, 4);
+  const headers = await mockChecker(t, (_req, res) => {
+    res.setHeader('X-Large', 'a'.repeat(9000));
+    serveDriveFixture(res, driveFixtures.download);
+  });
+  assert.equal((await headers.checker({ url: driveFixtures.public.url, formatCode: 'google_drive' })).access, 'unknown');
+  const stalled = await mockChecker(t, (_req, _res) => {}, { timeoutMs: 50 });
+  assert.match((await stalled.checker({ url: driveFixtures.public.url, formatCode: 'google_drive' })).message, /timed out/);
+});
+
+test('Canva explicit missing-design copy is not_found; challenge and script translations remain unknown', async (t) => {
+  for (const [fixture, body, access] of [
+    [driveFixtures.canvaMissingPage, undefined, 'not_found'],
+    [driveFixtures.canvaMissingPage, '<html><p>This design doesn&#39;t exist.</p></html>', 'not_found'],
+    [driveFixtures.canvaMissingPage, '<html><h1>Page not found</h1></html>', 'not_found'],
+    [fixtures.missing, undefined, 'not_found'],
+    [fixtures.challenge, driveFixtures.canvaMissingPage.body, 'unknown'],
+    [{ ...fixtures.challenge, status: 200 }, driveFixtures.canvaMissingPage.body, 'unknown'],
+    [{ ...fixtures.challenge, status: 404 }, driveFixtures.canvaMissingPage.body, 'unknown'],
+    [driveFixtures.canvaMissingPage, '<html><script>const strings = "This design does not exist";</script><title>Canva</title></html>', 'unknown'],
+  ]) {
+    const { checker, seen } = await mockChecker(t, (_req, res) => serveFixture(res, fixture, body));
+    assert.equal((await checker({ url: fixtures.public.url, formatCode: 'canva_link' })).access, access);
+    assert.ok(seen.every((r) => /Mozilla\/5\.0/.test(r.headers['user-agent'])));
+  }
+});
+
+test('missing-page detection ignores truncated scripts and file names that resemble errors', async (t) => {
+  for (const body of [
+    '<script>const template = "<h1>Page not found</h1>";</script>',
+    '<script>const translations = "This design does not exist";' + ' '.repeat(90_000),
+  ]) {
+    const { checker } = await mockChecker(t, (_req, res) => serveFixture(res, driveFixtures.canvaMissingPage, body));
+    assert.equal((await checker({ url: fixtures.public.url, formatCode: 'canva_link' })).access, 'unknown');
+  }
+  const { checker } = await mockChecker(t, (_req, res) => serveDriveFixture(res, driveFixtures.public,
+    driveHtml.toString().replaceAll('Logo (Glow, Opaque Keys).png', 'You need access.png')));
+  assert.equal((await checker({ url: driveFixtures.public.url, formatCode: 'google_drive' })).access, 'public_view');
+});
