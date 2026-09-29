@@ -180,7 +180,7 @@ import {
   parseAllowedOrigins,
   validateProductionServerEnvironment,
 } from "./runtime-config.js";
-import { createDatabase } from "./database.js";
+import { createDatabase, DOMAIN_MUTATION_LOCK } from "./database.js";
 import { createSupportMailer, emailConfigured } from "./support-mail.js";
 import {
   isSupportDeskRoute,
@@ -281,11 +281,14 @@ async function save(store) {
 }
 
 /** Inbox row plus a staff-only refetch ping. Party apps never receive either. */
-async function notifyStaffDesk({ type, title, occurrenceKey, resource, id }) {
+async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resourceId }) {
   await enqueueMutation(async () => {
+    // Desk writes already hold their own transaction lock. Nested transactions
+    // reuse it, so take the domain lock explicitly before loading its snapshot.
+    await database.query("SELECT pg_advisory_xact_lock(hashtext($1))", [DOMAIN_MUTATION_LOCK]);
     const latest = await load();
     notifyAdmins(latest, type, title, null, occurrenceKey, { createId: id, at: now() });
-    queueInvalidate(latest, { resource, ...(id ? { id } : {}) });
+    queueInvalidate(latest, { resource, ...(resourceId ? { id: resourceId } : {}) });
     await save(latest);
   });
 }

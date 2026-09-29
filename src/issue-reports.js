@@ -179,7 +179,7 @@ export async function assertDailyCapacity(database, incomingBytes, env = process
   }
 }
 
-export async function createIssueReport(database, storage, input, { now = new Date() } = {}) {
+export async function createIssueReport(database, storage, input, { now = new Date(), notifyStaff } = {}) {
   const reportId = crypto.randomUUID();
   const datePath = now.toISOString().slice(0, 10).replaceAll("-", "/");
   const objects = input.screenshots.map((shot, position) => ({
@@ -211,7 +211,17 @@ export async function createIssueReport(database, storage, input, { now = new Da
           [reportId, object.position, object.objectKey, object.contentType, object.bytes.length],
         );
       }
-      return { id: result.rows[0].id, createdAt: asIso(result.rows[0].created_at), screenshots: objects.length };
+      const report = { id: result.rows[0].id, createdAt: asIso(result.rows[0].created_at), screenshots: objects.length };
+      if (typeof notifyStaff === "function") {
+        await notifyStaff({
+          type: "ops_issue_report_filed",
+          title: "A new issue report was filed",
+          occurrenceKey: report.id,
+          resource: "issue-reports",
+          id: report.id,
+        });
+      }
+      return report;
     }, { lockKey: ISSUE_LOCK });
   } catch (error) {
     await Promise.all(stored.map((key) => storage.deleteObject(key).catch(() => {})));
@@ -392,16 +402,7 @@ export async function routeIssueReports({
       if (!parsed.ok) throw new ReportError(parsed.status ?? 400, parsed.code ?? "invalid_request", parsed.message);
       const incomingBytes = parsed.value.screenshots.reduce((sum, shot) => sum + shot.bytes.length, 0);
       await assertDailyCapacity(database, incomingBytes, env);
-      const report = await createIssueReport(database, storage, parsed.value);
-      if (typeof notifyStaff === "function") {
-        await notifyStaff({
-          type: "ops_issue_report_filed",
-          title: "A new issue report was filed",
-          occurrenceKey: report.id,
-          resource: "issue-reports",
-          id: report.id,
-        });
-      }
+      const report = await createIssueReport(database, storage, parsed.value, { notifyStaff });
       send(res, 201, report);
       return true;
     }

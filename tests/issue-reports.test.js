@@ -653,3 +653,31 @@ test("a new public report notifies each Operations and Super Admin membership on
   const pairs = rows.map((row) => `${row.user_id}:${row.app_role}`);
   assert.equal(new Set(pairs).size, pairs.length);
 });
+
+test("report notification rollback removes uploaded screenshots and metadata", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const issue = `report rollback ${crypto.randomUUID()}`;
+  let reportId;
+  let delivered = false;
+  t.after(async () => {
+    await database.query("DELETE FROM issue_reports WHERE issue=$1", [issue]);
+    await database.close();
+  });
+  await assert.rejects(createIssueReport(database, storage, {
+    issue, category: "bug", screenshots: [{ bytes: PNG, contentType: "image/png" }],
+  }, {
+    notifyStaff: async (event) => {
+      reportId = event.id;
+      assert.equal(database.inWriteTransaction(), true);
+      assert.equal((await database.query("SELECT report_id FROM issue_report_screenshots WHERE report_id=$1", [reportId])).rowCount, 1);
+      database.afterCommit(() => { delivered = true; });
+      throw new Error("injected notification failure");
+    },
+  }), /injected notification failure/);
+  assert.ok(reportId);
+  assert.equal((await database.query("SELECT id FROM issue_reports WHERE id=$1", [reportId])).rowCount, 0);
+  assert.equal((await database.query("SELECT report_id FROM issue_report_screenshots WHERE report_id=$1", [reportId])).rowCount, 0);
+  assert.equal(storage.objects.size, 0);
+  assert.equal(delivered, false);
+});
