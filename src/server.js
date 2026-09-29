@@ -7,9 +7,9 @@ import { createApnsDelivery, routePushDelivery } from "./apns.js";
 import { enqueueNotificationPushes, createOutboxWorker } from "./push-outbox.js";
 import { createTokenValidator } from "./push-token-validation.js";
 import { pushStats } from "./push-stats.js";
-import { deriveDomainEvents } from "./domain-events.js";
+import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
-import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES } from "./notifications.js";
+import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -278,6 +278,16 @@ async function save(store) {
   const queuedPushes = await enqueueNotificationPushes(database,store,createdNotifications);
   if (queuedPushes > 0 && pushDelivery.configured) database.afterCommit(kickPushDrain);
   await realtimeTransport.enqueue(store,createdNotifications);
+}
+
+/** Inbox row plus a staff-only refetch ping. Party apps never receive either. */
+async function notifyStaffDesk({ type, title, occurrenceKey, resource, id }) {
+  await enqueueMutation(async () => {
+    const latest = await load();
+    notifyAdmins(latest, type, title, null, occurrenceKey, { createId: id, at: now() });
+    queueInvalidate(latest, { resource, ...(id ? { id } : {}) });
+    await save(latest);
+  });
 }
 
 /**
@@ -1851,6 +1861,7 @@ async function handleRequest(req, res) {
       storage: objectStorage,
       verifyClerk: (token) => verifyClerkClaims(token, AUTH),
       loadClerkUser: (clerkUserId) => clerkBackend.users.getUser(clerkUserId),
+      notifyStaff: notifyStaffDesk,
     })) {
       return;
     }
@@ -2331,6 +2342,7 @@ async function handleRequest(req, res) {
         readBody,
         send,
         database,
+        notifyStaff: notifyStaffDesk,
       });
     }
 
@@ -2866,6 +2878,7 @@ async function handleRequest(req, res) {
       };
       const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
       const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
+        if (!invalidateFrameVisible(payload.resource, eventRole)) return;
         if (eventRole && !hasRole(committedStore,user.id,eventRole) && payload.resource !== 'identity') return;
         if (payload.resource === 'location' && payload.id && !canAccessOrder(committedStore,user.id,(committedStore.orders || []).find(o=>o.id===payload.id),{role:eventRole,location:true})) return;
         res.write(formatInvalidateEvent(payload));

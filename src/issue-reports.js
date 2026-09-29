@@ -377,6 +377,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export async function routeIssueReports({
   req, res, pathname, url, send, database, storage, env = process.env, verifyClerk, loadClerkUser,
+  notifyStaff,
 }) {
   const path = issueReportsPathname(pathname);
   if (!path) return false;
@@ -392,6 +393,15 @@ export async function routeIssueReports({
       const incomingBytes = parsed.value.screenshots.reduce((sum, shot) => sum + shot.bytes.length, 0);
       await assertDailyCapacity(database, incomingBytes, env);
       const report = await createIssueReport(database, storage, parsed.value);
+      if (typeof notifyStaff === "function") {
+        await notifyStaff({
+          type: "ops_issue_report_filed",
+          title: "A new issue report was filed",
+          occurrenceKey: report.id,
+          resource: "issue-reports",
+          id: report.id,
+        });
+      }
       send(res, 201, report);
       return true;
     }

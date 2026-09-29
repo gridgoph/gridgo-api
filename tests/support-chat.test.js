@@ -135,13 +135,30 @@ async function seedPeople(database) {
   return people;
 }
 
-async function wipe(database) {
+async function wipe(database, occurrenceKeys = []) {
+  if (occurrenceKeys.length) {
+    await database.query(
+      `DELETE FROM notifications WHERE data->>'occurrenceKey' = ANY($1::text[])`,
+      [occurrenceKeys],
+    );
+  }
+  await database.query(`DELETE FROM notifications WHERE user_id LIKE $1`, [`${PREFIX}%`]);
   await database.query(
     `DELETE FROM support_chat_threads WHERE party_user_id LIKE $1`,
     [`${PREFIX}%`],
   );
   await database.query(`DELETE FROM user_role_memberships WHERE user_id LIKE $1`, [`${PREFIX}%`]);
   await database.query(`DELETE FROM users WHERE id LIKE $1`, [`${PREFIX}%`]);
+}
+
+async function staffNotices(database, occurrenceKey) {
+  const result = await database.query(
+    `SELECT user_id, type, order_id, data->>'appRole' AS app_role
+     FROM notifications
+     WHERE data->>'occurrenceKey' = $1`,
+    [occurrenceKey],
+  );
+  return result.rows;
 }
 
 test("support-chat helpers keep messages honest", () => {
@@ -169,8 +186,9 @@ test("support-chat helpers keep messages honest", () => {
 
 test("authenticated roles chat with Operations on isolated threads", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
+  const occurrenceKeys = [];
   t.after(async () => {
-    await wipe(database);
+    await wipe(database, occurrenceKeys);
     await database.close();
   });
   await wipe(database);
@@ -200,6 +218,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "The tarpaulin colours look off." },
   });
   assert.equal(sent.status, 201);
+  occurrenceKeys.push(sent.body.message.id);
   assert.equal(sent.body.thread.partyRole, "client");
   assert.equal(sent.body.thread.partyUserId, byRole.client.id);
   assert.equal(sent.body.message.body, "The tarpaulin colours look off.");
@@ -223,6 +242,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "Need the artwork file formats for this listing." },
   });
   assert.equal(shop.status, 201);
+  occurrenceKeys.push(shop.body.message.id);
   assert.equal(shop.body.thread.partyRole, "supplier");
   assert.notEqual(shop.body.thread.id, sent.body.thread.id);
 
@@ -233,6 +253,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "The drop-off gate is locked after 6." },
   });
   assert.equal(bike.status, 201);
+  occurrenceKeys.push(bike.body.message.id);
   assert.equal(bike.body.thread.partyRole, "rider");
 
   const forbiddenDesk = await request(instance.api, "/support-chat/threads", {
@@ -262,7 +283,9 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "Send a daylight photo of the print and we will check the file." },
   });
   assert.equal(reply.status, 201);
+  occurrenceKeys.push(reply.body.message.id);
   assert.equal(reply.body.message.senderRole, "ops_admin");
+  assert.equal((await staffNotices(database, reply.body.message.id)).length, 0);
   assert.equal(reply.body.message.mine, true);
 
   const afterReply = await request(instance.api, "/support-chat/me", { token: client, role: "client" });
@@ -326,9 +349,35 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "This is a new conversation.", threadId: draft.body.thread.id },
   });
   assert.equal(second.status, 201);
+  occurrenceKeys.push(second.body.message.id);
   assert.equal(second.body.thread.id, draft.body.thread.id);
   assert.notEqual(second.body.thread.id, sent.body.thread.id);
 
   const history = await request(instance.api, "/support-chat/me", { token: client, role: "client" });
   assert.equal(history.body.threads.length, 2);
+
+  for (const messageId of [sent.body.message.id, shop.body.message.id, bike.body.message.id]) {
+    const rows = await staffNotices(database, messageId);
+    assert.equal(rows.filter((row) => row.user_id === byRole.ops.id && row.app_role === "ops_admin" && row.type === "ops_support_message").length, 1);
+    assert.equal(rows.filter((row) => row.user_id === byRole.super.id && row.app_role === "super_admin" && row.type === "ops_support_message").length, 1);
+    assert.equal(rows.filter((row) => [byRole.client.id, byRole.supplier.id, byRole.rider.id].includes(row.user_id)).length, 0);
+    assert.ok(rows.every((row) => row.order_id == null && (row.app_role === "ops_admin" || row.app_role === "super_admin")));
+    const pairs = rows.map((row) => `${row.user_id}:${row.app_role}`);
+    assert.equal(new Set(pairs).size, pairs.length);
+  }
+
+  for (const [token, role] of [[client, "client"], [supplier, "supplier"], [rider, "rider"]]) {
+    const inbox = await request(instance.api, `/notifications?role=${role}`, { token, role });
+    assert.equal(inbox.status, 200);
+    assert.equal(
+      inbox.body.notifications.some((row) => row.type === "ops_support_message" || row.type === "ops_issue_report_filed"),
+      false,
+    );
+  }
+  const opsInbox = await request(instance.api, "/notifications?role=ops_admin", { token: ops, role: "ops_admin" });
+  assert.equal(opsInbox.status, 200);
+  assert.equal(
+    opsInbox.body.notifications.some((row) => row.type === "ops_support_message" && row.orderId == null),
+    true,
+  );
 });

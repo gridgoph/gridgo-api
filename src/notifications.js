@@ -2,6 +2,9 @@ import { isContainedPickup, paymentSettled } from "./operational-model.js";
 export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
+/** Refetch pings that only Operations and Super Admin may receive. */
+export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "chat"]);
+
 export const INVALIDATE_RESOURCES = Object.freeze([
   "orders",
   "jobs",
@@ -11,7 +14,14 @@ export const INVALIDATE_RESOURCES = Object.freeze([
   "dispatch",
   "payouts",
   "notifications", "identity", "catalog", "services", "availability", "settings", "location", "credits",
+  ...STAFF_INVALIDATE_RESOURCES,
 ]);
+
+/** Party alert streams drop these; only an Operations or Super Admin session may apply them. */
+export function invalidateFrameVisible(resource, role) {
+  if (!STAFF_INVALIDATE_RESOURCES.includes(resource)) return true;
+  return role === "ops_admin" || role === "super_admin";
+}
 
 const pendingInvalidates = new WeakMap();
 
@@ -206,6 +216,7 @@ export function orderFromNotification(store, notification) {
  * client/rider when the ping is about their order.
  */
 export function invalidateAudienceIds(store, event) {
+  if (STAFF_INVALIDATE_RESOURCES.includes(event?.resource)) return opsAdminRecipientIds(store);
   const ids = new Set(event.userIds || []);
   if (["notifications", "identity", "credits"].includes(event.resource)) return [...ids];
   if (event.resource === "location") {

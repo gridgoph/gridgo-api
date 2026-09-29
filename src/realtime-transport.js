@@ -5,6 +5,8 @@ import {
   invalidateAudienceIds,
   notificationVisible,
   INVALIDATE_RESOURCES,
+  STAFF_INVALIDATE_RESOURCES,
+  opsAdminRecipientIds,
 } from "./notifications.js";
 const CHANNEL = "gridgo_realtime_v1";
 /** NOTIFY is issued in the domain transaction: PostgreSQL releases it only on commit. */
@@ -82,9 +84,13 @@ export function createRealtimeTransport({
       await next.query(`LISTEN ${CHANNEL}`);
       if (connectedBefore) {
         const store = await loadStore(database);
-        for (const userId of events.userIds())
-          for (const resource of INVALIDATE_RESOURCES)
+        const staffIds = new Set(opsAdminRecipientIds(store));
+        for (const userId of events.userIds()) {
+          for (const resource of INVALIDATE_RESOURCES) {
+            if (STAFF_INVALIDATE_RESOURCES.includes(resource) && !staffIds.has(userId)) continue;
             events.publishInvalidate(userId, { resource }, store);
+          }
+        }
       }
       connectedBefore = true;
     } catch {
