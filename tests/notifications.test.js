@@ -6,6 +6,7 @@ import {
   formatInvalidateEvent,
   formatNotificationEvent,
   invalidateAudienceIds,
+  invalidateFrameVisible,
   listInbox,
   notificationSnapshot,
   parseNotificationListLimit,
@@ -14,6 +15,7 @@ import {
   queueOrderInvalidate,
   takeQueuedInvalidates,
 } from "../src/notifications.js";
+import { deviceAcceptsNotification } from "../src/push-outbox.js";
 
 test("notification snapshot is the caller's last append, including a soft-deleted watermark", () => {
   const notifications = [
@@ -111,6 +113,80 @@ test("invalidate audience is membership-aware ops plus the assigned shop for job
   );
   assert.ok(!invalidateAudienceIds(store, { resource: "approvals" }).includes("user_legacy_ops"));
 });
+
+test("issue-report and chat pings reach only Operations and Super Admin", () => {
+  const store = {
+    userRoleMemberships: [
+      { userId: "user_ops", role: "ops_admin" },
+      { userId: "user_admin", role: "super_admin" },
+      { userId: "user_both", role: "client" },
+      { userId: "user_both", role: "ops_admin" },
+      { userId: "user_s", role: "supplier" },
+      { userId: "user_c", role: "client" },
+      { userId: "user_r", role: "rider" },
+    ],
+    notifications: [
+      notice("user_ops", "ops_admin", "ops_issue_report_filed", "report-1"),
+      notice("user_admin", "super_admin", "ops_issue_report_filed", "report-1"),
+      notice("user_both", "ops_admin", "ops_support_message", "message-1"),
+    ],
+    deviceTokens: [
+      { id: "d_ops", userId: "user_ops", appRole: "ops_admin" },
+      { id: "d_client", userId: "user_both", appRole: "client" },
+      { id: "d_supplier", userId: "user_s", appRole: "supplier" },
+      { id: "d_rider", userId: "user_r", appRole: "rider" },
+    ],
+  };
+  for (const resource of ["issue-reports", "chat"]) {
+    assert.deepEqual(
+      invalidateAudienceIds(store, {
+        resource,
+        id: "row-1",
+        clientId: "user_c",
+        supplierId: "user_s",
+        riderId: "user_r",
+        userIds: ["user_c"],
+      }).sort(),
+      ["user_admin", "user_both", "user_ops"],
+    );
+  }
+  for (const role of ["client", "supplier", "rider"]) {
+    assert.equal(invalidateFrameVisible("issue-reports", role), false);
+    assert.equal(invalidateFrameVisible("chat", role), false);
+    for (const userId of ["user_ops", "user_admin", "user_both", "user_c", "user_s", "user_r"]) {
+      const listed = listInbox(store, userId, { role });
+      assert.equal(
+        listed.notifications.some((row) => row.type === "ops_issue_report_filed" || row.type === "ops_support_message"),
+        false,
+        `${userId} ${role}`,
+      );
+    }
+  }
+  assert.equal(invalidateFrameVisible("issue-reports", "ops_admin"), true);
+  assert.equal(invalidateFrameVisible("chat", "super_admin"), true);
+  assert.equal(invalidateFrameVisible("orders", "client"), true);
+  assert.equal(listInbox(store, "user_ops", { role: "ops_admin" }).notifications[0].type, "ops_issue_report_filed");
+  assert.equal(listInbox(store, "user_ops", { role: "ops_admin" }).notifications[0].orderId, undefined);
+  const message = store.notifications[2];
+  assert.equal(deviceAcceptsNotification(store, store.deviceTokens[0], store.notifications[0]), true);
+  assert.equal(deviceAcceptsNotification(store, store.deviceTokens[1], message), false);
+  assert.equal(deviceAcceptsNotification(store, store.deviceTokens[2], message), false);
+  assert.equal(deviceAcceptsNotification(store, store.deviceTokens[3], message), false);
+});
+
+function notice(userId, appRole, type, occurrenceKey) {
+  return {
+    id: `${type}:${userId}`,
+    userId,
+    appRole,
+    type,
+    title: "Staff",
+    body: "Open GRIDGO to review the latest update.",
+    read: false,
+    at: "2026-09-29T03:00:00.000Z",
+    occurrenceKey,
+  };
+}
 
 test("queued invalidates de-dupe in one transaction and publish after take", () => {
   const store = {};

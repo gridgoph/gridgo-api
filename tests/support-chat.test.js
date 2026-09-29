@@ -43,7 +43,7 @@ async function freePort() {
   });
 }
 
-async function startApi() {
+async function startApi(extraEnv = {}) {
   const port = await freePort();
   const api = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["src/server.js"], {
@@ -59,6 +59,7 @@ async function startApi() {
       PORT: String(port),
       GRIDGO_BUILD_SHA: "support-chat-test",
       GRIDGO_BUILD_TIME: AT,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -135,13 +136,30 @@ async function seedPeople(database) {
   return people;
 }
 
-async function wipe(database) {
+async function wipe(database, occurrenceKeys = []) {
+  if (occurrenceKeys.length) {
+    await database.query(
+      `DELETE FROM notifications WHERE data->>'occurrenceKey' = ANY($1::text[])`,
+      [occurrenceKeys],
+    );
+  }
+  await database.query(`DELETE FROM notifications WHERE user_id LIKE $1`, [`${PREFIX}%`]);
   await database.query(
     `DELETE FROM support_chat_threads WHERE party_user_id LIKE $1`,
     [`${PREFIX}%`],
   );
   await database.query(`DELETE FROM user_role_memberships WHERE user_id LIKE $1`, [`${PREFIX}%`]);
   await database.query(`DELETE FROM users WHERE id LIKE $1`, [`${PREFIX}%`]);
+}
+
+async function staffNotices(database, occurrenceKey) {
+  const result = await database.query(
+    `SELECT user_id, type, order_id, data->>'appRole' AS app_role
+     FROM notifications
+     WHERE data->>'occurrenceKey' = $1`,
+    [occurrenceKey],
+  );
+  return result.rows;
 }
 
 test("support-chat helpers keep messages honest", () => {
@@ -169,8 +187,9 @@ test("support-chat helpers keep messages honest", () => {
 
 test("authenticated roles chat with Operations on isolated threads", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
+  const occurrenceKeys = [];
   t.after(async () => {
-    await wipe(database);
+    await wipe(database, occurrenceKeys);
     await database.close();
   });
   await wipe(database);
@@ -200,6 +219,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "The tarpaulin colours look off." },
   });
   assert.equal(sent.status, 201);
+  occurrenceKeys.push(sent.body.message.id);
   assert.equal(sent.body.thread.partyRole, "client");
   assert.equal(sent.body.thread.partyUserId, byRole.client.id);
   assert.equal(sent.body.message.body, "The tarpaulin colours look off.");
@@ -223,6 +243,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "Need the artwork file formats for this listing." },
   });
   assert.equal(shop.status, 201);
+  occurrenceKeys.push(shop.body.message.id);
   assert.equal(shop.body.thread.partyRole, "supplier");
   assert.notEqual(shop.body.thread.id, sent.body.thread.id);
 
@@ -233,6 +254,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "The drop-off gate is locked after 6." },
   });
   assert.equal(bike.status, 201);
+  occurrenceKeys.push(bike.body.message.id);
   assert.equal(bike.body.thread.partyRole, "rider");
 
   const forbiddenDesk = await request(instance.api, "/support-chat/threads", {
@@ -262,7 +284,9 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "Send a daylight photo of the print and we will check the file." },
   });
   assert.equal(reply.status, 201);
+  occurrenceKeys.push(reply.body.message.id);
   assert.equal(reply.body.message.senderRole, "ops_admin");
+  assert.equal((await staffNotices(database, reply.body.message.id)).length, 0);
   assert.equal(reply.body.message.mine, true);
 
   const afterReply = await request(instance.api, "/support-chat/me", { token: client, role: "client" });
@@ -326,9 +350,175 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
     body: { body: "This is a new conversation.", threadId: draft.body.thread.id },
   });
   assert.equal(second.status, 201);
+  occurrenceKeys.push(second.body.message.id);
   assert.equal(second.body.thread.id, draft.body.thread.id);
   assert.notEqual(second.body.thread.id, sent.body.thread.id);
 
   const history = await request(instance.api, "/support-chat/me", { token: client, role: "client" });
   assert.equal(history.body.threads.length, 2);
+
+  for (const messageId of [sent.body.message.id, shop.body.message.id, bike.body.message.id]) {
+    const rows = await staffNotices(database, messageId);
+    assert.equal(rows.filter((row) => row.user_id === byRole.ops.id && row.app_role === "ops_admin" && row.type === "ops_support_message").length, 1);
+    assert.equal(rows.filter((row) => row.user_id === byRole.super.id && row.app_role === "super_admin" && row.type === "ops_support_message").length, 1);
+    assert.equal(rows.filter((row) => [byRole.client.id, byRole.supplier.id, byRole.rider.id].includes(row.user_id)).length, 0);
+    assert.ok(rows.every((row) => row.order_id == null && (row.app_role === "ops_admin" || row.app_role === "super_admin")));
+    const pairs = rows.map((row) => `${row.user_id}:${row.app_role}`);
+    assert.equal(new Set(pairs).size, pairs.length);
+  }
+
+  for (const [token, role] of [[client, "client"], [supplier, "supplier"], [rider, "rider"]]) {
+    const inbox = await request(instance.api, `/notifications?role=${role}`, { token, role });
+    assert.equal(inbox.status, 200);
+    assert.equal(
+      inbox.body.notifications.some((row) => row.type === "ops_support_message" || row.type === "ops_issue_report_filed"),
+      false,
+    );
+  }
+  const opsInbox = await request(instance.api, "/notifications?role=ops_admin", { token: ops, role: "ops_admin" });
+  assert.equal(opsInbox.status, 200);
+  assert.equal(
+    opsInbox.body.notifications.some((row) => row.type === "ops_support_message" && row.orderId == null),
+    true,
+  );
+});
+
+async function openNotifications(api, person, role, lastEventId) {
+  const controller = new AbortController();
+  const response = await fetch(`${api}/notifications/stream?role=${role}`, {
+    headers: { Authorization: `Bearer ${clerkToken(person.clerk)}`, ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}) },
+    signal: controller.signal,
+  });
+  assert.equal(response.status, 200);
+  const frames = [];
+  const reader = response.body.getReader();
+  const done = (async () => {
+    let pending = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        pending += new TextDecoder().decode(value);
+        let end;
+        while ((end = pending.indexOf("\n\n")) !== -1) {
+          const frame = pending.slice(0, end);
+          pending = pending.slice(end + 2);
+          const data = frame.split("\n").find((line) => line.startsWith("data: "));
+          if (data) frames.push(JSON.parse(data.slice(6)));
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    }
+  })();
+  return { frames, async close() { controller.abort(); await done; } };
+}
+
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 250; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(message);
+}
+
+test("staff alerts stay out of party SSE on local delivery, LISTEN, replay and listener recovery", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const streams = [];
+  const instances = [];
+  const occurrences = [];
+  let reportId;
+  t.after(async () => {
+    for (const stream of streams) await stream.close();
+    for (const instance of instances) await stopApi(instance);
+    if (reportId) await database.query("DELETE FROM issue_reports WHERE id=$1", [reportId]);
+    await wipe(database, occurrences);
+    await database.close();
+  });
+  await wipe(database);
+  const people = await seedPeople(database);
+  const byRole = Object.fromEntries(people.map((person) => [person.role, person]));
+  // The same identity uses both a party app and the staff dashboard.
+  await database.query("INSERT INTO user_role_memberships(user_id,role,created_at) VALUES ($1,'ops_admin',now())", [byRole.client.id]);
+  const local = await startApi({ PGAPPNAME: `${PREFIX}_local`, GRIDGO_LIFECYCLE_INTERVAL_MS: "3600000", GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: "0" });
+  instances.push(local);
+  const remoteName = `${PREFIX}_remote`;
+  const remote = await startApi({ PGAPPNAME: remoteName, GRIDGO_LIFECYCLE_INTERVAL_MS: "3600000", GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: "0" });
+  instances.push(remote);
+  const party = [], staff = [];
+  for (const instance of instances) {
+    for (const role of ["client", "supplier", "rider"]) {
+      const stream = await openNotifications(instance.api, byRole[role], role);
+      streams.push(stream); party.push(stream);
+    }
+    for (const [person, role] of [[byRole.ops_admin, "ops_admin"], [byRole.super_admin, "super_admin"], [byRole.client, "ops_admin"]]) {
+      const stream = await openNotifications(instance.api, person, role);
+      streams.push(stream); staff.push(stream);
+    }
+  }
+  const message = await request(local.api, "/support-chat/me/messages", {
+    method: "POST", token: clerkToken(byRole.client.clerk), role: "client", body: { body: "Private message must never become notification copy." },
+  });
+  assert.equal(message.status, 201, JSON.stringify(message.body));
+  occurrences.push(message.body.message.id);
+  const report = await request(local.api, "/issue-reports", {
+    method: "POST", body: { issue: "Private report must never become notification copy." },
+  });
+  assert.equal(report.status, 201, JSON.stringify(report.body));
+  reportId = report.body.id;
+  occurrences.push(reportId);
+  await waitFor(() => staff.every((s) => ["chat", "issue-reports"].every((r) => s.frames.some((f) => f.resource === r))), "both API processes must deliver staff hints");
+  await waitFor(() => staff.every((s) => ["ops_support_message", "ops_issue_report_filed"].every((type) => s.frames.some((f) => f.type === type))), "both staff roles must receive durable notifications");
+  assert.ok(staff.every((s) => !JSON.stringify(s.frames).includes("Private")), "notification copy contains no report or message text");
+
+  // A party reconnect may supply a cursor owned by this multi-role identity.
+  const staffCursor = staff[2].frames.find((f) => f.type === "ops_support_message").id;
+  const replay = await openNotifications(remote.api, byRole.client, "client", staffCursor);
+  streams.push(replay); party.push(replay);
+  const killed = await database.query(
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1 AND query='LISTEN gridgo_realtime_v1'",
+    [remoteName],
+  );
+  assert.equal(killed.rowCount, 1, "terminate only this test API's LISTEN connection");
+  await waitFor(() => staff.slice(3).every((s) => s.frames.some((f) => f.resource === "chat" && !f.id) && s.frames.some((f) => f.resource === "issue-reports" && !f.id)), "reconnected LISTEN sends staff collection refreshes");
+  await waitFor(() => party.slice(3).every((s) => s.frames.some((f) => f.resource === "orders")), "party streams also observed listener recovery");
+  assert.ok(party.every((s) => !s.frames.some((f) => ["chat", "issue-reports"].includes(f.resource) || ["ops_support_message", "ops_issue_report_filed"].includes(f.type))), "staff events never reach any party session, including multi-role replay");
+});
+
+test("staff inbox failure rolls back the submitted chat or report", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  let instance;
+  const issue = `${PREFIX} rollback report`;
+  t.after(async () => {
+    if (instance) await stopApi(instance);
+    await database.query("DROP TRIGGER IF EXISTS test_reject_staff_notice ON notifications");
+    await database.query("DROP FUNCTION IF EXISTS test_reject_staff_notice()");
+    await database.query("DELETE FROM issue_reports WHERE issue=$1", [issue]);
+    await wipe(database);
+    await database.close();
+  });
+  await wipe(database);
+  const people = await seedPeople(database);
+  const client = people.find((person) => person.role === "client");
+  await database.query(`
+    CREATE FUNCTION test_reject_staff_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.type IN ('ops_support_message', 'ops_issue_report_filed') THEN
+        RAISE EXCEPTION 'injected inbox persistence failure';
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_reject_staff_notice BEFORE INSERT ON notifications
+      FOR EACH ROW EXECUTE FUNCTION test_reject_staff_notice();
+  `);
+  instance = await startApi();
+  const chat = await request(instance.api, "/support-chat/me/messages", {
+    method: "POST", token: clerkToken(client.clerk), role: "client", body: { body: "Must roll back with its staff inbox" },
+  });
+  assert.equal(chat.status, 500);
+  assert.equal((await database.query("SELECT id FROM support_chat_threads WHERE party_user_id=$1", [client.id])).rowCount, 0);
+  const report = await request(instance.api, "/issue-reports", { method: "POST", body: { issue } });
+  assert.equal(report.status, 500);
+  assert.equal((await database.query("SELECT id FROM issue_reports WHERE issue=$1", [issue])).rowCount, 0);
+  assert.equal((await database.query("SELECT id FROM notifications WHERE user_id LIKE $1", [`${PREFIX}%`])).rowCount, 0);
 });

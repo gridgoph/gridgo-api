@@ -574,3 +574,110 @@ test("the running API serves the firstmate issue-report routes only with FIRSTMA
     await stopApi(instance);
   }
 });
+
+test("a new public report notifies each Operations and Super Admin membership once", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const prefix = `rpt_${process.pid}_${Date.now().toString(36)}`;
+  const people = [
+    { id: `${prefix}_client`, role: "client" },
+    { id: `${prefix}_supplier`, role: "supplier" },
+    { id: `${prefix}_rider`, role: "rider" },
+    { id: `${prefix}_ops`, role: "ops_admin" },
+    { id: `${prefix}_super`, role: "super_admin" },
+  ];
+  const occurrenceKeys = [];
+  async function cleanup() {
+    const filed = await database.query(`SELECT id FROM issue_reports WHERE issue = $1`, [
+      "The reports desk does not refresh.",
+    ]);
+    const keys = [...occurrenceKeys, ...filed.rows.map((row) => row.id)];
+    if (keys.length) {
+      await database.query(
+        `DELETE FROM notifications WHERE data->>'occurrenceKey' = ANY($1::text[])`,
+        [keys],
+      );
+    }
+    await database.query(`DELETE FROM issue_reports WHERE issue = $1`, ["The reports desk does not refresh."]);
+    await database.query(`DELETE FROM notifications WHERE user_id LIKE $1`, [`${prefix}%`]);
+    await database.query(`DELETE FROM user_role_memberships WHERE user_id LIKE $1`, [`${prefix}%`]);
+    await database.query(`DELETE FROM users WHERE id LIKE $1`, [`${prefix}%`]);
+  }
+  t.after(async () => {
+    await cleanup();
+    await database.close();
+  });
+  await cleanup();
+  for (const person of people) {
+    await database.query(
+      `INSERT INTO users (id, clerk_user_id, email, name, role, account_type, verification_status, created_at, position, data)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now(), 0, '{}')`,
+      [
+        person.id,
+        `${person.id}_clerk`,
+        `${person.id}@gridgo.test`,
+        person.role,
+        person.role,
+        person.role === "client" ? "individual" : null,
+        person.role === "supplier" || person.role === "rider" ? "approved" : null,
+      ],
+    );
+    await database.query(
+      `INSERT INTO user_role_memberships (user_id, role, created_at) VALUES ($1, $2, now())`,
+      [person.id, person.role],
+    );
+  }
+  const instance = await startApi({});
+  t.after(() => stopApi(instance));
+  const filed = await call(instance.api, "/issue-reports", {
+    method: "POST",
+    cfIp: "203.0.113.29",
+    body: { issue: "The reports desk does not refresh.", category: "bug" },
+  });
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+  occurrenceKeys.push(filed.body.id);
+  const notes = await database.query(
+    `SELECT user_id, type, order_id, data->>'appRole' AS app_role, data->>'occurrenceKey' AS occurrence_key
+     FROM notifications WHERE data->>'occurrenceKey' = $1`,
+    [filed.body.id],
+  );
+  const rows = notes.rows;
+  assert.equal(rows.filter((row) => row.user_id === `${prefix}_ops` && row.app_role === "ops_admin" && row.type === "ops_issue_report_filed").length, 1);
+  assert.equal(rows.filter((row) => row.user_id === `${prefix}_super` && row.app_role === "super_admin" && row.type === "ops_issue_report_filed").length, 1);
+  assert.equal(rows.filter((row) => [`${prefix}_client`, `${prefix}_supplier`, `${prefix}_rider`].includes(row.user_id)).length, 0);
+  assert.equal(
+    rows.filter((row) => ["client", "supplier", "rider"].includes(row.app_role)).length,
+    0,
+    "ops_issue_report_filed would reach a party app",
+  );
+  assert.ok(rows.every((row) => row.order_id == null && row.occurrence_key === filed.body.id));
+  const pairs = rows.map((row) => `${row.user_id}:${row.app_role}`);
+  assert.equal(new Set(pairs).size, pairs.length);
+});
+
+test("report notification rollback removes uploaded screenshots and metadata", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const issue = `report rollback ${crypto.randomUUID()}`;
+  let reportId;
+  let delivered = false;
+  t.after(async () => {
+    await database.query("DELETE FROM issue_reports WHERE issue=$1", [issue]);
+    await database.close();
+  });
+  await assert.rejects(createIssueReport(database, storage, {
+    issue, category: "bug", screenshots: [{ bytes: PNG, contentType: "image/png" }],
+  }, {
+    notifyStaff: async (event) => {
+      reportId = event.id;
+      assert.equal(database.inWriteTransaction(), true);
+      assert.equal((await database.query("SELECT report_id FROM issue_report_screenshots WHERE report_id=$1", [reportId])).rowCount, 1);
+      database.afterCommit(() => { delivered = true; });
+      throw new Error("injected notification failure");
+    },
+  }), /injected notification failure/);
+  assert.ok(reportId);
+  assert.equal((await database.query("SELECT id FROM issue_reports WHERE id=$1", [reportId])).rowCount, 0);
+  assert.equal((await database.query("SELECT report_id FROM issue_report_screenshots WHERE report_id=$1", [reportId])).rowCount, 0);
+  assert.equal(storage.objects.size, 0);
+  assert.equal(delivered, false);
+});
