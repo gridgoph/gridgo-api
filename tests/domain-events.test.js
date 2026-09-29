@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveDomainEvents } from "../src/domain-events.js";
+import { deriveDomainEvents, notifyAdmins } from "../src/domain-events.js";
 import { takeQueuedInvalidates } from "../src/notifications.js";
 function fixture() {
   return {
@@ -501,4 +501,29 @@ test("a physical-invoice request lands in the Operations inbox with the order an
     after.notifications.filter((n) => n.type === "ops_physical_invoice_requested").length,
     2,
   );
+});
+
+test("notifyAdmins writes one staff row per membership and no party row", () => {
+  const store = fixture();
+  store.notifications = [];
+  let n = 0;
+  const options = {
+    createId: (prefix) => `${prefix}_${n++}`,
+    at: "2026-09-29T03:00:00.000Z",
+  };
+  notifyAdmins(store, "ops_issue_report_filed", "A new issue report was filed", null, "report-1", options);
+  notifyAdmins(store, "ops_support_message", "A support message arrived", null, "message-1", options);
+  assert.deepEqual(
+    store.notifications.map((row) => `${row.userId}:${row.appRole}:${row.type}:${row.occurrenceKey}`).sort(),
+    [
+      "ops:ops_admin:ops_issue_report_filed:report-1",
+      "ops:ops_admin:ops_support_message:message-1",
+      "super:super_admin:ops_issue_report_filed:report-1",
+      "super:super_admin:ops_support_message:message-1",
+    ],
+  );
+  assert.ok(store.notifications.every((row) => row.orderId == null));
+  assert.ok(store.notifications.every((row) => !["client", "supplier", "rider"].includes(row.appRole)));
+  notifyAdmins(store, "ops_issue_report_filed", "A new issue report was filed", null, "report-1", options);
+  assert.equal(store.notifications.length, 4);
 });

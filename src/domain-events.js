@@ -13,6 +13,44 @@ import {
   privilegedAdminMemberships,
   hasRole,
 } from "./notifications.js";
+const STAFF_INBOX_ROLES = new Set(["ops_admin", "super_admin"]);
+
+/**
+ * One inbox row per Operations and Super Admin membership.
+ * Callers that are not in the domain snapshot (a public issue report, a party
+ * chat message) use this, then `save()`. Party roles are never written.
+ */
+export function notifyAdmins(store, type, title, order, occurrence, { createId, at } = {}) {
+  if (typeof createId !== "function" || !at || !occurrence) {
+    throw new Error("notifyAdmins requires createId, at, and an occurrence key");
+  }
+  for (const membership of privilegedAdminMemberships(store)) {
+    if (!STAFF_INBOX_ROLES.has(membership.role)) {
+      throw new Error("notifyAdmins refused a membership that is not Operations or Super Admin");
+    }
+    writeDraft(
+      store,
+      {
+        userId: membership.userId,
+        type,
+        title,
+        body: "Open GRIDGO to review the latest update.",
+        read: false,
+        ...(order ? { orderId: order.id } : {}),
+        occurrenceKey: occurrence,
+        appRole: membership.role,
+      },
+      { id: createId("ntf"), at },
+    );
+  }
+  for (const notification of store.notifications || []) {
+    if (notification.type !== type || notification.occurrenceKey !== occurrence) continue;
+    if (!STAFF_INBOX_ROLES.has(notification.appRole)) {
+      throw new Error(`${type} would reach a party app`);
+    }
+  }
+}
+
 const changed = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
 const keyed = (rows) =>
   new Map(

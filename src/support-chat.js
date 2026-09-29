@@ -494,6 +494,7 @@ export async function routeSupportChat({
   readBody,
   send,
   database,
+  notifyStaff,
 }) {
   if (!isSupportChatRoute(pathname)) return false;
   if (!user) {
@@ -580,17 +581,29 @@ export async function routeSupportChat({
       }
     }
     const posted = await database.transaction(
-      () => postMessage(database, {
-        threadId: requestedId || undefined,
-        senderUserId: user.id,
-        senderRole: actorRole(user),
-        body: parsed.body,
-        createParty: { userId: user.id, role: actorRole(user) },
-        newThread: payload.newThread === true && !requestedId,
-      }),
+      async () => {
+        const posted = await postMessage(database, {
+          threadId: requestedId || undefined,
+          senderUserId: user.id,
+          senderRole: actorRole(user),
+          body: parsed.body,
+          createParty: { userId: user.id, role: actorRole(user) },
+          newThread: payload.newThread === true && !requestedId,
+        });
+        if (typeof notifyStaff === "function" && PARTY_ROLES.has(posted.message.senderRole)) {
+          await notifyStaff({
+            type: "ops_support_message",
+            title: "A support message arrived",
+            occurrenceKey: posted.message.id,
+            resource: "chat",
+            id: posted.message.id,
+          });
+        }
+        emitChatEvent(database, { type: "message", thread: posted.thread, message: posted.message });
+        return posted;
+      },
       { lockKey: CHAT_LOCK },
     );
-    emitChatEvent(database, { type: "message", thread: posted.thread, message: posted.message });
     send(res, 201, posted);
     return true;
   }
