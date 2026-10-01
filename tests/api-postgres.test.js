@@ -1703,7 +1703,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
       subject: "clerk_ops",
       body: {
         expectedVersion: current.body.version,
-        deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: "2500" }],
+        deliveryFeeBands: current.body.settings.deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor: "2500" } : band),
         reason: "Invalid string delivery fee",
       },
     });
@@ -1713,11 +1713,22 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     const updated = await request(instance.api, "/settings", {
       method: "PATCH",
       subject: "clerk_ops",
-      body: { expectedVersion: current.body.version, serviceFeeRateBps: 1250, reason: "Pilot fee update" },
+      body: {
+        expectedVersion: current.body.version, serviceFeeRateBps: 1250, reason: "Pilot fee update",
+        deliveryFeeBands: current.body.settings.deliveryFeeBands.map((band, i) => i === 3
+          ? { ...band, baseFeeMinor: 8000, perKmMinor: 1200 } : band),
+      },
     });
     assert.equal(updated.status, 200, JSON.stringify(updated.body));
     assert.equal(updated.body.version, current.body.version + 1);
     assert.equal(updated.body.settings.serviceFeeRateBps, 1250);
+    const persistedSettings = (await request(instance.api, "/settings", { subject: "clerk_ops" })).body.settings;
+    assert.deepEqual(persistedSettings.deliveryFeeBands, [
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 2500 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 5000 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 7500 },
+      { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 8000, perKmMinor: 1200 },
+    ]);
     assert.equal(updated.body.settings.serviceFeeVisibleToClient, true);
 
     const hidden = await request(instance.api, "/settings", {

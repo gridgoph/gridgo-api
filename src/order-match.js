@@ -1,6 +1,8 @@
-import { distanceMetersBetween } from "./operational-model.js";
+import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
+import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
+export { shopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 
 /**
  * Which press runs a job.
@@ -24,13 +26,6 @@ import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability
 export const MATCH_FACTORS = Object.freeze(["quality", "speed", "cost", "distance"]);
 const RANK_WEIGHTS = Object.freeze([0.4, 0.3, 0.2, 0.1]);
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
-
-/**
- * Below this, a shop is scored on how complete its listing is; at or above it,
- * on what clients actually said. Star ratings are savage in small numbers, and
- * a shop's first unlucky review should not bury it.
- */
-export const MIN_REVIEWS_FOR_RATING = 5;
 
 /** One working day, until Operations sets its own. See `projectFinish`. */
 const DEFAULT_ALLOWANCE_MINUTES = 600;
@@ -112,25 +107,6 @@ function listingCompleteness(item) {
   if ((item.optionGroups || []).length) score += 3;
   if ((item.prepSteps || []).length) score += 3;
   return Math.min(100, score);
-}
-
-/**
- * What clients said about this shop's work.
- *
- * Only the quality star feeds matching. Speed is measured from whether the shop
- * hit its own date, and cost is the price on the listing -- taking those from a
- * remembered rating would override a timestamp with a recollection, and would
- * mark a shop down twice for being expensive.
- */
-export function shopRating(store, supplierId) {
-  const reviews = (store.shopReviews || []).filter((row) => row.supplierId === supplierId);
-  if (reviews.length === 0) return null;
-  const stars = reviews.map((row) => Number(row.qualityStars)).filter((value) => Number.isFinite(value) && value > 0);
-  if (stars.length === 0) return null;
-  return {
-    count: stars.length,
-    average: stars.reduce((total, value) => total + value, 0) / stars.length,
-  };
 }
 
 /** Whether the shop hit the date its own board promised, across finished work. */
@@ -346,7 +322,7 @@ function scoreRows(rows, ranking) {
   return weights;
 }
 
-function reasonsFor(row, ranking, preferred, alternativesCount) {
+function reasonsFor(row, ranking, preferred, alternativesCount, distanceZone) {
   const reasons = ranking.map((factor, index) => {
     const detail = factor === "quality"
       ? `${Math.round(row.quality)}% listing completeness and approved standing`
@@ -358,7 +334,7 @@ function reasonsFor(row, ranking, preferred, alternativesCount) {
             : `Cheapest of the ${alternativesCount + 1} that can make your date`
           : row.distance == null
             ? "Distance was not scored because no delivery pin was supplied"
-            : `${row.distance} metres from the delivery pin`;
+            : distanceZone.label;
     return { code: `ranked_${factor}`, factor, rank: index + 1, weight: RANK_WEIGHTS[index], detail };
   });
   if (preferred) {
@@ -517,11 +493,19 @@ export function matchShop(store, input = {}) {
   const winner = preferred || rows[0];
   const alternativesCount = rows.length - 1;
 
+  const distanceZone = winner.distance == null ? null : distanceZoneForDistance(winner.distance, store.settings);
+  const rating = publicShopRating(store, winner.supplierId);
   return {
+    distanceZone,
+    ...(rating ? { rating } : {}),
     shop: winner.shop,
     queue: winner.queue,
-    reasons: reasonsFor(winner, ranking, Boolean(preferred), alternativesCount),
-    listings: winner.listings,
+    reasons: reasonsFor(winner, ranking, Boolean(preferred), alternativesCount, distanceZone),
+    listings: winner.listings.map((listing) => ({
+      ...listing,
+      distanceZone,
+      ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((winner.distance / 1000).toFixed(1)) } : {}),
+    })),
     alternativesCount,
     /**
      * What the client is told. The shop's own date is deliberately absent: a

@@ -1,4 +1,4 @@
-import { publicOrderFor } from "../src/operational-model.js";
+import { defaultOperationalSettings, publicOrderFor } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -36,11 +36,7 @@ function addPublicListing(store, { supplierId, itemId, priceMinor, shop, turnaro
 function fixture() {
   const client = { id: "user_client", role: "client", email: "client@gridgo.test" };
   const store = {
-    settings: {
-      serviceFeeRateBps: 1000,
-      issueWindowHours: 24,
-      deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor: 2500 }],
-    },
+    settings: defaultOperationalSettings(),
     taxonomy: defaultTaxonomy(),
     users: [client],
     userRoleMemberships: [{ userId: client.id, role: "client" }],
@@ -433,6 +429,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
   assert.equal(added.body.cart.lines.length, 2);
   assert.deepEqual(added.body.cart.lines[0].listing, {
     id: "item_a",
+    distanceZone: null,
     name: "supplier_a Flyers",
     supplierId: "supplier_a",
     fromPriceMinor: 12_500,
@@ -898,4 +895,67 @@ test('short-link preflight resolves only owned client cart writes and route reva
   assert.deepEqual((await call('PATCH', linePath, patch)).body.cart.lines[0].artworkLinks, normalized.artworkLinks);
   store.supplierServiceFileFormats = [];
   await assert.rejects(call('PATCH', linePath, patch), { code: 'artwork_link_format_not_accepted' });
+});
+
+for (const [meters, key, label, km] of [
+  [5000, "nearby", "Nearby"], [5001, "away", "Away"],
+  [10000, "away", "Away"], [10001, "long_distance", "Long Distance"],
+  [15000, "long_distance", "Long Distance"], [15001, "out_of_zone", "Out of Zone", 15],
+  [20550, "out_of_zone", "Out of Zone", 20.6],
+]) test(`client match at ${meters}m shows a zone and only Out of Zone listings show km`, async () => {
+  const { store, client } = fixture();
+  store.supplierProfiles[0].shop = { lat: 0, lng: 0, label: "Shop" };
+  const dropoff = { lat: meters / 6371000 * 180 / Math.PI, lng: 0, label: "Drop" };
+  const result = await caller(store, client)("POST", "/me/matches", {
+    subcategoryCode: "flyers", excludedSupplierIds: ["supplier_b"], dropoff,
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.distanceZone, { key, label });
+  assert.deepEqual(result.body.listings[0].distanceZone, { key, label });
+  assert.equal(result.body.listings[0].distanceKm, km);
+  assert.equal(Object.hasOwn(result.body, "distanceKm"), false);
+  assert.equal(Object.hasOwn(result.body.listings[0], "distanceKm"), km !== undefined);
+  const serialized = JSON.stringify(result.body);
+  assert.doesNotMatch(serialized, /distanceMeters|deliveryDistanceMeters|metres|kilometres|\d+ km/);
+});
+
+for (const count of [0, 4, 5, 6]) test(`match rating is ${count >= 5 ? "shown" : "omitted"} for ${count} reviews`, async () => {
+  const { store, client } = fixture();
+  store.shopReviews = Array.from({ length: count }, (_, index) => ({ supplierId: "supplier_a", qualityStars: index === 0 ? 4 : 5 }));
+  const result = await caller(store, client)("POST", "/me/matches", { subcategoryCode: "flyers", excludedSupplierIds: ["supplier_b"] });
+  for (const card of [result.body, ...result.body.listings]) {
+    assert.equal(Object.hasOwn(card, "rating"), count >= 5);
+    if (count >= 5) assert.deepEqual(card.rating, { average: 4.8, count });
+    assert.equal(card.distanceZone, null, "no pin means no inferred zone");
+  }
+});
+
+test("Out of Zone stays available, cart listings carry zones and ratings, checkout snapshots the full-distance fee", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  store.supplierProfiles[0].shop = { lat: 0, lng: 0, label: "Shop" };
+  store.shopReviews = Array.from({ length: 5 }, () => ({ supplierId: "supplier_a", qualityStars: 5 }));
+  const dropoff = { lat: 16001 / 6371000 * 180 / Math.PI, lng: 0, label: "Home" };
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "delivery", defaultDropoff: dropoff })).body.cart.id;
+  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 });
+  const full = await call("GET", `/me/carts/${cartId}`);
+  for (const response of [added, full]) {
+    const listing = response.body.cart.lines[0].listing;
+    assert.deepEqual(listing.distanceZone, { key: "out_of_zone", label: "Out of Zone" });
+    assert.equal(listing.distanceKm, 16);
+    assert.deepEqual(listing.rating, { average: 5, count: 5 });
+    assert.equal(Object.hasOwn(listing, "distanceMeters"), false);
+  }
+  const placed = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "OUT-OF-ZONE" },
+  });
+  assert.equal(placed.status, 201);
+  assert.equal(placed.body.order.deliveryFeeMinor, 24500);
+  const order = store.orders.find((row) => row.id === placed.body.order.id);
+  assert.equal(order.riderPayoutMinor, 20825);
+  assert.equal(order.platformDeliveryShareMinor, 3675);
+  assert.equal(store.orderJobs[0].deliveryDistanceMeters, 16001);
+  store.settings.deliveryFeeBands[3].perKmMinor = 2000;
+  assert.equal(publicOrderFor(order, client, store).deliveryFeeMinor, 24500);
+  assert.equal(store.orderJobs[0].deliveryFeeMinor, 24500);
 });

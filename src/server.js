@@ -3106,8 +3106,12 @@ async function handleRequest(req, res) {
       };
       validateOperationalSettings(next);
       next.deliveryFeeBands = next.deliveryFeeBands.map((band) => ({
+        zone: band.zone,
+        label: band.label,
         maxDistanceMeters: band.maxDistanceMeters,
-        feeMinor: band.feeMinor,
+        ...(band.zone === "out_of_zone"
+          ? { baseFeeMinor: band.baseFeeMinor, perKmMinor: band.perKmMinor }
+          : { feeMinor: band.feeMinor }),
       }));
       const previous = structuredClone(store.settings);
       store.settings = structuredClone(next);

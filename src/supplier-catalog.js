@@ -1,3 +1,4 @@
+import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { gridgoAmountMinor, measurementKindFor, priceLine } from "./pricing.js";
 
@@ -485,7 +486,10 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     effectivePriceMinor = selectedCatalogPrice(store, item, selectedOptionIds ?? []).effectiveUnitPriceMinor;
   }
   const fromPriceMinor = minimumCatalogPrice(store, item);
+  const rating = publicShopRating(store, item.supplierId);
   return {
+    distanceZone: null,
+    ...(rating ? { rating } : {}),
     id: item.id,
     supplierId: item.supplierId,
     supplierServiceId: item.supplierServiceId,

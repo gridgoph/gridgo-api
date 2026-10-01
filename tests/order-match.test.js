@@ -1,3 +1,4 @@
+import { defaultOperationalSettings } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -114,7 +115,7 @@ function fixture() {
     orderJobs: [],
     orders: [],
     shopReviews: [],
-    settings: { promiseAllowanceMinutes: 0 },
+    settings: { ...defaultOperationalSettings(), promiseAllowanceMinutes: 0 },
   };
 }
 
