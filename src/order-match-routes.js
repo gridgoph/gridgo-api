@@ -1,3 +1,4 @@
+import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
@@ -21,6 +22,7 @@ import {
   deliveryFeeForDistance,
   deliverySplit,
   distanceMetersBetween,
+  distanceZoneForDistance,
   downpaymentPercentSetting,
   orderDownpaymentPercent,
   roundBps,
@@ -326,6 +328,15 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
         ? publicCartListingStub(store, item, line.optionIds || [])
         : publicCatalogItem(store, item, { selectedOptionIds: line.optionIds || [] }))
       : null;
+    if (listing) {
+      const shop = (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.shop;
+      const dropoff = line.dropoff ?? cart.defaultDropoff;
+      const distance = shop && dropoff ? distanceMetersBetween(shop, dropoff) : null;
+      listing.distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
+      if (listing.distanceZone?.key === "out_of_zone") listing.distanceKm = Number((distance / 1000).toFixed(1));
+      const rating = publicShopRating(store, item.supplierId);
+      if (rating) listing.rating = rating;
+    }
     // Through the pricing engine, not a multiplication: the basket and the
     // invoice have to agree, and a measured or tiered line does not fit in a
     // unit price times a quantity. `lineSubtotalMinor` stays the shop figure;

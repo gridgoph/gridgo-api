@@ -111,6 +111,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1787007600000_artwork_links",
         "1787011200000_artwork_link_provider_formats",
         "1790553600000_client_refunds",
+        "1790812800000_delivery_distance_zones",
       ],
     );
 
@@ -289,6 +290,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverse the delivery-zone settings migration first.
+    await runner(migrationOptions(schema, "down", 1, client));
 
     // Empty refund schema can be reversed; any financial history refuses down.
     await runner(migrationOptions(schema, "down", 1, client));
@@ -940,5 +944,41 @@ test("rider split migration preserves old delivery fees and SQL computes exact n
     await assert.rejects(client.query("UPDATE orders SET rider_commission_bps = 10001"), (error) => error.code === "23514");
     await assert.rejects(client.query("UPDATE orders SET rider_commission_bps = NULL"), (error) => error.code === "23502");
     await assert.rejects(client.query("UPDATE orders SET rider_payout_minor = 123"), (error) => error.code === "428C9");
+  });
+});
+
+test("delivery zones migrate fees and settings version without touching existing order or job snapshots", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    const { readdir } = await import("node:fs/promises");
+    const oldCount = (await readdir(MIGRATIONS_DIR)).filter((name) => name.endsWith(".js") && name < "1790812800000").length;
+    await runner(migrationOptions(schema, "up", oldCount, client));
+    await client.query(`
+      INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 12,
+        '{"serviceFeeRateBps":1000,"issueWindowHours":24,"deliveryFeeBands":[{"maxDistanceMeters":4999,"feeMinor":3100},{"maxDistanceMeters":10000,"feeMinor":6200},{"maxDistanceMeters":null,"feeMinor":9300}]}');
+      INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
+        VALUES ('client', 'clerk_client', 'client@test.invalid', 'Client', 'client', 'individual', now(), 0);
+      INSERT INTO users (id, clerk_user_id, email, name, role, verification_status, created_at, position)
+        VALUES ('shop', 'clerk_shop', 'shop@test.invalid', 'Shop', 'supplier', 'approved', now(), 1);
+      INSERT INTO orders (id, client_id, state, delivery_fee_minor, created_at, updated_at, position)
+        VALUES ('old_order', 'client', 'draft', 9300, now(), now(), 0);
+      INSERT INTO order_jobs (id, order_id, supplier_id, state, fulfillment_mode,
+        pickup_lat, pickup_lng, pickup_label, dropoff_lat, dropoff_lng, dropoff_label,
+        supplier_subtotal_minor, delivery_distance_meters, delivery_fee_minor, estimated_hours, created_at, updated_at)
+        VALUES ('old_job', 'old_order', 'shop', 'needs_qa', 'delivery',
+          7, 125, 'Shop', 8, 125, 'Home', 10000, 111195, 9300, 24, now(), now());
+    `);
+    const before = {};
+    for (const table of ["orders", "order_jobs"]) before[table] = (await client.query(`SELECT * FROM ${table}`)).rows;
+    await runner(migrationOptions(schema, "up", undefined, client));
+    const { version, settings } = (await client.query("SELECT version, settings FROM platform_settings")).rows[0];
+    assert.equal(version, 13);
+    assert.equal(settings.serviceFeeRateBps, 1000);
+    assert.deepEqual(settings.deliveryFeeBands, [
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 3100 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 6200 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 9300 },
+      { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 7500, perKmMinor: 1000 },
+    ]);
+    for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows, before[table]);
   });
 });

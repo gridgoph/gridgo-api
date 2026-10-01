@@ -103,7 +103,7 @@ test("requires delivery fee settings to use actual safe integers", () => {
     expectDomainError(
       () => validateOperationalSettings({
         ...settings,
-        deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }],
+        deliveryFeeBands: settings.deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor } : band),
       }),
       400,
       "invalid_money",
@@ -164,7 +164,7 @@ test("allocates delivery, pickup full-online, and pickup-at-store plans exactly"
 test("uses the provisional configurable distance boundaries exactly", () => {
   const settings = defaultOperationalSettings();
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 4_999, settings }).deliveryFeeMinor, 2_500);
-  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 5_000);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 2_500);
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_000, settings }).deliveryFeeMinor, 5_000);
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
 });
@@ -754,7 +754,7 @@ test("delivery split snapshots the rider rate and rounds half-up with an exact r
     [0, 8500, 0, 0], [99, 0, 0, 99], [99, 10000, 99, 0],
   ]) {
     const settings = { ...defaultOperationalSettings(), riderCommissionBps: rate,
-      deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }] };
+      deliveryFeeBands: defaultOperationalSettings().deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor } : band) };
     const money = plan({ settings });
     settings.riderCommissionBps = 1000;
     assert.equal(money.riderCommissionBps, rate);

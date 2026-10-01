@@ -56,6 +56,8 @@ Response:
 ```json
 {
   "shop": { "supplierId": "user_shop", "shopName": "...", "shop": { "lat": 7.0, "lng": 125.6, "label": "..." } },
+  "distanceZone": { "key": "nearby", "label": "Nearby" },
+  "rating": { "average": 4.8, "count": 12 },
   "queue": { "jobsAhead": 2, "estimatedHours": 36 },
   "reasons": [{ "code": "ranked_quality", "factor": "quality", "rank": 1, "weight": 0.5, "detail": "..." }],
   "listings": [],
@@ -63,6 +65,18 @@ Response:
   "score": { "total": 84.5, "weights": { "quality": 0.5, "speed": 0.3, "distance": 0.2 }, "factors": {} }
 }
 ```
+
+### Distance and rating fields
+
+Both match routes return `distanceZone: { key, label }` at the response root (the Top Pick) and on each `listings[]` item. Keys/labels come from the same [four delivery fee bands](OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones): `nearby` / Nearby, `away` / Away, `long_distance` / Long Distance, `out_of_zone` / Out of Zone. Without a drop-off, `distanceZone` is `null`; no zone is guessed. The existing rule requiring a pin when distance is ranked first remains.
+
+Only Out of Zone **listing objects** carry `distanceKm`, a JSON number rounded to one decimal (`16`, for example, represents 16.0 km). The match root never carries `distanceKm`. In the other three zones that field is omitted, not null. Match reasons use the zone label in `ranked_distance.detail`, never metres or kilometres. Exact distances still determine internal ranking. Existing staff/Operations distances, order/job snapshots, and cart shop coordinate inputs are unchanged.
+
+The response root and listings include `rating: { average, count }` only at five or more valid quality-star reviews. `average` is rounded to one decimal; `count` is the valid review count used by `shopRating`. Below five reviews, the **entire field is omitted**. Quality ranking retains its existing minimum-review rule and uses the unrounded average internally.
+
+Full and compact cart listing objects have the same fields, using the line drop-off or the cart default. Generic catalog listings have `distanceZone: null` because those reads have no client drop-off; they include `rating` at the same threshold and never `distanceKm`. Photo signing and compact cart stubs keep their existing behavior.
+
+Client follow-up: render these labels and ratings on the Top Pick and listings; stop computing/displaying raw match distances from shop points or reason text. Before selecting an Out of Zone listing, show the delivery-cost warning. Checkout fee previews must read the four-band settings union: flat `feeMinor` for the first three bands, `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)` for the open-ended band. Do not use the rounded display `distanceKm` to calculate a charge. The API does not add a distance rejection or require warning acknowledgement.
 
 ## Cart
 
