@@ -1849,3 +1849,58 @@ test('HTTP short links check and persist canonical artwork outside the domain mu
   assert.deepEqual(placed.body.invoice.lines[0].artworkLinks, canonical);
   assert.deepEqual((await loadStore(database)).orderLineItems[0].artworkLinks, canonical);
 });
+
+test("match tokens persist across requests, select another shop and keep deadline/payment assignment", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const instance = await startApi();
+  t.after(async () => {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+  });
+  const post = (path, body) => request(instance.api, path, { method: "POST", subject: "clerk_client", body });
+  const deadline = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  const dropoff = { lat: 7.0731, lng: 125.6128, label: "Home" };
+  const match = await post("/me/matches", { subcategoryCode: "flyers", deadline, dropoff });
+  assert.equal(match.status, 200, JSON.stringify(match.body));
+  const listing = match.body.otherListings[0];
+  assert.equal(listing.id, "item_supplier_b");
+  assert.equal(listing.supplierId, undefined);
+  assert.equal(listing.shopName, undefined);
+  const selectionRows = (await database.query("SELECT * FROM client_match_selections")).rows;
+  assert.equal(selectionRows.length, 2);
+  const selected = selectionRows.find((row) => row.selection.catalogItemId === listing.id);
+  assert.equal(selected.client_id, "user_client");
+  assert.equal(selected.request_id, match.body.matchRequestId);
+  const created = await post("/me/carts", { defaultDropoff: dropoff });
+  const cartId = created.body.cart.id;
+  const body = { selectToken: listing.selectToken, matchRequestId: match.body.matchRequestId, optionIds: [], quantity: 1, artworkFileId: "file_art" };
+  const added = await post(`/me/carts/${cartId}/lines`, body);
+  assert.equal(added.status, 201, JSON.stringify(added.body));
+  const persistedLine = (await database.query("SELECT supplier_id, match_deadline FROM client_cart_lines WHERE cart_id=$1", [cartId])).rows[0];
+  assert.equal(persistedLine.supplier_id, "supplier_b");
+  assert.equal(persistedLine.match_deadline, deadline);
+  // Queue changes after selection cannot silently miss the requested date at checkout.
+  await database.query("UPDATE client_cart_lines SET match_deadline = $1 WHERE cart_id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
+  const payment = { method: "qr_manual", proofFileId: "file_qr", reference: "OTHER-SHOP" };
+  const late = await post(`/me/carts/${cartId}/checkout`, { payment });
+  assert.equal(late.status, 409, JSON.stringify(late.body));
+  assert.equal(late.body.error, "deadline_not_met");
+  assert.equal(Number((await database.query("SELECT count(*) FROM orders")).rows[0].count), 0, "failed checkout rolls back");
+  await database.query("UPDATE client_cart_lines SET match_deadline = $1 WHERE cart_id = $2", [deadline, cartId]);
+  const placed = await post(`/me/carts/${cartId}/checkout`, { payment });
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  const order = (await loadStore(database)).orders.find((row) => row.id === placed.body.order.id);
+  assert.equal(order.supplierId, "supplier_b");
+  assert.equal(order.supplierSubtotalMinor, 20_000);
+  assert.equal(order.serviceFeeMinor, 2_000);
+  assert.equal(order.payoutPlanVersion, 2);
+  const expires = selected.expires_at;
+  await database.query("UPDATE client_match_selections SET expires_at = now() - interval '1 second' WHERE token_hash=$1", [selected.token_hash]);
+  const another = (await post("/me/carts", {})).body.cart;
+  const expired = await post(`/me/carts/${another.id}/lines`, body);
+  assert.equal(expired.status, 410);
+  assert.equal(expired.body.error, "select_token_expired");
+  assert.ok(expires);
+});

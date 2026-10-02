@@ -31,6 +31,7 @@ Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/
 
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
 
+- Match priority, reason badges, anonymous alternatives, and expiring selection-token/cart-deadline semantics are defined in `docs/ORDER_MATCH_API.md`. Rank only deadline-capable listings; never restore weighted or same-shop boosts.
 - Match and cart responses must run through `decorateCatalogPhotoUrls` (`src/catalog-photo-urls.js`) the same way catalog does. `publicPhotos` only sets metadata `url` (`/catalog/media/:fileId`); the client needs signed `downloadUrl` on `body.listings` and `body.cart.lines[].listing`. Skipping the decorator is the empty match thumbnail. `POST`/`PATCH`/`DELETE` `/me/carts/:id/lines` return compact listing stubs without photos so add/save does not wait on MinIO signing; `GET /me/carts/:id` stays the full projection.
 - Delivery zones, inclusive bounds, Out of Zone pricing, and settings migration: `docs/OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones`. Match/listing distance and rating projections: `docs/ORDER_MATCH_API.md#distance-and-rating-fields`. Use the shared band lookup; never recalculate an existing order fee from current settings.
 - The client service fee is seeded at 1,000 bps on the supplier subtotal; accepted quotes snapshot the rate, amount, fulfillment, and generalized online/direct allocation plan. COD and supplier-proof approval states are retired.

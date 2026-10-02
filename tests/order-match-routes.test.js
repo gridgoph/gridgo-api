@@ -959,3 +959,77 @@ test("Out of Zone stays available, cart listings carry zones and ratings, checko
   assert.equal(publicOrderFor(order, client, store).deliveryFeeMinor, 24500);
   assert.equal(store.orderJobs[0].deliveryFeeMinor, 24500);
 });
+
+test("anonymous alternatives select the right shop with request-bound tokens and preserve saved preferences", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  await call("PUT", "/me/preferences", { ranking: ["cost", "speed", "quality", "distance"] });
+  const ranking = ["quality", "speed", "cost", "distance"];
+  const dropoff = { lat: 7.07, lng: 125.61, label: "Home" };
+  const deadline = "2026-09-05T00:00:00.000Z";
+  const match = (await call("POST", "/me/matches", { subcategoryCode: "flyers", ranking, dropoff, deadline })).body;
+  assert.deepEqual(match.ranking, ranking);
+  assert.equal((await call("GET", "/me/preferences")).body.preferences.ranking[0], "cost");
+  assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).body.ranking[0], "cost");
+  assert.equal(match.shop.supplierId, "supplier_a");
+  assert.ok(match.listings[0].supplierId, "legacy Top Pick fields remain");
+  for (const key of ["queue", "reasons", "score", "promiseBy", "alternativesCount"]) assert.ok(Object.hasOwn(match, key));
+  assert.equal(match.otherListings.length, 1);
+  const other = match.otherListings[0];
+  assert.equal(other.id, "item_b");
+  const forbidden = /^(supplierId|supplierServiceId|shopName|shop|address|addressLine|contactName|contact|logo|email|phone|objectKey|altText)$/;
+  function check(value) {
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) { assert.equal(forbidden.test(key), false, key); check(child); }
+  }
+  check(other);
+  assert.match(other.selectToken, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(JSON.stringify(store.matchSelections).includes(other.selectToken), false, "only token digests persist");
+  const cart = (await call("POST", "/me/carts", { defaultDropoff: dropoff })).body.cart;
+  const selection = { selectToken: other.selectToken, matchRequestId: match.matchRequestId, optionIds: [], quantity: 10 };
+  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, { ...selection, matchRequestId: "another-request" }), (e) => e.code === "select_token_request_mismatch");
+  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, { ...selection, catalogItemId: "item_a" }), (e) => e.code === "select_token_listing_mismatch");
+  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, { ...selection, dropoff: { ...dropoff, lat: 8 } }), (e) => e.code === "select_token_dropoff_mismatch");
+  const foreign = { id: "foreign", role: "client" };
+  const foreignCart = { ...store.carts[0], id: "foreign_cart", clientId: foreign.id };
+  store.carts.push(foreignCart);
+  await assert.rejects(caller(store, foreign)("POST", "/me/carts/foreign_cart/lines", selection), (e) => e.status === 403 && e.code === "foreign_select_token");
+  await assert.rejects(caller(store, client, "2026-08-24T01:15:00.000Z")("POST", `/me/carts/${cart.id}/lines`, selection), (e) => e.status === 410 && e.code === "select_token_expired");
+  const added = await call("POST", `/me/carts/${cart.id}/lines`, selection);
+  assert.equal(added.status, 201);
+  assert.equal(store.cartLines[0].supplierId, "supplier_b");
+  assert.deepEqual(store.cartLines[0].dropoff, dropoff);
+  assert.equal(store.cartLines[0].matchDeadline, deadline);
+  assert.equal(store.cartLines[0].catalogItemId, "item_b");
+  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, { ...selection, selectToken: match.listings[0].selectToken }), (e) => e.code === "cart_belongs_to_another_shop");
+});
+
+test("token selection rechecks changed listing availability and deadline", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const deadline = "2026-08-29T00:00:00.000Z";
+  const match = (await call("POST", "/me/matches", { subcategoryCode: "flyers", deadline })).body;
+  const cart = (await call("POST", "/me/carts", {})).body.cart;
+  const body = { selectToken: match.otherListings[0].selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [] };
+  store.orderJobs.push({ id: "new_queue", supplierId: "supplier_b", state: "production", estimatedHours: 300 });
+  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, body), (e) => e.code === "deadline_not_met");
+  store.catalogItems.find((row) => row.id === "item_b").active = false;
+  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, body), (e) => e.code === "catalog_item_stale");
+});
+
+test("selection rejects malformed/unknown tokens and cart rebinding; labels are not location identity", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const first = (await call("POST", "/me/carts", {})).body.cart;
+  const second = (await call("POST", "/me/carts", {})).body.cart;
+  const match = (await call("POST", "/me/matches", { cartId: first.id, subcategoryCode: "flyers", dropoff: { lat: 7.07, lng: 125.61, label: "Home" } })).body;
+  const body = { selectToken: match.otherListings[0].selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [] };
+  for (const selectToken of [null, "garbage", "a".repeat(43)]) {
+    await assert.rejects(call("POST", `/me/carts/${first.id}/lines`, { ...body, selectToken }), (e) => e.status === 400 && e.code === "invalid_select_token");
+  }
+  await assert.rejects(call("POST", `/me/carts/${second.id}/lines`, body), (e) => e.code === "select_token_cart_mismatch");
+  store.supplierProfiles.find((row) => row.userId === "supplier_b").isClosed = true;
+  await assert.rejects(call("POST", `/me/carts/${first.id}/lines`, body), (e) => e.code === "catalog_item_stale");
+  store.supplierProfiles.find((row) => row.userId === "supplier_b").isClosed = false;
+  assert.equal((await call("POST", `/me/carts/${first.id}/lines`, { ...body, dropoff: { lat: 7.07, lng: 125.61 } })).status, 201);
+});

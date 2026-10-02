@@ -38,6 +38,8 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     shop: { lat: 7.064, lng: 125.6085, label: "Shop" }, pickupAvailable: true,
     isClosed: true, version: 1, updatedAt: AT,
   }];
+  store.matchSelections = [{ tokenHash: "a".repeat(64), clientId: "user_client", requestId: "request_1",
+    expiresAt: "2026-08-24T01:15:00.000Z", selection: { catalogItemId: "item_a", deadline: AT, dropoff: null } }];
   store.clientPreferences = [{ userId: "user_client", ranking: ["quality", "speed", "cost", "distance"], version: 1, updatedAt: AT }];
   store.clientAddresses = [{
     id: "addr_one", clientId: "user_client", label: "Home", addressLine: "Bajada, Davao City",
@@ -89,6 +91,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
   await database.transaction(() => saveStore(database, store));
   const reloaded = await loadStore(database);
 
+  assert.deepEqual(reloaded.matchSelections, store.matchSelections);
   assert.deepEqual(reloaded.clientPreferences, store.clientPreferences);
   assert.deepEqual(reloaded.clientAddresses, store.clientAddresses);
   assert.deepEqual(reloaded.carts, store.carts);
