@@ -730,7 +730,7 @@ Default `GET /settings` response:
       { "zone": "nearby", "label": "Nearby", "maxDistanceMeters": 5000, "feeMinor": 2500 },
       { "zone": "away", "label": "Away", "maxDistanceMeters": 10000, "feeMinor": 5000 },
       { "zone": "long_distance", "label": "Long Distance", "maxDistanceMeters": 15000, "feeMinor": 7500 },
-      { "zone": "out_of_zone", "label": "Out of Zone", "maxDistanceMeters": null, "baseFeeMinor": 7500, "perKmMinor": 1000 }
+      { "zone": "out_of_zone", "label": "Out of Zone", "maxDistanceMeters": null, "baseFeeMinor": 4000, "perKmMinor": 1500 }
     ],
     "paymentQr": { "method": "qr_manual", "caption": "QR Ph" }
   }
@@ -754,11 +754,11 @@ Unauthenticated. Streams the current ready plate so checkout and the ops preview
 
 `settings.deliveryFeeBands` is the single source for distance labels and delivery prices (`src/operational-model.js`). Bounds are inclusive: Nearby is 0–5,000 m; Away is >5,000–10,000 m; Long Distance is >10,000–15,000 m; Out of Zone is >15,000 m with no maximum. Distances computed from coordinates are rounded to whole metres before band selection, as before. The former 4,999 m default becomes 5,000 m for future quotes.
 
-The first three bands use `feeMinor`. Out of Zone has **no `feeMinor`**; its price is `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)`, applied to the **whole** distance, not only the excess beyond 15 km. With the defaults, 15,001 m costs 23,500 minor units (PHP 235), 16,000 m costs the same, and 16,001 m costs 24,500 (PHP 245). Integer arithmetic rejects overflow. Out of Zone is never excluded because of its distance. The snapshotted rider/GRIDGO split remains 85/15 by default.
+The first three bands use `feeMinor`. Out of Zone has **no `feeMinor`**; its price is `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)`, applied to the **whole** distance, not only the excess beyond 15 km. With the defaults, 15,001 m costs 28,000 minor units (PHP 280), 16,000 m costs the same, and 16,001 m or 16,200 m costs 29,500 (PHP 295). Integer arithmetic rejects overflow. Out of Zone is never excluded because of its distance. The snapshotted rider/GRIDGO split remains 85/15 by default.
 
 Migration `1790812800000_delivery_distance_zones` preserves the three stored flat fees, adds the fixed zone metadata and 15,000 m cap, adds the Out of Zone band, and increments the settings version. It never updates orders, jobs, or their stored fees/splits. Existing accepted prices remain snapshots. Unusual legacy tables with other than three bands require review before migration.
 
-All default fees are placeholders, including **PHP 75 base + PHP 10 per kilometre** for Out of Zone. Operations must set the intended production prices before release. Operations/Super Admin can change prices without a release:
+Out of Zone defaults to **PHP 40 base + PHP 15 per kilometre**. Migration `1790985600000_out_of_zone_delivery_price` replaces only the shipped Out of Zone placeholder (7500/1000), increments the settings version only on change, and preserves customized prices and all three flat fees (including production PHP 89/149/229). Its down step restores 7500/1000 only when the band still holds 4000/1500. Existing order/job snapshots stay unchanged. Operations/Super Admin can change prices without a release:
 
 ```http
 PATCH /settings
