@@ -11,7 +11,7 @@ GET /me/preferences
 PUT /me/preferences
 ```
 
-`PUT` accepts `{ "ranking": ["quality","speed","distance"] }`. The array must contain those three values exactly once in any order. Rank weights are 50%, 30%, and 20%. `GET` defaults to quality/speed/distance with `version: 0` until saved.
+`PUT` accepts `{ "ranking": ["quality","speed","cost","distance"] }`. All four values must occur exactly once in any order (`400 invalid_preference_ranking` otherwise). This saved preference is the onboarding/account default. `GET` defaults to quality/speed/cost/distance with `version: 0` until saved; older saved three-factor rankings retain their order with the missing factor appended. Matching uses strict priority, not percentage weights.
 
 ```text
 GET /me/addresses
@@ -42,27 +42,123 @@ Body:
 {
   "subcategoryCode": "flyers",
   "addressId": "addr_...",
+  "ranking": ["quality", "speed", "cost", "distance"],
+  "deadline": "2026-10-10T15:59:59.999Z",
+  "units": 100,
   "cartId": "cart_...",
   "excludedSupplierIds": ["user_seen_shop"]
 }
 ```
 
-Send either `addressId` or an inline `dropoff` point. A drop-off is mandatory when distance is ranked first. `ranking` may override saved preferences for one call. `/next` requires at least one excluded shop ID. `cartId` enables same-shop preference when that cart's existing shop has a public listing in the requested subcategory.
+Send either `addressId` or an inline `dropoff` point (`lat`, `lng`, nonblank `label`). A drop-off is mandatory when distance is ranked first. **Omit `ranking` (or send null) to skip per-order confirmation and use the saved default.** A supplied ranking applies only to this request and never saves the preference. To rematch after a change, POST the same work/drop-off/deadline to `/me/matches` with the new ranking; no preference write or new endpoint is needed. The client's minimum three-second loader is entirely client-side; the API adds no delay.
 
-Eligibility is fail-closed: approved supplier membership, live covering service, complete public listing, and `isClosed=false`. Speed includes current open jobs in that shop's print queue. Stable ties sort by supplier ID.
+`deadline` is optional, a date-time parseable by the API (send ISO 8601 with offset); null means no deadline filter. `units` is an optional positive safe integer quantity used for capacity projection. Existing `measurement`, `structuredSpec`, `optionIds`, and `widthFeet` inputs still filter printer capability. `/next` requires at least one `excludedSupplierIds` entry. Optional `cartId` validates ownership, supplies existing lines for printer-width checks, and binds tokens to that cart. It **does not boost the cart's shop**. To choose a different shop from a nonempty cart, start a new cart and rematch without the old cart ID.
+
+Eligibility is fail-closed: active account, approved supplier membership, live covering service, complete public listing, printer capacity, and `isClosed=false`. Project each listing using its turnaround, shop schedule, current queue, supplied units/capacity, and the platform promise allowance. Remove every listing whose **client promise** exceeds the deadline before ranking. If none can make it, return `409 deadline_not_met` with `earliestAvailable`; if there are no eligible listings, return `404 match_not_found`.
+
+### Deterministic Top Pick
+
+Compare each factor in the supplied/saved ranking, stopping at the first different comparison value. Later factors only break ties. Comparison buckets (fixed boundaries, not pairwise differences) make sorting transitive and independent of input order:
+
+| Factor | Comparison value | Better |
+| --- | --- | --- |
+| `quality` | Floor of today's 0–100 quality score | Higher |
+| `speed` | UTC hour containing the padded client promise, `floor(epochMilliseconds / 3600000)` | Earlier |
+| `cost` | Listing `fromPriceMinor`, before quantity/options/service fee | Lower; exact centavos, a ₱0.01 difference separates |
+| `distance` | Nearby → Away → Long Distance → Out of Zone | Earlier zone; every distance within a zone ties |
+
+Quality is unchanged in kind: with five valid reviews, the unrounded average quality stars × 20; otherwise listing completeness and approved standing (50 standing + 8 name + 10 description + 7 starting price + 7 turnaround + 7 photos + 5 formats + 3 options + 3 preparation steps, capped at 100). Scores in the same whole-point bucket tie; even a small difference crossing its boundary separates. There is no exact-distance boost, same-shop boost, or weighted blend. Missing drop-off ties all distance values (distance-first still requires a pin).
+
+Within each shop choose its best eligible listing by these same comparisons, then listing ID ascending. Rank those representatives with supplier ID ascending as the final tie-break. This avoids combining one listing's price with another's speed. The Top Pick's `listings[]` contains **all its eligible deadline-capable listings**, in the same priority order; index 0 is its recommended listing. Each gains `readyBy` (the padded client promise), `placeInLine` (jobs ahead + 1), and `selectToken`.
+
+The root `matchReason` names the first factor that separates the winner from the runner-up, i.e. the factor deciding between the final contenders after earlier ties. It is `vetted` if there is one candidate or every factor ties and supplier ID decides. Labels are fixed:
+
+| key | label |
+| --- | --- |
+| `quality` | Matched for Quality |
+| `cost` | Matched for Best Value |
+| `speed` | Matched for Fastest Turnaround |
+| `distance` | Matched for Distance |
+| `vetted` | GRIDGO-Vetted Supplier |
+
+`ranking` at the root echoes the effective priority. Legacy `shop`, `listings`, `queue`, `promiseBy`, `distanceZone`, optional `rating`, `reasons`, `alternativesCount`, and `score` remain. `score` is deprecated diagnostics: weights are 1 for the first factor and 0 for the rest; total is that first normalized factor score. It does not determine ordering and may tie even when a later factor decides. `reasons[].weight` has the same 1/0 values. Render the new `matchReason` as the single badge.
 
 Response:
 
 ```json
 {
+  "ranking": ["quality", "speed", "cost", "distance"],
+  "matchReason": { "key": "quality", "label": "Matched for Quality" },
+  "matchRequestId": "opaque_random_request_id",
+  "selectTokenExpiresAt": "2026-10-02T01:15:00.000Z",
+  "otherListings": [],
   "shop": { "supplierId": "user_shop", "shopName": "...", "shop": { "lat": 7.0, "lng": 125.6, "label": "..." } },
+  "distanceZone": { "key": "nearby", "label": "Nearby" },
+  "rating": { "average": 4.8, "count": 12 },
   "queue": { "jobsAhead": 2, "estimatedHours": 36 },
-  "reasons": [{ "code": "ranked_quality", "factor": "quality", "rank": 1, "weight": 0.5, "detail": "..." }],
+  "reasons": [{ "code": "ranked_quality", "factor": "quality", "rank": 1, "weight": 1, "detail": "..." }],
   "listings": [],
   "alternativesCount": 2,
-  "score": { "total": 84.5, "weights": { "quality": 0.5, "speed": 0.3, "distance": 0.2 }, "factors": {} }
+  "score": { "total": 100, "weights": { "quality": 1, "speed": 0, "cost": 0, "distance": 0 }, "factors": {} }
 }
 ```
+
+### Other listings and token selection
+
+`otherListings[]` contains exactly one representative from **every other eligible shop**, in the same strict priority order, excluding the Top Pick and any excluded shops. No deadline means all eligible shops. It has no reason badge. Fields are an explicit allowlist:
+
+- Card: `id` (listing ID), `name` (product name), `photos`, `fromPriceMinor` (supplier price), `clientFromPriceMinor` (includes GRIDGO service fee), `pricingUnit`, `packageQty`, `distanceZone`, `readyBy`, `placeInLine`, `selectToken`.
+- Conditional: `distanceKm` only Out of Zone; `rating: {average,count}` only with at least five valid reviews.
+- Configuration for the selection sheet: `categoryCode`, `subcategoryCode`, `basePriceMinor`, `effectivePriceMinor`, `clientEffectivePriceMinor`, `measurementKind`, `measureUnit`, `minimumWidthMilli`, `minimumHeightMilli`, `minimumLengthMilli`, `minimumOrderQuantity`, `printerMaxWidthFeet`, `priceTiers`, `speedTiers`, `pricingBasis`, `turnaroundHours`, `minimumTurnaroundHours`, `rush`, `acceptedFormats`, `optionGroups`, `version`. These retain their catalog semantics. Supply chosen `optionIds`, quantity and any required measurement when adding to cart.
+
+No supplier ID, service ID, shop name, shop point/address, contact, or logo is projected into an alternative. `photos` starts with only `fileId`, `sortOrder`, and metadata `url`; the common catalog decorator adds `downloadUrl` and `downloadUrlExpiresAt` when storage signing succeeds. Photo alt text is omitted. Listing names, option labels and product photos are supplier-authored product content; this projection does not inspect image pixels. Existing Top Pick `shop` and listing supplier fields remain for compatibility as explicitly required by this rollout; the new matching UI must not display those shop fields. Cart and post-order shop projections are unchanged.
+
+Choose either the Top Pick listing or an alternative through the existing add-line endpoint:
+
+```http
+POST /me/carts/:cartId/lines
+```
+
+```json
+{
+  "matchRequestId": "opaque_random_request_id",
+  "selectToken": "opaque_random_selection_token",
+  "optionIds": [],
+  "quantity": 100,
+  "artworkFileId": "file_..."
+}
+```
+
+The server resolves the listing/shop; omit `catalogItemId` (if supplied it must match). Tokens contain no encoded identity, expire **15 minutes** after matching, and are bound to the authenticated client, exact `matchRequestId`, selected listing, snapshotted deadline/drop-off, and optional requested cart. A new match creates new tokens without revoking earlier unexpired requests. Tokens may be reused within their lifetime; normal add-line semantics apply, so they are not idempotency keys. They persist in PostgreSQL as SHA-256 digests, survive API restarts, and are issued atomically under the existing mutation transaction/lock.
+
+Token selection copies the match drop-off onto the line and refuses a conflicting drop-off. A null match drop-off leaves existing cart/drop-off behavior intact. The match deadline is saved on the line; selection rechecks current availability, price/options, quantity, printer cap, and promise. Checkout revalidates prices and the full cart's queue/capacity promise against all saved match deadlines, returning `409 deadline_not_met` if it no longer fits. This is a live estimate, not a queue or price reservation. A different shop in an already populated cart still returns `409 cart_belongs_to_another_shop`; start a separate order. QR payment and escrow belong to that cart's one selected shop exactly as before.
+
+Legacy add-line by `catalogItemId` without a token remains supported and does not acquire a match deadline. Both paths use the same existing pricing, drop-off/delivery fee and checkout rules. Use tokens for this redesigned flow to carry the matching deadline through checkout.
+
+| Status | error | Recovery |
+| --- | --- | --- |
+| 400 | `invalid_select_token` | Missing/malformed/unknown token; match again (omitting the field entirely uses legacy selection) |
+| 403 | `foreign_select_token` | Token belongs to another client; match as this client |
+| 410 | `select_token_expired` | Match again |
+| 409 | `select_token_request_mismatch` | Send the request ID returned with this token |
+| 409 | `select_token_cart_mismatch` | Use the original cart, or rematch for a new cart |
+| 409 | `select_token_listing_mismatch` | Omit conflicting `catalogItemId` |
+| 409 | `select_token_dropoff_mismatch` | Rematch with the new destination |
+| 409 | `catalog_item_stale` / `deadline_not_met` | Availability changed; refresh/rematch |
+
+Expired records are retained for at least a day after expiry and pruned during subsequent matches; after cleanup an old token returns `invalid_select_token`. None of these refusals changes the cart or places an order.
+
+### Distance and rating fields
+
+Both match routes return `distanceZone: { key, label }` at the response root (the Top Pick) and on each `listings[]` / `otherListings[]` item. Keys/labels come from the same [four delivery fee bands](OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones): `nearby` / Nearby, `away` / Away, `long_distance` / Long Distance, `out_of_zone` / Out of Zone. Without a drop-off, `distanceZone` is `null`; no zone is guessed. The existing rule requiring a pin when distance is ranked first remains.
+
+Only Out of Zone **listing objects** carry `distanceKm`, a JSON number rounded to one decimal (`16`, for example, represents 16.0 km). The match root never carries `distanceKm`. In the other three zones that field is omitted, not null. Match reasons use the zone label in `ranked_distance.detail`, never metres or kilometres. Distance ranking uses zones, never exact metres. Existing staff/Operations distances, order/job snapshots, and cart shop coordinate inputs are unchanged.
+
+The response root and listings include `rating: { average, count }` only at five or more valid quality-star reviews. `average` is rounded to one decimal; `count` is the valid review count used by `shopRating`. Below five reviews, the **entire field is omitted**. Quality ranking retains its existing minimum-review rule and uses the unrounded average internally.
+
+Full and compact cart listing objects have the same fields, using the line drop-off or the cart default. Generic catalog listings have `distanceZone: null` because those reads have no client drop-off; they include `rating` at the same threshold and never `distanceKm`. Photo signing and compact cart stubs keep their existing behavior.
+
+Client follow-up: render these labels and ratings on the Top Pick and listings; stop computing/displaying raw match distances from shop points or reason text. Before selecting an Out of Zone listing, show the delivery-cost warning. Checkout fee previews must read the four-band settings union: flat `feeMinor` for the first three bands, `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)` for the open-ended band. Do not use the rounded display `distanceKm` to calculate a charge. The API does not add a distance rejection or require warning acknowledgement.
 
 ## Cart
 

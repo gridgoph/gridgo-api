@@ -412,7 +412,7 @@ export function receiptReadyDraft(order) {
     occurrenceKey: `receipt:${order.id}`,
     orderId: order.id,
     title: "Your receipt is ready",
-    body: "Open the receipt to see printing, delivery, the service fee and your payment reference.",
+    body: "Open the receipt to see printing, delivery and your payment reference.",
     read: false,
   };
 }

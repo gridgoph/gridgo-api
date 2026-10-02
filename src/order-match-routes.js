@@ -1,3 +1,5 @@
+import { createHash, randomBytes } from "node:crypto";
+import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
@@ -21,11 +23,12 @@ import {
   deliveryFeeForDistance,
   deliverySplit,
   distanceMetersBetween,
+  distanceZoneForDistance,
   downpaymentPercentSetting,
   orderDownpaymentPercent,
   roundBps,
 } from "./operational-model.js";
-import { AvailabilityError } from "./availability.js";
+import { AvailabilityError, fitsDeadline } from "./availability.js";
 import {
   MatchError,
   deadlineDays,
@@ -172,6 +175,44 @@ function preferenceFor(store, userId) {
 function clientFacingMatch(match) {
   const { shopReadyBy: _shopReadyBy, ...clientFacing } = match;
   return clientFacing;
+}
+
+function selectionHash(token) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function resolveMatchSelection(store, user, cart, body, at) {
+  if (!Object.hasOwn(body, "selectToken")) return null;
+  if (typeof body.selectToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(body.selectToken)) {
+    fail(400, "invalid_select_token", "Send a selection token from a match response.");
+  }
+  const saved = (store.matchSelections || []).find((row) => row.tokenHash === selectionHash(body.selectToken));
+  if (!saved) fail(400, "invalid_select_token", "This selection is unknown; match again.");
+  if (saved.clientId !== user.id) fail(403, "foreign_select_token", "This selection belongs to another client.");
+  if (saved.requestId !== body.matchRequestId) fail(409, "select_token_request_mismatch", "Use the request id returned with this selection.");
+  if (Date.parse(saved.expiresAt) <= Date.parse(at)) fail(410, "select_token_expired", "This selection expired; match again.");
+  const selection = saved.selection;
+  if (selection.cartId && selection.cartId !== cart.id) fail(409, "select_token_cart_mismatch", "Use the cart supplied when matching.");
+  if (body.catalogItemId != null && body.catalogItemId !== selection.catalogItemId) {
+    fail(409, "select_token_listing_mismatch", "This token selects a different listing.");
+  }
+  if (selection.dropoff && body.dropoff != null) {
+    const sent = point(body.dropoff, "dropoff", { requireLabel: false });
+    if (sent.lat !== selection.dropoff.lat || sent.lng !== selection.dropoff.lng) {
+      fail(409, "select_token_dropoff_mismatch", "Match again to change the delivery location.");
+    }
+  }
+  body.catalogItemId = selection.catalogItemId;
+  if (selection.dropoff) body.dropoff = selection.dropoff;
+  return selection;
+}
+
+function assertMatchDeadline(store, item, line, at) {
+  if (!line.matchDeadline) return;
+  const { projection } = projectShopFinish(store, { supplierId: item.supplierId,
+    turnaroundHours: itemTurnaroundHours(item, (store.supplierServices || []).find((row) => row.id === item.supplierServiceId)),
+    units: line.quantity, now: at });
+  if (!fitsDeadline(projection, line.matchDeadline)) fail(409, "deadline_not_met", "This listing can no longer make the requested deadline.");
 }
 
 function publicPreference(store, userId) {
@@ -326,6 +367,15 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
         ? publicCartListingStub(store, item, line.optionIds || [])
         : publicCatalogItem(store, item, { selectedOptionIds: line.optionIds || [] }))
       : null;
+    if (listing) {
+      const shop = (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.shop;
+      const dropoff = line.dropoff ?? cart.defaultDropoff;
+      const distance = shop && dropoff ? distanceMetersBetween(shop, dropoff) : null;
+      listing.distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
+      if (listing.distanceZone?.key === "out_of_zone") listing.distanceKm = Number((distance / 1000).toFixed(1));
+      const rating = publicShopRating(store, item.supplierId);
+      if (rating) listing.rating = rating;
+    }
     // Through the pricing engine, not a multiplication: the basket and the
     // invoice have to agree, and a measured or tiered line does not fit in a
     // unit price times a quantity. `lineSubtotalMinor` stays the shop figure;
@@ -404,14 +454,6 @@ function addressPoint(store, userId, body) {
     return { ...address.point, label: address.addressLine };
   }
   return body.dropoff == null ? null : point(body.dropoff, "dropoff");
-}
-
-function preferredSupplierForCart(store, user, cartId) {
-  if (cartId == null) return null;
-  const cart = ownCart(store, user, String(cartId));
-  return (store.cartLines || [])
-    .filter((line) => line.cartId === cart.id)
-    .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id))[0]?.supplierId || null;
 }
 
 function attachOrderFile(file, orderId, field) {
@@ -617,6 +659,11 @@ function checkout(store, user, cart, body, createId, at) {
     now: at,
     units: orderedUnits,
   });
+  for (const line of cartLines) {
+    if (line.matchDeadline && !fitsDeadline(projection, line.matchDeadline)) {
+      fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.");
+    }
+  }
   order.supplierId = job.supplierId;
   order.pickup = { ...job.pickup };
   // The shop's own date, which it is held to. Never shown to the client.
@@ -855,28 +902,34 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     const cartLines = cartId
       ? (store.cartLines || []).filter((row) => row.cartId === cartId)
       : [];
-    return {
-      status: 200,
-      body: clientFacingMatch(matchShop(store, {
-        subcategoryCode: body.subcategoryCode,
-        ranking: body.ranking || publicPreference(store, user.id).ranking,
-        dropoff: addressPoint(store, user.id, body),
-        excludedSupplierIds: body.excludedSupplierIds || [],
-        preferredSupplierId: preferredSupplierForCart(store, user, body.cartId),
-        // The date the client gave before any shop was chosen. Without it the
-        // match cannot filter, and a shop that misses it is only found at
-        // checkout.
-        deadline: body.deadline ?? null,
-        now: now(),
-        measurement: body.measurement,
-        structuredSpec: body.structuredSpec,
-        optionIds: body.optionIds,
-        widthFeet: body.widthFeet,
-        cartLines,
-      })),
-      mutated: false,
+    if (cartId) ownCart(store, user, cartId);
+    const at = now();
+    const input = {
+      subcategoryCode: body.subcategoryCode,
+      ranking: body.ranking ?? publicPreference(store, user.id).ranking,
+      dropoff: addressPoint(store, user.id, body),
+      excludedSupplierIds: body.excludedSupplierIds || [],
+      deadline: body.deadline ?? null,
+      units: body.units == null ? undefined : positiveInteger(body.units, "units"),
+      now: at, measurement: body.measurement, structuredSpec: body.structuredSpec,
+      optionIds: body.optionIds, widthFeet: body.widthFeet, cartLines,
     };
+    const match = clientFacingMatch(matchShop(store, input));
+    const requestId = randomBytes(24).toString("base64url");
+    const expiresAt = new Date(Date.parse(at) + 15 * 60_000).toISOString();
+    // Keep expired records for a day so ordinary expiry has a distinct error.
+    store.matchSelections = (store.matchSelections || []).filter((row) => Date.parse(row.expiresAt) > Date.parse(at) - 86_400_000);
+    for (const listing of [...match.listings, ...match.otherListings]) {
+      const token = randomBytes(32).toString("base64url");
+      store.matchSelections.push({ tokenHash: selectionHash(token), clientId: user.id, requestId, expiresAt,
+        selection: { catalogItemId: listing.id, supplierId: store.catalogItems.find((row) => row.id === listing.id).supplierId,
+          cartId, deadline: input.deadline, dropoff: input.dropoff,
+          subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
+      listing.selectToken = token;
+    }
+    return { status: 200, body: { ...match, matchRequestId: requestId, selectTokenExpiresAt: expiresAt }, mutated: true };
   }
+
   if (req.method === "POST" && pathname === "/me/carts") {
     const body = record(await readBody(req));
     const at = now();
@@ -934,7 +987,8 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
   const linesMatch = /^\/me\/carts\/([^/]+)\/lines$/.exec(pathname);
   if (linesMatch && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(linesMatch[1]), { draft: true });
-    const body = record(await readBody(req));
+    const body = { ...record(await readBody(req)) };
+    const selection = resolveMatchSelection(store, user, cart, body, now());
     const item = (store.catalogItems || []).find((row) => row.id === text(body.catalogItemId, "catalogItemId", 120));
     if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
       fail(409, "catalog_item_stale", "That listing changed or is no longer public.");
@@ -953,6 +1007,12 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
         field: "catalogItemId",
       });
     }
+    if (selection && (item.supplierId !== selection.supplierId || item.subcategoryCode !== selection.subcategoryCode)) {
+      fail(409, "catalog_item_stale", "That listing changed since matching; match again.");
+    }
+    if (selection && (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.isClosed) {
+      fail(409, "catalog_item_stale", "That shop is no longer accepting work; match again.");
+    }
     const measurement = measurementFor(item, body);
     const structuredSpec = body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec"));
     assertPrinterCap(store, item, { measurement, structuredSpec, optionIds: body.optionIds });
@@ -960,11 +1020,13 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id,
       optionIds: [...body.optionIds], quantity: positiveInteger(body.quantity, "quantity"),
       measurement,
+      ...(selection?.deadline ? { matchDeadline: selection.deadline } : {}),
       structuredSpec,
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
     };
     assertCartLinePriceable(store, item, line);
+    assertMatchDeadline(store, item, line, at);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
     if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");

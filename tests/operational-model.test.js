@@ -103,7 +103,7 @@ test("requires delivery fee settings to use actual safe integers", () => {
     expectDomainError(
       () => validateOperationalSettings({
         ...settings,
-        deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }],
+        deliveryFeeBands: settings.deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor } : band),
       }),
       400,
       "invalid_money",
@@ -164,7 +164,7 @@ test("allocates delivery, pickup full-online, and pickup-at-store plans exactly"
 test("uses the provisional configurable distance boundaries exactly", () => {
   const settings = defaultOperationalSettings();
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 4_999, settings }).deliveryFeeMinor, 2_500);
-  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 5_000);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 2_500);
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_000, settings }).deliveryFeeMinor, 5_000);
   assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
 });
@@ -754,7 +754,7 @@ test("delivery split snapshots the rider rate and rounds half-up with an exact r
     [0, 8500, 0, 0], [99, 0, 0, 99], [99, 10000, 99, 0],
   ]) {
     const settings = { ...defaultOperationalSettings(), riderCommissionBps: rate,
-      deliveryFeeBands: [{ maxDistanceMeters: null, feeMinor }] };
+      deliveryFeeBands: defaultOperationalSettings().deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor } : band) };
     const money = plan({ settings });
     settings.riderCommissionBps = 1000;
     assert.equal(money.riderCommissionBps, rate);
@@ -956,4 +956,37 @@ test("production photos use ready attached supplier images, including legacy pro
   assert.deepEqual(publicOrderFor(order, { id: "client", role: "client" }, { files: [] }).productionProgress,
     { status: "waiting_for_photo", photos: [] });
   assert.equal(publicOrderFor(order, { id: "stranger", role: "client" }, store).productionProgress, undefined);
+});
+
+test("hidden client fee breakdowns cover legacy quotes without changing staff copy or stored money", () => {
+  const payments = createPaymentSchedule(plan()).payments;
+  const order = {
+    id: "order", clientId: "client", supplierId: "shop",
+    payments,
+    acceptedQuote: { payments },
+    pendingQuote: { payments },
+    quoteHistory: [{ payments }],
+  };
+  const original = structuredClone(order);
+  for (const visible of [false, true, undefined]) {
+    const store = { settings: { serviceFeeVisibleToClient: visible } };
+    for (const reader of [
+      { id: "client", role: "client" },
+      { id: "shop", role: "supplier" },
+      { id: "ops", role: "ops_admin" },
+      { id: "admin", role: "super_admin" },
+    ]) {
+      const projected = publicOrderFor(order, reader, store);
+      for (const quote of [projected, projected.acceptedQuote, projected.pendingQuote, ...projected.quoteHistory]) {
+        assert.equal(quote.payments.initial.amountMinor, payments.initial.amountMinor);
+        if (reader.role === "client" && visible === false) {
+          assert.equal("componentLines" in quote.payments.initial, false);
+          assert.doesNotMatch(JSON.stringify(quote.payments), /service fee/i);
+        } else {
+          assert.deepEqual(quote.payments.initial.componentLines, payments.initial.componentLines);
+        }
+      }
+    }
+  }
+  assert.deepEqual(order, original);
 });

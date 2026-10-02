@@ -218,9 +218,10 @@ export function defaultOperationalSettings() {
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     deliveryFeeBands: [
-      { maxDistanceMeters: 4_999, feeMinor: 2_500 },
-      { maxDistanceMeters: 10_000, feeMinor: 5_000 },
-      { maxDistanceMeters: null, feeMinor: 7_500 },
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 2_500 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 5_000 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15_000, feeMinor: 7_500 },
+      { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 4_000, perKmMinor: 1_500 },
     ],
   };
 }
@@ -269,44 +270,25 @@ export function validateOperationalSettings(settings) {
     );
   }
   const bands = settings?.deliveryFeeBands;
-  if (!Array.isArray(bands) || bands.length < 1) {
-    fail(
-      400,
-      "invalid_delivery_fee_bands",
-      "Add at least one delivery fee band and finish with an open-ended band.",
-    );
+  const canonical = defaultOperationalSettings().deliveryFeeBands;
+  if (!Array.isArray(bands) || bands.length !== canonical.length) {
+    fail(400, "invalid_delivery_fee_bands", "Set all four delivery zones in order, ending with Out of Zone.");
   }
-  let previous = -1;
   for (let index = 0; index < bands.length; index += 1) {
     const band = bands[index];
-    if (!Number.isSafeInteger(band?.feeMinor) || band.feeMinor < 0) {
-      fail(
-        400,
-        "invalid_money",
-        `deliveryFeeBands[${index}].feeMinor must be a non-negative integer in PHP minor units.`,
-        { field: `deliveryFeeBands[${index}].feeMinor` },
-      );
+    const expected = canonical[index];
+    if (band?.zone !== expected.zone || band?.label !== expected.label
+        || band?.maxDistanceMeters !== expected.maxDistanceMeters) {
+      fail(400, "invalid_delivery_fee_bands", "Keep the four fixed zone keys, labels, and inclusive distance limits in order.");
     }
-    const last = index === bands.length - 1;
-    if (last) {
-      if (band?.maxDistanceMeters !== null) {
-        fail(
-          400,
-          "invalid_delivery_fee_bands",
-          "Make the final delivery fee band open-ended by setting maxDistanceMeters to null.",
-        );
+    const fields = band.zone === "out_of_zone" ? ["baseFeeMinor", "perKmMinor"] : ["feeMinor"];
+    for (const field of fields) {
+      if (!Number.isSafeInteger(band[field]) || band[field] < 0) {
+        fail(400, "invalid_money",
+          `deliveryFeeBands[${index}].${field} must be a non-negative safe integer in PHP minor units.`,
+          { field: `deliveryFeeBands[${index}].${field}` });
       }
-      continue;
     }
-    const maximum = band?.maxDistanceMeters;
-    if (!Number.isSafeInteger(maximum) || maximum < 0 || maximum <= previous) {
-      fail(
-        400,
-        "invalid_delivery_fee_bands",
-        "Set each delivery distance maximum to a larger whole number of metres than the band before it.",
-      );
-    }
-    previous = maximum;
   }
   if (settings?.productionNudge !== undefined) validateProductionNudge(settings.productionNudge);
   return true;
@@ -399,7 +381,7 @@ export function distanceMetersBetween(pickup, dropoff) {
   return Math.round(earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-export function deliveryFeeForDistance(distanceMeters, settings) {
+function deliveryBandForDistance(distanceMeters, settings) {
   validateOperationalSettings(settings);
   const distance = Number(distanceMeters);
   if (!Number.isFinite(distance) || distance < 0) {
@@ -408,7 +390,27 @@ export function deliveryFeeForDistance(distanceMeters, settings) {
   const band = settings.deliveryFeeBands.find(
     (candidate) => candidate.maxDistanceMeters === null || distance <= candidate.maxDistanceMeters,
   );
-  return band.feeMinor;
+  return band;
+}
+
+/** Labels and pricing resolve through exactly the same inclusive band lookup. */
+export function distanceZoneForDistance(distanceMeters, settings) {
+  const band = deliveryBandForDistance(distanceMeters, settings);
+  return { key: band.zone, label: band.label };
+}
+
+export function deliveryFeeForDistance(distanceMeters, settings) {
+  const band = deliveryBandForDistance(distanceMeters, settings);
+  if (band.zone !== "out_of_zone") return band.feeMinor;
+  const kilometres = Math.ceil(Number(distanceMeters) / 1_000);
+  if (!Number.isSafeInteger(kilometres)) {
+    fail(400, "invalid_delivery_distance", "Delivery distance exceeds the supported range.");
+  }
+  const fee = BigInt(band.baseFeeMinor) + BigInt(band.perKmMinor) * BigInt(kilometres);
+  if (fee > BigInt(Number.MAX_SAFE_INTEGER)) {
+    fail(400, "invalid_money", "Delivery fee exceeds the supported safe-integer range.", { field: "deliveryFeeMinor" });
+  }
+  return Number(fee);
 }
 
 export function calculateOrderMoney({
@@ -971,6 +973,16 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  // Legacy payment breakdowns carry fee labels. Hide that breakdown for the
+  // client when checkout hides fees, including immutable quote snapshots.
+  if (owningClient && store?.settings?.serviceFeeVisibleToClient === false) {
+    const quotes = [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])];
+    for (const quote of quotes) {
+      for (const installment of Object.values(quote?.payments || {})) {
+        if (installment && typeof installment === "object") delete installment.componentLines;
+      }
+    }
+  }
   // Derive from the existing history, including pre-field orders. Never trust
   // an arbitrary orders.data field or expose this projection to another party.
   delete publicRecord.correction;
