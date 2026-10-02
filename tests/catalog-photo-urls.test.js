@@ -89,3 +89,12 @@ test("decorateCatalogPhotoUrls keeps fileId when signing fails", async () => {
   assert.equal(body.listings[0].photos[0].downloadUrl, undefined);
   assert.equal(body.listings[0].photos[0].fileId, "file_a");
 });
+
+test("otherListings photos get the same signed URL decoration", async () => {
+  const body = { otherListings: [{ photos: [{ fileId: "opaque", url: "/catalog/media/opaque" }] }] };
+  await decorateCatalogPhotoUrls({}, body, {
+    findFile: () => ({ objectKey: "private-key" }),
+    presignGet: async () => ({ url: "https://signed.test/photo", expiresAt: "soon" }),
+  });
+  assert.equal(body.otherListings[0].photos[0].downloadUrl, "https://signed.test/photo");
+});

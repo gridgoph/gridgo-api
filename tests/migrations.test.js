@@ -49,7 +49,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
-      "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
+      "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions",
@@ -112,6 +112,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1787011200000_artwork_link_provider_formats",
         "1790553600000_client_refunds",
         "1790812800000_delivery_distance_zones",
+        "1790899200000_match_selection_tokens",
       ],
     );
 
@@ -291,7 +292,12 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
-    // Reverse the delivery-zone settings migration first.
+    // Reverse selection tokens and durable cart deadlines.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.client_match_selections`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='client_cart_lines' AND column_name='match_deadline'", [schema])).rows.length, 0);
+
+    // Reverse the delivery-zone settings migration.
     await runner(migrationOptions(schema, "down", 1, client));
 
     // Empty refund schema can be reversed; any financial history refuses down.

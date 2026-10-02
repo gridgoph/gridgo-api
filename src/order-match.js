@@ -24,7 +24,6 @@ export { shopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
  */
 
 export const MATCH_FACTORS = Object.freeze(["quality", "speed", "cost", "distance"]);
-const RANK_WEIGHTS = Object.freeze([0.4, 0.3, 0.2, 0.1]);
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
 
 /** One working day, until Operations sets its own. See `projectFinish`. */
@@ -227,7 +226,7 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, units, n
   return { projection, queue };
 }
 
-function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units, widthRequest }) {
+function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
   const itemsBySupplier = new Map();
@@ -242,110 +241,119 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
   const rows = [];
   const missedDeadline = [];
   for (const [supplierId, items] of itemsBySupplier) {
-    const listings = items
+    const eligibleListings = items
       .map((item) => publicCatalogItem(store, item))
       .filter(Boolean)
-      .filter((listing) => listingFitsPrinterCap(listing, widthRequest, store))
-      .sort((left, right) => left.id.localeCompare(right.id));
-    if (listings.length === 0) continue;
+      .filter((listing) => listingFitsPrinterCap(listing, widthRequest, store));
     const profile = shops.get(supplierId);
-
-    // The fastest thing this shop offers for the work, because that is what it
-    // would put the job on.
-    const turnarounds = listings
-      .map((item) => item.turnaroundHours)
-      .filter((hours) => Number.isSafeInteger(hours) && hours > 0);
-    const turnaroundHours = turnarounds.length ? Math.min(...turnarounds) : 24;
-    const { projection, queue } = projectShopFinish(store, {
-      supplierId,
-      turnaroundHours,
-      now,
-      units,
+    const distance = dropoff ? distanceMetersBetween(profile.shop, dropoff) : null;
+    const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
+    // Rank real listing projections, never combine one listing's low price
+    // with another's fast promise. Each offered listing must meet the deadline.
+    const choices = eligibleListings.map((listing) => {
+      const { projection, queue } = projectShopFinish(store, {
+        supplierId, turnaroundHours: listing.turnaroundHours, now, units,
+      });
+      return {
+        supplierId, listing, projection, distance, distanceZone,
+        queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
+          Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
+        quality: capabilityScore(store, supplierId, [listing]),
+        speed: Math.max(1, Date.parse(projection.promiseBy) - Date.parse(now)),
+        cost: fromPrice([listing]),
+      };
+    }).filter((choice) => {
+      if (fitsDeadline(choice.projection, deadline)) return true;
+      missedDeadline.push({ supplierId, promiseBy: choice.projection.promiseBy });
+      return false;
     });
-
-    const row = {
-      supplierId,
-      shop: matchShopCard(profile, listings),
-      listings,
-      projection,
-      queue: {
-        jobsAhead: queue.jobsAhead,
-        // Hours the client actually waits, counted against the date they are
-        // given -- not the shop's working hours, which run out overnight and at
-        // weekends while the client keeps waiting.
-        estimatedHours: Math.max(
-          0,
-          Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000),
-        ),
-      },
-      quality: capabilityScore(store, supplierId, listings),
-      speed: Math.max(1, Date.parse(projection.promiseBy) - Date.parse(now)),
-      cost: fromPrice(listings),
-      distance: dropoff ? distanceMetersBetween(profile.shop, dropoff) : null,
-    };
-
-    // The filter. A shop that cannot make the date is absent, not last.
-    if (!fitsDeadline(projection, deadline)) {
-      missedDeadline.push({ supplierId, promiseBy: projection.promiseBy });
-      continue;
-    }
+    choices.sort((a, b) => compareFactors(a, b, ranking) || a.listing.id.localeCompare(b.listing.id));
+    if (!choices.length) continue;
+    const row = { ...choices[0], listings: choices.map((choice) => choice.listing), choices,
+      shop: matchShopCard(profile, choices.map((choice) => choice.listing)) };
     rows.push(row);
   }
   return { rows, missedDeadline };
 }
 
+const ZONE_RANK = { nearby: 0, away: 1, long_distance: 2, out_of_zone: 3 };
+const REASON_LABELS = {
+  quality: "Matched for Quality", cost: "Matched for Best Value",
+  speed: "Matched for Fastest Turnaround", distance: "Matched for Distance",
+  vetted: "GRIDGO-Vetted Supplier",
+};
+
+function factorValue(row, factor) {
+  if (factor === "quality") return -Math.floor(row.quality);
+  if (factor === "speed") return Math.floor(Date.parse(row.projection.promiseBy) / 3_600_000);
+  if (factor === "distance") return ZONE_RANK[row.distanceZone?.key] ?? 4;
+  return row.cost ?? Infinity;
+}
+
+function decidingFactor(left, right, ranking) {
+  return right ? ranking.find((factor) => factorValue(left, factor) !== factorValue(right, factor)) : undefined;
+}
+
+function compareFactors(left, right, ranking) {
+  const factor = decidingFactor(left, right, ranking);
+  return factor ? (factorValue(left, factor) < factorValue(right, factor) ? -1 : 1) : 0;
+}
+
 function scoreRows(rows, ranking) {
-  const weights = Object.fromEntries(ranking.map((factor, index) => [factor, RANK_WEIGHTS[index]]));
+  // Retained diagnostic shape for older apps; these numbers never sort rows.
+  const weights = Object.fromEntries(ranking.map((factor, index) => [factor, index === 0 ? 1 : 0]));
   const bestSpeed = Math.min(...rows.map((row) => row.speed));
-  const costs = rows.map((row) => row.cost).filter(Number.isFinite);
-  const bestCost = costs.length ? Math.min(...costs) : null;
-  const distances = rows.map((row) => row.distance).filter(Number.isFinite);
-  const bestDistance = distances.length ? Math.min(...distances) : null;
-  // Every factor is scored against the best candidate in the running, quality
-  // included. Scored absolutely it sat between 50 and 100 while the others
-  // spanned the full range, so the weight a client put on quality was quietly
-  // worth about half of what they asked for.
+  const bestCost = Math.min(...rows.map((row) => row.cost ?? Infinity));
+  const bestDistance = Math.min(...rows.map((row) => row.distance ?? Infinity));
   const bestQuality = Math.max(...rows.map((row) => row.quality));
   for (const row of rows) {
     row.factorScores = {
-      quality: bestQuality > 0 ? Math.min(100, (row.quality / bestQuality) * 100) : 0,
+      quality: bestQuality > 0 ? row.quality / bestQuality * 100 : 0,
       speed: normalizedInverse(row.speed, bestSpeed),
-      cost: bestCost == null || !Number.isFinite(row.cost) ? 0 : normalizedInverse(row.cost, bestCost),
-      distance: bestDistance == null ? 0 : normalizedInverse(row.distance, bestDistance),
+      cost: row.cost == null ? 0 : normalizedInverse(row.cost, bestCost),
+      distance: row.distance == null ? 0 : normalizedInverse(row.distance, bestDistance),
     };
-    row.totalScore = MATCH_FACTORS.reduce(
-      (total, factor) => total + row.factorScores[factor] * weights[factor],
-      0,
-    );
+    row.totalScore = row.factorScores[ranking[0]];
   }
-  rows.sort((left, right) => right.totalScore - left.totalScore || left.supplierId.localeCompare(right.supplierId));
+  rows.sort((a, b) => compareFactors(a, b, ranking) || a.supplierId.localeCompare(b.supplierId));
   return weights;
 }
 
-function reasonsFor(row, ranking, preferred, alternativesCount, distanceZone) {
+// An allowlist: never spread a catalog record into an anonymous match card.
+function otherListing(row) {
+  const item = row.listing;
+  return {
+    ...Object.fromEntries([
+      "categoryCode", "subcategoryCode", "basePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
+      "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
+      "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
+      "turnaroundHours", "minimumTurnaroundHours", "rush", "acceptedFormats", "optionGroups", "version",
+    ].map((key) => [key, item[key]])),
+    id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
+    fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,
+    pricingUnit: item.pricingUnit, packageQty: item.packageQty,
+    distanceZone: row.distanceZone,
+    ...(row.distanceZone?.key === "out_of_zone" ? { distanceKm: Number((row.distance / 1000).toFixed(1)) } : {}),
+    ...(item.rating ? { rating: item.rating } : {}),
+    readyBy: row.projection.promiseBy, placeInLine: row.queue.jobsAhead + 1,
+  };
+}
+
+function reasonsFor(row, ranking, distanceZone) {
   const reasons = ranking.map((factor, index) => {
     const detail = factor === "quality"
-      ? `${Math.round(row.quality)}% listing completeness and approved standing`
+      ? `${Math.round(row.quality)} quality points from established ratings or listing completeness and approved standing`
       : factor === "speed"
         ? `${row.queue.jobsAhead} jobs ahead; ready by ${row.projection.promiseBy}`
         : factor === "cost"
           ? row.cost == null
             ? "This shop has not published a starting price"
-            : `Cheapest of the ${alternativesCount + 1} that can make your date`
+            : `Starting price: ${row.cost} PHP minor units`
           : row.distance == null
             ? "Distance was not scored because no delivery pin was supplied"
             : distanceZone.label;
-    return { code: `ranked_${factor}`, factor, rank: index + 1, weight: RANK_WEIGHTS[index], detail };
+    return { code: `ranked_${factor}`, factor, rank: index + 1, weight: index === 0 ? 1 : 0, detail };
   });
-  if (preferred) {
-    reasons.unshift({
-      code: "same_shop_bundle",
-      factor: "bundle",
-      rank: 0,
-      weight: 1,
-      detail: "This shop is already in the cart and has an eligible listing for the requested work.",
-    });
-  }
   return reasons;
 }
 
@@ -376,13 +384,16 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     deadline: null,
     now: at,
     units: null,
+    ranking: ["speed", "quality", "cost", "distance"],
   });
 
   const promises = [...rows, ...missedDeadline]
     // A candidate that passed carries its date on its projection; one that was
     // filtered out carries it directly. Reading only one of the two shapes is
     // how this quietly answered "nobody can" for every day.
-    .map((row) => Date.parse(row.promiseBy ?? row.projection?.promiseBy))
+    .map((row) => row.choices
+      ? Math.min(...row.choices.map((choice) => Date.parse(choice.projection.promiseBy)))
+      : Date.parse(row.promiseBy))
     .filter((value) => Number.isFinite(value))
     .sort((left, right) => left - right);
 
@@ -462,6 +473,7 @@ export function matchShop(store, input = {}) {
     deadline,
     now,
     units: input.units,
+    ranking,
     widthRequest: {
       widthFeet: input.widthFeet,
       measurement: input.measurement,
@@ -481,28 +493,32 @@ export function matchShop(store, input = {}) {
       fail(409, "deadline_not_met", "No open shop can finish this by the date you gave.", {
         field: "deadline",
         earliestAvailable: soonest,
-        shopsConsidered: missedDeadline.length,
+        shopsConsidered: new Set(missedDeadline.map((row) => row.supplierId)).size,
       });
     }
     fail(404, "match_not_found", "No approved open shop currently has a public listing for this subcategory.");
   }
 
   const weights = scoreRows(rows, ranking);
-  const preferredSupplierId = input.preferredSupplierId == null ? null : String(input.preferredSupplierId);
-  const preferred = preferredSupplierId ? rows.find((row) => row.supplierId === preferredSupplierId) : null;
-  const winner = preferred || rows[0];
+  const winner = rows[0];
+  const reasonKey = decidingFactor(winner, rows[1], ranking) || "vetted";
   const alternativesCount = rows.length - 1;
 
   const distanceZone = winner.distance == null ? null : distanceZoneForDistance(winner.distance, store.settings);
   const rating = publicShopRating(store, winner.supplierId);
   return {
+    ranking,
+    matchReason: { key: reasonKey, label: REASON_LABELS[reasonKey] },
+    otherListings: rows.slice(1).map(otherListing),
     distanceZone,
     ...(rating ? { rating } : {}),
     shop: winner.shop,
     queue: winner.queue,
-    reasons: reasonsFor(winner, ranking, Boolean(preferred), alternativesCount, distanceZone),
-    listings: winner.listings.map((listing) => ({
-      ...listing,
+    reasons: reasonsFor(winner, ranking, distanceZone),
+    listings: winner.choices.map((choice) => ({
+      ...choice.listing,
+      readyBy: choice.projection.promiseBy,
+      placeInLine: choice.queue.jobsAhead + 1,
       distanceZone,
       ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((winner.distance / 1000).toFixed(1)) } : {}),
     })),

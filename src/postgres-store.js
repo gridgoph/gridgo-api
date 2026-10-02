@@ -36,6 +36,7 @@ const TABLES = [
   { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
+  { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "schedule", "version", "updated_at"] },
@@ -68,7 +69,7 @@ const TABLES = [
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "artwork_links", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "artwork_links", "match_deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
   { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
@@ -101,6 +102,7 @@ export function emptyStore() {
     userRoleMemberships: [],
     clientProfiles: [],
     clientPreferences: [],
+    matchSelections: [],
     clientAddresses: [],
     supplierProfiles: [],
     supplierPaymentTerms: [],
@@ -190,6 +192,10 @@ function rowsFromStore(store) {
   }
   for (const profile of (store.clientProfiles || [])) {
     rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, updated_at: profile.updatedAt });
+  }
+  for (const selection of (store.matchSelections || [])) {
+    rows.client_match_selections.push({ token_hash: selection.tokenHash, client_id: selection.clientId,
+      request_id: selection.requestId, expires_at: selection.expiresAt, selection: selection.selection });
   }
   for (const preference of (store.clientPreferences || [])) {
     rows.client_match_preferences.push({
@@ -500,6 +506,7 @@ function rowsFromStore(store) {
       structured_spec: line.structuredSpec || {},
       artwork_file_id: line.artworkFileId ?? null,
       artwork_links: JSON.stringify(line.artworkLinks || []),
+      match_deadline: line.matchDeadline ?? null,
       mockup_file_id: line.mockupFileId ?? null,
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
@@ -717,6 +724,10 @@ export async function loadStore(database) {
     present(item, "businessNature", row.business_nature);
     return item;
   });
+  store.matchSelections = orderedBy(loaded.client_match_selections, "token_hash").map((row) => ({
+    tokenHash: row.token_hash, clientId: row.client_id, requestId: row.request_id,
+    expiresAt: row.expires_at, selection: row.selection,
+  }));
   store.clientPreferences = orderedBy(loaded.client_match_preferences, "client_id").map((row) => ({
     userId: row.client_id, ranking: row.ranking, version: row.version, updatedAt: row.updated_at,
   }));
@@ -881,6 +892,7 @@ export async function loadStore(database) {
       optionIds: row.option_ids || [], quantity: row.quantity, structuredSpec: row.structured_spec || {},
       sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
     };
+    present(item, "matchDeadline", row.match_deadline);
     present(item, "artworkFileId", row.artwork_file_id);
     if (row.artwork_links?.length) item.artworkLinks = row.artwork_links;
     present(item, "mockupFileId", row.mockup_file_id);

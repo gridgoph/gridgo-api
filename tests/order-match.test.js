@@ -145,8 +145,7 @@ test("minor-unit multiplication stays integer-safe without materializing quantit
 
 /**
  * Four shops identical but for one factor each. Ranking a factor first has to
- * decide the winner when the others are level -- which is the only claim the
- * ranking screen makes, and the only one the weights can honestly support.
+ * decide the winner, even when a later factor favors a different shop.
  */
 function fourWayStore() {
   const store = fixture();
@@ -181,12 +180,13 @@ test("the first-ranked factor decides when the others are level", () => {
     const ranking = [factor, ...MATCH_FACTORS.filter((entry) => entry !== factor)];
     const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking, dropoff: DROPOFF });
     assert.equal(result.shop.supplierId, winner, `${factor} ranked first should pick ${winner}`);
-    assert.equal(result.score.weights[factor], 0.4);
+    assert.equal(result.score.weights[factor], 1);
+    assert.equal(result.matchReason.key, factor);
     assert.ok(result.reasons.some((reason) => reason.factor === factor && reason.rank === 1));
   }
 });
 
-test("matching applies 40/30/20/10 ranked weights and reports queue and alternatives", () => {
+test("matching applies strict priority and reports the winning queue and alternatives", () => {
   const store = fixture();
   addShop(store, { id: "supplier_quality", lat: 7.08, lng: 125.62, turnaroundHours: 36, prepSteps: 3 });
   addShop(store, { id: "supplier_speed", lat: 7.15, lng: 125.65, turnaroundHours: 6, openJobs: 2, description: "", prepSteps: 0 });
@@ -203,15 +203,14 @@ test("matching applies 40/30/20/10 ranked weights and reports queue and alternat
   assert.equal(result.alternativesCount, 2); // the closed shop is not a candidate
   assert.equal(result.listings.length, 1);
   assert.equal(result.listings[0].subcategoryCode, "flyers");
-  assert.equal(result.queue.jobsAhead, 2); // the winner's own queue, not the fleet's
+  assert.equal(result.queue.jobsAhead, 0); // the winner's own queue, not the fleet's
   assert.ok(result.queue.estimatedHours > 0);
-  assert.equal(result.score.weights.quality, 0.4);
-  assert.equal(result.score.weights.speed, 0.3);
-  assert.equal(result.score.weights.cost, 0.2);
-  assert.equal(result.score.weights.distance, 0.1);
-  // Ranking a factor first weights it most; it does not make it a veto. A shop
-  // six times faster still beats a small edge in listing completeness.
-  assert.equal(result.shop.supplierId, "supplier_speed");
+  assert.equal(result.score.weights.quality, 1);
+  assert.equal(result.score.weights.speed, 0);
+  assert.equal(result.score.weights.cost, 0);
+  assert.equal(result.score.weights.distance, 0);
+  // Lower priorities cannot offset a quality advantage.
+  assert.equal(result.shop.supplierId, "supplier_quality");
 });
 
 test("distance-first matching requires a drop-off and ties break on shop id", () => {
@@ -262,7 +261,7 @@ test("matching scores only the requested subcategory and skips shops with no pub
   assert.deepEqual(result.shop.services, []);
 });
 
-test("same-shop bundling wins when the cart shop has a public listing in the requested subcategory", () => {
+test("a cart shop cannot override the requested strict ranking", () => {
   const store = fixture();
   addShop(store, { id: "supplier_existing", lat: 7.20, lng: 125.70, turnaroundHours: 72, description: "", prepSteps: 0 });
   addShop(store, { id: "supplier_best", lat: 7.071, lng: 125.611, turnaroundHours: 4, prepSteps: 3 });
@@ -275,8 +274,8 @@ test("same-shop bundling wins when the cart shop has a public listing in the req
     preferredSupplierId: "supplier_existing",
   });
 
-  assert.equal(result.shop.supplierId, "supplier_existing");
-  assert.ok(result.reasons.some((reason) => reason.code === "same_shop_bundle"));
+  assert.equal(result.shop.supplierId, "supplier_best");
+  assert.equal(result.reasons.some((reason) => reason.code === "same_shop_bundle"), false);
   assert.equal(result.alternativesCount, 1);
 });
 
@@ -538,4 +537,82 @@ test("a kind of work nobody prints has no possible day at all", () => {
   });
   assert.equal(answer.earliest, null);
   assert.equal(answer.days.every((day) => day.state === "cannot"), true);
+});
+
+test("quality wins even when another shop is cheaper, much faster and nearby", () => {
+  const store = fixture();
+  addShop(store, { id: "far", lat: 7.9, lng: 125.9, turnaroundHours: 100, priceMinor: 99_999, reviews: [5, 5, 5, 5, 5] });
+  addShop(store, { id: "near", ...DROPOFF, turnaroundHours: 1, priceMinor: 1, reviews: [4, 4, 4, 4, 4] });
+  const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking: MATCH_FACTORS, dropoff: DROPOFF });
+  assert.equal(result.shop.supplierId, "far");
+  assert.deepEqual(result.matchReason, { key: "quality", label: "Matched for Quality" });
+  assert.equal(result.otherListings[0].id, "item_near_flyers");
+});
+
+test("reason names the factor separating the final tied contenders, or vetted", () => {
+  const store = fixture();
+  for (const id of ["b", "a"]) addShop(store, { id, ...DROPOFF, turnaroundHours: 2 });
+  const input = { now: AT, subcategoryCode: "flyers", ranking: MATCH_FACTORS, dropoff: DROPOFF };
+  assert.deepEqual(matchShop(store, input).matchReason, { key: "vetted", label: "GRIDGO-Vetted Supplier" });
+  store.catalogItems[0].basePriceMinor += 1;
+  assert.equal(matchShop(store, input).matchReason.key, "cost", "one centavo separates prices");
+  const single = matchShop(store, { ...input, excludedSupplierIds: ["b"] });
+  assert.equal(single.matchReason.key, "vetted");
+});
+
+test("same quality point and distance zone tie; raw distance gives no boost", () => {
+  const store = fixture();
+  addShop(store, { id: "a_farther", lat: 7.08, lng: 125.61, turnaroundHours: 2, reviews: Array(100).fill(4) });
+  addShop(store, { id: "z_nearer", ...DROPOFF, turnaroundHours: 2, reviews: [...Array(99).fill(4), 5] });
+  const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking: ["quality", "distance", "speed", "cost"], dropoff: DROPOFF });
+  assert.equal(result.shop.supplierId, "a_farther");
+  assert.equal(result.matchReason.key, "vetted");
+});
+
+test("other shops are complete, ordered, deadline-filtered and use the best feasible listing", () => {
+  const store = fixture();
+  for (const [id, priceMinor, turnaroundHours] of [["top", 100, 1], ["second", 200, 2], ["third", 300, 3], ["late", 1, 300]]) {
+    addShop(store, { id, ...DROPOFF, turnaroundHours, priceMinor });
+  }
+  const base = store.catalogItems.find((row) => row.supplierId === "second");
+  store.catalogItems.push({ ...base, id: "second_slow_cheap", basePriceMinor: 1, turnaroundMode: "override", turnaroundHours: 300 });
+  store.catalogItemPhotos.push({ ...store.catalogItemPhotos.find((row) => row.catalogItemId === base.id), catalogItemId: "second_slow_cheap" });
+  const input = { now: AT, subcategoryCode: "flyers", ranking: ["cost", "speed", "quality", "distance"], dropoff: DROPOFF, deadline: "2026-08-25T00:00:00.000Z" };
+  const result = matchShop(store, input);
+  assert.equal(result.shop.supplierId, "top");
+  assert.deepEqual(result.otherListings.map((row) => row.id), ["item_second_flyers", "item_third_flyers"]);
+  for (const listing of result.otherListings) {
+    assert.ok(Date.parse(listing.readyBy) <= Date.parse(input.deadline));
+    assert.equal(listing.placeInLine, 1);
+    for (const key of ["supplierId", "supplierServiceId", "shop", "shopName", "address", "contact", "logo", "rating", "distanceKm", "matchReason"]) assert.equal(Object.hasOwn(listing, key), false, key);
+  }
+  assert.equal(matchShop(store, { ...input, deadline: null }).otherListings.length, 3);
+  store.catalogItems.reverse(); store.supplierProfiles.reverse();
+  assert.deepEqual(matchShop(store, input), result, "store traversal cannot change ranking");
+});
+
+test("speed ties within a UTC promise hour and the next factor decides", () => {
+  const store = fixture();
+  const schedule = (opensMinute) => ({ utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute, closesMinute: 1080 }], closures: [] });
+  addShop(store, { id: "slower", ...DROPOFF, turnaroundHours: 1, priceMinor: 100, schedule: schedule(510) });
+  addShop(store, { id: "faster", ...DROPOFF, turnaroundHours: 1, priceMinor: 200, schedule: schedule(480) });
+  const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking: ["speed", "cost", "quality", "distance"] });
+  assert.equal(result.shop.supplierId, "slower", "09:00 and 09:30 are in the same promise-hour bucket");
+  assert.deepEqual(result.matchReason, { key: "cost", label: "Matched for Best Value" });
+  const calendar = deadlineDays(store, { now: AT, subcategoryCode: "flyers", days: 7 });
+  assert.equal(calendar.earliest, "2026-08-24T01:00:00.000Z");
+});
+
+test("other listings expose established ratings, zone-only distances, and queue position", () => {
+  const store = fixture();
+  addShop(store, { id: "top", ...DROPOFF, turnaroundHours: 1, priceMinor: 100 });
+  addShop(store, { id: "far", lat: 7.9, lng: 125.9, turnaroundHours: 2, priceMinor: 200, openJobs: 2, reviews: [5, 5, 4, 5, 5] });
+  const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking: ["cost", "speed", "quality", "distance"], dropoff: DROPOFF });
+  const other = result.otherListings[0];
+  assert.equal(other.distanceZone.key, "out_of_zone");
+  assert.equal(typeof other.distanceKm, "number");
+  assert.deepEqual(other.rating, { average: 4.8, count: 5 });
+  assert.equal(other.placeInLine, 3);
+  assert.deepEqual(other.optionGroups, []);
+  assert.equal(other.measurementKind, "none");
 });

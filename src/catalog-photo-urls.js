@@ -24,8 +24,8 @@ export function catalogItemsWithPhotos(body) {
       if (item?.photos) items.push(item);
     }
   }
-  if (Array.isArray(body?.listings)) {
-    for (const item of body.listings) {
+  for (const listings of [body?.listings, body?.otherListings]) {
+    for (const item of listings || []) {
       if (item?.photos) items.push(item);
     }
   }
