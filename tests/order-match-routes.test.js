@@ -950,14 +950,14 @@ test("Out of Zone stays available, cart listings carry zones and ratings, checko
     payment: { method: "qr_manual", proofFileId: "file_qr", reference: "OUT-OF-ZONE" },
   });
   assert.equal(placed.status, 201);
-  assert.equal(placed.body.order.deliveryFeeMinor, 24500);
+  assert.equal(placed.body.order.deliveryFeeMinor, 29500);
   const order = store.orders.find((row) => row.id === placed.body.order.id);
-  assert.equal(order.riderPayoutMinor, 20825);
-  assert.equal(order.platformDeliveryShareMinor, 3675);
+  assert.equal(order.riderPayoutMinor, 25075);
+  assert.equal(order.platformDeliveryShareMinor, 4425);
   assert.equal(store.orderJobs[0].deliveryDistanceMeters, 16001);
   store.settings.deliveryFeeBands[3].perKmMinor = 2000;
-  assert.equal(publicOrderFor(order, client, store).deliveryFeeMinor, 24500);
-  assert.equal(store.orderJobs[0].deliveryFeeMinor, 24500);
+  assert.equal(publicOrderFor(order, client, store).deliveryFeeMinor, 29500);
+  assert.equal(store.orderJobs[0].deliveryFeeMinor, 29500);
 });
 
 test("anonymous alternatives select the right shop with request-bound tokens and preserve saved preferences", async () => {

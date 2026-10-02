@@ -113,6 +113,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1790553600000_client_refunds",
         "1790812800000_delivery_distance_zones",
         "1790899200000_match_selection_tokens",
+        "1790985600000_out_of_zone_delivery_price",
       ],
     );
 
@@ -291,6 +292,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverse the guarded Out of Zone price change.
+    await runner(migrationOptions(schema, "down", 1, client));
 
     // Reverse selection tokens and durable cart deadlines.
     await runner(migrationOptions(schema, "down", 1, client));
@@ -975,7 +979,7 @@ test("delivery zones migrate fees and settings version without touching existing
     `);
     const before = {};
     for (const table of ["orders", "order_jobs"]) before[table] = (await client.query(`SELECT * FROM ${table}`)).rows;
-    await runner(migrationOptions(schema, "up", undefined, client));
+    await runner(migrationOptions(schema, "up", 1, client));
     const { version, settings } = (await client.query("SELECT version, settings FROM platform_settings")).rows[0];
     assert.equal(version, 13);
     assert.equal(settings.serviceFeeRateBps, 1000);
@@ -985,6 +989,40 @@ test("delivery zones migrate fees and settings version without touching existing
       { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 9300 },
       { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 7500, perKmMinor: 1000 },
     ]);
+    await runner(migrationOptions(schema, "up", undefined, client));
+    assert.equal((await client.query("SELECT version FROM platform_settings")).rows[0].version, 14);
     for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows, before[table]);
   });
 });
+
+for (const [baseFeeMinor, perKmMinor] of [[7500, 1000], [8000, 1200], [7500, 1200], [8000, 1000]]) {
+  test(`Out of Zone price migration guards ${baseFeeMinor}/${perKmMinor} and preserves flat fees`, { skip: !DATABASE_URL }, async (t) => {
+    await withMigrationSchema(t, async ({ schema, client }) => {
+      const { readdir } = await import("node:fs/promises");
+      const oldCount = (await readdir(MIGRATIONS_DIR)).filter((name) => name.endsWith(".js") && name < "1790985600000").length;
+      await runner(migrationOptions(schema, "up", oldCount, client));
+      const settings = { serviceFeeRateBps: 1000, deliveryFeeBands: [
+        { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 8900 },
+        { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 14900 },
+        { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 22900 },
+        { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor, perKmMinor },
+      ] };
+      await client.query("INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 12, $1)", [settings]);
+      const read = async () => (await client.query("SELECT version, settings FROM platform_settings")).rows[0];
+      const changed = baseFeeMinor === 7500 && perKmMinor === 1000;
+      const expected = structuredClone(settings);
+      if (changed) Object.assign(expected.deliveryFeeBands[3], { baseFeeMinor: 4000, perKmMinor: 1500 });
+      await runner(migrationOptions(schema, "up", 1, client));
+      assert.deepEqual(await read(), { version: changed ? 13 : 12, settings: expected });
+      await runner(migrationOptions(schema, "down", 1, client));
+      assert.deepEqual(await read(), { version: changed ? 14 : 12, settings });
+      if (changed) {
+        await runner(migrationOptions(schema, "up", 1, client));
+        expected.deliveryFeeBands[3].perKmMinor = 1800;
+        await client.query("UPDATE platform_settings SET settings = $1", [expected]);
+        await runner(migrationOptions(schema, "down", 1, client));
+        assert.deepEqual(await read(), { version: 15, settings: expected });
+      }
+    });
+  });
+}

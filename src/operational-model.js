@@ -221,7 +221,7 @@ export function defaultOperationalSettings() {
       { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 2_500 },
       { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 5_000 },
       { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15_000, feeMinor: 7_500 },
-      { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 7_500, perKmMinor: 1_000 },
+      { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 4_000, perKmMinor: 1_500 },
     ],
   };
 }

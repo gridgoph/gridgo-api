@@ -6,7 +6,7 @@ const bands = () => [
   { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 2500 },
   { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 5000 },
   { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 7500 },
-  { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 7500, perKmMinor: 1000 },
+  { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500 },
 ];
 
 test("one inclusive zone table determines the distance label and delivery price", () => {
@@ -15,9 +15,10 @@ test("one inclusive zone table determines the distance label and delivery price"
     [0, "nearby", "Nearby", 2500], [4999, "nearby", "Nearby", 2500],
     [5000, "nearby", "Nearby", 2500], [5001, "away", "Away", 5000],
     [10000, "away", "Away", 5000], [10001, "long_distance", "Long Distance", 7500],
-    [15000, "long_distance", "Long Distance", 7500], [15001, "out_of_zone", "Out of Zone", 23500],
-    [16000, "out_of_zone", "Out of Zone", 23500], [16001, "out_of_zone", "Out of Zone", 24500],
-    [20550, "out_of_zone", "Out of Zone", 28500],
+    [15000, "long_distance", "Long Distance", 7500], [15001, "out_of_zone", "Out of Zone", 28000],
+    [16000, "out_of_zone", "Out of Zone", 28000], [16001, "out_of_zone", "Out of Zone", 29500],
+    [16200, "out_of_zone", "Out of Zone", 29500],
+    [20550, "out_of_zone", "Out of Zone", 35500],
   ]) {
     assert.equal(model.deliveryFeeForDistance(distance, settings), fee, `${distance}m fee`);
     assert.deepEqual(model.distanceZoneForDistance(distance, settings), { key, label }, `${distance}m zone`);
