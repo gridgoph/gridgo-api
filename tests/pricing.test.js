@@ -302,3 +302,16 @@ test("GRIDGO amount is the shop figure plus the fee, in minor units, no floats",
   assert.equal(gridgoAmountMinor(0, 4_500), 0);
   assert.equal(gridgoAmountMinor(null, 4_500), null);
 });
+
+test("client pricing errors do not disclose the service fee or its rate", () => {
+  for (const rate of [-1, 10_001, 1.5, "1000", undefined]) {
+    assert.throws(() => gridgoAmountMinor(1_200, rate), (error) => {
+      assert.equal(error instanceof PricingError, true);
+      assert.equal(error.status, 503);
+      assert.equal(error.code, "pricing_unavailable");
+      assert.equal(error.message, "Pricing is temporarily unavailable. Please try again later.");
+      assert.doesNotMatch(JSON.stringify(error), /service.?fee|basis points/i);
+      return true;
+    });
+  }
+});
