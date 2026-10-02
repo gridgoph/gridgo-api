@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { pushMessageFor } from "../src/push.js";
 
 import {
   backfillOrderInboxNotifications,
@@ -504,13 +505,18 @@ test("an already rated job is not asked again", () => {
   );
 });
 
-test("checkout writes a receipt-ready row once", () => {
-  const store = { notifications: [] };
-  const order = { id: "ord_1", clientId: "user_c", state: "initial_payment_review" };
-  let n = 0;
-  const first = notifyClientReceiptReady(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
-  assert.equal(first.created, true);
-  assert.equal(first.notification.type, "order_receipt_ready");
-  const second = notifyClientReceiptReady(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
-  assert.equal(second.created, false);
-});
+for (const serviceFeeVisibleToClient of [false, true, undefined]) {
+  test(`checkout receipt stays neutral and writes once (fee visibility: ${serviceFeeVisibleToClient})`, () => {
+    const store = { notifications: [], settings: { serviceFeeVisibleToClient } };
+    const order = { id: "ord_1", clientId: "user_c", state: "initial_payment_review" };
+    let n = 0;
+    const first = notifyClientReceiptReady(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
+    assert.equal(first.created, true);
+    assert.equal(first.notification.type, "order_receipt_ready");
+    assert.equal(first.notification.body, "Open the receipt to see printing, delivery and your payment reference.");
+    const push = pushMessageFor(first.notification);
+    assert.doesNotMatch(`${push.title} ${push.body}`, /service.?fee|10%|basis points/i);
+    const second = notifyClientReceiptReady(store, order, { createId: () => `ntf_${++n}`, at: "2026-09-21T00:00:00.000Z" });
+    assert.equal(second.created, false);
+  });
+}

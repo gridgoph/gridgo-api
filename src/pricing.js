@@ -371,10 +371,9 @@ export function gridgoAmountMinor(supplierMinor, serviceFeeRateBps) {
   const shop = minor(supplierMinor, "supplierMinor");
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
     fail(
-      400,
-      "invalid_service_fee_rate",
-      "Set the client service-fee rate to a whole number from 0 to 10,000 basis points.",
-      { field: "serviceFeeRateBps" },
+      503,
+      "pricing_unavailable",
+      "Pricing is temporarily unavailable. Please try again later.",
     );
   }
   const fee = divideRounded(shop * BigInt(serviceFeeRateBps), BPS);

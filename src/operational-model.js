@@ -973,6 +973,16 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  // Legacy payment breakdowns carry fee labels. Hide that breakdown for the
+  // client when checkout hides fees, including immutable quote snapshots.
+  if (owningClient && store?.settings?.serviceFeeVisibleToClient === false) {
+    const quotes = [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])];
+    for (const quote of quotes) {
+      for (const installment of Object.values(quote?.payments || {})) {
+        if (installment && typeof installment === "object") delete installment.componentLines;
+      }
+    }
+  }
   // Derive from the existing history, including pre-field orders. Never trust
   // an arbitrary orders.data field or expose this projection to another party.
   delete publicRecord.correction;

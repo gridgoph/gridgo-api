@@ -957,3 +957,36 @@ test("production photos use ready attached supplier images, including legacy pro
     { status: "waiting_for_photo", photos: [] });
   assert.equal(publicOrderFor(order, { id: "stranger", role: "client" }, store).productionProgress, undefined);
 });
+
+test("hidden client fee breakdowns cover legacy quotes without changing staff copy or stored money", () => {
+  const payments = createPaymentSchedule(plan()).payments;
+  const order = {
+    id: "order", clientId: "client", supplierId: "shop",
+    payments,
+    acceptedQuote: { payments },
+    pendingQuote: { payments },
+    quoteHistory: [{ payments }],
+  };
+  const original = structuredClone(order);
+  for (const visible of [false, true, undefined]) {
+    const store = { settings: { serviceFeeVisibleToClient: visible } };
+    for (const reader of [
+      { id: "client", role: "client" },
+      { id: "shop", role: "supplier" },
+      { id: "ops", role: "ops_admin" },
+      { id: "admin", role: "super_admin" },
+    ]) {
+      const projected = publicOrderFor(order, reader, store);
+      for (const quote of [projected, projected.acceptedQuote, projected.pendingQuote, ...projected.quoteHistory]) {
+        assert.equal(quote.payments.initial.amountMinor, payments.initial.amountMinor);
+        if (reader.role === "client" && visible === false) {
+          assert.equal("componentLines" in quote.payments.initial, false);
+          assert.doesNotMatch(JSON.stringify(quote.payments), /service fee/i);
+        } else {
+          assert.deepEqual(quote.payments.initial.componentLines, payments.initial.componentLines);
+        }
+      }
+    }
+  }
+  assert.deepEqual(order, original);
+});
