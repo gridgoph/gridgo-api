@@ -2492,8 +2492,12 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(duplicateSubmit.status, 409, JSON.stringify(duplicateSubmit.body));
     assert.equal(duplicateSubmit.body.error, "approval_state_conflict");
 
-    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+    const riderDelete = await request(instance.api, "/files/file_rider_license_new", {
       method: "DELETE", subject: "clerk_rider_new",
+    });
+    assert.equal(riderDelete.status, 403);
+    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+      method: "DELETE", subject: "clerk_super", body: { reason: "Invalid verification evidence" },
     });
     assert.equal(licenseDeleted.status, 200, JSON.stringify(licenseDeleted.body));
     assert.equal(licenseDeleted.body.file.state, "deleted");

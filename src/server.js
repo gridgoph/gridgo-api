@@ -1,3 +1,4 @@
+import { createFileRetention } from "./file-retention.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
@@ -61,8 +62,6 @@ import {
   createPendingFile,
   findFile,
   markFileDeleted,
-  invalidateRiderDocumentsForFile,
-  markFileDeletePending,
   markFileReady,
   parseMultipartStream,
   publicFile,
@@ -241,6 +240,10 @@ const tracker = createTracker({
   load: () => load(),
   save: (store) => save(store),
   audit: (store, entry) => audit(store, entry),
+});
+const fileRetention = createFileRetention({ database, storage: objectStorage,
+  load: () => load(), save: (store) => save(store), now, id,
+  enabled: process.env.GRIDGO_FILE_RETENTION_DELETE_ENABLED === "true",
 });
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
@@ -2769,33 +2772,22 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (req.method === "GET" && pathname === "/admin/files/retention") {
+      if (user.role !== "super_admin") return send(res, 403, { error: "forbidden" });
+      return send(res, 200, await fileRetention.run({ dryRun: true }));
+    }
+
     if (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname)) {
-      const fileId = pathname.split("/")[2];
-      const pending = await enqueueMutation(async () => {
-        const latestStore = await load();
+      const body = await readBody(req);
+      const deleted = await fileRetention.deleteEarly(pathname.split("/")[2], async (latestStore) => {
         const latestUser = selectActorRole(
           latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
           { restrictMemberships: Boolean(eventRole) },
         );
-        if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
-        const latestFile = findFile(latestStore, fileId);
-        const alreadyDeleted = latestFile?.state === "deleted";
-        const deleteRequestedAt = now();
-        markFileDeletePending(latestFile, latestUser, deleteRequestedAt);
-        invalidateRiderDocumentsForFile(latestStore, latestFile, deleteRequestedAt);
-        await save(latestStore);
-        return { alreadyDeleted, file: latestFile, objectKey: latestFile.objectKey };
-      });
-      if (pending.alreadyDeleted) return send(res, 200, { file: publicFile(pending.file) });
-      await objectStorage.deleteObject(pending.objectKey);
-      const deleted = await enqueueMutation(async () => {
-        const latestStore = await load();
-        const latestFile = findFile(latestStore, fileId);
-        markFileDeleted(latestFile, now());
-        await save(latestStore);
-        return latestFile;
-      });
-      return send(res, 200, { file: publicFile(deleted) });
+        if (latestUser && accountHoldDenial(latestUser)) throw new AttachmentError(403, "forbidden");
+        return latestUser;
+      }, body?.reason);
+      return send(res, 200, { file: publicFile(deleted, user) });
     }
 
     // ---- push device registrations ----
@@ -3181,12 +3173,8 @@ async function handleRequest(req, res) {
           settings: publicOperationalSettings(store.settings, store),
         });
       }
-      const previous = previousId ? findFile(store, previousId) : null;
       store.settings = { ...store.settings, paymentQrFileId: file.fileId };
       store.version += 1;
-      if (previous && previous.state === "ready" && !previous.deletedAt && !previous.deleteRequestedAt) {
-        markFileDeletePending(previous, user, now());
-      }
       audit(store, {
         actor: user,
         action: "settings.payment_qr_replace",
@@ -6242,8 +6230,8 @@ const server = http.createServer((req, res) => {
   }
   logHttpRequest(req, res, pathname, Date.now());
   const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
-  // File transfers and MinIO calls stay outside database transactions. File routes
-  // acquire one only for short load -> validate -> mutate -> commit sections.
+  // Upload/attach routes queue their own transactions. Deletion commits intent
+  // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
     (req.method === "POST" && pathname === "/files") ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
@@ -6379,24 +6367,17 @@ const server = http.createServer((req, res) => {
 
 server.requestTimeout = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
 
-async function reconcileInterruptedFiles() {
-  const candidates = (await load()).files.filter(
-    (file) => ["pending_upload", "delete_pending"].includes(file.state) && file.objectKey,
-  );
-  for (const candidate of candidates) {
-    try {
-      await objectStorage.deleteObject(candidate.objectKey);
-      await enqueueMutation(async () => {
-        const latestStore = await load();
-        const latestFile = findFile(latestStore, candidate.fileId);
-        if (!latestFile || !["pending_upload", "delete_pending"].includes(latestFile.state)) return;
-        markFileDeleted(latestFile, now());
-        await save(latestStore);
-      });
-    } catch {
-      // Leave the durable pending state for the next boot; non-file routes remain usable.
-    }
-  }
+let retentionBusy = false;
+async function runFileRetention() {
+  if (retentionBusy || storageInitializing) return;
+  retentionBusy = true;
+  try {
+    // Retrying explicitly authorized deletes is independent of automatic cleanup.
+    await fileRetention.reconcile();
+    console.log(`file retention ${JSON.stringify(await fileRetention.run({ dryRun: false }))}`);
+  } catch (error) {
+    console.warn(`file retention failed reason=${error?.code || "unavailable"}`);
+  } finally { retentionBusy = false; }
 }
 
 const validatePushTokens = createTokenValidator({database,delivery:pushDelivery});
@@ -6440,7 +6421,7 @@ server.listen(PORT, HOST, () => {
   objectStorage
     .ensureBucket()
     .then(async () => {
-      await reconcileInterruptedFiles();
+      await fileRetention.reconcile();
       console.log(`MinIO ready: ${objectStorage.health().bucket}`);
     })
     .catch(() => {
@@ -6448,5 +6429,7 @@ server.listen(PORT, HOST, () => {
     })
     .finally(() => {
       storageInitializing = false;
+      void runFileRetention();
+      setInterval(runFileRetention, 24 * 60 * 60 * 1000).unref();
     });
 });

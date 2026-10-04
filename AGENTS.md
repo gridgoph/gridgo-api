@@ -79,6 +79,8 @@ Season awareness windows and Super Admin-only rollout controls are defined in `d
 - Push payload data is allowlisted to `notificationId`, `type`, `orderId`, and `at`.
 - Every implemented domain event writes a durable inbox row to each current `ops_admin` and `super_admin` membership (`privilegedAdminMemberships` in `src/notifications.js`). Super Admin is never invalidate-only. Contract: `docs/REALTIME_EVENTS.md`.
 
+- File retention and audited early deletion: `docs/STORAGE_API.md#retention-and-daily-cleanup`, `src/file-retention-policy.js`, and `src/file-retention.js`. Automatic deletion ships OFF; review production dry-run counts before enabling `GRIDGO_FILE_RETENTION_DELETE_ENABLED`. All deletion paths, including retries, must preserve open-case holds.
+
 ## Deployment
 
 `deploy/docker-compose.yml` is the server copy but CI never installs it. PostgreSQL uses named volume `gridgo_postgres_data` and private network `gridgo-api-storage`; it has no production host port. API and MinIO container names are proxy addresses and must remain stable.

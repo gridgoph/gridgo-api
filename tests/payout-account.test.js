@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { routePayoutAccount, opsPayoutAccountProjection } from "../src/payout-account.js";
 import { authorizeFileRead, markFileDeletePending } from "../src/attachments.js";
+import { retentionDecision } from "../src/file-retention-policy.js";
 import { publicOrderFor } from "../src/operational-model.js";
 import { resolveAuthorizationContext, selectActorRole } from "../src/authorization-context.js";
 
@@ -177,7 +178,8 @@ test("replacing the plate retires the old picture and a stale screen loses", asy
   assert.equal(replaced.body.payoutAccount.qr.fileId, "qr_two");
   assert.equal(replaced.body.payoutAccount.provider, "gcash");
   const old = store.files.find((file) => file.fileId === "qr_one");
-  assert.equal(old.state, "delete_pending");
+  assert.equal(old.state, "ready");
+  assert.equal(retentionDecision(store, old, "2026-09-16T00:00:00Z").eligible, true);
   assert.deepEqual(old.references, []);
   assert.deepEqual(store.files.find((file) => file.fileId === "qr_two").references, [
     { type: "supplier_payout_account", id: "supplier", field: "qr" },
@@ -230,7 +232,7 @@ test("removing the picture keeps the words; deleting the account retires everyth
   const cleared = await call(store, { method: "PATCH", body: { expectedVersion: 1, qrFileId: null } });
   assert.equal(cleared.body.payoutAccount.qr, null);
   assert.equal(cleared.body.payoutAccount.provider, "maya");
-  assert.equal(store.files[0].state, "delete_pending");
+  assert.equal(store.files[0].state, "ready");
 
   await rejects(() => call(store, { method: "DELETE" }), 400, "expected_version_required");
   const actions = [];
@@ -268,7 +270,7 @@ test("the plate is readable by its shop and Operations only, and cannot be delet
   assert.doesNotThrow(() => authorizeFileRead(actor(store, "ops"), store, file));
   assert.throws(() => authorizeFileRead(actor(store, "other_supplier"), store, file), (error) => error.status === 403);
   assert.throws(() => authorizeFileRead(actor(store, "client"), store, file), (error) => error.status === 403);
-  assert.throws(() => markFileDeletePending(file, actor(store, "supplier"), AT), (error) => error.code === "file_in_use");
+  assert.throws(() => markFileDeletePending(file, actor(store, "supplier"), AT), (error) => error.code === "forbidden");
 });
 
 test("Operations sees where the money goes on every order it reads; nobody else does", async () => {

@@ -326,7 +326,7 @@ Creates the account on the first write (`201`) and updates it afterwards (`200`)
 }
 ```
 
-`qrFileId` binds a ready `supplier_payout_qr` file the caller uploaded through `POST /files` (`docs/STORAGE_API.md`); the previous plate, if any, is retired to `delete_pending`. `"qrFileId": null` removes the picture and keeps the words. Every field is validated before anything is written, so a refused number or picture leaves no half-applied edit. Audited as `payout_account.create` / `payout_account.update`.
+`qrFileId` binds a ready `supplier_payout_qr` file the caller uploaded through `POST /files` (`docs/STORAGE_API.md`); the previous plate, if any, is unlinked for [scheduled unused-file cleanup](STORAGE_API.md#retention-and-daily-cleanup). `"qrFileId": null` removes the picture and keeps the words. Every field is validated before anything is written, so a refused number or picture leaves no half-applied edit. Audited as `payout_account.create` / `payout_account.update`.
 
 | Status | `error` | Meaning and fix |
 |---:|---|---|

@@ -258,7 +258,7 @@ Magic-byte/MIME/size checks are shared with ordinary uploads. Refund purposes ca
 
 The API never decodes or follows a QR URL. Object metadata and signed-response overrides set `Cache-Control: private, no-store, max-age=0`; refund JSON and file metadata/signing responses also use no-store. Signed URLs are still bearer credentials until expiry. Deployment must verify the production proxy/CDN respects these headers and denies expired signed links (existing infrastructure follow-up); local HTTP tests verify authorization and signed cache/expiry parameters.
 
-Bound QR revisions, evidence and receipts remain referenced/pinned, including after destination replacement and terminal requests. Generic delete refuses them. The investigation's proposed 7/90-day retention periods were **not adopted** by this policy; no automatic evidence deletion is introduced. Use the separately approved financial/file retention policy before implementing cleanup. Notifications and audit records contain IDs/revisions, not QR contents or account names.
+Bound QR revisions, evidence and receipts remain referenced/pinned, including after destination replacement and terminal requests. Early deletion and scheduled expiry follow the [file retention policy](STORAGE_API.md#retention-and-daily-cleanup); an open refund always blocks deletion. The investigation's proposed 7/90-day retention periods were **not adopted** by this policy; the separately approved file policy keeps financial evidence for five years after order closure, with automatic deletion off by default. Notifications and audit records contain IDs/revisions, not QR contents or account names.
 
 ## Refusals
 

@@ -210,7 +210,7 @@ PAYMENT_QR_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $O
 
 `tracker_decision` is evidence a Super Admin attaches to a tracker decision (JPEG/PNG/WebP/PDF, 10 MiB, at most 6 per decision). It is not attachable: upload it, then send its `fileId` in `attachmentIds` to `POST /admin/tracker/:repo/:number/decisions` ([Tracker API](TRACKER_API.md)). Binding writes a `tracker_decision` reference so the file reads as `file_in_use`. Only Super Admin may upload, read, sign or delete it; Operations gets `403`.
 
-`supplier_payout_qr` is the shop's own receiving plate (JPEG/PNG/WebP, 5 MiB), the one Operations scans to release a payout. It is not attachable either: upload it, then send its `fileId` as `qrFileId` to `PATCH /me/payout-account` (see `docs/OPERATIONAL_MODEL_V2_API.md`, "Supplier payout account"). Binding writes a `supplier_payout_account` reference so the file reads as `file_in_use` until the shop replaces or removes it; the replaced plate is retired to `delete_pending` the same way the platform QR is. Only the owning shop and Operations / Super Admin may read the bytes through `GET /files/:id/download-url`.
+`supplier_payout_qr` is the shop's own receiving plate (JPEG/PNG/WebP, 5 MiB), the one Operations scans to release a payout. It is not attachable either: upload it, then send its `fileId` as `qrFileId` to `PATCH /me/payout-account` (see `docs/OPERATIONAL_MODEL_V2_API.md`, "Supplier payout account"). Binding writes a `supplier_payout_account` reference; replacement/removal unlinks the old plate. The old picture then follows unused-file cleanup, including its default-off deletion flag, just like a replaced platform QR. Only the owning shop and Operations / Super Admin may read the bytes through `GET /files/:id/download-url`.
 
 ## POST /files/:fileId/attach — bind to a domain record
 
@@ -237,7 +237,7 @@ Verification-document attachment rules:
 
 - `documentType` is required and must be exactly `business_permit`, `valid_id`, or `sample_work`.
 - The API derives the supplier account from the bearer token. `userId`, `supplierId`, and all other target fields are rejected with `400 unexpected_target_field`; a supplier cannot target another account.
-- Attaching `business_permit` or `valid_id` automatically replaces every prior attachment in that singleton slot. Replaced files become unreferenced but remain private and readable to their owner/Operations/Super Admin until the owner deletes them.
+- Attaching `business_permit` or `valid_id` automatically replaces every prior attachment in that singleton slot. Replaced files remain private and follow the verification retention policy below; only Super Admin may delete them early with a reason.
 - `sample_work` without `replaceFileId` appends another photo/document. To replace one sample, send its currently attached `fileId` as `replaceFileId` with `documentType: "sample_work"`.
 - `replaceFileId` may also select the current permit or ID explicitly. It must be attached to the caller in the same type slot or the API returns `409 verification_document_replacement_mismatch`.
 
@@ -303,18 +303,53 @@ cmp ./artwork.pdf ./artwork-readback.pdf
 
 ## DELETE /files/:fileId — file deletion
 
-Auth: owner, `ops_admin`, or `super_admin` for ordinary purposes. A `verification_document` may be deleted only by its supplier owner, and a `rider_verification_document` only by its rider owner. For every purpose except `rider_verification_document`, only a `ready` file with `references: []` may be deleted: attached artwork, proofs, service images, delivery evidence, and current verification documents return `409 file_in_use`; deletion never silently removes evidence. Replace a verification slot first, then the supplier may delete the now-unreferenced old file.
+Auth: **Super Admin only**, or the owning client deleting their own `artwork` / `mockup` after every related order is `completed` or `payout_released`. Client artwork still used by a draft cart cannot be deleted. Clients cannot delete unattached uploads through this endpoint; unused uploads follow scheduled cleanup. Operations, suppliers and riders cannot delete files early, including their own verification evidence.
 
-`rider_verification_document` is the deliberate exception: the rider owner may delete their own uploaded evidence through this same flow even while rider-document rows still reference it. The same transaction that persists `delete_pending` marks every `rider_documents` row backed by that file non-current; the rows themselves are preserved as prior evidence. If that removes the rider's only current driver's licence backed by a `ready` file, a pending rider case reverts to unsubmitted intake (`submittedAt: null`); a case that already left `pending` is untouched. Every submit, reapply, and approval readiness gate rejects deleted or dangling licence evidence — a current rider-document row whose backing file is absent or not `ready` never satisfies any gate, so the rider must attach a replacement licence before submitting or reapplying.
+Super Admin sends a JSON body `{ "reason": "Written reason for deletion" }`. A nonblank reason of at most 2,000 characters is required (`400 reason_required` / `reason_too_long`). Client deletion needs no body. Both actions append a durable `file.early_delete` audit entry with actor, file ID, purpose, timestamp, and the Super Admin's trimmed reason. Authorization follows the selected database membership, never token role claims.
 
-The API first persists `delete_pending`, then deletes MinIO, then persists `deleted`. If MinIO is unavailable, the durable `delete_pending` marker remains and startup reconciliation retries it.
+**No role may bypass an open issue, claim, refund, dispute or pickup escalation.** The response is `409 file_retention_hold`; unresolved order/case references fail closed. This protection is rechecked under the domain mutation lock immediately before deleting storage bytes, including retries. For verification evidence, open cases on the owner's related orders also hold deletion.
 
-Success: `200 { "file": File }` where `state` is `deleted`, `deletedAt` is set, and `objectKey` remains absent.
+The API commits `delete_pending` and its audit entry before deleting MinIO, then commits `deleted`. If storage fails, the durable pending intent remains for boot/daily retry. The domain lock covers the final check and MinIO delete so a case cannot open between them. References and domain snapshots remain for historical integrity; tombstones have no object key. When rider evidence is deleted, backing `rider_documents` become non-current and a pending application lacking a ready licence reverts to unsubmitted intake.
+
+Success: `200 { "file": File }` with `state: "deleted"` and `deletedAt`. A case opened after the initial intent can defer deletion: the response retains `state: "delete_pending"` and retries wait until the hold clears. Existing signed URLs may remain usable until bytes are deleted.
 
 ```bash
-curl -fsS -X DELETE "$API/files/$UNATTACHED_FILE_ID" \
-  -H "Authorization: Bearer $CLIENT_TOKEN" | jq
+curl -fsS -X DELETE "$API/files/$FILE_ID" -H "Authorization: Bearer $SUPER_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' --data '{"reason":"Duplicate upload confirmed during review"}'
 ```
+
+## Retention and daily cleanup
+
+The policy decided on 4 October 2026 is implemented in `src/file-retention-policy.js`. All deadlines use UTC instants. A year means a calendar year (29 February rolls to 1 March in a non-leap year).
+
+| File type | Retention |
+| --- | --- |
+| Client artwork and design files (`artwork`, `mockup`) | 30 days after order completion. Cancelled orders do not qualify as completed. |
+| Money proof (`payment_proof`, `payout_receipt`, `refund_receipt`) | 5 years after the order closes (completed, payout released, or cancelled). |
+| Refund QR revisions and supporting refund evidence (`refund_qr`, `refund_evidence`) | 5 years after order closure, as part of the financial evidence. |
+| Production and delivery photos, legacy fulfilment proofs, handoff signatures | 1 year after order closure. |
+| Shop, rider, business/organization ID and verification evidence | While the account is active, then 1 year after removal/closure or rejection of the corresponding application. Suspension is not closure. Replaced verification evidence follows this same rule. |
+| Unused uploads and unlinked listing/shop images or receiving QRs | Eligible after a 24-hour upload grace period; each daily pass removes those no longer used. Active cart artwork, current media/settings references, and historical order evidence are not orphans. |
+
+Files referenced by multiple orders use the latest applicable closure and require every order to qualify. Closure comes from the explicit completion/closure timestamp or the first terminal timeline event, never the mutable `updatedAt`. Missing closure evidence, unresolved references, and unknown attached purposes are retained for review. Open issues, claims, refunds, disputes and pickup escalations block **all** deletion, including Super Admin requests and recovery of pending deletions. Financial metadata, audit records, order snapshots and external artwork links are not deleted by this job; only GRIDGO-managed file bytes are removed and file rows tombstoned.
+
+The API runs a pass after storage initialization and every 24 hours thereafter. **Automatic deletion is OFF unless `GRIDGO_FILE_RETENTION_DELETE_ENABLED=true` is explicitly configured.** Missing, false or any other value keeps the pass read-only. This flag does not disable explicitly authorized early deletion. Failed deletions keep their durable intent and retry on later passes. Legacy pending deletions without an audited source must qualify under the retention policy and the automatic-deletion flag before the worker adopts them with a new audit intent. Pending uploads are subject to the upload grace period and the automatic-deletion flag; a restart alone never discards an in-flight upload.
+
+### GET /admin/files/retention — dry-run counts
+
+Auth: Super Admin. Always read-only, regardless of the deletion flag; it performs no MinIO operation and changes no file rows. Returns `{at,dryRun:true,deletionEnabled,total,byPurpose,deleted:0,failed:0}`. `byPurpose` maps each eligible purpose to its count (absent purposes have zero candidates). Counts include eligible pending retries and exclude protected files. No filenames, private keys or URLs are returned.
+
+The operator CLI uses the same policy and defaults to dry run:
+
+```bash
+npm run files:retention -- --dry-run
+# Only after reviewing counts and approving the first production cleanup:
+GRIDGO_FILE_RETENTION_DELETE_ENABLED=true npm run files:retention -- --execute
+```
+
+Even `--execute` only reports counts while the flag is off. Real passes also report `deleted` and `failed`; a CLI pass with failures exits nonzero. Keep the flag off for the first production rollout. Firstmate must run the production dry run, report counts by file type, and stop for approval before enabling deletion. This implementation does not execute production cleanup.
+
+Privacy-notice wording for the landing/client follow-up: “We retain artwork for 30 days after completion, money evidence for five years after order closure, production/delivery evidence for one year, and verification documents while an account is active plus one year after closure or application rejection; open cases pause deletion.”
 
 ## File lifecycle and crash recovery
 
@@ -328,8 +363,8 @@ delete_pending --MinIO delete + metadata commit--> deleted
 - `pending_upload` is written before MinIO receives bytes.
 - `ready` is the only attachable, readable state.
 - If final metadata persistence fails after `PutObject`, the API attempts compensating object deletion. The durable pending row remains a reconciliation marker if cleanup cannot finish.
-- On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted`.
-- No automatic age-based retention is enabled in this demo. `purpose` and references are durable so a future retention job can apply different policies without guessing from keys.
+- On boot and daily retry, authorized `delete_pending` intents are rechecked against open cases before storage deletion; automatic intents additionally require the deletion flag.
+- Age-based retention follows the policy above, with automatic deletion disabled by default.
 
 ## Proof of Fulfilment lifecycle
 
@@ -371,7 +406,8 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 409 | `file_already_attached` | File already has a parent reference; upload a new file for another record. |
 | 409 | `file_state_conflict` | Requested lifecycle operation is invalid for current state; refresh metadata. |
 | 409 | `file_metadata_invalid` | Purpose/media/key/size metadata is internally inconsistent; upload again. |
-| 409 | `file_in_use` | File has domain references and is not rider-owned `rider_verification_document` evidence; do not delete lifecycle evidence. |
+| 409 | `file_in_use` | Client artwork is not exclusively tied to completed orders, or remains in an active cart. |
+| 409 | `file_retention_hold` | An open case or unresolved reference prevents deletion, including for Super Admin. |
 | 409 | `delivery_photo_upload_not_allowed` | Delivery is not in an allowed active/post-delivery state; refresh order state. |
 | 409 | `verification_document_replacement_mismatch` | `replaceFileId` is not attached to the caller in the requested document slot; refresh the supplier's documents and choose the matching file. |
 | 409 | `document_expired` | The driver's-licence expiry is not in the future in Asia/Manila; upload current evidence. |
@@ -402,7 +438,7 @@ No file route returns raw SDK exceptions, stack traces, credentials, or standalo
 | Trust extension or declared MIME alone | Prohibited; extension, optional specific declared MIME, and magic bytes must agree. |
 | Turn 200 MiB into multiple buffers | Avoided; multipart is streamed to disk, with only parser tail/signature bytes retained, then disk is streamed to MinIO. |
 | Assume object put + database commit are atomic | Avoided; pending record first, ready commit second, compensating delete, and boot reconciliation. |
-| Delete referenced evidence on uploader request | Prohibited for every purpose except `rider_verification_document` (`409 file_in_use`). A rider deleting their own evidence invalidates the backing rider-document rows in the same transaction instead of orphaning them. |
+| Delete referenced evidence on uploader request | Only Super Admin with a reason, or a client’s own artwork after completion; open cases always block. |
 | API uses root credentials | Prohibited; Compose provisions a separate bucket-policy API user. Root credentials are init/console only. |
 | Floating MinIO image | Prohibited; compose and CI smoke pin GRIDGO's own `ghcr.io/gridgoph/minio` and `ghcr.io/gridgoph/mc` by release tag **and** digest. See [MinIO images](#minio-images). |
 
@@ -421,7 +457,7 @@ Upstream withdrew the MinIO images GRIDGO used to pin: `quay.io/minio/minio` and
 
 ## PostgreSQL reconciliation
 
-Versioned migrations create file metadata and reference tables; there is no JSON import or load-time structural migration. On every successful-storage API boot, reconciliation deletes objects belonging to interrupted `pending_upload` or `delete_pending` records and tombstones them as `deleted` in a transaction.
+Versioned migrations create file metadata and reference tables; there is no JSON import or load-time structural migration. Boot retries durable deletion intents using the same hold checks as daily cleanup. Pending uploads use the 24-hour grace and automatic-deletion flag.
 
 ## Private refund files
 
@@ -431,4 +467,4 @@ The separately authorized shop settlement payout uses existing `payout_receipt` 
 
 ## Production photo visibility
 
-Progress images use the same private read gate as artwork. The client gallery and packing refusal contract are [Production progress photos](OPERATIONAL_MODEL_V2_API.md#production-progress-photos). A start-of-production image counts, including legacy shop image proofs; PDFs do not. Client/rider file metadata strips internal reference fields and calls legacy fulfilment evidence `order_photo`. Attached evidence cannot be deleted.
+Progress images use the same private read gate as artwork. The client gallery and packing refusal contract are [Production progress photos](OPERATIONAL_MODEL_V2_API.md#production-progress-photos). A start-of-production image counts, including legacy shop image proofs; PDFs do not. Client/rider file metadata strips internal reference fields and calls legacy fulfilment evidence `order_photo`. Attached evidence follows the retention and audited early-deletion policy above.
