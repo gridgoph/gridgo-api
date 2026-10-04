@@ -52,7 +52,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
-      "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows",
+      "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
 
@@ -115,6 +115,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1790899200000_match_selection_tokens",
         "1790985600000_out_of_zone_delivery_price",
         "1791072000000_season_windows",
+        "1791075600000_production_penalties",
       ],
     );
 
@@ -294,6 +295,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    // Reverse production penalties before season windows and earlier pricing changes.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.production_lapses`])).rows[0].t, null);
     await client.query(`INSERT INTO season_windows
       (id, name, start_date, end_date, demand_level, message, created_at, updated_at)
       VALUES ('season_test', 'Season', '2026-11-13', '2026-11-30', 'Peak', 'Plan early.', now(), now())`);

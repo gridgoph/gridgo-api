@@ -616,3 +616,16 @@ test("other listings expose established ratings, zone-only distances, and queue 
   assert.deepEqual(other.optionGroups, []);
   assert.equal(other.measurementKind, "none");
 });
+
+test('recent lapses modestly reduce quality ranking without overriding a higher client priority', () => {
+  const store = fixture();
+  for (const id of ['shop_a', 'shop_b']) addShop(store, { id, lat: 7.07, lng: 125.61, turnaroundHours: 24, priceMinor: 10000 });
+  const input = { now: AT, subcategoryCode: 'flyers', ranking: ['quality', 'cost', 'speed', 'distance'], dropoff: DROPOFF };
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_a');
+  store.productionLapses = [{ supplierId: 'shop_a', deadlineAt: AT, detectedAt: AT }];
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_b');
+  store.catalogItems.find((item) => item.supplierId === 'shop_a').basePriceMinor = 9000;
+  assert.equal(matchShop(store, { ...input, ranking: ['cost', 'quality', 'speed', 'distance'] }).shop.supplierId, 'shop_a');
+  store.productionLapses[0].deadlineAt = '2026-07-01T00:00:00.000Z';
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_a');
+});

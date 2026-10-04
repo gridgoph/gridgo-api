@@ -404,3 +404,11 @@ Every shop, ranked. Without `categoryCode` the table is overall; with one, only 
 ```
 
 Unranked shops (`count: 0`, `position: null`) follow the ranked ones, alphabetically. An unknown category is `400 invalid_category_code`.
+
+
+### Recent production lapses
+
+The quality factor subtracts two points per order with a missed ready-by deadline
+in the last 30 days, capped at ten of 100. Client factor priority and deadline
+feasibility filtering remain unchanged. The public rating is unchanged. See
+[late-production penalties](PRODUCTION_PENALTIES_API.md#matching-weight).

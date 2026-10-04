@@ -1339,3 +1339,10 @@ Fresh seed creates only reference data: taxonomy, catalog, zones, and settings. 
 The [Client refunds contract](REFUNDS_API.md) defines the durable request/review/settlement/manual-payment ledger, exact route shapes, privacy, available-funds ceilings, filing deadline, reconciliation and screen follow-ups. `POST /orders/:id/refund-requests` immediately stops work and payouts; accepted-but-unstarted and no-replacement orders are eligible for full verified-collection refunds. Operations can also cancel `payment_authorized` and `approved_for_matching` orders with a reason through the ordinary transition route; cancellation itself sends no money.
 
 Settlements supersede unpaid original milestones without changing their amounts or marking them paid. The separate `supplierSettlementPayouts` array appears alongside milestones for the owning supplier and Operations, with a manual exact-amount release using shop QR, reference and receipt. Refunds never recover an already released stage or rider earnings, never redeem Pilot Credits as cash, and never clear independent claims.
+
+
+## Late-production penalties
+
+See [Late-production warnings and deductions](PRODUCTION_PENALTIES_API.md) for tiers,
+Super Admin settings, the default-off deduction gate, supplier/Operations reads,
+reassignment eligibility, and net payout amounts.
