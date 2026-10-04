@@ -114,6 +114,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1790812800000_delivery_distance_zones",
         "1790899200000_match_selection_tokens",
         "1790985600000_out_of_zone_delivery_price",
+        "1790989200000_catalog_listing_suspension",
       ],
     );
 

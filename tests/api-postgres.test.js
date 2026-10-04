@@ -1635,6 +1635,9 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
   try {
     const current = await request(instance.api, "/settings", { subject: "clerk_ops" });
     assert.equal(current.status, 200);
+    const clientRead = await request(instance.api, "/settings", { subject: "clerk_client" });
+    assert.equal(clientRead.status, 200);
+    assert.equal(clientRead.body.settings.serviceFeeRateBps, current.body.settings.serviceFeeRateBps);
     assert.equal(current.body.settings.serviceFeeRateBps, 1000);
     assert.equal(current.body.settings.serviceFeeVisibleToClient, true);
     assert.deepEqual(current.body.settings.paymentQr, {
@@ -1648,22 +1651,23 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(current.body.settings.riderCommissionBps, 8500);
     for (const riderCommissionBps of [null, "8500", 8500.5, -1, 10001]) {
       const invalid = await request(instance.api, "/settings", {
-        method: "PATCH", subject: "clerk_ops",
+        method: "PATCH", subject: "clerk_super",
         body: { expectedVersion: current.body.version, riderCommissionBps, reason: "Invalid rider rate" },
       });
       assert.equal(invalid.status, 400);
       assert.equal(invalid.body.error, "invalid_rider_commission_rate");
     }
-    for (const subject of ["clerk_rider", "clerk_client", "clerk_supplier"]) {
+    for (const subject of ["clerk_ops", "clerk_rider", "clerk_client", "clerk_supplier"]) {
       const denied = await request(instance.api, "/settings", {
         method: "PATCH", subject,
         body: { expectedVersion: current.body.version, riderCommissionBps: 7000, reason: "Forbidden rate" },
       });
       assert.equal(denied.status, 403);
+      assert.equal(denied.body.error, "forbidden");
     }
     const badNudge = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: current.body.version,
         productionNudge: { ...current.body.settings.productionNudge, afterValue: "4" },
@@ -1676,7 +1680,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const noReason = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { expectedVersion: current.body.version, serviceFeeRateBps: 1250 },
     });
     assert.equal(noReason.status, 400);
@@ -1684,7 +1688,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const stale = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { expectedVersion: current.body.version - 1, serviceFeeRateBps: 1250, reason: "Pilot fee update" },
     });
     assert.equal(stale.status, 409);
@@ -1692,7 +1696,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const stringRate = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { expectedVersion: current.body.version, serviceFeeRateBps: "1000", reason: "Invalid string rate" },
     });
     assert.equal(stringRate.status, 400);
@@ -1700,7 +1704,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const stringDeliveryFee = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: current.body.version,
         deliveryFeeBands: current.body.settings.deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor: "2500" } : band),
@@ -1712,7 +1716,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const updated = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: current.body.version, serviceFeeRateBps: 1250, reason: "Pilot fee update",
         deliveryFeeBands: current.body.settings.deliveryFeeBands.map((band, i) => i === 3
@@ -1731,9 +1735,20 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     ]);
     assert.equal(updated.body.settings.serviceFeeVisibleToClient, true);
 
+    const opsAudit = await request(instance.api, "/audit", { subject: "clerk_ops" });
+    assert.equal(opsAudit.status, 403);
+    assert.equal(opsAudit.body.error, "forbidden");
+    const superAudit = await request(instance.api, "/audit", { subject: "clerk_super" });
+    assert.equal(superAudit.status, 200);
+    assert.equal(
+      superAudit.body.audit.some((entry) =>
+        entry.action === "settings.operational_update" && entry.reason === "Pilot fee update"),
+      true,
+    );
+
     const hidden = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: updated.body.version,
         serviceFeeVisibleToClient: false,
@@ -1745,7 +1760,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(hidden.body.settings.serviceFeeRateBps, 1250);
 
     let version = hidden.body.version;
-    for (const [subject, riderCommissionBps] of [["clerk_ops", 7000], ["clerk_super", 8500]]) {
+    for (const [subject, riderCommissionBps] of [["clerk_super", 7000], ["clerk_super", 8500]]) {
       const changed = await request(instance.api, "/settings", {
         method: "PATCH", subject,
         body: { expectedVersion: version, riderCommissionBps, reason: "Rider rate update" },
@@ -1794,7 +1809,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
   }
 });
 
-test("ops can replace the public payment QR without changing method or caption", { skip: !DATABASE_URL }, async () => {
+test("a Super Admin can replace the public payment QR without changing method or caption", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9, 0x00, 0x01, 0x02, 0x03]);
@@ -1821,6 +1836,14 @@ test("ops can replace the public payment QR without changing method or caption",
     assert.equal(Object.hasOwn(current.body.settings.paymentQr, "imageUrl"), false);
     assert.deepEqual(current.body.settings.paymentQr, { method: "qr_manual", caption: "QR Ph" });
 
+    const opsActivate = await request(instance.api, "/settings/payment-qr", {
+      method: "POST",
+      subject: "clerk_ops",
+      body: { fileId: "file_missing", reason: "Operations cannot set the plate" },
+    });
+    assert.equal(opsActivate.status, 403);
+    assert.equal(opsActivate.body.error, "forbidden");
+
     let health = await request(instance.api, "/health");
     for (let attempt = 0; attempt < 50 && health.body.storage?.status === "checking"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1829,7 +1852,7 @@ test("ops can replace the public payment QR without changing method or caption",
     if (health.body.storage?.status !== "available") {
       const patched = await request(instance.api, "/settings", {
         method: "PATCH",
-        subject: "clerk_ops",
+        subject: "clerk_super",
         body: { expectedVersion: current.body.version, reason: "Confirm paymentQr survives a band-free patch" },
       });
       assert.equal(patched.status, 200, JSON.stringify(patched.body));
@@ -1852,7 +1875,7 @@ test("ops can replace the public payment QR without changing method or caption",
 
     const activated = await request(instance.api, "/settings/payment-qr", {
       method: "POST",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { fileId: uploadedBody.file.fileId, reason: "Set the GCash plate" },
     });
     assert.equal(activated.status, 200, JSON.stringify(activated.body));
@@ -1863,7 +1886,7 @@ test("ops can replace the public payment QR without changing method or caption",
 
     const again = await request(instance.api, "/settings/payment-qr", {
       method: "POST",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { fileId: uploadedBody.file.fileId, reason: "Same plate again" },
     });
     assert.equal(again.status, 200, JSON.stringify(again.body));
@@ -1877,7 +1900,7 @@ test("ops can replace the public payment QR without changing method or caption",
 
     const patched = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: activated.body.version,
         serviceFeeRateBps: 1000,
@@ -3493,7 +3516,7 @@ test("rider dispatch earnings and Ops finance keep their rate across a settings 
   try {
     const settings = await request(instance.api, "/settings", { subject: "clerk_ops" });
     const updated = await request(instance.api, "/settings", {
-      method: "PATCH", subject: "clerk_ops",
+      method: "PATCH", subject: "clerk_super",
       body: { expectedVersion: settings.body.version, riderCommissionBps: 7000, reason: "Future rider jobs" },
     });
     assert.equal(updated.status, 200);
@@ -3818,11 +3841,38 @@ test("account suspend, remove, and restore are audited and separate from accredi
     const ordersBefore = await request(instance.api, "/orders", { subject: "clerk_client" });
     assert.equal(ordersBefore.status, 200, JSON.stringify(ordersBefore.body));
 
-    const opsDenied = await request(instance.api, "/users/user_client/account", {
-      method: "PATCH", subject: "clerk_ops", body: { status: "suspended", reason: "Not allowed" },
+    const opsRemove = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "removed", reason: "Not allowed" },
     });
-    assert.equal(opsDenied.status, 403);
-    assert.equal(opsDenied.body.error, "forbidden");
+    assert.equal(opsRemove.status, 403);
+    assert.equal(opsRemove.body.error, "forbidden");
+
+    const superRemoved = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "removed", reason: "Closed for the check" },
+    });
+    assert.equal(superRemoved.status, 200, JSON.stringify(superRemoved.body));
+    const opsRestoreRemoved = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "active", reason: "Bring them back" },
+    });
+    assert.equal(opsRestoreRemoved.status, 403);
+    assert.equal(opsRestoreRemoved.body.error, "forbidden");
+    const superRestored = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "active", reason: "Check finished" },
+    });
+    assert.equal(superRestored.status, 200, JSON.stringify(superRestored.body));
+    assert.equal(superRestored.body.user.accountStatus, "active");
+
+    const opsSuspend = await request(instance.api, "/users/user_rider/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "suspended", reason: "Desk hold" },
+    });
+    assert.equal(opsSuspend.status, 200, JSON.stringify(opsSuspend.body));
+    assert.equal(opsSuspend.body.user.accountStatus, "suspended");
+    assert.equal(opsSuspend.body.user.accountStatusReason, "Desk hold");
+    const opsRestore = await request(instance.api, "/users/user_rider/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "active", reason: "Hold lifted" },
+    });
+    assert.equal(opsRestore.status, 200, JSON.stringify(opsRestore.body));
+    assert.equal(opsRestore.body.user.accountStatus, "active");
 
     for (const reason of [undefined, "   "]) {
       const missing = await request(instance.api, "/users/user_client/account", {

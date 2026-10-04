@@ -277,6 +277,83 @@ test("public catalog requires a complete active item under a live service", () =
   assert.equal(publicCatalogItem(draft, draft.catalogItems[0]), null);
 });
 
+test("suspending one listing hides it from clients and leaves its sibling live", async () => {
+  const store = fixture();
+  const sibling = { ...store.catalogItems[0], id: "sibling", name: "Sibling banner", sortOrder: 1 };
+  store.catalogItems.push(sibling);
+  store.catalogItemPhotos.push({ catalogItemId: "sibling", fileId: "photo", sortOrder: 0, createdAt: AT });
+  const ops = { id: "ops", role: "ops_admin" };
+  const admin = { id: "super", role: "super_admin" };
+  const supplier = { id: "supplier", role: "supplier" };
+  const route = (method, pathname, user, body = {}) => routeSupplierCatalog({
+    req: { method, headers: {} },
+    url: new URL(`http://127.0.0.1${pathname}`),
+    store,
+    user,
+    readBody: async () => body,
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+
+  const missing = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, {}),
+    (error) => error.code === "reason_required",
+  );
+  assert.equal(missing, undefined);
+  const shopDenied = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", supplier, { reason: "Blurry sample" }),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(shopDenied, undefined);
+  const opsDenied = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", ops, { reason: "Blurry sample" }),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(opsDenied, undefined);
+
+  const suspended = await route("POST", "/catalog-items/item/suspend", admin, { reason: "  Blurry sample  " });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.item.active, false);
+  assert.equal(suspended.body.item.suspendReason, "Blurry sample");
+  assert.equal(suspended.body.item.suspendedAt, AT);
+  assert.equal(store.catalogItems.find((item) => item.id === "sibling").active, true);
+  assert.equal(store.catalogItems.find((item) => item.id === "sibling").suspendReason, undefined);
+  assert.equal(store.supplierServices[0].state, "live");
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+
+  const shopView = await route("GET", "/me/catalog-items/item", supplier);
+  assert.equal(shopView.status, 200);
+  assert.equal(shopView.body.item.suspendReason, "Blurry sample");
+  const notice = (store.notifications || []).find((row) => row.type === "listing_suspended");
+  assert.equal(notice.userId, "supplier");
+  assert.equal(notice.appRole, "supplier");
+  assert.equal(notice.body, "Blurry sample");
+  assert.equal(notice.catalogItemId, "item");
+
+  const opsRestore = await assert.rejects(
+    () => route("POST", "/catalog-items/item/restore", ops),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(opsRestore, undefined);
+
+  await assert.rejects(
+    () => route("PATCH", "/me/catalog-items/item", supplier, {
+      active: true,
+      expectedVersion: shopView.body.item.version,
+    }),
+    (error) => error.code === "listing_suspended" && error.details.reason === "Blurry sample",
+  );
+
+  const restored = await route("POST", "/catalog-items/item/restore", admin);
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.item.active, true);
+  assert.equal(restored.body.item.suspendReason, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item"))?.id, "item");
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+});
+
 test("the platform registry lists uploadable types and resolves a plus query", async () => {
   const store = fixture();
   store.acceptedFileFormats = defaultAcceptedFileFormats();

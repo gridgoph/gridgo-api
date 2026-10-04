@@ -3083,7 +3083,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
       if (!Number.isInteger(body.expectedVersion) || body.expectedVersion !== store.version) {
         return send(res, 409, { error: "settings_version_conflict", version: store.version });
@@ -3129,7 +3129,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/settings/payment-qr") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
@@ -3491,10 +3491,13 @@ async function handleRequest(req, res) {
       return send(res, 200, verificationUserResponse(store, target));
     }
 
-    // Super Admin account standing. Soft suspend/remove: the row, memberships,
-    // orders, and Clerk user stay. Accreditation is a different field.
+    // Account standing. Accreditation is a different field.
+    // Operations may suspend or restore. Only a Super Admin may remove.
+    // `removed` still only sets accountStatus: the row, memberships, orders,
+    // and Clerk user stay. Cutting off login is not implemented here — this
+    // API only loads a Clerk user, it does not ban or delete one.
     if (req.method === "PATCH" && /^\/users\/[^/]+\/account$/.test(pathname)) {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const uid = pathname.split("/")[2];
       const target = store.users.find((candidate) => candidate.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
@@ -3506,6 +3509,9 @@ async function handleRequest(req, res) {
           message: "Account status must be active, suspended, or removed.",
           allowed: allowedStatus,
         });
+      }
+      if ((body.status === "removed" || target.accountStatus === "removed") && !isSuper(user)) {
+        return send(res, 403, { error: "forbidden" });
       }
       const reason = typeof body.reason === "string" ? body.reason.trim() : "";
       if (!reason) {
@@ -4666,7 +4672,7 @@ async function handleRequest(req, res) {
 
     // ---- audit trail ----
     if (req.method === "GET" && pathname === "/audit") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       let list = store.auditLog || [];
       const entityType = url.searchParams.get("entityType");
       const entityId = url.searchParams.get("entityId");
