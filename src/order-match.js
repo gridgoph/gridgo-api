@@ -1,6 +1,7 @@
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
+import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 export { shopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 
@@ -164,22 +165,10 @@ function normalizedInverse(value, best) {
 }
 
 function approvedOpenSuppliers(store) {
-  const accountStatuses = new Map((store.users || []).map((user) => [user.id, user.accountStatus]));
-  const members = new Set(
-    (store.userRoleMemberships || [])
-      .filter((row) => row.role === "supplier")
-      .map((row) => row.userId),
-  );
-  const approved = new Set(
-    (store.approvalCases || [])
-      .filter((row) => row.kind === "supplier" && row.status === "approved")
-      .map((row) => row.userId),
-  );
+  const blockersFor = supplierMatchBlockersFor(store);
   const profiles = new Map();
   for (const profile of (store.supplierProfiles || [])) {
-    if ((accountStatuses.get(profile.userId) ?? "active") !== "active") continue;
-    if (profile.isClosed === true || !profile.shop) continue;
-    if (!members.has(profile.userId) || !approved.has(profile.userId)) continue;
+    if (blockersFor(profile.userId, profile).length) continue;
     profiles.set(profile.userId, profile);
   }
   return profiles;

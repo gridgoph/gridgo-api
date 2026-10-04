@@ -12,6 +12,7 @@ import {
   resolveFormatQuery,
 } from "./file-formats.js";
 import { philippineMobileNumber } from "./phone.js";
+import { supplierReadinessDetails, readinessRequestInput } from "./supplier-readiness.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import {
   CatalogError,
@@ -27,7 +28,6 @@ import {
   publicCatalogMediaFile,
   publicSupplierShop,
   publicSupplierShops,
-  supplierCatalogReadiness,
   TARPAULIN_OUTDOOR_BANNERS,
   validateSpecBinding,
 } from "./supplier-catalog.js";
@@ -588,7 +588,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
 
   if (req.method === "GET" && pathname === "/me/supplier-readiness") {
     requireSupplier(user);
-    return { status: 200, body: supplierCatalogReadiness(store, user.id) };
+    return { status: 200, body: supplierReadinessDetails(store, user.id, readinessRequestInput(url), now()) };
   }
 
   if (["GET", "PATCH"].includes(req.method) && pathname === "/me/supplier-profile") {
