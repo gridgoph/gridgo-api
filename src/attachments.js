@@ -1,3 +1,4 @@
+import { canReadOrderArtwork } from "./order-file-access.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -1214,6 +1215,13 @@ export function authorizeFileRead(user, store, file) {
   if (["supplier", "rider"].includes(user.role)
       && (file.references || []).some((reference) => reference.type === "order")
       && !hasApprovedWorkRole(user, user.role)) forbidden();
+  if (["supplier", "rider"].includes(user.role) && ["artwork", "mockup"].includes(file.purpose)
+      && (file.references || []).some((reference) => reference.type === "order")) {
+    if (file.references.some((reference) => reference.type === "order"
+        && canReadOrderArtwork(user, store, (store.orders || []).find((order) => order.id === reference.id),
+          file.fileId, file.purpose, file))) return;
+    forbidden();
+  }
   if (file.ownerId === user.id) return;
   if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
   forbidden();

@@ -1,3 +1,4 @@
+import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
@@ -949,6 +950,19 @@ export function publicOrderFor(order, user, store = null) {
   const publicRecord = clone(order);
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
   publicRecord.productionItems = productionItemsFor(store, order, user);
+  if (["supplier", "rider"].includes(user?.role)) {
+    const artworkIds = publicRecord.artworkFileIds || [];
+    for (const purpose of ["artwork", "mockup"]) {
+      const field = `${purpose}FileIds`;
+      publicRecord[field] = (publicRecord[field] || []).filter((fileId) =>
+        canReadOrderArtwork(user, store, order, fileId, purpose));
+    }
+    // The old order-wide filename can also belong to another shop's line.
+    const lastId = publicRecord.artworkFileIds.at(-1);
+    const unchanged = publicRecord.artworkFileIds.length === artworkIds.length;
+    publicRecord.artworkName = (store?.files || []).find((file) => file.fileId === lastId)?.originalFilename
+      || (lastId && unchanged ? publicRecord.artworkName : null) || null;
+  }
   /*
     Whether this order has been rated, so a client is asked once.
 
