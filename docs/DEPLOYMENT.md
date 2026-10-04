@@ -120,6 +120,14 @@ docker compose up -d --remove-orphans
 
 The seed inserts only catalog, the four-category taxonomy, zones, and operational settings. It creates no user, supplier service, order, file, payment, credit, claim, issue, audit, notification, ping, escalation, proof, or device registration.
 
+Production compose contains no `seed-dev` service. Development seed entry points
+refuse production mode, missing environment declarations, and live Clerk keys
+before any external access. Never override these checks to populate production.
+Migration `1791072000000` retires four fixed sample identities only when they have
+no order or money history; read [the retirement preflight and verification](DEMO_SHOP_RETIREMENT.md)
+before promoting that migration. Installing the updated compose remains an
+operator step because CI does not copy it to the server.
+
 Do not run bootstrap until the Clerk user ID and instance are independently checked. The command succeeds only while no `ops_admin` or `super_admin` exists, records an audit entry plus an immutable completion row, and then closes permanently even if roles later change. This one-time CLI bootstrap is the only first-administrator path: there is no HTTP bootstrap route and no redeemable bootstrap token.
 
 ## 4. Identity and role operations
