@@ -181,6 +181,13 @@ confuse it with a supplier quote. `/users`, `/supplier-services`,
 `/orders/:id/eligible-suppliers` and `/admin/shop-rankings` are already restricted
 to the appropriate supplier/staff roles and are not public shop directories.
 
+In particular, legacy quote snapshots call the origin `supplierShop`, not just
+`pickup`. Remove that object and `orderLines[].amountMinor` on client projections
+of `pendingQuote`, `acceptedQuote` and `quoteHistory[]`. Also inspect legacy
+`orderLines[].optionSnapshots` and top-level `optionSnapshots` for raw modifier
+amounts; preserve only client-safe specifications/labels. These paths are created
+by the quote/commit routes in `src/server.js`, independently of cart checkout.
+
 `publicOrderFor` already removes the shop origin from a client's delivery order,
 and substitutes the GRIDGO office for a collection. Preserve the office point
 and the client's own destination; neither is a private shop pin. The order
