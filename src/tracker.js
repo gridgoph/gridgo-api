@@ -58,6 +58,7 @@ const FIRSTMATE_BASE = "/firstmate/tracker/decisions";
 // Fields a Super Admin can see but never change: they belong to the report.
 const READ_ONLY_FIELDS = Object.freeze([
   "module", "section", "step", "order", "ref", "id", "requirement", "summary", "category", "developer",
+  "decisionQuestions", "decisionMarkdown",
 ]);
 
 export class TrackerError extends Error {
@@ -189,6 +190,77 @@ export function parseTrackerMarker(body) {
   }
 }
 
+/** Decision-panel content from the issue, with raw Markdown as a lossless fallback. */
+export function parseDecisionSection(body) {
+  const empty = { decisionQuestions: [], decisionMarkdown: "" };
+  if (typeof body !== "string") return empty;
+  // Strip even an unfinished marker before locating headings or parsing content.
+  const visible = body.replace(/<!--\s*tracker\s*:[\s\S]*?(?:-->|$)/gi, "");
+  const heading = /^[\t ]*##[\t ]+Waiting[\t ]+on[\t ]+a[\t ]+decision[\t ]*(?:#+[\t ]*)?\r?$/im.exec(visible);
+  if (!heading) return empty;
+  const rest = visible.slice(heading.index + heading[0].length);
+  const end = /^[\t ]*#{1,2}(?:[\t ]|$)/m.exec(rest);
+  const decisionMarkdown = rest.slice(0, end?.index ?? rest.length).trim();
+  const fallback = { decisionQuestions: [], decisionMarkdown };
+  const questions = [];
+  let current = null;
+  let target = null;
+  const unbold = (value) => value.replace(/\*\*|__/g, "").trim();
+
+  for (const rawLine of decisionMarkdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const question = /^\*\*\s*Question(?:\s+(\d+))?\s*\.\s*(.+?)\s*\*\*(.*)$/i.exec(line);
+    if (question) {
+      const number = question[1] ? Number(question[1]) : questions.length + 1;
+      if (!Number.isSafeInteger(number) || number < 1 || questions.some((item) => item.number === number)) return fallback;
+      current = {
+        number, question: unbold(question[2]), context: question[3].trim(),
+        options: [], allowOther: true, recommended: null,
+      };
+      questions.push(current);
+      target = { object: current, field: "context" };
+      continue;
+    }
+    // Do not offer a partial set of choices when a question heading is malformed.
+    if (/^(?:\*\*)?Question\b/i.test(line)) return fallback;
+    if (!current) continue;
+
+    const option = /^[-+*]\s+\*\*\s*([A-Z])\s*\.\s*(.*?)\s*\*\*\s*(.*)$/i.exec(line);
+    if (option) {
+      const key = option[1].toUpperCase();
+      const label = unbold(option[2]);
+      if (!label || current.options.some((item) => item.key === key)) return fallback;
+      const item = { key, label, detail: option[3].trim() };
+      current.options.push(item);
+      target = { object: item, field: "detail" };
+      continue;
+    }
+    if (/^[-+*]\s+(?:\*\*)?[A-Z]\s*\./i.test(line)) return fallback;
+    if (/^[-+*]\s+\*\*\s*Something\s+else\s*:\s*\*\*/i.test(line)) {
+      target = null;
+      continue;
+    }
+    const recommendation = /^\*{1,2}\s*Recommended\s*:\s*([A-Z])\b(.*?)\*{1,2}\s*(.*)$/i.exec(line);
+    if (recommendation) {
+      const key = recommendation[1].toUpperCase();
+      current.recommended = current.options.some((item) => item.key === key) ? {
+        key,
+        reason: [recommendation[2].replace(/^[\s.,:]+/, "").trim(), recommendation[3].trim()].filter(Boolean).join(" "),
+      } : null;
+      target = current.recommended ? { object: current.recommended, field: "reason" } : null;
+      continue;
+    }
+    if (target) target.object[target.field] += `\n${rawLine}`;
+  }
+  if (!questions.length || questions.some((item) => !item.question || !item.options.length)) return fallback;
+  for (const question of questions) {
+    question.context = question.context.trim();
+    for (const option of question.options) option.detail = option.detail.trim();
+    if (question.recommended) question.recommended.reason = question.recommended.reason.trim();
+  }
+  return { decisionQuestions: questions, decisionMarkdown };
+}
+
 /** An explicit `status:<value>` label wins; otherwise derive from state and labels. */
 export function trackerStatusOf(issue) {
   const lower = issue.labels.map((label) => label.toLowerCase());
@@ -256,6 +328,7 @@ export function projectTrackerItem(issue, decisions = []) {
     requirement: text(marker.summary) ?? issue.title,
     category: text(marker.category),
     ...trackerStatusOf(issue),
+    ...parseDecisionSection(issue.body),
     decisions,
   };
 }
@@ -674,6 +747,16 @@ export function createTracker({
       const attachment = /^\/admin\/tracker\/decisions\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname);
       if (method === "GET" && attachment) {
         send(res, 200, await signedAttachment(segment(attachment[1]), segment(attachment[2])));
+        return true;
+      }
+      const itemDetail = /^\/admin\/tracker\/([^/]+)\/([0-9]+)$/.exec(pathname);
+      if (method === "GET" && itemDetail) {
+        const repo = repoFor(segment(itemDetail[1]));
+        const number = Number(itemDetail[2]);
+        const { issues } = await snapshot({ refresh: url?.searchParams.get("refresh") === "1" });
+        const issue = Number.isSafeInteger(number) && issues.get(`${repo.name}#${number}`);
+        if (!issue) throw new TrackerError(404, "tracker_item_not_found", `${repo.name}#${itemDetail[2]} is not a tracker item.`);
+        send(res, 200, await itemResponse(issue));
         return true;
       }
       const itemAction = /^\/admin\/tracker\/([^/]+)\/([^/]+)\/(status|decisions)$/.exec(pathname);
