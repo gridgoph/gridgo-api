@@ -19,6 +19,12 @@ const AT = "2026-09-01T00:00:00.000Z";
 const GITHUB_TOKEN = "github_pat_test_only";
 const FIRSTMATE_TOKEN = "firstmate-test-token";
 const PNG = Buffer.concat([Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"), Buffer.alloc(64, 1)]);
+const DECISION_MARKDOWN = "**Question 1. Which option?**\nContext for admins.\n- **A. First.** First detail.\n- **B. Second.** Second detail.\n- **Something else:** write in the box.\n\n*Recommended: B.* This is why.";
+const DECISION_QUESTIONS = [{
+  number: 1, question: "Which option?", context: "Context for admins.",
+  options: [{ key: "A", label: "First.", detail: "First detail." }, { key: "B", label: "Second.", detail: "Second detail." }],
+  allowOther: true, recommended: { key: "B", reason: "This is why." },
+}];
 
 function token(subject) {
   const current = Math.floor(Date.now() / 1000);
@@ -122,7 +128,7 @@ async function upload(api, subject, { purpose = "tracker_decision", name = "evid
 
 /** A small in-memory GitHub Issues API. */
 async function startMockGithub() {
-  const marker = (fields) => `Body\n\n<!-- tracker: ${JSON.stringify(fields)} -->`;
+  const marker = (fields) => `Body\n\n## Waiting on a decision\n${DECISION_MARKDOWN}\n\n<!-- tracker: ${JSON.stringify(fields)} -->`;
   const repos = {
     "gridgo-api": [
       { number: 1, title: "API one", body: marker({ id: "S2-1", section: "step-02", order: 1, ref: "2.1", summary: "Quote in minutes", category: "Orders", sheetStatus: "Open", owner: "mark" }), state: "open", state_reason: null, labels: ["tracker", "owner:mark"] },
@@ -257,6 +263,7 @@ test("tracker answers 503 when unconfigured and hides the firstmate routes witho
     assert.equal(unconfigured.body.error, "tracker_not_configured");
     assert.match(unconfigured.body.message, /GITHUB_TRACKER_TOKEN/);
     const patch = await request(instance.api, "/admin/tracker/gridgo-api/1/status", { method: "PATCH", subject: "clerk_super", body: { status: "open" } });
+    assert.equal((await request(instance.api, "/admin/tracker/gridgo-api/1", { subject: "clerk_super" })).body.error, "tracker_not_configured");
     assert.equal(patch.status, 503);
 
     const hidden = await request(instance.api, "/firstmate/tracker/decisions?unprocessed=1", { bearer: "anything" });
@@ -297,15 +304,19 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     }
     assert.equal((await request(api, "/admin/tracker/gridgo-api/2/status", { method: "PATCH", subject: "clerk_ops", body: { status: "open" } })).status, 403);
 
+    const coldDetail = await request(api, "/admin/tracker/gridgo-api/2", { subject: "clerk_super" });
+    assert.equal(coldDetail.status, 200);
     const listed = await request(api, "/admin/tracker", { subject: "clerk_super" });
     assert.equal(listed.status, 200, JSON.stringify(listed.body));
     assert.match(listed.body.fetchedAt, /^\d{4}-/);
     assert.deepEqual(listed.body.items.map((item) => item.key), ["gridgo-api#2", "gridgo-web#5", "gridgo-api#1"]);
     const [general, supplier, step] = listed.body.items;
+    assert.deepEqual(coldDetail.body, general);
     assert.deepEqual(general, {
       key: "gridgo-api#2", repo: "gridgo-api", number: 2, url: "https://github.com/gridgoph/gridgo-api/issues/2",
       section: "general", order: 1, ref: "G.1", module: "General", developer: "Ven", requirement: "One login",
       category: "Auth", status: "needs-decision", statusSource: "derived", decisions: [],
+      decisionQuestions: DECISION_QUESTIONS, decisionMarkdown: DECISION_MARKDOWN,
     });
     assert.equal(supplier.status, "live");
     assert.equal(supplier.statusSource, "derived");
@@ -317,16 +328,38 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     // Cached for 60 s; ?refresh=1 goes back to GitHub.
     const listCalls = () => github.calls.filter((call) => call.method === "GET" && call.path.endsWith("/issues")).length;
     const before = listCalls();
+    assert.equal(github.calls.length, 2, "one list fetch per repository, no per-item GitHub calls");
     assert.equal((await request(api, "/admin/tracker", { subject: "clerk_super" })).status, 200);
     assert.equal(listCalls(), before);
-    assert.equal((await request(api, "/admin/tracker?refresh=1", { subject: "clerk_super" })).status, 200);
+    assert.equal((await request(api, "/admin/tracker/gridgo-api/2")).status, 401);
+    for (const subject of ["clerk_ops", "clerk_client"]) {
+      assert.equal((await request(api, "/admin/tracker/gridgo-api/2", { subject })).status, 403);
+    }
+    const detail = await request(api, "/admin/tracker/gridgo-api/2", { subject: "clerk_super" });
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.body, general);
+    assert.equal(github.calls.length, 2, "detail reuses the issue body in the list cache");
+    for (const item of ["gridgo-api/0", "gridgo-api/3", "gridgo-api/99999999999999999", "gridgo-rider/1"]) {
+      const missing = await request(api, `/admin/tracker/${item}`, { subject: "clerk_super" });
+      assert.equal(missing.status, 404);
+      assert.equal(missing.body.error, "tracker_item_not_found");
+    }
+    github.repos["gridgo-api"][1].body = github.repos["gridgo-api"][1].body.replace("Which option?", "Updated question?");
+    assert.equal((await request(api, "/admin/tracker/gridgo-api/2", { subject: "clerk_super" })).body.decisionQuestions[0].question, "Which option?");
+    const refreshed = await request(api, "/admin/tracker/gridgo-api/2?refresh=1", { subject: "clerk_super" });
+    assert.equal(refreshed.body.decisionQuestions[0].question, "Updated question?");
     assert.equal(listCalls(), before + 2);
+    github.repos["gridgo-api"][1].body = github.repos["gridgo-api"][1].body.replace("Updated question?", "Which option?");
+    assert.equal((await request(api, "/admin/tracker?refresh=1", { subject: "clerk_super" })).status, 200);
+    assert.equal(listCalls(), before + 4);
 
     // Status: one status label; live closes as completed; anything else reopens.
     const toReview = await request(api, "/admin/tracker/gridgo-api/1/status", { method: "PATCH", subject: "clerk_super", body: { status: "in-review", note: "PR up" } });
     assert.equal(toReview.status, 200, JSON.stringify(toReview.body));
     assert.equal(toReview.body.status, "in-review");
     assert.equal(toReview.body.statusSource, "explicit");
+    assert.deepEqual(toReview.body.decisionQuestions, DECISION_QUESTIONS);
+    assert.equal(toReview.body.decisionMarkdown, DECISION_MARKDOWN);
     assert.deepEqual(github.repos["gridgo-api"][0].labels, ["tracker", "owner:mark", "status:in-review"]);
 
     const live = await request(api, "/admin/tracker/gridgo-api/1/status", { method: "PATCH", subject: "clerk_super", body: { status: "live" } });
@@ -401,6 +434,10 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     assert.equal(decided.body.status, "open");
     assert.equal(decided.body.statusSource, "explicit");
     assert.equal(decided.body.decisions.length, 1);
+    assert.deepEqual(decided.body.decisionQuestions, DECISION_QUESTIONS);
+    assert.equal(decided.body.decisionMarkdown, DECISION_MARKDOWN);
+    const decidedDetail = await request(api, "/admin/tracker/gridgo-api/2", { subject: "clerk_super" });
+    assert.deepEqual(decidedDetail.body, decided.body);
     const [decision] = decided.body.decisions;
     assert.match(decision.id, /^tdec_/);
     assert.equal(decision.text, "Use Clerk Google sign-in only.");

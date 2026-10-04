@@ -81,6 +81,7 @@ test("projectTrackerItem maps the marker, developer label and module fallback", 
     key: "gridgo-api#7", repo: "gridgo-api", number: 7, url: "https://github.com/gridgoph/gridgo-api/issues/7",
     section: "step-01", order: 2, ref: "1.2", module: "Step 01", developer: "Mark",
     requirement: "Client can pay", category: "Payments", status: "open", statusSource: "derived", decisions: [],
+    decisionQuestions: [], decisionMarkdown: "",
   });
   const noLabel = projectTrackerItem(issue({ body: '<!-- tracker: {"owner":"ven","module":"Supplier onboarding","section":"supplier"} -->' }));
   assert.equal(noLabel.developer, "Ven");
@@ -93,6 +94,8 @@ test("statusInput and decisionInput validate text, limits, statuses and read-onl
   assert.throws(() => statusInput({ status: "done" }), { code: "invalid_tracker_status" });
   assert.throws(() => statusInput({ status: "open", requirement: "new" }), { code: "tracker_field_not_editable" });
   assert.throws(() => statusInput({ status: "open", category: "x" }), { code: "tracker_field_not_editable" });
+  assert.throws(() => statusInput({ status: "open", decisionQuestions: [] }), { code: "tracker_field_not_editable" });
+  assert.throws(() => decisionInput({ text: "ok", decisionMarkdown: "replacement" }), { code: "tracker_field_not_editable" });
 
   assert.deepEqual(decisionInput({ text: " Go with B " }), { text: "Go with B", attachmentIds: [], status: "open" });
   assert.deepEqual(decisionInput({ text: "ok", attachmentIds: ["f1", "f1", "f2"], status: "blocked" }), { text: "ok", attachmentIds: ["f1", "f2"], status: "blocked" });

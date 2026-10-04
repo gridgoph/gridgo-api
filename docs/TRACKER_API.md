@@ -37,11 +37,44 @@ The last marker in the body wins; an issue without one still lists, using its ti
 | `requirement` | marker `summary`, else the issue title |
 | `category` | marker `category` |
 | `status`, `statusSource` | see [Statuses](#statuses) |
+| `decisionQuestions`, `decisionMarkdown` | parsed questions/options and raw fallback from the issue’s decision section; see [Decision panel contract](#decision-panel-contract) |
 | `decisions` | `[{ id, text, attachments: [{ id, name, contentType, size }], decidedBy: { id, name }, decidedAt }]`, oldest first |
 
 Items sort in report order: `general`, `supplier`, `step-01` … `step-08`, then any other section, then by `order`, repository, and issue number.
 
-Module, step, id, requirement, and category are never editable. Sending any of `module`, `section`, `step`, `order`, `ref`, `id`, `requirement`, `summary`, `category`, or `developer` to a write route gives `400 tracker_field_not_editable`.
+Module, step, id, requirement, category, and decision-panel content are never editable. Sending any of `module`, `section`, `step`, `order`, `ref`, `id`, `requirement`, `summary`, `category`, `developer`, `decisionQuestions`, or `decisionMarkdown` to a write route gives `400 tracker_field_not_editable`.
+
+## Decision panel contract
+
+Every projected tracker item includes these additive, read-only fields, regardless of status:
+
+```json
+{
+  "decisionQuestions": [
+    {
+      "number": 1,
+      "question": "Which option should we use?",
+      "context": "Optional context paragraphs or bullets.",
+      "options": [
+        { "key": "A", "label": "First option.", "detail": "Explanation of A." },
+        { "key": "B", "label": "Second option.", "detail": "Explanation of B." }
+      ],
+      "allowOther": true,
+      "recommended": { "key": "A", "reason": "Why A. Additional sentences stay here." }
+    }
+  ],
+  "decisionMarkdown": "**Question 1. Which option should we use?**\nOptional context paragraphs or bullets.\n- **A. First option.** Explanation of A.\n- **B. Second option.** Explanation of B.\n- **Something else:** write what you want in the decision box.\n\n*Recommended: A.* Why A. Additional sentences stay here."
+}
+```
+
+- Source: the first `## Waiting on a decision` section, ending at the next level-one or level-two heading or the end of the body. Heading whitespace and case are tolerated. `decisionMarkdown` is that section without its heading, trimmed at the edges, with hidden `<!-- tracker: … -->` comments removed (including unfinished markers). Internal Markdown and line endings are preserved. No section means `decisionMarkdown: ""`.
+- `decisionQuestions` follows source order. A question starts with `**Question 1. …**`; the unnumbered `**Question. …**` variant uses its one-based position. `number` is a positive safe integer. `question` omits the prefix and bold markers. `context` is the text after the question and before its first option, including inline context, paragraphs and bullets, trimmed at the edges; absent context is `""`.
+- Options follow source order: `- **A. Label.** detail`. Keys are uppercase single letters. Labels omit the key and bold markers, retaining punctuation and other Markdown such as backticks. `detail` is a trimmed string, possibly empty or multiline. Every parsed question has `allowOther: true`; the “Something else” bullet is not an option.
+- `recommended` is `{ "key": "A", "reason": "…" }` or `null` when absent or referring to an unknown option. Both `*Recommended: A*` and `*Recommended: A.*` work. Qualifiers such as `*Recommended: D, starting at A.*` or `*Recommended: A for the pilot.*` are retained in `reason`, followed by all explanatory sentences; an absent reason is `""`.
+- Missing, empty, non-text or unparseable sections produce `decisionQuestions: []`. Malformed question headings, missing options, empty option labels or duplicate question numbers/option keys reject the structured section as a whole; the dashboard can display `decisionMarkdown` instead. Both fields exclude hidden tracker comments. Treat content as untrusted GitHub Markdown and sanitize any rendered HTML.
+- Returned by `GET /admin/tracker` in each `items[]` entry, `GET /admin/tracker/:repo/:number` as the item directly (no envelope), and the updated-item responses from `PATCH /admin/tracker/:repo/:number/status` and `POST /admin/tracker/:repo/:number/decisions`. All require a Super Admin Clerk session.
+- List and detail share the existing 60-second GitHub snapshot, including issue bodies. Either accepts `?refresh=1`; detail refresh reloads the same repository lists. There are no extra GitHub calls per item. Decisions remain live PostgreSQL reads, and successful writes update the cached issue immediately.
+- Saving a choice still uses `POST /admin/tracker/:repo/:number/decisions` with `{ "text": "Question 1: A — First option.", "attachmentIds": [], "status": "open" }`. The dashboard formats selected options and any “Something else” answer into `text` (1–5000 characters). There is no new structured answer write format or server-side option validation; the existing needs-decision gate remains.
 
 ## Statuses
 
@@ -65,7 +98,7 @@ Without an explicit label the status is derived (`statusSource: "derived"`): `li
 
 ## Super Admin routes
 
-All four routes need a Clerk session with a `super_admin` membership. No session gives `401 unauthorized`. Operations and every other role get `403 forbidden`. An unconfigured tracker gives `503 tracker_not_configured`. GitHub being unreachable or refusing the token gives `502 tracker_github_unavailable`. GitHub's own error text and the token are never relayed.
+All five routes need a Clerk session with a `super_admin` membership. No session gives `401 unauthorized`. Operations and every other role get `403 forbidden`. An unconfigured tracker gives `503 tracker_not_configured`. GitHub being unreachable or refusing the token gives `502 tracker_github_unavailable`. GitHub's own error text and the token are never relayed.
 
 Writes serialize on a tracker advisory lock while GitHub answers. They take the domain mutation lock only for the final commit, which holds the audit row, the decision's file references, and the decision row, so a slow GitHub never stalls other platform mutations. GitHub is written before that commit, so a GitHub failure leaves no decision behind and the Super Admin can retry.
 
@@ -76,6 +109,12 @@ Writes serialize on a tracker advisory lock while GitHub answers. They take the 
 ```
 
 GitHub reads are cached in-process for 60 seconds, and `fetchedAt` says when the cache was filled. `?refresh=1` bypasses the cache. A status change or decision updates its item in the cache straight away. Decisions are always read live from PostgreSQL.
+
+### `GET /admin/tracker/:repo/:number`
+
+Returns a single projected item directly, including `decisionQuestions`, `decisionMarkdown`, and `decisions`. It uses the same GitHub cache as the list; `?refresh=1` refreshes that snapshot. It also works before the first list request.
+
+Errors: `404 tracker_item_not_found` for an unknown repository or an issue number absent from the tracker snapshot (including untracked issues and pull requests).
 
 ### `PATCH /admin/tracker/:repo/:number/status`
 
