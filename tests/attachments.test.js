@@ -571,6 +571,7 @@ test("a matched job shop can read the client's attached mockup", () => {
   const store = {
     orders: [matchedOrder],
     orderJobs: [{ id: "job-match", orderId: matchedOrder.id, supplierId: supplier.id, riderId: null }],
+    orderLineItems: [{ id: "one", orderId: matchedOrder.id, jobId: "job-match", mockupFileId: "file-mockup" }],
     supplierServices: [],
   };
   const file = readyFile("mockup", {
@@ -703,7 +704,7 @@ test("payment receipts stay private to their owner and Operations after order bi
   for (const user of [client, ops, superAdmin]) assert.doesNotThrow(() => authorizeFileRead(user, store, receipt));
   for (const user of [supplier, rider, otherClient]) expectError(() => authorizeFileRead(user, store, receipt), 403, "forbidden");
   for (const purpose of ["artwork", "mockup"]) {
-    const file = readyFile(purpose, { ownerId: client.id, references: [{ type: "order", id: "order-a", field: "line:one:artwork" }] });
+    const file = readyFile(purpose, { ownerId: client.id, references: [{ type: "order", id: "order-a", field: `${purpose}FileIds` }] });
     for (const user of [supplier, rider]) assert.doesNotThrow(() => authorizeFileRead(user, store, file));
   }
 });

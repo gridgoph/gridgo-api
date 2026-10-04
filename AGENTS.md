@@ -74,6 +74,7 @@ Season awareness windows and Super Admin-only rollout controls are defined in `d
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.
 
 - `save()` is the notification/outbox and realtime enqueue boundary; delivery occurs after commit. Do not send at individual notification append sites. Queue invalidates with `queueInvalidate` / `queueOrderInvalidate` before `save()`; delivery contract: `docs/REALTIME_EVENTS.md`.
+- Artwork/mockup lists and signed reads share `src/order-file-access.js`; job scope, single-shop legacy fallback, and unattributed multi-shop denial are defined in `docs/STORAGE_API.md#get-filesfileid--metadata`.
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.
 - `save()` kicks the single-flight outbox drain after commit (`kickPushDrain`); the lifecycle tick is only the retry backstop. Reach/delivery aggregates, `/health.push` since-boot fields, and the hourly `validate_only` stale-token sweep (`src/push-token-validation.js`, `device_token_checks`): `docs/OPERATIONAL_MODEL_V2_API.md#get-opspushstats`.
 - One token belongs to one `user.id`. Anonymous registration is hostile input and exposes only a fixed `{ok:true}` body.

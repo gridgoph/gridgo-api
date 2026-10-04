@@ -357,7 +357,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null, extraEnv = {} } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -375,7 +375,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
     item.measureUnit = "ft";
     await saveStore(database, store);
   });
-  const instance = await startApi();
+  const instance = await startApi({ extraEnv });
   t.after(async () => {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -1903,4 +1903,83 @@ test("match tokens persist across requests, select another shop and keep deadlin
   assert.equal(expired.status, 410);
   assert.equal(expired.body.error, "select_token_expired");
   assert.ok(expires);
+});
+
+test("multi-shop artwork lists and signed downloads enforce job ownership through the HTTP API", { skip: !DATABASE_URL }, async (t) => {
+  // Mock only the object store's HEAD transport; authorization and URL signing are real.
+  const storage = http.createServer((req, res) => {
+    res.writeHead(req.method === "HEAD" ? 200 : 404, { "Content-Length": 10 });
+    res.end();
+  });
+  await new Promise((resolve) => storage.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => storage.close(resolve)));
+  const storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  const { call, database, orderId } = await placedOrder(t, {
+    extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl },
+  });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === orderId);
+    order.state = "production";
+    order.supplierId = null;
+    order.riderId = "user_rider";
+    const job = store.orderJobs.find((row) => row.orderId === orderId);
+    job.riderId = "user_rider";
+    job.state = "production";
+    const line = store.orderLineItems.find((row) => row.orderId === orderId);
+    store.orderJobs.push({ ...structuredClone(job), id: "job_second", supplierId: "supplier_b", riderId: "user_rider_second" });
+    store.orderLineItems.push({ ...structuredClone(line), id: "line_second", jobId: "job_second", artworkFileId: "file_art_second", mockupFileId: "file_mock_second", sortOrder: 1 });
+    for (const [sourceId, fileId, purpose] of [["file_art", "file_art_second", "artwork"], ["file_mock", "file_mock_second", "mockup"]]) {
+      const source = store.files.find((row) => row.fileId === sourceId);
+      store.files.push({ ...structuredClone(source), fileId, objectKey: `test/${fileId}`, references: [{ type: "order", id: orderId, field: `line:line_second:${purpose}` }] });
+      const legacyId = `${sourceId}_legacy`;
+      store.files.push({ ...structuredClone(source), fileId: legacyId, objectKey: `test/${legacyId}`, references: [{ type: "order", id: orderId, field: `${purpose}FileIds` }] });
+      order[`${purpose}FileIds`] = [sourceId, fileId, legacyId];
+    }
+    for (const [sourceId, userId, subject] of [["user_ops", "user_super", "clerk_super"], ["user_rider", "user_rider_second", "clerk_rider_second"]]) {
+      const source = store.users.find((row) => row.id === sourceId);
+      const role = userId === "user_super" ? "super_admin" : "rider";
+      store.users.push({ ...source, id: userId, clerkUserId: subject, email: `${userId}@example.test`, role });
+      store.userRoleMemberships.push({ userId, role, createdAt: AT });
+      if (role === "rider") {
+        store.riderProfiles.push({ ...store.riderProfiles.find((row) => row.userId === sourceId), userId });
+        store.approvalCases.push({ ...store.approvalCases.find((row) => row.userId === sourceId), id: "case_rider_second", userId });
+      }
+    }
+    await saveStore(database, store);
+  });
+  const allFiles = ["file_art", "file_art_second", "file_art_legacy", "file_mock", "file_mock_second", "file_mock_legacy"];
+  for (const [subject, ownFiles] of [
+    ["clerk_supplier_a", ["file_art", "file_mock"]],
+    ["clerk_supplier_b", ["file_art_second", "file_mock_second"]],
+    ["clerk_rider", ["file_art", "file_mock"]],
+    ["clerk_rider_second", ["file_art_second", "file_mock_second"]],
+    ["clerk_client", allFiles], ["clerk_ops", allFiles], ["clerk_super", allFiles],
+  ]) {
+    // Order access still has one active rider; select that rider without changing job ownership.
+    if (subject.startsWith("clerk_rider")) await database.query(
+      "UPDATE orders SET rider_id = $2 WHERE id = $1", [orderId, subject === "clerk_rider" ? "user_rider" : "user_rider_second"],
+    );
+    for (const route of [`/orders/${orderId}`, "/orders"]) {
+      const response = await call(route, { subject });
+      assert.equal(response.status, 200, `${subject} ${route}: ${JSON.stringify(response.body)}`);
+      const view = response.body.order || response.body.orders.find((row) => row.id === orderId);
+      assert.ok(view, `${subject} can view the order`);
+      assert.deepEqual(view.artworkFileIds, ownFiles.filter((id) => id.startsWith("file_art")), subject);
+      assert.deepEqual(view.mockupFileIds, ownFiles.filter((id) => id.startsWith("file_mock")), subject);
+    }
+    for (const fileId of allFiles) for (const suffix of ["", "/download-url"]) {
+      const response = await call(`/files/${fileId}${suffix}`, { subject });
+      assert.equal(response.status, ownFiles.includes(fileId) ? 200 : 403, `${subject} ${fileId}${suffix}: ${JSON.stringify(response.body)}`);
+      if (!ownFiles.includes(fileId)) assert.equal(response.body.error, "forbidden");
+      else if (suffix) assert.match(response.body.url, /X-Amz-Signature=/);
+    }
+  }
+  // A combined delivery grants this rider both assigned jobs, but not unattributed legacy files.
+  await database.query("UPDATE order_jobs SET rider_id = 'user_rider' WHERE order_id = $1", [orderId]);
+  await database.query("UPDATE orders SET rider_id = 'user_rider' WHERE id = $1", [orderId]);
+  const combined = await call(`/orders/${orderId}`, { subject: "clerk_rider" });
+  assert.deepEqual(combined.body.order.artworkFileIds, ["file_art", "file_art_second"]);
+  assert.equal((await call("/files/file_art_second/download-url", { subject: "clerk_rider" })).status, 200);
+  assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
 });
