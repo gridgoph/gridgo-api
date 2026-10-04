@@ -21,6 +21,7 @@ import {
   publicSupplierShop,
   selectedCatalogPrice,
 } from "../src/supplier-catalog.js";
+import { matchShop, MATCH_FACTORS } from "../src/order-match.js";
 import { gridgoAmountMinor } from "../src/pricing.js";
 import { routeSupplierCatalog } from "../src/catalog-routes.js";
 import { UNOPENED_FILE_MESSAGE } from "../src/file-formats.js";
@@ -891,6 +892,18 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
   assert.equal(starters.status, 200);
   assert.ok(starters.body.starters.some((starter) => starter.subcategoryCode === "tarpaulins_outdoor_banners"));
   assert.ok(starters.body.starters[0].groups.length > 0);
+
+  const anonymousReadiness = await request(api, "/me/supplier-readiness");
+  assert.equal(anonymousReadiness.status, 401);
+  const readiness = await request(api, "/me/supplier-readiness", { subject: "clerk_supplier" });
+  assert.equal(readiness.status, 200);
+  assert.equal(readiness.body.operational.ready, false);
+  assert.ok(readiness.body.operational.missing.some(step => step.code === "no_matchable_listing"));
+  assert.deepEqual(readiness.body.operational.listings, []);
+  assert.equal(readiness.body.requestEligibility.evaluated, false);
+  const invalidReadiness = await request(api, "/me/supplier-readiness?units=0", { subject: "clerk_supplier" });
+  assert.equal(invalidReadiness.status, 400);
+  assert.equal(invalidReadiness.body.error, "invalid_readiness_request");
 });
 
 /** The fixture's groups are required; these tests are about price, not choices. */
@@ -1259,4 +1272,146 @@ test("overriding ready-in time can state the soonest and latest hours", async ()
     }),
     (error) => error.status === 400 && error.code === "invalid_catalog_item",
   );
+});
+
+async function readinessResponse(store, query = "") {
+  const result = await routeSupplierCatalog({
+    req: { method: "GET" }, url: new URL(`http://localhost/me/supplier-readiness${query}`),
+    store, user: store.users[0], now: () => AT,
+  });
+  assert.equal(result.status, 200);
+  return result.body;
+}
+
+// CB608D07: setup-only requirements must not make an eligible listing look blocked.
+test("operational readiness accepts listing format overrides without a shop image or service defaults", async () => {
+  const store = fixture({ fileFormatMode: "override" });
+  store.supplierServiceFileFormats = [];
+  store.supplierShopMedia = [];
+  const result = await readinessResponse(store);
+  assert.equal(result.readyForApproval, false);
+  assert.deepEqual(result.missing, ["review_ready_service_line", "shop_identity_image"]);
+  assert.deepEqual(result.publishableServiceIds, []);
+  assert.equal(result.operational?.ready, true);
+  assert.deepEqual(result.operational.missing, []);
+  assert.equal(result.operational.listings[0].ready, true);
+  assert.equal(result.profileCompletion.complete, false);
+  assert.ok(result.profileCompletion.services[0].missing.some(step => step.code === "service_default_formats"));
+  assert.ok(result.profileCompletion.missing.some(step => step.code === "shop_identity_image"));
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).id, "item");
+  assert.equal(matchShop(store, { subcategoryCode: "tarpaulins_outdoor_banners", ranking: MATCH_FACTORS, now: AT }).listings[0].id, "item");
+});
+
+test("operational readiness reports every listing blocker including a suspended parent and printer width", async () => {
+  const store = fixture();
+  store.supplierServices[0].state = "suspended";
+  store.catalogItems[0].printerMaxWidthFeet = null;
+  store.catalogItemPhotos = [];
+  store.catalogOptions = [];
+  const result = await readinessResponse(store);
+  assert.equal(result.operational?.ready, false);
+  const missing = result.operational.listings[0].missing;
+  assert.deepEqual(missing.map(step => step.code), [
+    "printer_max_width_feet", "photo", "option_group", "option_group", "service_not_live",
+  ]);
+  assert.deepEqual(missing.filter(step => step.code === "option_group").map(step => step.optionGroupId), ["size", "grommets"]);
+  for (const step of missing) {
+    assert.equal(typeof step.message, "string");
+    assert.ok(step.message.length > 10);
+    assert.equal(typeof step.action, "string");
+  }
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+});
+
+test("operational readiness explains shop gates without changing legacy setup readiness", async () => {
+  for (const [code, change] of [
+    ["account_inactive", s => { s.users[0].accountStatus = "suspended"; }],
+    ["shop_closed", s => { s.supplierProfiles[0].isClosed = true; }],
+    ["shop_location", s => { s.supplierProfiles[0].shop = null; }],
+    ["supplier_profile", s => { s.supplierProfiles = []; }],
+    ["supplier_not_approved", s => { s.approvalCases[0].status = "pending"; }],
+  ]) {
+    const store = fixture(); change(store);
+    const result = await readinessResponse(store);
+    assert.equal(result.operational?.ready, false, code);
+    assert.ok(result.operational.missing.some(step => step.code === code), code);
+    assert.ok(result.operational.listings[0].missing.some(step => step.code === code), code);
+    assert.throws(() => matchShop(store, { subcategoryCode: "tarpaulins_outdoor_banners", ranking: MATCH_FACTORS, now: AT }), error => error.code === "match_not_found");
+  }
+});
+
+test("one eligible listing makes the shop operational even when other listings need work", async () => {
+  const store = fixture();
+  store.catalogItems.push({ ...store.catalogItems[0], id: "draft", active: false });
+  const result = await readinessResponse(store);
+  assert.equal(result.operational?.ready, true);
+  assert.deepEqual(result.operational.missing, []);
+  assert.equal(result.operational.listings[1].ready, false);
+  assert.ok(result.operational.listings[1].missing.some(step => step.code === "item_inactive"));
+});
+
+test("request deadline and printer capacity failures stay separate from operational readiness", async () => {
+  const store = fixture();
+  store.supplierServices[0].capacityDaily = 1;
+  const plain = await readinessResponse(store);
+  assert.equal(plain.requestEligibility?.evaluated, false);
+  const result = await readinessResponse(store, "?deadline=2026-08-17T01:00:00Z&units=100&widthFeet=6");
+  assert.equal(result.operational.ready, true);
+  assert.equal(result.requestEligibility.evaluated, true);
+  const request = result.requestEligibility.listings[0];
+  assert.equal(request.eligible, false);
+  assert.deepEqual(request.missing.map(step => step.code), ["printer_capacity_exceeded", "deadline_not_met"]);
+  assert.equal(request.projection.limitedBy, "capacity");
+  assert.ok(request.projection.capacityDays > 0);
+  assert.ok(Date.parse(request.projection.readyBy) > Date.parse("2026-08-17T01:00:00Z"));
+  assert.equal(Object.hasOwn(request.projection, "promiseBy"), false);
+});
+
+test("readiness validates optional request inputs and remains supplier scoped", async () => {
+  for (const query of ["?units=0", "?units=1.5", "?units=", "?widthFeet=-1", "?deadline=bad"]) {
+    await assert.rejects(readinessResponse(fixture(), query), error => error.status === 400);
+  }
+  await assert.rejects(readinessResponse({ ...fixture(), users: [{ id: "client", role: "client" }] }), error => error.status === 403);
+});
+
+test("request diagnostics agree with matching for a later deadline and a narrower printer width", async () => {
+  const store = fixture();
+  const input = { subcategoryCode: "tarpaulins_outdoor_banners", ranking: MATCH_FACTORS, now: AT };
+  for (const [query, request, eligible, code] of [
+    ["?widthFeet=6", { widthFeet: 6 }, false, "match_not_found"],
+    ["?deadline=2026-08-17T01:00:00Z", { deadline: "2026-08-17T01:00:00Z" }, false, "deadline_not_met"],
+    ["?deadline=2026-09-17T01:00:00Z&widthFeet=5", { deadline: "2026-09-17T01:00:00Z", widthFeet: 5 }, true],
+  ]) {
+    const result = await readinessResponse(store, query);
+    assert.equal(result.operational.ready, true);
+    assert.equal(result.requestEligibility.listings[0].eligible, eligible);
+    if (eligible) assert.equal(matchShop(store, { ...input, ...request }).listings[0].id, "item");
+    else assert.throws(() => matchShop(store, { ...input, ...request }), error => error.code === code);
+  }
+});
+
+test("schedule closures are request failures and never expose the client promise to the shop", async () => {
+  const store = fixture();
+  store.supplierProfiles[0].schedule = {
+    utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 480, closesMinute: 1080 }],
+    closures: [{ startDay: "2026-01-01", endDay: "2028-01-01" }],
+  };
+  const result = await readinessResponse(store, "?units=1");
+  assert.equal(result.operational.ready, true);
+  assert.equal(result.requestEligibility.listings[0].eligible, false);
+  assert.deepEqual(result.requestEligibility.listings[0].missing.map(step => step.code), ["shop_never_open"]);
+  assert.throws(() => matchShop(store, { subcategoryCode: "tarpaulins_outdoor_banners", ranking: MATCH_FACTORS, now: AT }), error => error.code === "shop_never_open");
+});
+
+test("setup lists incomplete fields separately and readiness never includes another shop's listings", async () => {
+  const store = fixture();
+  Object.assign(store.supplierProfiles[0], { shopName: "", contactName: "", shop: null });
+  store.catalogItems[0].active = false;
+  store.catalogItems.push({ ...store.catalogItems[0], id: "other_item", supplierId: "other" });
+  const result = await readinessResponse(store, "?units=1");
+  assert.deepEqual(result.profileCompletion.missing.map(step => step.code), [
+    "supplier_profile", "complete_catalog_item", "shop_name", "contact_name", "shop_location",
+  ]);
+  assert.deepEqual(result.operational.listings.map(row => row.catalogItemId), ["item"]);
+  assert.deepEqual(result.requestEligibility.listings, [{ catalogItemId: "item", evaluated: false, eligible: null, missing: [] }]);
 });

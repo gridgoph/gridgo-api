@@ -465,6 +465,73 @@ test("firstmate reads new reports with signed screenshots and links them with it
   );
 });
 
+test("the list pages with before=<last id shown>, never repeating or skipping a report", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const env = { FIRSTMATE_TRACKER_TOKEN: FIRSTMATE_TOKEN };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const send = (response, status, body) => {
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(body));
+    };
+    const handled = await routeFirstmateIssueReports({ req, res, pathname: url.pathname, url, send, database, storage, env });
+    if (!handled) send(res, 404, { error: "unrouted" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    server.close();
+    await database.query("TRUNCATE issue_reports CASCADE").catch(() => {});
+    await database.close?.();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+
+  // Seven reports, three of them filed in the same instant, plus one already handled.
+  const ids = [];
+  for (let index = 0; index < 7; index += 1) {
+    const filed = await createIssueReport(database, storage, { issue: `Report ${index}`, category: null, screenshots: [] });
+    const at = index < 3 ? "2026-09-20T00:00:00Z" : `2026-09-2${index - 2}T00:00:00Z`;
+    await database.query("UPDATE issue_reports SET created_at = $2 WHERE id = $1", [filed.id, at]);
+    ids.push(filed.id);
+  }
+  const handled = await createIssueReport(database, storage, { issue: "Handled", category: null, screenshots: [] });
+  await database.query("UPDATE issue_reports SET status = 'dismissed' WHERE id = $1", [handled.id]);
+
+  const everything = await call(base, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
+  assert.equal(everything.body.reports.length, 7);
+  assert.deepEqual(Object.keys(everything.body).sort(), ["counts", "reports"]);
+
+  const paged = [];
+  let before = null;
+  for (let guard = 0; guard < 10; guard += 1) {
+    const page = await call(
+      base,
+      `/firstmate/issue-reports?status=new&limit=2${before ? `&before=${before}` : ""}`,
+      { token: FIRSTMATE_TOKEN },
+    );
+    assert.equal(page.status, 200);
+    assert.deepEqual(page.body.counts, { new: 7, tracked: 0, published: 0, dismissed: 1 });
+    if (!page.body.reports.length) break;
+    assert.ok(page.body.reports.length <= 2);
+    paged.push(...page.body.reports.map((report) => report.id));
+    before = paged.at(-1);
+  }
+  assert.deepEqual(paged, everything.body.reports.map((report) => report.id));
+  assert.equal(new Set(paged).size, 7);
+
+  // The cursor may be a report that has since left the tab.
+  const afterHandled = await call(base, `/firstmate/issue-reports?status=new&before=${handled.id}`, { token: FIRSTMATE_TOKEN });
+  assert.equal(afterHandled.status, 200);
+  assert.equal(afterHandled.body.reports.length, 7);
+
+  for (const bad of ["nope", "00000000-0000-4000-8000-000000000000"]) {
+    const refused = await call(base, `/firstmate/issue-reports?status=new&before=${bad}`, { token: FIRSTMATE_TOKEN });
+    assert.equal(refused.status, 400, bad);
+    assert.equal(refused.body.error, "invalid_request");
+  }
+});
+
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
 
 async function freePort() {

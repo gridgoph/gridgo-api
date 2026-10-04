@@ -36,6 +36,7 @@ The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin`
 Send a Clerk session token as `Authorization: Bearer <token>`. The account's verified primary email must be on `SUPPORT_DESK_ALLOWED_EMAILS` — the same gate as the ticket desk. Another Clerk account is `403 forbidden`; no or an invalid token is `401 unauthorized`; an empty allowlist is `503 desk_unconfigured`.
 
 - `GET /issue-reports?status=new&since=2026-09-24&limit=200` lists newest first. `status` is `new | tracked | published | dismissed`; every filter is optional. `limit` is capped at 500.
+- Paging: `before=<report id>` returns only reports older than that one (same filters, same order; ties on `createdAt` are broken by `id`), so the next page is `?status=new&limit=25&before=<id of the last report shown>`. An id that is not a report is `400 invalid_request`. Without `before` the response is unchanged. `counts` are always the totals per status, so a caller knows more remain while it has shown fewer than `counts[status]`.
 - `GET /issue-reports/:id` returns one report.
 - `PATCH /issue-reports/:id` with `{ "status": "published", "publishedIn": "09-24-2026" }` marks it handled. `publishedIn` is kept only for `published`.
 
