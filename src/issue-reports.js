@@ -266,13 +266,18 @@ async function projectReports(database, storage, rows) {
 
 const REPORT_COLUMNS = "id, issue, category, status, published_in, tracker_issue_url, created_at, updated_at";
 
-export async function listIssueReports(database, storage, { status = null, since = null, limit = 200 } = {}) {
+/**
+ * Newest first, with `id` breaking ties so pages never overlap. `before` is
+ * the id of the last report of the previous page: only older reports follow.
+ */
+export async function listIssueReports(database, storage, { status = null, since = null, limit = 200, before = null } = {}) {
   const result = await database.query(
     `SELECT ${REPORT_COLUMNS} FROM issue_reports
      WHERE ($1::text IS NULL OR status = $1) AND ($2::timestamptz IS NULL OR created_at >= $2)
-     ORDER BY created_at DESC
+       AND ($4::uuid IS NULL OR (created_at, id) < (SELECT created_at, id FROM issue_reports WHERE id = $4))
+     ORDER BY created_at DESC, id DESC
      LIMIT $3`,
-    [status, since, limit],
+    [status, since, limit, before],
   );
   return projectReports(database, storage, result.rows);
 }
@@ -344,7 +349,17 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
     }
     const limitRaw = Number(url?.searchParams.get("limit") || 200);
     const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 200;
-    const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit });
+    // Paging: the id of the last report already shown. Absent, the first page.
+    const before = url?.searchParams.get("before") || null;
+    if (before) {
+      const anchor = UUID_RE.test(before)
+        ? await database.query("SELECT 1 FROM issue_reports WHERE id = $1", [before])
+        : { rowCount: 0 };
+      if (!anchor.rowCount) {
+        throw new ReportError(400, "invalid_request", "before must be the id of an issue report.");
+      }
+    }
+    const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit, before });
     send(res, 200, { reports, counts: await reportCounts(database) });
     return true;
   }
