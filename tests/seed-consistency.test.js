@@ -32,7 +32,12 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
   assert.ok(first.catalog.length > 0);
   assert.ok(first.taxonomy.categories.length > 0);
   assert.ok(first.zones.length > 0);
-  assert.ok(first.settings.deliveryFeeBands.length > 0);
+  assert.deepEqual(first.settings.deliveryFeeBands, [
+    { zone: 'nearby', label: 'Nearby', maxDistanceMeters: 5000, feeMinor: 8900 },
+    { zone: 'away', label: 'Away', maxDistanceMeters: 10000, feeMinor: 14900 },
+    { zone: 'long_distance', label: 'Long Distance', maxDistanceMeters: 15000, feeMinor: 22900 },
+    { zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500 },
+  ]);
   for (const key of ["users", "supplierServices", "orders", "files", "claims", "issues", "auditLog", "notifications", "locationPings", "escalations", "deviceTokens"]) {
     assert.deepEqual(first[key], [], key);
   }
@@ -44,6 +49,10 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
     const customized = await loadStore(database);
     customized.version += 1;
     customized.settings.issueWindowHours = 48;
+    [1200, 6500, 23000].forEach((limit, index) => {
+      customized.settings.deliveryFeeBands[index].maxDistanceMeters = limit;
+      customized.settings.deliveryFeeBands[index].feeMinor += 100;
+    });
     customized.taxonomy.categories.push({
       id: "taxc_ops",
       code: "ops_special",
@@ -57,6 +66,8 @@ test("fresh seed is idempotent platform reference data with no accounts", { skip
   const preserved = await loadStore(database);
   assert.equal(preserved.version, first.version + 1);
   assert.equal(preserved.settings.issueWindowHours, 48);
+  assert.deepEqual(preserved.settings.deliveryFeeBands, first.settings.deliveryFeeBands.map((band, index) =>
+    index === 3 ? band : { ...band, maxDistanceMeters: [1200, 6500, 23000][index], feeMinor: band.feeMinor + 100 }));
   assert.ok(preserved.taxonomy.categories.some((item) => item.code === "ops_special"));
   await database.close();
 });

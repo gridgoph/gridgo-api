@@ -957,14 +957,14 @@ test("rider split migration preserves old delivery fees and SQL computes exact n
   });
 });
 
-test("delivery zones migrate fees and settings version without touching existing order or job snapshots", { skip: !DATABASE_URL }, async (t) => {
+for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zones preserve flat fees ${fees.join('/')} and default limits without touching existing order or job snapshots`, { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     const { readdir } = await import("node:fs/promises");
     const oldCount = (await readdir(MIGRATIONS_DIR)).filter((name) => name.endsWith(".js") && name < "1790812800000").length;
     await runner(migrationOptions(schema, "up", oldCount, client));
     await client.query(`
       INSERT INTO platform_settings (singleton, version, settings) VALUES (true, 12,
-        '{"serviceFeeRateBps":1000,"issueWindowHours":24,"deliveryFeeBands":[{"maxDistanceMeters":4999,"feeMinor":3100},{"maxDistanceMeters":10000,"feeMinor":6200},{"maxDistanceMeters":null,"feeMinor":9300}]}');
+        '{"serviceFeeRateBps":1000,"issueWindowHours":24,"deliveryFeeBands":[{"maxDistanceMeters":4999,"feeMinor":${fees[0]}},{"maxDistanceMeters":10000,"feeMinor":${fees[1]}},{"maxDistanceMeters":null,"feeMinor":${fees[2]}}]}');
       INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
         VALUES ('client', 'clerk_client', 'client@test.invalid', 'Client', 'client', 'individual', now(), 0);
       INSERT INTO users (id, clerk_user_id, email, name, role, verification_status, created_at, position)
@@ -984,13 +984,18 @@ test("delivery zones migrate fees and settings version without touching existing
     assert.equal(version, 13);
     assert.equal(settings.serviceFeeRateBps, 1000);
     assert.deepEqual(settings.deliveryFeeBands, [
-      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 3100 },
-      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 6200 },
-      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 9300 },
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: fees[0] },
+      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: fees[1] },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: fees[2] },
       { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 7500, perKmMinor: 1000 },
     ]);
     await runner(migrationOptions(schema, "up", undefined, client));
-    assert.equal((await client.query("SELECT version FROM platform_settings")).rows[0].version, 14);
+    const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
+    assert.equal(migrated.version, 14);
+    assert.deepEqual(migrated.settings.deliveryFeeBands.slice(0, 3), settings.deliveryFeeBands.slice(0, 3));
+    assert.deepEqual(migrated.settings.deliveryFeeBands[3], {
+      zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,
+    });
     for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows, before[table]);
   });
 });
