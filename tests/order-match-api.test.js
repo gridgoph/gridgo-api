@@ -323,7 +323,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   });
   assert.equal(checkout.status, 201, `${JSON.stringify(checkout.body)}\n${instance.output()}`);
   assert.equal(checkout.body.order.state, "initial_payment_review");
-  assert.equal(checkout.body.order.totalMinor, 35_500);
+  assert.equal(checkout.body.order.totalMinor, 41_900);
   assert.equal(checkout.body.order.jobs.length, 1);
   assert.ok(checkout.body.order.readyBy, "the client is given a promised date");
 

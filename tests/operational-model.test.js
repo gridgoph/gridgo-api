@@ -136,7 +136,7 @@ test("allocates delivery, pickup full-online, and pickup-at-store plans exactly"
       total: delivery.totalMinor,
       supplierPayout: delivery.supplierPlatformPayoutMinor,
     },
-    { fee: 10_000, principalNow: 25_000, initial: 35_000, later: 77_500, store: 0, total: 112_500, supplierPayout: 100_000 },
+    { fee: 10_000, principalNow: 25_000, initial: 35_000, later: 83_900, store: 0, total: 118_900, supplierPayout: 100_000 },
   );
 
   const fullOnline = plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_full_online", supplierDownpaymentRateBps: 10_000 });
@@ -157,16 +157,16 @@ test("allocates delivery, pickup full-online, and pickup-at-store plans exactly"
     { paymentCode: "initial", component: "supplier_principal", amountMinor: 25_000 },
     { paymentCode: "initial", component: "service_fee", amountMinor: 10_000 },
     { paymentCode: "final_online", component: "supplier_principal", amountMinor: 75_000 },
-    { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: 2_500 },
+    { paymentCode: "final_online", component: "delivery_pass_through", amountMinor: 8_900 },
   ]);
 });
 
-test("uses the provisional configurable distance boundaries exactly", () => {
+test("uses the default inclusive distance boundaries exactly", () => {
   const settings = defaultOperationalSettings();
-  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 4_999, settings }).deliveryFeeMinor, 2_500);
-  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 2_500);
-  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_000, settings }).deliveryFeeMinor, 5_000);
-  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 7_500);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 4_999, settings }).deliveryFeeMinor, 8_900);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 5_000, settings }).deliveryFeeMinor, 8_900);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_000, settings }).deliveryFeeMinor, 14_900);
+  assert.equal(plan({ supplierSubtotalMinor: 1_000, distanceMeters: 10_001, settings }).deliveryFeeMinor, 22_900);
 });
 
 test("publicOrderFor always sends a timeline array, even when the row never stored one", () => {
@@ -293,8 +293,8 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(clientOrder.payments.initial.amountMinor, 35_000);
   assert.equal(clientOrder.subtotalMinor, 100_000);
   assert.equal(clientOrder.serviceFeeMinor, 10_000);
-  assert.equal(clientOrder.deliveryFeeMinor, 2_500);
-  assert.equal(clientOrder.totalMinor, 112_500);
+  assert.equal(clientOrder.deliveryFeeMinor, 8_900);
+  assert.equal(clientOrder.totalMinor, 118_900);
 
   const supplierOrder = publicOrderFor(order, { id: "supplier-a", role: "supplier" });
   assert.equal(supplierOrder.supplierSubtotalMinor, 100_000);
@@ -320,7 +320,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(opsOrder.platformRevenue.collectedMinor, 10_000);
   assert.equal(opsOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
   assert.deepEqual(moneyReportingForOrder(order).platformRevenue, {
-    billedMinor: 10_375,
+    billedMinor: 11_335,
     collectedMinor: 10_000,
     recognizedMinor: 0,
     adjustedMinor: 0,
@@ -333,7 +333,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     { kind: "refund", amountMinor: -2_000 },
   ];
   assert.deepEqual(moneyReportingForOrder(adjusted).platformRevenue, {
-    billedMinor: 10_375,
+    billedMinor: 11_335,
     collectedMinor: 10_000,
     recognizedMinor: 7_000,
     adjustedMinor: -1_000,
@@ -776,8 +776,8 @@ test("dispatch and ops expose delivery earnings while client and supplier omit t
   const order = { id: "split", clientId: "client", supplierId: "supplier", ...plan() };
   for (const role of ["rider", "ops_admin", "super_admin"]) {
     const projected = publicOrderFor(order, { id: role, role });
-    assert.equal(projected.riderPayoutMinor, 2125);
-    assert.equal(projected.platformDeliveryShareMinor, 375);
+    assert.equal(projected.riderPayoutMinor, 7565);
+    assert.equal(projected.platformDeliveryShareMinor, 1335);
     assert.equal(projected.riderCommissionBps, 8500);
   }
   for (const role of ["client", "supplier"]) {
@@ -785,18 +785,18 @@ test("dispatch and ops expose delivery earnings while client and supplier omit t
     assert.equal(projected.riderPayoutMinor, undefined);
     assert.equal(projected.platformDeliveryShareMinor, undefined);
     assert.equal(projected.riderCommissionBps, undefined);
-    assert.equal(projected.deliveryFeeMinor, 2500);
+    assert.equal(projected.deliveryFeeMinor, 8900);
   }
 });
 
 test("finance counts GRIDGO delivery revenue only from confirmed collection", () => {
   const order = { ...plan(), ...createPaymentSchedule(plan()), commercialCommittedAt: AT, state: "delivered" };
-  assert.equal(moneyReportingForOrder(order).platformRevenue.billedMinor, 10375);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.billedMinor, 11335);
   assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 0);
   order.payments.final_online.status = "confirmed";
-  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 375);
-  assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 375);
-  assert.equal(moneyReportingForOrder(order).deliverySettlement.riderPayoutMinor, 2125);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 1335);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 1335);
+  assert.equal(moneyReportingForOrder(order).deliverySettlement.riderPayoutMinor, 7565);
   // The 75/25 plan collects delivery in both installments. Round cumulatively:
   // 8 paid centavos at 85% -> 7 rider, 1 platform; all 10 -> 9 rider, 1 platform.
   Object.assign(order, { deliveryFeeMinor: 10, riderCommissionBps: 8500, paymentAllocations: [

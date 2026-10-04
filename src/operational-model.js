@@ -218,9 +218,9 @@ export function defaultOperationalSettings() {
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     deliveryFeeBands: [
-      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 2_500 },
-      { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 5_000 },
-      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15_000, feeMinor: 7_500 },
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 8_900 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 14_900 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15_000, feeMinor: 22_900 },
       { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 4_000, perKmMinor: 1_500 },
     ],
   };
@@ -278,8 +278,17 @@ export function validateOperationalSettings(settings) {
     const band = bands[index];
     const expected = canonical[index];
     if (band?.zone !== expected.zone || band?.label !== expected.label
-        || band?.maxDistanceMeters !== expected.maxDistanceMeters) {
-      fail(400, "invalid_delivery_fee_bands", "Keep the four fixed zone keys, labels, and inclusive distance limits in order.");
+        || (band.zone === "out_of_zone" && band.maxDistanceMeters !== null)) {
+      fail(400, "invalid_delivery_fee_bands", "Keep the four fixed zone keys and labels in order, with a null Out of Zone maximum.");
+    }
+    if (band.zone !== "out_of_zone") {
+      const field = `deliveryFeeBands[${index}].maxDistanceMeters`;
+      if (!Number.isInteger(band.maxDistanceMeters) || band.maxDistanceMeters <= 0 || band.maxDistanceMeters > 100_000) {
+        fail(400, "invalid_delivery_zone_limit", "Set each zone limit to a whole number of metres from 1 to 100,000 (100 km).", { field });
+      }
+      if (index > 0 && band.maxDistanceMeters <= bands[index - 1].maxDistanceMeters) {
+        fail(400, "delivery_zone_limits_not_increasing", "Nearby, Away, and Long Distance limits must be strictly increasing.", { field });
+      }
     }
     const fields = band.zone === "out_of_zone" ? ["baseFeeMinor", "perKmMinor"] : ["feeMinor"];
     for (const field of fields) {
