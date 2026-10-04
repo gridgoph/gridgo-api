@@ -64,6 +64,8 @@ Supplier readiness separates legacy setup checks, operational listing eligibilit
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
+Season awareness windows and Super Admin-only rollout controls are defined in `docs/SEASON_WINDOWS_API.md`. Scheduled season pushes default off; `noticeQueuedAt` is immutable and never reset by edits.
+
 ## Files and push
 
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.

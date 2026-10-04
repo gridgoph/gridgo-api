@@ -217,6 +217,7 @@ export function defaultOperationalSettings() {
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
+    seasonWindowPush: { enabled: false, version: 1 },
     deliveryFeeBands: [
       { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 2_500 },
       { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 5_000 },
