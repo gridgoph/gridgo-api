@@ -45,6 +45,8 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkou
 - Any path that suspends supplier lines with the account must tag each line `approvalSuspensionCaseId`/`approvalSuspensionPreviousState` (jsonb `data`); `suspendedWithAccount` in `src/approval-cases.js` decides what `POST /approval-cases/:id/restore` `restoreServiceIds` may bring back. Contract: `docs/OPERATIONAL_MODEL_V2_API.md#approval-queue-and-decisions`.
 - Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it. `POST /me/business-application` (and legacy `POST /me/business-apply`) opens a pending `business_client` case — do not flip `accountType` until Operations approves it. A pending application lives on its approval-case snapshot, never on the profile: `client_profiles_check` forbids business fields on a personal row and stays, because nothing clears them on reject.
 
+Late-production warnings, the Super Admin deductions gate (off by default), net payout adjustments, and recent-lapse matching weight: `docs/PRODUCTION_PENALTIES_API.md`. Published payout shares remain gross; stage `amountMinor` is net of `productionDeductionMinor`.
+
 ## Geography
 
 Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties. Rider location and Operations map contracts: `docs/OPERATIONAL_MODEL_V2_API.md#rider-location`.

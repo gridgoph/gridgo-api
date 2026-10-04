@@ -1,3 +1,4 @@
+import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
@@ -217,6 +218,7 @@ export function defaultOperationalSettings() {
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
+    productionPenalty: defaultProductionPenalty(),
     seasonWindowPush: { enabled: false, version: 1 },
     deliveryFeeBands: [
       { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 8_900 },
@@ -228,6 +230,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
     fail(
@@ -660,6 +663,8 @@ export function collectedSupplierPrincipalMinor(order) {
 
 export function moneyReportingForOrder(order, store = null) {
   const settlement = refundSettlementFor(store, order);
+  const deductionsMinor = orderPenaltyMinor(order);
+  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) - deductionsMinor);
   const refundedPrincipalMinor = (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
     .reduce((sum, row) => sum + row.principalMinor, 0);
   const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order)]
@@ -685,7 +690,7 @@ export function moneyReportingForOrder(order, store = null) {
   const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
   const protectedPaymentMinor = Math.max(
     0,
-    Math.min(settlement?.shopEntitlementMinor ?? order.supplierPlatformPayoutMinor ?? 0, collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
+    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
   );
   return {
     supplierSettlement: {
@@ -694,12 +699,12 @@ export function moneyReportingForOrder(order, store = null) {
       receivedAtStoreMinor,
       collectedSupplierPrincipalMinor: collectedPrincipalMinor,
       protectedPaymentMinor,
-      gridgoDeductionsMinor: 0,
-      totalSupplierEarningsMinor: settlement?.shopEntitlementMinor ?? order.supplierSubtotalMinor,
+      gridgoDeductionsMinor: deductionsMinor,
+      totalSupplierEarningsMinor: entitlementMinor,
       supplierReleasedMinor: releasedThroughPlatformMinor,
       supplierOutstandingMinor: Math.max(
         0,
-        (settlement?.shopEntitlementMinor ?? order.supplierSubtotalMinor ?? 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
+        entitlementMinor - receivedAtStoreMinor - releasedThroughPlatformMinor,
       ),
     },
     deliverySettlement: {
@@ -756,6 +761,13 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   if (milestone.status === "released") return milestone;
   if (refundSettlementFor(store, order)) {
     fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
+  }
+
+  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id);
+  if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+      && (!lapse || lapse.policy.deductionsEnabled)
+      && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
+    fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
   }
 
   // The older meaning of "pickup", where the job never left the shop and its
@@ -1062,6 +1074,8 @@ export function publicOrderFor(order, user, store = null) {
   if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
 
   if (!ops && !assignedSupplier) {
+    delete publicRecord.productionReassignmentEligible;
+    delete publicRecord.productionNoCommunication;
     delete publicRecord.supplierPriceMinor;
     delete publicRecord.supplierSubtotalMinor;
     delete publicRecord.supplierPlatformPayoutMinor;
@@ -1071,11 +1085,12 @@ export function publicOrderFor(order, user, store = null) {
     delete publicRecord.payoutReceiptFileIds;
     if (Array.isArray(publicRecord.payoutMilestones)) {
       publicRecord.payoutMilestones = publicRecord.payoutMilestones.map((milestone) => {
-        const { amountMinor: _amountMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
+        const { amountMinor: _amountMinor, productionDeductionMinor: _productionDeductionMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
         return visible;
       });
     }
   }
+  if ((ops || assignedSupplier) && reporting) publicRecord.supplierEarningsMinor = reporting.supplierSettlement.totalSupplierEarningsMinor;
   if (assignedSupplier && reporting) publicRecord.supplierSettlement = reporting.supplierSettlement;
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;
