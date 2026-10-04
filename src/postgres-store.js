@@ -32,6 +32,7 @@ function rowKey(row, columns) {
 }
 
 const TABLES = [
+  { name: "season_windows", keys: ["id"], columns: ["id", "name", "start_date", "end_date", "demand_level", "message", "version", "notice_queued_at", "created_at", "updated_at"] },
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
   { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
@@ -114,6 +115,7 @@ export function emptyStore() {
     catalog: [],
     taxonomy: { categories: [], categoryAliases: [], subcategories: [], materials: [], finishes: [] },
     settings: {},
+    seasonWindows: [],
     zones: [],
     supplierServices: [],
     supplierServicePriceTiers: [],
@@ -163,6 +165,11 @@ export function emptyStore() {
 
 function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
+  for (const item of store.seasonWindows || []) rows.season_windows.push({
+    id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
+    demand_level: item.demandLevel, message: item.message, version: item.version,
+    notice_queued_at: item.noticeQueuedAt ?? null, created_at: item.createdAt, updated_at: item.updatedAt,
+  });
   rows.platform_settings.push({ singleton: true, version: store.version || 3, settings: store.settings || {} });
 
   for (const [position, user] of (store.users || []).entries()) {
@@ -706,6 +713,11 @@ export async function loadStore(database) {
   const settings = loaded.platform_settings[0];
   if (settings) { store.version = settings.version; store.settings = settings.settings; }
 
+  store.seasonWindows = loaded.season_windows.map(row => ({
+    id: row.id, name: row.name, startDate: row.start_date, endDate: row.end_date,
+    demandLevel: row.demand_level, message: row.message, version: row.version,
+    noticeQueuedAt: row.notice_queued_at, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
   store.users = ordered(loaded.users).map((row) => {
     const item = { ...row.data, id: row.id, clerkUserId: row.clerk_user_id, email: row.email, name: row.name, role: row.role, version: row.version || 1, createdAt: row.created_at };
     present(item, "phone", row.phone); present(item, "accountType", row.account_type); present(item, "orgName", row.org_name); present(item, "verificationStatus", row.verification_status);

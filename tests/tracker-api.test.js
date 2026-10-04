@@ -463,7 +463,7 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     }]);
     const pinned = (await database.query("SELECT file_id FROM file_references WHERE reference_type = 'tracker_decision' AND reference_id = $1 ORDER BY file_id", [decision.id])).rows;
     assert.deepEqual(pinned.map((pin) => pin.file_id), [...attachmentIds].sort());
-    assert.equal((await request(api, `/files/${attachmentIds[0]}`, { method: "DELETE", subject: "clerk_super" })).body.error, "file_in_use");
+    assert.equal((await request(api, `/files/${attachmentIds[0]}`, { method: "DELETE", subject: "clerk_super" })).body.error, "reason_required");
 
     // The item no longer needs a decision; a second one is refused.
     assert.equal((await request(api, "/admin/tracker/gridgo-api/2/decisions", { method: "POST", subject: "clerk_super", body: { text: "Again" } })).status, 409);
