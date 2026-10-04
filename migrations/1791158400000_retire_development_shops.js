@@ -20,7 +20,7 @@ export async function up(pgm) {
       approval approval_cases%ROWTYPE;
       retired_at timestamptz := transaction_timestamp();
       retirement_reason text := 'Development sample retirement (gridgo-api#133)';
-      retirement_actor text := 'migration:1791072000000';
+      retirement_actor text := 'migration:1791158400000';
       service_ids jsonb;
     BEGIN
       FOREACH fingerprint IN ARRAY ARRAY[

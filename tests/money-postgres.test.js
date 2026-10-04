@@ -143,8 +143,8 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
       initialSupplierPrincipalMinor: 25_000,
       supplierRemainderMinor: 74_999,
       initialOnlineMinor: 35_000,
-      finalOnlineMinor: 77_499,
-      totalMinor: 112_499,
+      finalOnlineMinor: 83_899,
+      totalMinor: 118_899,
     },
   );
   // Each order keeps the plan it was committed under, split the way the
@@ -170,14 +170,17 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
   ]);
 
   assert.equal(delivery.riderCommissionBps, 8500);
-  assert.equal(delivery.riderPayoutMinor, 2125);
-  assert.equal(delivery.platformDeliveryShareMinor, 375);
+  assert.equal(delivery.riderPayoutMinor, 7565);
+  assert.equal(delivery.platformDeliveryShareMinor, 1335);
   assert.deepEqual((await database.query(`SELECT rider_payout_minor, platform_delivery_share_minor
     FROM orders WHERE id = 'delivery_rounding'`)).rows[0], {
-    rider_payout_minor: 2125, platform_delivery_share_minor: 375,
+    rider_payout_minor: 7565, platform_delivery_share_minor: 1335,
   });
   persisted.settings.riderCommissionBps = 7000;
+  [1200, 6500, 23000].forEach((limit, index) => { persisted.settings.deliveryFeeBands[index].maxDistanceMeters = limit; });
+  persisted.settings.deliveryFeeBands[0].feeMinor = 9000;
   const snapshotted = {
+    deliveryFee: delivery.deliveryFeeMinor,
     riderRate: delivery.riderCommissionBps,
     riderPayout: delivery.riderPayoutMinor,
     rate: delivery.serviceFeeRateBps,
@@ -189,6 +192,7 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
   await database.transaction(() => saveStore(database, persisted));
   const afterSettingChange = (await loadStore(database)).orders.find((order) => order.id === delivery.id);
   assert.deepEqual({
+    deliveryFee: afterSettingChange.deliveryFeeMinor,
     riderRate: afterSettingChange.riderCommissionBps,
     riderPayout: afterSettingChange.riderPayoutMinor,
     rate: afterSettingChange.serviceFeeRateBps,

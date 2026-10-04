@@ -1724,9 +1724,9 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(updated.body.settings.serviceFeeRateBps, 1250);
     const persistedSettings = (await request(instance.api, "/settings", { subject: "clerk_ops" })).body.settings;
     assert.deepEqual(persistedSettings.deliveryFeeBands, [
-      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 2500 },
-      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 5000 },
-      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 7500 },
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 8900 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 14900 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 22900 },
       { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 8000, perKmMinor: 1200 },
     ]);
     assert.equal(updated.body.settings.serviceFeeVisibleToClient, true);
@@ -1790,6 +1790,70 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test('delivery zone limit updates persist with the settings handshake and preserve order/job snapshots', { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.query(`INSERT INTO order_jobs (id, order_id, supplier_id, state, fulfillment_mode,
+    pickup_lat, pickup_lng, pickup_label, dropoff_lat, dropoff_lng, dropoff_label,
+    supplier_subtotal_minor, delivery_distance_meters, delivery_fee_minor, estimated_hours, created_at, updated_at)
+    VALUES ('job_snapshot', 'ord_payout', 'user_supplier', 'needs_qa', 'delivery',
+      7, 125, 'Pickup', 8, 125, 'Dropoff', 100000, 111195, 2500, 24, now(), now())`);
+  const instance = await startApi();
+  try {
+    const current = (await request(instance.api, '/settings', { subject: 'clerk_ops' })).body;
+    const before = (await database.query("SELECT * FROM orders WHERE id = 'ord_payout'")).rows;
+    const jobsBefore = (await database.query("SELECT * FROM order_jobs WHERE id = 'job_snapshot'")).rows;
+    const patch = (body, subject = 'clerk_ops') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
+    const limits = [1200, 6500, 23000];
+    const deliveryFeeBands = current.settings.deliveryFeeBands.map((band, index) => ({
+      ...band, maxDistanceMeters: limits[index] ?? null,
+    }));
+    const input = { expectedVersion: current.version, reason: 'Update delivery zone limits', deliveryFeeBands };
+    assert.equal((await patch(input, 'clerk_client')).status, 403);
+    assert.equal((await patch(input, 'clerk_supplier')).status, 403);
+    assert.equal((await patch(input, 'clerk_rider')).status, 403);
+    assert.equal((await patch({ ...input, reason: '' })).body.error, 'settings_reason_required');
+    assert.equal((await patch({ ...input, expectedVersion: current.version - 1 })).body.error, 'settings_version_conflict');
+    for (const [index, limit, error] of [
+      [0, 0, 'invalid_delivery_zone_limit'], [0, '1200', 'invalid_delivery_zone_limit'],
+      [0, null, 'invalid_delivery_zone_limit'], [1, 1.5, 'invalid_delivery_zone_limit'],
+      [2, 100001, 'invalid_delivery_zone_limit'], [1, 1200, 'delivery_zone_limits_not_increasing'],
+      [1, 1199, 'delivery_zone_limits_not_increasing'], [2, 6500, 'delivery_zone_limits_not_increasing'],
+      [3, 100000, 'invalid_delivery_fee_bands'],
+    ]) {
+      const invalidBands = structuredClone(deliveryFeeBands);
+      invalidBands[index].maxDistanceMeters = limit;
+      const invalid = await patch({ ...input, deliveryFeeBands: invalidBands });
+      assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
+      assert.equal(invalid.body.error, error);
+      if (error !== 'invalid_delivery_fee_bands') assert.equal(invalid.body.field, `deliveryFeeBands[${index}].maxDistanceMeters`);
+      assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_ops' })).body, current);
+    }
+    const updated = await patch(input);
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.version, current.version + 1);
+    assert.deepEqual(updated.body.settings.deliveryFeeBands, deliveryFeeBands);
+    assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_client' })).body, updated.body);
+    assert.equal((await patch(input)).body.error, 'settings_version_conflict');
+    const store = await loadStoreEventually(database, store => store.settings.deliveryFeeBands[0].maxDistanceMeters === 1200);
+    const audit = store.auditLog.find(entry => entry.action === 'settings.operational_update');
+    assert.deepEqual(audit.detail.previous.deliveryFeeBands, current.settings.deliveryFeeBands);
+    assert.deepEqual(audit.detail.current.deliveryFeeBands, deliveryFeeBands);
+    assert.deepEqual((await database.query("SELECT * FROM orders WHERE id = 'ord_payout'")).rows, before);
+    assert.deepEqual((await database.query("SELECT * FROM order_jobs WHERE id = 'job_snapshot'")).rows, jobsBefore);
+    const existingOrder = await request(instance.api, '/orders/ord_payout', { subject: 'clerk_client' });
+    assert.equal(existingOrder.body.order.deliveryFeeMinor, 2500);
+    assert.equal(existingOrder.body.order.totalMinor, 112500);
+    const unrelated = await patch({ expectedVersion: updated.body.version, reason: 'Adjust issue window', issueWindowHours: 48 }, 'clerk_super');
+    assert.equal(unrelated.status, 200);
+    assert.deepEqual(unrelated.body.settings.deliveryFeeBands, deliveryFeeBands);
+  } finally {
+    instance.child.kill('SIGTERM');
+    await new Promise(resolve => instance.child.once('exit', resolve));
     await database.close();
   }
 });
@@ -2428,8 +2492,12 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(duplicateSubmit.status, 409, JSON.stringify(duplicateSubmit.body));
     assert.equal(duplicateSubmit.body.error, "approval_state_conflict");
 
-    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+    const riderDelete = await request(instance.api, "/files/file_rider_license_new", {
       method: "DELETE", subject: "clerk_rider_new",
+    });
+    assert.equal(riderDelete.status, 403);
+    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+      method: "DELETE", subject: "clerk_super", body: { reason: "Invalid verification evidence" },
     });
     assert.equal(licenseDeleted.status, 200, JSON.stringify(licenseDeleted.body));
     assert.equal(licenseDeleted.body.file.state, "deleted");

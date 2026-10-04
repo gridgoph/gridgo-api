@@ -17,7 +17,7 @@ declares development mode for migration and seeding. `npm run seed` remains refe
 
 ## Fixed scope and preflight
 
-Migration `1791072000000_retire_development_shops.js` selects four exact
+Migration `1791158400000_retire_development_shops.js` selects four exact
 `md5(users.id)` fingerprints. These identify the seed's 8/6/3/1-listing group,
 totalling the issue's 18 listings, including the two category-exclusive shops.
 The fifth seeded identity is excluded. The separate shop marked as a test is

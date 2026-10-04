@@ -269,12 +269,12 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   assert.equal(checkedOut.status, 201);
   const committed = store.orders.find((order) => order.id === checkedOut.body.order.id);
   assert.equal(committed.riderCommissionBps, 8500);
-  assert.equal(committed.riderPayoutMinor, 2125);
-  assert.equal(committed.platformDeliveryShareMinor, 375);
+  assert.equal(committed.riderPayoutMinor, 7565);
+  assert.equal(committed.platformDeliveryShareMinor, 1335);
   assert.equal(store.orderJobs[0].riderCommissionBps, 8500);
-  assert.equal(store.orderJobs[0].riderPayoutMinor, 2125);
+  assert.equal(store.orderJobs[0].riderPayoutMinor, 7565);
   store.settings.riderCommissionBps = 7000;
-  assert.equal(committed.riderPayoutMinor, 2125);
+  assert.equal(committed.riderPayoutMinor, 7565);
   assert.equal(checkedOut.body.order.riderPayoutMinor, undefined);
   assert.equal(checkedOut.body.order.jobs[0].riderPayoutMinor, undefined);
 
@@ -283,14 +283,14 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   assert.ok(checkedOut.body.order.readyBy, "the client is given a promised date at checkout");
   assert.equal(checkedOut.body.order.itemSubtotalMinor, 30_000);
   assert.equal(checkedOut.body.order.serviceFeeMinor, 3_000);
-  assert.equal(checkedOut.body.order.deliveryFeeMinor, 2_500); // one shop, one delivery
-  assert.equal(checkedOut.body.order.totalMinor, 35_500);
+  assert.equal(checkedOut.body.order.deliveryFeeMinor, 8_900); // one shop, one delivery
+  assert.equal(checkedOut.body.order.totalMinor, 41_900);
   // Paid in full up front: one transfer, and no balance left to owe.
   assert.equal(checkedOut.body.order.downpaymentPercent, 100);
   assert.deepEqual(checkedOut.body.order.paymentPlan, {
     method: "qr_manual",
     downpaymentPercent: 100,
-    downpaymentMinor: 35_500,
+    downpaymentMinor: 41_900,
     balanceMinor: 0,
     downpaymentStatus: "pending_confirmation",
     balanceStatus: "not_required",
@@ -301,15 +301,15 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   // Every peso of the shop's price rides on the one payment.
   assert.deepEqual(
     committed.paymentAllocations.map((row) => `${row.paymentCode}:${row.component}:${row.amountMinor}`),
-    ["initial:supplier_principal:30000", "initial:service_fee:3000", "initial:delivery_pass_through:2500"],
+    ["initial:supplier_principal:30000", "initial:service_fee:3000", "initial:delivery_pass_through:8900"],
   );
   // The split is the order's own, like the rider share: the setting moving
   // afterwards never changes what this client owes.
   store.settings.downpaymentPercent = 75;
-  assert.equal(committed.payments.initial.amountMinor, 35_500);
+  assert.equal(committed.payments.initial.amountMinor, 41_900);
   delete store.settings.downpaymentPercent;
   assert.equal(checkedOut.body.order.jobs.length, 1);
-  assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.deliveryFeeMinor), [2_500]);
+  assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.deliveryFeeMinor), [8_900]);
   // A delivered job gives the client no origin pin: the shop's coordinates are
   // GRIDGO's business, and the client watches the rider and their own address.
   assert.deepEqual(checkedOut.body.order.jobs.map((job) => job.pickup), [null]);
@@ -334,8 +334,8 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
 
   const invoice = await call("GET", `/orders/${checkedOut.body.order.id}/invoice`);
   assert.equal(invoice.status, 200);
-  assert.equal(invoice.body.invoice.totalMinor, 35_500);
-  assert.deepEqual(invoice.body.invoice.paymentPlan, { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: 35_500, balanceMinor: 0 });
+  assert.equal(invoice.body.invoice.totalMinor, 41_900);
+  assert.deepEqual(invoice.body.invoice.paymentPlan, { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: 41_900, balanceMinor: 0 });
   assert.equal(invoice.body.invoice.deliveryLines.length, 1);
   assert.equal(invoice.body.invoice.lines.find((line) => line.id === lineId).mockupFileId, "file_mock");
 });
@@ -358,8 +358,8 @@ test("with the setting at 75, checkout snapshots a 75/25 split and a balance to 
   assert.deepEqual(checkedOut.body.order.paymentPlan, {
     method: "qr_manual",
     downpaymentPercent: 75,
-    downpaymentMinor: 26_625,
-    balanceMinor: 8_875,
+    downpaymentMinor: 31_425,
+    balanceMinor: 10_475,
     downpaymentStatus: "pending_confirmation",
     balanceStatus: "not_submitted",
   });
@@ -919,6 +919,37 @@ for (const [meters, key, label, km] of [
   assert.doesNotMatch(serialized, /distanceMeters|deliveryDistanceMeters|metres|kilometres|\d+ km/);
 });
 
+for (const [meters, key, label, feeMinor, km] of [
+  [1200, 'nearby', 'Nearby', 8900], [1201, 'away', 'Away', 14900],
+  [6500, 'away', 'Away', 14900], [6501, 'long_distance', 'Long Distance', 22900],
+  [23000, 'long_distance', 'Long Distance', 22900], [23001, 'out_of_zone', 'Out of Zone', 40000, 23],
+]) test(`custom zone limits label Top Pick, alternatives, and carts at ${meters}m`, async () => {
+  const { store, client } = fixture();
+  [1200, 6500, 23000].forEach((limit, index) => { store.settings.deliveryFeeBands[index].maxDistanceMeters = limit; });
+  for (const profile of store.supplierProfiles) profile.shop = { lat: 0, lng: 0, label: 'Shop' };
+  const dropoff = { lat: meters / 6371000 * 180 / Math.PI, lng: 0, label: 'Drop' };
+  const call = caller(store, client);
+  const match = await call('POST', '/me/matches', { subcategoryCode: 'flyers', dropoff, ranking: ['distance', 'cost', 'speed', 'quality'] });
+  assert.deepEqual(match.body.distanceZone, { key, label });
+  assert.equal(match.body.reasons.find(reason => reason.factor === 'distance').detail, label);
+  for (const listing of [...match.body.listings, ...match.body.otherListings]) {
+    assert.deepEqual(listing.distanceZone, { key, label });
+    assert.equal(listing.distanceKm, km);
+  }
+  assert.ok(match.body.otherListings.length > 0);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: dropoff })).body.cart.id;
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1 });
+  const cart = (await call('GET', `/me/carts/${cartId}`)).body.cart;
+  assert.deepEqual(cart.lines[0].listing.distanceZone, { key, label });
+  assert.equal(cart.lines[0].listing.distanceKm, km);
+  const placed = await call('POST', `/me/carts/${cartId}/checkout`, {
+    payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'CUSTOM-ZONE-LIMITS' },
+  });
+  assert.equal(placed.status, 201);
+  assert.equal(placed.body.order.deliveryFeeMinor, feeMinor);
+  assert.equal(store.orderJobs[0].deliveryFeeMinor, feeMinor);
+});
+
 for (const count of [0, 4, 5, 6]) test(`match rating is ${count >= 5 ? "shown" : "omitted"} for ${count} reviews`, async () => {
   const { store, client } = fixture();
   store.shopReviews = Array.from({ length: count }, (_, index) => ({ supplierId: "supplier_a", qualityStars: index === 0 ? 4 : 5 }));
@@ -956,6 +987,9 @@ test("Out of Zone stays available, cart listings carry zones and ratings, checko
   assert.equal(order.platformDeliveryShareMinor, 4425);
   assert.equal(store.orderJobs[0].deliveryDistanceMeters, 16001);
   store.settings.deliveryFeeBands[3].perKmMinor = 2000;
+  store.settings.deliveryFeeBands[2].maxDistanceMeters = 23000;
+  const refreshedCart = (await call('GET', `/me/carts/${cartId}`)).body.cart;
+  assert.deepEqual(refreshedCart.lines[0].listing.distanceZone, { key: 'long_distance', label: 'Long Distance' });
   assert.equal(publicOrderFor(order, client, store).deliveryFeeMinor, 29500);
   assert.equal(store.orderJobs[0].deliveryFeeMinor, 29500);
 });

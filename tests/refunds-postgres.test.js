@@ -6,6 +6,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { createDatabase } from '../src/database.js';
 import { emptyStore, loadStore, saveStore } from '../src/postgres-store.js';
+import { createFileRetention } from '../src/file-retention.js';
 import { routeRefunds } from '../src/refunds.js';
 import { calculateRefundSettlement, collectedRefundComponents, assertRefundWorkAllowed } from '../src/refund-policy.js';
 import { createPayoutMilestones, defaultOperationalSettings, publicOrderFor, expireIssueWindows, confirmIssueWindow, releaseMilestone } from '../src/operational-model.js';
@@ -247,7 +248,7 @@ test('closed-window all-paid row, no replacement, limits, holds, QR privacy and 
     const store = await loadStore(db);
     for (const key of ['client', 'ops', 'super']) assert.doesNotThrow(() => authorizeFileRead(actor(store, key), store, store.files.find((f) => f.fileId === 'qr')));
     for (const key of ['other', 'supplier', 'rider']) assert.throws(() => authorizeFileRead(actor(store, key), store, store.files.find((f) => f.fileId === 'qr')), errorCode('forbidden'));
-    assert.throws(() => markFileDeletePending(store.files.find((f) => f.fileId === 'qr'), actor(store, 'client'), AT), errorCode('file_in_use'));
+    assert.throws(() => markFileDeletePending(store.files.find((f) => f.fileId === 'qr'), actor(store, 'client'), AT), errorCode('forbidden'));
     assert.throws(() => authorizeFileUpload(actor(store, 'supplier'), 'refund_qr'), errorCode('forbidden'));
     assert.throws(() => authorizeFileUpload(actor(store, 'client'), 'refund_receipt'), errorCode('forbidden'));
     refund = await pay(db, await reserve(db, await settle(db, await review(db, refund))));
@@ -327,6 +328,7 @@ async function freePort() {
 async function apiForTest(t) {
   const storage = http.createServer((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
+    else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
     else { res.writeHead(404); res.end(); }
   });
   await new Promise((resolve) => storage.listen(0, '127.0.0.1', resolve));
@@ -516,4 +518,89 @@ test('live API reconciles a pending final payment during a hold without resuming
   refund = await settle(db, refund, { shop: 40000, total: 71000 });
   assert.equal(refund.settlement.snapshot.collected.principalMinor, 100000);
   assert.equal((await api('ops', 'POST', '/orders/order/payments/final_online/confirm', {})).body.error, 'refund_fulfillment_stopped');
+});
+
+test('live HTTP retention report, early-delete roles, reason audit, and open-case protection', { skip: !DATABASE_URL }, async (t) => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'completed' });
+  await db.transaction(async () => {
+    const store = await loadStore(db);
+    const file = readyFile('artwork', 'artwork');
+    file.references = [{ type: 'order', id: 'order', field: 'artwork' }];
+    store.files.push(file);
+    await saveStore(db, store);
+  });
+  const api = await apiForTest(t);
+  assert.equal((await api(null, 'GET', '/admin/files/retention')).status, 401);
+  for (const key of ['client', 'other', 'ops', 'supplier', 'rider']) {
+    assert.equal((await api(key, 'GET', '/admin/files/retention')).status, 403);
+  }
+  const before = (await loadStore(db)).files;
+  const report = await api('super', 'GET', '/admin/files/retention');
+  assert.equal(report.status, 200); assert.equal(report.body.dryRun, true);
+  assert.equal(report.body.deletionEnabled, false);
+  assert.ok(report.body.byPurpose.refund_qr >= 1);
+  assert.deepEqual((await loadStore(db)).files, before);
+  for (const key of ['ops', 'supplier', 'rider', 'other']) {
+    assert.equal((await api(key, 'DELETE', '/files/artwork', { reason: 'Request removal' })).status, 403);
+  }
+  assert.equal((await api('super', 'DELETE', '/files/artwork')).body.error, 'reason_required');
+  assert.equal((await api('super', 'DELETE', '/files/artwork', { reason: '  ' })).body.error, 'reason_required');
+  assert.equal((await api('client', 'DELETE', '/files/receipt')).status, 403);
+  await db.transaction(async () => {
+    const store = await loadStore(db); store.orders[0].payoutHold = true; await saveStore(db, store);
+  });
+  for (const key of ['super', 'client']) assert.equal((await api(key, 'DELETE', '/files/artwork', { reason: 'Request removal' })).body.error, 'file_retention_hold');
+  await db.transaction(async () => {
+    const store = await loadStore(db); store.orders[0].payoutHold = false; await saveStore(db, store);
+  });
+  const deleted = await api('client', 'DELETE', '/files/artwork');
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.body)); assert.equal(deleted.body.file.state, 'deleted');
+  assert.equal(deleted.body.file.objectKey, undefined);
+  const receipt = await api('super', 'DELETE', '/files/receipt', { reason: '  Duplicate transfer evidence  ' });
+  assert.equal(receipt.status, 200, JSON.stringify(receipt.body)); assert.equal(receipt.body.file.state, 'deleted');
+  const store = await loadStore(db);
+  assert.ok(store.auditLog.some((row) => row.entityId === 'artwork' && row.action === 'file.early_delete' && row.actorRole === 'client'));
+  assert.ok(store.auditLog.some((row) => row.entityId === 'receipt' && row.actorId === 'super' && row.reason === 'Duplicate transfer evidence'));
+});
+
+test('retention intent and audit survive storage failure in PostgreSQL and retry idempotently', { skip: !DATABASE_URL }, async (t) => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'completed' });
+  let unavailable = true;
+  const objects = new Set((await loadStore(db)).files.map((file) => file.objectKey));
+  const worker = createFileRetention({ database: db, load: () => loadStore(db), save: (store) => saveStore(db, store),
+    storage: { deleteObject: async (key) => { if (unavailable) throw new Error('unavailable'); objects.delete(key); } },
+    enabled: true, now: () => '2032-10-04T00:00:00Z', id });
+  const failed = await worker.run({ dryRun: false });
+  assert.ok(failed.failed > 0); assert.equal(failed.deleted, 0);
+  let store = await loadStore(db);
+  assert.ok(store.files.some((file) => file.state === 'delete_pending' && file.deletionSource === 'retention'));
+  const auditCount = store.auditLog.filter((entry) => entry.action === 'file.retention_delete').length;
+  assert.equal(auditCount, failed.failed);
+  unavailable = false;
+  const retried = await worker.run({ dryRun: false });
+  assert.equal(retried.deleted, failed.failed); assert.equal(retried.failed, 0);
+  store = await loadStore(db);
+  assert.equal(store.auditLog.filter((entry) => entry.action === 'file.retention_delete').length, auditCount);
+  assert.ok(store.files.filter((file) => file.deletionSource === 'retention').every((file) => file.state === 'deleted' && file.objectKey === null));
+  assert.equal((await worker.run({ dryRun: false })).deleted, 0);
+});
+
+test('replacing the platform receiving QR leaves old bytes for gated retention cleanup', { skip: !DATABASE_URL }, async (t) => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db);
+  await db.transaction(async () => {
+    const store = await loadStore(db);
+    store.files.push(readyFile('platform_old', 'payment_qr', 'ops'), readyFile('platform_new', 'payment_qr', 'ops'));
+    store.settings.paymentQrFileId = 'platform_old';
+    await saveStore(db, store);
+  });
+  const api = await apiForTest(t);
+  const replaced = await api('ops', 'POST', '/settings/payment-qr', { fileId: 'platform_new', reason: 'Replace receiving image' });
+  assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
+  const store = await loadStore(db);
+  assert.equal(store.settings.paymentQrFileId, 'platform_new');
+  assert.equal(store.files.find((file) => file.fileId === 'platform_old').state, 'ready');
+  assert.equal(store.files.find((file) => file.fileId === 'platform_old').deleteRequestedAt, undefined);
 });

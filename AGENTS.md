@@ -65,6 +65,8 @@ Supplier readiness separates legacy setup checks, operational listing eligibilit
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
+Season awareness windows and Super Admin-only rollout controls are defined in `docs/SEASON_WINDOWS_API.md`. Scheduled season pushes default off; `noticeQueuedAt` is immutable and never reset by edits.
+
 ## Files and push
 
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.
@@ -77,6 +79,8 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 - Prune `INVALID_ARGUMENT` only when the violation identifies `message.token`.
 - Push payload data is allowlisted to `notificationId`, `type`, `orderId`, and `at`.
 - Every implemented domain event writes a durable inbox row to each current `ops_admin` and `super_admin` membership (`privilegedAdminMemberships` in `src/notifications.js`). Super Admin is never invalidate-only. Contract: `docs/REALTIME_EVENTS.md`.
+
+- File retention and audited early deletion: `docs/STORAGE_API.md#retention-and-daily-cleanup`, `src/file-retention-policy.js`, and `src/file-retention.js`. Automatic deletion ships OFF; review production dry-run counts before enabling `GRIDGO_FILE_RETENTION_DELETE_ENABLED`. All deletion paths, including retries, must preserve open-case holds.
 
 ## Deployment
 

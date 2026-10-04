@@ -140,7 +140,7 @@ test("tracker_decision uploads: Super Admin only, png/jpeg/webp/pdf, 10 MB, priv
   assert.throws(() => markFileDeletePending({ ...file }, OPS, "2026-09-25T00:00:00Z"), { code: "forbidden" });
   assert.throws(
     () => markFileDeletePending({ ...file, references: [{ type: "tracker_decision", id: "tdec_1", field: "attachmentIds" }] }, SUPER, "2026-09-25T00:00:00Z"),
-    { code: "file_in_use" },
+    { code: "reason_required" },
   );
   assert.throws(() => resolveFileTarget({}, "tracker_decision", {}, SUPER), { code: "tracker_decision_not_attachable" });
 });

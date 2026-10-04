@@ -7,7 +7,7 @@ import { loadStore } from "../src/postgres-store.js";
 import { ADDITIONAL_DEV_SHOPS, LOVIS_DEV_SHOP } from "../src/seed-dev.js";
 import { catalogItemBlockers } from "../src/supplier-catalog.js";
 import { supplierMatchBlockersFor } from "../src/supplier-eligibility.js";
-import { up } from "../migrations/1791072000000_retire_development_shops.js";
+import { up } from "../migrations/1791158400000_retire_development_shops.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 test.before(() => { process.env.NODE_ENV = "production"; });
