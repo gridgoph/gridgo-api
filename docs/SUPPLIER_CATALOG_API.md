@@ -94,6 +94,91 @@ Existing-record mutations require `expectedVersion` or `If-Match`. DELETE may se
 
 `GET /me/catalog-items/:id` always returns `{ item }` with `item.id` and `photos[]` of `{ fileId, sortOrder, altText }` (private photos may also include a short-lived `downloadUrl`). `prepSteps` is `[{ id, sortOrder, title, body }]`.
 
+## Supplier readiness diagnostics
+
+`GET /me/supplier-readiness` is supplier-only and reads the caller's shop. It does not change approval, listing publication or matching eligibility. The original `readyForApproval`, string `missing[]`, and `publishableServiceIds` fields retain their exact setup-check semantics. `/auth/me/supplier` and Operations approval readiness are unchanged.
+
+Use **`operational.ready`** for whether at least one listing passes the shop and public-listing gates. Use each `operational.listings[].ready` for that listing's standing. Do not label a matchable shop “Not ready” using `readyForApproval` or `profileCompletion.complete`: setup requirements include a shop image and service-default formats, while matching permits listing-format overrides and does not require a shop image.
+
+```json
+{
+  "readyForApproval": false,
+  "missing": ["review_ready_service_line", "shop_identity_image"],
+  "publishableServiceIds": [],
+  "operational": {
+    "ready": true,
+    "missing": [],
+    "listings": [{ "catalogItemId": "item_example", "ready": true, "missing": [] }]
+  },
+  "profileCompletion": {
+    "complete": false,
+    "missing": [
+      { "code": "review_ready_service_line", "message": "Complete at least one live or submitted service line with pricing, turnaround and default artwork formats.", "action": "edit_services" },
+      { "code": "shop_identity_image", "message": "Upload a shop identity image to complete your shop setup.", "action": "upload_shop_image" }
+    ],
+    "services": [{ "supplierServiceId": "service_example", "missing": [
+      { "code": "service_default_formats", "message": "Choose default artwork formats for this service line to complete setup. Listings may use their own formats for matching.", "action": "edit_service_formats" }
+    ] }]
+  },
+  "requestEligibility": { "evaluated": false, "input": null, "listings": [] }
+}
+```
+
+All new `missing[]` entries have `{code,message,action}`. Render every entry; `action` is a stable app navigation/action key, not an API URL. An `option_group` entry also has `optionGroupId`. Listing entries include shop blockers as well as their own blockers. The shop-level list includes `no_matchable_listing` if no listing passes; inspect the listing entries for all concrete fixes. An empty board also returns this code. Other incomplete/hidden listings do not block a shop with at least one eligible listing. `profileCompletion.services[]` explains every service's setup gaps, including optional unfinished lines even when another line already satisfies the setup checklist.
+
+### Request-specific checks
+
+Optional query parameters: `deadline` (ISO date/time with offset), `units` (positive safe integer), `widthFeet` (positive finite number). For example:
+
+```text
+GET /me/supplier-readiness?deadline=2026-11-10T15:59:59Z&units=100&widthFeet=6
+```
+
+With any of these supplied, `requestEligibility` has `evaluated:true`, normalized `input`, and one result per owned listing. Operationally blocked listings have `{catalogItemId,evaluated:false,eligible:null,missing:[]}`; their blockers remain in `operational`. Checked listings have `{catalogItemId,evaluated:true,eligible,missing}` and, when scheduling succeeds, `projection:{startsAt,readyBy,limitedBy,capacityDays,jobsAhead}`. `readyBy` is the shop's own ready time; the padded client promise is never returned to the supplier. `limitedBy` is `capacity | turnaround`.
+
+Request checks reuse matching's printer-width and queue/calendar projection, including default opening hours, closures, live-service daily capacity, turnaround and platform allowance. A missed deadline is a request failure, never a setup failure. Quantity capacity can delay a promise; it is not a new standalone maximum-quantity gate. A bounded calendar that cannot fit the work returns `shop_never_open` on that listing, without hiding diagnostics for other listings. Without a deadline there is no deadline filter; without a width there is no width filter.
+
+This is a supplier diagnostic preview, not a match or reservation. `operational.ready` means the static shop/public-listing gates pass, not that every request will match. The client's selected active subcategory, width (including structured specs/options), deadline, exclusions, and ranking still determine actual results. Zone remains a ranking/pricing input, not a new readiness gate. Neither endpoint writes state. Invalid numeric input returns `400 invalid_readiness_request` with `field`; invalid deadline returns `400 invalid_deadline`. Existing authentication/account holds still apply before the route.
+
+### Missing-step codes
+
+The following is the complete new structured-code vocabulary. The legacy top-level `missing` remains strings.
+
+| Code | Plain-English message | Action |
+|---|---|---|
+| `account_inactive` | Your account is not active. | `contact_operations` |
+| `supplier_profile` | Complete your shop profile. | `edit_profile` |
+| `shop_name` | Add your shop name. | `edit_profile` |
+| `contact_name` | Add your shop contact name. | `edit_profile` |
+| `shop_location` | Set your shop pickup location. | `edit_profile` |
+| `shop_closed` | Your shop is marked closed for new work. | `open_shop` |
+| `supplier_membership` | This account has no supplier membership. | `contact_operations` |
+| `supplier_not_approved` | Your shop needs Operations approval before clients can match with it. | `view_approval` |
+| `no_matchable_listing` | No listing is eligible for matching. Complete the steps listed for your listings, or add a listing. | `edit_listings` |
+| `owning_service` | This listing needs a service line belonging to your shop. | `edit_listing` |
+| `name` | Add a listing name. | `edit_listing` |
+| `base_price` | Set a valid non-negative listing price. | `edit_listing` |
+| `subcategory` | Choose a listing subcategory. | `edit_listing` |
+| `printer_max_width_feet` | Set the printer maximum width to a whole number from 1 to 20 feet. | `edit_listing` |
+| `accepted_file_formats` | Choose accepted artwork formats on this listing or its service line. | `edit_listing_formats` |
+| `photo` | Attach at least one fully uploaded listing photo. | `upload_listing_photo` |
+| `option_group` | Add or enable at least one option in this option group, or remove the group. | `edit_listing_options` |
+| `item_inactive` | This listing is hidden. Make it active to offer it to clients. | `activate_listing` |
+| `service_not_live` | The parent service line is not live. Operations must approve or restore it before this listing can match. | `view_service` |
+| `pickup_payment_terms` | Enable an available pickup payment option. | `edit_payment_terms` |
+| `review_ready_service_line` | Complete at least one live or submitted service line with pricing, turnaround and default artwork formats. | `edit_services` |
+| `complete_catalog_item` | Complete and activate at least one listing. | `edit_listings` |
+| `shop_identity_image` | Upload a shop identity image to complete your shop setup. | `upload_shop_image` |
+| `service_not_submitted` | Submit this service line for review or ask Operations about its status. | `view_service` |
+| `pricing_basis` | Set the pricing basis for this service line. | `edit_service` |
+| `turnaround` | Set a positive whole-number turnaround for this service line. | `edit_service` |
+| `service_default_formats` | Choose default artwork formats for this service line to complete setup. Listings may use their own formats for matching. | `edit_service_formats` |
+| `printer_capacity_exceeded` | The requested width exceeds this listing's printer maximum width. | `choose_smaller_width` |
+| `deadline_not_met` | This listing cannot meet the selected deadline with the current queue, opening hours, turnaround and quantity capacity. | `choose_later_deadline` |
+| `shop_never_open` | The schedule cannot fit this work within the scheduling horizon. Review opening hours, closures and requested quantity. | `review_schedule` |
+
+Shop gates use `account_inactive`, `supplier_profile`, `shop_location`, `shop_closed`, `supplier_membership`, `supplier_not_approved`, and the aggregate `no_matchable_listing`. Listing gates use `owning_service` through `service_not_live` in the table, plus inherited shop gates. Profile completion uses the legacy setup codes plus `shop_name`, `contact_name`, and `shop_location`; per-service setup uses `service_not_submitted`, `pricing_basis`, `turnaround`, and `service_default_formats`. Only request results use `printer_capacity_exceeded`, `deadline_not_met`, and `shop_never_open`.
+
 ## Formats and snapshots
 
 Seeded file codes: `pdf`, `png`, `jpeg`, `webp`, `psd`, `3mf`, `stl` (`inputKind: "file"`). Seeded URL codes: `canva_link`, `google_drive`, `dropbox`, `we_transfer`, `other_link` (`inputKind: "url"`). Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format. A plus-finder query resolves against this registry and its aliases; it never stores a shop-invented type.
