@@ -18,7 +18,8 @@ export function createFileRetention({ database, load, save, storage, enabled = f
     return database.transaction(async () => {
       const store = await load();
       const file = store.files.find((row) => row.fileId === fileId);
-      if (!file || file.state !== 'delete_pending' || (file.deletionSource === 'retention' && !enabled)
+      if (!file || file.state !== 'delete_pending' || !['early', 'retention'].includes(file.deletionSource)
+        || (file.deletionSource === 'retention' && (!enabled || !retentionDecision(store, file, now()).eligible))
         || fileRelationships(store, file).held) return false;
       // Keep the domain lock until deletion finishes: opening a case cannot race
       // the final protection check. The pending intent was committed separately.
@@ -61,7 +62,7 @@ export function createFileRetention({ database, load, save, storage, enabled = f
           const store = await load();
           const file = store.files.find((row) => row.fileId === candidate.fileId);
           if (!file || !retentionDecision(store, file, now()).eligible) return false;
-          if (file.state !== 'delete_pending') {
+          if (file.state !== 'delete_pending' || !['early', 'retention'].includes(file.deletionSource)) {
             pending(store, file, 'retention');
             await save(store);
           }

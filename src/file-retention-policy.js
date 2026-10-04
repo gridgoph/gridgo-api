@@ -75,7 +75,9 @@ export function retentionDecision(store, file, at) {
   if (!['ready', 'pending_upload', 'delete_pending'].includes(file.state)) return keep('not_live');
   const links = fileRelationships(store, file);
   if (links.held) return keep('open_case');
-  if (file.state === 'delete_pending') return { eligible: true, reason: 'retry' };
+  if (file.state === 'delete_pending' && file.deletionSource === 'early') {
+    return { eligible: true, reason: 'retry' };
+  }
   if (links.activeCart) return keep('active_cart');
   if (file.purpose === 'announcement_image' && (store.notifications || []).some((row) => {
     try { return new URL(row.imageUrl).pathname === `/public/announcement-images/${file.fileId}`; }

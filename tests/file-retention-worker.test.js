@@ -75,3 +75,30 @@ test('optional client reason never turns a valid deletion into a server error', 
   await f.worker.deleteEarly('artwork', { id: 'client', role: 'client' }, 42);
   assert.equal(f.store.files[0].state, 'deleted');
 });
+
+test('legacy pending deletions cannot bypass the default-off rollout gate', async () => {
+  const f = fixture(); f.store.files[0].state = 'delete_pending';
+  await f.worker.reconcile();
+  assert.equal(f.store.files[0].state, 'delete_pending');
+  assert.equal(f.objects.size, 3); assert.equal(f.commits, 0);
+});
+test('legacy pending deletions must qualify under retention and receive a new audit intent', async () => {
+  const f = fixture({ enabled: true });
+  f.store.files[0].state = 'delete_pending'; f.store.orders[0].state = 'production';
+  f.store.files[2].state = 'delete_pending';
+  await f.worker.reconcile();
+  assert.equal(f.objects.size, 3);
+  const report = await f.worker.run({ dryRun: false });
+  assert.equal(report.deleted, 1);
+  assert.equal(f.store.files[0].state, 'delete_pending');
+  assert.equal(f.store.files[2].state, 'deleted');
+  assert.equal(f.store.auditLog[0].action, 'file.retention_delete');
+});
+
+test('a restored active account cancels eligibility of a queued verification cleanup', async () => {
+  const f = fixture({ enabled: true });
+  Object.assign(f.store.files[0], { purpose: 'verification_document', state: 'delete_pending', deletionSource: 'retention', references: [{ type: 'user', id: 'client' }] });
+  f.store.users = [{ id: 'client', accountStatus: 'active' }];
+  assert.equal(await f.worker.finishPending('artwork'), false);
+  assert.equal(f.store.files[0].state, 'delete_pending'); assert.equal(f.objects.size, 3);
+});
