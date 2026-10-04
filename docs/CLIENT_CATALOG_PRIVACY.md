@@ -168,6 +168,7 @@ PostgreSQL, accepted money snapshots, or authorized supplier/staff responses.
 | --- | --- |
 | `/catalog/shops`, `/catalog/shops/:id`, match `shop`, cart `shops[]`, checkout `jobs[].shop` | `shopName`, `shop` (`label`, `lat`, `lng`), shop identity `media` (logos/cover images must not serve as an identity-directory bypass) |
 | Any nested listing in public boards, item detail, match `listings[]`/`otherListings[]`, cart, checkout job boards | `basePriceMinor`, `fromPriceMinor`, `effectivePriceMinor`, `optionGroups[].options[].priceModifierMinor`, `priceTiers[].unitPriceMinor`, `speedTiers[].priceMinor`, `speedTiers[].surchargeMinor`, `rush.priceMinor` |
+| Match diagnostics | `reasons[].detail` for `factor: "cost"` currently embeds the supplier starting amount in prose; retire or replace it with client-safe wording. The supported client badge is `matchReason` |
 | Cart | `lines[].lineSubtotalMinor`; consume `clientLineSubtotalMinor` and `clientQuote` |
 | Checkout result | `itemSubtotalMinor`, `serviceFeeMinor`, `serviceFeeRateBps`; consume `totalMinor - deliveryFeeMinor`. Remove `jobs[].deliveryDistanceMeters`; use zones, Out of Zone kilometres only |
 | Invoice (checkout and read) | `itemSubtotalMinor`, `serviceFeeMinor`, `serviceFeeRateBps`, `lines[].unitPriceMinor`, `lines[].amountMinor`, `deliveryLines[].shopName`; consume additive client fields |
