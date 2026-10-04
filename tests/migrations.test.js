@@ -114,6 +114,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1790812800000_delivery_distance_zones",
         "1790899200000_match_selection_tokens",
         "1790985600000_out_of_zone_delivery_price",
+        "1791072000000_production_penalties",
       ],
     );
 
@@ -292,6 +293,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverse production penalties before the earlier pricing changes.
+    await runner(migrationOptions(schema, "down", 1, client));
 
     // Reverse the guarded Out of Zone price change.
     await runner(migrationOptions(schema, "down", 1, client));

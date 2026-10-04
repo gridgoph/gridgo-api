@@ -1,3 +1,4 @@
+import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
@@ -549,6 +550,7 @@ function publicOperationalSettings(settings, store = null) {
     downpaymentPercent: downpaymentPercentSetting(rest),
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
+    productionPenalty: productionPenaltySettings(rest),
     paymentQr,
   };
 }
@@ -1471,6 +1473,13 @@ async function expireElapsedIssueWindows() {
       }
     }
     await save(store);
+  });
+}
+
+async function sweepProductionPenalties() {
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (assessProductionLapses(store, { at: now(), createId: id })) await save(store);
   });
 }
 
@@ -3074,6 +3083,33 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (req.method === "GET" && (pathname === "/me/production-lapses" || /^\/users\/[^/]+\/production-lapses$/.test(pathname))) {
+      const own = pathname === "/me/production-lapses";
+      if (own ? !identityHasMembership(user, "supplier") : !isOps(user)) return send(res, 403, { error: "forbidden" });
+      const supplierId = own ? user.id : pathname.split("/")[2];
+      if (!hasRole(store, supplierId, "supplier")) return send(res, 404, { error: "supplier_not_found" });
+      return send(res, 200, { supplierId, lapses: supplierLapses(store, supplierId) });
+    }
+
+    // Silence outside this API cannot be inferred. Operations attests it with an audited reason.
+    if (req.method === "POST" && /^\/orders\/[^/]+\/production-no-communication$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const order = store.orders.find((row) => row.id === pathname.split("/")[2]);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      if (!reason) return send(res, 400, { error: "reason_required" });
+      if (!order.supplierId || order.readyAt || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
+          || !latenessTier(productionDeadline(order), now())) return send(res, 409, { error: "production_deadline_not_missed" });
+      if (!order.productionNoCommunication) {
+        order.productionNoCommunication = { at: now(), by: user.id, reason };
+        audit(store, { actor: user, action: "production_lapse.no_communication", entityType: "order", entityId: order.id, orderId: order.id, reason });
+        assessProductionLapses(store, { at: now(), createId: id, orderId: order.id });
+        await save(store);
+      }
+      return send(res, 200, { lapses: supplierLapses(store, order.supplierId).filter((row) => row.orderId === order.id) });
+    }
+
     // ---- global operational settings ----
     if (req.method === "GET" && pathname === "/settings") {
       return send(res, 200, {
@@ -3090,8 +3126,12 @@ async function handleRequest(req, res) {
       }
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
+      if (Object.hasOwn(body, "productionPenalty") && !identityHasMembership(user, "super_admin")) {
+        return send(res, 403, { error: "forbidden" });
+      }
       const next = {
         ...store.settings,
+        productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
           ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
         // New checkouts only: every order keeps the split it was placed under.
@@ -6387,6 +6427,7 @@ async function runLifecycleWork() {
   lifecycleBusy = true;
   try {
     await continueAfterStepFailure([
+      sweepProductionPenalties,
       expireElapsedIssueWindows,
       sweepProductionInactivity,
       drainPushOutbox,

@@ -4095,3 +4095,113 @@ test("progress photos attach privately and every client order response signs a s
     await database.close();
   }
 });
+
+test('production penalties: Super Admin settings, private ledger, atomic warnings and net payouts', { skip: !DATABASE_URL }, async (t) => {
+  const { assessProductionLapses } = await import('../src/production-penalties.js');
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi({ GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000' });
+  t.after(async () => { instance.child.kill('SIGTERM'); await database.close(); });
+  const settings = await request(instance.api, '/settings', { subject: 'clerk_super' });
+  const policy = settings.body.settings.productionPenalty;
+  assert.deepEqual(policy, { deductionsEnabled: false, minorBps: 500, moderateBps: 1500, severeBps: 3000 });
+  const update = { expectedVersion: settings.body.version, reason: 'Test policy', productionPenalty: { ...policy, deductionsEnabled: true } };
+  const denied = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_ops', body: update });
+  assert.equal(denied.status, 403);
+  const bad = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_super', body: { ...update, productionPenalty: null } });
+  assert.equal(bad.status, 400);
+  const enabled = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_super', body: update });
+  assert.equal(enabled.status, 200);
+  const stale = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_super', body: update });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error, 'settings_version_conflict');
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_penalty_${++sequence}`;
+  const warnAt = '2026-10-02T02:00:00.000Z';
+  const deductAt = '2026-10-02T02:01:00.000Z';
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = structuredClone(store.orders.find((row) => row.id === 'ord_payout'));
+    order.id = 'ord_penalty';
+    store.orders.push(order);
+    order.readyBy = '2026-10-01T00:00:00.000Z'; order.readyAt = warnAt;
+    // Exercise the published plan's database invariant as well as net release math.
+    order.payoutPlanVersion = 2;
+    order.moneyModelVersion = 3;
+    order.payoutMilestones = createPayoutMilestones(order, { version: 2 });
+    for (const stage of order.payoutMilestones) { stage.pofFileIds = ['file_pof']; stage.status = 'pof_attached'; }
+    order.payoutMilestones[0].status = 'released';
+    await saveStore(database, store);
+  });
+  const sweep = (at) => database.transaction(async () => {
+    const store = await loadStore(database);
+    if (assessProductionLapses(store, { at, createId })) await saveStore(database, store);
+  });
+  await Promise.all([sweep(warnAt), sweep(warnAt)]);
+  let store = await loadStore(database);
+  assert.equal(store.productionLapses.length, 1);
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
+  assert.equal(store.notifications.filter((row) => row.type === 'production_lapse_warning').length, 3);
+  await assert.rejects(database.transaction(async () => {
+    const pending = await loadStore(database);
+    assessProductionLapses(pending, { at: deductAt, createId });
+    await saveStore(database, pending);
+    throw new Error('Abort the deduction transaction');
+  }), /Abort the deduction transaction/);
+  const rolledBack = await loadStore(database);
+  assert.equal(rolledBack.productionLapses[0].deductionMinor, 0);
+  assert.equal(rolledBack.notifications.filter((row) => row.type === 'production_lapse_deduction').length, 0);
+  await Promise.all([sweep(deductAt), sweep(deductAt)]);
+  store = await loadStore(database);
+  assert.equal(store.productionLapses[0].deductionMinor, 18000);
+  assert.equal(store.productionLapses[0].remainingBalanceMinor, 60000);
+  assert.equal(store.notifications.filter((row) => row.type === 'production_lapse_deduction').length, 3);
+  const own = await request(instance.api, '/me/production-lapses', { subject: 'clerk_supplier' });
+  assert.equal(own.status, 200); assert.equal(own.body.lapses[0].deductionMinor, 18000);
+  for (const subject of ['clerk_ops', 'clerk_super']) {
+    const read = await request(instance.api, '/users/user_supplier/production-lapses', { subject });
+    assert.equal(read.status, 200); assert.deepEqual(read.body, own.body);
+  }
+  for (const pathname of ['/me/production-lapses', '/users/user_supplier/production-lapses']) {
+    assert.equal((await request(instance.api, pathname)).status, 401);
+    assert.equal((await request(instance.api, pathname, { subject: 'clerk_client' })).status, 403);
+  }
+  assert.equal((await request(instance.api, '/users/user_supplier/production-lapses', { subject: 'clerk_supplier' })).status, 403);
+  await assert.rejects(database.query("UPDATE payout_milestones SET production_deduction_minor=production_deduction_minor+1 WHERE order_id='ord_penalty' AND code='delivered'"), { code: '23514' });
+  await assert.rejects(database.query("UPDATE production_lapses SET deduction_minor=1 WHERE order_id='ord_penalty'"), { code: '23514' });
+  await assert.rejects(database.query("UPDATE payout_milestones SET amount_minor=1 WHERE order_id='ord_penalty' AND code='production_started'"), { code: '23514' });
+  for (const code of ['delivered', 'issue_window']) {
+    const released = await request(instance.api, `/orders/ord_penalty/milestones/${code}/release`, { method: 'POST', subject: 'clerk_ops', body: { reference: `penalty-${code}` } });
+    assert.equal(released.status, 200, JSON.stringify(released.body));
+  }
+  store = await loadStore(database);
+  assert.equal(store.orders.find((row) => row.id === 'ord_penalty').payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), 82000);
+});
+
+test('production penalties: Operations confirms no communication with a reason; suppliers cannot attest it', { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi({ GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000' });
+  t.after(async () => { instance.child.kill('SIGTERM'); await database.close(); });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === 'ord_payout');
+    order.state = 'production';
+    order.readyBy = new Date(Date.now() - 3600000).toISOString();
+    await saveStore(database, store);
+  });
+  const pathname = '/orders/ord_payout/production-no-communication';
+  assert.equal((await request(instance.api, pathname, { method: 'POST', subject: 'clerk_supplier', body: { reason: 'No reply' } })).status, 403);
+  assert.equal((await request(instance.api, pathname, { method: 'POST', subject: 'clerk_ops', body: {} })).status, 400);
+  const result = await request(instance.api, pathname, { method: 'POST', subject: 'clerk_ops', body: { reason: 'No reply to the deadline check' } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.lapses[0].tier, 'severe');
+  assert.equal(result.body.lapses[0].status, 'warning_only');
+  assert.equal(result.body.lapses[0].reassignmentEligible, true);
+  const repeated = await request(instance.api, pathname, { method: 'POST', subject: 'clerk_ops', body: { reason: 'No reply to the deadline check' } });
+  assert.equal(repeated.status, 200);
+  const store = await loadStore(database);
+  assert.equal(store.auditLog.filter((row) => row.action === 'production_lapse.no_communication').length, 1);
+  assert.equal(store.productionLapses[0].warnings.length, 1);
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
+});
