@@ -10,6 +10,7 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 - Every HTTP mutation runs in one transaction with a transaction-scoped advisory lock. Money/order/credit/claim/issue changes, audit rows, and notifications commit atomically.
 - MinIO owns file bytes. PostgreSQL stores metadata, private object keys, and opaque file references only.
 - Fresh `npm run seed` is idempotent reference data only: catalog, taxonomy, zones, settings, formats, starters. It must never create users or operational records and has no destructive reset.
+- `seed:dev` requires explicit development/test `NODE_ENV` and a development Clerk key; production compose has no development seed service. Fixed demo retirement and its operator preflight: `docs/DEMO_SHOP_RETIREMENT.md`.
 - Local development only: `npm run seed:dev` (and local compose) additionally seeds three Davao shops against real development Clerk users, including Lovis Printshop for `felyciaaa0220@gmail.com`. Production compose must keep `npm run seed`.
 
 ## Clerk-only identity
