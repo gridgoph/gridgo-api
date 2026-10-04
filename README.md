@@ -98,7 +98,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`).
+All routes except `/health`, `/catalog`, `/season-windows`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`).
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
@@ -110,5 +110,7 @@ All routes except `/health`, `/catalog`, public support-ticket and issue-report 
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`
 - Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
+
+- Season awareness: public `/season-windows`, Super Admin editor and disabled-by-default scheduled notices under `/admin/season-windows`; see [Season windows API](docs/SEASON_WINDOWS_API.md).
 
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.

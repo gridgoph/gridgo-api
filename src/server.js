@@ -149,6 +149,7 @@ import {
 } from "./taxonomy.js";
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
+import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { applyProductionNudges, continueAfterStepFailure } from "./production-inactivity.js";
@@ -1474,6 +1475,19 @@ async function expireElapsedIssueWindows() {
   });
 }
 
+async function sweepSeasonWindows() {
+  const candidate = await database.query(`
+    SELECT 1 FROM platform_settings WHERE settings #> '{seasonWindowPush,enabled}' = 'true'::jsonb
+      AND EXISTS (SELECT 1 FROM season_windows WHERE notice_queued_at IS NULL
+        AND $1::date BETWEEN start_date - 42 AND start_date - 28)
+  `, [manilaDate(now())]);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (applySeasonNotices(store, { at: now(), createId: id, audit }).length) await save(store);
+  });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -1995,6 +2009,11 @@ async function handleRequest(req, res) {
       return servePaymentQr(req, res, store);
     }
 
+    if (req.method === "GET" && pathname === "/season-windows") {
+      const response = await routeSeasonWindows({ req, url, store, now });
+      return send(res, response.status, response.body);
+    }
+
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
       return send(res, 404, { error: "not_found", path: pathname });
@@ -2281,6 +2300,12 @@ async function handleRequest(req, res) {
     if (accountProfileResponse) {
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
+    const seasonResponse = await routeSeasonWindows({ req, url, store, user, readBody, now, createId: id, audit });
+    if (seasonResponse) {
+      if (seasonResponse.mutated) await save(store);
+      return send(res, seasonResponse.status, seasonResponse.body);
     }
 
     const physicalInvoiceResponse = await routePhysicalInvoice({
@@ -6389,6 +6414,7 @@ async function runLifecycleWork() {
     await continueAfterStepFailure([
       expireElapsedIssueWindows,
       sweepProductionInactivity,
+      sweepSeasonWindows,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }

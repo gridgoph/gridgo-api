@@ -497,9 +497,10 @@ export function pushMessageFor(notification, env = process.env) {
   }
   const image = resolveFcmImageUrl(notification.imageUrl, env);
   const presentation = pushPresentation(notification);
+  const publicMessage = ["announcement", "season_window"].includes(notification.type);
   return {
-    title: notification.type === "announcement" ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
-    body: notification.type === "announcement" ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",
+    title: publicMessage ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
+    body: publicMessage ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",
     data,
     androidChannelId: presentation.androidChannelId,
     sound: presentation.sound,
