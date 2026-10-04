@@ -11,7 +11,8 @@
     "migrate": "node --env-file-if-exists=.env ./node_modules/node-pg-migrate/bin/node-pg-migrate.js up --migrations-dir migrations",
     "seed": "node --env-file-if-exists=.env src/seed.js",
     "seed:dev": "node --env-file-if-exists=.env src/seed-dev.js",
-    "bootstrap-admin": "node --env-file-if-exists=.env src/bootstrap-admin.js"
+    "bootstrap-admin": "node --env-file-if-exists=.env src/bootstrap-admin.js",
+    "files:retention": "node --env-file-if-exists=.env src/file-retention-cli.js"
   },
   "engines": {
     "node": ">=20.9.0"
