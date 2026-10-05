@@ -117,6 +117,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791072000000_season_windows",
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
+        "1791216000000_order_reschedule_request",
       ],
     );
 
@@ -295,6 +296,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reschedule protection reverses before the earlier domain migrations.
+    assert.notEqual((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
 
     // Retirement has no automatic restore; its down only removes the migration marker.
     await runner(migrationOptions(schema, "down", 1, client));
