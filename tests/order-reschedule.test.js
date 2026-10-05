@@ -283,3 +283,15 @@ test('replacement starts its own acceptance window and retains earlier shop laps
   assert.equal(order.shopAcceptance.status, 'pending');
   assert.ok(Date.parse(order.shopAcceptance.deadlineAt) > Date.parse(AT));
 });
+
+test('reschedule replacement matching uses approved listings while sensitive revisions wait', async () => {
+  const { startListingReview } = await import('../src/catalog-review-state.js');
+  const store = fixture();
+  const listing = store.catalogItems.find(row => row.supplierId === 'replacement');
+  startListingReview(store, listing);
+  listing.subcategoryCode = 'brochures';
+  listing.basePriceMinor = 90000;
+  assert.equal(findRescheduleReplacement(store, store.orders[0], AT)?.supplierId, 'replacement');
+  listing.approvedSnapshot = null;
+  assert.equal(findRescheduleReplacement(store, store.orders[0], AT), null);
+});

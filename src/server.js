@@ -1,3 +1,5 @@
+import { catalogReviewNotice } from "./catalog-review-routes.js";
+
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { routeOrderReschedule, expireRescheduleRequests } from './order-reschedule.js';
 import { routeBaskets, basketForOrder } from "./baskets.js";
@@ -2706,7 +2708,9 @@ async function handleRequest(req, res) {
         authorizeFileAttach(latestUser, latestFile, latestTarget);
         if (latestTarget.type === "order") assertRefundWorkAllowed(latestStore, latestTarget.record);
         if (latestTarget.type === "supplier_catalog_item") {
+          const priorReviewStatus = latestTarget.record.reviewStatus;
           const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
+          if (priorReviewStatus !== "pending") catalogReviewNotice(latestStore, attached.item, { id, now }, "catalog_review_pending");
           await save(latestStore);
           const item = privateCatalogItem(latestStore, attached.item);
           await decorateCatalogPhotoUrls(latestStore, { item });

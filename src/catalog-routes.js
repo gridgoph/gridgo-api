@@ -1,3 +1,5 @@
+import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
+import { routeCatalogReview, catalogReviewNotice } from "./catalog-review-routes.js";
 import {
   MEASURE_UNITS,
   PRICING_UNITS,
@@ -647,7 +649,31 @@ function parseFormatFinderQuery(url) {
   return query;
 }
 
-export async function routeSupplierCatalog({ req, url, store, user, readBody, id, now, audit }) {
+export async function routeSupplierCatalog(args) {
+  const review = await routeCatalogReview(args);
+  if (review) return review;
+  const { req, url, store } = args;
+  const parts = url.pathname.split("/");
+  const listingWrite = req.method !== "GET" && parts[1] === "me" && ["catalog-items", "catalog-option-groups"].includes(parts[2]);
+  const itemId = parts[2] === "catalog-option-groups"
+    ? (store.catalogOptionGroups || []).find(group => group.id === parts[3])?.catalogItemId : parts[3];
+  const before = listingWrite && (store.catalogItems || []).find(item => item.id === itemId);
+  const snapshot = before ? listingSnapshot(store, before) : null;
+  const priorStatus = before?.reviewStatus || "approved";
+  const response = await routeSupplierCatalogExisting(args);
+  const item = snapshot && (store.catalogItems || []).find(row => row.id === itemId);
+  if (response?.mutated && item && sensitiveSnapshot(snapshot) !== sensitiveSnapshot(listingSnapshot(store, item))) {
+    startListingReview(store, item, snapshot);
+    if (priorStatus !== "pending") catalogReviewNotice(store, item, args, "catalog_review_pending");
+    if (response.body?.item) response.body.item = privateCatalogItem(store, item);
+    response.body.reviewStatus = item.reviewStatus;
+    response.body.reviewReason = item.reviewReason;
+  }
+  if (response?.mutated && item) retainApprovedPhotos(store, item);
+  return response;
+}
+
+async function routeSupplierCatalogExisting({ req, url, store, user, readBody, id, now, audit }) {
   let { pathname } = url;
   const staffRead = req.method === "GET" && /^\/ops\/catalog\/(shops(?:\/[^/]+)?|items\/[^/]+)$/.test(pathname);
   const ownPreview = req.method === "GET" && pathname === "/me/catalog-preview";
@@ -968,6 +994,8 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const existing = (store.catalogItems || []).filter((item) => item.supplierId === user.id);
     const item = {
       id: id("sci"),
+      reviewStatus: "pending",
+      reviewReason: null,
       supplierId: user.id,
       supplierServiceId: service.id,
       subcategoryCode,
@@ -988,6 +1016,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (!Array.isArray(store.catalogOptions)) store.catalogOptions = [];
     if (!Array.isArray(store.catalogItemFileFormats)) store.catalogItemFileFormats = [];
     store.catalogItems.push(item);
+    catalogReviewNotice(store, item, { id, now }, "catalog_review_pending");
     if (starter) copyStarterIntoItem(store, starter, item, id, at);
     auditChange(audit, store, user, "catalog_item.create", "supplier_catalog_item", item.id, { serviceId: service.id });
     return { status: 201, body: { item: privateCatalogItem(store, item) }, mutated: true };

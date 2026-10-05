@@ -25,7 +25,7 @@ export function catalogItemsWithPhotos(body) {
       else if (item?.item?.photos) items.push(item.item);
     }
   }
-  for (const listings of [body?.listings, body?.otherListings]) {
+  for (const listings of [body?.listings, body?.otherListings, body?.productTypes]) {
     for (const item of listings || []) {
       if (item?.photos) items.push(item);
     }

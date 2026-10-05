@@ -1,3 +1,4 @@
+import { approvedCatalogView } from "./catalog-review-state.js";
 import {
   CatalogError, catalogItemBlockers, itemTurnaroundHours, listingFitsPrinterCap, supplierCatalogReadiness,
 } from "./supplier-catalog.js";
@@ -24,6 +25,8 @@ const STEPS = {
   accepted_file_formats: ["Choose accepted artwork formats on this listing or its service line.", "edit_listing_formats"],
   photo: ["Attach at least one fully uploaded listing photo.", "upload_listing_photo"],
   option_group: ["Add or enable at least one option in this option group, or remove the group.", "edit_listing_options"],
+  listing_not_approved: ["Operations must approve this listing before clients can match it.", "view_listing_review"],
+  listing_suspended: ["Operations must restore this listing before it can be offered again.", "contact_operations"],
   item_inactive: ["This listing is hidden. Make it active to offer it to clients.", "activate_listing"],
   service_not_live: ["The parent service line is not live. Operations must approve or restore it before this listing can match.", "view_service"],
   pickup_payment_terms: ["Enable an available pickup payment option.", "edit_payment_terms"],
@@ -92,6 +95,7 @@ function profileCompletion(store, supplierId, legacy) {
 /** Diagnostics only: neither legacy setup rules nor matching gates change. */
 export function supplierReadinessDetails(store, supplierId, request = null, now = new Date().toISOString()) {
   const legacy = supplierCatalogReadiness(store, supplierId);
+  store = approvedCatalogView(store);
   const profile = (store.supplierProfiles || []).find(row => row.userId === supplierId);
   const shopBlockers = supplierMatchBlockersFor(store)(supplierId, profile);
   const items = (store.catalogItems || []).filter(row => row.supplierId === supplierId);

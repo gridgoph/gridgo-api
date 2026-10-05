@@ -324,3 +324,16 @@ for (const status of ['pending', 'failed']) test(`supplier recovery routes stay 
   assert.equal(expireShopAcceptances(store, { at: '2026-10-06T00:00:00Z', createId: id }), false);
   assert.equal(order.shopAcceptance, undefined);
 });
+
+test('replacement matching uses the approved type and specs while a listing revision is pending', async () => {
+  const { startListingReview } = await import('../src/catalog-review-state.js');
+  const store = fixture();
+  const item = store.catalogItems.find(row => row.supplierId === 'replacement');
+  startListingReview(store, item);
+  item.subcategoryCode = 'brochures';
+  item.basePriceMinor = 90000;
+  const replacement = findReplacementShop(store, store.orders[0], AT);
+  assert.equal(replacement?.supplierId, 'replacement');
+  item.approvedSnapshot = null;
+  assert.equal(findReplacementShop(store, store.orders[0], AT), null);
+});

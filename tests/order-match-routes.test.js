@@ -1417,6 +1417,37 @@ test("invoice client amounts use immutable invoice pricing after the live fee ch
   await assert.rejects(() => call("GET", `/me/carts/${cart.id}/quote`), (error) => error.code === "cart_checked_out");
 });
 
+test("listing review: carts and checkout use approved prices while preserving the supplier draft", async () => {
+  const { routeSupplierCatalog } = await import("../src/catalog-routes.js");
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  await routeSupplierCatalog({ req: { method: "PATCH" }, url: new URL("http://localhost/me/catalog-items/item_a"), store,
+    user: store.users.find(row => row.id === "supplier_a"), readBody: async () => ({ expectedVersion: 1, basePriceMinor: 99000 }),
+    id: prefix => `${prefix}_review`, now: () => AT, audit: () => {} });
+  await routeSupplierCatalog({ req: { method: "PATCH" }, url: new URL("http://localhost/me/catalog-items/item_b"), store,
+    user: store.users.find(row => row.id === "supplier_b"), readBody: async () => ({ expectedVersion: 1, basePriceMinor: 88000 }),
+    id: prefix => `${prefix}_review_b`, now: () => AT, audit: () => {} });
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup", deadline: "2026-09-10T00:00:00Z" })).body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_b", optionIds: [], quantity: 1, artworkFileId: "file_art" });
+  const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
+  assert.equal(cart.lines[0].listing.basePriceMinor, 10000);
+  const result = await call("POST", `/me/carts/${cartId}/checkout`, { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "APPROVED" } });
+  assert.equal(result.status, 201);
+  assert.deepEqual(store.orderLineItems.map(row => row.baseUnitPriceMinor), [10000, 20000]);
+  assert.equal(store.orders.length, 2);
+  assert.equal(store.catalogItems[0].basePriceMinor, 99000);
+  assert.equal(store.catalogItems[0].reviewStatus, "pending");
+});
+
+test("listing review: a direct cart add cannot bypass pending approval", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  store.catalogItems[0].reviewStatus = "pending";
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  await assert.rejects(call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 }), error => error.status === 409);
+  assert.equal(store.cartLines.length, 0);
+});
 test('multi-shop client quotes and receipt sections use per-group rounding and full upfront payment', async () => {
   const { store, client } = fixture();
   store.settings.downpaymentPercent = 75;

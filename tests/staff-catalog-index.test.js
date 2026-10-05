@@ -193,7 +193,8 @@ test("a sticker priced per metre carries its shop on the index and the detail", 
   assert.equal(sticker.item.photos[0].fileId, "photo_sticker");
   assert.equal(sticker.item.updatedAt, AT);
   assert.equal("approvalStatus" in sticker.item, false);
-  assert.equal("reviewStatus" in sticker.item, false);
+  assert.equal(sticker.item.reviewStatus, "approved");
+  assert.equal(sticker.item.hasApprovedVersion, true);
   assert.equal("suspensionReason" in sticker.item, false);
 
   const detail = await call(user("super_admin"), "/ops/catalog-items/sticker");

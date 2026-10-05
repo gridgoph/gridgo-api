@@ -1,3 +1,4 @@
+import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
@@ -8,7 +9,7 @@ import { approvalCaseFor, authorizationContextFor, identityHasMembership } from 
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
 import { payoutPlanFor, payoutStageFor } from "./payout-plan.js";
-import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
+import { publicCatalogMediaFile, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
 export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
@@ -1004,6 +1005,7 @@ export function attachCatalogItemPhoto(store, file, target, { at }) {
   if (!existingAtSlot && photos.length >= 8) {
     fail(409, "catalog_photo_limit", "A listing can have at most eight sample photos.");
   }
+  startListingReview(store, target.record);
   if (existingAtSlot) {
     const replaced = (store.files || []).find((candidate) => candidate.fileId === existingAtSlot.fileId);
     if (replaced) {
@@ -1024,6 +1026,7 @@ export function attachCatalogItemPhoto(store, file, target, { at }) {
   file.references.push({ type: "supplier_catalog_item", id: target.record.id, field: "photos" });
   target.record.version = (target.record.version || 1) + 1;
   target.record.updatedAt = at;
+  retainApprovedPhotos(store, target.record);
   return { photo: store.catalogItemPhotos.find((photo) => photo.fileId === file.fileId), item: target.record };
 }
 
@@ -1136,7 +1139,7 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
   return { document, approvalCase: approvalCase || null };
 }
 
-function canReadReference(user, store, reference) {
+function canReadReference(user, store, reference, file) {
   if (reference.type === "supplier_payout_account") {
     return hasRole(user, "supplier") && reference.id === user.id;
   }
@@ -1144,7 +1147,7 @@ function canReadReference(user, store, reference) {
     const item = (store.catalogItems || []).find((candidate) => candidate.id === reference.id);
     if (!item) return false;
     if (hasRole(user, "supplier") && item.supplierId === user.id) return true;
-    return Boolean(publicCatalogItem(store, item));
+    return Boolean(publicCatalogMediaFile(store, file.fileId));
   }
   if (reference.type === "supplier_shop_media") {
     if (hasRole(user, "supplier") && reference.id === user.id) return true;
@@ -1206,7 +1209,7 @@ export function authorizeFileRead(user, store, file) {
     if (
       user.role === "supplier"
       && hasApprovedWorkRole(user, "supplier")
-      && (file.references || []).some((reference) => canReadReference(user, store, reference))
+      && (file.references || []).some((reference) => canReadReference(user, store, reference, file))
     ) return;
     forbidden();
   }
@@ -1224,6 +1227,6 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (file.ownerId === user.id) return;
-  if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
+  if ((file.references || []).some((reference) => canReadReference(user, store, reference, file))) return;
   forbidden();
 }

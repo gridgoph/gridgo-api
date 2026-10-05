@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { approvedCatalogView } from './catalog-review-state.js';
 import { matchShop, MatchError, projectShopFinish } from './order-match.js';
 import { catalogGroupsForItem, createOrderLineSnapshot, listingFitsPrinterCap } from './supplier-catalog.js';
 
@@ -48,6 +49,7 @@ function equivalentSelection(store, order, line, item) {
 
 /** Re-evaluated at consent time. Original immutable order lines remain the production instructions. */
 export function findRescheduleReplacement(store, order, at, onlySupplierId = null) {
+  store = approvedCatalogView(store);
   const lines = (store.orderLineItems || []).filter((row) => row.orderId === order.id);
   if (!lines.length || (store.orderJobs || []).some((job) => job.orderId === order.id && job.supplierId !== order.supplierId)) return null;
   const selections = new Map();

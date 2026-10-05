@@ -1,3 +1,4 @@
+import { approvedCatalogView } from "./catalog-review-state.js";
 import { recentLapseQualityPenalty } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
@@ -217,6 +218,7 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, units, n
 }
 
 function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
+  store = approvedCatalogView(store);
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
   const itemsBySupplier = new Map();
