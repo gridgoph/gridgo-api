@@ -26,7 +26,11 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 ## Operational model
 
+Settings writes are Super Admin only. Operations audit reads are limited to workspace correction/deletion scopes; account standing changes cannot target privileged memberships. Contracts: `docs/OPERATIONAL_MODEL_V2_API.md#audit-access` and its account/settings sections.
+
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
+
+Production deadline requests, client consent, replacement/refund holds and applied-deduction escalation: `docs/ORDER_RESCHEDULE_API.md`. The single request stays in `orders.data`; preserve its immutable original facts and role-safe projection.
 
 Shop acceptance, cancellation and client-approved recovery follow `docs/SHOP_RECOVERY_API.md`; `shopRecovery` is an independent work/payout hold. Never reassign automatically after any shop payout release.
 
@@ -74,6 +78,8 @@ Checkout enforces fresh link probes and server upload verdicts; supplier access/
 Supplier readiness separates legacy setup checks, operational listing eligibility, and request-specific capacity/deadline diagnostics; see `docs/SUPPLIER_CATALOG_API.md#supplier-readiness-diagnostics`. Matching and readiness share shop gates in `src/supplier-eligibility.js`.
 
 Listing approval, grandfathered live rows, private revisions, required specs, and product-type requests follow `docs/SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker`. Client pricing and matching must use `approvedCatalogView`; review decisions never clear visibility or take-down holds.
+
+Super Admin listing take-downs and shop-controlled republication follow `docs/SUPPLIER_CATALOG_API.md#staff-listing-index-and-take-down`.
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 

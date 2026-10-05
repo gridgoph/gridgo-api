@@ -277,6 +277,118 @@ test("public catalog requires a complete active item under a live service", () =
   assert.equal(publicCatalogItem(draft, draft.catalogItems[0]), null);
 });
 
+test("suspending one listing hides it from clients and leaves its sibling live", async () => {
+  const store = fixture();
+  const sibling = { ...store.catalogItems[0], id: "sibling", name: "Sibling banner", sortOrder: 1 };
+  store.catalogItems.push(sibling);
+  store.catalogItemPhotos.push({ catalogItemId: "sibling", fileId: "photo", sortOrder: 0, createdAt: AT });
+  const ops = { id: "ops", role: "ops_admin" };
+  const admin = { id: "super", role: "super_admin" };
+  const supplier = { id: "supplier", role: "supplier" };
+  const route = (method, pathname, user, body = {}) => routeSupplierCatalog({
+    req: { method, headers: {} },
+    url: new URL(`http://127.0.0.1${pathname}`),
+    store,
+    user,
+    readBody: async () => body,
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+
+  const missing = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, {}),
+    (error) => error.code === "reason_required",
+  );
+  assert.equal(missing, undefined);
+  const shopDenied = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", supplier, { reason: "Blurry sample" }),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(shopDenied, undefined);
+  const opsDenied = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", ops, { reason: "Blurry sample" }),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(opsDenied, undefined);
+
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, { reason: "x".repeat(2001) }),
+    (error) => error.status === 400 && error.code === "reason_too_long",
+  );
+  assert.equal(store.catalogItems[0].active, true);
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", { id: "client", role: "client" }, { reason: "Sample" }),
+    (error) => error.code === "forbidden",
+  );
+  const suspended = await route("POST", "/catalog-items/item/suspend", admin, { reason: "  Blurry sample  " });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.item.active, false);
+  assert.equal(suspended.body.item.suspendReason, "Blurry sample");
+  assert.equal(suspended.body.item.suspendedAt, AT);
+  assert.equal(store.catalogItems.find((item) => item.id === "sibling").active, true);
+  assert.equal(store.catalogItems.find((item) => item.id === "sibling").suspendReason, undefined);
+  assert.equal(store.supplierServices[0].state, "live");
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+
+  const firstSuspension = structuredClone(store.catalogItems[0]);
+  const noticesBeforeRepeat = (store.notifications || []).length;
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, { reason: "Replacement reason" }),
+    (error) => error.status === 409 && error.code === "listing_suspended",
+  );
+  assert.deepEqual(store.catalogItems[0], firstSuspension);
+  assert.equal(store.notifications.length, noticesBeforeRepeat);
+
+  const shopView = await route("GET", "/me/catalog-items/item", supplier);
+  assert.equal(shopView.status, 200);
+  assert.equal(shopView.body.item.suspendReason, "Blurry sample");
+  const notice = (store.notifications || []).find((row) => row.type === "listing_suspended");
+  assert.equal(notice.userId, "supplier");
+  assert.equal(notice.appRole, "supplier");
+  assert.equal(notice.body, "Blurry sample");
+  assert.equal(notice.catalogItemId, "item");
+
+  const opsRestore = await assert.rejects(
+    () => route("POST", "/catalog-items/item/restore", ops),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(opsRestore, undefined);
+
+  await assert.rejects(
+    () => route("PATCH", "/me/catalog-items/item", supplier, {
+      active: true,
+      expectedVersion: shopView.body.item.version,
+    }),
+    (error) => error.code === "listing_suspended" && error.details.reason === "Blurry sample",
+  );
+
+  const restored = await route("POST", "/catalog-items/item/restore", admin);
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.item.active, false);
+  assert.equal(restored.body.item.suspendReason, null);
+  assert.equal(restored.body.item.suspendedAt, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
+  const restoreNotice = store.notifications.find((row) => row.type === "listing_restored");
+  assert.equal(restoreNotice.userId, "supplier");
+  assert.equal(restoreNotice.appRole, "supplier");
+  assert.equal(restoreNotice.catalogItemId, "item");
+  assert.match(restoreNotice.body, /still hidden/);
+  const published = await route("PATCH", "/me/catalog-items/item", supplier, {
+    active: true, expectedVersion: restored.body.item.version,
+  });
+  assert.equal(published.body.item.active, true);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0])?.id, "item");
+
+  // A listing the shop already hid also stays hidden after take-down and restore.
+  store.catalogItems[0].active = false;
+  await route("POST", "/catalog-items/item/suspend", admin, { reason: "x".repeat(2000) });
+  const hiddenRestore = await route("POST", "/catalog-items/item/restore", admin);
+  assert.equal(hiddenRestore.body.item.active, false);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+});
+
 test("the platform registry lists uploadable types and resolves a plus query", async () => {
   const store = fixture();
   store.acceptedFileFormats = defaultAcceptedFileFormats();
@@ -1657,4 +1769,20 @@ test("listing review: text-only changes on approved listings never start review"
   const edited = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, name: "Updated banner", description: "Updated description" } });
   assert.equal(edited.body.item.reviewStatus, "approved");
   assert.equal(publicCatalogItem(store, store.catalogItems[0]).name, "Updated banner");
+});
+
+test("listing review: take-down and restore stay independent of a pending revision", async () => {
+  const store = fixture();
+  const admin = { id: "admin", role: "super_admin" };
+  await reviewCall(store, "/catalog-items/item/suspend", { reason: "Replace the sample" }, admin);
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 4, basePriceMinor: 500 } });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  await reviewCall(store, "/catalog-items/item/restore", {}, admin);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 6, active: true } });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0])?.basePriceMinor, 100);
+  await reviewCall(store, "/catalog-items/item/suspend", { reason: "Sample still needs replacement" }, admin);
+  await reviewCall(store, "/ops/catalog-reviews/item/decision", { expectedVersion: 8, status: "approved", photosUnbranded: true });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  assert.equal(store.catalogItems[0].suspendReason, "Sample still needs replacement");
 });

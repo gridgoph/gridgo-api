@@ -80,6 +80,7 @@ export function publicNotification(notification, order) {
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;
   if (notification.announcementId) item.announcementId = notification.announcementId;
   if (notification.approvalCaseId) item.approvalCaseId = notification.approvalCaseId;
+  if (notification.catalogItemId) item.catalogItemId = notification.catalogItemId;
   if (order?.title) item.orderTitle = order.title;
   if (order?.state) {
     const privateShopEvent = ["supplier", "ops_admin", "super_admin"].includes(notification.appRole);
@@ -348,6 +349,9 @@ export function notificationVisible(store, notification, userId, role) {
     const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);
     return Boolean(c && ((c.userId === userId && (!role || role === (c.kind === 'business_client' ? 'client' : c.kind))) || ((!role || ['ops_admin','super_admin'].includes(role)) && opsAdminRecipientIds(store).includes(userId))));
   }
+  // The requesting shop retains this bounded historical outcome after a replacement.
+  if (requiredRole === 'supplier' && notification.type?.startsWith('order_reschedule_')
+      && orderFromNotification(store, notification)?.rescheduleRequest?.supplierId === userId) return true;
   if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || (legacySuperSeesOps ? 'super_admin' : requiredRole),offer:notification.type === 'dispatch_available'});
   return true;
 }

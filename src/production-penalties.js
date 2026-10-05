@@ -1,3 +1,4 @@
+import { rescheduleHold } from './order-reschedule-policy.js';
 import { formatMinorPhp } from './payout-copy.js';
 import { refundHold, refundSettlementFor } from './refund-policy.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
@@ -18,7 +19,7 @@ export function validateProductionPenalty(policy) {
   }
 }
 
-/** Future mutually agreed rescheduling must replace this resolver with its approved snapshot. */
+/** Only client acceptance changes readyBy; pending/expired requests retain the original deadline. */
 export function productionDeadline(order) { return order.readyBy || null; }
 
 export function latenessTier(deadlineAt, finishedAt, noCommunication = false) {
@@ -112,7 +113,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
     if (!lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
     if (!order.readyAt && lapse.tier !== 'severe') continue;
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
-    if (refundHold(store, order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
+    if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
       && ['open', 'payout_held'].includes(claim.status))) continue;
     const unpaid = (order.payoutMilestones || []).filter((stage) => !['released', 'superseded'].includes(stage.status));
     const remaining = unpaid.reduce((sum, stage) => sum + BigInt(stage.amountMinor), 0n);

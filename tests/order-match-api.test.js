@@ -1672,7 +1672,7 @@ test("a legacy 75/25 order still needs its balance before delivery", { skip: !DA
 });
 
 /**
- * The split is an Operations setting on the existing versioned handshake. It
+ * The split is a Super Admin setting on the existing versioned handshake. It
  * decides new checkouts only; every order keeps the split it was placed under.
  */
 test("the downpayment setting switches new checkouts between 75 and 100 and validates", { skip: !DATABASE_URL }, async (t) => {
@@ -1682,6 +1682,8 @@ test("the downpayment setting switches new checkouts between 75 and 100 and vali
   // A settings row written before the field existed reads as 100.
   await database.transaction(async () => {
     const store = await loadStore(database);
+    store.users.push({ id: "user_super", clerkUserId: "clerk_super", email: "super@gridgo.test", name: "Super", role: "super_admin", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "user_super", role: "super_admin", createdAt: AT });
     delete store.settings.downpaymentPercent;
     await saveStore(database, store);
   });
@@ -1691,7 +1693,7 @@ test("the downpayment setting switches new checkouts between 75 and 100 and vali
     await new Promise((resolve) => instance.child.once("exit", resolve));
   });
   const call = (pathname, options = {}) => request(instance.api, pathname, options);
-  const patch = (body, subject = "clerk_ops") => call("/settings", { method: "PATCH", subject, body });
+  const patch = (body, subject = "clerk_super") => call("/settings", { method: "PATCH", subject, body });
 
   let current = await call("/settings", { subject: "clerk_client" });
   assert.equal(current.status, 200);
@@ -1699,6 +1701,9 @@ test("the downpayment setting switches new checkouts between 75 and 100 and vali
   const version = current.body.version;
 
   assert.equal((await patch({ expectedVersion: version, reason: "Back to 75/25", downpaymentPercent: 75 }, "clerk_client")).status, 403);
+  const opsDenied = await patch({ expectedVersion: version, reason: "Back to 75/25", downpaymentPercent: 75 }, "clerk_ops");
+  assert.equal(opsDenied.status, 403);
+  assert.equal(opsDenied.body.error, "forbidden");
   for (const bad of [50, 0, "75", 75.5, null]) {
     const invalid = await patch({ expectedVersion: version, reason: "Try", downpaymentPercent: bad });
     assert.equal(invalid.status, 400, `${JSON.stringify(bad)}: ${JSON.stringify(invalid.body)}`);

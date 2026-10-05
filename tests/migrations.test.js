@@ -120,6 +120,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791244800000_shop_recovery_penalty_ownership",
         "1791248400000_hub_pickup_request",
         "1791252000000_multi_shop_baskets",
+        "1791255600000_order_reschedule_request",
+        "1791331200000_catalog_listing_suspension",
         "1791417600000_listing_reviews",
       ],
     );
@@ -301,6 +303,21 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     )).rowCount, 1);
 
     await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'suspend_reason'",
+      [schema],
+    )).rowCount, 1);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'suspend_reason'",
+      [schema],
+    )).rowCount, 0);
+
+    // Reschedule protection reverses before the earlier domain migrations.
+    assert.notEqual((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
+
     // Empty basket schema can be reversed without touching existing orders.
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('order_baskets') AS t")).rows[0].t, null);

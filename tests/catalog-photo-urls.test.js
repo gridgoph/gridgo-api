@@ -16,6 +16,14 @@ test("catalogItemsWithPhotos walks match listings and cart line listings", () =>
   assert.deepEqual(collected.map((item) => item.id), ["sci_a", "sci_b"]);
 });
 
+test("catalogItemsWithPhotos walks a staff index row's listing", () => {
+  const listing = { id: "sci_sticker", photos: [{ fileId: "file_sticker" }] };
+  const collected = catalogItemsWithPhotos({
+    items: [{ shop: { supplierId: "shop", shopName: "Metre Press" }, item: listing }],
+  });
+  assert.deepEqual(collected.map((item) => item.id), ["sci_sticker"]);
+});
+
 test("catalogItemsWithPhotos walks a shop board's service items", () => {
   const collected = catalogItemsWithPhotos({
     shop: {

@@ -1,4 +1,6 @@
 import { approvedCatalogView } from "./catalog-review-state.js";
+
+import { rescheduleHold } from './order-reschedule-policy.js';
 import { addOpeningMilliseconds, defaultShopSchedule } from './availability.js';
 import { matchShop, MatchError, projectShopFinish } from './order-match.js';
 import { catalogGroupsForItem, publicCatalogItem, selectedCatalogPrice, priceCatalogSelection, listingFitsPrinterCap } from './supplier-catalog.js';
@@ -106,6 +108,7 @@ export function notifyRecovery(store, order, kind, at, createId) {
 }
 
 export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null }) {
+  if (rescheduleHold(order)) fail('reschedule_fulfillment_stopped');
   if (recoveryHeld(order)) fail('shop_recovery_pending');
   if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail('shop_cancel_not_available');
   if (refundHold(store, order) || refundSettlementFor(store, order)) fail('refund_fulfillment_stopped');

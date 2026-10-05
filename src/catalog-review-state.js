@@ -70,6 +70,7 @@ export function approvedCatalogView(store) {
     const item = { ...snapshot.item, reviewStatus: "approved" };
     for (const key of LIVE_FIELDS) {
       if (Object.hasOwn(draft, key)) item[key] = draft[key];
+      else delete item[key];
     }
     view.catalogItems = view.catalogItems.map(row => row.id === draft.id ? item : row);
     const groupIds = new Set((store.catalogOptionGroups || []).filter(row => row.catalogItemId === draft.id).map(row => row.id));

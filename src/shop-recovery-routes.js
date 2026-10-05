@@ -1,3 +1,4 @@
+import { rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased } from './artwork-gates.js';
 import { publicRecovery } from './shop-recovery-projection.js';
 import { approvedRole } from './notifications.js';
@@ -61,6 +62,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
     } else if (match[3] === 'accept') {
       if (recovery.status === 'accepted') return { status: 200, body: { recovery: publicRecovery(order, user) } };
       if (recovery.status !== 'awaiting_client' || !recovery.proposal || !recoveryHeld(order)) fail(409, 'shop_recovery_not_available');
+      if (rescheduleHold(order)) fail(409, 'reschedule_fulfillment_stopped');
       if (paidShopShare(store, order)) fail(409, 'shop_recovery_requires_operations');
       if (refundHold(store, order) || refundSettlementFor(store, order)) fail(409, 'refund_fulfillment_stopped');
       if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail(409, 'shop_recovery_not_available');
