@@ -1346,3 +1346,7 @@ Settlements supersede unpaid original milestones without changing their amounts 
 See [Late-production warnings and deductions](PRODUCTION_PENALTIES_API.md) for tiers,
 Super Admin settings, the default-off deduction gate, supplier/Operations reads,
 reassignment eligibility, and net payout amounts.
+
+## Production deadline rescheduling
+
+See [Production deadline requests](ORDER_RESCHEDULE_API.md) for the one-request rule, client answers, renewed-date penalties, 24-hour expiry, consented replacement, refund and Operations endpoints.

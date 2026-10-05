@@ -1,3 +1,5 @@
+import { rescheduleHold } from './order-reschedule-policy.js';
+import { routeOrderReschedule, expireRescheduleRequests } from './order-reschedule.js';
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
@@ -1480,6 +1482,17 @@ async function expireElapsedIssueWindows() {
   });
 }
 
+async function sweepRescheduleRequests() {
+  const candidate = await database.query(`SELECT 1 FROM orders
+    WHERE data #>> '{rescheduleRequest,status}' = 'pending'
+      AND (data #>> '{rescheduleRequest,expiresAt}')::timestamptz <= now() LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (expireRescheduleRequests(store, { at: now(), id })) await save(store);
+  });
+}
+
 async function sweepProductionPenalties() {
   await enqueueMutation(async () => {
     const store = await load();
@@ -2424,6 +2437,12 @@ async function handleRequest(req, res) {
     if (pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
+    const rescheduleResponse = await routeOrderReschedule({ req, url, store, user, readBody, now, id, audit });
+    if (rescheduleResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (rescheduleResponse.mutated) await save(store);
+      return send(res, rescheduleResponse.status, rescheduleResponse.body);
+    }
     const refundResponse = await routeRefunds({ req, url, store, user, readBody, now, id, audit });
     if (refundResponse) {
       if (refundResponse.mutated) await save(store);
@@ -2435,7 +2454,7 @@ async function handleRequest(req, res) {
       const refundGuard = pathname.match(/^\/(?:orders|dispatch)\/([^/]+)\/(.+)$/);
       if (refundGuard && !["issues", "physical-invoice"].includes(refundGuard[2])) {
         const guardedOrder = store.orders.find((order) => order.id === refundGuard[1]);
-        if (guardedOrder && (refundHold(store, guardedOrder) || refundSettlementFor(store, guardedOrder))
+        if (guardedOrder && (refundHold(store, guardedOrder) || refundSettlementFor(store, guardedOrder) || rescheduleHold(guardedOrder))
           && !canAccessOrder(store, user.id, guardedOrder, { role: user.role, offer: true })) {
           return send(res, 403, { error: "forbidden" });
         }
@@ -6433,6 +6452,7 @@ async function runLifecycleWork() {
   lifecycleBusy = true;
   try {
     await continueAfterStepFailure([
+      sweepRescheduleRequests,
       sweepProductionPenalties,
       expireElapsedIssueWindows,
       sweepProductionInactivity,

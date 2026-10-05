@@ -1,3 +1,4 @@
+import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
@@ -727,7 +728,7 @@ export function moneyReportingForOrder(order, store = null) {
 
 export function activePayoutHold(store, order) {
   return Boolean(
-    refundHold(store, order) || order.payoutHold ||
+    refundHold(store, order) || rescheduleHold(order) || order.payoutHold ||
       (store?.claims || []).some(
         (claim) => claim.orderId === order.id && ["open", "payout_held"].includes(claim.status),
       ),
@@ -764,6 +765,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
   }
 
+  if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id);
   if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
@@ -950,6 +952,12 @@ export function publicOrderFor(order, user, store = null) {
   const publicRecord = clone(order);
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
   publicRecord.productionItems = productionItemsFor(store, order, user);
+  delete publicRecord.rescheduleRequest;
+  const reschedule = publicReschedule(order, user);
+  if (reschedule) publicRecord.rescheduleRequest = reschedule;
+  if (order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
+    publicRecord.promisedDate = user?.role === 'supplier' ? order.readyBy : order.promiseBy;
+  }
   if (["supplier", "rider"].includes(user?.role)) {
     const artworkIds = publicRecord.artworkFileIds || [];
     for (const purpose of ["artwork", "mockup"]) {
