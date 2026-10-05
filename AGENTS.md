@@ -30,6 +30,8 @@ The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
 Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/transfer evidence, reserved manual attempts). `src/refund-policy.js` owns independent work/payout holds; never let claim release bypass them. Settlements preserve original money/stage snapshots, supersede unpaid stages, and pay any agreed shop remainder through the separate settlement item.
 
+Client catalogue privacy is staged: `docs/CLIENT_CATALOG_PRIVACY.md` defines client quotes, authenticated catalogue reads, deprecated fields and release gates. Keep legacy public fields until the compatible client release and old-build update coverage are confirmed; quotes use checkout arithmetic, never sums of marked-up display components.
+
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
 
 - New requests opt into pre-match delivery/hub pickup via `fulfillmentMode`; token selection locks the cart choice. Hub hours/fees are Super Admin settings; pickup fee defaults to zero and occupies the existing fulfillment charge slot. Contract and released-build compatibility: `docs/ORDER_MATCH_API.md#fulfillment-before-matching`.

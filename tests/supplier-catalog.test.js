@@ -1415,3 +1415,42 @@ test("setup lists incomplete fields separately and readiness never includes anot
   assert.deepEqual(result.operational.listings.map(row => row.catalogItemId), ["item"]);
   assert.deepEqual(result.requestEligibility.listings, [{ catalogItemId: "item", evaluated: false, eligible: null, missing: [] }]);
 });
+
+test("client catalogue amounts include signed options, volume, speed and rush display prices", () => {
+  const store = fixture();
+  store.settings = { serviceFeeRateBps: 1000 };
+  store.catalogOptions[0].priceModifierMinor = -155;
+  store.catalogPriceTiers = [{ catalogItemId: "item", minQuantity: 10, unitPriceMinor: 55 }];
+  store.catalogSpeedTiers = [{ id: "speed", catalogItemId: "item", turnaroundHours: 12, surchargeMinor: 105 }];
+  Object.assign(store.supplierServices[0], { rushEnabled: true, rushPriceMinor: 105, rushTurnaroundHours: 12 });
+  const item = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(item.clientBasePriceMinor, 110);
+  assert.equal(item.optionGroups[0].options[0].clientPriceModifierMinor, -171);
+  assert.equal(item.priceTiers[0].clientUnitPriceMinor, 61);
+  assert.equal(item.speedTiers[0].clientPriceMinor, null);
+  assert.equal(item.speedTiers[0].clientSurchargeMinor, 116);
+  assert.equal(item.rush.clientPriceMinor, 116);
+  assert.equal(item.basePriceMinor, 100, "phase one preserves legacy amounts");
+  assert.equal(item.optionGroups[0].options[0].priceModifierMinor, -155);
+});
+
+test("staff catalogue membership and own preview cannot be selected by caller identifiers", async () => {
+  const store = fixture();
+  const { resolveAuthorizationContext } = await import("../src/authorization-context.js");
+  const call = (pathname, user) => routeSupplierCatalog({
+    req: { method: "GET" }, url: new URL(`http://gridgo.test${pathname}`), store, user,
+  });
+  const admin = { id: "admin", role: "client" };
+  store.userRoleMemberships.push({ userId: admin.id, role: "super_admin" });
+  resolveAuthorizationContext(store, admin);
+  const privileged = await call("/ops/catalog/shops/supplier", admin);
+  assert.equal(privileged.body.shop.shopName, store.supplierProfiles[0].shopName);
+  assert.deepEqual(privileged.body.shop.shop, store.supplierProfiles[0].shop);
+  assert.equal(privileged.body.shop.services[0].items[0].basePriceMinor, 100);
+  const forged = { id: "stranger", role: "super_admin" };
+  resolveAuthorizationContext(store, forged);
+  await assert.rejects(() => call("/ops/catalog/shops/supplier", forged), (error) => error.status === 403);
+  const own = await call("/me/catalog-preview?supplierId=stranger", store.users[0]);
+  assert.equal(own.body.shop.supplierId, "supplier");
+  assert.equal((await call("/ops/catalog/items/absent", admin)).status, 404);
+});

@@ -314,7 +314,7 @@ function otherListing(row) {
   const item = row.listing;
   return {
     ...Object.fromEntries([
-      "categoryCode", "subcategoryCode", "basePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
+      "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
       "turnaroundHours", "minimumTurnaroundHours", "rush", "acceptedFormats", "optionGroups", "version",
