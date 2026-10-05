@@ -298,7 +298,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(mockup.status, 200, JSON.stringify(mockup.body));
   const second = await request(instance.api, `/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_a_brochures", optionIds: [], quantity: 1 },
+    body: { catalogItemId: "item_supplier_a_brochures", optionIds: [], quantity: 1, artworkFileId: "file_art" },
   });
   assert.equal(second.status, 201, JSON.stringify(second.body));
 
