@@ -1,3 +1,4 @@
+import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
@@ -727,7 +728,7 @@ export function moneyReportingForOrder(order, store = null) {
 
 export function activePayoutHold(store, order) {
   return Boolean(
-    refundHold(store, order) || order.payoutHold ||
+    refundHold(store, order) || (order.shopRecovery && order.shopRecovery.status !== "accepted") || order.payoutHold ||
       (store?.claims || []).some(
         (claim) => claim.orderId === order.id && ["open", "payout_held"].includes(claim.status),
       ),
@@ -764,7 +765,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
   }
 
-  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id);
+  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
   if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
@@ -1006,6 +1007,14 @@ export function publicOrderFor(order, user, store = null) {
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order, store) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
+  delete publicRecord.shopRecoveryHistory;
+  delete publicRecord.shopFailureEvents;
+  delete publicRecord.declinedBy;
+  if (order.shopRecovery) publicRecord.shopRecovery = publicRecovery(order, user);
+  if (publicRecord.shopAcceptance) {
+    delete publicRecord.shopAcceptance.schedule;
+    if (!ops && user?.role !== 'supplier') delete publicRecord.shopAcceptance;
+  }
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
