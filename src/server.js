@@ -2617,7 +2617,6 @@ async function handleRequest(req, res) {
 
     const needsInitializedStorage =
       (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
-      (req.method === "GET" && /^\/files\/[^/]+\/(download-url|content)$/.test(pathname)) ||
       (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
     if (storageInitializing && needsInitializedStorage) {
       throw new AttachmentError(
@@ -2744,6 +2743,10 @@ async function handleRequest(req, res) {
       authorizeFileRead(user, store, file);
       if (serveContent && !["payment_proof", "payout_receipt", "refund_receipt"].includes(file.purpose)) {
         throw new AttachmentError(400, "file_content_not_supported", "Only payment proofs and payout or refund receipts can be read through this route.");
+      }
+      // Refused readers must get the same response regardless of storage readiness.
+      if (storageInitializing) {
+        throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
       }
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
