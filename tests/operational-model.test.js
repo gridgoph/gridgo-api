@@ -320,6 +320,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(opsOrder.platformRevenue.collectedMinor, 10_000);
   assert.equal(opsOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
   assert.deepEqual(moneyReportingForOrder(order).platformRevenue, {
+    grossServiceFeeMinor: 10000, netServiceFeeMinor: 10000, organizationDiscountMinor: 0,
     billedMinor: 11_335,
     collectedMinor: 10_000,
     recognizedMinor: 0,
@@ -333,6 +334,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
     { kind: "refund", amountMinor: -2_000 },
   ];
   assert.deepEqual(moneyReportingForOrder(adjusted).platformRevenue, {
+    grossServiceFeeMinor: 10000, netServiceFeeMinor: 10000, organizationDiscountMinor: 0,
     billedMinor: 11_335,
     collectedMinor: 10_000,
     recognizedMinor: 7_000,

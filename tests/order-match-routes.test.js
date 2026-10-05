@@ -1514,3 +1514,84 @@ for (const [count, fee, expected] of [[2, 2501, [1251, 1250]], [3, 2501, [834, 8
     assert.deepEqual((await call('GET', `/orders/${store.orders[0].id}/invoice`)).body.invoice, placed.invoice);
   });
 }
+
+for (const count of [1, 2]) {
+  test(`approved organization discount funds ${count} shop group(s) without reducing payouts`, async () => {
+    const { store, client } = fixture();
+    client.accountType = 'organization';
+    store.approvalCases.push({ id: 'org_case', userId: client.id, kind: 'business_client', status: 'approved' });
+    const call = caller(store, client);
+    const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', deadline: '2026-09-10T00:00:00.000Z',
+      defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
+    for (const catalogItemId of ['item_a', 'item_b'].slice(0, count)) await call('POST', `/me/carts/${cart.id}/lines`, {
+      catalogItemId, quantity: 1, optionIds: [], artworkFileId: 'file_art',
+    });
+    const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+    assert.equal(preview.clientQuote.organizationDiscountMinor, count === 1 ? 500 : 1500);
+    const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: {
+      method: 'qr_manual', reference: 'ORG', proofFileId: 'file_qr',
+    } })).body;
+    assert.equal(placed.invoice.organizationDiscountMinor, count === 1 ? 500 : 1500);
+    assert.equal(placed.invoice.totalMinor, preview.clientQuote.totalMinor);
+    assert.ok(!JSON.stringify(placed).includes('serviceFeeMinor'));
+    for (const [index, order] of store.orders.entries()) {
+      assert.equal(order.organizationDiscountMinor, index === 0 ? 500 : 1000);
+      assert.equal(order.serviceFeeMinor, index === 0 ? 500 : 1000);
+      assert.equal(order.grossServiceFeeMinor, index === 0 ? 1000 : 2000);
+      assert.equal(order.totalMinor, order.supplierSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+      assert.equal(order.payoutMilestones.reduce((sum, row) => sum + row.amountMinor, 0), index === 0 ? 10000 : 20000);
+      assert.equal(order.riderPayoutMinor, Math.round(order.deliveryFeeMinor * .85));
+      order.payments.initial.status = 'confirmed';
+      const revenue = moneyReportingForOrder(order).platformRevenue;
+      assert.equal(revenue.organizationDiscountMinor, index === 0 ? 500 : 1000);
+      assert.equal(revenue.billedMinor, order.serviceFeeMinor + order.platformDeliveryShareMinor);
+      assert.equal(revenue.collectedMinor, revenue.billedMinor);
+      const projected = publicOrderFor(order, client, store);
+      assert.equal(projected.serviceFeeMinor, undefined);
+      assert.equal(projected.grossServiceFeeMinor, undefined);
+      const receipt = (await call('GET', `/orders/${order.id}/invoice`)).body.invoice;
+      assert.equal(receipt.serviceFeeMinor, undefined);
+    }
+  });
+}
+
+test('organization group rounding is snapshotted and fee visibility does not hide the discount', async () => {
+  const { store, client } = fixture();
+  client.accountType = 'organization';
+  store.approvalCases.push({ id: 'org_case', userId: client.id, kind: 'business_client', status: 'approved' });
+  store.settings.serviceFeeVisibleToClient = false;
+  for (const item of store.catalogItems) item.basePriceMinor = 10;
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00.000Z' })).body.cart;
+  for (const catalogItemId of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, {
+    catalogItemId, quantity: 1, optionIds: [], artworkFileId: 'file_art',
+  });
+  const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  assert.equal(preview.clientQuote.organizationDiscountMinor, 2);
+  assert.equal(preview.clientQuote.totalMinor, 20);
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: {
+    method: 'qr_manual', reference: 'ROUNDING', proofFileId: 'file_qr',
+  } })).body;
+  assert.equal(placed.invoice.organizationDiscountMinor, 2);
+  assert.equal(placed.invoice.totalMinor, 20);
+  assert.deepEqual(placed.invoice.groups.map(row => row.organizationDiscountMinor), [1, 1]);
+  store.settings.organizationDiscountRateBps = 1000;
+  store.settings.serviceFeeRateBps = 1500;
+  store.approvalCases.find(row => row.id === 'org_case').status = 'suspended';
+  const receipt = (await call('GET', `/orders/${store.orders[0].id}/invoice`)).body.invoice;
+  assert.equal(receipt.organizationDiscountMinor, 2);
+  assert.equal(receipt.totalMinor, 20);
+});
+
+test('pending organization gets no discount and a client cannot supply its own discount', async () => {
+  const { store, client } = fixture();
+  client.accountType = 'organization';
+  store.approvalCases.push({ id: 'org_case', userId: client.id, kind: 'business_client', status: 'pending' });
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart;
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { organizationDiscountMinor: 1000, organizationDiscountRateBps: 1000,
+    payment: { method: 'qr_manual', reference: 'PENDING', proofFileId: 'file_qr' } })).body;
+  assert.equal(placed.invoice.organizationDiscountMinor, 0);
+  assert.equal(placed.invoice.totalMinor, 11000);
+});

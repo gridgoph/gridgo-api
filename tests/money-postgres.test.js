@@ -21,6 +21,7 @@ async function clear(database) {
 
 function committedOrder(id, options) {
   const money = calculateOrderMoney({
+    organizationEligible: options.organizationEligible ?? false,
     supplierSubtotalMinor: options.supplierSubtotalMinor ?? 100_000,
     fulfillmentMode: options.fulfillmentMode,
     paymentPlan: options.paymentPlan,
@@ -126,8 +127,20 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
     },
   ];
 
+  store.orders.push(committedOrder("organization_quote", {
+    organizationEligible: true, fulfillmentMode: "delivery", paymentPlan: "delivery_online", supplierDownpaymentRateBps: 2500,
+  }));
   await database.transaction(() => saveStore(database, store));
   const persisted = await loadStore(database);
+  const organization = persisted.orders.find(row => row.id === "organization_quote");
+  assert.equal(organization.organizationDiscountMinor, 5000);
+  assert.equal(organization.grossServiceFeeMinor, 10000);
+  assert.equal(organization.serviceFeeMinor, 5000);
+  assert.equal(organization.totalMinor, 113900);
+  assert.equal(organization.payments.initial.amountMinor, 30000);
+  assert.equal(organization.supplierPlatformPayoutMinor, 100000);
+  assert.equal(organization.riderPayoutMinor, 7565);
+  await assert.rejects(database.query("UPDATE platform_settings SET settings=jsonb_set(settings, '{serviceFeeRateBps}', '499')"), { code: '23514' });
   const delivery = persisted.orders.find((order) => order.id === "delivery_rounding");
   assert.deepEqual(
     {

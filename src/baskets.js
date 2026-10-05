@@ -1,3 +1,4 @@
+import { publicOrganizationDiscount } from "./organization-money.js";
 import { clientInvoice } from "./invoice-projection.js";
 import { publicOrderFor } from './operational-model.js';
 import { identityHasMembership } from './authorization-context.js';
@@ -34,7 +35,8 @@ export function publicBasket(store, basket, user) {
       hubPickup: { ...structuredClone(orders[0].hubPickup), feeMinor: basket.pickupFeeMinor } } : {}),
     groups: orders.map((order, index) => ({
       orderId: order.id, label: shopLabel(index), state: order.state,
-      clientItemSubtotalMinor: order.supplierSubtotalMinor + order.serviceFeeMinor,
+      ...publicOrganizationDiscount(order),
+      clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor),
       ...(privileged ? { itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor } : {}),
       deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor,
       ...(order.pickupFeeMinor != null ? { pickupFeeMinor: order.pickupFeeMinor } : {}),
