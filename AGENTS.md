@@ -59,6 +59,8 @@ Multi-shop basket payment/receipt and independent group order contracts: `docs/M
 
 Late-production warnings, the Super Admin deductions gate (off by default), net payout adjustments, and recent-lapse matching weight: `docs/PRODUCTION_PENALTIES_API.md`. Published payout shares remain gross; stage `amountMinor` is net of `productionDeductionMinor`.
 
+Organization discounts and non-tax statements: `docs/ORGANIZATION_MONEY_API.md`. Discounts reduce only each shop group's service fee; order discount snapshots are immutable.
+
 ## Geography
 
 Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties. Rider location and Operations map contracts: `docs/OPERATIONAL_MODEL_V2_API.md#rider-location`.

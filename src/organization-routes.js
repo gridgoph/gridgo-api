@@ -57,6 +57,7 @@ export function sweepOfficerConfirmations(store, { at, createId }) {
 }
 export async function routeOrganization({ req, url, store, user, readBody, now, createId, mailer, emailSecret }) {
   const path = url.pathname;
+  if (path === '/me/organization/statements') return null;
   const mine = path === '/me/client-application/checklist' || path === '/me/organization' || path.startsWith('/me/organization/');
   const ops = /^\/ops\/organizations(?:\/[^/]+(?:\/notice)?)?$/.test(path);
   const permit = /^\/approval-cases\/([^/]+)\/request-business-permit$/.exec(path);

@@ -1,4 +1,5 @@
 import { officerSnapshot } from "./client-applications.js";
+import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
 import { approvedCatalogView, CATALOG_REVIEW_TABLES } from "./catalog-review-state.js";
 import { clientInvoice } from "./invoice-projection.js";
 import { basketForOrder, publicBasket, shopLabel, splitBasketFee } from "./baskets.js";
@@ -437,13 +438,15 @@ function clientCartQuote(store, cart, lines) {
   const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
   const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
     : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
+  const organizationDiscountMinor = subtotals.some((amount) => amount == null) ? null : addMinor([...grouped.values()].map((entries) => organizationFeeMoney(
+    addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"), store.settings, approvedOrganization(store, cart.clientId)).organizationDiscountMinor), "quote.discount");
   const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
-    : addMinor([clientItemSubtotalMinor, deliveryFeeMinor], "quote.total");
+    : addMinor([clientItemSubtotalMinor - organizationDiscountMinor, deliveryFeeMinor], "quote.total");
   const downpaymentPercent = grouped.size > 1 ? 100 : downpaymentPercentSetting(store.settings);
   const downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
-    clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor,
+    clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     downpaymentPercent, downpaymentMinor, balanceMinor: totalMinor == null ? null : totalMinor - downpaymentMinor,
   };
@@ -504,11 +507,12 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
         ? deliveryFeeForDistance(Math.max(...dropoffs.map((dropoff) => distanceMetersBetween(profile.shop, dropoff))), store.settings) : null;
     const amounts = groupLines.map((line) => cartLineSubtotal(store, line));
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
-    const serviceFeeMinor = itemSubtotalMinor == null ? null : roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
-    return { id: groupLines[0].id, label: shopLabel(index), lineIds: groupLines.map((line) => line.id),
+    const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, cart.clientId));
+    const serviceFeeMinor = fee?.grossServiceFeeMinor ?? null;
+    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(index), lineIds: groupLines.map((line) => line.id),
       ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
-      totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
+      totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
   });
   if (groups.length > 1) {
     for (const line of publicLines) {
@@ -620,7 +624,8 @@ function publicMatchedOrder(store, order) {
     id: order.id,
     ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
     state: order.state,
-    ...(order.basketId ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + order.serviceFeeMinor } : {
+    ...publicOrganizationDiscount(order),
+    ...(order.basketId || order.organizationDiscountRateBps > 0 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
       itemSubtotalMinor: order.supplierSubtotalMinor,
       serviceFeeRateBps: order.serviceFeeRateBps,
       serviceFeeMinor: order.serviceFeeMinor,
@@ -826,13 +831,15 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Pickup is a per-order platform charge. The internal trip to the hub keeps
   // the existing zero-charge job contract and never earns a share of this fee.
   const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
-  const serviceFeeMinor = roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
+  const fee = organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, user.id));
+  const { serviceFeeMinor } = fee;
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
   const downpaymentMinor = roundBps(totalMinor, downpaymentRateBps);
   const balanceMinor = totalMinor - downpaymentMinor;
   const upfront = balanceMinor === 0;
   Object.assign(order, {
+    ...fee,
     supplierSubtotalMinor: itemSubtotalMinor,
     subtotalMinor: itemSubtotalMinor,
     serviceFeeMinor,
@@ -901,6 +908,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   attachOrderFile(proof, orderId, "payment:initial:proof");
 
   const invoice = {
+    ...fee,
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer),
     orderId,
@@ -939,7 +947,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   store.auditLog.push({
     id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "order_match.checkout",
     entityType: "order", entityId: orderId, orderId,
-    detail: { jobCount: jobs.length, itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
+    detail: { jobCount: jobs.length, itemSubtotalMinor, ...fee, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
   notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
@@ -947,7 +955,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     notifyClientReceiptReady(store, order, { createId, at });
   }
   queueOrderInvalidate(store, order, ["orders"]);
-  return { order: publicMatchedOrder(store, order), invoice: clientInvoice(invoice) };
+  return { order: publicMatchedOrder(store, order), invoice };
 }
 
 function checkoutBasket(store, user, cart, body, createId, at, req) {
@@ -978,10 +986,14 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     lines: results.flatMap((result) => result.invoice.lines),
     groups: results.map((result, index) => ({ orderId: result.order.id, label: shopLabel(index),
       lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
+      grossServiceFeeMinor: result.invoice.grossServiceFeeMinor, organizationDiscountMinor: result.invoice.organizationDiscountMinor,
       serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
       ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
     itemSubtotalMinor: addMinor(orders.map((order) => order.supplierSubtotalMinor), "basket.itemSubtotalMinor"),
     serviceFeeRateBps: first.serviceFeeRateBps,
+    organizationDiscountRateBps: first.organizationDiscountRateBps,
+    organizationDiscountMinor: addMinor(orders.map((order) => order.organizationDiscountMinor), "basket.discount"),
+    grossServiceFeeMinor: addMinor(orders.map((order) => order.grossServiceFeeMinor), "basket.grossFee"),
     serviceFeeMinor: addMinor(orders.map((order) => order.serviceFeeMinor), "basket.serviceFeeMinor"),
     deliveryLines: results.flatMap((result, index) => result.invoice.deliveryLines.map((line) => ({ jobId: line.jobId, shopName: shopLabel(index), amountMinor: line.amountMinor }))),
     deliveryFeeMinor: addMinor(orders.map((order) => order.deliveryFeeMinor), "basket.deliveryFeeMinor"),
@@ -999,7 +1011,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
   notifyOpsPaymentSubmitted(store, first, { createId, at });
   notifyClientReceiptReady(store, first, { createId, at });
-  return { order: results[0].order, basket: publicBasket(store, basket, user), invoice: clientInvoice(invoice, { hideSupplierAmounts: true }) };
+  return { order: results[0].order, basket: publicBasket(store, basket, user), invoice };
 }
 
 export function isOrderMatchRoute(method, pathname) {
@@ -1088,7 +1100,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId)) && !privileged });
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId) || invoice.snapshot.organizationDiscountRateBps > 0) && !privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
@@ -1298,6 +1310,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
+    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(result.basket || result.invoice.organizationDiscountRateBps > 0) });
     return { status: 201, body: result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {

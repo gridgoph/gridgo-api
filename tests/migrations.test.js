@@ -124,7 +124,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791255600000_order_reschedule_request",
         "1791331200000_catalog_listing_suspension",
         "1791417600000_listing_reviews",
-        "1791504000000_organization_accounts",
+      "1791504000000_organization_discount",
+      "1791590400000_organization_accounts",
       ],
     );
 
@@ -306,10 +307,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
 
     await client.query(`INSERT INTO organization_accounts (user_id, name_key, school_key, data)
       VALUES ('multi_role_shop', 'test organization', 'test school', '{}')`);
+    await client.query("BEGIN");
     await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /client verification records exist/);
+    await client.query("ROLLBACK");
     await client.query('DELETE FROM organization_accounts');
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('organization_accounts') AS t")).rows[0].t, null);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.guard_organization_discount()`])).rows[0].fn, null);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(

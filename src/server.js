@@ -1,6 +1,8 @@
 import { routeOrganization, organizationProjection, sweepOfficerConfirmations } from "./organization-routes.js";
 import { createOrganizationMailer } from "./organization-email.js";
 import { officerSnapshot } from "./client-applications.js";
+import { routeOrganizationStatements } from "./organization-statements.js";
+import { approvedOrganization } from "./organization-money.js";
 import { catalogReviewNotice } from "./catalog-review-routes.js";
 
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -2445,6 +2447,17 @@ async function handleRequest(req, res) {
       }
     }
 
+    const statementResponse = routeOrganizationStatements({ req, url, store, user, now });
+    if (statementResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (statementResponse.bytes) {
+        res.writeHead(statementResponse.status, { 'Content-Type': statementResponse.contentType,
+          'Content-Disposition': `attachment; filename="${statementResponse.filename}"`,
+          'Content-Length': statementResponse.bytes.length, 'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(statementResponse.bytes);
+      }
+      return send(res, statementResponse.status, statementResponse.body);
+    }
     const basketResponse = await routeBaskets({ req, url, store, user, readBody, id, now });
     if (basketResponse) {
       if (basketResponse.mutated) await save(store);
@@ -3175,6 +3188,7 @@ async function handleRequest(req, res) {
         downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
+        organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
@@ -5579,6 +5593,7 @@ async function handleRequest(req, res) {
 
         const money = calculateOrderMoney({
           supplierSubtotalMinor: quote.supplierSubtotalMinor,
+          organizationEligible: approvedOrganization(store, user.id),
           fulfillmentMode,
           paymentPlan,
           supplierDownpaymentRateBps,
@@ -5602,6 +5617,9 @@ async function handleRequest(req, res) {
             paymentPlan,
             serviceFeeRateBps: money.serviceFeeRateBps,
             serviceFeeMinor: money.serviceFeeMinor,
+            grossServiceFeeMinor: money.grossServiceFeeMinor,
+            organizationDiscountRateBps: money.organizationDiscountRateBps,
+            organizationDiscountMinor: money.organizationDiscountMinor,
             deliveryDistanceMeters: money.deliveryDistanceMeters,
             deliveryFeeMinor: money.deliveryFeeMinor,
             totalMinor: money.totalMinor,

@@ -154,7 +154,7 @@ Single-shop and basket invoice snapshots carry the same field. Invoice/statement
 must print this **order-time snapshot**, never the live profile's name. `GET /orders` and
 `GET /orders/:id` expose it only to the owning client and staff, and
 `GET /orders/:id/invoice` uses its immutable receipt snapshot. This supplies the officer
-field for statement consumers; it does not introduce the separate statement-export product.
+field for statement consumers. The JSON, CSV and PDF exports in `docs/ORGANIZATION_MONEY_API.md` read this immutable snapshot, including during a pending handover.
 Older orders stay unattributed if no verified officer was recorded then.
 
 ## Quarterly confirmation and manual notices
@@ -193,7 +193,7 @@ changed bodies return `409 idempotency_conflict`.
 
 ## Persistence and retention
 
-Migration `1791504000000` adds `organization_accounts`, `organization_email_challenges` and
+Migration `1791590400000` adds `organization_accounts`, `organization_email_challenges` and
 `approval_cases.business_permit_required`; application evidence stays on existing immutable
 approval events and private file references. No schema is created at boot. All mutations,
 case changes, history, audits and notification records share the domain transaction lock.

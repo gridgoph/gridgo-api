@@ -111,6 +111,7 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Supplier payout account: `/me/payout-account` (where a shop wants to be paid, with its receiving-QR file) and the Operations read `/users/:id/payout-account`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
 - Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
+- Organization discount and statements: [Organization money API](docs/ORGANIZATION_MONEY_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`

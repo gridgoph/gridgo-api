@@ -2605,3 +2605,91 @@ test("signed catalogue reads protect full shop details and quotes expose client 
   assert.equal(savedCart.clientQuote.totalMinor, null);
   assert.equal(savedCart.version, 2);
 });
+
+for (const groupCount of [1, 2]) {
+  test(`organization money HTTP persists ${groupCount} discounted group(s), statements and fee floor`, { skip: !DATABASE_URL }, async (t) => {
+    const database = createDatabase({ DATABASE_URL });
+    t.after(() => database.close());
+    await fixture(database);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      Object.assign(store.users.find(row => row.id === 'user_client'), { accountType: 'organization', orgName: 'Organization fixture' });
+      store.organizationAccounts = [{ userId: 'user_client', nameKey: 'organization fixture', schoolKey: 'test school',
+        currentOfficer: { id: 'officer_original', fullName: 'Original Officer', verifiedAt: AT } }];
+      store.approvalCases.push({ id: 'case_org', userId: 'user_client', kind: 'business_client', status: 'approved',
+        version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
+      store.users.find(row => row.id === 'user_ops').role = 'super_admin';
+      store.userRoleMemberships.push({ userId: 'user_ops', role: 'super_admin', createdAt: AT });
+      await saveStore(database, store);
+    });
+    const instance = await startApi();
+    t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+    const call = (path, options = {}) => request(instance.api, path, { subject: 'clerk_client', ...options });
+    const created = await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'delivery',
+      deadline: new Date(Date.now() + 90 * 86400000).toISOString(), defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } } });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const cartId = created.body.cart.id;
+    for (const suffix of ['a', 'b'].slice(0, groupCount)) {
+      assert.equal((await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: {
+        catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art',
+      } })).status, 201);
+    }
+    const checkout = await call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: {
+      payment: { method: 'qr_manual', reference: 'ORG-MONEY', proofFileId: 'file_qr' },
+    } });
+    assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+    assert.equal(checkout.body.invoice.organizationDiscountMinor, groupCount === 1 ? 500 : 1500);
+    assert.ok(!JSON.stringify(checkout.body).includes('serviceFeeMinor'));
+    let store = await loadStore(database);
+    assert.deepEqual(store.orders.map(row => row.organizationDiscountMinor).sort((a,b) => a-b), groupCount === 1 ? [500] : [500, 1000]);
+    const order = store.orders[0];
+    await assert.rejects(database.query("UPDATE orders SET data=jsonb_set(data, '{organizationDiscountMinor}', '1') WHERE id=$1", [order.id]), { code: '23514' });
+    await assert.rejects(database.query("UPDATE orders SET data=data - 'organizationDiscountMinor' WHERE id=$1", [order.id]), { code: '23514' });
+    const settings = await call('/settings', { subject: 'clerk_ops' });
+    for (const patch of [{ serviceFeeRateBps: 499 }, { organizationDiscountRateBps: 1001 }]) {
+      const refused = await call('/settings', { method: 'PATCH', subject: 'clerk_ops', body: {
+        expectedVersion: settings.body.version, reason: 'Validate fee coverage', ...patch,
+      } });
+      assert.equal(refused.status, 400, JSON.stringify(refused.body));
+      assert.equal(refused.body.error, 'organization_discount_exceeds_service_fee');
+    }
+    const closedAt = '2026-10-03T12:00:00.000Z';
+    await database.transaction(async () => {
+      store = await loadStore(database);
+      for (const row of store.orders) {
+        row.state = 'completed';
+        row.timeline.push({ state: 'completed', at: closedAt, by: 'system' });
+      }
+      await saveStore(database, store);
+    });
+    await database.transaction(async () => {
+      const current = await loadStore(database);
+      current.approvalCases.find(row => row.id === 'case_org').status = 'pending';
+      current.organizationAccounts[0].currentOfficer = { id: 'officer_new', fullName: 'Current Officer', verifiedAt: AT };
+      await saveStore(database, current);
+    });
+    const statementPath = '/me/organization/statements?from=2026-10-01&to=2026-10-31';
+    const report = await call(statementPath);
+    assert.equal(report.status, 200, JSON.stringify(report.body));
+    assert.equal(report.body.statement.orderCount, groupCount);
+    assert.equal(report.body.statement.discountEarnedMinor, groupCount === 1 ? 500 : 1500);
+    assert.equal(report.body.statement.totalSpendMinor, checkout.body.invoice.totalMinor);
+    assert.equal(report.body.statement.orders[0].officerOfRecord, 'Original Officer');
+    assert.equal((await call(statementPath, { subject: 'clerk_supplier_a' })).status, 403);
+    assert.equal((await request(instance.api, statementPath)).status, 401);
+    for (const format of ['csv', 'pdf']) {
+      const response = await fetch(`${instance.api}${statementPath}&format=${format}`, { headers: { Authorization: `Bearer ${token('clerk_client')}` } });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get('content-disposition'), /attachment/);
+      assert.match(response.headers.get('cache-control'), /no-store/);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      assert.ok(bytes.length > 200);
+      if (format === 'pdf') assert.equal(bytes.toString('ascii', 0, 5), '%PDF-');
+      else assert.match(bytes.toString(), /Not a tax document/);
+    }
+    const dashboard = await call('/ops/organizations/user_client/statements?from=2026-10-01&to=2026-10-31', { subject: 'clerk_ops' });
+    assert.deepEqual(dashboard.body, report.body);
+    await database.query("UPDATE approval_cases SET status='suspended', suspension_reason='Verification review' WHERE id='case_org'");
+    assert.equal((await call(statementPath)).status, 403);
+  });
+}
