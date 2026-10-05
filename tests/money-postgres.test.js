@@ -1,3 +1,4 @@
+import { down as rollbackOrganizationDiscount } from "../migrations/1791504000000_organization_discount.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -132,6 +133,9 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
   }));
   await database.transaction(() => saveStore(database, store));
   const persisted = await loadStore(database);
+  const rollbackSql = [];
+  await rollbackOrganizationDiscount({ sql: (sql) => rollbackSql.push(sql) });
+  await assert.rejects(database.transaction(() => database.query(rollbackSql.join("\n"))), /Committed organization discount snapshots require a forward migration/);
   const organization = persisted.orders.find(row => row.id === "organization_quote");
   assert.equal(organization.organizationDiscountMinor, 5000);
   assert.equal(organization.grossServiceFeeMinor, 10000);
