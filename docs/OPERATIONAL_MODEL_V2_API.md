@@ -864,6 +864,37 @@ Acceptance snapshots the service-fee setting and every money/fulfillment field, 
 
 Task G defines and validates both pickup financial shapes, but pickup commercial commitment remains contained until Task H owns handover. Selecting either pickup plan currently returns `409 pickup_fulfillment_not_available`; it does not create a payable pickup order or expose that order to rider dispatch.
 
+### Hub pick-up settings
+
+`GET /settings` exposes `settings.hubPickup: {point,schedule,feeMinor}` to authenticated apps. `point` is the existing GRIDGO hub from `src/gridgo-office.js` and is read-only. Defaults are `feeMinor: 0` (PHP minor units) and `schedule: null` (operating hours not yet configured). Migration adds these defaults to existing settings; no existing order or cart is changed.
+
+Only a Super Admin membership may include `hubPickup` in `PATCH /settings`, using the existing `expectedVersion` and nonblank `reason` handshake. Operations may continue editing its other settings but receives `403 forbidden` when attempting this field. Send the complete `{schedule,feeMinor}` object; omission preserves the previous value. Negative, fractional, string or unsafe fees return `400 invalid_hub_pickup`; invalid schedules return `400 invalid_hub_pickup_schedule`. Stale versions return `409 settings_version_conflict`. Success increments version and audits previous/current settings atomically.
+
+Example dashboard update (sample hours, not production defaults):
+
+```json
+{
+  "expectedVersion": 4,
+  "reason": "Configure collection hours",
+  "hubPickup": {
+    "feeMinor": 0,
+    "schedule": {
+      "utcOffsetMinutes": 480,
+      "week": [
+        { "weekday": 1, "opensMinute": 540, "closesMinute": 1020 },
+        { "weekday": 3, "opensMinute": 540, "closesMinute": 1020 },
+        { "weekday": 5, "opensMinute": 540, "closesMinute": 1020 }
+      ],
+      "closures": []
+    }
+  }
+}
+```
+
+Schedule follows the shared `src/availability.js` validation: weekday 0 is Sunday through 6 Saturday, times are whole minutes after midnight (0–1440), closing is after opening, and same-day windows cannot overlap. A configured schedule has at least one opening window (maximum 28); optional closures (maximum 120) use inclusive `startDay` / `endDay` date strings. `null` clears the schedule. The dashboard follow-up should place this editor next to delivery bands, restrict editing to Super Admin, and leave the fee at zero until explicitly configured. Read-only apps must distinguish an unconfigured schedule from an all-week opening claim.
+
+The opt-in pre-match request and read-only checkout contract, including compatibility and fulfillment-charge fields, is [Fulfillment before matching](ORDER_MATCH_API.md#fulfillment-before-matching). Placed pickup orders and their invoices preserve the schedule and fee at checkout; subsequent settings edits apply only to future checkouts.
+
 ### Rider delivery split
 
 `riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Operations and Super Admin edit it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.

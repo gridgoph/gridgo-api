@@ -1,4 +1,5 @@
-import { defaultOperationalSettings, publicOrderFor } from "../src/operational-model.js";
+import { calculateRefundSettlement } from "../src/refund-policy.js";
+import { defaultOperationalSettings, publicOrderFor, moneyReportingForOrder } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -1066,4 +1067,94 @@ test("selection rejects malformed/unknown tokens and cart rebinding; labels are 
   await assert.rejects(call("POST", `/me/carts/${first.id}/lines`, body), (e) => e.code === "catalog_item_stale");
   store.supplierProfiles.find((row) => row.userId === "supplier_b").isClosed = false;
   assert.equal((await call("POST", `/me/carts/${first.id}/lines`, { ...body, dropoff: { lat: 7.07, lng: 125.61 } })).status, 201);
+});
+
+for (const fulfillmentMode of ["delivery", "pickup"]) {
+  test(`pre-match ${fulfillmentMode} carries the destination and charge through read-only checkout`, async () => {
+    const { store, client } = fixture();
+    const call = caller(store, client);
+    const dropoff = { lat: 7.28, lng: 125.62, label: "Recipient" };
+    store.settings.hubPickup = { schedule: { utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 540, closesMinute: 1020 }], closures: [] }, feeMinor: 2500 };
+    const match = await call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode, dropoff, deadline: "2026-09-01T00:00:00Z" });
+    const selected = match.body.listings[0];
+    const choice = match.body.requestFulfillment;
+    assert.equal(choice.fulfillmentMode, fulfillmentMode);
+    assert.deepEqual(choice.dropoff, fulfillmentMode === "delivery" ? dropoff : {
+      lat: 7.092287234449552, lng: 125.61651084538697, label: "GRIDGO Office",
+    });
+    assert.equal(selected.distanceZone.key, fulfillmentMode === "delivery" ? "out_of_zone" : "nearby");
+    const created = await call("POST", "/me/carts", {});
+    const cartId = created.body.cart.id;
+    const added = await call("POST", `/me/carts/${cartId}/lines`, {
+      selectToken: selected.selectToken, matchRequestId: match.body.matchRequestId,
+      optionIds: [], quantity: 1, artworkFileId: "file_art",
+    });
+    assert.deepEqual(added.body.cart.requestFulfillment, choice);
+    assert.equal(added.body.cart.fulfillmentMode, fulfillmentMode);
+    const lineId = added.body.cart.lines[0].id;
+    for (const [method, path, body] of [
+      ["PATCH", `/me/carts/${cartId}`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["PUT", `/me/carts/${cartId}/dropoffs`, { defaultDropoff: { ...dropoff, lat: 7.4 } }],
+      ["PUT", `/me/carts/${cartId}/dropoffs`, { lines: [{ lineId, dropoff: { ...dropoff, lat: 7.4 } }] }],
+      ["PATCH", `/me/carts/${cartId}/lines/${lineId}`, { dropoff: { ...dropoff, lat: 7.4 } }],
+      ["POST", `/me/carts/${cartId}/checkout`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+    ]) {
+      await assert.rejects(call(method, path, body), (error) => error.code === "request_fulfillment_locked");
+    }
+    const checked = await call("POST", `/me/carts/${cartId}/checkout`, {
+      payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+    });
+    const order = checked.body.order;
+    assert.deepEqual(order.requestFulfillment, choice);
+    assert.equal(order.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(order.totalMinor, order.itemSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+    if (fulfillmentMode === "pickup") {
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.deepEqual(order.hubPickup, match.body.hubPickup);
+      assert.equal(store.orders[0].riderPayoutMinor, 0);
+      assert.equal(store.orders[0].platformDeliveryShareMinor, 2500);
+      const storedOrder = store.orders[0];
+      storedOrder.payments.initial.status = "confirmed";
+      assert.equal(moneyReportingForOrder(storedOrder).platformRevenue.collectedMinor, order.serviceFeeMinor + 2500);
+      const refund = calculateRefundSettlement(storedOrder, {
+        beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0,
+      });
+      assert.equal(refund.totalMinor, order.totalMinor);
+      assert.equal(refund.deliveryMinor, 2500);
+      store.settings.hubPickup.feeMinor = 9999;
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.equal(checked.body.invoice.pickupFeeMinor, 2500);
+    }
+  });
+}
+
+test("explicit delivery needs a destination even without distance-first ranking; legacy matches remain accepted", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  await assert.rejects(call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode: "delivery" }), (error) => error.code === "dropoff_required");
+  await assert.rejects(call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode: "invalid" }), (error) => error.code === "invalid_fulfillment_mode");
+  assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).status, 200);
+  const pickup = await call("POST", "/me/matches/next", { subcategoryCode: "flyers", fulfillmentMode: "pickup", excludedSupplierIds: ["supplier_b"] });
+  assert.equal(pickup.body.hubPickup.feeMinor, 0);
+  assert.equal(pickup.body.hubPickup.schedule, null);
+  assert.equal(pickup.body.listings[0].deliveryFeeMinor, 0);
+});
+
+
+test("legacy pickup carts remain free and editable after Super Admin sets a hub fee", async () => {
+  const { store, client } = fixture();
+  store.settings.hubPickup.feeMinor = 2500;
+  const call = caller(store, client);
+  const created = await call("POST", "/me/carts", { fulfillmentMode: "pickup" });
+  const cartId = created.body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [] });
+  await call("PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: "delivery" });
+  await call("PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: "pickup" });
+  const checked = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+  });
+  assert.equal(checked.body.order.deliveryFeeMinor, 0);
+  assert.equal(checked.body.order.pickupFeeMinor, undefined);
+  assert.equal(checked.body.order.requestFulfillment, undefined);
 });

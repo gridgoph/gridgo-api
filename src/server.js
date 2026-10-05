@@ -1,3 +1,4 @@
+import { hubPickupSettings, publicHubPickup } from "./hub-pickup.js";
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
@@ -552,6 +553,7 @@ function publicOperationalSettings(settings, store = null) {
     ...rest,
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     downpaymentPercent: downpaymentPercentSetting(rest),
+    hubPickup: publicHubPickup(rest),
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
@@ -3143,11 +3145,13 @@ async function handleRequest(req, res) {
       }
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
-      if (Object.hasOwn(body, "productionPenalty") && !identityHasMembership(user, "super_admin")) {
+      if ((Object.hasOwn(body, "productionPenalty") || Object.hasOwn(body, "hubPickup"))
+          && !identityHasMembership(user, "super_admin")) {
         return send(res, 403, { error: "forbidden" });
       }
       const next = {
         ...store.settings,
+        hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
         productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
           ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
@@ -3170,6 +3174,7 @@ async function handleRequest(req, res) {
           ? { baseFeeMinor: band.baseFeeMinor, perKmMinor: band.perKmMinor }
           : { feeMinor: band.feeMinor }),
       }));
+      next.hubPickup = { schedule: structuredClone(next.hubPickup.schedule), feeMinor: next.hubPickup.feeMinor };
       const previous = structuredClone(store.settings);
       store.settings = structuredClone(next);
       store.version += 1;

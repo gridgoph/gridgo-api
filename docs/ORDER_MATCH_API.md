@@ -148,6 +148,23 @@ Legacy add-line by `catalogItemId` without a token remains supported and does no
 
 Expired records are retained for at least a day after expiry and pruned during subsequent matches; after cleanup an old token returns `invalid_select_token`. None of these refusals changes the cart or places an order.
 
+### Fulfillment before matching
+
+New requests choose Delivery or Pick-up immediately after the deadline, before calling either match endpoint. Send `fulfillmentMode: "delivery" | "pickup"` on **every** `/me/matches` and `/me/matches/next` request.
+
+- Delivery requires an owned `addressId` or inline `dropoff: {lat,lng,label}`, regardless of preference ranking. This is request input; activation/onboarding needs no address. Matching, listing distance zones, and checkout fees use that destination and the existing delivery band table.
+- Pick-up uses the fixed GRIDGO hub point returned by `GET /settings` at `settings.hubPickup.point`. The API overrides any supplied address for this path. Shop distance ranking is measured to the hub. The client's pickup charge is the configured flat hub fee, not a distance-band delivery charge.
+
+An explicit-choice match adds `requestFulfillment: {fulfillmentMode,dropoff}`; pickup also adds `hubPickup: {point,schedule,feeMinor}`. Every offered listing, including anonymous alternatives, has `deliveryFeeMinor` as its fulfillment-charge preview; pickup listings also have `pickupFeeMinor`, which names the same amount. Existing photo signing and selection-token expiry rules apply.
+
+Create an empty cart (existing `POST /me/carts`), then add a listing with its `selectToken` and `matchRequestId`. The server carries the choice and resolved destination from that token into the cart. The cart's `requestFulfillment` is returned on full and compact reads and persists across API restarts; pickup carts expose the current `hubPickup` settings. Checkout renders this choice read-only. A conflicting fulfillment or destination on cart PATCH, fulfillment/drop-off PUT, line add/PATCH, or checkout returns `409 request_fulfillment_locked`. To change it, rematch and use a new empty cart. Attaching an explicit-choice token to an existing legacy nonempty cart returns `409 request_fulfillment_requires_empty_cart`.
+
+At checkout the order and invoice snapshot `requestFulfillment`; pickup additionally snapshots `hubPickup` and `pickupFeeMinor` from current settings. A draft preview can change when settings change; a placed order's schedule and charge cannot. The fee is once per order, not per line. For compatibility with the existing financial model, `deliveryFeeMinor` remains the total fulfillment-charge slot and its `delivery_pass_through` payment allocation: on a new pickup order it **already includes** `pickupFeeMinor`. Do not add these two values together. Printing subtotal and service-fee calculations exclude the pickup fee; pickup fee earns no supplier payout or rider share. Internal pickup jobs retain their existing zero-charge trip contract. Existing collection/refund accounting handles the fee as platform-owned fulfillment funds.
+
+Compatibility: omitting `fulfillmentMode` from matching preserves released-build behavior, including its optional destination and checkout-time choice. Existing tokens, carts, and orders are not upgraded or locked, and legacy pickup carts keep their zero-charge checkout even after a hub fee is configured. The client follow-up must enable the new step only for new request drafts; resume old drafts/orders through their existing flow.
+
+Hub operating hours are settings for the collection information shown by the client. They do not replace supplier production calendars, change the promised production deadline, or automatically select a collection appointment. `schedule: null` means Super Admin has not configured hours yet; the client must show that state instead of inventing opening days. QR collection and reminder workflows remain separate follow-ups.
+
 ### Distance and rating fields
 
 Both match routes return `distanceZone: { key, label }` at the response root (the Top Pick) and on each `listings[]` / `otherListings[]` item. Keys/labels come from the same [four delivery fee bands](OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones): `nearby` / Nearby, `away` / Away, `long_distance` / Long Distance, `out_of_zone` / Out of Zone. Without a drop-off, `distanceZone` is `null`; no zone is guessed. The existing rule requiring a pin when distance is ranked first remains.
