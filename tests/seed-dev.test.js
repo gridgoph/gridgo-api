@@ -10,6 +10,11 @@ import { defaultListingStarters } from "../src/listing-starters.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
+test.before(() => {
+  process.env.NODE_ENV = "test";
+  process.env.CLERK_SECRET_KEY = "sk_test_fixture";
+});
+
 const clerkBackend = {
   users: {
     getUserList: async ({ emailAddress } = {}) => {

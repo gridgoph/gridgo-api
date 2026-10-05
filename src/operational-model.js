@@ -1,3 +1,5 @@
+import { canReadOrderArtwork } from "./order-file-access.js";
+import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
@@ -217,16 +219,19 @@ export function defaultOperationalSettings() {
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
+    productionPenalty: defaultProductionPenalty(),
+    seasonWindowPush: { enabled: false, version: 1 },
     deliveryFeeBands: [
-      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 2_500 },
-      { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 5_000 },
-      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15_000, feeMinor: 7_500 },
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 8_900 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 14_900 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15_000, feeMinor: 22_900 },
       { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 4_000, perKmMinor: 1_500 },
     ],
   };
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
     fail(
@@ -278,8 +283,17 @@ export function validateOperationalSettings(settings) {
     const band = bands[index];
     const expected = canonical[index];
     if (band?.zone !== expected.zone || band?.label !== expected.label
-        || band?.maxDistanceMeters !== expected.maxDistanceMeters) {
-      fail(400, "invalid_delivery_fee_bands", "Keep the four fixed zone keys, labels, and inclusive distance limits in order.");
+        || (band.zone === "out_of_zone" && band.maxDistanceMeters !== null)) {
+      fail(400, "invalid_delivery_fee_bands", "Keep the four fixed zone keys and labels in order, with a null Out of Zone maximum.");
+    }
+    if (band.zone !== "out_of_zone") {
+      const field = `deliveryFeeBands[${index}].maxDistanceMeters`;
+      if (!Number.isInteger(band.maxDistanceMeters) || band.maxDistanceMeters <= 0 || band.maxDistanceMeters > 100_000) {
+        fail(400, "invalid_delivery_zone_limit", "Set each zone limit to a whole number of metres from 1 to 100,000 (100 km).", { field });
+      }
+      if (index > 0 && band.maxDistanceMeters <= bands[index - 1].maxDistanceMeters) {
+        fail(400, "delivery_zone_limits_not_increasing", "Nearby, Away, and Long Distance limits must be strictly increasing.", { field });
+      }
     }
     const fields = band.zone === "out_of_zone" ? ["baseFeeMinor", "perKmMinor"] : ["feeMinor"];
     for (const field of fields) {
@@ -650,6 +664,8 @@ export function collectedSupplierPrincipalMinor(order) {
 
 export function moneyReportingForOrder(order, store = null) {
   const settlement = refundSettlementFor(store, order);
+  const deductionsMinor = orderPenaltyMinor(order);
+  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) - deductionsMinor);
   const refundedPrincipalMinor = (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
     .reduce((sum, row) => sum + row.principalMinor, 0);
   const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order)]
@@ -675,7 +691,7 @@ export function moneyReportingForOrder(order, store = null) {
   const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
   const protectedPaymentMinor = Math.max(
     0,
-    Math.min(settlement?.shopEntitlementMinor ?? order.supplierPlatformPayoutMinor ?? 0, collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
+    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
   );
   return {
     supplierSettlement: {
@@ -684,12 +700,12 @@ export function moneyReportingForOrder(order, store = null) {
       receivedAtStoreMinor,
       collectedSupplierPrincipalMinor: collectedPrincipalMinor,
       protectedPaymentMinor,
-      gridgoDeductionsMinor: 0,
-      totalSupplierEarningsMinor: settlement?.shopEntitlementMinor ?? order.supplierSubtotalMinor,
+      gridgoDeductionsMinor: deductionsMinor,
+      totalSupplierEarningsMinor: entitlementMinor,
       supplierReleasedMinor: releasedThroughPlatformMinor,
       supplierOutstandingMinor: Math.max(
         0,
-        (settlement?.shopEntitlementMinor ?? order.supplierSubtotalMinor ?? 0) - receivedAtStoreMinor - releasedThroughPlatformMinor,
+        entitlementMinor - receivedAtStoreMinor - releasedThroughPlatformMinor,
       ),
     },
     deliverySettlement: {
@@ -746,6 +762,13 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   if (milestone.status === "released") return milestone;
   if (refundSettlementFor(store, order)) {
     fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
+  }
+
+  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id);
+  if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+      && (!lapse || lapse.policy.deductionsEnabled)
+      && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
+    fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
   }
 
   // The older meaning of "pickup", where the job never left the shop and its
@@ -927,6 +950,19 @@ export function publicOrderFor(order, user, store = null) {
   const publicRecord = clone(order);
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
   publicRecord.productionItems = productionItemsFor(store, order, user);
+  if (["supplier", "rider"].includes(user?.role)) {
+    const artworkIds = publicRecord.artworkFileIds || [];
+    for (const purpose of ["artwork", "mockup"]) {
+      const field = `${purpose}FileIds`;
+      publicRecord[field] = (publicRecord[field] || []).filter((fileId) =>
+        canReadOrderArtwork(user, store, order, fileId, purpose));
+    }
+    // The old order-wide filename can also belong to another shop's line.
+    const lastId = publicRecord.artworkFileIds.at(-1);
+    const unchanged = publicRecord.artworkFileIds.length === artworkIds.length;
+    publicRecord.artworkName = (store?.files || []).find((file) => file.fileId === lastId)?.originalFilename
+      || (lastId && unchanged ? publicRecord.artworkName : null) || null;
+  }
   /*
     Whether this order has been rated, so a client is asked once.
 
@@ -1052,6 +1088,8 @@ export function publicOrderFor(order, user, store = null) {
   if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
 
   if (!ops && !assignedSupplier) {
+    delete publicRecord.productionReassignmentEligible;
+    delete publicRecord.productionNoCommunication;
     delete publicRecord.supplierPriceMinor;
     delete publicRecord.supplierSubtotalMinor;
     delete publicRecord.supplierPlatformPayoutMinor;
@@ -1061,11 +1099,12 @@ export function publicOrderFor(order, user, store = null) {
     delete publicRecord.payoutReceiptFileIds;
     if (Array.isArray(publicRecord.payoutMilestones)) {
       publicRecord.payoutMilestones = publicRecord.payoutMilestones.map((milestone) => {
-        const { amountMinor: _amountMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
+        const { amountMinor: _amountMinor, productionDeductionMinor: _productionDeductionMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
         return visible;
       });
     }
   }
+  if ((ops || assignedSupplier) && reporting) publicRecord.supplierEarningsMinor = reporting.supplierSettlement.totalSupplierEarningsMinor;
   if (assignedSupplier && reporting) publicRecord.supplierSettlement = reporting.supplierSettlement;
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;

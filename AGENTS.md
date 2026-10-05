@@ -10,6 +10,7 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 - Every HTTP mutation runs in one transaction with a transaction-scoped advisory lock. Money/order/credit/claim/issue changes, audit rows, and notifications commit atomically.
 - MinIO owns file bytes. PostgreSQL stores metadata, private object keys, and opaque file references only.
 - Fresh `npm run seed` is idempotent reference data only: catalog, taxonomy, zones, settings, formats, starters. It must never create users or operational records and has no destructive reset.
+- `seed:dev` requires explicit development/test `NODE_ENV` and a development Clerk key; production compose has no development seed service. Fixed demo retirement and its operator preflight: `docs/DEMO_SHOP_RETIREMENT.md`.
 - Local development only: `npm run seed:dev` (and local compose) additionally seeds three Davao shops against real development Clerk users, including Lovis Printshop for `felyciaaa0220@gmail.com`. Production compose must keep `npm run seed`.
 
 ## Clerk-only identity
@@ -44,6 +45,8 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkou
 - Any path that suspends supplier lines with the account must tag each line `approvalSuspensionCaseId`/`approvalSuspensionPreviousState` (jsonb `data`); `suspendedWithAccount` in `src/approval-cases.js` decides what `POST /approval-cases/:id/restore` `restoreServiceIds` may bring back. Contract: `docs/OPERATIONAL_MODEL_V2_API.md#approval-queue-and-decisions`.
 - Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it. `POST /me/business-application` (and legacy `POST /me/business-apply`) opens a pending `business_client` case — do not flip `accountType` until Operations approves it. A pending application lives on its approval-case snapshot, never on the profile: `client_profiles_check` forbids business fields on a personal row and stays, because nothing clears them on reject.
 
+Late-production warnings, the Super Admin deductions gate (off by default), net payout adjustments, and recent-lapse matching weight: `docs/PRODUCTION_PENALTIES_API.md`. Published payout shares remain gross; stage `amountMinor` is net of `productionDeductionMinor`.
+
 ## Geography
 
 Orders snapshot `pickup` and `dropoff`; supplier users may have a shop point. Existing order pickup/money never changes when a shop moves. Rider pings are authorized to the assigned/related parties. Rider location and Operations map contracts: `docs/OPERATIONAL_MODEL_V2_API.md#rider-location`.
@@ -64,11 +67,14 @@ Supplier readiness separates legacy setup checks, operational listing eligibilit
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
+Season awareness windows and Super Admin-only rollout controls are defined in `docs/SEASON_WINDOWS_API.md`. Scheduled season pushes default off; `noticeQueuedAt` is immutable and never reset by edits.
+
 ## Files and push
 
 `docs/STORAGE_API.md` is authoritative. File states are `pending_upload | ready | delete_pending | deleted`. Supplier and rider verification documents stay private to their respective owner and ops/super.
 
 - `save()` is the notification/outbox and realtime enqueue boundary; delivery occurs after commit. Do not send at individual notification append sites. Queue invalidates with `queueInvalidate` / `queueOrderInvalidate` before `save()`; delivery contract: `docs/REALTIME_EVENTS.md`.
+- Artwork/mockup lists and signed reads share `src/order-file-access.js`; job scope, single-shop legacy fallback, and unattributed multi-shop denial are defined in `docs/STORAGE_API.md#get-filesfileid--metadata`.
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.
 - `save()` kicks the single-flight outbox drain after commit (`kickPushDrain`); the lifecycle tick is only the retry backstop. Reach/delivery aggregates, `/health.push` since-boot fields, and the hourly `validate_only` stale-token sweep (`src/push-token-validation.js`, `device_token_checks`): `docs/OPERATIONAL_MODEL_V2_API.md#get-opspushstats`.
 - One token belongs to one `user.id`. Anonymous registration is hostile input and exposes only a fixed `{ok:true}` body.
@@ -76,6 +82,8 @@ Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They n
 - Prune `INVALID_ARGUMENT` only when the violation identifies `message.token`.
 - Push payload data is allowlisted to `notificationId`, `type`, `orderId`, and `at`.
 - Every implemented domain event writes a durable inbox row to each current `ops_admin` and `super_admin` membership (`privilegedAdminMemberships` in `src/notifications.js`). Super Admin is never invalidate-only. Contract: `docs/REALTIME_EVENTS.md`.
+
+- File retention and audited early deletion: `docs/STORAGE_API.md#retention-and-daily-cleanup`, `src/file-retention-policy.js`, and `src/file-retention.js`. Automatic deletion ships OFF; review production dry-run counts before enabling `GRIDGO_FILE_RETENTION_DELETE_ENABLED`. All deletion paths, including retries, must preserve open-case holds.
 
 ## Deployment
 

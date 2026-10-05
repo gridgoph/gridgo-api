@@ -236,7 +236,7 @@ test("pending -> ready -> delete_pending -> deleted never exposes objectKey", ()
   assert.equal(file.state, "pending_upload");
   assert.equal("objectKey" in publicFile(file), false);
   markFileReady(file, "2026-08-09T00:01:00Z");
-  markFileDeletePending(file, client, "2026-08-09T00:02:00Z");
+  markFileDeletePending(file, superAdmin, "2026-08-09T00:02:00Z", { reason: "Unused upload" });
   markFileDeleted(file, "2026-08-09T00:03:00Z");
   assert.equal(file.state, "deleted");
   assert.equal(file.objectKey, null);
@@ -392,7 +392,7 @@ test("verification documents attach only to the uploader and support typed repla
     },
   ]);
   expectError(() => markFileDeletePending(first, ops, "2026-08-09T00:00:00Z"), 403, "forbidden");
-  assert.doesNotThrow(() => markFileDeletePending(first, supplier, "2026-08-09T00:00:00Z"));
+  expectError(() => markFileDeletePending(first, supplier, "2026-08-09T00:00:00Z"), 403, "forbidden");
 });
 
 test("rider licence attachment preserves evidence without submitting enrollment", () => {
@@ -503,7 +503,7 @@ test("deleting rider licence evidence reverts a pending submission to intake", (
   approvalCase.submittedAt = "2026-08-16T01:30:00.000Z";
   approvalCase.updatedAt = "2026-08-16T01:30:00.000Z";
 
-  assert.doesNotThrow(() => markFileDeletePending(license, rider, "2026-08-16T02:00:00.000Z"));
+  assert.doesNotThrow(() => markFileDeletePending(license, superAdmin, "2026-08-16T02:00:00.000Z", { store, reason: "Remove invalid evidence" }));
   const invalidated = invalidateRiderDocumentsForFile(store, license, "2026-08-16T02:00:00.000Z");
   assert.deepEqual(invalidated.map(({ id }) => id), ["rider-document-live"]);
   assert.equal(store.riderDocuments.length, 1);
@@ -532,7 +532,7 @@ test("deleting rider licence evidence reverts a pending submission to intake", (
     documentId: "rider-document-selfie",
     at: "2026-08-16T04:00:00.000Z",
   });
-  assert.doesNotThrow(() => markFileDeletePending(selfie, rider, "2026-08-16T05:00:00.000Z"));
+  assert.doesNotThrow(() => markFileDeletePending(selfie, superAdmin, "2026-08-16T05:00:00.000Z", { store, reason: "Remove invalid evidence" }));
   invalidateRiderDocumentsForFile(store, selfie, "2026-08-16T05:00:00.000Z");
   assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-selfie").isCurrent, false);
   assert.equal(store.riderDocuments.find(({ id }) => id === "rider-document-next").isCurrent, true);
@@ -571,6 +571,7 @@ test("a matched job shop can read the client's attached mockup", () => {
   const store = {
     orders: [matchedOrder],
     orderJobs: [{ id: "job-match", orderId: matchedOrder.id, supplierId: supplier.id, riderId: null }],
+    orderLineItems: [{ id: "one", orderId: matchedOrder.id, jobId: "job-match", mockupFileId: "file-mockup" }],
     supplierServices: [],
   };
   const file = readyFile("mockup", {
@@ -582,7 +583,7 @@ test("a matched job shop can read the client's attached mockup", () => {
 });
 
 test("referenced evidence cannot be deleted", () => {
-  expectError(() => markFileDeletePending(readyFile("artwork", { references: [{ type: "order", id: "order-a" }] }), client, "2026-08-09T00:00:00Z"), 409, "file_in_use");
+  expectError(() => markFileDeletePending(readyFile("artwork", { references: [{ type: "order", id: "order-a" }] }), client, "2026-08-09T00:00:00Z", { store: { orders: [order()] } }), 409, "file_in_use");
 });
 
 test("order files require approved work membership while verification evidence stays accessible", () => {
@@ -703,7 +704,7 @@ test("payment receipts stay private to their owner and Operations after order bi
   for (const user of [client, ops, superAdmin]) assert.doesNotThrow(() => authorizeFileRead(user, store, receipt));
   for (const user of [supplier, rider, otherClient]) expectError(() => authorizeFileRead(user, store, receipt), 403, "forbidden");
   for (const purpose of ["artwork", "mockup"]) {
-    const file = readyFile(purpose, { ownerId: client.id, references: [{ type: "order", id: "order-a", field: "line:one:artwork" }] });
+    const file = readyFile(purpose, { ownerId: client.id, references: [{ type: "order", id: "order-a", field: `${purpose}FileIds` }] });
     for (const user of [supplier, rider]) assert.doesNotThrow(() => authorizeFileRead(user, store, file));
   }
 });
@@ -764,5 +765,5 @@ test("production photos are supplier-owned images attached to assigned productio
   assert.deepEqual(record.productionPhotoFileIds, [file.fileId]);
   for (const actor of [client, supplier, rider, ops]) authorizeFileRead(actor, store, file);
   expectError(() => authorizeFileRead(otherClient, store, file), 403, "forbidden");
-  expectError(() => markFileDeletePending(file, supplier, "now"), 409, "file_in_use");
+  expectError(() => markFileDeletePending(file, supplier, "now"), 403, "forbidden");
 });

@@ -118,7 +118,7 @@ test("binding puts the receipt on the share and the order, and the right people 
   assert.doesNotThrow(() => authorizeFileRead(actor(store, "supplier"), store, file));
   assert.throws(() => authorizeFileRead(actor(store, "other_supplier"), store, file), (error) => error.status === 403);
   assert.throws(() => authorizeFileRead(actor(store, "client"), store, file), (error) => error.status === 403);
-  assert.throws(() => markFileDeletePending(file, actor(store, "ops"), AT), (error) => error.code === "file_in_use");
+  assert.throws(() => markFileDeletePending(file, actor(store, "ops"), AT), (error) => error.code === "forbidden");
 
   const forOps = publicOrderFor(order, actor(store, "ops"), store);
   assert.equal(forOps.payoutMilestones[0].receiptFileId, "rcpt_one");

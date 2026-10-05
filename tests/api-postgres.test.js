@@ -1724,9 +1724,9 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(updated.body.settings.serviceFeeRateBps, 1250);
     const persistedSettings = (await request(instance.api, "/settings", { subject: "clerk_ops" })).body.settings;
     assert.deepEqual(persistedSettings.deliveryFeeBands, [
-      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 2500 },
-      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 5000 },
-      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 7500 },
+      { zone: "nearby", label: "Nearby", maxDistanceMeters: 5000, feeMinor: 8900 },
+      { zone: "away", label: "Away", maxDistanceMeters: 10000, feeMinor: 14900 },
+      { zone: "long_distance", label: "Long Distance", maxDistanceMeters: 15000, feeMinor: 22900 },
       { zone: "out_of_zone", label: "Out of Zone", maxDistanceMeters: null, baseFeeMinor: 8000, perKmMinor: 1200 },
     ]);
     assert.equal(updated.body.settings.serviceFeeVisibleToClient, true);
@@ -1790,6 +1790,70 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test('delivery zone limit updates persist with the settings handshake and preserve order/job snapshots', { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.query(`INSERT INTO order_jobs (id, order_id, supplier_id, state, fulfillment_mode,
+    pickup_lat, pickup_lng, pickup_label, dropoff_lat, dropoff_lng, dropoff_label,
+    supplier_subtotal_minor, delivery_distance_meters, delivery_fee_minor, estimated_hours, created_at, updated_at)
+    VALUES ('job_snapshot', 'ord_payout', 'user_supplier', 'needs_qa', 'delivery',
+      7, 125, 'Pickup', 8, 125, 'Dropoff', 100000, 111195, 2500, 24, now(), now())`);
+  const instance = await startApi();
+  try {
+    const current = (await request(instance.api, '/settings', { subject: 'clerk_ops' })).body;
+    const before = (await database.query("SELECT * FROM orders WHERE id = 'ord_payout'")).rows;
+    const jobsBefore = (await database.query("SELECT * FROM order_jobs WHERE id = 'job_snapshot'")).rows;
+    const patch = (body, subject = 'clerk_ops') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
+    const limits = [1200, 6500, 23000];
+    const deliveryFeeBands = current.settings.deliveryFeeBands.map((band, index) => ({
+      ...band, maxDistanceMeters: limits[index] ?? null,
+    }));
+    const input = { expectedVersion: current.version, reason: 'Update delivery zone limits', deliveryFeeBands };
+    assert.equal((await patch(input, 'clerk_client')).status, 403);
+    assert.equal((await patch(input, 'clerk_supplier')).status, 403);
+    assert.equal((await patch(input, 'clerk_rider')).status, 403);
+    assert.equal((await patch({ ...input, reason: '' })).body.error, 'settings_reason_required');
+    assert.equal((await patch({ ...input, expectedVersion: current.version - 1 })).body.error, 'settings_version_conflict');
+    for (const [index, limit, error] of [
+      [0, 0, 'invalid_delivery_zone_limit'], [0, '1200', 'invalid_delivery_zone_limit'],
+      [0, null, 'invalid_delivery_zone_limit'], [1, 1.5, 'invalid_delivery_zone_limit'],
+      [2, 100001, 'invalid_delivery_zone_limit'], [1, 1200, 'delivery_zone_limits_not_increasing'],
+      [1, 1199, 'delivery_zone_limits_not_increasing'], [2, 6500, 'delivery_zone_limits_not_increasing'],
+      [3, 100000, 'invalid_delivery_fee_bands'],
+    ]) {
+      const invalidBands = structuredClone(deliveryFeeBands);
+      invalidBands[index].maxDistanceMeters = limit;
+      const invalid = await patch({ ...input, deliveryFeeBands: invalidBands });
+      assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
+      assert.equal(invalid.body.error, error);
+      if (error !== 'invalid_delivery_fee_bands') assert.equal(invalid.body.field, `deliveryFeeBands[${index}].maxDistanceMeters`);
+      assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_ops' })).body, current);
+    }
+    const updated = await patch(input);
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.version, current.version + 1);
+    assert.deepEqual(updated.body.settings.deliveryFeeBands, deliveryFeeBands);
+    assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_client' })).body, updated.body);
+    assert.equal((await patch(input)).body.error, 'settings_version_conflict');
+    const store = await loadStoreEventually(database, store => store.settings.deliveryFeeBands[0].maxDistanceMeters === 1200);
+    const audit = store.auditLog.find(entry => entry.action === 'settings.operational_update');
+    assert.deepEqual(audit.detail.previous.deliveryFeeBands, current.settings.deliveryFeeBands);
+    assert.deepEqual(audit.detail.current.deliveryFeeBands, deliveryFeeBands);
+    assert.deepEqual((await database.query("SELECT * FROM orders WHERE id = 'ord_payout'")).rows, before);
+    assert.deepEqual((await database.query("SELECT * FROM order_jobs WHERE id = 'job_snapshot'")).rows, jobsBefore);
+    const existingOrder = await request(instance.api, '/orders/ord_payout', { subject: 'clerk_client' });
+    assert.equal(existingOrder.body.order.deliveryFeeMinor, 2500);
+    assert.equal(existingOrder.body.order.totalMinor, 112500);
+    const unrelated = await patch({ expectedVersion: updated.body.version, reason: 'Adjust issue window', issueWindowHours: 48 }, 'clerk_super');
+    assert.equal(unrelated.status, 200);
+    assert.deepEqual(unrelated.body.settings.deliveryFeeBands, deliveryFeeBands);
+  } finally {
+    instance.child.kill('SIGTERM');
+    await new Promise(resolve => instance.child.once('exit', resolve));
     await database.close();
   }
 });
@@ -2428,8 +2492,12 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(duplicateSubmit.status, 409, JSON.stringify(duplicateSubmit.body));
     assert.equal(duplicateSubmit.body.error, "approval_state_conflict");
 
-    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+    const riderDelete = await request(instance.api, "/files/file_rider_license_new", {
       method: "DELETE", subject: "clerk_rider_new",
+    });
+    assert.equal(riderDelete.status, 403);
+    const licenseDeleted = await request(instance.api, "/files/file_rider_license_new", {
+      method: "DELETE", subject: "clerk_super", body: { reason: "Invalid verification evidence" },
     });
     assert.equal(licenseDeleted.status, 200, JSON.stringify(licenseDeleted.body));
     assert.equal(licenseDeleted.body.file.state, "deleted");
@@ -4094,4 +4162,114 @@ test("progress photos attach privately and every client order response signs a s
     await new Promise((resolve) => storage.server.close(resolve));
     await database.close();
   }
+});
+
+test('production penalties: Super Admin settings, private ledger, atomic warnings and net payouts', { skip: !DATABASE_URL }, async (t) => {
+  const { assessProductionLapses } = await import('../src/production-penalties.js');
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi({ GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000' });
+  t.after(async () => { instance.child.kill('SIGTERM'); await database.close(); });
+  const settings = await request(instance.api, '/settings', { subject: 'clerk_super' });
+  const policy = settings.body.settings.productionPenalty;
+  assert.deepEqual(policy, { deductionsEnabled: false, minorBps: 500, moderateBps: 1500, severeBps: 3000 });
+  const update = { expectedVersion: settings.body.version, reason: 'Test policy', productionPenalty: { ...policy, deductionsEnabled: true } };
+  const denied = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_ops', body: update });
+  assert.equal(denied.status, 403);
+  const bad = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_super', body: { ...update, productionPenalty: null } });
+  assert.equal(bad.status, 400);
+  const enabled = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_super', body: update });
+  assert.equal(enabled.status, 200);
+  const stale = await request(instance.api, '/settings', { method: 'PATCH', subject: 'clerk_super', body: update });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error, 'settings_version_conflict');
+  let sequence = 0;
+  const createId = (prefix) => `${prefix}_penalty_${++sequence}`;
+  const warnAt = '2026-10-02T02:00:00.000Z';
+  const deductAt = '2026-10-02T02:01:00.000Z';
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = structuredClone(store.orders.find((row) => row.id === 'ord_payout'));
+    order.id = 'ord_penalty';
+    store.orders.push(order);
+    order.readyBy = '2026-10-01T00:00:00.000Z'; order.readyAt = warnAt;
+    // Exercise the published plan's database invariant as well as net release math.
+    order.payoutPlanVersion = 2;
+    order.moneyModelVersion = 3;
+    order.payoutMilestones = createPayoutMilestones(order, { version: 2 });
+    for (const stage of order.payoutMilestones) { stage.pofFileIds = ['file_pof']; stage.status = 'pof_attached'; }
+    order.payoutMilestones[0].status = 'released';
+    await saveStore(database, store);
+  });
+  const sweep = (at) => database.transaction(async () => {
+    const store = await loadStore(database);
+    if (assessProductionLapses(store, { at, createId })) await saveStore(database, store);
+  });
+  await Promise.all([sweep(warnAt), sweep(warnAt)]);
+  let store = await loadStore(database);
+  assert.equal(store.productionLapses.length, 1);
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
+  assert.equal(store.notifications.filter((row) => row.type === 'production_lapse_warning').length, 3);
+  await assert.rejects(database.transaction(async () => {
+    const pending = await loadStore(database);
+    assessProductionLapses(pending, { at: deductAt, createId });
+    await saveStore(database, pending);
+    throw new Error('Abort the deduction transaction');
+  }), /Abort the deduction transaction/);
+  const rolledBack = await loadStore(database);
+  assert.equal(rolledBack.productionLapses[0].deductionMinor, 0);
+  assert.equal(rolledBack.notifications.filter((row) => row.type === 'production_lapse_deduction').length, 0);
+  await Promise.all([sweep(deductAt), sweep(deductAt)]);
+  store = await loadStore(database);
+  assert.equal(store.productionLapses[0].deductionMinor, 18000);
+  assert.equal(store.productionLapses[0].remainingBalanceMinor, 60000);
+  assert.equal(store.notifications.filter((row) => row.type === 'production_lapse_deduction').length, 3);
+  const own = await request(instance.api, '/me/production-lapses', { subject: 'clerk_supplier' });
+  assert.equal(own.status, 200); assert.equal(own.body.lapses[0].deductionMinor, 18000);
+  for (const subject of ['clerk_ops', 'clerk_super']) {
+    const read = await request(instance.api, '/users/user_supplier/production-lapses', { subject });
+    assert.equal(read.status, 200); assert.deepEqual(read.body, own.body);
+  }
+  for (const pathname of ['/me/production-lapses', '/users/user_supplier/production-lapses']) {
+    assert.equal((await request(instance.api, pathname)).status, 401);
+    assert.equal((await request(instance.api, pathname, { subject: 'clerk_client' })).status, 403);
+  }
+  assert.equal((await request(instance.api, '/users/user_supplier/production-lapses', { subject: 'clerk_supplier' })).status, 403);
+  await assert.rejects(database.query("UPDATE payout_milestones SET production_deduction_minor=production_deduction_minor+1 WHERE order_id='ord_penalty' AND code='delivered'"), { code: '23514' });
+  await assert.rejects(database.query("UPDATE production_lapses SET deduction_minor=1 WHERE order_id='ord_penalty'"), { code: '23514' });
+  await assert.rejects(database.query("UPDATE payout_milestones SET amount_minor=1 WHERE order_id='ord_penalty' AND code='production_started'"), { code: '23514' });
+  for (const code of ['delivered', 'issue_window']) {
+    const released = await request(instance.api, `/orders/ord_penalty/milestones/${code}/release`, { method: 'POST', subject: 'clerk_ops', body: { reference: `penalty-${code}` } });
+    assert.equal(released.status, 200, JSON.stringify(released.body));
+  }
+  store = await loadStore(database);
+  assert.equal(store.orders.find((row) => row.id === 'ord_penalty').payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), 82000);
+});
+
+test('production penalties: Operations confirms no communication with a reason; suppliers cannot attest it', { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi({ GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000' });
+  t.after(async () => { instance.child.kill('SIGTERM'); await database.close(); });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === 'ord_payout');
+    order.state = 'production';
+    order.readyBy = new Date(Date.now() - 3600000).toISOString();
+    await saveStore(database, store);
+  });
+  const pathname = '/orders/ord_payout/production-no-communication';
+  assert.equal((await request(instance.api, pathname, { method: 'POST', subject: 'clerk_supplier', body: { reason: 'No reply' } })).status, 403);
+  assert.equal((await request(instance.api, pathname, { method: 'POST', subject: 'clerk_ops', body: {} })).status, 400);
+  const result = await request(instance.api, pathname, { method: 'POST', subject: 'clerk_ops', body: { reason: 'No reply to the deadline check' } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.lapses[0].tier, 'severe');
+  assert.equal(result.body.lapses[0].status, 'warning_only');
+  assert.equal(result.body.lapses[0].reassignmentEligible, true);
+  const repeated = await request(instance.api, pathname, { method: 'POST', subject: 'clerk_ops', body: { reason: 'No reply to the deadline check' } });
+  assert.equal(repeated.status, 200);
+  const store = await loadStore(database);
+  assert.equal(store.auditLog.filter((row) => row.action === 'production_lapse.no_communication').length, 1);
+  assert.equal(store.productionLapses[0].warnings.length, 1);
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
 });

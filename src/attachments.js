@@ -1,3 +1,5 @@
+import { canReadOrderArtwork } from "./order-file-access.js";
+import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -578,22 +580,12 @@ export function markFileReady(file, at) {
   return file;
 }
 
-export function markFileDeletePending(file, user, at) {
-  if (!file) fail(404, "file_not_found", "That file no longer exists. Refresh your uploads and try again.");
-  if (["verification_document", "rider_verification_document"].includes(file.purpose)) {
-    const ownerRole = file.purpose === "verification_document" ? "supplier" : "rider";
-    if (!user || !hasRole(user, ownerRole) || user.id !== file.ownerId) forbidden();
-  } else if (file.purpose === "tracker_decision") {
-    if (!user || !hasRole(user, "super_admin") || user.id !== file.ownerId) forbidden();
-  } else if (!user || (user.id !== file.ownerId && !["ops_admin", "super_admin"].includes(user.role))) {
-    forbidden();
-  }
+export function markFileDeletePending(file, user, at, { store = {}, reason } = {}) {
+  try { assertEarlyFileDeletion(store, file, user, reason); }
+  catch (error) { throw new AttachmentError(error.status, error.code, error.message); }
   if (file.state === "deleted" || file.state === "delete_pending") return file;
   if (file.state !== "ready") {
-    fail(409, "file_state_conflict", "This file is not ready to delete. Refresh its status and try again.");
-  }
-  if ((file.references || []).some((reference) => reference.type !== "rider_document")) {
-    fail(409, "file_in_use", "This file is attached to a GRIDGO record. Remove that reference before deleting the file.");
+    fail(409, "file_state_conflict", "This file is not ready to delete.");
   }
   file.state = "delete_pending";
   file.deleteRequestedAt = at;
@@ -1223,6 +1215,13 @@ export function authorizeFileRead(user, store, file) {
   if (["supplier", "rider"].includes(user.role)
       && (file.references || []).some((reference) => reference.type === "order")
       && !hasApprovedWorkRole(user, user.role)) forbidden();
+  if (["supplier", "rider"].includes(user.role) && ["artwork", "mockup"].includes(file.purpose)
+      && (file.references || []).some((reference) => reference.type === "order")) {
+    if (file.references.some((reference) => reference.type === "order"
+        && canReadOrderArtwork(user, store, (store.orders || []).find((order) => order.id === reference.id),
+          file.fileId, file.purpose, file))) return;
+    forbidden();
+  }
   if (file.ownerId === user.id) return;
   if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
   forbidden();
