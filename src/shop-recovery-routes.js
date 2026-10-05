@@ -1,3 +1,5 @@
+import { rescheduleHold } from './order-reschedule-policy.js';
+import { supplierArtworkReleased } from './artwork-gates.js';
 import { publicRecovery } from './shop-recovery-projection.js';
 import { approvedRole } from './notifications.js';
 import { recordShopFailure, recoveryHeld, paidShopShare, findReplacementShop, startShopAcceptance, notifyRecovery, CANCELLABLE_SHOP_STATES } from './shop-recovery.js';
@@ -23,7 +25,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
   const order = store.orders.find((row) => row.id === match[1]);
   if (!order) fail(404, 'order_not_found');
   const ownClient = user.role === 'client' && order.clientId === user.id;
-  const ownSupplier = user.role === 'supplier' && order.supplierId === user.id && approvedRole(store, user.id, 'supplier');
+  const ownSupplier = user.role === 'supplier' && order.supplierId === user.id && approvedRole(store, user.id, 'supplier') && supplierArtworkReleased(order);
   if (!ops && !ownClient && !ownSupplier) fail(403, 'forbidden');
   if (req.method === 'GET' && match[2] === 'shop-recovery' && !match[3]) {
     return { status: 200, body: { recovery: publicRecovery(order, user) } };
@@ -60,6 +62,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
     } else if (match[3] === 'accept') {
       if (recovery.status === 'accepted') return { status: 200, body: { recovery: publicRecovery(order, user) } };
       if (recovery.status !== 'awaiting_client' || !recovery.proposal || !recoveryHeld(order)) fail(409, 'shop_recovery_not_available');
+      if (rescheduleHold(order)) fail(409, 'reschedule_fulfillment_stopped');
       if (paidShopShare(store, order)) fail(409, 'shop_recovery_requires_operations');
       if (refundHold(store, order) || refundSettlementFor(store, order)) fail(409, 'refund_fulfillment_stopped');
       if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail(409, 'shop_recovery_not_available');

@@ -152,7 +152,7 @@ async function fixture(database) {
     store.catalogItemPhotos.push({ catalogItemId: `${itemId}_brochures`, fileId: `${photoId}_brochures`, sortOrder: 0, createdAt: AT });
     }
     store.files.push(
-      { fileId: "file_art", ownerId: "user_client", purpose: "artwork", originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
+      { fileId: "file_art", ownerId: "user_client", purpose: "artwork", artworkCheck: { status: "passed", checkedAt: AT }, originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
       { fileId: "file_mock", ownerId: "user_client", purpose: "mockup", originalFilename: "mock.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/mock.jpg", references: [], createdAt: AT },
       { fileId: "file_qr", ownerId: "user_client", purpose: "payment_proof", originalFilename: "qr.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/qr.jpg", references: [], createdAt: AT },
       { fileId: "file_drop", ownerId: "user_rider", purpose: "delivery_photo", originalFilename: "drop.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "rider/drop.jpg", references: [], createdAt: AT },
@@ -298,18 +298,9 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(mockup.status, 200, JSON.stringify(mockup.body));
   const second = await request(instance.api, `/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_a_brochures", optionIds: [], quantity: 1 },
+    body: { catalogItemId: "item_supplier_a_brochures", optionIds: [], quantity: 1, artworkFileId: "file_art" },
   });
   assert.equal(second.status, 201, JSON.stringify(second.body));
-
-  // A basket belongs to one shop. Adding another shop's listing is refused
-  // rather than quietly splitting the order in two.
-  const otherShop = await request(instance.api, `/me/carts/${cartId}/lines`, {
-    method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_b", optionIds: [], quantity: 1 },
-  });
-  assert.equal(otherShop.status, 409, JSON.stringify(otherShop.body));
-  assert.equal(otherShop.body.error, "cart_belongs_to_another_shop");
 
   const rejected = await request(instance.api, `/me/carts/${cartId}/checkout`, {
     method: "POST", subject: "clerk_client",
@@ -344,7 +335,6 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   const inbox = persisted.notifications.map((row) => `${row.userId}:${row.type}`).sort();
   assert.deepEqual(inbox, [
-    "supplier_a:shop_job_assigned",
     "user_client:order_receipt_ready",
     "user_client:order_submitted",
     "user_ops:ops_assignment_changed",
@@ -422,7 +412,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
  */
 test("a paid order clears money, then quality, and only then reaches the shop", { skip: !DATABASE_URL }, async (t) => {
   {
-    const { call, orderId } = await placedOrder(t);
+    const { call, orderId, database } = await placedOrder(t);
     const transition = (state, subject, body = {}) => call(
       `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
     );
@@ -432,6 +422,24 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const early = await transition("payment_authorized", "clerk_supplier_a");
     assert.equal(early.status, 409, JSON.stringify(early.body));
 
+    const assertHeld = async () => {
+      for (const subject of ["clerk_supplier_a", "clerk_supplier_b"]) {
+        assert.equal((await call(`/orders/${orderId}`, { subject })).status, 403);
+        assert.equal((await call(`/orders/${orderId}/shop-recovery`, { subject })).status, 403);
+        assert.deepEqual((await call("/jobs", { subject })).body.jobs, []);
+        assert.deepEqual((await call("/orders", { subject })).body.orders, []);
+        assert.equal((await call("/files/file_art", { subject })).status, 403);
+      }
+      const store = await loadStore(database);
+      assert.equal(store.notifications.filter(n => n.orderId === orderId && n.appRole === "supplier").length, 0);
+    };
+    await assertHeld();
+    const waiting = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.fileCheck;
+    assert.equal(waiting.status, "pending");
+    assert.equal((await loadStore(database)).orders[0].shopAcceptance, undefined);
+    assert.ok(waiting.waitingSeconds >= 0);
+    const inbox = await call("/notifications", { subject: "clerk_ops" });
+    assert.ok(inbox.body.notifications.some(n => n.orderId === orderId && n.type === "ops_job_needs_qa"));
     // Step one: the transfer. Confirming it hands the order to quality control,
     // not to the shop -- the artwork has not been looked at yet.
     const confirmed = await call(`/orders/${orderId}/payments/initial/confirm`, {
@@ -439,12 +447,16 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     });
     assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
     assert.equal(await stateOf(), "needs_qa");
+    await assertHeld();
 
     // Step two: the artwork. A failed check goes back to the client and the
     // money stays where it is.
     const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi" });
     assert.equal(failed.status, 200, JSON.stringify(failed.body));
     assert.equal(await stateOf(), "client_correction");
+    await assertHeld();
+    assert.equal(failed.body.order.fileCheck.status, "failed");
+    assert.equal(failed.body.order.fileCheck.reason, "Artwork is 72dpi");
     const corrected = await call(`/orders/${orderId}`, { subject: "clerk_client" });
     assert.deepEqual(corrected.body.order.correction, {
       reason: "Artwork is 72dpi", requestedAt: failed.body.order.updatedAt,
@@ -459,6 +471,8 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     // the order again.
     const resubmitted = await transition("needs_qa", "clerk_client");
     assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
+    assert.equal(resubmitted.body.order.fileCheck.status, "pending");
+    await assertHeld();
     assert.deepEqual(resubmitted.body.order.correction, corrected.body.order.correction);
 
     // Passing quality control hands it to the shop that was matched before the
@@ -466,6 +480,12 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const approved = await transition("supplier_assigned", "clerk_ops", { note: "Artwork approved" });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.order.supplierId, "supplier_a");
+    assert.equal(approved.body.order.fileCheck.status, "passed");
+    assert.equal(approved.body.order.fileCheck.reviewedBy, "user_ops");
+    assert.equal(approved.body.order.shopAcceptance.assignedAt, approved.body.order.updatedAt);
+    const released = await loadStore(database);
+    assert.equal(released.notifications.filter(n => n.orderId === orderId && n.type === "shop_job_assigned").length, 1);
+    assert.ok(released.auditLog.some(row => row.orderId === orderId && row.action === "order.file_check" && row.detail.fileCheck.status === "passed"));
 
     // The shop sees it for the first time here, already priced and already dated.
     const jobs = await call("/jobs", { subject: "clerk_supplier_a" });
@@ -1784,7 +1804,10 @@ test("design links persist through PostgreSQL checkout and remain scoped to artw
     for (const formatCode of ["canva_link", "google_drive", "dropbox", "we_transfer"]) store.supplierServiceFileFormats.push({ supplierServiceId: listing.supplierServiceId, formatCode });
     await saveStore(database, store);
   });
-  const instance = await startApi();
+  const provider = http.createServer((_req, res) => { res.writeHead(200, { 'content-type': 'application/pdf' }); res.end(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url))); });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
   t.after(async () => { instance.child.kill("SIGTERM"); await new Promise((resolve) => instance.child.once("exit", resolve)); });
   const call = (pathname, options = {}) => request(instance.api, pathname, { subject: "clerk_client", ...options });
   const artworkLinks = [
@@ -1801,6 +1824,9 @@ test("design links persist through PostgreSQL checkout and remain scoped to artw
   const orderId = placed.body.order.id;
   const reloaded = await loadStore(database);
   assert.deepEqual(reloaded.orderLineItems.find((line) => line.orderId === orderId).artworkLinks, artworkLinks);
+  assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" })).status, 403);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
   for (const subject of ["clerk_client", "clerk_supplier_a", "clerk_ops"]) {
     const result = await call(`/orders/${orderId}`, { subject });
     assert.equal(result.status, 200, JSON.stringify(result.body));
@@ -1897,14 +1923,14 @@ test("match tokens persist across requests, select another shop and keep deadlin
   const persistedLine = (await database.query("SELECT supplier_id, match_deadline FROM client_cart_lines WHERE cart_id=$1", [cartId])).rows[0];
   assert.equal(persistedLine.supplier_id, "supplier_b");
   assert.equal(persistedLine.match_deadline, deadline);
-  // Queue changes after selection cannot silently miss the requested date at checkout.
-  await database.query("UPDATE client_cart_lines SET match_deadline = $1 WHERE cart_id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
+  // The basket deadline is revalidated at checkout after a change.
+  await database.query("UPDATE client_carts SET deadline = $1 WHERE id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
   const payment = { method: "qr_manual", proofFileId: "file_qr", reference: "OTHER-SHOP" };
   const late = await post(`/me/carts/${cartId}/checkout`, { payment });
   assert.equal(late.status, 409, JSON.stringify(late.body));
   assert.equal(late.body.error, "deadline_not_met");
   assert.equal(Number((await database.query("SELECT count(*) FROM orders")).rows[0].count), 0, "failed checkout rolls back");
-  await database.query("UPDATE client_cart_lines SET match_deadline = $1 WHERE cart_id = $2", [deadline, cartId]);
+  await database.query("UPDATE client_carts SET deadline = $1 WHERE id = $2", [deadline, cartId]);
   const placed = await post(`/me/carts/${cartId}/checkout`, { payment });
   assert.equal(placed.status, 201, JSON.stringify(placed.body));
   const order = (await loadStore(database)).orders.find((row) => row.id === placed.body.order.id);
@@ -1937,6 +1963,7 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
     const store = await loadStore(database);
     const order = store.orders.find((row) => row.id === orderId);
     order.state = "production";
+    order.fileCheck.status = "passed";
     order.supplierId = null;
     order.riderId = "user_rider";
     const job = store.orderJobs.find((row) => row.orderId === orderId);
@@ -2000,6 +2027,452 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
   assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
 });
 
+for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [2, 'pickup'], [3, 'pickup']]) {
+  test(`multi-shop ${groupCount} ${fulfillmentMode} groups persist one payment and receipt, with independent payouts and refunds`, { skip: !DATABASE_URL }, async (t) => {
+    const database = createDatabase({ DATABASE_URL });
+    t.after(() => database.close());
+    await fixture(database);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.settings.downpaymentPercent = 75;
+      store.settings.hubPickup.feeMinor = 2501;
+      if (groupCount === 3) {
+        const copy = (rows, key, from, to) => rows.push({ ...structuredClone(rows.find((row) => row[key] === from)), [key]: to });
+        copy(store.users, 'id', 'supplier_b', 'supplier_c');
+        Object.assign(store.users.at(-1), { clerkUserId: 'clerk_supplier_c', email: 'c@gridgo.test' });
+        copy(store.userRoleMemberships, 'userId', 'supplier_b', 'supplier_c');
+        copy(store.supplierProfiles, 'userId', 'supplier_b', 'supplier_c');
+        copy(store.approvalCases, 'userId', 'supplier_b', 'supplier_c');
+        store.approvalCases.at(-1).id = 'case_c';
+        const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+        store.supplierServices.push({ ...structuredClone(service), id: 'service_c', supplierId: 'supplier_c' });
+        store.supplierServiceFileFormats.push({ supplierServiceId: 'service_c', formatCode: 'pdf' });
+        store.files.push({ ...structuredClone(store.files.find((file) => file.fileId === 'photo_supplier_b')),
+          fileId: 'photo_supplier_c', ownerId: 'supplier_c', objectKey: 'supplier_c/photo.jpg' });
+        store.catalogItemPhotos.push({ catalogItemId: 'item_supplier_c', fileId: 'photo_supplier_c', sortOrder: 0, createdAt: AT });
+        store.catalogItems.push({ ...structuredClone(store.catalogItems.find((row) => row.id === 'item_supplier_b')),
+          id: 'item_supplier_c', supplierId: 'supplier_c', supplierServiceId: 'service_c' });
+      }
+      store.files.push({ fileId: 'file_refund_qr', ownerId: 'user_client', purpose: 'refund_qr', state: 'ready',
+        originalFilename: 'destination.png', declaredContentType: 'image/png', detectedContentType: 'image/png',
+        objectKey: 'client/refund.png', size: 100, createdAt: AT, references: [] });
+      await saveStore(database, store);
+    });
+    const instance = await startApi();
+    t.after(async () => { instance.child.kill('SIGTERM'); await new Promise((resolve) => instance.child.once('exit', resolve)); });
+    const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+    const post = (pathname, body = {}, subject = 'clerk_ops') => call(pathname, { method: 'POST', subject, body });
+    const deadline = new Date(Date.now() + 90 * 86400000).toISOString();
+    const created = await post('/me/carts', { fulfillmentMode, deadline,
+      defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } }, 'clerk_client');
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const cartId = created.body.cart.id;
+    for (const suffix of ['a', 'b', 'c'].slice(0, groupCount)) {
+      let selection = {};
+      if (fulfillmentMode === 'pickup') {
+        const match = await post('/me/matches', { subcategoryCode: 'flyers', cartId, fulfillmentMode }, 'clerk_client');
+        assert.equal(match.status, 200, JSON.stringify(match.body));
+        const listing = [...match.body.listings, ...match.body.otherListings].find(row => row.id === `item_supplier_${suffix}`);
+        assert.ok(listing, JSON.stringify(match.body));
+        selection = { selectToken: listing.selectToken, matchRequestId: match.body.matchRequestId };
+      }
+      const added = await post(`/me/carts/${cartId}/lines`, { catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...selection }, 'clerk_client');
+      assert.equal(added.status, 201, JSON.stringify(added.body));
+    }
+    // A failure in a later group must roll back earlier groups and file bindings.
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.carts.find((cart) => cart.id === cartId).deadline = new Date(Date.now() + 2 * 86400000).toISOString();
+      const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+      service.turnaroundHours = 500;
+      service.standardTurnaroundHours = 500;
+      await saveStore(database, store);
+    });
+    const late = await post(`/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'TOO-LATE', proofFileId: 'file_qr' } }, 'clerk_client');
+    assert.equal(late.body.error, 'deadline_not_met', JSON.stringify(late.body));
+    assert.equal(Number((await database.query('SELECT count(*) FROM orders')).rows[0].count), 0);
+    assert.equal(Number((await database.query('SELECT count(*) FROM order_invoices')).rows[0].count), 0);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const cart = store.carts.find((row) => row.id === cartId);
+      assert.equal(cart.state, 'draft');
+      cart.deadline = deadline;
+      const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+      service.turnaroundHours = 24;
+      service.standardTurnaroundHours = 24;
+      await saveStore(database, store);
+    });
+    const before = (await call(`/me/carts/${cartId}`)).body.cart;
+    const secondLine = before.lines[1].id;
+    assert.equal((await call(`/me/carts/${cartId}/lines/${secondLine}`, { method: 'PATCH', body: { artworkFileId: null } })).status, 200);
+    const missing = await post(`/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'MISSING-ART', proofFileId: 'file_qr' } }, 'clerk_client');
+    assert.equal(missing.body.error, 'artwork_required');
+    assert.equal(Number((await database.query('SELECT count(*) FROM orders')).rows[0].count), 0);
+    assert.equal((await call(`/me/carts/${cartId}/lines/${secondLine}`, { method: 'PATCH', body: { artworkFileId: 'file_art' } })).status, 200);
+    const placed = await post(`/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'BASKET-ONE', proofFileId: 'file_qr' } }, 'clerk_client');
+    assert.equal(placed.status, 201, `${JSON.stringify(placed.body)}\n${instance.output()}`);
+    const { basket, invoice } = placed.body;
+    const [first, second] = basket.groups.map((group) => group.orderId);
+    assert.equal(basket.groups.length, groupCount);
+    assert.equal(basket.totalMinor, before.clientQuote.totalMinor);
+    assert.equal((await call(`/orders/${first}`, { subject: 'clerk_supplier_a' })).status, 403);
+    const expectedPickup = groupCount === 2 ? [1251, 1250] : [834, 834, 833];
+    if (fulfillmentMode === 'pickup') {
+      assert.equal(basket.pickupFeeMinor, 2501);
+      assert.equal(invoice.pickupFeeMinor, 2501);
+      assert.deepEqual(before.groups.map(group => group.pickupFeeMinor), expectedPickup);
+      assert.deepEqual(basket.groups.map(group => group.pickupFeeMinor), expectedPickup);
+      assert.deepEqual(invoice.groups.map(group => group.pickupFeeMinor), expectedPickup);
+      const stored = await loadStore(database);
+      assert.equal(stored.baskets[0].pickupFeeMinor, 2501);
+      assert.deepEqual(stored.baskets[0].orderIds.map(id => stored.orders.find(order => order.id === id).pickupFeeMinor), expectedPickup);
+      assert.ok(stored.orders.every(order => order.riderPayoutMinor === 0));
+      assert.ok(stored.orderJobs.every(job => job.deliveryFeeMinor === 0));
+      await assert.rejects(database.query('UPDATE order_baskets SET pickup_fee_minor=2502 WHERE id=$1', [basket.id]), /basket snapshot/);
+      await database.transaction(async () => {
+        const current = await loadStore(database);
+        current.settings.hubPickup.feeMinor = 9000;
+        await saveStore(database, current);
+      });
+      assert.equal((await call(`/baskets/${basket.id}`)).body.basket.pickupFeeMinor, 2501);
+    }
+    const intake = await loadStore(database);
+    assert.equal(intake.notifications.filter(row => row.type === 'ops_job_needs_qa' && row.userId === 'user_ops').length, groupCount);
+    assert.equal(basket.payment.amountMinor, invoice.totalMinor);
+    assert.equal((await post(`/orders/${first}/payments/initial/confirm`)).body.error, 'basket_payment_required');
+    assert.equal((await call(`/baskets/${basket.id}`, { subject: 'clerk_supplier_a' })).status, 403);
+    assert.equal((await post(`/baskets/${basket.id}/payment/confirm`, {}, 'clerk_client')).status, 403);
+    assert.equal((await post(`/baskets/${basket.id}/payment/reject`, { reason: 'Reference needs correction' })).status, 200);
+    assert.equal((await post(`/baskets/${basket.id}/payment/submit`, { method: 'qr_manual', proofFileId: 'file_qr', reference: 'BASKET-CORRECTED' }, 'clerk_client')).status, 200);
+    const confirmed = await post(`/baskets/${basket.id}/payment/confirm`);
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.ok(confirmed.body.basket.groups.every((group) => group.state === 'needs_qa'));
+    assert.equal((await post(`/baskets/${basket.id}/payment/confirm`)).status, 409);
+    for (const group of basket.groups) {
+      const receipt = await call(`/orders/${group.orderId}/invoice`);
+      assert.deepEqual(receipt.body.invoice, invoice);
+    }
+    const ops = await call(`/baskets/${basket.id}`, { subject: 'clerk_ops' });
+    assert.equal(ops.body.basket.groups[0].order.supplierId, 'supplier_a');
+    assert.equal(ops.body.basket.groups[0].order.payoutMilestones.length, 3);
+    const clientRead = await call(`/orders/${first}`);
+    assert.equal(clientRead.body.order.supplierId, undefined);
+    assert.equal(clientRead.body.order.payoutMilestones, undefined);
+    for (const [state, actor] of [['supplier_assigned', 'clerk_ops'], ['payment_authorized', 'clerk_supplier_a'], ['production', 'clerk_supplier_a']]) {
+      const moved = await post(`/orders/${first}/transition`, { state }, actor);
+      assert.equal(moved.status, 200, JSON.stringify(moved.body));
+    }
+    await attachProofDirectly(database, first, 'production_started');
+    const released = await post(`/orders/${first}/milestones/production_started/release`);
+    assert.equal(released.status, 200, JSON.stringify(released.body));
+    let persisted = await loadStore(database);
+    assert.equal(persisted.orders.find((order) => order.id === first).payoutMilestones[0].status, 'released');
+    assert.ok(persisted.orders.find((order) => order.id === second).payoutMilestones.every((stage) => stage.status !== 'released'));
+    assert.equal(persisted.orderInvoices.length, 1);
+    assert.equal(persisted.baskets.length, 1);
+    assert.equal(persisted.orders.reduce((sum, order) => sum + order.payments.initial.amountMinor, 0), basket.totalMinor);
+
+    const refundCall = async (pathname, body, subject = 'clerk_ops') => {
+      const response = await fetch(`${instance.api}${pathname}`, { method: 'POST',
+        headers: { Authorization: `Bearer ${token(subject)}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify(body) });
+      const result = await response.json();
+      assert.ok(response.ok, JSON.stringify(result));
+      return result.refund;
+    };
+    if (groupCount === 2) {
+      const assigned = await post(`/orders/${second}/transition`, { state: 'supplier_assigned' });
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+      assert.equal(assigned.body.order.shopAcceptance.workingMinutes, 60);
+      const declined = await post(`/orders/${second}/decline`, { reason: 'Unable to fulfil this group' }, 'clerk_supplier_b');
+      assert.equal(declined.status, 200, JSON.stringify(declined.body));
+      assert.equal((await loadStore(database)).orders.find((order) => order.id === first).state, 'production');
+    }
+    let refund = await refundCall(`/orders/${second}/refund-requests`, { kind: 'cancellation', reason: 'Cancel this group only',
+      destination: { qrFileId: 'file_refund_qr', provider: 'other', accountName: 'Account holder', ownershipConfirmed: true } }, 'clerk_client');
+    refund = await refundCall(`/refund-requests/${refund.id}/review`, { expectedVersion: refund.version,
+      destinationVerified: true, reason: 'Destination verified' });
+    const secondTotal = basket.groups[1].totalMinor;
+    refund = await refundCall(`/refund-requests/${refund.id}/settle`, { expectedVersion: refund.version,
+      shopEntitlementMinor: 0, riderEntitlementMinor: 0, totalMinor: secondTotal, workStopped: true,
+      shopAgreement: 'No work performed', deliveryEvidence: 'No trip performed', reason: 'Full group refund' });
+    assert.equal(refund.settlement.totalMinor, secondTotal);
+    if (fulfillmentMode === 'pickup') assert.equal(refund.settlement.deliveryMinor, expectedPickup[1]);
+    persisted = await loadStore(database);
+    assert.equal(persisted.orders.find((order) => order.id === second).state, 'cancelled');
+    assert.equal(persisted.orders.find((order) => order.id === first).state, 'production');
+    assert.equal(persisted.orders.find((order) => order.id === first).payoutMilestones[0].status, 'released');
+    assert.deepEqual((await call(`/baskets/${basket.id}/invoice`)).body.invoice, invoice);
+    await assert.rejects(database.transaction(async () => {
+      await database.query("UPDATE order_payments SET status='not_submitted' WHERE order_id=$1 AND code='initial'", [first]);
+    }), /basket payment/);
+  });
+}
+test('checkout checks links for released clients, refuses every failed or inconclusive verdict, and rolls back', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: 'canva_link' });
+    await saveStore(database, store);
+  });
+  let mode = 'missing';
+  let probes = 0;
+  const provider = http.createServer((_req, res) => {
+    probes++;
+    if (mode === 'unreachable') { res.destroy(); return; }
+    const status = { missing: 404, private: 401, challenged: 403, unknown: 200, passed: 200 }[mode];
+    res.writeHead(status, { 'content-type': mode === 'passed' ? 'application/pdf' : 'text/html' });
+    res.end(mode === 'passed' ? readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)) : '<html>Unavailable artwork</html>');
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  const links = [{ formatCode: 'canva_link', url: 'https://www.canva.com/design/ABC/view' }];
+  const added = await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkFileId: 'file_art', artworkLinks: links } });
+  assert.equal(added.status, 201);
+  const checkout = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'ARTWORK-GATE' }, artworkCheck: { ok: true } } });
+  for (mode of ['missing', 'private', 'challenged', 'unknown', 'unreachable']) {
+    const result = await checkout();
+    assert.equal(result.status, 409, JSON.stringify(result.body));
+    assert.equal(result.body.error, 'artwork_link_check_failed');
+    assert.equal(result.body.lineId, added.body.cart.lines[0].id);
+    assert.equal(result.body.field, 'artwork');
+    assert.match(result.body.message, /viewable by anyone with the link/);
+    assert.match(result.body.message, /upload the file instead/);
+    const store = await loadStore(database);
+    assert.equal(store.orders.length, 0);
+    assert.equal(store.orderJobs.length, 0);
+    assert.equal(store.orderInvoices.length, 0);
+    assert.equal(store.notifications.length, 0);
+    assert.equal(store.carts[0].state, 'draft');
+    assert.deepEqual(store.files.find(f => f.fileId === 'file_qr').references, []);
+  }
+  const lineId = added.body.cart.lines[0].id;
+  await call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body: { artworkLinks: [], artworkFileId: 'file_art' } });
+  // An existing upload without a verdict is explicit reupload guidance, never a silent QA order.
+  for (const verdict of [undefined, { status: 'failed', reason: 'artwork_file_unreadable', message: 'The artwork could not be read. Export and upload it again.' }]) {
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.files.find(f => f.fileId === 'file_art').artworkCheck = verdict;
+      await saveStore(database, store);
+    });
+    const result = await checkout();
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error, 'artwork_file_check_failed');
+    assert.equal(result.body.fileId, 'file_art');
+    assert.match(result.body.message, /[Uu]pload/);
+    assert.equal((await loadStore(database)).orders.length, 0);
+  }
+  await call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body: { artworkFileId: null } });
+  const empty = await checkout();
+  assert.equal(empty.body.error, 'artwork_required');
+  await call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body: { artworkLinks: links } });
+  mode = 'passed';
+  const placed = await checkout();
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  assert.equal(placed.body.order.fileCheck.status, 'pending');
+  assert.ok(probes >= 5, 'checks happen without a client call to link-check');
+  const store = await loadStore(database);
+  assert.equal(store.notifications.some(n => n.appRole === 'supplier'), false);
+  assert.ok(store.notifications.some(n => n.appRole === 'ops_admin' && n.type === 'ops_job_needs_qa'));
+});
+
+test('checkout provider wait holds no domain lock and a concurrent artwork change invalidates the verdict', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: 'canva_link' });
+    await saveStore(database, store);
+  });
+  let reached, release;
+  const reachedProvider = new Promise(resolve => { reached = resolve; });
+  const releasedProvider = new Promise(resolve => { release = resolve; });
+  const provider = http.createServer(async (_req, res) => {
+    reached(); await releasedProvider;
+    res.writeHead(200, { 'content-type': 'application/pdf' }); res.end(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)));
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { release(); provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkLinks: [{ formatCode: 'canva_link', url: 'https://www.canva.com/design/ABC/view' }] } });
+  const placing = call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'CONCURRENT-ARTWORK' } } });
+  await Promise.race([reachedProvider, placing.then(result => { throw new Error(JSON.stringify(result)); })]);
+  try {
+    assert.equal((await database.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', ['gridgo-domain-mutation'])).rows[0].acquired, true);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.cartLines[0].artworkLinks[0].url = 'https://www.canva.com/design/CHANGED/view';
+      await saveStore(database, store);
+    });
+  } finally { release(); }
+  const result = await placing;
+  assert.equal(result.status, 409, JSON.stringify(result.body));
+  assert.equal(result.body.error, 'artwork_check_required');
+  assert.equal((await loadStore(database)).orders.length, 0);
+});
+
+test('artwork uploads persist their automatic verdict and checkout refuses a corrupted upload', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const objects = new Map();
+  const storage = http.createServer((req, res) => {
+    if (req.url.includes('location')) { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<LocationConstraint></LocationConstraint>'); return; }
+    if (req.method === 'PUT') {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => { objects.set(req.url, Buffer.concat(chunks)); res.writeHead(200, { ETag: '"fixture"' }); res.end(); });
+      return;
+    }
+    res.writeHead(200, { 'Content-Length': objects.get(req.url)?.length || 0 }); res.end();
+  });
+  await new Promise(resolve => storage.listen(0, '127.0.0.1', resolve));
+  t.after(() => { storage.closeAllConnections(); return new Promise(resolve => storage.close(resolve)); });
+  const storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  const instance = await startApi({ extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const upload = async bytes => {
+    const form = new FormData();
+    form.set('purpose', 'artwork');
+    form.set('file', new Blob([bytes], { type: 'application/pdf' }), 'design.pdf');
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
+      const body = await response.json();
+      if (body.error === 'storage_initializing') {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        continue;
+      }
+      assert.equal(response.status, 201, JSON.stringify(body) + instance.output());
+      return body.file;
+    }
+    assert.fail(`Storage recovery did not finish: ${instance.output()}`);
+  };
+  const invalid = await upload(Buffer.from('%PDF-1.7 truncated'));
+  assert.equal(invalid.artworkCheck.status, 'failed');
+  assert.equal((await call(`/files/${invalid.fileId}`)).body.file.artworkCheck.status, 'failed');
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  const added = await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkFileId: invalid.fileId } });
+  const checkout = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'FILE-CHECK' } } });
+  assert.equal((await checkout()).body.error, 'artwork_file_check_failed');
+  const valid = await upload(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)));
+  assert.equal(valid.artworkCheck.status, 'passed');
+  assert.equal((await loadStore(database)).files.find(file => file.fileId === valid.fileId).artworkCheck.status, 'passed');
+  await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { method: 'PATCH', body: { artworkFileId: valid.fileId } });
+  assert.equal((await checkout()).status, 201);
+});
+
+test("hub pickup settings are Super Admin-only and early choices survive PostgreSQL round trips", async (t) => {
+  const database = createDatabase();
+  await fixture(database);
+  t.after(() => database.close());
+  const { api, child } = await startApi();
+  t.after(async () => {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", resolve));
+  });
+  const patch = (body, subject = "clerk_ops") => request(api, "/settings", { method: "PATCH", subject, body });
+  const initial = await request(api, "/settings", { subject: "clerk_client" });
+  assert.equal(initial.body.settings.hubPickup.feeMinor, 0);
+  assert.equal(initial.body.settings.hubPickup.schedule, null);
+  const hubPickup = { feeMinor: 2500, schedule: { utcOffsetMinutes: 480,
+    week: [1, 3, 5].map((weekday) => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] } };
+  for (const subject of ["clerk_client", "clerk_supplier_a", "clerk_rider", "clerk_ops"]) {
+    assert.equal((await patch({ expectedVersion: initial.body.version, reason: "Configure pickup", hubPickup }, subject)).status, 403);
+  }
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships.push({ userId: "user_ops", role: "super_admin", createdAt: AT });
+    await saveStore(database, store);
+  });
+  for (const bad of [null, { feeMinor: -1, schedule: null }, { feeMinor: 1.5, schedule: null },
+    { feeMinor: "0", schedule: null }, { feeMinor: Number.MAX_SAFE_INTEGER + 1, schedule: null },
+    { feeMinor: 0, schedule: {} }]) {
+    assert.equal((await patch({ expectedVersion: initial.body.version, reason: "Invalid pickup", hubPickup: bad })).status, 400);
+  }
+  assert.equal((await patch({ expectedVersion: initial.body.version - 1, reason: "Configure pickup", hubPickup })).body.error, "settings_version_conflict");
+  assert.equal((await patch({ expectedVersion: initial.body.version, hubPickup })).body.error, "settings_reason_required");
+  const configured = await patch({ expectedVersion: initial.body.version, reason: "Configure pickup", hubPickup });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+  assert.equal(configured.body.settings.hubPickup.feeMinor, 2500);
+  const unrelated = await patch({ expectedVersion: configured.body.version, reason: "Window update", issueWindowHours: 48 });
+  assert.equal(unrelated.status, 200);
+  assert.deepEqual(unrelated.body.settings.hubPickup, configured.body.settings.hubPickup);
+
+  const post = (path, body) => request(api, path, { method: "POST", subject: "clerk_client", body });
+  const orders = [];
+  for (const fulfillmentMode of ["delivery", "pickup"]) {
+    const dropoff = { lat: 7.28, lng: 125.62, label: "Recipient" };
+    const match = await post("/me/matches", { subcategoryCode: "flyers", fulfillmentMode, dropoff });
+    assert.equal(match.status, 200, JSON.stringify(match.body));
+    const selected = match.body.listings[0];
+    const created = await post("/me/carts", {});
+    const cartId = created.body.cart.id;
+    const added = await post(`/me/carts/${cartId}/lines`, {
+      selectToken: selected.selectToken, matchRequestId: match.body.matchRequestId,
+      optionIds: [], quantity: 1, artworkFileId: "file_art",
+    });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    const read = await request(api, `/me/carts/${cartId}`, { subject: "clerk_client" });
+    assert.deepEqual(read.body.cart.requestFulfillment, match.body.requestFulfillment);
+    const quote = await request(api, `/me/carts/${cartId}/quote`, { subject: "clerk_client" });
+    assert.equal(quote.body.quote.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(quote.body.quote.totalMinor, quote.body.quote.clientItemSubtotalMinor + quote.body.quote.deliveryFeeMinor);
+    assert.equal(quote.body.quote.pickupFeeMinor, fulfillmentMode === "pickup" ? 2500 : undefined);
+    for (const field of ["supplierSubtotalMinor", "shop", "shopName", "pickup"]) {
+      assert.equal(Object.hasOwn(quote.body.quote, field), false, field);
+    }
+    const changed = await request(api, `/me/carts/${cartId}/fulfillment`, { method: "PUT", subject: "clerk_client",
+      body: { fulfillmentMode: fulfillmentMode === "pickup" ? "delivery" : "pickup" } });
+    assert.equal(changed.status, 409);
+    assert.equal(changed.body.error, "request_fulfillment_locked");
+    const checked = await post(`/me/carts/${cartId}/checkout`, { payment: {
+      method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123",
+    } });
+    assert.equal(checked.status, 201, JSON.stringify(checked.body));
+    assert.equal(checked.body.order.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(checked.body.order.totalMinor, quote.body.quote.totalMinor);
+    assert.equal(checked.body.invoice.clientItemSubtotalMinor, quote.body.quote.clientItemSubtotalMinor);
+    orders.push(checked.body.order);
+    const saved = await loadStore(database);
+    const order = saved.orders.find((row) => row.id === checked.body.order.id);
+    assert.deepEqual(order.requestFulfillment, match.body.requestFulfillment);
+    assert.equal(order.totalMinor, order.supplierSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+    assert.equal(order.paymentAllocations.reduce((sum, row) => sum + row.amountMinor, 0), order.totalMinor);
+    if (fulfillmentMode === "pickup") {
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.equal(order.riderPayoutMinor, 0);
+      assert.equal(order.platformDeliveryShareMinor, 2500);
+      const confirmed = await request(api, `/orders/${order.id}/payments/initial/confirm`, {
+        method: "POST", subject: "clerk_ops", body: {},
+      });
+      assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+      const assigned = await request(api, `/orders/${order.id}/transition`, {
+        method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
+      });
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+      assert.equal(assigned.body.order.pickupFeeMinor, 2500);
+      await assert.rejects(database.query(`UPDATE orders SET data=jsonb_set(data,'{pickupFeeMinor}','3000') WHERE id=$1`, [order.id]),
+        (error) => error.constraint === "orders_request_fulfillment_immutable");
+    }
+  }
+  const changed = await patch({ expectedVersion: unrelated.body.version, reason: "Later fee", hubPickup: { ...hubPickup, feeMinor: 9000 } });
+  assert.equal(changed.status, 200);
+  const saved = await loadStore(database);
+  assert.equal(saved.orders.find((row) => row.id === orders[1].id).pickupFeeMinor, 2500);
+  assert.ok(saved.auditLog.some((row) => row.action === "settings.operational_update" && row.detail.current.hubPickup.feeMinor === 2500));
+});
+
 test('shop acceptance timeout is enforced by HTTP before the lifecycle sweep and cannot release payouts', { skip: !DATABASE_URL }, async (t) => {
   const { call, orderId, database } = await placedOrder(t);
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
@@ -2048,6 +2521,7 @@ test('replacement preserves an applied original-shop penalty ledger and resets o
     const store = await loadStore(database), order = store.orders[0];
     store.catalogItems.find((row) => row.id === 'item_supplier_a').name = store.orderLineItems[0].itemNameSnapshot;
     store.settings.productionPenalty.deductionsEnabled = true;
+    order.fileCheck.status = 'passed';
     order.state = 'production'; order.readyBy = '2026-01-01T00:00:00.000Z';
     const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
     assessProductionLapses(store, { at: '2026-01-03T00:00:00.000Z', createId });

@@ -1,3 +1,4 @@
+import { supplierArtworkReleased } from "./artwork-gates.js";
 import { isContainedPickup, paymentSettled } from "./operational-model.js";
 import { privilegedAdminMemberships, eligibleRiderIds, finalPaymentAction } from "./notifications.js";
 
@@ -312,6 +313,7 @@ export function writeDraft(store, draft, { id, at }) {
 }
 
 export function shopNotificationDraft(order) {
+  if (!supplierArtworkReleased(order)) return null;
   if (!order?.supplierId || !order.id || !order.state) return null;
   const copy = SHOP_COPY[order.state];
   if (!copy) return null;
@@ -613,7 +615,7 @@ export function notifyOpsOrderProgress(store, order, { createId, at }) {
 }
 
 export function notifyShopPayoutHeld(store, order, { createId, at }) {
-  if (!order?.id || !order.supplierId) return [];
+  if (!order?.id || !order.supplierId || !supplierArtworkReleased(order)) return [];
   const result = writeDraft(
     store,
     {

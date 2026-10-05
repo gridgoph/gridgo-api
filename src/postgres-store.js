@@ -69,12 +69,14 @@ const TABLES = [
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
-  { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at"] },
+  { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "artwork_links", "match_deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "scheduled_for", "created_at", "updated_at"] },
   { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
+  { name: "order_baskets", keys: ["id"], columns: ["id", "client_id", "receipt_order_id", "total_minor", "pickup_fee_minor", "deadline", "fulfillment_mode", "payment", "created_at", "updated_at"] },
+  { name: "order_basket_groups", keys: ["basket_id", "position"], columns: ["basket_id", "order_id", "position"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
   { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
@@ -132,6 +134,7 @@ export function emptyStore() {
     listingStarters: [],
     listingStarterGroups: [],
     listingStarterOptions: [],
+    baskets: [],
     carts: [],
     cartLines: [],
     orders: [],
@@ -512,6 +515,8 @@ function rowsFromStore(store) {
       created_at: cart.createdAt,
       updated_at: cart.updatedAt,
       checked_out_at: cart.checkedOutAt ?? null,
+      deadline: cart.deadline ?? null,
+      request_fulfillment: cart.requestFulfillment ?? null,
     });
   }
   for (const line of (store.cartLines || [])) {
@@ -646,6 +651,12 @@ function rowsFromStore(store) {
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
   for (const [position, item] of (store.deviceTokens || []).entries()) rows.device_tokens.push(deviceTokenRow(item, position));
   writeRefundRows(store, rows);
+  for (const basket of store.baskets || []) {
+    rows.order_baskets.push({ id: basket.id, client_id: basket.clientId, receipt_order_id: basket.receiptOrderId,
+      total_minor: money(basket.totalMinor, "basket.totalMinor"), pickup_fee_minor: basket.pickupFeeMinor == null ? null : money(basket.pickupFeeMinor, "basket.pickupFeeMinor"), deadline: basket.deadline,
+      fulfillment_mode: basket.fulfillmentMode, payment: basket.payment, created_at: basket.createdAt, updated_at: basket.updatedAt });
+    basket.orderIds.forEach((orderId, position) => rows.order_basket_groups.push({ basket_id: basket.id, order_id: orderId, position }));
+  }
   return rows;
 }
 
@@ -904,16 +915,25 @@ export async function loadStore(database) {
     priceMultiplierBps: row.price_multiplier_bps ?? null,
     specBinding: row.spec_binding, sortOrder: row.sort_order,
   }));
+  store.baskets = loaded.order_baskets.map((row) => ({ id: row.id, clientId: row.client_id,
+    receiptOrderId: row.receipt_order_id, totalMinor: row.total_minor, deadline: row.deadline,
+    ...(row.pickup_fee_minor != null ? { pickupFeeMinor: row.pickup_fee_minor } : {}),
+    fulfillmentMode: row.fulfillment_mode, payment: row.payment, createdAt: row.created_at, updatedAt: row.updated_at,
+    orderIds: loaded.order_basket_groups.filter((group) => group.basket_id === row.id)
+      .sort((a, b) => a.position - b.position).map((group) => group.order_id),
+  }));
   store.carts = orderedBy(loaded.client_carts, "client_id", "created_at", "id").map((row) => {
     const item = {
       id: row.id, clientId: row.client_id, state: row.state, version: row.version,
       serviceLevel: row.service_level, fulfillmentMode: row.fulfillment_mode,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
+    present(item, "requestFulfillment", row.request_fulfillment);
     present(item, "scheduledFor", row.scheduled_for);
     if (row.default_dropoff_lat != null) item.defaultDropoff = { lat: row.default_dropoff_lat, lng: row.default_dropoff_lng, label: row.default_dropoff_label };
     present(item, "checkedOutOrderId", row.checked_out_order_id);
     present(item, "checkedOutAt", row.checked_out_at);
+    present(item, "deadline", row.deadline);
     return item;
   });
   store.cartLines = orderedBy(loaded.client_cart_lines, "cart_id", "sort_order", "id").map((row) => {

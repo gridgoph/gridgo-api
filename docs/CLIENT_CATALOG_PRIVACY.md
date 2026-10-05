@@ -131,7 +131,8 @@ The quote contains:
 | `reasons[]` | `{code, lineId? , lineIds?}`; `cart_empty`, `catalog_item_stale`, `line_unpriced`, `shop_unavailable`, `dropoff_required` |
 | `clientItemSubtotalMinor` | GRIDGO amount, fee rounded **once on the aggregate**; null if a line cannot be priced |
 | `deliveryLines[]` | `{lineIds, distanceZone, deliveryFeeMinor, distanceKm?}`; no supplier identity, origin pin, address or exact metres |
-| `deliveryFeeMinor` | Sum of delivery legs, null if any leg is unknown; pickup is zero |
+| `deliveryFeeMinor` | Sum of delivery legs, null if any leg is unknown; new pre-match pickup includes the configured hub fee (legacy pickup stays zero) |
+| `pickupFeeMinor` | On a pre-match pickup cart only: the hub fee already included in `deliveryFeeMinor`; never add it again |
 | `totalMinor` | GRIDGO items plus delivery; null for incomplete quotes |
 | `downpaymentPercent` | Current 75/100 setting for a new order |
 | `downpaymentMinor`, `balanceMinor` | Checkout's half-up installment amounts; null if total is unknown |
@@ -140,6 +141,7 @@ Delivery shares checkout's distance and inclusive zone-band lookup: group lines
 by supplier and charge for the farthest line/default destination once per group.
 Out of Zone alone includes `distanceKm`, rounded to one decimal. Pickup has no
 client delivery legs. The existing one-shop-per-cart restriction is unchanged.
+On carts selected through the pre-match fulfillment flow, quotes preserve the locked choice and destination; conflicting preview overrides return `409 request_fulfillment_locked`.
 The quote uses current listings/settings; checkout validates and snapshots them
 again. A quote is not a reservation, QA decision, or payment confirmation.
 
