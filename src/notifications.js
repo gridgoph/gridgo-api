@@ -75,6 +75,11 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
+  if (notification.type === "organization_officer_confirmation") {
+    item.officerId = notification.officerId;
+    item.actions = ["confirm_officer", "change_officer"];
+  }
   if (CLIENT_EVENT_STATES[notification.type]) item.eventState = CLIENT_EVENT_STATES[notification.type];
   if (notification.orderId) item.orderId = notification.orderId;
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;

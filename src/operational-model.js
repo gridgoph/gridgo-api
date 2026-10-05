@@ -964,6 +964,7 @@ function clientCorrectionFor(order) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
   if (user?.role === "client" && order.organizationDiscountRateBps > 0) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
       if (!record) continue;

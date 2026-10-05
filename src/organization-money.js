@@ -4,7 +4,8 @@ export function approvedOrganization(store, userId) {
   return Boolean(user && user.accountType === 'organization'
     && !['suspended', 'removed'].includes(user.accountStatus)
     && (store.userRoleMemberships || []).some((row) => row.userId === userId && row.role === 'client')
-    && (store.approvalCases || []).some((row) => row.userId === userId && row.kind === 'business_client' && row.status === 'approved'));
+    && (store.approvalCases || []).some((row) => row.userId === userId && row.kind === 'business_client' && (row.status === 'approved' || (['pending', 'rejected'].includes(row.status)
+      && (store.organizationAccounts || []).some((account) => account.userId === userId && account.currentOfficer)))));
 }
 
 export function organizationMoneyError(code, message, status = 400) {

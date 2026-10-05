@@ -1,3 +1,6 @@
+import { routeOrganization, organizationProjection, sweepOfficerConfirmations } from "./organization-routes.js";
+import { createOrganizationMailer } from "./organization-email.js";
+import { officerSnapshot } from "./client-applications.js";
 import { routeOrganizationStatements } from "./organization-statements.js";
 import { approvedOrganization } from "./organization-money.js";
 import { catalogReviewNotice } from "./catalog-review-routes.js";
@@ -260,6 +263,7 @@ const fileRetention = createFileRetention({ database, storage: objectStorage,
 });
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
+const organizationMailer = createOrganizationMailer(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
 // under their own advisory lock and can never hold up the domain lock that
@@ -978,6 +982,7 @@ function approvalCaseDetail(store, approvalCase) {
       ...base,
       clientProfile: clientProfileProjection(store, approvalCase.userId),
       application: businessApplicationProjection(store, approvalCase),
+      organization: organizationProjection(store, approvalCase.userId, { includeHistory: true }),
     };
   }
   if (approvalCase.kind === "rider") {
@@ -1069,10 +1074,11 @@ function fixedAuthProjection(store, auth, role) {
   const base = { user: { ...publicIdentity(auth.user), ...accountStateFields(auth.user) }, membership };
   if (role === "client") {
     const approvalCase = approvalCaseFor(context, "business_client");
-    const approved = approvalCase?.status === "approved";
+    const approved = approvalCase?.status === "approved" || (Boolean(officerSnapshot(store, auth.user.id)) && approvalCase?.status !== "suspended");
     return {
       ...base,
       clientProfile: clientProfileProjection(store, auth.user.id),
+      organization: organizationProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       capabilities: {
         placePersonalOrders: true,
@@ -1460,6 +1466,17 @@ async function sweepSeasonWindows() {
   await enqueueMutation(async () => {
     const store = await load();
     if (applySeasonNotices(store, { at: now(), createId: id, audit }).length) await save(store);
+  });
+}
+
+async function sweepOrganizationOfficers() {
+  // An empty or not-yet-due roster must not acquire the domain lock on every tick.
+  const candidate = await database.query(`SELECT 1 FROM organization_accounts
+    WHERE (data->>'nextConfirmationAt')::timestamptz <= now() LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (sweepOfficerConfirmations(store, { at: now(), createId: id })) await save(store);
   });
 }
 
@@ -2218,6 +2235,13 @@ async function handleRequest(req, res) {
     if (pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
+    const organizationResponse = await routeOrganization({ req, url, store, user, readBody, now, createId: id,
+      mailer: organizationMailer, emailSecret: process.env.CLERK_SECRET_KEY });
+    if (organizationResponse) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (organizationResponse.mutated) await save(store);
+      return send(res, organizationResponse.status, organizationResponse.body);
     }
     const catalogResponse = await routeSupplierCatalog({
       req,
@@ -5181,6 +5205,7 @@ async function handleRequest(req, res) {
       const order = {
         id: id("ord"),
         clientId: user.id,
+        organizationOfficer: officerSnapshot(store, user.id),
         supplierId: null,
         riderId: null,
         state: body.submit ? "submitted" : "draft",
@@ -6439,6 +6464,7 @@ async function runLifecycleWork() {
       expireElapsedIssueWindows,
       sweepProductionInactivity,
       sweepSeasonWindows,
+      sweepOrganizationOfficers,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }

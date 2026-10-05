@@ -46,3 +46,14 @@ test('legacy quote commitment reduces only the initial service-fee collection', 
 test('gross Printing must remain safe even when a discount makes the payable total safe', () => {
   assert.throws(() => organizationFeeMoney(8_500_000_000_000_000, settings, true), { code: 'invalid_money' });
 });
+
+test('verified organizations keep eligibility during pending or rejected handovers', () => {
+  const store = { users: [{ id: 'c', accountType: 'organization' }], userRoleMemberships: [{ userId: 'c', role: 'client' }],
+    approvalCases: [{ userId: 'c', kind: 'business_client', status: 'pending' }],
+    organizationAccounts: [{ userId: 'c', currentOfficer: { id: 'verified_officer' } }] };
+  assert.equal(approvedOrganization(store, 'c'), true);
+  store.approvalCases[0].status = 'rejected';
+  assert.equal(approvedOrganization(store, 'c'), true);
+  store.approvalCases[0].status = 'suspended';
+  assert.equal(approvedOrganization(store, 'c'), false);
+});

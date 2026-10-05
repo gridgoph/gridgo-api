@@ -78,15 +78,11 @@ A basket owns one payment but each group owns its own discount and finance recor
   This is an order-spend summary, not a refund, cash-movement or tax ledger.
 - Every representation says **Not a tax document. Official receipts are issued
   separately.** Existing per-order official-receipt handling is unchanged.
-- The officer field defensively reads an immutable `order.officerOfRecord` or
-  receipt `snapshot.officerOfRecord` (string or `{ name }`). It stays blank when
-  absent; it never substitutes today's officer or the account display name.
-  The upstream officer-of-record implementation (#164) is built separately and
-  is not present on this branch's base.
-- `401 unauthorized` for unsigned requests; `403 forbidden` for a wrong role;
-  `403 organization_approval_required` for non-approved/non-organization accounts;
-  `400 invalid_statement_period`/`invalid_statement_format` for invalid queries.
-  Unsafe aggregate totals return `409 statement_total_too_large`.
+- The officer field reads immutable `order.organizationOfficer` or receipt
+  `snapshot.organizationOfficer` (`{ fullName }`), with legacy `officerOfRecord`
+  support. It stays blank when absent; it never substitutes today's officer.
+  Pending or rejected handovers preserve organization eligibility while the
+  previously verified officer remains active. Suspensions still deny access.
 
 PDF uses an embedded, licensed Unicode font and paginated text with wrapping. CSV
 is UTF-8 with BOM, RFC-style quoting and spreadsheet-formula neutralization.

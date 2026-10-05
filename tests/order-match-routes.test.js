@@ -1515,6 +1515,25 @@ for (const [count, fee, expected] of [[2, 2501, [1251, 1250]], [3, 2501, [834, 8
   });
 }
 
+test('checkout and invoice preserve the order-time officer across later handovers', async () => {
+  const { store, client } = fixture();
+  const original = { id: 'officer_old', fullName: 'Officer One', verifiedAt: AT };
+  store.organizationAccounts = [{ userId: client.id, currentOfficer: { ...original } }];
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkFileId: 'file_art' });
+  const result = await call('POST', `/me/carts/${cartId}/checkout`, {
+    payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'OFFICER-SNAPSHOT' },
+  });
+  assert.deepEqual(result.body.order.organizationOfficer, original);
+  store.organizationAccounts[0].currentOfficer = { id: 'officer_new', fullName: 'Officer Two', verifiedAt: AT };
+  const invoice = await call('GET', `/orders/${result.body.order.id}/invoice`);
+  assert.deepEqual(invoice.body.invoice.organizationOfficer, original);
+  const order = store.orders.find((row) => row.id === result.body.order.id);
+  assert.deepEqual(publicOrderFor(order, client, store).organizationOfficer, original);
+  assert.equal(publicOrderFor(order, { id: 'supplier_a', role: 'supplier' }, store).organizationOfficer, undefined);
+});
+
 for (const count of [1, 2]) {
   test(`approved organization discount funds ${count} shop group(s) without reducing payouts`, async () => {
     const { store, client } = fixture();

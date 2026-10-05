@@ -1,3 +1,4 @@
+import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -34,9 +35,10 @@ test("applyForBusiness opens a pending case and leaves the account personal", ()
     store: context.store,
     user: context.user,
     body: {
-      businessName: "Bautista Trading",
+      ...businessApplication(context.store, context.user.id),
+      businessName: "Test business",
       businessNature: "Corporate merchandise",
-      accountType: "organization",
+      accountType: "business",
     },
     idempotencyKey: "apply-1",
     createId: (prefix) => `${prefix}_${++sequence}`,
@@ -52,8 +54,8 @@ test("applyForBusiness opens a pending case and leaves the account personal", ()
   // The requested name is held on the application event, never on the still
   // personal profile, so a rejected application leaves nothing behind.
   assert.equal(result.clientProfile.businessName ?? null, null);
-  assert.equal(context.store.approvalCaseEvents[0].snapshot.businessName, "Bautista Trading");
-  assert.equal(context.store.approvalCaseEvents[0].snapshot.accountType, "organization");
+  assert.equal(context.store.approvalCaseEvents[0].snapshot.businessName, "Test business");
+  assert.equal(context.store.approvalCaseEvents[0].snapshot.accountType, "business");
 });
 
 test("applyForBusiness retries the same idempotency key without opening a second case", () => {
@@ -63,7 +65,7 @@ test("applyForBusiness retries the same idempotency key without opening a second
   const input = {
     store: context.store,
     user: context.user,
-    body: { businessName: "Bautista Trading", businessNature: "Events" },
+    body: { ...businessApplication(context.store, context.user.id), businessName: "Test business", businessNature: "Events" },
     idempotencyKey: "apply-1",
     createId,
     now: () => AT,

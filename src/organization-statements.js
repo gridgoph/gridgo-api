@@ -45,8 +45,8 @@ function closedAt(order) {
 }
 function officerFor(order, invoice) {
   // #164 owns the immutable order/receipt snapshot. Never use today's profile officer.
-  const value = order.officerOfRecord ?? invoice?.officerOfRecord;
-  return typeof value === 'string' ? value : typeof value?.name === 'string' ? value.name : '';
+  const value = order.organizationOfficer ?? invoice?.organizationOfficer ?? order.officerOfRecord ?? invoice?.officerOfRecord;
+  return typeof value === 'string' ? value : typeof value?.fullName === 'string' ? value.fullName : typeof value?.name === 'string' ? value.name : '';
 }
 function csvCell(value) {
   let text = String(value ?? '');

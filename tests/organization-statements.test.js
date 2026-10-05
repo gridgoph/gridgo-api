@@ -52,3 +52,18 @@ test('exports use the same totals and guard CSV formulas; malformed periods are 
     assert.throws(() => call(fixture(), query), (e) => e.status === 400);
   }
 });
+
+ test('statements retain order-time officers and stay available during a handover', () => {
+  const store = fixture();
+  store.approvalCases[0].status = 'pending';
+  store.organizationAccounts = [{ userId: 'c', currentOfficer: { fullName: 'Current Officer' } }];
+  store.orders[0].organizationOfficer = { fullName: 'Original Officer' };
+  store.orderInvoices = [{ orderId: store.orders[1].id, snapshot: { organizationOfficer: { fullName: 'Invoice Officer' } } }];
+  const statement = call(store).body.statement;
+  assert.equal(statement.orders[0].officerOfRecord, 'Original Officer');
+  assert.equal(statement.orders[1].officerOfRecord, 'Invoice Officer');
+  const output = call(store, '?from=2026-10-01&to=2026-10-31&format=csv').bytes.toString();
+  assert.match(output, /Original Officer/);
+  assert.match(output, /Invoice Officer/);
+  assert.doesNotMatch(output, /Current Officer/);
+ });

@@ -120,3 +120,5 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Season awareness: public `/season-windows`, Super Admin editor and disabled-by-default scheduled notices under `/admin/season-windows`; see [Season windows API](docs/SEASON_WINDOWS_API.md).
 
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.
+
+- Business and organization application documents, shared-login email codes, officer handover/history, and quarterly notices: [Organization accounts API](docs/ORGANIZATION_ACCOUNTS_API.md).

@@ -1,3 +1,4 @@
+import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -429,7 +430,7 @@ test("approving a business-client case flips account type only then", () => {
     clientProfiles: [{
       userId: "client",
       clientKind: "personal",
-      businessName: "Bautista Trading",
+      businessName: "Test business",
       businessNature: "Events",
       updatedAt: AT,
     }],
@@ -453,15 +454,17 @@ test("approving a business-client case flips account type only then", () => {
       actorKind: "applicant",
       requestId: "enrollment:business_client:client:key",
       snapshot: {
-        businessName: "Bautista Trading",
+        businessName: "Test business",
         businessNature: "Events",
-        accountType: "organization",
+        accountType: "business",
       },
       createdAt: AT,
     }],
     notifications: [],
     auditLog: [],
   };
+
+  Object.assign(store.approvalCaseEvents[0].snapshot, { ...businessApplication(store, "client"), schemaVersion: 1 });
 
   decideApprovalCase({
     store,
@@ -475,8 +478,8 @@ test("approving a business-client case flips account type only then", () => {
   });
 
   assert.equal(store.approvalCases[0].status, "approved");
-  assert.equal(store.users[0].accountType, "organization");
-  assert.equal(store.users[0].orgName, "Bautista Trading");
+  assert.equal(store.users[0].accountType, "business");
+  assert.equal(store.users[0].orgName, "Test business");
   assert.equal(store.users[0].version, 2);
   assert.equal(store.clientProfiles[0].clientKind, "business");
 });

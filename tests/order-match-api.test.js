@@ -2614,6 +2614,8 @@ for (const groupCount of [1, 2]) {
     await database.transaction(async () => {
       const store = await loadStore(database);
       Object.assign(store.users.find(row => row.id === 'user_client'), { accountType: 'organization', orgName: 'Organization fixture' });
+      store.organizationAccounts = [{ userId: 'user_client', nameKey: 'organization fixture', schoolKey: 'test school',
+        currentOfficer: { id: 'officer_original', fullName: 'Original Officer', verifiedAt: AT } }];
       store.approvalCases.push({ id: 'case_org', userId: 'user_client', kind: 'business_client', status: 'approved',
         version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
       store.users.find(row => row.id === 'user_ops').role = 'super_admin';
@@ -2660,13 +2662,19 @@ for (const groupCount of [1, 2]) {
       }
       await saveStore(database, store);
     });
+    await database.transaction(async () => {
+      const current = await loadStore(database);
+      current.approvalCases.find(row => row.id === 'case_org').status = 'pending';
+      current.organizationAccounts[0].currentOfficer = { id: 'officer_new', fullName: 'Current Officer', verifiedAt: AT };
+      await saveStore(database, current);
+    });
     const statementPath = '/me/organization/statements?from=2026-10-01&to=2026-10-31';
     const report = await call(statementPath);
     assert.equal(report.status, 200, JSON.stringify(report.body));
     assert.equal(report.body.statement.orderCount, groupCount);
     assert.equal(report.body.statement.discountEarnedMinor, groupCount === 1 ? 500 : 1500);
     assert.equal(report.body.statement.totalSpendMinor, checkout.body.invoice.totalMinor);
-    assert.equal(report.body.statement.orders[0].officerOfRecord, '');
+    assert.equal(report.body.statement.orders[0].officerOfRecord, 'Original Officer');
     assert.equal((await call(statementPath, { subject: 'clerk_supplier_a' })).status, 403);
     assert.equal((await request(instance.api, statementPath)).status, 401);
     for (const format of ['csv', 'pdf']) {
