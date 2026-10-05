@@ -609,6 +609,8 @@ test("other listings expose established ratings, zone-only distances, and queue 
   addShop(store, { id: "far", lat: 7.9, lng: 125.9, turnaroundHours: 2, priceMinor: 200, openJobs: 2, reviews: [5, 5, 4, 5, 5] });
   const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking: ["cost", "speed", "quality", "distance"], dropoff: DROPOFF });
   const other = result.otherListings[0];
+  assert.equal(other.clientBasePriceMinor, 220);
+  assert.equal(result.listings[0].clientBasePriceMinor, 110);
   assert.equal(other.distanceZone.key, "out_of_zone");
   assert.equal(typeof other.distanceKm, "number");
   assert.deepEqual(other.rating, { average: 4.8, count: 5 });

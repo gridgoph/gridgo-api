@@ -1,5 +1,10 @@
 # Supplier catalog API
 
+See [client catalogue privacy](CLIENT_CATALOG_PRIVACY.md) for additive GRIDGO
+price fields, signed-in `/ops/catalog/*` and `/me/catalog-preview` reads, and the
+staged removal of legacy public shop prices/identity. Phase 1 keeps existing
+responses compatible; new clients should use the client fields and quotes.
+
 Supplier catalog items are shop-owned listings under one taxonomy-governed service line. They do not replace `GET /catalog` platform products or make a non-live service matchable. Prices and modifiers are safe integer PHP minor units.
 
 Effective unit price is `max(0, basePriceMinor + selected modifiers)`. Matching stays on the service line.

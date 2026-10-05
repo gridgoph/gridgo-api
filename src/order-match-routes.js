@@ -1,3 +1,4 @@
+import { clientInvoice } from "./invoice-projection.js";
 import { basketForOrder, publicBasket, shopLabel } from "./baskets.js";
 import { createHash, randomBytes } from "node:crypto";
 import { publicShopRating } from "./shop-rating.js";
@@ -357,6 +358,62 @@ function publicCartForLineMutation(store, cart, at) {
   return publicCart(store, cart, at, { compactListings: true });
 }
 
+// Shared by estimates and checkout: one delivery per shop, to its farthest drop.
+function cartDelivery(store, cart, supplierId, lines) {
+  if (cart.fulfillmentMode === "pickup") return { dropoff: null, distance: 0, feeMinor: 0 };
+  const shop = (store.supplierProfiles || []).find((row) => row.userId === supplierId)?.shop;
+  if (!shop) return { error: "shop_unavailable" };
+  const dropoffs = lines.map((line) => line.dropoff || cart.defaultDropoff);
+  if (dropoffs.some((dropoff) => !dropoff)) return { error: "dropoff_required" };
+  const farthest = dropoffs.map((dropoff) => ({ dropoff, distance: distanceMetersBetween(shop, dropoff) }))
+    .sort((left, right) => right.distance - left.distance)[0];
+  return { ...farthest, feeMinor: deliveryFeeForDistance(farthest.distance, store.settings) };
+}
+
+function clientCartQuote(store, cart, lines) {
+  const reasons = [];
+  if (!lines.length) reasons.push({ code: "cart_empty" });
+  const subtotals = lines.map((line) => {
+    const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+    const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
+    const unavailable = !item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
+      || catalogItemBlockers(store, item, { publicOnly: true }).length;
+    const amount = unavailable ? null : cartLineSubtotal(store, line);
+    if (amount == null) reasons.push({ lineId: line.id, code: unavailable ? "catalog_item_stale" : "line_unpriced" });
+    return amount;
+  });
+
+  const grouped = new Map();
+  for (const line of lines) {
+    if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
+    grouped.get(line.supplierId).push(line);
+  }
+  const clientItemSubtotalMinor = subtotals.some((amount) => amount == null) ? null
+    : addMinor([...grouped.values()].map((entries) => clientMoneyMinor(store,
+      addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"))), "quote.items");
+  const deliveryLines = cart.fulfillmentMode === "pickup" ? [] : [...grouped.entries()].map(([supplierId, entries]) => {
+    const delivery = cartDelivery(store, cart, supplierId, entries);
+    const lineIds = entries.map((line) => line.id);
+    if (delivery.error) reasons.push({ lineIds, code: delivery.error });
+    const distanceZone = delivery.error ? null : distanceZoneForDistance(delivery.distance, store.settings);
+    return {
+      lineIds, distanceZone, deliveryFeeMinor: delivery.feeMinor ?? null,
+      ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((delivery.distance / 1000).toFixed(1)) } : {}),
+    };
+  });
+  const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
+    : addMinor(deliveryLines.map((line) => line.deliveryFeeMinor), "quote.delivery");
+  const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
+    : addMinor([clientItemSubtotalMinor, deliveryFeeMinor], "quote.total");
+  const downpaymentPercent = grouped.size > 1 ? 100 : downpaymentPercentSetting(store.settings);
+  const downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
+  return {
+    status: totalMinor == null ? "incomplete" : "priced", reasons,
+    clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor,
+    downpaymentPercent, downpaymentMinor, balanceMinor: totalMinor == null ? null : totalMinor - downpaymentMinor,
+  };
+}
+
 function publicCart(store, cart, at, { compactListings = false } = {}) {
   const lines = (store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
@@ -413,7 +470,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
     const serviceFeeMinor = itemSubtotalMinor == null ? null : roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
     return { id: groupLines[0].id, label: shopLabel(index), lineIds: groupLines.map((line) => line.id),
-      itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor,
+      clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
   });
   if (groups.length > 1) {
@@ -440,6 +497,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     shops: groups.length > 1 ? groups.map(({ id, label }) => ({ id, label })) : cartShops(store, lines),
     groups,
     ...(cart.checkedOutOrderId && basketForOrder(store, cart.checkedOutOrderId) ? { basketId: basketForOrder(store, cart.checkedOutOrderId).id } : {}),
+    clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines) : null,
     checkedOutOrderId: cart.checkedOutOrderId ?? null,
     createdAt: cart.createdAt,
     updatedAt: cart.updatedAt,
@@ -522,9 +580,11 @@ function publicMatchedOrder(store, order) {
     id: order.id,
     ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
     state: order.state,
-    itemSubtotalMinor: order.supplierSubtotalMinor,
-    serviceFeeRateBps: order.serviceFeeRateBps,
-    serviceFeeMinor: order.serviceFeeMinor,
+    ...(order.basketId ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + order.serviceFeeMinor } : {
+      itemSubtotalMinor: order.supplierSubtotalMinor,
+      serviceFeeRateBps: order.serviceFeeRateBps,
+      serviceFeeMinor: order.serviceFeeMinor,
+    }),
     deliveryFeeMinor: order.deliveryFeeMinor,
     totalMinor: order.totalMinor,
     fulfillmentMode: order.fulfillmentMode,
@@ -637,18 +697,9 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
   for (const [supplierId, entries] of [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
     if (!profile?.shop || profile.isClosed) fail(409, "shop_unavailable", "A shop in this cart is no longer available.", basketId ? { groupLabel } : { supplierId });
-    let jobDropoff = null;
-    let distance = 0;
-    let deliveryFeeMinor = 0;
-    if (cart.fulfillmentMode === "delivery") {
-      const dropoffs = entries.map(({ line }) => line.dropoff || cart.defaultDropoff);
-      if (dropoffs.some((dropoff) => !dropoff)) fail(409, "dropoff_required", "Set a delivery drop-off for every cart line.");
-      const distances = dropoffs.map((dropoff) => ({ dropoff, distance: distanceMetersBetween(profile.shop, dropoff) }));
-      const farthest = distances.sort((left, right) => right.distance - left.distance)[0];
-      jobDropoff = { ...farthest.dropoff };
-      distance = farthest.distance;
-      deliveryFeeMinor = deliveryFeeForDistance(distance, store.settings);
-    }
+    const delivery = cartDelivery(store, cart, supplierId, entries.map(({ line }) => line));
+    if (delivery.error) fail(409, delivery.error, "Set a delivery drop-off for every cart line.");
+    const { dropoff: jobDropoff, distance, feeMinor: deliveryFeeMinor } = delivery;
     const jobId = createId("job");
     const jobSnapshots = entries.map(({ line, item, listing }) => {
       const snapshot = createOrderLineSnapshot(store, {
@@ -828,7 +879,7 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     notifyClientReceiptReady(store, order, { createId, at });
   }
   queueOrderInvalidate(store, order, ["orders"]);
-  return { order: publicMatchedOrder(store, order), invoice };
+  return { order: publicMatchedOrder(store, order), invoice: clientInvoice(invoice) };
 }
 
 function checkoutBasket(store, user, cart, body, createId, at) {
@@ -874,11 +925,11 @@ function checkoutBasket(store, user, cart, body, createId, at) {
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
   notifyOpsPaymentSubmitted(store, first, { createId, at });
   notifyClientReceiptReady(store, first, { createId, at });
-  return { order: results[0].order, basket: publicBasket(store, basket, user), invoice };
+  return { order: results[0].order, basket: publicBasket(store, basket, user), invoice: clientInvoice(invoice, { hideSupplierAmounts: true }) };
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days"].includes(pathname)) return true;
+  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes"].includes(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
@@ -921,7 +972,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = structuredClone(invoice.snapshot);
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId)) && !privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
@@ -930,6 +981,47 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
   }
 
   requireClient(user);
+  if (req.method === "POST" && pathname === "/me/catalog-quotes") {
+    const body = record(await readBody(req));
+    const item = (store.catalogItems || []).find((row) => row.id === body.catalogItemId);
+    if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
+      fail(404, "catalog_item_not_found", "That listing is no longer available.");
+    }
+    // Speed selection is not part of the current cart/checkout contract.
+    if (body.speedTier != null || body.speedTierId != null) fail(400, "invalid_service_level", "Speed selection is not supported by checkout.");
+    const optionIds = body.optionIds ?? [];
+    if (!Array.isArray(optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.");
+    const quantity = positiveInteger(body.quantity, "quantity");
+    const measurement = measurementFor(item, body);
+    const structuredSpec = body.structuredSpec == null ? {} : record(body.structuredSpec, "structuredSpec");
+    assertPrinterCap(store, item, { optionIds, measurement, structuredSpec });
+    const { selectedOptions } = selectedCatalogPrice(store, item, optionIds);
+    const priced = priceCatalogSelection(store, item, { selectedOptions, quantity, measurement });
+    const service = store.supplierServices.find((row) => row.id === item.supplierServiceId);
+    return { status: 200, body: { quote: {
+      catalogItemId: item.id, version: item.version, serviceVersion: service.version || 1, quantity: priced.quantity,
+      clientUnitRateMinor: clientMoneyMinor(store, priced.unitRateMinor),
+      clientLineSubtotalMinor: clientMoneyMinor(store, priced.lineSubtotalMinor),
+      billableMilliUnits: priced.billableMilliUnits, minimumMeasurementApplied: priced.minimumMeasurementApplied,
+    } }, mutated: false };
+  }
+  const quoteMatch = /^\/me\/carts\/([^/]+)\/quote$/.exec(pathname);
+  if (quoteMatch && ["GET", "POST"].includes(req.method)) {
+    const cart = ownCart(store, user, decodeURIComponent(quoteMatch[1]), { draft: true });
+    const body = req.method === "POST" ? record(await readBody(req)) : {};
+    const preview = { ...cart, ...fulfillmentInput(body, cart) };
+    const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id).map((line) => ({ ...line }));
+    if (body.lines != null) {
+      if (!Array.isArray(body.lines)) fail(400, "invalid_request", "lines must be an array.");
+      for (const input of body.lines) {
+        record(input, "line");
+        const line = lines.find((row) => row.id === input.lineId);
+        if (!line) fail(404, "cart_line_not_found", "A cart line no longer exists.");
+        line.dropoff = point(input.dropoff, "dropoff", { required: false });
+      }
+    }
+    return { status: 200, body: { quote: clientCartQuote(store, preview, lines) }, mutated: false };
+  }
   if (req.method === "GET" && pathname === "/me/preferences") {
     return { status: 200, body: { preferences: publicPreference(store, user.id) }, mutated: false };
   }

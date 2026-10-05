@@ -32,8 +32,7 @@ Cart responses add `deadline` and `groups`:
         "id": "cline_first_in_group",
         "label": "Shop A",
         "lineIds": ["cline_first_in_group", "cline_another"],
-        "itemSubtotalMinor": 100000,
-        "serviceFeeMinor": 10000,
+        "clientItemSubtotalMinor": 110000,
         "deliveryFeeMinor": 8900,
         "totalMinor": 118900
       }
@@ -58,7 +57,8 @@ live estimates, not payment reservations.
 Multi-shop cart lines have `groupId`; their `supplierId` and listing supplier/service
 IDs are omitted. `shops` becomes `[{id,label}]`, without names or coordinates.
 Matches against a multi-shop cart (or with `groupId`) also omit shop identity.
-Single-shop legacy responses retain their existing fields. Full cart reads keep
+Single-shop legacy responses retain their existing fields. New group summaries
+use `clientItemSubtotalMinor` inclusive of the GRIDGO service fee; do not add it again. Full cart reads keep
 signed listing photos; line mutations remain compact as before.
 
 ## Checkout response and payment
@@ -98,8 +98,7 @@ reads additionally return `basketId`.
         "orderId": "ord_a",
         "label": "Shop A",
         "state": "initial_payment_review",
-        "itemSubtotalMinor": 100000,
-        "serviceFeeMinor": 10000,
+        "clientItemSubtotalMinor": 110000,
         "deliveryFeeMinor": 8900,
         "totalMinor": 118900,
         "order": {"id":"ord_a","basketId":"bsk_...","groupLabel":"Shop A"}
@@ -108,8 +107,7 @@ reads additionally return `basketId`.
         "orderId": "ord_b",
         "label": "Shop B",
         "state": "initial_payment_review",
-        "itemSubtotalMinor": 200000,
-        "serviceFeeMinor": 20000,
+        "clientItemSubtotalMinor": 220000,
         "deliveryFeeMinor": 17800,
         "totalMinor": 237800,
         "order": {"id":"ord_b","basketId":"bsk_...","groupLabel":"Shop B"}
@@ -122,7 +120,8 @@ reads additionally return `basketId`.
 The example abbreviates nested orders and timestamps. Nested orders use the
 role-aware projection; use the existing order detail endpoint for signed progress
 galleries. Each group order additionally has `basketId`, `groupLabel`, and the
-immutable `basketDeadline`. Clients get anonymous labels and no supplier ID;
+immutable `basketDeadline`. Clients get anonymous labels and GRIDGO-inclusive amounts with no supplier ID or
+supplier-price breakdown on the new basket/group responses;
 Operations gets the supplier identity and that group's existing money/payout/refund
 projections. Supplier and rider access remains scoped to their assigned order.
 
@@ -194,10 +193,14 @@ receipt remains immutable; refund records describe the subsequent adjustment.
 
 There is exactly one `order_invoices` row and invoice number per basket. Both
 `/baskets/:id/invoice` and `/orders/:anyGroupOrderId/invoice` return the same snapshot.
-The existing flat `lines`, `deliveryLines`, totals and `paymentPlan` remain, with
-additive `basketId` and `groups: [{orderId,label,lines,itemSubtotalMinor,
-serviceFeeMinor,deliveryFeeMinor,totalMinor}]`. Delivery labels are Shop A, Shop B,
-etc. The receipt contains no shop identity or payout amounts. One receipt-ready
+The flat `lines`, `deliveryLines`, customer totals and `paymentPlan` remain, with
+additive `basketId` and `groups: [{orderId,label,lines,clientItemSubtotalMinor,
+deliveryFeeMinor,totalMinor}]`. Operations also receives each group's
+`itemSubtotalMinor` and `serviceFeeMinor`. Single-shop legacy invoice fields stay unchanged. Delivery labels are Shop A, Shop B,
+etc. Client receipts expose `clientItemSubtotalMinor` and line
+`clientUnitPriceMinor` / `clientAmountMinor`; they omit supplier amounts and
+service-fee decomposition. Operations retains the original amount fields.
+The receipt contains no shop identity or payout amounts. One receipt-ready
 notification is written, linked to `receiptOrderId`.
 
 The migration adds relational basket/group records and a cart deadline; no data

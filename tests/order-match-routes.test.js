@@ -1171,3 +1171,162 @@ test('add-more matching filters capacity already consumed by the same draft grou
   await assert.rejects(call('POST', '/me/matches', { cartId, groupId: added.body.cart.groups[0].id,
     subcategoryCode: 'flyers', units: 1 }), (error) => error.code === 'deadline_not_met' || error.code === 'match_not_found');
 });
+
+test("listing quotes price measured selections on the server without supplier figures", async () => {
+  const { store, client } = fixture();
+  const item = store.catalogItems[0];
+  Object.assign(item, { pricingUnit: "per_area", measureUnit: "ft", basePriceMinor: 105 });
+  const call = caller(store, client);
+  const response = await call("POST", "/me/catalog-quotes", {
+    catalogItemId: item.id, quantity: 3, measurement: { width: 1500, height: 1000 },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.quote, {
+    catalogItemId: item.id, version: 1, serviceVersion: 1, quantity: 3,
+    clientUnitRateMinor: 116, clientLineSubtotalMinor: 520,
+    billableMilliUnits: 4500, minimumMeasurementApplied: false,
+  });
+  assert.equal(response.mutated, false);
+  await assert.rejects(() => call("POST", "/me/catalog-quotes", {
+    catalogItemId: item.id, quantity: 3,
+  }), (error) => error.status === 400);
+});
+
+test("basket quotes use the farthest dropoff, agree with checkout, and never expose the origin", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", { defaultDropoff: { lat: 7.064, lng: 125.6085, label: "Destination" } })).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a2", quantity: 1, optionIds: [], artworkFileId: "file_art", dropoff: { lat: 7.14, lng: 125.6085, label: "Destination" } });
+  const quoted = await call("GET", `/me/carts/${cart.id}/quote`);
+  assert.equal(quoted.status, 200);
+  const quote = quoted.body.quote;
+  assert.equal(quote.clientItemSubtotalMinor, 33000);
+  assert.equal(quote.deliveryLines.length, 1);
+  assert.equal(quote.deliveryLines[0].lineIds.length, 2);
+  assert.deepEqual(quote.deliveryLines[0].distanceZone, { key: "away", label: "Away" });
+  assert.equal(quote.deliveryFeeMinor, 14900);
+  for (const field of ["shop", "shopName", "pickup", "supplierSubtotalMinor", "basePriceMinor", "distanceMeters", "distanceKm"]) {
+    assert.equal(JSON.stringify(quote).includes(`"${field}"`), false, field);
+  }
+  const checked = await call("POST", `/me/carts/${cart.id}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QUOTE-PARITY" },
+  });
+  assert.equal(quote.totalMinor, checked.body.order.totalMinor);
+  assert.equal(quote.deliveryFeeMinor, checked.body.order.deliveryFeeMinor);
+  assert.equal(quote.downpaymentMinor, checked.body.invoice.paymentPlan.downpaymentMinor);
+});
+
+test("basket quote preview does not save dropoffs and missing destinations stay unpriced", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", {})).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [] });
+  const before = structuredClone(store);
+  const missing = (await call("GET", `/me/carts/${cart.id}/quote`)).body.quote;
+  assert.equal(missing.deliveryFeeMinor, null);
+  assert.equal(missing.totalMinor, null);
+  const preview = await call("POST", `/me/carts/${cart.id}/quote`, { defaultDropoff: { lat: 8, lng: 125.6, label: "Destination" } });
+  assert.equal(preview.body.quote.deliveryLines[0].distanceZone.key, "out_of_zone");
+  assert.ok(preview.body.quote.deliveryLines[0].distanceKm > 20);
+  const pickup = await call("POST", `/me/carts/${cart.id}/quote`, { fulfillmentMode: "pickup" });
+  assert.equal(pickup.body.quote.deliveryFeeMinor, 0);
+  assert.equal(pickup.body.quote.totalMinor, 11000);
+  assert.deepEqual(store, before);
+  await assert.rejects(() => caller(store, { id: "another", role: "client" })("GET", `/me/carts/${cart.id}/quote`), (e) => e.status === 403);
+});
+
+test("basket quote rounds the aggregate once, preserves 75 percent installments and refuses unavailable lines", async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  store.catalogItems[0].basePriceMinor = 5;
+  store.catalogItems[1].basePriceMinor = 5;
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  const added = await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a2", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  assert.deepEqual(added.body.cart.lines.map((line) => line.clientLineSubtotalMinor), [6, 6]);
+  assert.equal(added.body.cart.clientQuote.clientItemSubtotalMinor, 11);
+  assert.equal(added.body.cart.clientQuote.downpaymentMinor, 8);
+  assert.equal(added.body.cart.clientQuote.balanceMinor, 3);
+  store.catalogItems[0].active = false;
+  const stale = (await call("GET", `/me/carts/${cart.id}/quote`)).body.quote;
+  assert.equal(stale.totalMinor, null);
+  assert.equal(stale.clientItemSubtotalMinor, null);
+  assert.equal(stale.reasons[0].code, "catalog_item_stale");
+  store.catalogItems[0].active = true;
+  const checkout = await call("POST", `/me/carts/${cart.id}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "ROUNDING-PARITY" },
+  });
+  assert.equal(checkout.body.order.totalMinor, 11);
+  assert.equal(checkout.body.invoice.paymentPlan.downpaymentMinor, 8);
+});
+
+test("listing quotes enforce options, quantity tiers, multipliers, minimums and current listing eligibility", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const item = store.catalogItems[0];
+  item.minimumOrderQuantity = 10;
+  store.catalogPriceTiers = [{ catalogItemId: item.id, minQuantity: 10, unitPriceMinor: 105 }];
+  store.catalogOptionGroups.push({ id: "finish", catalogItemId: item.id, required: true, kind: "spec" });
+  store.catalogOptions.push({ id: "double", optionGroupId: "finish", priceModifierMinor: 0, priceMultiplierBps: 20000 });
+  const input = { catalogItemId: item.id, quantity: 10, optionIds: ["double"] };
+  assert.equal((await call("POST", "/me/catalog-quotes", input)).body.quote.clientLineSubtotalMinor, 2310);
+  for (const [patch, code] of [
+    [{ quantity: 9 }, "below_minimum_quantity"],
+    [{ optionIds: [] }, "invalid_catalog_options"],
+    [{ optionIds: ["unknown"] }, "invalid_catalog_options"],
+    [{ speedTierId: "arbitrary" }, "invalid_service_level"],
+  ]) {
+    await assert.rejects(() => call("POST", "/me/catalog-quotes", { ...input, ...patch }), (error) => error.code === code);
+  }
+  item.active = false;
+  await assert.rejects(() => call("POST", "/me/catalog-quotes", input), (error) => error.status === 404);
+});
+
+test("invoice client amounts use immutable invoice pricing after the live fee changes", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 2, optionIds: [], artworkFileId: "file_art" });
+  const checked = await call("POST", `/me/carts/${cart.id}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "INVOICE-QUOTE" },
+  });
+  assert.equal(checked.body.invoice.clientItemSubtotalMinor, 22000);
+  assert.equal(checked.body.invoice.lines[0].clientAmountMinor, 22000);
+  assert.equal(checked.body.invoice.lines[0].clientUnitPriceMinor, 11000);
+  const saved = structuredClone(store.orderInvoices);
+  store.settings.serviceFeeRateBps = 4500;
+  const invoice = (await call("GET", `/orders/${checked.body.order.id}/invoice`)).body.invoice;
+  assert.equal(invoice.clientItemSubtotalMinor, 22000);
+  assert.equal(invoice.lines[0].clientAmountMinor, 22000);
+  assert.equal(invoice.lines[0].clientUnitPriceMinor, 11000);
+  assert.equal(invoice.lines[0].amountMinor, 20000);
+  assert.deepEqual(store.orderInvoices, saved);
+  assert.equal((await call("GET", `/me/carts/${cart.id}`)).body.cart.clientQuote, null);
+  await assert.rejects(() => call("GET", `/me/carts/${cart.id}/quote`), (error) => error.code === "cart_checked_out");
+});
+
+test('multi-shop client quotes and receipt sections use per-group rounding and full upfront payment', async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  for (const item of store.catalogItems) item.basePriceMinor = 5;
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00Z' })).body.cart;
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, quantity: 1, optionIds: [] });
+  const quoted = (await call('GET', `/me/carts/${cart.id}/quote`)).body.quote;
+  assert.equal(quoted.totalMinor, 12);
+  assert.equal(quoted.clientItemSubtotalMinor, 12);
+  assert.equal(quoted.downpaymentPercent, 100);
+  assert.equal(quoted.balanceMinor, 0);
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'ROUNDING' } })).body;
+  assert.equal(placed.invoice.totalMinor, quoted.totalMinor);
+  assert.equal(placed.invoice.clientItemSubtotalMinor, 12);
+  assert.deepEqual(placed.invoice.groups.map((group) => group.clientItemSubtotalMinor), [6, 6]);
+  assert.equal(placed.invoice.serviceFeeMinor, undefined);
+  assert.equal(placed.invoice.groups[0].itemSubtotalMinor, undefined);
+  assert.equal(placed.invoice.lines[0].amountMinor, undefined);
+  assert.equal(placed.invoice.lines[0].clientAmountMinor, 6);
+  assert.equal(placed.invoice.groups[0].lines[0].clientAmountMinor, 6);
+  assert.equal(store.orderInvoices[0].snapshot.serviceFeeMinor, 2);
+});

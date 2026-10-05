@@ -1,3 +1,4 @@
+import { clientInvoice } from "./invoice-projection.js";
 import { publicOrderFor } from './operational-model.js';
 import { identityHasMembership } from './authorization-context.js';
 import { MatchError } from './order-match.js';
@@ -24,7 +25,8 @@ export function publicBasket(store, basket, user) {
     payment: { ...basket.payment, amountMinor: basket.totalMinor },
     groups: orders.map((order, index) => ({
       orderId: order.id, label: shopLabel(index), state: order.state,
-      itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor,
+      clientItemSubtotalMinor: order.supplierSubtotalMinor + order.serviceFeeMinor,
+      ...(privileged ? { itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor } : {}),
       deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor,
       order: publicOrderFor(order, privileged ? { ...user, role: 'ops_admin' } : { ...user, role: 'client' }, store),
     })),
@@ -46,7 +48,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   if (!basket || (!privileged && basket.clientId !== user.id)) fail(404, 'basket_not_found', 'That basket is unavailable.');
   if (req.method === 'GET' && !match[2]) return { status: 200, body: { basket: publicBasket(store, basket, user) } };
   if (req.method === 'GET' && match[2] === 'invoice') {
-    return { status: 200, body: { invoice: structuredClone(store.orderInvoices.find((row) => row.orderId === basket.receiptOrderId).snapshot) } };
+    return { status: 200, body: { invoice: clientInvoice(store.orderInvoices.find((row) => row.orderId === basket.receiptOrderId).snapshot, { hideSupplierAmounts: !privileged }) } };
   }
   if (req.method !== 'POST' || !match[3]) fail(404, 'not_found', 'Route not found.');
   const action = match[3];
