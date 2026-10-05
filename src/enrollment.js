@@ -1,3 +1,4 @@
+import { CLIENT_APPLICATION_FIELDS, validateClientApplication, bindClientApplication } from "./client-applications.js";
 import crypto from "node:crypto";
 
 import { clerkClientProfile } from "./auth.js";
@@ -437,9 +438,9 @@ export function enrollRider({ store, clerkUserId, clerkUser, body, idempotencyKe
 
 const BUSINESS_ACCOUNT_TYPES = new Set(["business", "organization"]);
 
-export function applyForBusiness({ store, user, body, idempotencyKey, createId, now }) {
+export function applyForBusiness({ store, user, body, idempotencyKey, createId, now, handover = false }) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["businessName", "businessNature", "accountType"]);
+  rejectUnexpected(body, [...CLIENT_APPLICATION_FIELDS, "expectedVersion"]);
   const fields = {};
   const businessName = nonblank(body.businessName);
   const businessNature = nonblank(body.businessNature);
@@ -465,8 +466,43 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
   if (exactRetry(store, { kind: "business_client", user, key: idempotencyKey, body })) {
     return retryResult(store, user, "client", "business_client");
   }
-  ensureNoCase(store, user.id, "business_client");
+  const existingCase = store.approvalCases.find((row) => row.userId === user.id && row.kind === "business_client");
+  if (existingCase) {
+    const initialOrganizationVerification = user.accountType === "organization" && !(store.organizationAccounts || []).some((row) => row.userId === user.id && row.currentOfficer);
+    if (body.expectedVersion !== existingCase.version || !["pending", "rejected", ...(handover || initialOrganizationVerification ? ["approved"] : [])].includes(existingCase.status)) {
+      fail(409, "approval_state_conflict", "Refresh the application and send its current expectedVersion.");
+    }
+    const at = now();
+    const account = (store.organizationAccounts || []).find((row) => row.userId === user.id);
+    if (account?.currentOfficer && (body.accountType !== "organization" || body.businessName !== account.name || body.school !== account.school)) {
+      fail(409, "organization_identity_immutable", "An officer handover cannot rename the organization or school.");
+    }
+    const application = validateClientApplication(store, user, body, at, { approvalCase: existingCase });
+    if (account?.currentOfficer && Object.values(application.documents).some((fileId) =>
+      store.files.find((row) => row.fileId === fileId)?.clientApplicationApprovedAt)) {
+      fail(409, "new_officer_documents_required", "Upload the incoming officer's verification documents.");
+    }
+    const fromStatus = existingCase.status;
+    existingCase.status = "pending";
+    existingCase.version += 1;
+    existingCase.applicationRevision += 1;
+    existingCase.submittedAt = at;
+    existingCase.updatedAt = at;
+    for (const field of ["decidedAt", "decidedBy", "rejectionReason", "suspensionReason"]) delete existingCase[field];
+    store.approvalCaseEvents.push({ id: createId("ace"), approvalCaseId: existingCase.id,
+      applicationRevision: existingCase.applicationRevision, fromStatus, toStatus: "pending", actorUserId: user.id,
+      actorKind: "applicant", requestId: enrollmentRequestId("business_client", user.id, idempotencyKey),
+      snapshot: { ...application, handover: Boolean(account?.currentOfficer), requestPayloadHash: payloadHash(body) }, createdAt: at });
+    bindClientApplication(store, user, existingCase, application, at);
+    store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
+      action: account?.currentOfficer ? "organization.officer_handover" : "client_application.resubmit",
+      entityType: "approval_case", entityId: existingCase.id,
+      detail: { applicationRevision: existingCase.applicationRevision } });
+    notifySignupAndInvalidate(store, existingCase, createId, at);
+    return { ...retryResult(store, user, "client", "business_client"), status: 201 };
+  }
   const at = now();
+  const application = validateClientApplication(store, user, body, at);
   let profile = store.clientProfiles.find((candidate) => candidate.userId === user.id);
   if (!profile) {
     profile = { userId: user.id, clientKind: "personal", updatedAt: at };
@@ -487,8 +523,9 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
   */
   const approvalCase = addInitialCase(store, {
     user, kind: "business_client", submittedAt: at, key: idempotencyKey, body, createId, at,
-    snapshot: { businessName, businessNature, accountType },
+    snapshot: application,
   });
+  bindClientApplication(store, user, approvalCase, application, at);
   notifySignupAndInvalidate(store, approvalCase, createId, at);
   return {
     status: 201,
@@ -669,6 +706,12 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
   const kind = REAPPLY_KINDS.get(pathKind);
   if (!kind) fail(404, "not_found", "That approval application kind does not exist.");
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
+  if (kind.caseKind === "business_client") {
+    rejectUnexpected(body, ["expectedVersion", "correctionSummary", "application"]);
+    const result = applyForBusiness({ store, user, body: { ...body.application, expectedVersion: body.expectedVersion },
+      idempotencyKey, createId, now });
+    return { status: 200, approvalCase: result.approvalCase, replay: result.status === 200 };
+  }
   rejectUnexpected(body, ["expectedVersion", "correctionSummary"]);
   const correctionSummary = nonblank(body.correctionSummary);
   const fields = {};

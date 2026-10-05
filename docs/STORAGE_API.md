@@ -472,3 +472,7 @@ The separately authorized shop settlement payout uses existing `payout_receipt` 
 ## Production photo visibility
 
 Progress images use the same private read gate as artwork. The client gallery and packing refusal contract are [Production progress photos](OPERATIONAL_MODEL_V2_API.md#production-progress-photos). A start-of-production image counts, including legacy shop image proofs; PDFs do not. Client/rider file metadata strips internal reference fields and calls legacy fulfilment evidence `order_photo`. Attached evidence follows the retention and audited early-deletion policy above.
+
+### Client application documents
+
+`client_verification_document` uploads are client-owned JPEG/PNG/WebP/PDF files up to 20 MiB. Complete application submission attaches them through the existing file-reference mechanism. Only Operations and Super Admin can read metadata or signed bytes, including after submission; the owner receives the opaque file ID at upload. Track checklists, rejected-revision retention and handover rules are in [Organization accounts](ORGANIZATION_ACCOUNTS_API.md). Automatic deletion remains disabled by default.

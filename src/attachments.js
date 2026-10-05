@@ -108,6 +108,9 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 20 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
   },
+  client_verification_document: {
+    roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: [...CONTENT_TYPES],
+  },
   rider_verification_document: {
     roles: ["rider"],
     maxBytes: 20 * 1024 * 1024,
@@ -1192,6 +1195,7 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (file.purpose === "client_verification_document") forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"

@@ -63,4 +63,23 @@ export async function up(pgm) {
   `);
 }
 
-export async function down() { throw new Error('Staff handovers require a forward migration to preserve the handout ledger.'); }
+export async function down(pgm) {
+  pgm.sql(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM staff_profiles) OR EXISTS (SELECT 1 FROM staff_invites)
+        OR EXISTS (SELECT 1 FROM hub_handouts)
+        OR EXISTS (SELECT 1 FROM users WHERE role = 'staff')
+        OR EXISTS (SELECT 1 FROM user_role_memberships WHERE role = 'staff')
+        OR EXISTS (SELECT 1 FROM orders WHERE data ? 'handover')
+        OR EXISTS (SELECT 1 FROM staff_roles WHERE code <> 'hub_staff' OR name <> 'Hub staff' OR NOT can_handout)
+      THEN RAISE EXCEPTION 'Staff handovers require a forward migration once used'; END IF;
+    END $$;
+    DROP TRIGGER orders_handover_immutable ON orders;
+    DROP FUNCTION protect_handover_credentials();
+    DROP TABLE hub_handouts, staff_invites, staff_profiles, staff_roles;
+    ALTER TABLE users DROP CONSTRAINT users_role_check,
+      ADD CONSTRAINT users_role_check CHECK (role IN ('client','supplier','rider','ops_admin','super_admin'));
+    ALTER TABLE user_role_memberships DROP CONSTRAINT user_role_memberships_role_check,
+      ADD CONSTRAINT user_role_memberships_role_check CHECK (role IN ('client','supplier','rider','ops_admin','super_admin'));
+  `);
+}

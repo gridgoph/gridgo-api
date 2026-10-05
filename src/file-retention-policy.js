@@ -98,7 +98,8 @@ export function retentionDecision(store, file, at) {
     const kind = file.purpose.startsWith('rider') ? 'rider' : file.purpose === 'verification_document' ? 'supplier' : 'business_client';
     const approval = (store.approvalCases || []).find((row) => row.userId === file.ownerId && row.kind === kind);
     const endedAt = owner?.accountStatus === 'removed' ? owner.accountStatusAt
-      : approval?.status === 'rejected' ? approval.decidedAt : null;
+      : file.purpose === 'client_verification_document' ? file.clientApplicationRejectedAt
+        : approval?.status === 'rejected' ? approval.decidedAt : null;
     if (!endedAt) return keep('account_active');
     due = deadline(endedAt, 1); reason = 'verification_expired';
   } else {

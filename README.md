@@ -113,6 +113,7 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Supplier payout account: `/me/payout-account` (where a shop wants to be paid, with its receiving-QR file) and the Operations read `/users/:id/payout-account`
 - Orders/money: `/orders`, transitions, manual QR installments, payout milestones, credits, claims, issues
 - Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
+- Organization discount and statements: [Organization money API](docs/ORGANIZATION_MONEY_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`
@@ -121,3 +122,5 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Season awareness: public `/season-windows`, Super Admin editor and disabled-by-default scheduled notices under `/admin/season-windows`; see [Season windows API](docs/SEASON_WINDOWS_API.md).
 
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.
+
+- Business and organization application documents, shared-login email codes, officer handover/history, and quarterly notices: [Organization accounts API](docs/ORGANIZATION_ACCOUNTS_API.md).

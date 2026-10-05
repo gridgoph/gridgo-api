@@ -46,8 +46,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rows.map((row) => row.table_name));
     for (const table of [
+      "staff_roles", "staff_profiles", "staff_invites", "hub_handouts",
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
+      "organization_accounts", "organization_email_challenges",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
@@ -123,6 +125,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791255600000_order_reschedule_request",
         "1791331200000_catalog_listing_suspension",
         "1791417600000_listing_reviews",
+      "1791504000000_organization_discount",
+      "1791590400000_organization_accounts",
+        "1791676800000_staff_hub_handovers",
       ],
     );
 
@@ -301,6 +306,27 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Rollback is allowed only before staff configuration or handovers exist.
+    await client.query("INSERT INTO staff_roles VALUES ('counter_assistant', 'Counter assistant', false)");
+    await client.query('BEGIN');
+    await assert.rejects(runner(migrationOptions(schema, 'down', 1, client)), /Staff handovers require a forward migration once used/);
+    await client.query('ROLLBACK');
+    await client.query("DELETE FROM staff_roles WHERE code = 'counter_assistant'");
+    await runner(migrationOptions(schema, 'down', 1, client));
+    assert.equal((await client.query("SELECT to_regclass('hub_handouts') AS t")).rows[0].t, null);
+
+    await client.query(`INSERT INTO organization_accounts (user_id, name_key, school_key, data)
+      VALUES ('multi_role_shop', 'test organization', 'test school', '{}')`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /client verification records exist/);
+    await client.query("ROLLBACK");
+    await client.query('DELETE FROM organization_accounts');
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('organization_accounts') AS t")).rows[0].t, null);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.guard_organization_discount()`])).rows[0].fn, null);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(

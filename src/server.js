@@ -1,5 +1,10 @@
 import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
 import { redeemStaffInvite } from './staff-access.js';
+import { routeOrganization, organizationProjection, sweepOfficerConfirmations } from "./organization-routes.js";
+import { createOrganizationMailer } from "./organization-email.js";
+import { officerSnapshot } from "./client-applications.js";
+import { routeOrganizationStatements } from "./organization-statements.js";
+import { approvedOrganization } from "./organization-money.js";
 import { catalogReviewNotice } from "./catalog-review-routes.js";
 
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -260,6 +265,7 @@ const fileRetention = createFileRetention({ database, storage: objectStorage,
 });
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
+const organizationMailer = createOrganizationMailer(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
 // under their own advisory lock and can never hold up the domain lock that
@@ -999,6 +1005,7 @@ function approvalCaseDetail(store, approvalCase) {
       ...base,
       clientProfile: clientProfileProjection(store, approvalCase.userId),
       application: businessApplicationProjection(store, approvalCase),
+      organization: organizationProjection(store, approvalCase.userId, { includeHistory: true }),
     };
   }
   if (approvalCase.kind === "rider") {
@@ -1090,10 +1097,11 @@ function fixedAuthProjection(store, auth, role) {
   const base = { user: { ...publicIdentity(auth.user), ...accountStateFields(auth.user) }, membership };
   if (role === "client") {
     const approvalCase = approvalCaseFor(context, "business_client");
-    const approved = approvalCase?.status === "approved";
+    const approved = approvalCase?.status === "approved" || (Boolean(officerSnapshot(store, auth.user.id)) && approvalCase?.status !== "suspended");
     return {
       ...base,
       clientProfile: clientProfileProjection(store, auth.user.id),
+      organization: organizationProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       capabilities: {
         placePersonalOrders: true,
@@ -1481,6 +1489,17 @@ async function sweepSeasonWindows() {
   await enqueueMutation(async () => {
     const store = await load();
     if (applySeasonNotices(store, { at: now(), createId: id, audit }).length) await save(store);
+  });
+}
+
+async function sweepOrganizationOfficers() {
+  // An empty or not-yet-due roster must not acquire the domain lock on every tick.
+  const candidate = await database.query(`SELECT 1 FROM organization_accounts
+    WHERE (data->>'nextConfirmationAt')::timestamptz <= now() LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (sweepOfficerConfirmations(store, { at: now(), createId: id })) await save(store);
   });
 }
 
@@ -2249,6 +2268,13 @@ async function handleRequest(req, res) {
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
+    const organizationResponse = await routeOrganization({ req, url, store, user, readBody, now, createId: id,
+      mailer: organizationMailer, emailSecret: process.env.CLERK_SECRET_KEY });
+    if (organizationResponse) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (organizationResponse.mutated) await save(store);
+      return send(res, organizationResponse.status, organizationResponse.body);
+    }
     const catalogResponse = await routeSupplierCatalog({
       req,
       url,
@@ -2460,6 +2486,17 @@ async function handleRequest(req, res) {
       }
     }
 
+    const statementResponse = routeOrganizationStatements({ req, url, store, user, now });
+    if (statementResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (statementResponse.bytes) {
+        res.writeHead(statementResponse.status, { 'Content-Type': statementResponse.contentType,
+          'Content-Disposition': `attachment; filename="${statementResponse.filename}"`,
+          'Content-Length': statementResponse.bytes.length, 'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(statementResponse.bytes);
+      }
+      return send(res, statementResponse.status, statementResponse.body);
+    }
     const basketResponse = await routeBaskets({ req, url, store, user, readBody, id, now });
     if (basketResponse) {
       if (basketResponse.mutated) await save(store);
@@ -3191,6 +3228,7 @@ async function handleRequest(req, res) {
         downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
+        organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
@@ -5207,6 +5245,7 @@ async function handleRequest(req, res) {
       const order = {
         id: id("ord"),
         clientId: user.id,
+        organizationOfficer: officerSnapshot(store, user.id),
         supplierId: null,
         riderId: null,
         state: body.submit ? "submitted" : "draft",
@@ -5596,6 +5635,7 @@ async function handleRequest(req, res) {
 
         const money = calculateOrderMoney({
           supplierSubtotalMinor: quote.supplierSubtotalMinor,
+          organizationEligible: approvedOrganization(store, user.id),
           fulfillmentMode,
           paymentPlan,
           supplierDownpaymentRateBps,
@@ -5619,6 +5659,9 @@ async function handleRequest(req, res) {
             paymentPlan,
             serviceFeeRateBps: money.serviceFeeRateBps,
             serviceFeeMinor: money.serviceFeeMinor,
+            grossServiceFeeMinor: money.grossServiceFeeMinor,
+            organizationDiscountRateBps: money.organizationDiscountRateBps,
+            organizationDiscountMinor: money.organizationDiscountMinor,
             deliveryDistanceMeters: money.deliveryDistanceMeters,
             deliveryFeeMinor: money.deliveryFeeMinor,
             totalMinor: money.totalMinor,
@@ -6436,10 +6479,19 @@ async function runLifecycleWork() {
       expireElapsedIssueWindows,
       sweepProductionInactivity,
       sweepSeasonWindows,
-      async () => enqueueMutation(async () => {
-        const store = await load();
-        if (sweepHubReminders(store, { at: now(), id })) await save(store);
-      }),
+      async () => {
+        // Avoid taking the global mutation lock when there are no active hub
+        // handovers. Recheck the graph under the lock if a candidate exists.
+        const candidates = await database.query(`SELECT 1 FROM orders
+          WHERE state = 'awaiting_collection' AND data->'handover'->>'qrToken' IS NOT NULL
+          AND data->'handover'->>'consumedAt' IS NULL LIMIT 1`);
+        if (!candidates.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (sweepHubReminders(store, { at: now(), id })) await save(store);
+        });
+      },
+      sweepOrganizationOfficers,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }
