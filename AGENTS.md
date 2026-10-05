@@ -62,6 +62,7 @@ A category or subcategory can be deleted (`DELETE /taxonomy/{categories,subcateg
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 
 Artwork design links are cart-line `artworkLinks`, snapshotted immutably at checkout and projected with scoped `productionItems`; `POST /artwork/link-check` is an anonymous-provider probe for signed-in clients, never proof of edit permission. Contract: `docs/ORDER_MATCH_API.md#artwork-design-links`.
+Checkout enforces fresh link probes and server upload verdicts; supplier access/inbox/realtime stay held until Operations passes `order.fileCheck`. See `docs/ORDER_MATCH_API.md#artwork-checkout-gate-and-operations-handoff` and shared gates in `src/artwork-gates.js`.
 
 Supplier readiness separates legacy setup checks, operational listing eligibility, and request-specific capacity/deadline diagnostics; see `docs/SUPPLIER_CATALOG_API.md#supplier-readiness-diagnostics`. Matching and readiness share shop gates in `src/supplier-eligibility.js`.
 

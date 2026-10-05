@@ -226,13 +226,45 @@ The array has at most **3** entries. Each entry has `formatCode: "canva_link" | 
 | `we_transfer` | `wetransfer.com` and subdomains; `we.tl` |
 | `other_link` | Any otherwise-valid URL (including these providers for compatibility) |
 
-Canva short links are resolved through the same SSRF-safe checker before the cart mutation transaction, then stored as `canva_link` with the resolved HTTPS `canva.com/design/.../view` or `/edit` URL, including any sharing-token segment and query. This also applies when an older client sends a `canva.link` URL as `other_link`. The listing must therefore accept `canva_link`. A short link without a resolved HTTPS Canva design returns `400 artwork_link_unresolved`; paste the full design URL instead. This resolution shares the checker's per-user rate budget. Direct links need no provider round trip during cart writes. Canonicalization is not a grant of public access: a resolved private or unavailable design still requires the client's check UX.
+Canva short links are resolved through the same SSRF-safe checker before the cart mutation transaction, then stored as `canva_link` with the resolved HTTPS `canva.com/design/.../view` or `/edit` URL, including any sharing-token segment and query. This also applies when an older client sends a `canva.link` URL as `other_link`. The listing must therefore accept `canva_link`. A short link without a resolved HTTPS Canva design returns `400 artwork_link_unresolved`; paste the full design URL instead. This resolution shares the checker's per-user rate budget. Direct links need no provider round trip during cart writes. Canonicalization is not a grant of public access: checkout probes every design link again and refuses a private, unavailable, or inconclusive result.
 
 The listing's effective, active `acceptedFormats` must contain that exact code with `inputKind: "url"`. Listing overrides replace inherited service formats. These rules run on add, patch, and checkout, including a format withdrawn since the line was added.
 
 Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid. Invalid shape/URL returns `400 { "error": "invalid_artwork_links", "message": "..." }`; an unaccepted format returns `400 { "error": "artwork_link_format_not_accepted", "message": "..." }`.
 
 Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Top-level `artworkFileIds` and `mockupFileIds` follow the same job scope; metadata and signed downloads enforce it independently. Legacy fallback and combined-delivery rules are in [Storage API](STORAGE_API.md#get-filesfileid--metadata). Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
+
+### Artwork checkout gate and Operations handoff
+
+`POST /me/carts/:id/checkout` checks artwork on **every line**. No new client request field or check token is required. Released clients that skip `/artwork/link-check` receive the same explicit checkout errors; a client-supplied verdict never grants permission. The API probes every saved link afresh before taking the domain transaction lock, then verifies the exact line artwork is unchanged in the transaction. All supplied links must pass, even when the line also has an uploaded file. To use an upload instead, clear failed links with `artworkLinks: []`.
+
+| Checkout error | HTTP | Client fix |
+| --- | --- | --- |
+| `artwork_required` | 409 | Upload artwork or add a publicly viewable design link. |
+| `artwork_link_check_failed` | 409 | Show `message` in the Artwork tab. Make the design viewable by anyone with the link and retry, or remove the link and upload the file. Private, missing, unreachable, timed-out, bot-challenged, unreadable and inconclusive links all block. |
+| `artwork_file_check_failed` | 409 | Re-export, upload and replace the artwork. Old uploads without a stored verdict require re-upload. |
+| `artwork_check_required` | 409 | Artwork changed during the probe; retry checkout against the current cart. |
+
+Errors include `field: "artwork"` and `lineId`; link failures also include `url` and `access`, and file failures include `fileId` and `reason`. Existing unsafe URL, malformed format, not-ready file, and rate-limit errors still apply. A failed checkout commits no order, job, invoice, payment attachment or notification, and the cart stays draft. Link probes share the existing 10-checks-per-minute per-user budget with `/artwork/link-check`; retry after a minute on `429 artwork_link_rate_limited`.
+
+`POST /files` with `purpose=artwork` keeps its multipart request and `{ file }` response. The response and `GET /files/:id` add `file.artworkCheck: { status: "passed" | "failed", checkedAt, reason, message }`. The server checks bytes from its upload spool, independently of the editable/advisory `file.detected` measurements. Failed structural checks may still produce a ready file, so show `artworkCheck.message` and replace the file; **ready means uploaded, not approved for checkout**. PDF checks require readable page structure, a final cross-reference marker and end marker, and refuse encrypted files; PNG checks include chunk bounds and checksums; JPEG checks require a readable frame, scan and end marker; WebP/Photoshop checks require consistent container/image structure. These checks are bounded and cannot prove every decoder or print requirement. Operations opens the file and checks print readiness before handoff. Nothing supplied by a client can set these verdicts.
+
+Successful checkout returns state `initial_payment_review` and `order.fileCheck.status: "pending"`. It writes an immediate durable `ops_job_needs_qa` alert for each Operations and Super Admin membership, alongside the payment alert. Push and realtime enqueue after the same commit. The shop receives no order inbox row or refresh event while held, and `/jobs`, `/orders`, order detail, and artwork metadata/download authorization exclude it. A snapshotted supplier/job ID alone grants no early access. There is no office-hours exception or timer release.
+
+Operations uses the existing `POST /orders/:id/payments/initial/confirm`, then `POST /orders/:id/transition`:
+
+| Action / transition | File review | Shop handoff |
+| --- | --- | --- |
+| Payment confirmed → `needs_qa` | Stays `pending`; wait begins at checkout, not payment confirmation. | Held. |
+| Operations/Super Admin: `needs_qa` → `client_correction`, with nonblank `note` | `failed`; reason is the note. Missing note returns `400 file_check_reason_required`. | Held. |
+| Owning client: `client_correction` → `needs_qa` (or legacy `submitted`) | Resets to `pending`, with a new `requestedAt`; alerts staff on resubmission. | Held until reviewed again. |
+| Operations/Super Admin: `needs_qa` → `supplier_assigned` | `passed`, with reviewer and review time; matched orders need no `supplierId` in the request. | Shop sees the job and receives `shop_job_assigned` after commit. |
+| Operations/Super Admin: `needs_qa` → `approved_for_matching` or `proof_approval` | Also records `passed` for the legacy assignment/proof flow. | Assignment notification follows the normal assignment step. |
+| Cancel before a pass | `cancelled`; no accumulating review wait. | Held. |
+
+`GET /orders` and `GET /orders/:id` expose `fileCheck: { status, requestedAt, reviewedAt, reviewedBy, reason, waitingSeconds }` to Operations/Super Admin; the owning client receives the same projection without `reviewedBy`. Suppliers/riders omit it. `waitingSeconds` is computed at read time, in elapsed wall-clock seconds while pending, and is zero after a decision/cancellation. The dashboard follow-up should filter pending checks, sort by `requestedAt` and render the elapsed wait on each row, including `initial_payment_review` orders, so out-of-hours backlogs stay visible. Existing production orders without this additive snapshot retain access; existing intake remains hidden until the quality-control handoff.
+
+Client follow-up: show upload/link-check failure guidance on the Artwork tab and route checkout errors to the indicated line; do not treat an `unknown` check as a warning. Dashboard follow-up: render the pending queue/wait and use the transitions above to pass or request correction. Backend delivery alone does not finish the issue's production + client-release acceptance gate.
 
 ### POST `/artwork/link-check`
 
@@ -272,7 +304,7 @@ The checker sends HEAD, then GET for a success needing content inspection or a H
 
 Access evidence is deliberately conservative:
 
-- Recognizable leading PDF/PNG/JPEG/WebP bytes with the matching Content-Type served successfully without authentication (including files larger than the cap) support `public_view` and “Anyone with the link can view this artwork.” A Content-Type header alone does not.
+- A complete PDF/PNG/JPEG/WebP body with matching Content-Type and a passing structural file check supports `public_view`. Leading magic bytes or a Content-Type header alone do not prove a usable file. Downloadable bodies over the 64 KiB check cap remain `unknown`; upload the file instead. Public provider viewer pages can still pass using the documented anonymous viewer evidence.
 - 401, a fetched login/sign-in URL, or an HTML password input gives `sign_in_required`; 404/410 gives `not_found`. A Drive redirect to `accounts.google.com` gives `sign_in_required` after validating the target DNS, without fetching the sign-in page. Drive “You need access” pages also require sharing changes.
 - Drive file view/preview HTML with the captured viewer config identifying the requested file and `isItemTrashed: false` supports `public_view`. A matching trashed config or explicit missing/deleted-file page gives `not_found`. Metadata alone is insufficient. Drive download redirects (including `drive.usercontent.google.com`) use the same per-hop DNS checks and redirect budget; their bytes require matching MIME and magic as above.
 - A Canva `/design/<id>[/<share-token>]/view` or `/edit` response with status 200 and the captured viewer bootstrap identifying that same design supports `public_view`, including when this evidence is within the retained 64 KiB prefix of a larger page. `/edit` plus viewer evidence establishes viewing only; this implementation never claims `public_edit`.

@@ -1,3 +1,6 @@
+import { isArtworkCheckout, prepareArtworkCheckout } from "./order-match-routes.js";
+import { checkArtworkUpload } from "./artwork-file-check.js";
+import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-gates.js";
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
@@ -2592,6 +2595,7 @@ async function handleRequest(req, res) {
         // file is on local disk, and re-downloading it later to measure it
         // would cost a round trip per upload.
         const detected = await readArtworkMeasurements(file, detectedContentType, purpose);
+        const artworkCheck = purpose === "artwork" ? await checkArtworkUpload(file, detectedContentType, createdAt) : null;
         const pending = createPendingFile({
           fileId,
           objectKey,
@@ -2602,6 +2606,8 @@ async function handleRequest(req, res) {
           detected,
           at: createdAt,
         });
+
+        if (artworkCheck) pending.artworkCheck = artworkCheck;
 
         await enqueueMutation(async () => {
           const latestStore = await load();
@@ -4350,7 +4356,7 @@ async function handleRequest(req, res) {
         list = list.filter((i) => i.clientId === user.id);
       } else if (user.role === "supplier") {
         // suppliers see issues on their orders only
-        const myOrderIds = new Set((store.orders || []).filter((o) => o.supplierId === user.id).map((o) => o.id));
+        const myOrderIds = new Set((store.orders || []).filter((o) => o.supplierId === user.id && supplierArtworkReleased(o)).map((o) => o.id));
         list = list.filter((i) => myOrderIds.has(i.orderId));
       } else if (!isOps(user)) {
         return send(res, 403, { error: "forbidden" });
@@ -5385,6 +5391,10 @@ async function handleRequest(req, res) {
         order.cancellationReason = reason;
       }
 
+      if (order.fileCheck && order.state === "needs_qa" && next === "client_correction"
+          && (typeof body.note !== "string" || !body.note.trim())) {
+        return send(res, 400, { error: "file_check_reason_required", message: "Explain what the client must fix in the artwork." });
+      }
       const allowed = TRANSITIONS[order.state]?.[next];
       if (!allowed || !allowed.includes(user.role)) {
         return send(res, 409, {
@@ -5694,8 +5704,16 @@ async function handleRequest(req, res) {
       if (next === "ready_for_dispatch" && !order.readyAt) {
         order.readyAt = now();
       }
+      const previousState = order.state;
+      const previousFileCheck = JSON.stringify(order.fileCheck);
       order.state = next;
       order.updatedAt = now();
+      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "");
+      if (previousFileCheck !== JSON.stringify(order.fileCheck)) {
+        audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,
+          orderId: order.id, reason: order.fileCheck.reason || null,
+          detail: { from: previousState, to: next, fileCheck: { ...order.fileCheck } } });
+      }
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       if (next === "ready_for_dispatch" || next === "rider_assigned") {
         syncJobsWithOrder(store, order, order.updatedAt);
@@ -6217,7 +6235,7 @@ async function handleRequest(req, res) {
       if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
         jobs: await Promise.all(store.orders
-          .filter((o) => o.supplierId === user.id)
+          .filter((o) => o.supplierId === user.id && supplierArtworkReleased(o))
           .map((order) => publicOrder(order, user, store))),
       });
     }
@@ -6382,6 +6400,15 @@ const server = http.createServer((req, res) => {
               const user = selectActorRole(store, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
               await prepareCartArtworkLinks({ req, pathname, store, user, body });
             }
+          }
+        }
+        if (isArtworkCheckout(req.method, pathname)) {
+          const store = await load();
+          const auth = await authenticateRequest(req, store);
+          if (auth.user && !accountHoldDenial(auth.user)) {
+            const role = req.headers["x-gridgo-role"];
+            const user = selectActorRole(store, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
+            await prepareArtworkCheckout({ req, pathname, store, user });
           }
         }
         return enqueueMutation(() => handleRequest(req, res));

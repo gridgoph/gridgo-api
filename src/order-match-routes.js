@@ -1,3 +1,4 @@
+import { fileCheckProjection } from "./artwork-gates.js";
 import { createHash, randomBytes } from "node:crypto";
 import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
@@ -508,6 +509,7 @@ function publicMatchedOrder(store, order) {
     },
     jobs,
     invoiceNumber: order.invoiceNumber,
+    fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
     createdAt: order.createdAt,
   };
 }
@@ -517,7 +519,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at) {
+function checkout(store, user, cart, body, createId, at, req) {
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
     fail(400, "payment_method_not_allowed", "Checkout accepts QR Ph manual payment only.", { allowed: ["qr_manual"] });
@@ -543,6 +545,7 @@ function checkout(store, user, cart, body, createId, at) {
     // Money first. Operations confirms the transfer, then checks the artwork,
     // and only then does the shop see the job.
     state: "initial_payment_review",
+    fileCheck: { status: "pending", requestedAt: at, reviewedAt: null, reviewedBy: null, reason: null },
     supplierSubtotalMinor: 0,
     subtotalMinor: 0,
     serviceFeeRateBps: store.settings.serviceFeeRateBps,
@@ -589,7 +592,19 @@ function checkout(store, user, cart, body, createId, at) {
     }
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
-    if (line.artworkFileId) fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
+    if (!line.artworkFileId && !(line.artworkLinks || []).length) {
+      fail(409, "artwork_required", "Upload artwork or add a publicly viewable design link before checkout.", { lineId: line.id, field: "artwork" });
+    }
+    if (line.artworkFileId) {
+      const file = fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
+      if (file.artworkCheck?.status !== "passed") fail(409, "artwork_file_check_failed",
+        file.artworkCheck?.message || "This artwork has not passed its file check. Upload the original file again and replace the cart artwork.",
+        { lineId: line.id, fileId: file.fileId, field: "artwork", reason: file.artworkCheck?.reason || "file_check_required" });
+    }
+    const links = line.artworkLinks || [];
+    if (links.length && req[checkoutChecks]?.get(line.id) !== artworkFingerprint(line)) {
+      fail(409, "artwork_check_required", "The cart artwork changed while being checked. Retry checkout to check the current links.", { lineId: line.id, field: "artwork" });
+    }
     if (line.mockupFileId) fileFor(store, user, line.mockupFileId, "mockup", "mockupFileId");
     if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
     grouped.get(line.supplierId).push({ line, item, listing });
@@ -820,6 +835,34 @@ export async function prepareCartArtworkLinks({ req, pathname, store, user, body
     checker || ((link) => checkArtworkLinkForUser(user.id, link)));
 }
 
+const checkoutChecks = Symbol("artworkCheckoutChecks");
+const artworkFingerprint = line => JSON.stringify([line.artworkFileId || null, line.artworkLinks || []]);
+export function isArtworkCheckout(method, pathname) {
+  return method === "POST" && /^\/me\/carts\/[^/]+\/checkout$/.test(pathname);
+}
+
+// Probe fresh links for every checkout, including released clients that skip
+// link-check. Bind results to this request and revalidate under the domain lock.
+export async function prepareArtworkCheckout({ req, pathname, store, user, checker }) {
+  if (!isArtworkCheckout(req.method, pathname)) return;
+  requireClient(user);
+  const cart = ownCart(store, user, decodeURIComponent(pathname.split("/")[3]), { draft: true });
+  req[checkoutChecks] = new Map();
+  for (const line of (store.cartLines || []).filter(row => row.cartId === cart.id)) {
+    const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
+    const listing = item && publicCatalogItem(store, item);
+    if (!listing) continue; // Locked checkout reports stale listings.
+    const links = validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
+    for (const link of links) {
+      const check = await (checker || (link => checkArtworkLinkForUser(user.id, link)))(link);
+      if (!check.ok) fail(409, "artwork_link_check_failed",
+        `${check.message} Make the link viewable by anyone with the link, then retry checkout; or remove the link and upload the file instead.`,
+        { lineId: line.id, field: "artwork", url: link.url, access: check.access });
+    }
+    req[checkoutChecks].set(line.id, artworkFingerprint(line));
+  }
+}
+
 export async function routeOrderMatch({ req, url, store, user, readBody, id, now }) {
   const { pathname } = url;
   if (!isOrderMatchRoute(req.method, pathname)) return null;
@@ -958,7 +1001,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
-    const result = checkout(store, user, cart, record(await readBody(req)), id, now());
+    const result = checkout(store, user, cart, record(await readBody(req)), id, now(), req);
     return { status: 201, body: result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {

@@ -152,7 +152,7 @@ async function fixture(database) {
     store.catalogItemPhotos.push({ catalogItemId: `${itemId}_brochures`, fileId: `${photoId}_brochures`, sortOrder: 0, createdAt: AT });
     }
     store.files.push(
-      { fileId: "file_art", ownerId: "user_client", purpose: "artwork", originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
+      { fileId: "file_art", ownerId: "user_client", purpose: "artwork", artworkCheck: { status: "passed", checkedAt: AT }, originalFilename: "art.pdf", declaredContentType: "application/pdf", detectedContentType: "application/pdf", size: 10, state: "ready", objectKey: "client/art.pdf", references: [], createdAt: AT },
       { fileId: "file_mock", ownerId: "user_client", purpose: "mockup", originalFilename: "mock.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/mock.jpg", references: [], createdAt: AT },
       { fileId: "file_qr", ownerId: "user_client", purpose: "payment_proof", originalFilename: "qr.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "client/qr.jpg", references: [], createdAt: AT },
       { fileId: "file_drop", ownerId: "user_rider", purpose: "delivery_photo", originalFilename: "drop.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 10, state: "ready", objectKey: "rider/drop.jpg", references: [], createdAt: AT },
@@ -422,7 +422,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
  */
 test("a paid order clears money, then quality, and only then reaches the shop", { skip: !DATABASE_URL }, async (t) => {
   {
-    const { call, orderId } = await placedOrder(t);
+    const { call, orderId, database } = await placedOrder(t);
     const transition = (state, subject, body = {}) => call(
       `/orders/${orderId}/transition`, { method: "POST", subject, body: { state, ...body } },
     );
@@ -432,6 +432,22 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const early = await transition("payment_authorized", "clerk_supplier_a");
     assert.equal(early.status, 409, JSON.stringify(early.body));
 
+    const assertHeld = async () => {
+      for (const subject of ["clerk_supplier_a", "clerk_supplier_b"]) {
+        assert.equal((await call(`/orders/${orderId}`, { subject })).status, 403);
+        assert.deepEqual((await call("/jobs", { subject })).body.jobs, []);
+        assert.deepEqual((await call("/orders", { subject })).body.orders, []);
+        assert.equal((await call("/files/file_art", { subject })).status, 403);
+      }
+      const store = await loadStore(database);
+      assert.equal(store.notifications.filter(n => n.orderId === orderId && n.appRole === "supplier").length, 0);
+    };
+    await assertHeld();
+    const waiting = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.fileCheck;
+    assert.equal(waiting.status, "pending");
+    assert.ok(waiting.waitingSeconds >= 0);
+    const inbox = await call("/notifications", { subject: "clerk_ops" });
+    assert.ok(inbox.body.notifications.some(n => n.orderId === orderId && n.type === "ops_job_needs_qa"));
     // Step one: the transfer. Confirming it hands the order to quality control,
     // not to the shop -- the artwork has not been looked at yet.
     const confirmed = await call(`/orders/${orderId}/payments/initial/confirm`, {
@@ -439,12 +455,16 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     });
     assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
     assert.equal(await stateOf(), "needs_qa");
+    await assertHeld();
 
     // Step two: the artwork. A failed check goes back to the client and the
     // money stays where it is.
     const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi" });
     assert.equal(failed.status, 200, JSON.stringify(failed.body));
     assert.equal(await stateOf(), "client_correction");
+    await assertHeld();
+    assert.equal(failed.body.order.fileCheck.status, "failed");
+    assert.equal(failed.body.order.fileCheck.reason, "Artwork is 72dpi");
     const corrected = await call(`/orders/${orderId}`, { subject: "clerk_client" });
     assert.deepEqual(corrected.body.order.correction, {
       reason: "Artwork is 72dpi", requestedAt: failed.body.order.updatedAt,
@@ -459,6 +479,8 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     // the order again.
     const resubmitted = await transition("needs_qa", "clerk_client");
     assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
+    assert.equal(resubmitted.body.order.fileCheck.status, "pending");
+    await assertHeld();
     assert.deepEqual(resubmitted.body.order.correction, corrected.body.order.correction);
 
     // Passing quality control hands it to the shop that was matched before the
@@ -466,6 +488,11 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const approved = await transition("supplier_assigned", "clerk_ops", { note: "Artwork approved" });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.order.supplierId, "supplier_a");
+    assert.equal(approved.body.order.fileCheck.status, "passed");
+    assert.equal(approved.body.order.fileCheck.reviewedBy, "user_ops");
+    const released = await loadStore(database);
+    assert.equal(released.notifications.filter(n => n.orderId === orderId && n.type === "shop_job_assigned").length, 1);
+    assert.ok(released.auditLog.some(row => row.orderId === orderId && row.action === "order.file_check" && row.detail.fileCheck.status === "passed"));
 
     // The shop sees it for the first time here, already priced and already dated.
     const jobs = await call("/jobs", { subject: "clerk_supplier_a" });
@@ -1768,7 +1795,10 @@ test("design links persist through PostgreSQL checkout and remain scoped to artw
     for (const formatCode of ["canva_link", "google_drive", "dropbox", "we_transfer"]) store.supplierServiceFileFormats.push({ supplierServiceId: listing.supplierServiceId, formatCode });
     await saveStore(database, store);
   });
-  const instance = await startApi();
+  const provider = http.createServer((_req, res) => { res.writeHead(200, { 'content-type': 'application/pdf' }); res.end(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url))); });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
   t.after(async () => { instance.child.kill("SIGTERM"); await new Promise((resolve) => instance.child.once("exit", resolve)); });
   const call = (pathname, options = {}) => request(instance.api, pathname, { subject: "clerk_client", ...options });
   const artworkLinks = [
@@ -1785,6 +1815,9 @@ test("design links persist through PostgreSQL checkout and remain scoped to artw
   const orderId = placed.body.order.id;
   const reloaded = await loadStore(database);
   assert.deepEqual(reloaded.orderLineItems.find((line) => line.orderId === orderId).artworkLinks, artworkLinks);
+  assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" })).status, 403);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
+  await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
   for (const subject of ["clerk_client", "clerk_supplier_a", "clerk_ops"]) {
     const result = await call(`/orders/${orderId}`, { subject });
     assert.equal(result.status, 200, JSON.stringify(result.body));
@@ -1921,6 +1954,7 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
     const store = await loadStore(database);
     const order = store.orders.find((row) => row.id === orderId);
     order.state = "production";
+    order.fileCheck.status = "passed";
     order.supplierId = null;
     order.riderId = "user_rider";
     const job = store.orderJobs.find((row) => row.orderId === orderId);
@@ -1982,4 +2016,161 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
   assert.deepEqual(combined.body.order.artworkFileIds, ["file_art", "file_art_second"]);
   assert.equal((await call("/files/file_art_second/download-url", { subject: "clerk_rider" })).status, 200);
   assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
+});
+
+test('checkout checks links for released clients, refuses every failed or inconclusive verdict, and rolls back', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: 'canva_link' });
+    await saveStore(database, store);
+  });
+  let mode = 'missing';
+  let probes = 0;
+  const provider = http.createServer((_req, res) => {
+    probes++;
+    if (mode === 'unreachable') { res.destroy(); return; }
+    const status = { missing: 404, private: 401, challenged: 403, unknown: 200, passed: 200 }[mode];
+    res.writeHead(status, { 'content-type': mode === 'passed' ? 'application/pdf' : 'text/html' });
+    res.end(mode === 'passed' ? readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)) : '<html>Unavailable artwork</html>');
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  const links = [{ formatCode: 'canva_link', url: 'https://www.canva.com/design/ABC/view' }];
+  const added = await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkFileId: 'file_art', artworkLinks: links } });
+  assert.equal(added.status, 201);
+  const checkout = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'ARTWORK-GATE' }, artworkCheck: { ok: true } } });
+  for (mode of ['missing', 'private', 'challenged', 'unknown', 'unreachable']) {
+    const result = await checkout();
+    assert.equal(result.status, 409, JSON.stringify(result.body));
+    assert.equal(result.body.error, 'artwork_link_check_failed');
+    assert.equal(result.body.lineId, added.body.cart.lines[0].id);
+    assert.equal(result.body.field, 'artwork');
+    assert.match(result.body.message, /viewable by anyone with the link/);
+    assert.match(result.body.message, /upload the file instead/);
+    const store = await loadStore(database);
+    assert.equal(store.orders.length, 0);
+    assert.equal(store.orderJobs.length, 0);
+    assert.equal(store.orderInvoices.length, 0);
+    assert.equal(store.notifications.length, 0);
+    assert.equal(store.carts[0].state, 'draft');
+    assert.deepEqual(store.files.find(f => f.fileId === 'file_qr').references, []);
+  }
+  const lineId = added.body.cart.lines[0].id;
+  await call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body: { artworkLinks: [], artworkFileId: 'file_art' } });
+  // An existing upload without a verdict is explicit reupload guidance, never a silent QA order.
+  for (const verdict of [undefined, { status: 'failed', reason: 'artwork_file_unreadable', message: 'The artwork could not be read. Export and upload it again.' }]) {
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.files.find(f => f.fileId === 'file_art').artworkCheck = verdict;
+      await saveStore(database, store);
+    });
+    const result = await checkout();
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error, 'artwork_file_check_failed');
+    assert.equal(result.body.fileId, 'file_art');
+    assert.match(result.body.message, /[Uu]pload/);
+    assert.equal((await loadStore(database)).orders.length, 0);
+  }
+  await call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body: { artworkFileId: null } });
+  const empty = await checkout();
+  assert.equal(empty.body.error, 'artwork_required');
+  await call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body: { artworkLinks: links } });
+  mode = 'passed';
+  const placed = await checkout();
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  assert.equal(placed.body.order.fileCheck.status, 'pending');
+  assert.ok(probes >= 5, 'checks happen without a client call to link-check');
+  const store = await loadStore(database);
+  assert.equal(store.notifications.some(n => n.appRole === 'supplier'), false);
+  assert.ok(store.notifications.some(n => n.appRole === 'ops_admin' && n.type === 'ops_job_needs_qa'));
+});
+
+test('checkout provider wait holds no domain lock and a concurrent artwork change invalidates the verdict', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: 'canva_link' });
+    await saveStore(database, store);
+  });
+  let reached, release;
+  const reachedProvider = new Promise(resolve => { reached = resolve; });
+  const releasedProvider = new Promise(resolve => { release = resolve; });
+  const provider = http.createServer(async (_req, res) => {
+    reached(); await releasedProvider;
+    res.writeHead(200, { 'content-type': 'application/pdf' }); res.end(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)));
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { release(); provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: { ARTWORK_TEST_PORT: String(provider.address().port) } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkLinks: [{ formatCode: 'canva_link', url: 'https://www.canva.com/design/ABC/view' }] } });
+  const placing = call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'CONCURRENT-ARTWORK' } } });
+  await Promise.race([reachedProvider, placing.then(result => { throw new Error(JSON.stringify(result)); })]);
+  try {
+    assert.equal((await database.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', ['gridgo-domain-mutation'])).rows[0].acquired, true);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.cartLines[0].artworkLinks[0].url = 'https://www.canva.com/design/CHANGED/view';
+      await saveStore(database, store);
+    });
+  } finally { release(); }
+  const result = await placing;
+  assert.equal(result.status, 409, JSON.stringify(result.body));
+  assert.equal(result.body.error, 'artwork_check_required');
+  assert.equal((await loadStore(database)).orders.length, 0);
+});
+
+test('artwork uploads persist their automatic verdict and checkout refuses a corrupted upload', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const objects = new Map();
+  const storage = http.createServer((req, res) => {
+    if (req.url.includes('location')) { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<LocationConstraint></LocationConstraint>'); return; }
+    if (req.method === 'PUT') {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => { objects.set(req.url, Buffer.concat(chunks)); res.writeHead(200, { ETag: '"fixture"' }); res.end(); });
+      return;
+    }
+    res.writeHead(200, { 'Content-Length': objects.get(req.url)?.length || 0 }); res.end();
+  });
+  await new Promise(resolve => storage.listen(0, '127.0.0.1', resolve));
+  t.after(() => { storage.closeAllConnections(); return new Promise(resolve => storage.close(resolve)); });
+  const storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  const instance = await startApi({ extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const upload = async bytes => {
+    const form = new FormData();
+    form.set('purpose', 'artwork');
+    form.set('file', new Blob([bytes], { type: 'application/pdf' }), 'design.pdf');
+    const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
+    const body = await response.json();
+    assert.equal(response.status, 201, JSON.stringify(body) + instance.output());
+    return body.file;
+  };
+  const invalid = await upload(Buffer.from('%PDF-1.7 truncated'));
+  assert.equal(invalid.artworkCheck.status, 'failed');
+  assert.equal((await call(`/files/${invalid.fileId}`)).body.file.artworkCheck.status, 'failed');
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  const added = await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkFileId: invalid.fileId } });
+  const checkout = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'FILE-CHECK' } } });
+  assert.equal((await checkout()).body.error, 'artwork_file_check_failed');
+  const valid = await upload(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)));
+  assert.equal(valid.artworkCheck.status, 'passed');
+  assert.equal((await loadStore(database)).files.find(file => file.fileId === valid.fileId).artworkCheck.status, 'passed');
+  await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { method: 'PATCH', body: { artworkFileId: valid.fileId } });
+  assert.equal((await checkout()).status, 201);
 });
