@@ -118,6 +118,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
         "1791244800000_multi_shop_baskets",
+        "1791244800000_shop_recovery_penalty_ownership",
       ],
     );
 
@@ -297,6 +298,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    // Reverse shop-specific lapse ownership before the earlier migrations.
+    await runner(migrationOptions(schema, "down", 1, client));
     // Empty basket schema can be reversed without touching existing orders.
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('order_baskets') AS t")).rows[0].t, null);
