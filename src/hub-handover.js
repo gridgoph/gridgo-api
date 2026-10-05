@@ -1,6 +1,6 @@
 import { assertRefundWorkAllowed } from './refund-policy.js';
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import { hubPickupSettings, publicHubPickup } from './hub-pickup.js';
+import { publicHubPickup } from './hub-pickup.js';
 import { paymentSettled, issueWindowExpiresAt, carriedToOffice } from './operational-model.js';
 import { notifyOrderParties } from './client-order-notifications.js';
 import { notifyAdmins } from './domain-events.js';
@@ -8,8 +8,7 @@ import { queueOrderInvalidate } from './notifications.js';
 import { staffError as fail, staffAccess, activeAccount, hasMembership, routeStaffAccess } from './staff-access.js';
 
 const READY_STATES = ['ready_for_dispatch', 'rider_assigned', 'picked_up', 'out_for_delivery'];
-const DEFAULT_SCHEDULE = { utcOffsetMinutes: 480, week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
-export const hubRecord = settings => ({ id: 'primary', name: 'GRIDGO pickup hub', ...publicHubPickup(settings), schedule: hubPickupSettings(settings).schedule || structuredClone(DEFAULT_SCHEDULE) });
+export const hubRecord = settings => ({ id: 'primary', name: 'GRIDGO pickup hub', ...publicHubPickup(settings) });
 
 /** Mint once at the physical handover boundary, never on a read. */
 export function prepareHandover(store, order, { at }) {
@@ -71,14 +70,21 @@ export function sweepHubReminders(store, { at, id }) {
   for (const order of store.orders || []) {
     const h = order.handover;
     if (order.state !== 'awaiting_collection' || !h?.qrToken || h.consumedAt) continue;
-    const schedule = h.schedule, offset = schedule.utcOffsetMinutes * 60000;
+    const schedule = h.schedule;
     const readyMs = Date.parse(h.readyAt), nowMs = Date.parse(at);
     if (nowMs < readyMs) continue;
     if (!h.readyNotifiedAt) {
       const alreadyNotified = store.notifications.some(n => n.orderId === order.id && n.userId === order.clientId && n.type === 'order_ready_for_pickup');
-      if (!alreadyNotified) clientNotice(store, order, 'hub_ready', 'Your order is ready. Bring its QR and matching code during hub hours.', at, id);
+      if (!alreadyNotified) clientNotice(store, order, 'hub_ready', schedule
+        ? 'Your order is ready. Bring its QR and matching code during hub hours.'
+        : 'Your order is ready. Collection hours are not set yet. Contact Operations to arrange pickup.', at, id);
       h.readyNotifiedAt = at; changed = true;
     }
+    if (!schedule) {
+      if (changed) queueOrderInvalidate(store, order, ['orders']);
+      continue;
+    }
+    const offset = schedule.utcOffsetMinutes * 60000;
     const first = Date.parse(new Date(readyMs + offset).toISOString().slice(0, 10) + 'T00:00:00Z');
     const last = Date.parse(new Date(nowMs + offset).toISOString().slice(0, 10) + 'T00:00:00Z');
     for (let day = first; day <= last; day += 86400000) {

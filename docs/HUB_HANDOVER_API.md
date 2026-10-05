@@ -34,7 +34,7 @@ No new Clerk application, local passwords, signup, distribution automation or ap
 | GET | `/ops/hub/unclaimed` | all waiting orders, ready time, missed days, Operations flag and redelivery requests |
 | GET | `/ops/hub/escalations` | handover mismatch reports, including delivery reports |
 
-The single hub record has `id:"primary"`, name, point, fee and schedule. Its point is the existing GRIDGO counter location. Its schedule and fee use the previously shipped `settings.hubPickup`; changes remain on the existing versioned Super Admin settings endpoint. When no schedule is configured, the pilot fallback is Monday/Wednesday/Friday, 09:00–17:00, UTC+08:00. Set actual opening hours and closures before accepting pilot pickups. Each QR snapshots the point and schedule when the rider records arrival. Existing order fee snapshots never change.
+The single hub record has `id:"primary"`, name, point, fee and schedule. Its point is the existing GRIDGO counter location. Its schedule and fee use the previously shipped `settings.hubPickup`; changes remain on the existing versioned Super Admin settings endpoint. `GET /settings` and `GET /staff/hub` both expose `schedule: null` when no schedule is configured; settings are the only source of opening hours. Unset hours do not block pickup readiness or claims. Set actual opening hours and closures before accepting pilot pickups. Each QR snapshots the point and schedule when the rider records arrival. Existing order fee snapshots never change.
 
 SOP text covers identification, QR/OTP matching, blocked mismatch/escalation, named handouts and the restrictions on pricing talk, solicitation and supplier contacts. The API never pays a staff incentive.
 
@@ -59,7 +59,7 @@ Both successful delivery and hub claim call the same delivery event: record deli
 
 ## Unclaimed timeline and redelivery
 
-The existing transactional lifecycle worker sends the ready notification and catches up each completed open hub date. A date counts once, after its last closing time, if the package was ready before closing; closures and closed weekdays do not count. Readiness after closing starts counting on the next open date. Multiple opening windows count as one hub day. The ready date itself counts if the client misses its closing time. Stored date keys make retries/restarts idempotent.
+The existing transactional lifecycle worker sends the ready notification and catches up each completed open hub date. A date counts once, after its last closing time, if the package was ready before closing; closures and closed weekdays do not count. Readiness after closing starts counting on the next open date. Multiple opening windows count as one hub day. The ready date itself counts if the client misses its closing time. Stored date keys make retries/restarts idempotent. A handover with a null schedule gets a ready notice saying collection hours are unset; no missed-day reminders or escalation are calculated without opening hours. Existing issued schedules remain immutable.
 
 The first missed day gets a reminder; the second gets a stronger warning. On the third, `operationsRequired` becomes true, both administrator memberships receive a durable inbox event, and the client can request redelivery at their own cost. Later missed hub days continue reminders. No state cancellation, payment forfeiture or payout happens.
 
