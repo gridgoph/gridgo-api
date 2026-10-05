@@ -81,8 +81,9 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
   let changed = false;
   for (const order of store.orders || []) {
     if (orderId && order.id !== orderId) continue;
+    if (order.shopRecovery && order.shopRecovery.status !== 'accepted') continue;
     if (!order.supplierId || !order.commercialCommittedAt || !productionDeadline(order)) continue;
-    let lapse = store.productionLapses.find((row) => row.orderId === order.id);
+    let lapse = store.productionLapses.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
     if (lapse && (lapse.appliedAt || lapse.closedAt)) continue;
     if (refundSettlementFor(store, order) || order.state === 'cancelled') {
       if (lapse) { lapse.closedAt = at; changed = true; }

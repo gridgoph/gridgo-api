@@ -28,7 +28,7 @@ The same role-safe `rescheduleRequest` summary appears in order/job projections.
 
 Only `production` or `supplier_self_qc`, before `readyAt`, can request a deadline. The reason is required, at most 2,000 characters. The proposed shop-ready timestamp must include a timezone, be in the future, and be later than the current shop deadline. Existing refund work stops still apply. Orders without reconcilable original dates must go to Operations.
 
-Exactly one request is allowed per order for its lifetime. Original request facts are protected by migration `1791216000000`; no deletion, replacement, renewed request or second answer can clear its history. The request does not change any dates until acceptance. An unanswered request expires at **requestedAt + 24 hours**, including the exact boundary. The lifecycle worker and late-answer route both record expiration once, notify Operations and Super Admin, and retain the original deadline. Ordinary expired requests do not stop work.
+Exactly one request is allowed per order for its lifetime. Original request facts are protected by migration `1791255600000`; no deletion, replacement, renewed request or second answer can clear its history. The request does not change any dates until acceptance. An unanswered request expires at **requestedAt + 24 hours**, including the exact boundary. The lifecycle worker and late-answer route both record expiration once, notify Operations and Super Admin, and retain the original deadline. Ordinary expired requests do not stop work.
 
 Acceptance changes `readyBy` and moves `promiseBy` by the same interval, preserving the snapshotted gap between the two dates. Effective `promisedDate` in order projections follows the renewed date for the caller (shop-ready for suppliers, client promise for clients); immutable original quote/invoice snapshots remain historical. Future production penalties measure the renewed `readyBy`. An unapplied warning is archived on the request, with its existing audits/notifications retained; a later renewed-date breach starts a new warning and assessment. Pending/declined/expired requests never rebase lateness. Requests count on the shop record regardless of outcome.
 
@@ -63,3 +63,9 @@ Errors use `{error:"snake_case"}`. Main conflicts: `reschedule_already_requested
 Durable `order_reschedule_{requested,accepted,declined,expired,operations_required,rematch_refreshed,rematched,refund_requested,resolved}` inbox rows go to the client, requesting shop and every current Operations/Super Admin membership. A replacement receives the accepted-replacement event. `save()` owns after-commit outbox/realtime delivery. Push data keeps the existing allowlist; dates, reasons, shop identity and money are not added to push data. Order/job/payout invalidations accompany mutations.
 
 Backend only: supplier/client screens and dashboard rendering must consume these endpoints in their own releases.
+
+## Basket groups and shop recovery
+
+Use each basket group’s `orderId` for these endpoints. The one-request limit, changed dates, holds and replacement apply only to that group; sibling orders and the immutable basket deadline, payment and receipt stay unchanged. Basket responses expose the group’s effective date through its role-safe order projection.
+
+An unresolved shop recovery blocks deadline answers and replacement acceptance. A declined deadline hold blocks shop cancellation and shop-recovery acceptance, so neither workflow bypasses the other. A consented reschedule replacement starts a fresh shop-acceptance window. Earlier shops’ lapse history is retained.

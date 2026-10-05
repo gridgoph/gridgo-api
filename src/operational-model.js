@@ -1,4 +1,7 @@
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
+import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
+import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
+import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
@@ -216,6 +219,7 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     riderCommissionBps: 8_500,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
+    hubPickup: hubPickupSettings(),
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
@@ -232,6 +236,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
@@ -728,7 +733,7 @@ export function moneyReportingForOrder(order, store = null) {
 
 export function activePayoutHold(store, order) {
   return Boolean(
-    refundHold(store, order) || rescheduleHold(order) || order.payoutHold ||
+    refundHold(store, order) || rescheduleHold(order) || (order.shopRecovery && order.shopRecovery.status !== "accepted") || order.payoutHold ||
       (store?.claims || []).some(
         (claim) => claim.orderId === order.id && ["open", "payout_held"].includes(claim.status),
       ),
@@ -766,7 +771,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   }
 
   if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
-  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id);
+  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
   if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
@@ -950,8 +955,16 @@ function clientCorrectionFor(order) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (order.basketId && user?.role === "client") {
+    publicRecord.clientItemSubtotalMinor = order.supplierSubtotalMinor + order.serviceFeeMinor;
+    for (const field of ["supplierId", "subtotalMinor", "serviceFeeMinor", "serviceFeeRateBps"]) delete publicRecord[field];
+  }
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
-  publicRecord.productionItems = productionItemsFor(store, order, user);
+  publicRecord.productionItems = user?.role === "supplier" && !supplierArtworkReleased(order) ? [] : productionItemsFor(store, order, user);
+  if (["ops_admin", "super_admin", "client"].includes(user?.role) && order.fileCheck) {
+    publicRecord.fileCheck = fileCheckProjection(order);
+    if (user.role === "client") delete publicRecord.fileCheck.reviewedBy;
+  } else delete publicRecord.fileCheck;
   delete publicRecord.rescheduleRequest;
   const reschedule = publicReschedule(order, user);
   if (reschedule) publicRecord.rescheduleRequest = reschedule;
@@ -1014,6 +1027,14 @@ export function publicOrderFor(order, user, store = null) {
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order, store) : null;
   delete publicRecord.attachments;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
+  delete publicRecord.shopRecoveryHistory;
+  delete publicRecord.shopFailureEvents;
+  delete publicRecord.declinedBy;
+  if (order.shopRecovery) publicRecord.shopRecovery = publicRecovery(order, user);
+  if (publicRecord.shopAcceptance) {
+    delete publicRecord.shopAcceptance.schedule;
+    if (!ops && user?.role !== 'supplier') delete publicRecord.shopAcceptance;
+  }
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";

@@ -50,7 +50,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "order_invoices", "support_admins", "support_tickets",
+      "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
@@ -117,7 +117,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791072000000_season_windows",
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
-        "1791216000000_order_reschedule_request",
+        "1791244800000_shop_recovery_penalty_ownership",
+        "1791248400000_hub_pickup_request",
+        "1791252000000_multi_shop_baskets",
+        "1791255600000_order_reschedule_request",
       ],
     );
 
@@ -302,6 +305,24 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
 
+    // Empty basket schema can be reversed without touching existing orders.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('order_baskets') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('order_basket_groups') AS t")).rows[0].t, null);
+
+    await client.query(`INSERT INTO client_carts
+      (id,client_id,state,version,service_level,fulfillment_mode,created_at,updated_at,request_fulfillment)
+      VALUES ('chosen_cart','multi_role_shop','draft',1,'standard','pickup',now(),now(),
+        '{"fulfillmentMode":"pickup","dropoff":{"lat":7,"lng":125,"label":"Hub"}}')`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /request fulfillment snapshots exist/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM client_carts WHERE id='chosen_cart'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='client_carts' AND column_name='request_fulfillment'", [schema])).rowCount, 0);
+
+    // Reverse shop-specific lapse ownership before the earlier migrations.
+    await runner(migrationOptions(schema, "down", 1, client));
     // Retirement has no automatic restore; its down only removes the migration marker.
     await runner(migrationOptions(schema, "down", 1, client));
 
@@ -1056,3 +1077,23 @@ for (const [baseFeeMinor, perKmMinor] of [[7500, 1000], [8000, 1200], [7500, 120
     });
   });
 }
+
+
+test("hub pickup migration adds a zero fee without replacing configured settings", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner(migrationOptions(schema, "up", undefined, client));
+    const { rows: [{ count: rollbackCount }] } = await client.query(`SELECT count(*)::integer AS count FROM pgmigrations
+      WHERE name >= '1791248400000_hub_pickup_request'`);
+    await runner(migrationOptions(schema, "down", rollbackCount, client));
+    await client.query(`INSERT INTO platform_settings (singleton,version,settings) VALUES (true,7,'{}')`);
+    await runner(migrationOptions(schema, "up", undefined, client));
+    let settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
+    assert.deepEqual(settings.hubPickup, { schedule: null, feeMinor: 0 });
+    await client.query(`UPDATE platform_settings SET settings=jsonb_set(settings,'{hubPickup,feeMinor}','2500')`);
+    await runner(migrationOptions(schema, "down", rollbackCount, client));
+    await runner(migrationOptions(schema, "up", undefined, client));
+    settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
+    assert.equal(settings.hubPickup.feeMinor, 2500);
+    assert.equal((await client.query("SELECT version FROM platform_settings")).rows[0].version, 7);
+  });
+});

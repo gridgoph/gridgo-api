@@ -63,6 +63,9 @@ export function supplierRefundPayouts(store, order) {
 
 export function assertRefundWorkAllowed(store, order) {
   if (rescheduleHold(order)) refundFail(409, 'reschedule_fulfillment_stopped', 'Resolve the deadline request before continuing production or fulfillment.');
+  if (order.shopRecovery && order.shopRecovery.status !== 'accepted') {
+    refundFail(409, 'shop_recovery_pending', 'Resolve the shop replacement or refund before continuing.');
+  }
   if (refundHold(store, order) || refundSettlementFor(store, order)) {
     refundFail(409, 'refund_fulfillment_stopped', 'This order is stopped for a refund. Resolve the refund before continuing.');
   }

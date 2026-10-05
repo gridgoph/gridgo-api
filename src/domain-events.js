@@ -1,3 +1,4 @@
+import { supplierArtworkReleased } from "./artwork-gates.js";
 import { activePayoutHold } from "./operational-model.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
@@ -88,7 +89,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
     });
   }
   function notify(userId, type, title, order, occurrence, appRole, extra = {}, preserveOccurrences = false) {
-    if (!userId) return;
+    if (!userId || (appRole === "supplier" && order && !supplierArtworkReleased(order))) return;
     // Existing route effect for the same recipient/purpose wins in this transaction.
     if (
       (store.notifications || []).some(

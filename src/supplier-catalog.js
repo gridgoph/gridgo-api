@@ -460,6 +460,12 @@ export function clientMoneyMinor(store, supplierMinor) {
   return gridgoAmountMinor(supplierMinor, rate);
 }
 
+// Option discounts round the magnitude, then restore the sign, like the client UI.
+function clientModifierMinor(store, amount) {
+  if (!Number.isSafeInteger(amount)) return null;
+  return amount < 0 ? -clientMoneyMinor(store, -amount) : clientMoneyMinor(store, amount);
+}
+
 export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
   if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
@@ -476,6 +482,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
       id: option.id,
       label: option.label,
       priceModifierMinor: option.priceModifierMinor,
+      clientPriceModifierMinor: clientModifierMinor(store, option.priceModifierMinor),
       priceMultiplierBps: option.priceMultiplierBps ?? null,
       specBinding: option.specBinding ?? null,
       sortOrder: option.sortOrder,
@@ -498,6 +505,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     name: item.name,
     description: item.description,
     basePriceMinor: item.basePriceMinor,
+    clientBasePriceMinor: clientMoneyMinor(store, item.basePriceMinor),
     fromPriceMinor,
     effectivePriceMinor,
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
@@ -512,8 +520,14 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
-    priceTiers: priceTiersFor(store, item.id),
-    speedTiers: speedTiersFor(store, item.id),
+    priceTiers: priceTiersFor(store, item.id).map((tier) => ({
+      ...tier, clientUnitPriceMinor: clientMoneyMinor(store, tier.unitPriceMinor),
+    })),
+    speedTiers: speedTiersFor(store, item.id).map((tier) => ({
+      ...tier,
+      clientPriceMinor: clientMoneyMinor(store, tier.priceMinor),
+      clientSurchargeMinor: clientMoneyMinor(store, tier.surchargeMinor),
+    })),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
     turnaroundHours: itemTurnaroundHours(item, service),
@@ -521,6 +535,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     rush: service.rushEnabled ? {
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
+      clientPriceMinor: clientMoneyMinor(store, service.rushPriceMinor),
     } : null,
     acceptedFormats: effectiveAcceptedFormats(store, item),
     photos: publicPhotos(store, item.id),

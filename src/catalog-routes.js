@@ -529,7 +529,21 @@ function parseFormatFinderQuery(url) {
 }
 
 export async function routeSupplierCatalog({ req, url, store, user, readBody, id, now, audit }) {
-  const { pathname } = url;
+  let { pathname } = url;
+  const staffRead = req.method === "GET" && /^\/ops\/catalog\/(shops(?:\/[^/]+)?|items\/[^/]+)$/.test(pathname);
+  const ownPreview = req.method === "GET" && pathname === "/me/catalog-preview";
+  if (staffRead || ownPreview) {
+    if (!user) fail(401, "unauthorized", "Sign in to read this catalogue.");
+    if (staffRead) {
+      if (!identityHasMembership(user, "ops_admin") && !identityHasMembership(user, "super_admin")) {
+        fail(403, "forbidden", "An Operations membership is required.");
+      }
+      pathname = pathname.slice(4);
+    } else {
+      requireSupplier(user);
+      pathname = `/catalog/shops/${encodeURIComponent(user.id)}`;
+    }
+  }
 
   if (req.method === "GET" && pathname === "/accepted-file-formats") {
     const formats = publicAcceptedFormats(store);

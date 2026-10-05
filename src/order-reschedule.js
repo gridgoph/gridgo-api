@@ -1,3 +1,4 @@
+import { recoveryHeld, startShopAcceptance } from './shop-recovery.js';
 import { approvedRole, hasRole, privilegedAdminMemberships, queueOrderInvalidate, queueInvalidate } from './notifications.js';
 import { writeDraft } from './client-order-notifications.js';
 import { refundHold, refundSettlementFor, assertRefundWorkAllowed } from './refund-policy.js';
@@ -21,7 +22,7 @@ function requireOperations(store, order) {
   return true;
 }
 function archiveWarning(store, order) {
-  const lapse = (store.productionLapses || []).find((row) => row.orderId === order.id && !row.appliedAt);
+  const lapse = (store.productionLapses || []).find((row) => row.orderId === order.id && row.supplierId === order.supplierId && !row.appliedAt);
   if (!lapse) return;
   order.rescheduleRequest.priorLapse = structuredClone(lapse);
   store.productionLapses = store.productionLapses.filter((row) => row.id !== lapse.id);
@@ -123,6 +124,7 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
   }
   if (!request) fail(404, 'reschedule_not_found', 'No deadline request exists for this order.');
   if (body.requestId !== request.id) fail(409, 'reschedule_stale', 'Reload the deadline request before answering.');
+  if (['answer', 'rematch'].includes(action) && recoveryHeld(order)) fail(409, 'shop_recovery_pending', 'Resolve the shop recovery before changing the production deadline or assignment.');
   if (action === 'answer') {
     if (request.status !== 'pending') fail(409, 'reschedule_already_answered', 'This deadline request is no longer awaiting an answer.');
     if (Date.parse(at) >= Date.parse(request.expiresAt)) {
@@ -197,6 +199,7 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
       }
       order.timeline ||= [];
       order.timeline.push({ at, state: order.state, by: user.id, note: 'Client accepted a replacement for the original product and specifications.' });
+      startShopAcceptance(store, order, at);
       event(store, order, 'rematched', user, at, id);
     }
   } else if (action === 'refund') {

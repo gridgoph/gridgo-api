@@ -229,3 +229,57 @@ test('free-form production specs require equivalent governed option bindings bef
   store.catalogOptions[0].specBinding.valueCode = 'uncoated';
   assert.equal(findRescheduleReplacement(store, store.orders[0], AT), null);
 });
+
+test('basket group deadline changes and replacements leave siblings and the combined receipt unchanged', async () => {
+  const { publicBasket } = await import('../src/baskets.js');
+  for (const outcome of ['accept', 'decline']) {
+    const store = fixture(), order = store.orders[0];
+    order.basketId = 'basket'; order.basketDeadline = order.promiseBy;
+    const sibling = { ...structuredClone(order), id: 'sibling', supplierId: 'replacement' };
+    store.orders.push(sibling);
+    const siblingJob = { ...structuredClone(store.orderJobs[0]), id: 'sibling_job', orderId: sibling.id, supplierId: 'replacement' };
+    store.orderJobs.push(siblingJob);
+    const basket = { id: 'basket', clientId: 'client', orderIds: ['order', 'sibling'], receiptOrderId: 'order',
+      deadline: order.promiseBy, totalMinor: 24000, payment: { status: 'confirmed' } };
+    store.baskets.push(basket);
+    const before = structuredClone({ sibling, siblingJob, basket });
+    await request(store); await answer(store, outcome);
+    if (outcome === 'decline') await call(store, 'client', 'rematch', { requestId: order.rescheduleRequest.id,
+      offerId: order.rescheduleRequest.offer.id, action: 'accept' });
+    assert.deepEqual({ sibling, siblingJob, basket }, before);
+    const projection = publicBasket(store, basket, actors.client);
+    assert.equal(projection.groups[0].order.rescheduleRequest.status, outcome === 'accept' ? 'accepted' : 'declined');
+    assert.equal(projection.groups[0].order.supplierId, undefined);
+    assert.equal(projection.groups[1].order.rescheduleRequest, undefined);
+  }
+});
+
+test('shop recovery and reschedule holds cannot bypass one another', async () => {
+  const { recordShopFailure } = await import('../src/shop-recovery.js');
+  const store = fixture(), order = store.orders[0];
+  await request(store);
+  order.shopRecovery = { status: 'awaiting_client' };
+  await assert.rejects(answer(store, 'accept'), code('shop_recovery_pending'));
+  assert.equal(order.readyBy, ORIGINAL);
+  delete order.shopRecovery;
+  await answer(store, 'decline');
+  assert.throws(() => recordShopFailure(store, order, { kind: 'cancelled', reason: 'Cannot continue', at: AT, createId: id }), code('reschedule_fulfillment_stopped'));
+  order.shopRecovery = { id: 'recovery', status: 'awaiting_client', proposal: {} };
+  await assert.rejects(call(store, 'client', 'rematch', { requestId: order.rescheduleRequest.id, action: 'refresh' }), code('shop_recovery_pending'));
+  const { routeShopRecovery } = await import('../src/shop-recovery-routes.js');
+  await assert.rejects(routeShopRecovery({ req: { method: 'POST' },
+    url: new URL('http://api.test/orders/order/shop-recovery/accept'), store, user: actors.client,
+    readBody: async () => ({ recoveryId: 'recovery' }), now: () => AT, id }), code('reschedule_fulfillment_stopped'));
+});
+
+test('replacement starts its own acceptance window and retains earlier shop lapse history', async () => {
+  const store = fixture(), order = store.orders[0];
+  const historical = { id: 'historical', orderId: order.id, supplierId: 'other_shop', closedAt: AT };
+  store.productionLapses.push(historical);
+  await request(store); await answer(store, 'decline');
+  await call(store, 'client', 'rematch', { requestId: order.rescheduleRequest.id, offerId: order.rescheduleRequest.offer.id, action: 'accept' });
+  assert.ok(store.productionLapses.includes(historical));
+  assert.equal(order.shopAcceptance.supplierId, 'replacement');
+  assert.equal(order.shopAcceptance.status, 'pending');
+  assert.ok(Date.parse(order.shopAcceptance.deadlineAt) > Date.parse(AT));
+});

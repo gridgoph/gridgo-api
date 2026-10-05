@@ -1,6 +1,6 @@
 import { recentLapseQualityPenalty } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
-import { listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
+import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
@@ -240,9 +240,21 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
     // Rank real listing projections, never combine one listing's low price
     // with another's fast promise. Each offered listing must meet the deadline.
+    const groupLines = (widthRequest?.cartLines || []).filter((line) => line.supplierId === supplierId);
+    const groupUnits = groupLines.reduce((total, line) => total + BigInt(line.quantity), 0n);
+    const groupHours = groupLines.map((line) => {
+      const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+      const service = (store.supplierServices || []).find((row) => row.id === item?.supplierServiceId);
+      return item ? itemTurnaroundHours(item, service) : 0;
+    });
     const choices = eligibleListings.map((listing) => {
+      // Draft lines consume capacity when another product joins their group.
+      // Use the same combined quantity and slowest turnaround as checkout.
+      const combinedUnits = groupUnits + BigInt(units ?? listing.minimumOrderQuantity ?? 1);
+      if (combinedUnits > MAX_SAFE_MINOR) fail(400, "invalid_quantity", "The group's quantity exceeds the supported range.");
       const { projection, queue } = projectShopFinish(store, {
-        supplierId, turnaroundHours: listing.turnaroundHours, now, units,
+        supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours), now,
+        units: groupLines.length ? Number(combinedUnits) : units,
       });
       return {
         supplierId, listing, projection, distance, distanceZone,
@@ -314,7 +326,7 @@ function otherListing(row) {
   const item = row.listing;
   return {
     ...Object.fromEntries([
-      "categoryCode", "subcategoryCode", "basePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
+      "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
       "turnaroundHours", "minimumTurnaroundHours", "rush", "acceptedFormats", "optionGroups", "version",
