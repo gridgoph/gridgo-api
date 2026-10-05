@@ -309,3 +309,18 @@ for (const fulfillmentMode of ["delivery", "pickup"]) {
       pickupFeeMinor: order.pickupFeeMinor, deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor }, snapshot);
   });
 }
+
+for (const status of ['pending', 'failed']) test(`supplier recovery routes stay private while file check is ${status}`, async () => {
+  const store = fixture(), order = store.orders[0];
+  order.state = 'needs_qa';
+  order.fileCheck = { status, requestedAt: AT };
+  const user = { id: order.supplierId, role: 'supplier' };
+  await assert.rejects(routeShopRecovery({ req: { method: 'GET' }, url: new URL('http://test/orders/order/shop-recovery'),
+    store, user, readBody: async () => ({}), now: () => AT, id }), { code: 'forbidden' });
+  await assert.rejects(call(store, 'decline', { reason: 'Cannot fulfil' }, user), { code: 'forbidden' });
+  await assert.rejects(call(store, 'shop-cancel', { reason: 'Cannot fulfil' }, user), { code: 'forbidden' });
+  assert.equal(order.shopAcceptance, undefined);
+  assert.equal(store.notifications.length, 0);
+  assert.equal(expireShopAcceptances(store, { at: '2026-10-06T00:00:00Z', createId: id }), false);
+  assert.equal(order.shopAcceptance, undefined);
+});

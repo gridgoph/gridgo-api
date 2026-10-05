@@ -1,3 +1,4 @@
+import { supplierArtworkReleased } from "./artwork-gates.js";
 // Shared by order projections and file metadata/download authorization.
 export function canReadOrderArtwork(user, store, order, fileId, purpose, file = null) {
   if (!user || !order || !["artwork", "mockup"].includes(purpose)) return false;
@@ -5,6 +6,7 @@ export function canReadOrderArtwork(user, store, order, fileId, purpose, file = 
       || (user.role === "client" && order.clientId === user.id)) return true;
   if (!["supplier", "rider"].includes(user.role)) return false;
 
+  if (user.role === "supplier" && !supplierArtworkReleased(order)) return false;
   const partyField = user.role === "supplier" ? "supplierId" : "riderId";
   const jobs = (store?.orderJobs || []).filter((job) => job.orderId === order.id);
   const ownJobs = new Set(jobs.filter((job) => job[partyField] === user.id).map((job) => job.id));

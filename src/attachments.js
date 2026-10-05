@@ -657,6 +657,7 @@ export function publicFile(file, user = null) {
         : { ...reference }),
     // Only present when the file said something about itself, so a client can
     // tell "we read 210 x 297 mm" from "we could not tell".
+    ...(file.artworkCheck ? { artworkCheck: { ...file.artworkCheck } } : {}),
     ...(file.detected ? { detected: { ...file.detected } } : {}),
     ...(file.verificationDocumentType ? { verificationDocumentType: file.verificationDocumentType } : {}),
   };
