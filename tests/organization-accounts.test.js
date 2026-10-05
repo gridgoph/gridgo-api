@@ -267,3 +267,10 @@ test('unknown business tracks, including object prototype keys, are validation e
     assert.throws(() => applyForBusiness({ ...ctx, body: { ...ctx.body, businessType } }), { code: 'invalid_application' });
   }
 });
+
+test('a business cannot select the organization checklist to omit bank and registration evidence', () => {
+  const ctx = fixture();
+  ctx.body = { accountType: 'business', businessType: 'organization', businessName: 'Test business', businessNature: 'Printing',
+    signatory: ctx.body.officer, documents: ctx.body.documents };
+  assert.throws(() => applyForBusiness(ctx), { code: 'invalid_application' });
+});

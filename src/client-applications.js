@@ -28,7 +28,8 @@ export function validateClientApplication(store, user, body, at, { approvalCase,
   const accountType = body.accountType ?? 'business';
   const track = accountType === 'organization' ? 'organization' : body.businessType;
   if (!['organization', 'business'].includes(accountType)) fields.accountType = 'choose organization or business';
-  const checklist = typeof track === 'string' && Object.hasOwn(APPLICATION_DOCUMENTS, track) ? APPLICATION_DOCUMENTS[track] : null;
+  const allowedTracks = accountType === 'organization' ? ['organization'] : ['sole_proprietor', 'partnership', 'corporation'];
+  const checklist = allowedTracks.includes(track) ? APPLICATION_DOCUMENTS[track] : null;
   if (!checklist) fields.businessType = 'choose sole_proprietor, partnership or corporation';
   for (const field of ['businessName', 'businessNature']) {
     if (!text(body[field]) || text(body[field]).length > 200) fields[field] = 'required; maximum 200 characters';
