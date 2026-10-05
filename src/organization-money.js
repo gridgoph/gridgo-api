@@ -27,6 +27,9 @@ export function organizationFeeMoney(subtotalMinor, settings, eligible = false) 
   if (!Number.isSafeInteger(subtotalMinor) || subtotalMinor < 0) throw organizationMoneyError('invalid_money', 'Invalid printing subtotal.');
   const round = (rate) => Number((BigInt(subtotalMinor) * BigInt(rate) + 5000n) / 10000n);
   const grossServiceFeeMinor = round(settings.serviceFeeRateBps);
+  if (BigInt(subtotalMinor) + BigInt(grossServiceFeeMinor) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw organizationMoneyError('invalid_money', 'Printing including the service fee exceeds the safe-integer range.');
+  }
   const organizationDiscountRateBps = eligible ? configured : 0;
   const organizationDiscountMinor = round(organizationDiscountRateBps);
   return { grossServiceFeeMinor, organizationDiscountRateBps, organizationDiscountMinor,

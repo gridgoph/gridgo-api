@@ -42,3 +42,7 @@ test('legacy quote commitment reduces only the initial service-fee collection', 
   assert.equal(org.organizationDiscountMinor, 5000);
   for (const field of ['supplierPlatformPayoutMinor', 'riderPayoutMinor', 'finalOnlineMinor']) assert.equal(org[field], regular[field]);
 });
+
+test('gross Printing must remain safe even when a discount makes the payable total safe', () => {
+  assert.throws(() => organizationFeeMoney(8_500_000_000_000_000, settings, true), { code: 'invalid_money' });
+});
