@@ -1157,3 +1157,17 @@ test('basket payment reconciliation never restarts a cancelled group', async () 
   assert.deepEqual(store.orders.map((order) => order.state), ['needs_qa', 'cancelled']);
   assert.ok(store.orders.every((order) => order.payments.initial.status === 'confirmed'));
 });
+
+test('add-more matching filters capacity already consumed by the same draft group', async () => {
+  const { store, client } = fixture();
+  store.settings.promiseAllowanceMinutes = 0;
+  const service = store.supplierServices.find((row) => row.supplierId === 'supplier_a');
+  Object.assign(service, { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
+  const call = caller(store, client);
+  const deadline = '2026-08-24T10:00:00.000Z';
+  const created = await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline });
+  const cartId = created.body.cart.id;
+  const added = await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', quantity: 10, optionIds: [] });
+  await assert.rejects(call('POST', '/me/matches', { cartId, groupId: added.body.cart.groups[0].id,
+    subcategoryCode: 'flyers', units: 1 }), (error) => error.code === 'deadline_not_met' || error.code === 'match_not_found');
+});

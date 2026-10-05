@@ -71,4 +71,18 @@ export async function up(pgm) {
       DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_basket_payment();
   `);
 }
-export async function down() { throw new Error('Forward migration only'); }
+export async function down(pgm) {
+  pgm.sql(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM order_baskets) THEN
+        RAISE EXCEPTION 'Cannot reverse while multi-shop baskets exist';
+      END IF;
+    END $$;
+    DROP TRIGGER basket_allocations_check ON order_payments;
+    DROP TABLE order_basket_groups;
+    DROP TABLE order_baskets;
+    DROP FUNCTION validate_basket_payment();
+    DROP FUNCTION guard_basket_snapshot();
+    ALTER TABLE client_carts DROP COLUMN deadline;
+  `);
+}

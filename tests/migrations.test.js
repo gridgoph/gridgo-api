@@ -50,7 +50,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "order_invoices", "support_admins", "support_tickets",
+      "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
@@ -117,6 +117,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791072000000_season_windows",
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
+        "1791244800000_multi_shop_baskets",
       ],
     );
 
@@ -295,6 +296,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Empty basket schema can be reversed without touching existing orders.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('order_baskets') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('order_basket_groups') AS t")).rows[0].t, null);
 
     // Retirement has no automatic restore; its down only removes the migration marker.
     await runner(migrationOptions(schema, "down", 1, client));
