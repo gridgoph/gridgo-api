@@ -1,3 +1,4 @@
+import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -512,7 +513,14 @@ test("client account profile routes persist versioned edits and an idempotent bu
     assert.equal(missingBusinessName.body.error, "invalid_account_profile");
     assert.equal(missingBusinessName.body.field, "businessName");
 
+    let checklist;
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      checklist = businessApplication(store, "user_client");
+      await saveStore(database, store);
+    });
     const application = {
+      ...checklist,
       accountType: "business",
       businessName: "GRIDGO Business Customer",
       address: {
@@ -2311,8 +2319,15 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       );
     }
 
+    let checklist;
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      checklist = businessApplication(store, "user_promote");
+      await saveStore(database, store);
+    });
     const businessBody = {
-      businessName: "Davao Events Co.",
+      ...checklist,
+      businessName: "Test business",
       businessNature: "Events and corporate merchandise",
     };
     const businessKey = "44444444-4444-4444-8444-444444444444";
@@ -2364,7 +2379,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     const converted = await request(instance.api, "/me", { subject: "clerk_promote" });
     assert.equal(converted.status, 200, JSON.stringify(converted.body));
     assert.equal(converted.body.user.accountType, "business");
-    assert.equal(converted.body.user.orgName, "Davao Events Co.");
+    assert.equal(converted.body.user.orgName, "Test business");
     assert.equal(converted.body.approvalCase.status, "approved");
 
     const riderKey = "55555555-5555-4555-8555-555555555555";
@@ -4614,6 +4629,130 @@ test("paper-invoice promise commits one client inbox notice and notifies changed
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test('organization verification, handover, notices and code attempts persist through HTTP and restart', { skip: !DATABASE_URL }, async () => {
+  const { requestOrganizationCode } = await import('../src/organization-email.js');
+  const { sweepOfficerConfirmations } = await import('../src/organization-routes.js');
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const storage = await startMockObjectStorage({ size: 10 });
+  let instance;
+  const codes = {};
+  const applications = {};
+  try {
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      for (const userId of ['user_client', 'user_promote']) {
+        const user = store.users.find((row) => row.id === userId);
+        const checklist = businessApplication(store, userId);
+        const documents = { government_id: checklist.documents.government_id };
+        for (const kind of ['student_id', 'enrollment_document']) {
+          const source = store.files.find((row) => row.fileId === documents.government_id);
+          const file = { ...source, fileId: `organization_${userId}_${kind}`, objectKey: `test/${userId}/${kind}.pdf` };
+          store.files.push(file);
+          documents[kind] = file.fileId;
+        }
+        applications[userId] = { accountType: 'organization', businessName: 'Test organization', businessNature: 'Education',
+          school: 'Test school', organizationEmail: user.email, documents,
+          officer: { ...checklist.signatory, fullName: 'Officer One', studentIdExpiresOn: '2099-12-31' } };
+        await requestOrganizationCode({ store, user, body: { email: user.email }, at: new Date().toISOString(),
+          secret: 'test-only-placeholder', mailer: { configured: true, sendCode: async (_email, code) => { codes[userId] = code; } } });
+      }
+      await saveStore(database, store);
+    });
+    const extraEnv = { MINIO_ENDPOINT: storage.url, MINIO_BUCKET: 'gridgo-organization-test', EMAIL_USER: '', EMAIL_PASSWORD: '' };
+    instance = await startApi(extraEnv);
+    const forbidden = await request(instance.api, '/me/organization/email-code/verify', { method: 'POST', body: { code: codes.user_client } });
+    assert.equal(forbidden.status, 401);
+    const wrong = await request(instance.api, '/me/organization/email-code/verify', { method: 'POST', subject: 'clerk_client', body: { code: 'wrong' } });
+    assert.equal(wrong.status, 400);
+    assert.equal((await loadStore(database)).organizationEmailChallenges.find((row) => row.userId === 'user_client').attempts, 1);
+    for (const [userId, subject] of [['user_client', 'clerk_client'], ['user_promote', 'clerk_promote']]) {
+      const verified = await request(instance.api, '/me/organization/email-code/verify', { method: 'POST', subject, body: { code: codes[userId] } });
+      assert.equal(verified.status, 200, JSON.stringify(verified.body));
+    }
+    const applied = await request(instance.api, '/me/business-application', { method: 'POST', subject: 'clerk_client',
+      headers: { 'Idempotency-Key': 'organization-initial' }, body: applications.user_client });
+    assert.equal(applied.status, 201, JSON.stringify(applied.body));
+    const duplicate = await request(instance.api, '/me/business-application', { method: 'POST', subject: 'clerk_promote',
+      headers: { 'Idempotency-Key': 'organization-duplicate' }, body: applications.user_promote });
+    assert.equal(duplicate.status, 409, JSON.stringify(duplicate.body));
+    assert.equal(duplicate.body.error, 'organization_already_exists');
+    const caseId = applied.body.approvalCase.id;
+    const detail = await request(instance.api, `/approval-cases/${caseId}`, { subject: 'clerk_ops' });
+    assert.equal(detail.status, 200, JSON.stringify(detail.body));
+    assert.deepEqual(detail.body.application.documents, applications.user_client.documents);
+    assert.equal(JSON.stringify(detail.body).includes('codeHash'), false);
+    const fileId = applications.user_client.documents.government_id;
+    for (const suffix of ['', '/download-url']) {
+      assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: 'clerk_client' })).status, 403);
+      assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: 'clerk_supplier' })).status, 403);
+      assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: 'clerk_ops' })).status, 200);
+      assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: 'clerk_super' })).status, 200);
+    }
+    const approved = await request(instance.api, `/approval-cases/${caseId}/approve`, { method: 'POST', subject: 'clerk_ops',
+      body: { expectedVersion: 1, requestId: 'organization-approve-one' } });
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    const oldOfficer = approved.body.organization.currentOfficer;
+    let handover;
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const user = store.users.find((row) => row.id === 'user_client');
+      store.organizationEmailChallenges = store.organizationEmailChallenges.filter((row) => row.userId !== user.id);
+      await requestOrganizationCode({ store, user, body: { email: user.email }, at: new Date().toISOString(), secret: 'test-only-placeholder',
+        mailer: { configured: true, sendCode: async (_email, code) => { codes[user.id] = code; } } });
+      handover = { officer: { ...applications.user_client.officer, fullName: 'Officer Two' }, documents: {}, expectedVersion: 2 };
+      for (const [kind, originalId] of Object.entries(applications.user_client.documents)) {
+        const original = store.files.find((row) => row.fileId === originalId);
+        const file = { ...original, fileId: `${originalId}_new`, objectKey: `${original.objectKey}_new`, references: [] };
+        delete file.clientApplicationApprovedAt;
+        store.files.push(file);
+        handover.documents[kind] = file.fileId;
+      }
+      await saveStore(database, store);
+    });
+    assert.equal((await request(instance.api, '/me/organization/email-code/verify', { method: 'POST', subject: 'clerk_client', body: { code: codes.user_client } })).status, 200);
+    const submitted = await request(instance.api, '/me/organization/officer/handover', { method: 'POST', subject: 'clerk_client',
+      body: handover, headers: { 'Idempotency-Key': 'organization-handover' } });
+    assert.equal(submitted.status, 201, JSON.stringify(submitted.body));
+    assert.equal(submitted.body.organization.currentOfficer.id, oldOfficer.id);
+    const auth = await request(instance.api, '/auth/me/client', { subject: 'clerk_client' });
+    assert.equal(auth.body.capabilities.placeBusinessOrders, true);
+    const secondApproval = await request(instance.api, `/approval-cases/${caseId}/approve`, { method: 'POST', subject: 'clerk_super',
+      body: { expectedVersion: 3, requestId: 'organization-approve-two' } });
+    assert.equal(secondApproval.status, 200, JSON.stringify(secondApproval.body));
+    assert.equal(secondApproval.body.organization.officerHistory.length, 2);
+    assert.equal(secondApproval.body.organization.officerHistory[0].endedAt, secondApproval.body.organization.currentOfficer.startedAt);
+    const notice = await request(instance.api, '/ops/organizations/user_client/notice', { method: 'POST', subject: 'clerk_ops',
+      headers: { 'Idempotency-Key': 'organization-notice' }, body: { title: 'Test notice', body: 'Check your ordering schedule.' } });
+    assert.equal(notice.status, 201, JSON.stringify(notice.body));
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const account = store.organizationAccounts[0];
+      assert.equal(sweepOfficerConfirmations(store, { at: account.nextConfirmationAt, createId: (prefix) => `${prefix}_${crypto.randomUUID()}` }), 1);
+      await saveStore(database, store);
+    });
+    instance.child.kill('SIGTERM');
+    await new Promise((resolve) => instance.child.once('exit', resolve));
+    instance = await startApi(extraEnv);
+    const account = await request(instance.api, '/ops/organizations/user_client', { subject: 'clerk_ops' });
+    assert.equal(account.body.organization.officerHistory.length, 2);
+    assert.equal(account.body.organization.currentOfficer.fullName, 'Officer Two');
+    const inbox = await request(instance.api, '/notifications', { subject: 'clerk_client' });
+    assert.ok(inbox.body.notifications.some((row) => row.id === notice.body.notificationId));
+    assert.ok(inbox.body.notifications.some((row) => row.type === 'organization_officer_confirmation' && row.actions.includes('change_officer')));
+    const confirmed = await request(instance.api, '/me/organization/officer/confirm', { method: 'POST', subject: 'clerk_client', body: { officerId: account.body.organization.currentOfficer.id } });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.organization.confirmationRequestedAt, null);
+  } finally {
+    if (instance?.child.exitCode == null) {
+      instance.child.kill('SIGTERM');
+      await new Promise((resolve) => instance.child.once('exit', resolve));
+    }
+    await new Promise((resolve) => storage.server.close(resolve));
     await database.close();
   }
 });

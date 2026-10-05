@@ -75,6 +75,11 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
+  if (notification.type === "organization_officer_confirmation") {
+    item.officerId = notification.officerId;
+    item.actions = ["confirm_officer", "change_officer"];
+  }
   if (CLIENT_EVENT_STATES[notification.type]) item.eventState = CLIENT_EVENT_STATES[notification.type];
   if (notification.orderId) item.orderId = notification.orderId;
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;
@@ -302,7 +307,7 @@ export function publishQueuedInvalidates(events, store) {
   }
 }
 
-export const EVENT_ROLES = Object.freeze(['client', 'supplier', 'rider', 'ops_admin', 'super_admin']);
+export const EVENT_ROLES = Object.freeze(['client', 'supplier', 'rider', 'ops_admin', 'super_admin', 'staff']);
 export function hasRole(store, userId, role) {
   return (store.userRoleMemberships || []).some(m => m.userId === userId && m.role === role);
 }
@@ -327,7 +332,7 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
     if (r === 'client') return order.clientId === userId && (!location || order.fulfillmentMode !== 'pickup');
     if (!approvedRole(store,userId,r)) return false;
     if (r === 'supplier') return supplierArtworkReleased(order) && (order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled')));
-    return order.riderId === userId || (!location && offer && order.state === 'ready_for_dispatch' && !order.riderId && !isContainedPickup(order));
+    return r === 'rider' && (order.riderId === userId || (!location && offer && order.state === 'ready_for_dispatch' && !order.riderId && !isContainedPickup(order)));
   });
 }
 export function notificationVisible(store, notification, userId, role) {

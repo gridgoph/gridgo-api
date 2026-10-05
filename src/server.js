@@ -1,3 +1,10 @@
+import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
+import { redeemStaffInvite } from './staff-access.js';
+import { routeOrganization, organizationProjection, sweepOfficerConfirmations } from "./organization-routes.js";
+import { createOrganizationMailer } from "./organization-email.js";
+import { officerSnapshot } from "./client-applications.js";
+import { routeOrganizationStatements } from "./organization-statements.js";
+import { approvedOrganization } from "./organization-money.js";
 import { catalogReviewNotice } from "./catalog-review-routes.js";
 
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -257,6 +264,7 @@ const fileRetention = createFileRetention({ database, storage: objectStorage,
 });
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
+const organizationMailer = createOrganizationMailer(process.env);
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
 // under their own advisory lock and can never hold up the domain lock that
@@ -283,6 +291,25 @@ function kickPushDrain() {
 }
 
 async function save(store) {
+  const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
+  for (const order of store.orders || []) {
+    // Existing completed/ready orders keep their legacy contract until a new
+    // physical readiness transition; unrelated saves never activate the gate.
+    if (before.get(order.id)?.state !== order.state && ['ready_for_dispatch', 'awaiting_collection'].includes(order.state)) {
+      prepareHandover(store, order, { at: now() });
+    }
+  }
+  sweepHubReminders(store, { at: now(), id });
+  const previousFiles = new Map((originalDomainStore(store)?.files || []).map(file => [file.fileId, file]));
+  for (const file of store.files || []) {
+    if (file.purpose !== 'supplier_invoice' || file.state !== 'ready') continue;
+    for (const ref of file.references || []) {
+      if (ref.type !== 'order' || (previousFiles.get(file.fileId)?.references || []).some(r => r.type === 'order' && r.id === ref.id)) continue;
+      const order = store.orders.find(o => o.id === ref.id);
+      notifyAdmins(store, 'supplier_invoice_scanned', 'Supplier invoice scan received', order, `invoice-scan:${file.fileId}`, { createId: id, at: now() });
+      if (order) queueOrderInvalidate(store, order, ['orders']);
+    }
+  }
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
@@ -562,6 +589,7 @@ function publicOperationalSettings(settings, store = null) {
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
+    handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
@@ -694,6 +722,7 @@ async function authenticateRequest(req, store) {
 async function verifyClerkBeforeMutation(req, pathname) {
   const verified = await verifiedClerkClaimsFor(req);
   const needsClerkProfile = [
+    "/auth/staff/redeem",
     "/auth/clerk/activate",
     "/auth/clerk/enroll/supplier",
     "/auth/clerk/enroll/rider",
@@ -975,6 +1004,7 @@ function approvalCaseDetail(store, approvalCase) {
       ...base,
       clientProfile: clientProfileProjection(store, approvalCase.userId),
       application: businessApplicationProjection(store, approvalCase),
+      organization: organizationProjection(store, approvalCase.userId, { includeHistory: true }),
     };
   }
   if (approvalCase.kind === "rider") {
@@ -1066,10 +1096,11 @@ function fixedAuthProjection(store, auth, role) {
   const base = { user: { ...publicIdentity(auth.user), ...accountStateFields(auth.user) }, membership };
   if (role === "client") {
     const approvalCase = approvalCaseFor(context, "business_client");
-    const approved = approvalCase?.status === "approved";
+    const approved = approvalCase?.status === "approved" || (Boolean(officerSnapshot(store, auth.user.id)) && approvalCase?.status !== "suspended");
     return {
       ...base,
       clientProfile: clientProfileProjection(store, auth.user.id),
+      organization: organizationProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       capabilities: {
         placePersonalOrders: true,
@@ -1457,6 +1488,17 @@ async function sweepSeasonWindows() {
   await enqueueMutation(async () => {
     const store = await load();
     if (applySeasonNotices(store, { at: now(), createId: id, audit }).length) await save(store);
+  });
+}
+
+async function sweepOrganizationOfficers() {
+  // An empty or not-yet-due roster must not acquire the domain lock on every tick.
+  const candidate = await database.query(`SELECT 1 FROM organization_accounts
+    WHERE (data->>'nextConfirmationAt')::timestamptz <= now() LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (sweepOfficerConfirmations(store, { at: now(), createId: id })) await save(store);
   });
 }
 
@@ -1986,6 +2028,15 @@ async function handleRequest(req, res) {
       return send(res, response.status, response.body);
     }
 
+    if (req.method === 'POST' && pathname === '/auth/staff/redeem') {
+      const body = await readBody(req);
+      const result = redeemStaffInvite({ store, claims: req.gridgoVerifiedClaims?.claims,
+        clerkUser: req.gridgoClerkUser?.clerkUser, code: body.code, id, at: now(), audit });
+      if (result.mutated) await save(store);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, 200, { staff: result.staff });
+    }
+
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
       return send(res, 404, { error: "not_found", path: pathname });
@@ -2216,6 +2267,13 @@ async function handleRequest(req, res) {
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
+    const organizationResponse = await routeOrganization({ req, url, store, user, readBody, now, createId: id,
+      mailer: organizationMailer, emailSecret: process.env.CLERK_SECRET_KEY });
+    if (organizationResponse) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (organizationResponse.mutated) await save(store);
+      return send(res, organizationResponse.status, organizationResponse.body);
+    }
     const catalogResponse = await routeSupplierCatalog({
       req,
       url,
@@ -2382,6 +2440,13 @@ async function handleRequest(req, res) {
       return send(res, 200, { categories: board.categories, ...table });
     }
 
+    const hubResponse = await routeHubHandover({ req, url, store, user, readBody, now, id, audit });
+    if (hubResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (hubResponse.mutated) await save(store);
+      return send(res, hubResponse.status, hubResponse.body);
+    }
+
     const artworkLinkResponse = await routeArtworkLinkCheck({ req, url, user, readBody });
     if (artworkLinkResponse) return send(res, artworkLinkResponse.status, artworkLinkResponse.body);
 
@@ -2420,6 +2485,17 @@ async function handleRequest(req, res) {
       }
     }
 
+    const statementResponse = routeOrganizationStatements({ req, url, store, user, now });
+    if (statementResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (statementResponse.bytes) {
+        res.writeHead(statementResponse.status, { 'Content-Type': statementResponse.contentType,
+          'Content-Disposition': `attachment; filename="${statementResponse.filename}"`,
+          'Content-Length': statementResponse.bytes.length, 'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(statementResponse.bytes);
+      }
+      return send(res, statementResponse.status, statementResponse.body);
+    }
     const basketResponse = await routeBaskets({ req, url, store, user, readBody, id, now });
     if (basketResponse) {
       if (basketResponse.mutated) await save(store);
@@ -3144,6 +3220,7 @@ async function handleRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
         productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
@@ -3152,6 +3229,7 @@ async function handleRequest(req, res) {
         downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
+        organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
@@ -5168,6 +5246,7 @@ async function handleRequest(req, res) {
       const order = {
         id: id("ord"),
         clientId: user.id,
+        organizationOfficer: officerSnapshot(store, user.id),
         supplierId: null,
         riderId: null,
         state: body.submit ? "submitted" : "draft",
@@ -5231,6 +5310,8 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if (order.handover && ['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(next)
+          && !order.handover.consumedAt) return send(res, 409, { error: 'handover_verification_required' });
       if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});
       if (body.paymentMethod != null && String(body.paymentMethod).trim().toLowerCase() !== "qr_manual") {
         return send(res, 400, {
@@ -5561,6 +5642,7 @@ async function handleRequest(req, res) {
 
         const money = calculateOrderMoney({
           supplierSubtotalMinor: quote.supplierSubtotalMinor,
+          organizationEligible: approvedOrganization(store, user.id),
           fulfillmentMode,
           paymentPlan,
           supplierDownpaymentRateBps,
@@ -5584,6 +5666,9 @@ async function handleRequest(req, res) {
             paymentPlan,
             serviceFeeRateBps: money.serviceFeeRateBps,
             serviceFeeMinor: money.serviceFeeMinor,
+            grossServiceFeeMinor: money.grossServiceFeeMinor,
+            organizationDiscountRateBps: money.organizationDiscountRateBps,
+            organizationDiscountMinor: money.organizationDiscountMinor,
             deliveryDistanceMeters: money.deliveryDistanceMeters,
             deliveryFeeMinor: money.deliveryFeeMinor,
             totalMinor: money.totalMinor,
@@ -6067,6 +6152,10 @@ async function handleRequest(req, res) {
           message: "Attach the delivery photo or signature image to this order before completing delivery.",
         });
       }
+      if (!carriedToOffice(order) && order.handover) {
+        const denied = checkHandoverAttempt(order, body.otp, now());
+        if (denied) { await save(store); return send(res, denied.status, denied.body); }
+      }
       const deliveredAt = now();
       order.deliveryEvidence = {
         fileId: evidenceFileId,
@@ -6091,26 +6180,8 @@ async function handleRequest(req, res) {
         await save(store);
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
-      order.state = "delivered";
-      order.timeline.push({
-        at: deliveredAt,
-        state: "delivered",
-        by: user.id,
-        note: body.evidenceType === "photo" ? "Delivery completed with photo evidence" : "Delivery completed with signature evidence",
-        fileId: evidenceFileId,
-      });
-      order.issueWindowOpenedAt = deliveredAt;
-      order.issueWindowExpiresAt = issueWindowExpiresAt(deliveredAt, store.settings.issueWindowHours);
-      order.state = "issue_window_open";
-      order.updatedAt = deliveredAt;
-      order.timeline.push({
-        at: deliveredAt,
-        state: "issue_window_open",
-        by: "system",
-        note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
-      });
-      notifyOrderParties(store, order, { createId: id, at: deliveredAt });
-      queueOrderInvalidate(store, order, ["orders", "jobs"]);
+      completeHandover(store, order, { actor: user, at: deliveredAt, id,
+        note: body.evidenceType === 'photo' ? 'Delivery completed with photo evidence' : 'Delivery completed with signature evidence', fileId: evidenceFileId });
       await save(store);
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
@@ -6128,6 +6199,10 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.handover?.qrToken) return send(res, 409, {
+        error: 'hub_claim_required', message: 'Scan the QR and matching OTP using the staff claim endpoint.',
+        claimPath: '/staff/hub/claims',
+      });
       if (order.state !== "awaiting_collection") {
         return send(res, 409, {
           error: "collection_not_available",
@@ -6151,24 +6226,7 @@ async function handleRequest(req, res) {
       }
       const collectedAt = now();
       order.collection = { receivedBy, recordedBy: user.id, at: collectedAt };
-      order.state = "delivered";
-      order.timeline.push({
-        at: collectedAt,
-        state: "delivered",
-        by: user.id,
-        note: `Collected at GRIDGO Office by ${receivedBy}`,
-      });
-      order.issueWindowOpenedAt = collectedAt;
-      order.issueWindowExpiresAt = issueWindowExpiresAt(collectedAt, store.settings.issueWindowHours);
-      order.state = "issue_window_open";
-      order.updatedAt = collectedAt;
-      order.timeline.push({
-        at: collectedAt,
-        state: "issue_window_open",
-        by: "system",
-        note: `Issue window opened for ${store.settings.issueWindowHours} hours`,
-      });
-      notifyOrderParties(store, order, { createId: id, at: collectedAt });
+      completeHandover(store, order, { actor: user, at: collectedAt, id, note: `Collected at GRIDGO Office by ${receivedBy}` });
       audit(store, {
         actor: user,
         action: "order_collected",
@@ -6427,6 +6485,19 @@ async function runLifecycleWork() {
       expireElapsedIssueWindows,
       sweepProductionInactivity,
       sweepSeasonWindows,
+      async () => {
+        // Avoid taking the global mutation lock when there are no active hub
+        // handovers. Recheck the graph under the lock if a candidate exists.
+        const candidates = await database.query(`SELECT 1 FROM orders
+          WHERE state = 'awaiting_collection' AND data->'handover'->>'qrToken' IS NOT NULL
+          AND data->'handover'->>'consumedAt' IS NULL LIMIT 1`);
+        if (!candidates.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (sweepHubReminders(store, { at: now(), id })) await save(store);
+        });
+      },
+      sweepOrganizationOfficers,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }

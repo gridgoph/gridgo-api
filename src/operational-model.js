@@ -1,3 +1,4 @@
+import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
@@ -217,9 +218,11 @@ export function defaultProductionNudge() {
 export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
+    organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
+    handoverOtpEnabled: false,
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
@@ -236,6 +239,9 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.handoverOtpEnabled !== undefined && typeof settings.handoverOtpEnabled !== 'boolean') {
+    fail(400, 'invalid_handover_otp_setting', 'handoverOtpEnabled must be a boolean.');
+  }
   if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
@@ -247,6 +253,7 @@ export function validateOperationalSettings(settings) {
       { field: "serviceFeeRateBps" },
     );
   }
+  validateOrganizationFee(settings);
   if (
     settings?.serviceFeeVisibleToClient !== undefined &&
     typeof settings.serviceFeeVisibleToClient !== "boolean"
@@ -434,6 +441,7 @@ export function deliveryFeeForDistance(distanceMeters, settings) {
 }
 
 export function calculateOrderMoney({
+  organizationEligible = false,
   supplierSubtotalMinor,
   fulfillmentMode,
   paymentPlan,
@@ -446,7 +454,8 @@ export function calculateOrderMoney({
   validateOperationalSettings(settings);
   const supplierSubtotal = finiteMinor(supplierSubtotalMinor, "supplierSubtotalMinor");
   const serviceFeeRateBps = finiteBps(settings.serviceFeeRateBps, "serviceFeeRateBps");
-  const serviceFeeMinor = roundBps(supplierSubtotal, serviceFeeRateBps);
+  const fee = organizationFeeMoney(supplierSubtotal, settings, organizationEligible);
+  const { serviceFeeMinor } = fee;
   const allowedPlans = new Set(["delivery_online", "pickup_full_online", "pickup_downpayment_store"]);
   if (!allowedPlans.has(paymentPlan)) {
     fail(400, "invalid_payment_plan", "Choose one of the payment plans offered for this quote.");
@@ -493,6 +502,7 @@ export function calculateOrderMoney({
 
   return {
     supplierSubtotalMinor: supplierSubtotal,
+    ...fee,
     subtotalMinor: supplierSubtotal,
     serviceFeeRateBps,
     serviceFeeMinor,
@@ -722,6 +732,9 @@ export function moneyReportingForOrder(order, store = null) {
       platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
     },
     platformRevenue: {
+      grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
+      organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
+      netServiceFeeMinor: order.serviceFeeMinor ?? 0,
       billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor : 0,
       collectedMinor: platformCollectedMinor,
       recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
@@ -955,9 +968,18 @@ function clientCorrectionFor(order) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
+  if (user?.role === "client" && order.organizationDiscountRateBps > 0) {
+    for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
+      if (!record) continue;
+      if (record.supplierSubtotalMinor != null && record.serviceFeeMinor != null) record.clientItemSubtotalMinor = record.supplierSubtotalMinor + (record.grossServiceFeeMinor ?? record.serviceFeeMinor);
+      for (const field of ["subtotalMinor", "supplierSubtotalMinor", "serviceFeeMinor", "serviceFeeRateBps", "grossServiceFeeMinor", "organizationDiscountRateBps", "initialSupplierPrincipalMinor", "supplierRemainderMinor"]) delete record[field];
+      for (const payment of Object.values(record.payments || {})) delete payment.componentLines;
+    }
+  }
   if (order.basketId && user?.role === "client") {
-    publicRecord.clientItemSubtotalMinor = order.supplierSubtotalMinor + order.serviceFeeMinor;
-    for (const field of ["supplierId", "subtotalMinor", "serviceFeeMinor", "serviceFeeRateBps"]) delete publicRecord[field];
+    publicRecord.clientItemSubtotalMinor = order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor);
+    for (const field of ["supplierId", "subtotalMinor", "serviceFeeMinor", "serviceFeeRateBps", "grossServiceFeeMinor", "organizationDiscountRateBps"]) delete publicRecord[field];
   }
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
   publicRecord.productionItems = user?.role === "supplier" && !supplierArtworkReleased(order) ? [] : productionItemsFor(store, order, user);
@@ -1026,6 +1048,8 @@ export function publicOrderFor(order, user, store = null) {
   }
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order, store) : null;
   delete publicRecord.attachments;
+  // Credentials are available only from the caller-scoped handover endpoint.
+  delete publicRecord.handover;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   delete publicRecord.shopRecoveryHistory;
   delete publicRecord.shopFailureEvents;
@@ -1117,6 +1141,7 @@ export function publicOrderFor(order, user, store = null) {
   if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
 
   if (!ops && !assignedSupplier) {
+    delete publicRecord.supplierInvoiceFileIds;
     delete publicRecord.productionReassignmentEligible;
     delete publicRecord.productionNoCommunication;
     delete publicRecord.supplierPriceMinor;

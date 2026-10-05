@@ -1,7 +1,7 @@
 // Retention operates on domain relationships, never object-key naming conventions.
 const DAY = 86_400_000;
 const ARTWORK = new Set(['artwork', 'mockup']);
-const MONEY = new Set(['payment_proof', 'payout_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
+const MONEY = new Set(['supplier_invoice', 'payment_proof', 'payout_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
 const PHOTOS = new Set(['production_photo', 'fulfilment_proof', 'delivery_photo', 'handoff_signature']);
 const CLOSED = new Set(['completed', 'payout_released', 'cancelled']);
 const CASE_TERMINALS = {
@@ -98,7 +98,8 @@ export function retentionDecision(store, file, at) {
     const kind = file.purpose.startsWith('rider') ? 'rider' : file.purpose === 'verification_document' ? 'supplier' : 'business_client';
     const approval = (store.approvalCases || []).find((row) => row.userId === file.ownerId && row.kind === kind);
     const endedAt = owner?.accountStatus === 'removed' ? owner.accountStatusAt
-      : approval?.status === 'rejected' ? approval.decidedAt : null;
+      : file.purpose === 'client_verification_document' ? file.clientApplicationRejectedAt
+        : approval?.status === 'rejected' ? approval.decidedAt : null;
     if (!endedAt) return keep('account_active');
     due = deadline(endedAt, 1); reason = 'verification_expired';
   } else {

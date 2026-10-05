@@ -20,6 +20,7 @@ const KINDS = new Set([
   "production_photo",
   "delivery_photo",
   "handoff_signature",
+  "supplier_invoice",
   "service_image",
   "catalog_item_photo",
   "supplier_shop_image",
@@ -46,6 +47,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
+  supplier_invoice: { roles: ["supplier"], maxBytes: 15 * 1024 * 1024, contentTypes: [...CONTENT_TYPES] },
   production_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
@@ -105,6 +107,9 @@ export const PURPOSE_POLICIES = Object.freeze({
     roles: ["supplier"],
     maxBytes: 20 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
+  },
+  client_verification_document: {
+    roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: [...CONTENT_TYPES],
   },
   rider_verification_document: {
     roles: ["rider"],
@@ -926,6 +931,10 @@ function hasApprovedWorkRole(user, role) {
 export function authorizeFileAttach(user, file, target) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
+  if (file.purpose === 'supplier_invoice') {
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
+    return;
+  }
   if (file.purpose === "production_photo") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
@@ -1063,6 +1072,7 @@ export function attachSupplierShopImage(store, file, target, { at }) {
 
 export function attachFileReference(file, target) {
   const map = {
+    supplier_invoice: "supplierInvoiceFileIds",
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
     production_photo: "productionPhotoFileIds",
@@ -1188,10 +1198,15 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (file.purpose === "client_verification_document") forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"
         && (store.refundRequests || []).some((row) => row.id === ref.id && row.clientId === user.id)))) return;
+    forbidden();
+  }
+  if (file.purpose === 'supplier_invoice') {
+    if (hasApprovedWorkRole(user, 'supplier') && file.ownerId === user.id) return;
     forbidden();
   }
   if (file.purpose === "payment_proof") {
