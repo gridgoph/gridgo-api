@@ -312,6 +312,10 @@ Set drop-offs in one call with:
 
 ## Checkout and invoice
 
+Multi-shop baskets use the additive [multi-shop checkout contract](MULTI_SHOP_CHECKOUT_API.md):
+one basket deadline and fulfillment choice, 100% upfront, one combined receipt,
+and independent order ledgers per shop. The single-shop flow below is unchanged.
+
 Upload the QR Ph screenshot with `POST /files`, `purpose=payment_proof`, then:
 
 ```text
@@ -328,7 +332,7 @@ POST /me/carts/:cartId/checkout
 }
 ```
 
-No other payment method is accepted. Checkout groups lines by shop into one job per shop, snapshots listings/options/artwork/mockups/drop-offs, and calculates each delivery line independently from that shop pin to the job's farthest effective drop-off. Pickup jobs have zero delivery fee.
+No other payment method is accepted. Single-shop checkout creates one job, snapshots listings/options/artwork/mockups/drop-offs, and calculates delivery from the shop pin to the job's farthest effective drop-off. Pickup jobs have zero delivery fee. Multi-shop checkout creates independent orders as specified in the linked contract.
 
 Order totals are:
 

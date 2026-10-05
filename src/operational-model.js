@@ -948,6 +948,7 @@ function clientCorrectionFor(order) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (order.basketId && user?.role === "client") delete publicRecord.supplierId;
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
   publicRecord.productionItems = productionItemsFor(store, order, user);
   if (["supplier", "rider"].includes(user?.role)) {

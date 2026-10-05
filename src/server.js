@@ -1,3 +1,4 @@
+import { routeBaskets, basketForOrder } from "./baskets.js";
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
@@ -2442,6 +2443,19 @@ async function handleRequest(req, res) {
         const reconcileBalance = /^payments\/(final_online|balance)\/(confirm|reject)$/.test(refundGuard[2])
           && guardedOrder && refundHold(store, guardedOrder) && !refundSettlementFor(store, guardedOrder);
         if (guardedOrder && !reconcileBalance) assertRefundWorkAllowed(store, guardedOrder);
+      }
+    }
+
+    const basketResponse = await routeBaskets({ req, url, store, user, readBody, id, now });
+    if (basketResponse) {
+      if (basketResponse.mutated) await save(store);
+      return send(res, basketResponse.status, basketResponse.body);
+    }
+    if (req.method === "POST" && /^\/orders\/[^/]+\/payments\//.test(pathname)) {
+      const basket = basketForOrder(store, pathname.split("/")[2]);
+      if (basket) {
+        if (basket.clientId !== user.id && !isOps(user)) return send(res, 403, { error: "forbidden" });
+        return send(res, 409, { error: "basket_payment_required", basketId: basket.id });
       }
     }
 
