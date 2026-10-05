@@ -1,3 +1,4 @@
+import { recentLapseQualityPenalty } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
@@ -247,7 +248,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
         supplierId, listing, projection, distance, distanceZone,
         queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
           Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
-        quality: capabilityScore(store, supplierId, [listing]),
+        quality: Math.max(0, capabilityScore(store, supplierId, [listing]) - recentLapseQualityPenalty(store, supplierId, now)),
         speed: Math.max(1, Date.parse(projection.promiseBy) - Date.parse(now)),
         cost: fromPrice([listing]),
       };
@@ -313,7 +314,7 @@ function otherListing(row) {
   const item = row.listing;
   return {
     ...Object.fromEntries([
-      "categoryCode", "subcategoryCode", "basePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
+      "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
       "turnaroundHours", "minimumTurnaroundHours", "rush", "acceptedFormats", "optionGroups", "version",

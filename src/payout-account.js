@@ -1,5 +1,5 @@
 import { identityHasMembership } from "./authorization-context.js";
-import { findFile, markFileDeletePending } from "./attachments.js";
+import { findFile } from "./attachments.js";
 import { philippineMobileNumber } from "./phone.js";
 import {
   CatalogError,
@@ -172,11 +172,9 @@ function stripQrReference(store, account) {
   return previous;
 }
 
-function retireQrFile(store, account, user, at) {
-  const previous = stripQrReference(store, account);
-  if (previous && previous.state === "ready" && !previous.deletedAt && !previous.deleteRequestedAt) {
-    markFileDeletePending(previous, user, at);
-  }
+function retireQrFile(store, account) {
+  // Unlink now; the daily retention worker owns deletion of unused bytes.
+  stripQrReference(store, account);
 }
 
 /**

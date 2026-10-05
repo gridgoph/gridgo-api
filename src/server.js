@@ -1,3 +1,5 @@
+import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
+import { createFileRetention } from "./file-retention.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
@@ -61,8 +63,6 @@ import {
   createPendingFile,
   findFile,
   markFileDeleted,
-  invalidateRiderDocumentsForFile,
-  markFileDeletePending,
   markFileReady,
   parseMultipartStream,
   publicFile,
@@ -149,6 +149,7 @@ import {
 } from "./taxonomy.js";
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
+import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { applyProductionNudges, continueAfterStepFailure } from "./production-inactivity.js";
@@ -240,6 +241,10 @@ const tracker = createTracker({
   load: () => load(),
   save: (store) => save(store),
   audit: (store, entry) => audit(store, entry),
+});
+const fileRetention = createFileRetention({ database, storage: objectStorage,
+  load: () => load(), save: (store) => save(store), now, id,
+  enabled: process.env.GRIDGO_FILE_RETENTION_DELETE_ENABLED === "true",
 });
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
@@ -549,6 +554,7 @@ function publicOperationalSettings(settings, store = null) {
     downpaymentPercent: downpaymentPercentSetting(rest),
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
+    productionPenalty: productionPenaltySettings(rest),
     paymentQr,
   };
 }
@@ -1474,6 +1480,26 @@ async function expireElapsedIssueWindows() {
   });
 }
 
+async function sweepProductionPenalties() {
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (assessProductionLapses(store, { at: now(), createId: id })) await save(store);
+  });
+}
+
+async function sweepSeasonWindows() {
+  const candidate = await database.query(`
+    SELECT 1 FROM platform_settings WHERE settings #> '{seasonWindowPush,enabled}' = 'true'::jsonb
+      AND EXISTS (SELECT 1 FROM season_windows WHERE notice_queued_at IS NULL
+        AND $1::date BETWEEN start_date - 42 AND start_date - 28)
+  `, [manilaDate(now())]);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (applySeasonNotices(store, { at: now(), createId: id, audit }).length) await save(store);
+  });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -1995,6 +2021,11 @@ async function handleRequest(req, res) {
       return servePaymentQr(req, res, store);
     }
 
+    if (req.method === "GET" && pathname === "/season-windows") {
+      const response = await routeSeasonWindows({ req, url, store, now });
+      return send(res, response.status, response.body);
+    }
+
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
       return send(res, 404, { error: "not_found", path: pathname });
@@ -2221,6 +2252,10 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
+        || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
     const catalogResponse = await routeSupplierCatalog({
       req,
       url,
@@ -2281,6 +2316,12 @@ async function handleRequest(req, res) {
     if (accountProfileResponse) {
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
+    const seasonResponse = await routeSeasonWindows({ req, url, store, user, readBody, now, createId: id, audit });
+    if (seasonResponse) {
+      if (seasonResponse.mutated) await save(store);
+      return send(res, seasonResponse.status, seasonResponse.body);
     }
 
     const physicalInvoiceResponse = await routePhysicalInvoice({
@@ -2744,33 +2785,22 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (req.method === "GET" && pathname === "/admin/files/retention") {
+      if (user.role !== "super_admin") return send(res, 403, { error: "forbidden" });
+      return send(res, 200, await fileRetention.run({ dryRun: true }));
+    }
+
     if (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname)) {
-      const fileId = pathname.split("/")[2];
-      const pending = await enqueueMutation(async () => {
-        const latestStore = await load();
+      const body = await readBody(req);
+      const deleted = await fileRetention.deleteEarly(pathname.split("/")[2], async (latestStore) => {
         const latestUser = selectActorRole(
           latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
           { restrictMemberships: Boolean(eventRole) },
         );
-        if (!latestUser) throw new AttachmentError(401, "unauthorized", "Sign in and request the deletion again.");
-        const latestFile = findFile(latestStore, fileId);
-        const alreadyDeleted = latestFile?.state === "deleted";
-        const deleteRequestedAt = now();
-        markFileDeletePending(latestFile, latestUser, deleteRequestedAt);
-        invalidateRiderDocumentsForFile(latestStore, latestFile, deleteRequestedAt);
-        await save(latestStore);
-        return { alreadyDeleted, file: latestFile, objectKey: latestFile.objectKey };
-      });
-      if (pending.alreadyDeleted) return send(res, 200, { file: publicFile(pending.file) });
-      await objectStorage.deleteObject(pending.objectKey);
-      const deleted = await enqueueMutation(async () => {
-        const latestStore = await load();
-        const latestFile = findFile(latestStore, fileId);
-        markFileDeleted(latestFile, now());
-        await save(latestStore);
-        return latestFile;
-      });
-      return send(res, 200, { file: publicFile(deleted) });
+        if (latestUser && accountHoldDenial(latestUser)) throw new AttachmentError(403, "forbidden");
+        return latestUser;
+      }, body?.reason);
+      return send(res, 200, { file: publicFile(deleted, user) });
     }
 
     // ---- push device registrations ----
@@ -3074,6 +3104,33 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (req.method === "GET" && (pathname === "/me/production-lapses" || /^\/users\/[^/]+\/production-lapses$/.test(pathname))) {
+      const own = pathname === "/me/production-lapses";
+      if (own ? !identityHasMembership(user, "supplier") : !isOps(user)) return send(res, 403, { error: "forbidden" });
+      const supplierId = own ? user.id : pathname.split("/")[2];
+      if (!hasRole(store, supplierId, "supplier")) return send(res, 404, { error: "supplier_not_found" });
+      return send(res, 200, { supplierId, lapses: supplierLapses(store, supplierId) });
+    }
+
+    // Silence outside this API cannot be inferred. Operations attests it with an audited reason.
+    if (req.method === "POST" && /^\/orders\/[^/]+\/production-no-communication$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const order = store.orders.find((row) => row.id === pathname.split("/")[2]);
+      if (!order) return send(res, 404, { error: "order_not_found" });
+      const body = await readBody(req);
+      const reason = String(body.reason || "").trim();
+      if (!reason) return send(res, 400, { error: "reason_required" });
+      if (!order.supplierId || order.readyAt || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
+          || !latenessTier(productionDeadline(order), now())) return send(res, 409, { error: "production_deadline_not_missed" });
+      if (!order.productionNoCommunication) {
+        order.productionNoCommunication = { at: now(), by: user.id, reason };
+        audit(store, { actor: user, action: "production_lapse.no_communication", entityType: "order", entityId: order.id, orderId: order.id, reason });
+        assessProductionLapses(store, { at: now(), createId: id, orderId: order.id });
+        await save(store);
+      }
+      return send(res, 200, { lapses: supplierLapses(store, order.supplierId).filter((row) => row.orderId === order.id) });
+    }
+
     // ---- global operational settings ----
     if (req.method === "GET" && pathname === "/settings") {
       return send(res, 200, {
@@ -3090,8 +3147,12 @@ async function handleRequest(req, res) {
       }
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
+      if (Object.hasOwn(body, "productionPenalty") && !identityHasMembership(user, "super_admin")) {
+        return send(res, 403, { error: "forbidden" });
+      }
       const next = {
         ...store.settings,
+        productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
           ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
         // New checkouts only: every order keeps the split it was placed under.
@@ -3156,12 +3217,8 @@ async function handleRequest(req, res) {
           settings: publicOperationalSettings(store.settings, store),
         });
       }
-      const previous = previousId ? findFile(store, previousId) : null;
       store.settings = { ...store.settings, paymentQrFileId: file.fileId };
       store.version += 1;
-      if (previous && previous.state === "ready" && !previous.deletedAt && !previous.deleteRequestedAt) {
-        markFileDeletePending(previous, user, now());
-      }
       audit(store, {
         actor: user,
         action: "settings.payment_qr_replace",
@@ -6223,8 +6280,8 @@ const server = http.createServer((req, res) => {
   }
   logHttpRequest(req, res, pathname, Date.now());
   const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
-  // File transfers and MinIO calls stay outside database transactions. File routes
-  // acquire one only for short load -> validate -> mutate -> commit sections.
+  // Upload/attach routes queue their own transactions. Deletion commits intent
+  // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
     (req.method === "POST" && pathname === "/files") ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
@@ -6360,24 +6417,17 @@ const server = http.createServer((req, res) => {
 
 server.requestTimeout = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
 
-async function reconcileInterruptedFiles() {
-  const candidates = (await load()).files.filter(
-    (file) => ["pending_upload", "delete_pending"].includes(file.state) && file.objectKey,
-  );
-  for (const candidate of candidates) {
-    try {
-      await objectStorage.deleteObject(candidate.objectKey);
-      await enqueueMutation(async () => {
-        const latestStore = await load();
-        const latestFile = findFile(latestStore, candidate.fileId);
-        if (!latestFile || !["pending_upload", "delete_pending"].includes(latestFile.state)) return;
-        markFileDeleted(latestFile, now());
-        await save(latestStore);
-      });
-    } catch {
-      // Leave the durable pending state for the next boot; non-file routes remain usable.
-    }
-  }
+let retentionBusy = false;
+async function runFileRetention() {
+  if (retentionBusy || storageInitializing) return;
+  retentionBusy = true;
+  try {
+    // Retrying explicitly authorized deletes is independent of automatic cleanup.
+    await fileRetention.reconcile();
+    console.log(`file retention ${JSON.stringify(await fileRetention.run({ dryRun: false }))}`);
+  } catch (error) {
+    console.warn(`file retention failed reason=${error?.code || "unavailable"}`);
+  } finally { retentionBusy = false; }
 }
 
 const validatePushTokens = createTokenValidator({database,delivery:pushDelivery});
@@ -6393,8 +6443,10 @@ async function runLifecycleWork() {
   lifecycleBusy = true;
   try {
     await continueAfterStepFailure([
+      sweepProductionPenalties,
       expireElapsedIssueWindows,
       sweepProductionInactivity,
+      sweepSeasonWindows,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }
@@ -6420,7 +6472,7 @@ server.listen(PORT, HOST, () => {
   objectStorage
     .ensureBucket()
     .then(async () => {
-      await reconcileInterruptedFiles();
+      await fileRetention.reconcile();
       console.log(`MinIO ready: ${objectStorage.health().bucket}`);
     })
     .catch(() => {
@@ -6428,5 +6480,7 @@ server.listen(PORT, HOST, () => {
     })
     .finally(() => {
       storageInitializing = false;
+      void runFileRetention();
+      setInterval(runFileRetention, 24 * 60 * 60 * 1000).unref();
     });
 });

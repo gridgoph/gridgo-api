@@ -57,7 +57,7 @@ For host-run commands against local compose (optional `DATABASE_URL` export over
 ```bash
 npm run migrate
 npm run seed
-npm run seed:dev
+NODE_ENV=development npm run seed:dev
 npm run dev
 ```
 
@@ -72,6 +72,11 @@ DATABASE_URL=postgresql://gridgo:gridgo_dev@127.0.0.1:55439/gridgo_test npm test
 ```
 
 `npm run seed` creates only catalog, taxonomy, zones, file-format registry, listing starters, and global operational settings. It never creates users or operational records and has no destructive reset mode.
+
+Development seeding requires explicit `NODE_ENV=development` (or `test`) and a
+development Clerk `sk_test_` key. It refuses all other environments before any
+database, identity, or storage call. Production compose has no development seed
+service. See [sample retirement and production verification](docs/DEMO_SHOP_RETIREMENT.md).
 
 Local compose and `npm run seed:dev` seed three approved Davao fixture shops from existing development Clerk users. **Lovis Printshop** remains fixed to `felyciaaa0220@gmail.com`; two other real Clerk email identities receive local-only Davao Quickprint and Matina Creative Hub fixtures. All three publish Flyers plus another listing for matching and same-shop bundling. Production `deploy/docker-compose.yml` still runs `npm run seed` only.
 
@@ -98,7 +103,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`).
+All routes except `/health`, `/catalog`, `/season-windows`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`).
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
@@ -110,5 +115,7 @@ All routes except `/health`, `/catalog`, public support-ticket and issue-report 
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`
 - Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
+
+- Season awareness: public `/season-windows`, Super Admin editor and disabled-by-default scheduled notices under `/admin/season-windows`; see [Season windows API](docs/SEASON_WINDOWS_API.md).
 
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.

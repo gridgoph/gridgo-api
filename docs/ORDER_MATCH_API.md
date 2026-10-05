@@ -4,6 +4,11 @@ This is the authoritative first-drop contract for client matching and cart check
 
 All routes require a Clerk bearer mapped to a PostgreSQL `client` membership, except Operations/Super Admin may also read an invoice. Money is integer PHP minor units.
 
+Client-price migration: [staged privacy contract](CLIENT_CATALOG_PRIVACY.md) defines
+`POST /me/catalog-quotes`, basket quotes (`cart.clientQuote` and
+`GET/POST /me/carts/:id/quote`), invoice client amounts, deprecated fields and the
+required release order. Phase 1 remains additive; legacy shop fields still exist.
+
 ## Preferences and addresses
 
 ```text
@@ -232,7 +237,7 @@ The listing's effective, active `acceptedFormats` must contain that exact code w
 
 Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid. Invalid shape/URL returns `400 { "error": "invalid_artwork_links", "message": "..." }`; an unaccepted format returns `400 { "error": "artwork_link_format_not_accepted", "message": "..." }`.
 
-Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
+Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Top-level `artworkFileIds` and `mockupFileIds` follow the same job scope; metadata and signed downloads enforce it independently. Legacy fallback and combined-delivery rules are in [Storage API](STORAGE_API.md#get-filesfileid--metadata). Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
 
 ### POST `/artwork/link-check`
 
@@ -404,3 +409,11 @@ Every shop, ranked. Without `categoryCode` the table is overall; with one, only 
 ```
 
 Unranked shops (`count: 0`, `position: null`) follow the ranked ones, alphabetically. An unknown category is `400 invalid_category_code`.
+
+
+### Recent production lapses
+
+The quality factor subtracts two points per order with a missed ready-by deadline
+in the last 30 days, capped at ten of 100. Client factor priority and deadline
+feasibility filtering remain unchanged. The public rating is unchanged. See
+[late-production penalties](PRODUCTION_PENALTIES_API.md#matching-weight).

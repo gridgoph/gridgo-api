@@ -323,7 +323,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   });
   assert.equal(checkout.status, 201, `${JSON.stringify(checkout.body)}\n${instance.output()}`);
   assert.equal(checkout.body.order.state, "initial_payment_review");
-  assert.equal(checkout.body.order.totalMinor, 35_500);
+  assert.equal(checkout.body.order.totalMinor, 41_900);
   assert.equal(checkout.body.order.jobs.length, 1);
   assert.ok(checkout.body.order.readyBy, "the client is given a promised date");
 
@@ -357,7 +357,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null, extraEnv = {} } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -375,7 +375,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
     item.measureUnit = "ft";
     await saveStore(database, store);
   });
-  const instance = await startApi();
+  const instance = await startApi({ extraEnv });
   t.after(async () => {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -1906,4 +1906,135 @@ test("match tokens persist across requests, select another shop and keep deadlin
   assert.equal(expired.status, 410);
   assert.equal(expired.body.error, "select_token_expired");
   assert.ok(expires);
+});
+
+test("multi-shop artwork lists and signed downloads enforce job ownership through the HTTP API", { skip: !DATABASE_URL }, async (t) => {
+  // Mock only the object store's HEAD transport; authorization and URL signing are real.
+  const storage = http.createServer((req, res) => {
+    res.writeHead(req.method === "HEAD" ? 200 : 404, { "Content-Length": 10 });
+    res.end();
+  });
+  await new Promise((resolve) => storage.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => storage.close(resolve)));
+  const storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  const { call, database, orderId } = await placedOrder(t, {
+    extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl },
+  });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find((row) => row.id === orderId);
+    order.state = "production";
+    order.supplierId = null;
+    order.riderId = "user_rider";
+    const job = store.orderJobs.find((row) => row.orderId === orderId);
+    job.riderId = "user_rider";
+    job.state = "production";
+    const line = store.orderLineItems.find((row) => row.orderId === orderId);
+    store.orderJobs.push({ ...structuredClone(job), id: "job_second", supplierId: "supplier_b", riderId: "user_rider_second" });
+    store.orderLineItems.push({ ...structuredClone(line), id: "line_second", jobId: "job_second", artworkFileId: "file_art_second", mockupFileId: "file_mock_second", sortOrder: 1 });
+    for (const [sourceId, fileId, purpose] of [["file_art", "file_art_second", "artwork"], ["file_mock", "file_mock_second", "mockup"]]) {
+      const source = store.files.find((row) => row.fileId === sourceId);
+      store.files.push({ ...structuredClone(source), fileId, objectKey: `test/${fileId}`, references: [{ type: "order", id: orderId, field: `line:line_second:${purpose}` }] });
+      const legacyId = `${sourceId}_legacy`;
+      store.files.push({ ...structuredClone(source), fileId: legacyId, objectKey: `test/${legacyId}`, references: [{ type: "order", id: orderId, field: `${purpose}FileIds` }] });
+      order[`${purpose}FileIds`] = [sourceId, fileId, legacyId];
+    }
+    for (const [sourceId, userId, subject] of [["user_ops", "user_super", "clerk_super"], ["user_rider", "user_rider_second", "clerk_rider_second"]]) {
+      const source = store.users.find((row) => row.id === sourceId);
+      const role = userId === "user_super" ? "super_admin" : "rider";
+      store.users.push({ ...source, id: userId, clerkUserId: subject, email: `${userId}@example.test`, role });
+      store.userRoleMemberships.push({ userId, role, createdAt: AT });
+      if (role === "rider") {
+        store.riderProfiles.push({ ...store.riderProfiles.find((row) => row.userId === sourceId), userId });
+        store.approvalCases.push({ ...store.approvalCases.find((row) => row.userId === sourceId), id: "case_rider_second", userId });
+      }
+    }
+    await saveStore(database, store);
+  });
+  const allFiles = ["file_art", "file_art_second", "file_art_legacy", "file_mock", "file_mock_second", "file_mock_legacy"];
+  for (const [subject, ownFiles] of [
+    ["clerk_supplier_a", ["file_art", "file_mock"]],
+    ["clerk_supplier_b", ["file_art_second", "file_mock_second"]],
+    ["clerk_rider", ["file_art", "file_mock"]],
+    ["clerk_rider_second", ["file_art_second", "file_mock_second"]],
+    ["clerk_client", allFiles], ["clerk_ops", allFiles], ["clerk_super", allFiles],
+  ]) {
+    // Order access still has one active rider; select that rider without changing job ownership.
+    if (subject.startsWith("clerk_rider")) await database.query(
+      "UPDATE orders SET rider_id = $2 WHERE id = $1", [orderId, subject === "clerk_rider" ? "user_rider" : "user_rider_second"],
+    );
+    for (const route of [`/orders/${orderId}`, "/orders"]) {
+      const response = await call(route, { subject });
+      assert.equal(response.status, 200, `${subject} ${route}: ${JSON.stringify(response.body)}`);
+      const view = response.body.order || response.body.orders.find((row) => row.id === orderId);
+      assert.ok(view, `${subject} can view the order`);
+      assert.deepEqual(view.artworkFileIds, ownFiles.filter((id) => id.startsWith("file_art")), subject);
+      assert.deepEqual(view.mockupFileIds, ownFiles.filter((id) => id.startsWith("file_mock")), subject);
+    }
+    for (const fileId of allFiles) for (const suffix of ["", "/download-url"]) {
+      const response = await call(`/files/${fileId}${suffix}`, { subject });
+      assert.equal(response.status, ownFiles.includes(fileId) ? 200 : 403, `${subject} ${fileId}${suffix}: ${JSON.stringify(response.body)}`);
+      if (!ownFiles.includes(fileId)) assert.equal(response.body.error, "forbidden");
+      else if (suffix) assert.match(response.body.url, /X-Amz-Signature=/);
+    }
+  }
+  // A combined delivery grants this rider both assigned jobs, but not unattributed legacy files.
+  await database.query("UPDATE order_jobs SET rider_id = 'user_rider' WHERE order_id = $1", [orderId]);
+  await database.query("UPDATE orders SET rider_id = 'user_rider' WHERE id = $1", [orderId]);
+  const combined = await call(`/orders/${orderId}`, { subject: "clerk_rider" });
+  assert.deepEqual(combined.body.order.artworkFileIds, ["file_art", "file_art_second"]);
+  assert.equal((await call("/files/file_art_second/download-url", { subject: "clerk_rider" })).status, 200);
+  assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
+});
+
+test("signed catalogue reads protect full shop details and quotes expose client amounts only", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase();
+  t.after(() => database.close());
+  await fixture(database);
+  const { api, child } = await startApi();
+  t.after(() => child.kill("SIGTERM"));
+  for (const pathname of ["/ops/catalog/shops", "/ops/catalog/shops/supplier_a", "/ops/catalog/items/item_supplier_a", "/me/catalog-preview"]) {
+    assert.equal((await request(api, pathname)).status, 401, pathname);
+    assert.equal((await request(api, pathname, { subject: "clerk_client" })).status, 403, pathname);
+  }
+  for (const pathname of ["/ops/catalog/shops", "/ops/catalog/shops/supplier_a", "/ops/catalog/items/item_supplier_a"]) {
+    assert.equal((await request(api, pathname, { subject: "clerk_supplier_a" })).status, 403);
+    const ops = await request(api, pathname, { subject: "clerk_ops" });
+    assert.equal(ops.status, 200, JSON.stringify(ops.body));
+    if (ops.body.item) assert.equal(ops.body.item.basePriceMinor, 10000);
+    else assert.ok((ops.body.shop || ops.body.shops[0]).shop.lat);
+  }
+  const preview = await request(api, "/me/catalog-preview", { subject: "clerk_supplier_a" });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.shop.supplierId, "supplier_a");
+  assert.equal(preview.body.shop.services[0].items[0].basePriceMinor, 10000);
+  const own = await request(api, "/me/catalog-items/item_supplier_a", { subject: "clerk_supplier_a" });
+  assert.equal(own.body.item.basePriceMinor, 10000);
+  const publicItem = await request(api, "/catalog/items/item_supplier_a");
+  assert.equal(publicItem.body.item.clientBasePriceMinor, 11000);
+  assert.equal(publicItem.body.item.basePriceMinor, 10000, "legacy fields survive phase one");
+  const quoteInput = { catalogItemId: "item_supplier_a", quantity: 2 };
+  assert.equal((await request(api, "/me/catalog-quotes", { method: "POST", body: quoteInput })).status, 401);
+  assert.equal((await request(api, "/me/catalog-quotes", { method: "POST", subject: "clerk_supplier_a", body: quoteInput })).status, 403);
+  const priced = await request(api, "/me/catalog-quotes", { method: "POST", subject: "clerk_client", body: quoteInput });
+  assert.equal(priced.status, 200);
+  assert.equal(priced.body.quote.clientLineSubtotalMinor, 22000);
+  for (const field of ["basePriceMinor", "lineSubtotalMinor", "unitRateMinor", "shop", "shopName", "pickup", "supplierSubtotalMinor"]) {
+    assert.equal(JSON.stringify(priced.body).includes(`"${field}"`), false, field);
+  }
+  const cart = (await request(api, "/me/carts", { method: "POST", subject: "clerk_client", body: {} })).body.cart;
+  await request(api, `/me/carts/${cart.id}/lines`, {
+    method: "POST", subject: "clerk_client", body: { ...quoteInput, optionIds: [] },
+  });
+  const quotePath = `/me/carts/${cart.id}/quote`;
+  assert.equal((await request(api, quotePath)).status, 401);
+  assert.equal((await request(api, quotePath, { subject: "clerk_supplier_a" })).status, 403);
+  const previewQuote = await request(api, quotePath, {
+    method: "POST", subject: "clerk_client", body: { fulfillmentMode: "pickup" },
+  });
+  assert.equal(previewQuote.body.quote.totalMinor, 22000);
+  const savedCart = (await request(api, `/me/carts/${cart.id}`, { subject: "clerk_client" })).body.cart;
+  assert.equal(savedCart.fulfillmentMode, "delivery");
+  assert.equal(savedCart.clientQuote.totalMinor, null);
+  assert.equal(savedCart.version, 2);
 });

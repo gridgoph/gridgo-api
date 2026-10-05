@@ -14,6 +14,13 @@ import { measurementKindFor } from "./pricing.js";
 import { priceCatalogSelection, selectedCatalogPrice, TARPAULIN_OUTDOOR_BANNERS } from "./supplier-catalog.js";
 import { defaultTaxonomy } from "./taxonomy.js";
 
+function assertDevelopmentSeedAllowed(env = process.env) {
+  if (!["development", "test"].includes(env.NODE_ENV)
+    || !String(env.CLERK_SECRET_KEY || "").startsWith("sk_test_")) {
+    throw new Error("development_seed_not_allowed: use NODE_ENV=development (or test) and a development Clerk key; production sample seeding is forbidden.");
+  }
+}
+
 /**
  * Printer roll width for a seeded tarpaulin listing.
  *
@@ -218,6 +225,7 @@ function upsert(list, key, record) {
 }
 
 export async function resolveDevClerkUser(email, clerkBackend) {
+  assertDevelopmentSeedAllowed();
   const backend = clerkBackend || createClerkBackend(authConfiguration(process.env));
   const listed = await backend.users.getUserList({ emailAddress: [email], limit: 5 });
   const rows = listed?.data || listed || [];
@@ -327,6 +335,7 @@ export async function seedDevelopmentShop(database, {
   objectStorage,
   now = () => new Date().toISOString(),
 } = {}) {
+  assertDevelopmentSeedAllowed();
   const clerkUser = await resolveDevClerkUser(LOVIS_DEV_SHOP.email, clerkBackend);
   const person = clerkClientProfile(clerkUser);
   const at = now();
@@ -1179,6 +1188,7 @@ async function seedDevelopmentClient(database, clerkBackend, now) {
  * fresh migrate, without sending the rider through apply.
  */
 export async function seedDevelopmentRider(database, clerkBackend, now = () => new Date().toISOString()) {
+  assertDevelopmentSeedAllowed();
   const clerkUser = await resolveDevClerkUser(MARK_DEV_RIDER.email, clerkBackend);
   const person = clerkClientProfile(clerkUser);
   const at = typeof now === "function" ? now() : now;
@@ -1281,6 +1291,7 @@ export async function seedDevelopmentPrivilegedAccounts(database, {
   clerkBackend,
   now = () => new Date().toISOString(),
 } = {}) {
+  assertDevelopmentSeedAllowed();
   const backend = clerkBackend || createClerkBackend(authConfiguration(process.env));
   const accounts = [];
   for (const account of PRIVILEGED_DEV_ACCOUNTS) {
@@ -1368,6 +1379,7 @@ export async function seedDevelopmentShops(database, {
   objectStorage,
   now = () => new Date().toISOString(),
 } = {}) {
+  assertDevelopmentSeedAllowed();
   const backend = clerkBackend || createClerkBackend(authConfiguration(process.env));
   const lovis = await seedDevelopmentShop(database, { clerkBackend: backend, objectStorage, now });
   const shops = [lovis];
@@ -1384,9 +1396,7 @@ export async function seedDevelopmentShops(database, {
    first signs in are indistinguishable from real ones to the person reading
    them, and there is no undo short of deleting rows by hand.
 
-   So they are opt-out, and the opt-out is explicit rather than inferred from
-   NODE_ENV -- a seed that silently does less because of an ambient variable is
-   worse than one that asks.
+   Within an explicitly allowed development environment they remain opt-out.
   */
   if (client.userId && seedQueueRequested()) {
     await seedDevelopmentQueue(database, client.userId, now);
@@ -1790,6 +1800,7 @@ function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
 }
 
 async function main() {
+  assertDevelopmentSeedAllowed();
   const database = createDatabase(process.env);
   try {
     await database.assertReady();

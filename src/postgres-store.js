@@ -32,6 +32,7 @@ function rowKey(row, columns) {
 }
 
 const TABLES = [
+  { name: "season_windows", keys: ["id"], columns: ["id", "name", "start_date", "end_date", "demand_level", "message", "version", "notice_queued_at", "created_at", "updated_at"] },
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
   { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
@@ -77,7 +78,9 @@ const TABLES = [
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
   { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
   { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
-  { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "status", "position", "data"] },
+  { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "production_deduction_minor", "status", "position", "data"] },
+  // Money is relational; policy and bounded warning history are snapshots.
+  { name: "production_lapses", keys: ["id"], columns: ["id", "order_id", "supplier_id", "tier", "deadline_at", "detected_at", "rate_bps", "deduction_minor", "remaining_balance_minor", "applied_at", "data"] },
   ...refundTableDefinitions,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
@@ -112,6 +115,7 @@ export function emptyStore() {
     catalog: [],
     taxonomy: { categories: [], categoryAliases: [], subcategories: [], materials: [], finishes: [] },
     settings: {},
+    seasonWindows: [],
     zones: [],
     supplierServices: [],
     supplierServicePriceTiers: [],
@@ -131,6 +135,7 @@ export function emptyStore() {
     carts: [],
     cartLines: [],
     orders: [],
+    productionLapses: [],
     orderJobs: [],
     shopReviews: [],
     catalogPriceTiers: [],
@@ -160,6 +165,11 @@ export function emptyStore() {
 
 function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
+  for (const item of store.seasonWindows || []) rows.season_windows.push({
+    id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
+    demand_level: item.demandLevel, message: item.message, version: item.version,
+    notice_queued_at: item.noticeQueuedAt ?? null, created_at: item.createdAt, updated_at: item.updatedAt,
+  });
   rows.platform_settings.push({ singleton: true, version: store.version || 3, settings: store.settings || {} });
 
   for (const [position, user] of (store.users || []).entries()) {
@@ -477,9 +487,15 @@ function rowsFromStore(store) {
       });
     }
     for (const [milestonePosition, milestone] of (order.payoutMilestones || []).entries()) {
-      rows.payout_milestones.push({ order_id: order.id, code: milestone.code, share_percent: milestone.sharePercent, amount_minor: money(milestone.amountMinor, "payoutMilestone.amountMinor"), status: milestone.status, position: milestonePosition, data: without(milestone, ["code", "sharePercent", "amountMinor", "status"]) });
+      rows.payout_milestones.push({ order_id: order.id, code: milestone.code, share_percent: milestone.sharePercent, amount_minor: money(milestone.amountMinor, "payoutMilestone.amountMinor"), production_deduction_minor: money(milestone.productionDeductionMinor || 0, "productionDeductionMinor"), status: milestone.status, position: milestonePosition, data: without(milestone, ["code", "sharePercent", "amountMinor", "productionDeductionMinor", "status"]) });
     }
   }
+  for (const lapse of store.productionLapses || []) rows.production_lapses.push({
+    id: lapse.id, order_id: lapse.orderId, supplier_id: lapse.supplierId, tier: lapse.tier,
+    deadline_at: lapse.deadlineAt, detected_at: lapse.detectedAt, rate_bps: lapse.rateBps,
+    deduction_minor: money(lapse.deductionMinor, "deductionMinor"), remaining_balance_minor: money(lapse.remainingBalanceMinor, "remainingBalanceMinor"),
+    applied_at: lapse.appliedAt, data: without(lapse, ["id", "orderId", "supplierId", "tier", "deadlineAt", "detectedAt", "rateBps", "deductionMinor", "remainingBalanceMinor", "appliedAt"]),
+  });
   for (const cart of (store.carts || [])) {
     rows.client_carts.push({
       id: cart.id,
@@ -700,6 +716,11 @@ export async function loadStore(database) {
   const settings = loaded.platform_settings[0];
   if (settings) { store.version = settings.version; store.settings = settings.settings; }
 
+  store.seasonWindows = loaded.season_windows.map(row => ({
+    id: row.id, name: row.name, startDate: row.start_date, endDate: row.end_date,
+    demandLevel: row.demand_level, message: row.message, version: row.version,
+    noticeQueuedAt: row.notice_queued_at, createdAt: row.created_at, updatedAt: row.updated_at,
+  }));
   store.users = ordered(loaded.users).map((row) => {
     const item = { ...row.data, id: row.id, clerkUserId: row.clerk_user_id, email: row.email, name: row.name, role: row.role, version: row.version || 1, createdAt: row.created_at };
     present(item, "phone", row.phone); present(item, "accountType", row.account_type); present(item, "orgName", row.org_name); present(item, "verificationStatus", row.verification_status);
@@ -981,8 +1002,9 @@ export async function loadStore(database) {
   const milestones = new Map();
   for (const row of ordered(loaded.payout_milestones)) {
     if (!milestones.has(row.order_id)) milestones.set(row.order_id, []);
-    milestones.get(row.order_id).push({ ...row.data, code: row.code, sharePercent: row.share_percent, amountMinor: row.amount_minor, status: row.status });
+    milestones.get(row.order_id).push({ ...row.data, code: row.code, sharePercent: row.share_percent, amountMinor: row.amount_minor, ...(row.production_deduction_minor ? { productionDeductionMinor: row.production_deduction_minor } : {}), status: row.status });
   }
+  store.productionLapses = loaded.production_lapses.map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, supplierId: row.supplier_id, tier: row.tier, deadlineAt: row.deadline_at, detectedAt: row.detected_at, rateBps: row.rate_bps, deductionMinor: row.deduction_minor, remainingBalanceMinor: row.remaining_balance_minor, appliedAt: row.applied_at }));
   store.orders = ordered(loaded.orders).map((row) => {
     const item = {
       ...row.data,

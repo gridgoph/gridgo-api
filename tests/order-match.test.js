@@ -609,10 +609,25 @@ test("other listings expose established ratings, zone-only distances, and queue 
   addShop(store, { id: "far", lat: 7.9, lng: 125.9, turnaroundHours: 2, priceMinor: 200, openJobs: 2, reviews: [5, 5, 4, 5, 5] });
   const result = matchShop(store, { now: AT, subcategoryCode: "flyers", ranking: ["cost", "speed", "quality", "distance"], dropoff: DROPOFF });
   const other = result.otherListings[0];
+  assert.equal(other.clientBasePriceMinor, 220);
+  assert.equal(result.listings[0].clientBasePriceMinor, 110);
   assert.equal(other.distanceZone.key, "out_of_zone");
   assert.equal(typeof other.distanceKm, "number");
   assert.deepEqual(other.rating, { average: 4.8, count: 5 });
   assert.equal(other.placeInLine, 3);
   assert.deepEqual(other.optionGroups, []);
   assert.equal(other.measurementKind, "none");
+});
+
+test('recent lapses modestly reduce quality ranking without overriding a higher client priority', () => {
+  const store = fixture();
+  for (const id of ['shop_a', 'shop_b']) addShop(store, { id, lat: 7.07, lng: 125.61, turnaroundHours: 24, priceMinor: 10000 });
+  const input = { now: AT, subcategoryCode: 'flyers', ranking: ['quality', 'cost', 'speed', 'distance'], dropoff: DROPOFF };
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_a');
+  store.productionLapses = [{ supplierId: 'shop_a', deadlineAt: AT, detectedAt: AT }];
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_b');
+  store.catalogItems.find((item) => item.supplierId === 'shop_a').basePriceMinor = 9000;
+  assert.equal(matchShop(store, { ...input, ranking: ['cost', 'quality', 'speed', 'distance'] }).shop.supplierId, 'shop_a');
+  store.productionLapses[0].deadlineAt = '2026-07-01T00:00:00.000Z';
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_a');
 });
