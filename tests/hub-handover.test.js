@@ -190,3 +190,9 @@ test('disabled rollout preserves released-app handovers; disabling after issuanc
   assert.deepEqual(order.handover, original);
   assert.throws(() => verifyHandoverOtp(order, undefined), e => e.code === 'handover_otp_mismatch');
 });
+
+test('malformed staff role input is rejected before any role is created', async () => {
+  const store = setup();
+  await rejects(call(store, 'admin', '/admin/staff/roles', { name: 'Desk', canHandout: true }), 'invalid_staff_role');
+  assert.equal(store.staffRoles.length, 1);
+});

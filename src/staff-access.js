@@ -61,7 +61,7 @@ export async function routeStaffAccess({ req, url, store, user, readBody, now, i
     if (req.method === 'GET') return { status: 200, body: { roles: store.staffRoles } };
     if (req.method === 'POST') {
       const body = await readBody(req);
-      if (!/^[a-z][a-z0-9_]{1,39}$/.test(body.code) || typeof body.name !== 'string' || !body.name.trim() || body.name.length > 80 || typeof body.canHandout !== 'boolean') staffError(400, 'invalid_staff_role');
+      if (typeof body.code !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(body.code) || typeof body.name !== 'string' || !body.name.trim() || body.name.length > 80 || typeof body.canHandout !== 'boolean') staffError(400, 'invalid_staff_role');
       if (store.staffRoles.some(r => r.code === body.code)) staffError(409, 'staff_role_exists');
       const role = { code: body.code, name: body.name.trim(), canHandout: body.canHandout };
       store.staffRoles.push(role); record('staff.role_created', role.code, role);
