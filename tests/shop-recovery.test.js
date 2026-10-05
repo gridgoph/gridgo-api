@@ -1,3 +1,5 @@
+import { publicHubPickup } from "../src/hub-pickup.js";
+import { gridgoOfficePoint } from "../src/gridgo-office.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultOperationalSettings, createPayoutMilestones, activePayoutHold, publicOrderFor } from '../src/operational-model.js';
@@ -274,3 +276,36 @@ test('ordinary refund intake during recovery also records the full-refund choice
   assert.equal(order.shopRecovery.refundRequestId, response.body.refund.id);
   assert.equal(order.shopRecovery.status, 'refund_requested');
 });
+
+
+for (const fulfillmentMode of ["delivery", "pickup"]) {
+  test(`pre-match ${fulfillmentMode} recovery uses the chosen point and preserves charges`, async () => {
+    const store = fixture(), order = store.orders[0];
+    const dropoff = fulfillmentMode === "pickup" ? gridgoOfficePoint()
+      : { lat: 7.2, lng: 125.7, label: "Recipient" };
+    order.fulfillmentMode = fulfillmentMode;
+    order.dropoff = fulfillmentMode === "pickup" ? null : { ...dropoff };
+    order.requestFulfillment = { fulfillmentMode, dropoff };
+    order.deliveryFeeMinor = fulfillmentMode === "pickup" ? 2500 : 8900;
+    order.totalMinor += order.deliveryFeeMinor;
+    order.payments.initial.amountMinor = order.totalMinor;
+    order.paymentAllocations.push({ paymentCode: "initial", component: "delivery_pass_through", amountMinor: order.deliveryFeeMinor });
+    if (fulfillmentMode === "pickup") {
+      store.settings.hubPickup.feeMinor = 2500;
+      order.hubPickup = publicHubPickup(store.settings);
+      order.pickupFeeMinor = 2500;
+      order.riderCommissionBps = 0;
+    }
+    store.clientPreferences = [{ userId: order.clientId, ranking: ["distance", "quality", "speed", "cost"] }];
+    const snapshot = structuredClone({ requestFulfillment: order.requestFulfillment, hubPickup: order.hubPickup,
+      pickupFeeMinor: order.pickupFeeMinor, deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor });
+    failShop(store);
+    assert.equal(order.shopRecovery.proposal.supplierId, "replacement");
+    store.settings.hubPickup.feeMinor = 9000;
+    const accepted = await call(store, "shop-recovery/accept", { recoveryId: order.shopRecovery.id });
+    assert.equal(accepted.status, 200);
+    assert.equal(order.supplierId, "replacement");
+    assert.deepEqual({ requestFulfillment: order.requestFulfillment, hubPickup: order.hubPickup,
+      pickupFeeMinor: order.pickupFeeMinor, deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor }, snapshot);
+  });
+}

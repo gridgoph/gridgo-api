@@ -72,7 +72,7 @@ export function findReplacementShop(store, order, at, reserve = true) {
   for (let attempt = 0; attempt < (store.supplierProfiles || []).length; attempt++) {
     let match;
     try {
-      match = matchShop(store, { subcategoryCode: source.subcategoryCode, ranking, dropoff: order.dropoff || null,
+      match = matchShop(store, { subcategoryCode: source.subcategoryCode, ranking, dropoff: order.requestFulfillment?.dropoff ?? order.dropoff ?? null,
         excludedSupplierIds: excluded, units: lines.reduce((sum, line) => sum + line.quantity, 0), now: at });
     } catch (error) { if (error instanceof MatchError) return null; throw error; }
     const supplierId = match.shop.supplierId;
@@ -135,4 +135,3 @@ export function expireShopAcceptances(store, { at, createId }) {
   }
   return changed;
 }
-

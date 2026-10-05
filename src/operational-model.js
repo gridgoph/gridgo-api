@@ -1,3 +1,4 @@
+import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
@@ -216,6 +217,7 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     riderCommissionBps: 8_500,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
+    hubPickup: hubPickupSettings(),
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
@@ -232,6 +234,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {

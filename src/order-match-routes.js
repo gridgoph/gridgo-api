@@ -1,3 +1,4 @@
+import { publicHubPickup } from "./hub-pickup.js";
 import { createHash, randomBytes } from "node:crypto";
 import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
@@ -181,6 +182,34 @@ function selectionHash(token) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function samePoint(left, right) {
+  return left?.lat === right?.lat && left?.lng === right?.lng;
+}
+
+function assertRequestFulfillment(cart, body) {
+  const choice = cart.requestFulfillment;
+  if (!choice) return;
+  if ((Object.hasOwn(body, "fulfillmentMode") && body.fulfillmentMode !== choice.fulfillmentMode)
+      || ["defaultDropoff", "dropoff"].some((field) => Object.hasOwn(body, field)
+        && !samePoint(body[field], choice.dropoff))) {
+    fail(409, "request_fulfillment_locked", "Start a new match and cart to change the chosen fulfillment.");
+  }
+}
+
+function adoptRequestFulfillment(store, cart, choice) {
+  if (!choice) return;
+  if (cart.requestFulfillment) {
+    assertRequestFulfillment(cart, { fulfillmentMode: choice.fulfillmentMode, dropoff: choice.dropoff });
+    return;
+  }
+  if ((store.cartLines || []).some((line) => line.cartId === cart.id)) {
+    fail(409, "request_fulfillment_requires_empty_cart", "Use a new cart for the fulfillment selected before matching.");
+  }
+  cart.requestFulfillment = structuredClone(choice);
+  cart.fulfillmentMode = choice.fulfillmentMode;
+  cart.defaultDropoff = choice.fulfillmentMode === "delivery" ? { ...choice.dropoff } : null;
+}
+
 function resolveMatchSelection(store, user, cart, body, at) {
   if (!Object.hasOwn(body, "selectToken")) return null;
   if (typeof body.selectToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(body.selectToken)) {
@@ -202,6 +231,7 @@ function resolveMatchSelection(store, user, cart, body, at) {
       fail(409, "select_token_dropoff_mismatch", "Match again to change the delivery location.");
     }
   }
+  adoptRequestFulfillment(store, cart, selection.requestFulfillment);
   body.catalogItemId = selection.catalogItemId;
   if (selection.dropoff) body.dropoff = selection.dropoff;
   return selection;
@@ -397,8 +427,9 @@ function clientCartQuote(store, cart, lines) {
       ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((delivery.distance / 1000).toFixed(1)) } : {}),
     };
   });
+  const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
   const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
-    : addMinor(deliveryLines.map((line) => line.deliveryFeeMinor), "quote.delivery");
+    : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
   const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
     : addMinor([clientItemSubtotalMinor, deliveryFeeMinor], "quote.total");
   const downpaymentPercent = downpaymentPercentSetting(store.settings);
@@ -406,6 +437,7 @@ function clientCartQuote(store, cart, lines) {
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor,
+    ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     downpaymentPercent, downpaymentMinor, balanceMinor: totalMinor == null ? null : totalMinor - downpaymentMinor,
   };
 }
@@ -423,7 +455,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       : null;
     if (listing) {
       const shop = (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.shop;
-      const dropoff = line.dropoff ?? cart.defaultDropoff;
+      const dropoff = cart.requestFulfillment?.dropoff ?? line.dropoff ?? cart.defaultDropoff;
       const distance = shop && dropoff ? distanceMetersBetween(shop, dropoff) : null;
       listing.distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
       if (listing.distanceZone?.key === "out_of_zone") listing.distanceKm = Number((distance / 1000).toFixed(1));
@@ -461,6 +493,8 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     serviceLevel: cart.serviceLevel,
     scheduledFor: cart.scheduledFor ?? null,
     fulfillmentMode: cart.fulfillmentMode,
+    requestFulfillment: cart.requestFulfillment ? structuredClone(cart.requestFulfillment) : null,
+    ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { hubPickup: publicHubPickup(store.settings) } : {}),
     defaultDropoff: cart.defaultDropoff ? { ...cart.defaultDropoff } : null,
     lines: publicLines,
     clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines) : null,
@@ -477,6 +511,7 @@ function updateCart(cart, at) {
 }
 
 function fulfillmentInput(body, current) {
+  assertRequestFulfillment(current, body);
   const fulfillmentMode = body.fulfillmentMode == null ? current.fulfillmentMode : String(body.fulfillmentMode);
   if (!["delivery", "pickup"].includes(fulfillmentMode)) {
     fail(400, "invalid_fulfillment_mode", "fulfillmentMode must be delivery or pickup.", { field: "fulfillmentMode" });
@@ -547,6 +582,8 @@ function publicMatchedOrder(store, order) {
     deliveryFeeMinor: order.deliveryFeeMinor,
     totalMinor: order.totalMinor,
     fulfillmentMode: order.fulfillmentMode,
+    ...(order.requestFulfillment ? { requestFulfillment: structuredClone(order.requestFulfillment) } : {}),
+    ...(order.hubPickup ? { hubPickup: structuredClone(order.hubPickup), pickupFeeMinor: order.pickupFeeMinor } : {}),
     serviceLevel: order.serviceLevel,
     scheduledFor: order.scheduledFor ?? null,
     // The promised date, never the shop's own. A client who can see both can
@@ -584,6 +621,7 @@ function clientInvoice(snapshot) {
 }
 
 function checkout(store, user, cart, body, createId, at) {
+  assertRequestFulfillment(cart, body);
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
     fail(400, "payment_method_not_allowed", "Checkout accepts QR Ph manual payment only.", { allowed: ["qr_manual"] });
@@ -616,6 +654,9 @@ function checkout(store, user, cart, body, createId, at) {
     deliveryFeeMinor: 0,
     totalMinor: 0,
     fulfillmentMode: cart.fulfillmentMode,
+    ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
+    ...(cart.requestFulfillment?.fulfillmentMode === "pickup"
+      ? { hubPickup: publicHubPickup(store.settings), pickupFeeMinor: publicHubPickup(store.settings).feeMinor } : {}),
     // The order-match QR plan. The name predates 100 percent checkout; the
     // split this order was placed under is `downpaymentPercent`.
     paymentPlan: "order_match_qr_75_25",
@@ -698,7 +739,7 @@ function checkout(store, user, cart, body, createId, at) {
       fulfillmentMode: cart.fulfillmentMode, pickup: { ...profile.shop },
       ...(jobDropoff ? { dropoff: jobDropoff } : {}),
       supplierSubtotalMinor, deliveryDistanceMeters: distance, deliveryFeeMinor,
-      ...deliverySplit(deliveryFeeMinor, store.settings.riderCommissionBps ?? 8_500),
+      ...deliverySplit(deliveryFeeMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
       estimatedHours, ...(cart.scheduledFor ? { scheduledFor: cart.scheduledFor } : {}),
       createdAt: at, updatedAt: at,
     };
@@ -729,7 +770,9 @@ function checkout(store, user, cart, body, createId, at) {
   order.promiseBy = projection.promiseBy;
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
-  const deliveryTotalMinor = addMinor(jobs.map((job) => job.deliveryFeeMinor), "order.deliveryFeeMinor");
+  // Pickup is a per-order platform charge. The internal trip to the hub keeps
+  // the existing zero-charge job contract and never earns a share of this fee.
+  const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
   const serviceFeeMinor = roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
@@ -741,7 +784,7 @@ function checkout(store, user, cart, body, createId, at) {
     subtotalMinor: itemSubtotalMinor,
     serviceFeeMinor,
     deliveryFeeMinor: deliveryTotalMinor,
-    ...deliverySplit(deliveryTotalMinor, store.settings.riderCommissionBps ?? 8_500),
+    ...deliverySplit(deliveryTotalMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
     totalMinor,
     onlineDueMinor: totalMinor,
     supplierPlatformPayoutMinor: itemSubtotalMinor,
@@ -826,6 +869,8 @@ function checkout(store, user, cart, body, createId, at) {
     serviceFeeMinor,
     deliveryLines: jobs.map((job) => ({ jobId: job.id, shopName: publicSupplierShop(store, job.supplierId)?.shopName || "Shop", amountMinor: job.deliveryFeeMinor })),
     deliveryFeeMinor: deliveryTotalMinor,
+    ...(order.hubPickup ? { hubPickup: structuredClone(order.hubPickup), pickupFeeMinor: order.pickupFeeMinor } : {}),
+    ...(order.requestFulfillment ? { requestFulfillment: structuredClone(order.requestFulfillment) } : {}),
     totalMinor,
     paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor, balanceMinor },
   };
@@ -935,6 +980,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
         record(input, "line");
         const line = lines.find((row) => row.id === input.lineId);
         if (!line) fail(404, "cart_line_not_found", "A cart line no longer exists.");
+        assertRequestFulfillment(cart, input);
         line.dropoff = point(input.dropoff, "dropoff", { required: false });
       }
     }
@@ -1002,10 +1048,19 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       : [];
     if (cartId) ownCart(store, user, cartId);
     const at = now();
+    let requestFulfillment = null;
+    if (Object.hasOwn(body, "fulfillmentMode")) {
+      if (!["delivery", "pickup"].includes(body.fulfillmentMode)) {
+        fail(400, "invalid_fulfillment_mode", "Choose delivery or pickup before matching.");
+      }
+      const dropoff = body.fulfillmentMode === "pickup" ? gridgoOfficePoint() : addressPoint(store, user.id, body);
+      if (!dropoff) fail(400, "dropoff_required", "Choose a delivery drop-off before matching.");
+      requestFulfillment = { fulfillmentMode: body.fulfillmentMode, dropoff };
+    }
     const input = {
       subcategoryCode: body.subcategoryCode,
       ranking: body.ranking ?? publicPreference(store, user.id).ranking,
-      dropoff: addressPoint(store, user.id, body),
+      dropoff: requestFulfillment?.dropoff ?? addressPoint(store, user.id, body),
       excludedSupplierIds: body.excludedSupplierIds || [],
       deadline: body.deadline ?? null,
       units: body.units == null ? undefined : positiveInteger(body.units, "units"),
@@ -1013,6 +1068,17 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       optionIds: body.optionIds, widthFeet: body.widthFeet, cartLines,
     };
     const match = clientFacingMatch(matchShop(store, input));
+    if (requestFulfillment) {
+      match.requestFulfillment = structuredClone(requestFulfillment);
+      if (requestFulfillment.fulfillmentMode === "pickup") match.hubPickup = publicHubPickup(store.settings);
+      for (const listing of [...match.listings, ...match.otherListings]) {
+        const item = store.catalogItems.find((row) => row.id === listing.id);
+        const shop = store.supplierProfiles.find((row) => row.userId === item.supplierId).shop;
+        listing.deliveryFeeMinor = requestFulfillment.fulfillmentMode === "pickup"
+          ? match.hubPickup.feeMinor : deliveryFeeForDistance(distanceMetersBetween(shop, input.dropoff), store.settings);
+        if (match.hubPickup) listing.pickupFeeMinor = match.hubPickup.feeMinor;
+      }
+    }
     const requestId = randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.parse(at) + 15 * 60_000).toISOString();
     // Keep expired records for a day so ordinary expiry has a distinct error.
@@ -1022,6 +1088,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       store.matchSelections.push({ tokenHash: selectionHash(token), clientId: user.id, requestId, expiresAt,
         selection: { catalogItemId: listing.id, supplierId: store.catalogItems.find((row) => row.id === listing.id).supplierId,
           cartId, deadline: input.deadline, dropoff: input.dropoff,
+          ...(requestFulfillment ? { requestFulfillment } : {}),
           subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
       listing.selectToken = token;
     }
@@ -1068,12 +1135,14 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
   if (specialCartMatch && specialCartMatch[2] === "dropoffs" && req.method === "PUT") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     const body = record(await readBody(req));
+    assertRequestFulfillment(cart, body);
     if (Object.hasOwn(body, "defaultDropoff")) cart.defaultDropoff = point(body.defaultDropoff, "defaultDropoff", { required: false });
     if (body.lines != null) {
       if (!Array.isArray(body.lines)) fail(400, "invalid_request", "lines must be an array.", { field: "lines" });
       for (const input of body.lines) {
         const line = (store.cartLines || []).find((row) => row.id === input.lineId && row.cartId === cart.id);
         if (!line) fail(404, "cart_line_not_found", "A cart line no longer exists.", { lineId: input.lineId });
+        assertRequestFulfillment(cart, input);
         line.dropoff = point(input.dropoff, "dropoff", { required: false });
         line.updatedAt = now();
       }
@@ -1087,6 +1156,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     const cart = ownCart(store, user, decodeURIComponent(linesMatch[1]), { draft: true });
     const body = { ...record(await readBody(req)) };
     const selection = resolveMatchSelection(store, user, cart, body, now());
+    assertRequestFulfillment(cart, body);
     const item = (store.catalogItems || []).find((row) => row.id === text(body.catalogItemId, "catalogItemId", 120));
     if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
       fail(409, "catalog_item_stale", "That listing changed or is no longer public.");
@@ -1148,6 +1218,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     }
     const body = record(await readBody(req));
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
+    assertRequestFulfillment(cart, body);
     if (Object.hasOwn(body, "quantity")) line.quantity = positiveInteger(body.quantity, "quantity");
     if (Object.hasOwn(body, "optionIds")) {
       if (!Array.isArray(body.optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.", { field: "optionIds" });
