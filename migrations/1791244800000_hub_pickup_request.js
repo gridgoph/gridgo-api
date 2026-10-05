@@ -39,6 +39,18 @@ export async function up(pgm) {
   `);
 }
 
-export async function down() {
-  throw new Error('Forward-only: request fulfillment snapshots must be preserved.');
+export async function down(pgm) {
+  pgm.sql(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM client_carts WHERE request_fulfillment IS NOT NULL)
+         OR EXISTS (SELECT 1 FROM orders WHERE data ? 'requestFulfillment' OR data ? 'hubPickup') THEN
+        RAISE EXCEPTION 'request fulfillment snapshots exist; rollback would discard them';
+      END IF;
+    END $$;
+    DROP TRIGGER orders_request_fulfillment_snapshot ON orders;
+    DROP FUNCTION protect_request_fulfillment_snapshot();
+    ALTER TABLE client_carts DROP COLUMN request_fulfillment;
+    UPDATE platform_settings SET settings = settings - 'hubPickup'
+      WHERE settings->'hubPickup' = '{"schedule":null,"feeMinor":0}'::jsonb;
+  `);
 }
