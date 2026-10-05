@@ -1635,6 +1635,9 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
   try {
     const current = await request(instance.api, "/settings", { subject: "clerk_ops" });
     assert.equal(current.status, 200);
+    const clientRead = await request(instance.api, "/settings", { subject: "clerk_client" });
+    assert.equal(clientRead.status, 200);
+    assert.equal(clientRead.body.settings.serviceFeeRateBps, current.body.settings.serviceFeeRateBps);
     assert.equal(current.body.settings.serviceFeeRateBps, 1000);
     assert.equal(current.body.settings.serviceFeeVisibleToClient, true);
     assert.deepEqual(current.body.settings.paymentQr, {
@@ -1648,22 +1651,23 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(current.body.settings.riderCommissionBps, 8500);
     for (const riderCommissionBps of [null, "8500", 8500.5, -1, 10001]) {
       const invalid = await request(instance.api, "/settings", {
-        method: "PATCH", subject: "clerk_ops",
+        method: "PATCH", subject: "clerk_super",
         body: { expectedVersion: current.body.version, riderCommissionBps, reason: "Invalid rider rate" },
       });
       assert.equal(invalid.status, 400);
       assert.equal(invalid.body.error, "invalid_rider_commission_rate");
     }
-    for (const subject of ["clerk_rider", "clerk_client", "clerk_supplier"]) {
+    for (const subject of ["clerk_ops", "clerk_rider", "clerk_client", "clerk_supplier"]) {
       const denied = await request(instance.api, "/settings", {
         method: "PATCH", subject,
         body: { expectedVersion: current.body.version, riderCommissionBps: 7000, reason: "Forbidden rate" },
       });
       assert.equal(denied.status, 403);
+      assert.equal(denied.body.error, "forbidden");
     }
     const badNudge = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: current.body.version,
         productionNudge: { ...current.body.settings.productionNudge, afterValue: "4" },
@@ -1676,7 +1680,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const noReason = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { expectedVersion: current.body.version, serviceFeeRateBps: 1250 },
     });
     assert.equal(noReason.status, 400);
@@ -1684,7 +1688,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const stale = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { expectedVersion: current.body.version - 1, serviceFeeRateBps: 1250, reason: "Pilot fee update" },
     });
     assert.equal(stale.status, 409);
@@ -1692,7 +1696,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const stringRate = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { expectedVersion: current.body.version, serviceFeeRateBps: "1000", reason: "Invalid string rate" },
     });
     assert.equal(stringRate.status, 400);
@@ -1700,7 +1704,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const stringDeliveryFee = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: current.body.version,
         deliveryFeeBands: current.body.settings.deliveryFeeBands.map((band, i) => i === 0 ? { ...band, feeMinor: "2500" } : band),
@@ -1712,7 +1716,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
 
     const updated = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: current.body.version, serviceFeeRateBps: 1250, reason: "Pilot fee update",
         deliveryFeeBands: current.body.settings.deliveryFeeBands.map((band, i) => i === 3
@@ -1731,9 +1735,20 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     ]);
     assert.equal(updated.body.settings.serviceFeeVisibleToClient, true);
 
+    const opsAudit = await request(instance.api, "/audit", { subject: "clerk_ops" });
+    assert.equal(opsAudit.status, 403);
+    assert.equal(opsAudit.body.error, "forbidden");
+    const superAudit = await request(instance.api, "/audit", { subject: "clerk_super" });
+    assert.equal(superAudit.status, 200);
+    assert.equal(
+      superAudit.body.audit.some((entry) =>
+        entry.action === "settings.operational_update" && entry.reason === "Pilot fee update"),
+      true,
+    );
+
     const hidden = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: updated.body.version,
         serviceFeeVisibleToClient: false,
@@ -1745,7 +1760,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(hidden.body.settings.serviceFeeRateBps, 1250);
 
     let version = hidden.body.version;
-    for (const [subject, riderCommissionBps] of [["clerk_ops", 7000], ["clerk_super", 8500]]) {
+    for (const [subject, riderCommissionBps] of [["clerk_super", 7000], ["clerk_super", 8500]]) {
       const changed = await request(instance.api, "/settings", {
         method: "PATCH", subject,
         body: { expectedVersion: version, riderCommissionBps, reason: "Rider rate update" },
@@ -1807,7 +1822,7 @@ test('delivery zone limit updates persist with the settings handshake and preser
     const current = (await request(instance.api, '/settings', { subject: 'clerk_ops' })).body;
     const before = (await database.query("SELECT * FROM orders WHERE id = 'ord_payout'")).rows;
     const jobsBefore = (await database.query("SELECT * FROM order_jobs WHERE id = 'job_snapshot'")).rows;
-    const patch = (body, subject = 'clerk_ops') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
+    const patch = (body, subject = 'clerk_super') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
     const limits = [1200, 6500, 23000];
     const deliveryFeeBands = current.settings.deliveryFeeBands.map((band, index) => ({
       ...band, maxDistanceMeters: limits[index] ?? null,
@@ -1816,6 +1831,7 @@ test('delivery zone limit updates persist with the settings handshake and preser
     assert.equal((await patch(input, 'clerk_client')).status, 403);
     assert.equal((await patch(input, 'clerk_supplier')).status, 403);
     assert.equal((await patch(input, 'clerk_rider')).status, 403);
+    assert.equal((await patch(input, 'clerk_ops')).status, 403);
     assert.equal((await patch({ ...input, reason: '' })).body.error, 'settings_reason_required');
     assert.equal((await patch({ ...input, expectedVersion: current.version - 1 })).body.error, 'settings_version_conflict');
     for (const [index, limit, error] of [
@@ -1858,7 +1874,7 @@ test('delivery zone limit updates persist with the settings handshake and preser
   }
 });
 
-test("ops can replace the public payment QR without changing method or caption", { skip: !DATABASE_URL }, async () => {
+test("a Super Admin can replace the public payment QR without changing method or caption", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9, 0x00, 0x01, 0x02, 0x03]);
@@ -1885,6 +1901,14 @@ test("ops can replace the public payment QR without changing method or caption",
     assert.equal(Object.hasOwn(current.body.settings.paymentQr, "imageUrl"), false);
     assert.deepEqual(current.body.settings.paymentQr, { method: "qr_manual", caption: "QR Ph" });
 
+    const opsActivate = await request(instance.api, "/settings/payment-qr", {
+      method: "POST",
+      subject: "clerk_ops",
+      body: { fileId: "file_missing", reason: "Operations cannot set the plate" },
+    });
+    assert.equal(opsActivate.status, 403);
+    assert.equal(opsActivate.body.error, "forbidden");
+
     let health = await request(instance.api, "/health");
     for (let attempt = 0; attempt < 50 && health.body.storage?.status === "checking"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1893,7 +1917,7 @@ test("ops can replace the public payment QR without changing method or caption",
     if (health.body.storage?.status !== "available") {
       const patched = await request(instance.api, "/settings", {
         method: "PATCH",
-        subject: "clerk_ops",
+        subject: "clerk_super",
         body: { expectedVersion: current.body.version, reason: "Confirm paymentQr survives a band-free patch" },
       });
       assert.equal(patched.status, 200, JSON.stringify(patched.body));
@@ -1916,7 +1940,7 @@ test("ops can replace the public payment QR without changing method or caption",
 
     const activated = await request(instance.api, "/settings/payment-qr", {
       method: "POST",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { fileId: uploadedBody.file.fileId, reason: "Set the GCash plate" },
     });
     assert.equal(activated.status, 200, JSON.stringify(activated.body));
@@ -1927,7 +1951,7 @@ test("ops can replace the public payment QR without changing method or caption",
 
     const again = await request(instance.api, "/settings/payment-qr", {
       method: "POST",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { fileId: uploadedBody.file.fileId, reason: "Same plate again" },
     });
     assert.equal(again.status, 200, JSON.stringify(again.body));
@@ -1941,7 +1965,7 @@ test("ops can replace the public payment QR without changing method or caption",
 
     const patched = await request(instance.api, "/settings", {
       method: "PATCH",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: {
         expectedVersion: activated.body.version,
         serviceFeeRateBps: 1000,
@@ -3561,7 +3585,7 @@ test("rider dispatch earnings and Ops finance keep their rate across a settings 
   try {
     const settings = await request(instance.api, "/settings", { subject: "clerk_ops" });
     const updated = await request(instance.api, "/settings", {
-      method: "PATCH", subject: "clerk_ops",
+      method: "PATCH", subject: "clerk_super",
       body: { expectedVersion: settings.body.version, riderCommissionBps: 7000, reason: "Future rider jobs" },
     });
     assert.equal(updated.status, 200);
@@ -3886,11 +3910,38 @@ test("account suspend, remove, and restore are audited and separate from accredi
     const ordersBefore = await request(instance.api, "/orders", { subject: "clerk_client" });
     assert.equal(ordersBefore.status, 200, JSON.stringify(ordersBefore.body));
 
-    const opsDenied = await request(instance.api, "/users/user_client/account", {
-      method: "PATCH", subject: "clerk_ops", body: { status: "suspended", reason: "Not allowed" },
+    const opsRemove = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "removed", reason: "Not allowed" },
     });
-    assert.equal(opsDenied.status, 403);
-    assert.equal(opsDenied.body.error, "forbidden");
+    assert.equal(opsRemove.status, 403);
+    assert.equal(opsRemove.body.error, "forbidden");
+
+    const superRemoved = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "removed", reason: "Closed for the check" },
+    });
+    assert.equal(superRemoved.status, 200, JSON.stringify(superRemoved.body));
+    const opsRestoreRemoved = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "active", reason: "Bring them back" },
+    });
+    assert.equal(opsRestoreRemoved.status, 403);
+    assert.equal(opsRestoreRemoved.body.error, "forbidden");
+    const superRestored = await request(instance.api, "/users/user_client/account", {
+      method: "PATCH", subject: "clerk_super", body: { status: "active", reason: "Check finished" },
+    });
+    assert.equal(superRestored.status, 200, JSON.stringify(superRestored.body));
+    assert.equal(superRestored.body.user.accountStatus, "active");
+
+    const opsSuspend = await request(instance.api, "/users/user_rider/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "suspended", reason: "Desk hold" },
+    });
+    assert.equal(opsSuspend.status, 200, JSON.stringify(opsSuspend.body));
+    assert.equal(opsSuspend.body.user.accountStatus, "suspended");
+    assert.equal(opsSuspend.body.user.accountStatusReason, "Desk hold");
+    const opsRestore = await request(instance.api, "/users/user_rider/account", {
+      method: "PATCH", subject: "clerk_ops", body: { status: "active", reason: "Hold lifted" },
+    });
+    assert.equal(opsRestore.status, 200, JSON.stringify(opsRestore.body));
+    assert.equal(opsRestore.body.user.accountStatus, "active");
 
     for (const reason of [undefined, "   "]) {
       const missing = await request(instance.api, "/users/user_client/account", {
@@ -4274,4 +4325,147 @@ test('production penalties: Operations confirms no communication with a reason; 
   assert.equal(store.productionLapses[0].warnings.filter((warning) => warning.tier === 'severe').length, 1);
   assert.deepEqual(store.productionLapses[0].warnings, result.body.lapses[0].warnings);
   assert.equal(store.productionLapses[0].deductionMinor, 0);
+});
+
+test("Operations account changes refuse every privileged membership and allow client, shop and rider holds", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    // Privileged memberships must protect an identity even when its legacy role is client.
+    store.userRoleMemberships.push({ userId: "user_promote", role: "ops_admin", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "user_client", role: "super_admin", createdAt: AT });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise(resolve => instance.child.once("exit", resolve)); });
+  const change = (id, status, subject = "clerk_ops") => request(instance.api, `/users/${id}/account`, {
+    method: "PATCH", subject, body: { status, reason: "Account review" },
+  });
+  for (const target of ["user_super", "user_ops", "user_promote", "user_client"]) {
+    const denied = await change(target, "suspended");
+    assert.equal(denied.status, 403, `${target}: ${JSON.stringify(denied.body)}`);
+    assert.equal(denied.body.error, "forbidden");
+  }
+  for (const target of ["user_promote", "user_client"]) {
+    assert.equal((await change(target, "suspended", "clerk_super")).status, 200);
+    const denied = await change(target, "active");
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error, "forbidden");
+    assert.equal((await change(target, "active", "clerk_super")).status, 200);
+  }
+  // Remove the added membership to exercise the ordinary personal account path.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships = store.userRoleMemberships.filter(row => !(row.userId === "user_client" && row.role === "super_admin"));
+    await saveStore(database, store);
+  });
+  for (const target of ["user_client", "user_supplier", "user_rider"]) {
+    assert.equal((await change(target, "suspended")).status, 200, target);
+    assert.equal((await change(target, "active")).status, 200, target);
+  }
+  const store = await loadStore(database);
+  assert.equal(store.users.find(row => row.id === "user_super").accountStatus, "active");
+  assert.equal(store.auditLog.some(row => row.actorId === "user_ops" && ["user_super", "user_ops", "user_promote"].includes(row.entityId)), false);
+});
+
+test("Operations audit reads are limited to workspace actions or one file", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  const rows = [
+    { id: "aud_override", action: "order.production_override", entityType: "order", entityId: "ord_payout", orderId: "ord_payout" },
+    { id: "aud_early", action: "file.early_delete", entityType: "file", entityId: "file_pof" },
+    { id: "aud_retention", action: "file.retention_delete", entityType: "file", entityId: "file_other" },
+    { id: "aud_file", action: "file.attach", entityType: "file", entityId: "file_pof" },
+    { id: "aud_private", action: "settings.operational_update", entityType: "settings", entityId: "platform" },
+  ];
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.auditLog.push(...rows.map(row => ({ ...row, at: AT, actorId: "user_super", actorRole: "super_admin", reason: "Review record" })));
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise(resolve => instance.child.once("exit", resolve)); });
+  for (const [query, expected] of [
+    ["action=order.production_override&orderId=ord_payout", ["aud_override"]],
+    ["action=file.early_delete", ["aud_early"]],
+    ["action=file.retention_delete", ["aud_retention"]],
+    ["entityType=file&entityId=file_pof", ["aud_early", "aud_file"]],
+    ["entityType=file&entityId=file_pof&action=file.attach", ["aud_file"]],
+  ]) {
+    const result = await request(instance.api, `/audit?${query}`, { subject: "clerk_ops" });
+    assert.equal(result.status, 200, query);
+    assert.deepEqual(result.body.audit.map(row => row.id).sort(), expected.sort());
+  }
+  for (const query of ["", "?action=settings.operational_update", "?orderId=ord_payout", "?entityType=file", "?entityType=file&entityId=%20", "?entityId=file_pof", "?entityType=order&entityId=ord_payout", "?action=file.early_delete.extra"]) {
+    const result = await request(instance.api, `/audit${query}`, { subject: "clerk_ops" });
+    assert.equal(result.status, 403, query);
+    assert.equal(result.body.error, "forbidden");
+  }
+  for (const subject of ["clerk_client", "clerk_supplier", "clerk_rider"]) {
+    for (const query of ["action=file.early_delete", "entityType=file&entityId=file_pof"]) {
+      assert.equal((await request(instance.api, `/audit?${query}`, { subject })).status, 403);
+    }
+  }
+  assert.equal((await request(instance.api, "/audit?action=file.early_delete")).status, 401);
+  const unrestricted = await request(instance.api, "/audit", { subject: "clerk_super" });
+  assert.equal(unrestricted.status, 200);
+  assert.deepEqual(unrestricted.body.audit.map(row => row.id).sort(), rows.map(row => row.id).sort());
+});
+
+test("listing take-down survives PostgreSQL own-list reads and restore keeps it hidden with a shop notice", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.catalogItems.push({
+      id: "item_takedown", supplierId: "user_supplier", supplierServiceId: "svc_banner",
+      subcategoryCode: "tarpaulins_outdoor_banners", name: "Sample listing", description: "",
+      basePriceMinor: 1000, pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit",
+      printerMaxWidthFeet: 10, active: true, sortOrder: 0, version: 1, createdAt: AT, updatedAt: AT,
+    });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise(resolve => instance.child.once("exit", resolve)); });
+  const suspend = (reason, subject = "clerk_super") => request(instance.api, "/catalog-items/item_takedown/suspend", {
+    method: "POST", subject, body: { reason },
+  });
+  for (const subject of ["clerk_ops", "clerk_client", "clerk_supplier", "clerk_rider"]) {
+    assert.equal((await suspend("Review needed", subject)).status, 403);
+  }
+  const longReason = await suspend("x".repeat(2001));
+  assert.equal(longReason.status, 400);
+  assert.equal(longReason.body.error, "reason_too_long");
+  const suspended = await suspend("  Correct the sample  ");
+  assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+  for (const query of ["", "?q=sample", "?active=false"]) {
+    const listed = await request(instance.api, `/me/catalog-items${query}`, { subject: "clerk_supplier" });
+    assert.equal(listed.status, 200);
+    const item = listed.body.items.find(row => row.id === "item_takedown");
+    assert.equal(item.active, false);
+    assert.equal(item.suspendReason, "Correct the sample");
+    assert.equal(item.suspendedAt, suspended.body.item.suspendedAt);
+  }
+  const repeated = await suspend("Replace the original reason");
+  assert.equal(repeated.status, 409);
+  assert.equal(repeated.body.error, "listing_suspended");
+  const beforeRestore = await loadStore(database);
+  assert.equal(beforeRestore.catalogItems[0].suspendReason, "Correct the sample");
+  assert.equal(beforeRestore.notifications.filter(row => row.type === "listing_suspended").length, 1);
+  assert.equal(beforeRestore.auditLog.filter(row => row.action === "catalog_item.suspend").length, 1);
+  const restored = await request(instance.api, "/catalog-items/item_takedown/restore", { method: "POST", subject: "clerk_super" });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.item.active, false);
+  const listed = await request(instance.api, "/me/catalog-items", { subject: "clerk_supplier" });
+  assert.equal(listed.body.items[0].active, false);
+  assert.equal(listed.body.items[0].suspendReason, null);
+  assert.equal(listed.body.items[0].suspendedAt, null);
+  const inbox = await request(instance.api, "/notifications", { subject: "clerk_supplier" });
+  const notice = inbox.body.notifications.find(row => row.type === "listing_restored");
+  assert.equal(notice.catalogItemId, "item_takedown");
+  assert.match(notice.body, /still hidden/);
 });

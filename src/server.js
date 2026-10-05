@@ -791,10 +791,14 @@ function accountHoldDenial(user) {
   };
 }
 
-function targetIsSuperAdmin(store, target) {
-  return target?.role === "super_admin" || (store.userRoleMemberships || []).some(
-    (membership) => membership.userId === target.id && membership.role === "super_admin",
+function targetHasMembership(store, target, role) {
+  return target?.role === role || (store.userRoleMemberships || []).some(
+    (membership) => membership.userId === target.id && membership.role === role,
   );
+}
+
+function targetIsSuperAdmin(store, target) {
+  return targetHasMembership(store, target, "super_admin");
 }
 
 /** Active means the membership can still open GRIDGO. A held Super Admin cannot. */
@@ -3122,7 +3126,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
       if (!Number.isInteger(body.expectedVersion) || body.expectedVersion !== store.version) {
         return send(res, 409, { error: "settings_version_conflict", version: store.version });
@@ -3175,7 +3179,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/settings/payment-qr") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
@@ -3533,10 +3537,14 @@ async function handleRequest(req, res) {
       return send(res, 200, verificationUserResponse(store, target));
     }
 
-    // Super Admin account standing. Soft suspend/remove: the row, memberships,
-    // orders, and Clerk user stay. Accreditation is a different field.
+    // Account standing. Accreditation is a different field.
+    // Operations may suspend or restore clients, shops and riders.
+    // Privileged accounts and removal require a Super Admin.
+    // `removed` still only sets accountStatus: the row, memberships, orders,
+    // and Clerk user stay. Cutting off login is not implemented here — this
+    // API only loads a Clerk user, it does not ban or delete one.
     if (req.method === "PATCH" && /^\/users\/[^/]+\/account$/.test(pathname)) {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const uid = pathname.split("/")[2];
       const target = store.users.find((candidate) => candidate.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
@@ -3548,6 +3556,12 @@ async function handleRequest(req, res) {
           message: "Account status must be active, suspended, or removed.",
           allowed: allowedStatus,
         });
+      }
+      if ((body.status === "removed" || target.accountStatus === "removed") && !isSuper(user)) {
+        return send(res, 403, { error: "forbidden" });
+      }
+      if (!isSuper(user) && (targetIsSuperAdmin(store, target) || targetHasMembership(store, target, "ops_admin"))) {
+        return send(res, 403, { error: "forbidden" });
       }
       const reason = typeof body.reason === "string" ? body.reason.trim() : "";
       if (!reason) {
@@ -4715,6 +4729,13 @@ async function handleRequest(req, res) {
       const orderId = url.searchParams.get("orderId");
       const actorId = url.searchParams.get("actorId");
       const action = url.searchParams.get("action");
+      // Operations needs correction/deletion bylines in daily workspaces,
+      // while the unrestricted audit log remains Super Admin only.
+      const operationalAction = ["order.production_override", "file.early_delete", "file.retention_delete"].includes(action);
+      const specificFile = entityType === "file" && Boolean(entityId?.trim());
+      if (!isSuper(user) && !operationalAction && !specificFile) {
+        return send(res, 403, { error: "forbidden" });
+      }
       const limit = Math.min(Number(url.searchParams.get("limit") || 100), 500);
       if (entityType) list = list.filter((e) => e.entityType === entityType);
       if (entityId) list = list.filter((e) => e.entityId === entityId);

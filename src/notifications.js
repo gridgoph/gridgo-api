@@ -80,6 +80,7 @@ export function publicNotification(notification, order) {
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;
   if (notification.announcementId) item.announcementId = notification.announcementId;
   if (notification.approvalCaseId) item.approvalCaseId = notification.approvalCaseId;
+  if (notification.catalogItemId) item.catalogItemId = notification.catalogItemId;
   if (order?.title) item.orderTitle = order.title;
   if (order?.state) {
     const privateShopEvent = ["supplier", "ops_admin", "super_admin"].includes(notification.appRole);
