@@ -604,3 +604,33 @@ test('replacing the platform receiving QR leaves old bytes for gated retention c
   assert.equal(store.files.find((file) => file.fileId === 'platform_old').state, 'ready');
   assert.equal(store.files.find((file) => file.fileId === 'platform_old').deleteRequestedAt, undefined);
 });
+
+test('shop recovery full-refund choice persists, rejects partial settlement and pays through reserved transfer', { skip: !DATABASE_URL }, async (t) => {
+  const { recordShopFailure } = await import('../src/shop-recovery.js');
+  const { routeShopRecovery } = await import('../src/shop-recovery-routes.js');
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'supplier_self_qc' });
+  await db.transaction(async () => {
+    const store = await loadStore(db), order = store.orders[0];
+    recordShopFailure(store, order, { kind: 'cancelled', reason: 'Cannot complete the run', at: AT, createId: id, actorId: 'supplier' });
+    const result = await routeShopRecovery({ req: { method: 'POST', headers: { 'idempotency-key': id('key') } },
+      url: new URL('http://test/orders/order/shop-recovery/refund'), store, user: actor(store, 'client'),
+      readBody: async () => ({ recoveryId: order.shopRecovery.id, destination: qr }), now: () => AT, id, audit });
+    assert.equal(result.status, 200);
+    await saveStore(db, store);
+  });
+  let store = await loadStore(db);
+  assert.equal(store.orders[0].shopFailureEvents[0].stage, 'supplier_self_qc');
+  const requestId = store.orders[0].shopRecovery.refundRequestId;
+  let refund = (await call(db, 'client', 'GET', `/refund-requests/${requestId}`)).body.refund;
+  refund = await review(db, refund);
+  await assert.rejects(settle(db, refund, { shop: 10000, total: 104000 }), errorCode('shop_recovery_full_refund_required'));
+  await assert.rejects(settle(db, refund, { principal: 50000, total: 60000 }), errorCode('shop_recovery_full_refund_required'));
+  refund = await settle(db, refund);
+  assert.equal(refund.settlement.totalMinor, 115000);
+  refund = await pay(db, await reserve(db, refund));
+  assert.equal(refund.status, 'paid');
+  store = await loadStore(db);
+  assert.equal(store.orders[0].state, 'cancelled');
+  assert.equal(store.refundPayments[0].amountMinor, 115000);
+});

@@ -529,25 +529,30 @@ test("a shop that cannot take the work hands it on rather than stopping it", asy
 
   // Supplier B is dearer than the job was sold for, so it is not a candidate.
   // The order lands on Operations rather than costing the client more.
-  assert.equal(declined.body.replaced, false);
-  assert.equal(declined.body.order.state, "approved_for_matching");
+  assert.equal(declined.body.recovery.status, "awaiting_client");
+  assert.equal(declined.body.order.state, "supplier_assigned");
   assert.equal(declined.body.order.supplierId, undefined);
 
-  // And the shop that declined no longer sees it.
+  // The original shop can read the held order until replacement is accepted.
   const inbox = await call("/jobs", { subject: "clerk_supplier_a" });
-  assert.equal(inbox.body.jobs.length, 0);
+  assert.equal(inbox.body.jobs.length, 1);
 
   // Declining twice is not a way to loop.
   const again = await call(`/orders/${orderId}/decline`, {
     method: "POST", subject: "clerk_supplier_a", body: { reason: "still down" },
   });
-  assert.equal(again.status, 403, JSON.stringify(again.body));
+  assert.equal(again.status, 409, JSON.stringify(again.body));
 });
 
 test("a declined job moves to a shop that can still make the date, at no more cost", async (t) => {
   // Placed with the dearer, slower shop, so a cheaper and faster one exists to
   // take it on.
-  const { call, orderId, output } = await placedOrder(t, { catalogItemId: "item_supplier_b" });
+  const { call, database, orderId, output } = await placedOrder(t, { catalogItemId: "item_supplier_b" });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.catalogItems.find((row) => row.id === 'item_supplier_a').name = store.orderLineItems[0].itemNameSnapshot;
+    await saveStore(database, store);
+  });
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, {
     method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
@@ -560,7 +565,13 @@ test("a declined job moves to a shop that can still make the date, at no more co
     method: "POST", subject: "clerk_supplier_b", body: { reason: "Fully booked" },
   });
   assert.equal(declined.status, 200, `${JSON.stringify(declined.body)}\n${output()}`);
-  assert.equal(declined.body.replaced, true);
+  assert.equal(declined.body.recovery.status, 'awaiting_client');
+  const offer = await call(`/orders/${orderId}/shop-recovery`, { subject: 'clerk_client' });
+  assert.equal(offer.body.recovery.canAccept, true, JSON.stringify(offer.body));
+  const accepted = await call(`/orders/${orderId}/shop-recovery/accept`, {
+    method: 'POST', subject: 'clerk_client', body: { recoveryId: offer.body.recovery.id },
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
 
   const after = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
   assert.equal(after.supplierId, "supplier_a", "the job moved to the shop that can take it");
@@ -572,7 +583,7 @@ test("a declined job moves to a shop that can still make the date, at no more co
   assert.equal(after.supplierSubtotalMinor, before.supplierSubtotalMinor);
 
   // And the new shop is not promised later than the client already was.
-  assert.ok(Date.parse(after.promiseBy) <= Date.parse(before.promiseBy));
+  assert.equal(after.promiseBy, offer.body.recovery.replacement.promiseBy);
 
   // The new shop sees it; the one that declined does not.
   assert.equal((await call("/jobs", { subject: "clerk_supplier_a" })).body.jobs.length, 1);
@@ -1987,6 +1998,86 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
   assert.deepEqual(combined.body.order.artworkFileIds, ["file_art", "file_art_second"]);
   assert.equal((await call("/files/file_art_second/download-url", { subject: "clerk_rider" })).status, 200);
   assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
+});
+
+test('shop acceptance timeout is enforced by HTTP before the lifecycle sweep and cannot release payouts', { skip: !DATABASE_URL }, async (t) => {
+  const { call, orderId, database } = await placedOrder(t);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  const assignment = await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  assert.equal(assignment.status, 200);
+  assert.equal(assignment.body.order.shopAcceptance.workingMinutes, 60);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders[0].shopAcceptance.deadlineAt = '2020-01-01T00:00:00.000Z';
+    await saveStore(database, store);
+  });
+  const accept = await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_supplier_a', body: { state: 'payment_authorized' } });
+  assert.equal(accept.status, 409, JSON.stringify(accept.body));
+  assert.equal(accept.body.error, 'shop_acceptance_expired');
+  const events = await call('/ops/shop-failures?supplierId=supplier_a', { subject: 'clerk_ops' });
+  assert.equal(events.body.events[0].kind, 'timed_out');
+  assert.equal(events.body.events[0].stage, 'supplier_assigned');
+  assert.equal((await call('/ops/shop-failures', { subject: 'clerk_client' })).status, 403);
+  const blocked = await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  assert.equal(blocked.body.error, 'shop_recovery_pending');
+});
+
+test('lifecycle sweep auto-declines once without a supplier request', { skip: !DATABASE_URL }, async (t) => {
+  const { call, orderId, database } = await placedOrder(t, { extraEnv: { GRIDGO_LIFECYCLE_INTERVAL_MS: '1000' } });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders[0].shopAcceptance.deadlineAt = '2020-01-01T00:00:00.000Z';
+    await saveStore(database, store);
+  });
+  // Poll durable state while the isolated API's real lifecycle timer runs.
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const store = await loadStore(database);
+    if (store.orders[0].shopFailureEvents?.length) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal((await loadStore(database)).orders[0].shopFailureEvents.length, 1);
+});
+
+test('replacement preserves an applied original-shop penalty ledger and resets only unpaid stages', { skip: !DATABASE_URL }, async (t) => {
+  const { assessProductionLapses } = await import('../src/production-penalties.js');
+  const { call, orderId, database } = await placedOrder(t, { catalogItemId: 'item_supplier_b' });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  await database.transaction(async () => {
+    const store = await loadStore(database), order = store.orders[0];
+    store.catalogItems.find((row) => row.id === 'item_supplier_a').name = store.orderLineItems[0].itemNameSnapshot;
+    store.settings.productionPenalty.deductionsEnabled = true;
+    order.state = 'production'; order.readyBy = '2026-01-01T00:00:00.000Z';
+    const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
+    assessProductionLapses(store, { at: '2026-01-03T00:00:00.000Z', createId });
+    assessProductionLapses(store, { at: '2026-01-03T00:01:00.000Z', createId });
+    await saveStore(database, store);
+  });
+  const before = (await loadStore(database)).productionLapses[0];
+  assert.ok(before.deductionMinor > 0);
+  const cancel = await call(`/orders/${orderId}/shop-cancel`, { method: 'POST', subject: 'clerk_supplier_b', body: { reason: 'Unable to finish' } });
+  assert.equal(cancel.status, 200, JSON.stringify(cancel.body));
+  const accept = await call(`/orders/${orderId}/shop-recovery/accept`, { method: 'POST', subject: 'clerk_client', body: { recoveryId: cancel.body.recovery.id } });
+  assert.equal(accept.status, 200, JSON.stringify(accept.body));
+  const store = await loadStore(database);
+  assert.deepEqual(store.productionLapses[0], before);
+  assert.ok(store.orders[0].payoutMilestones.every((row) => !row.productionDeductionMinor));
+  assert.equal(store.orders[0].supplierId, 'supplier_a');
+  assert.equal(store.orderJobs[0].supplierId, 'supplier_a');
+  await database.transaction(async () => {
+    const current = await loadStore(database);
+    current.orders[0].state = 'production';
+    current.orders[0].readyBy = '2026-01-04T00:00:00.000Z';
+    const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
+    assessProductionLapses(current, { at: '2026-01-06T00:00:00.000Z', createId });
+    assessProductionLapses(current, { at: '2026-01-06T00:01:00.000Z', createId });
+    await saveStore(database, current);
+  });
+  const later = await loadStore(database);
+  assert.equal(later.productionLapses.length, 2);
+  assert.deepEqual(later.productionLapses.find((row) => row.supplierId === 'supplier_b'), before);
+  assert.ok(later.productionLapses.find((row) => row.supplierId === 'supplier_a').deductionMinor > 0);
 });
 
 test("signed catalogue reads protect full shop details and quotes expose client amounts only", { skip: !DATABASE_URL }, async (t) => {

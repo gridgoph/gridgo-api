@@ -30,6 +30,8 @@ Settings writes are Super Admin only. Operations audit reads are limited to work
 
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
+Shop acceptance, cancellation and client-approved recovery follow `docs/SHOP_RECOVERY_API.md`; `shopRecovery` is an independent work/payout hold. Never reassign automatically after any shop payout release.
+
 Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/transfer evidence, reserved manual attempts). `src/refund-policy.js` owns independent work/payout holds; never let claim release bypass them. Settlements preserve original money/stage snapshots, supersede unpaid stages, and pay any agreed shop remainder through the separate settlement item.
 
 Client catalogue privacy is staged: `docs/CLIENT_CATALOG_PRIVACY.md` defines client quotes, authenticated catalogue reads, deprecated fields and release gates. Keep legacy public fields until the compatible client release and old-build update coverage are confirmed; quotes use checkout arithmetic, never sums of marked-up display components.

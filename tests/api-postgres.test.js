@@ -4321,7 +4321,9 @@ test('production penalties: Operations confirms no communication with a reason; 
   assert.equal(repeated.status, 200);
   const store = await loadStore(database);
   assert.equal(store.auditLog.filter((row) => row.action === 'production_lapse.no_communication').length, 1);
-  assert.equal(store.productionLapses[0].warnings.length, 1);
+  // The startup sweep may already have recorded a minor warning before the attestation.
+  assert.equal(store.productionLapses[0].warnings.filter((warning) => warning.tier === 'severe').length, 1);
+  assert.deepEqual(store.productionLapses[0].warnings, result.body.lapses[0].warnings);
   assert.equal(store.productionLapses[0].deductionMinor, 0);
 });
 
