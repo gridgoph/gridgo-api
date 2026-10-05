@@ -123,8 +123,15 @@ function settlementCalculation(store, order, request, body) {
     shopEntitlementMinor: body.shopEntitlementMinor, riderEntitlementMinor: body.riderEntitlementMinor,
     earlier: earlierAmounts(store, order), settlementPaidMinor: sumMinor(store.refundSupplierPayouts
       .filter((row) => row.orderId === order.id && row.status === 'released').map((row) => row.amountMinor)) };
+  const recoveryRefund = order.shopRecovery?.refundRequestId === request.id;
+  if (recoveryRefund && (body.shopEntitlementMinor !== 0 || body.riderEntitlementMinor !== 0)) {
+    fail(409, 'shop_recovery_full_refund_required', 'This client chose a full refund. Resolve released obligations with Operations first.');
+  }
   const maximum = calculateRefundSettlement(order, input);
   const amounts = calculateRefundSettlement(order, { ...input, principalMinor: body.principalMinor });
+  if (recoveryRefund && amounts.totalMinor !== sumMinor(Object.values(amounts.collected))) {
+    fail(409, 'shop_recovery_full_refund_required', 'Refund every verified collected component.');
+  }
   const split = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10000);
   if (deliveryCompleted(order) && amounts.riderEntitlementMinor < split.riderPayoutMinor) {
     fail(409, 'refund_requires_super_admin', 'Earned rider pay must be protected. Refer exceptions to Super Admin.', { escalateTo: 'super_admin' });
@@ -191,6 +198,10 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (body.destination) changeDestination(store, request, user, body.destination);
     for (const file of evidence) bind(file, request, 'evidence');
     store.refundRequests.push(request);
+    if (order.shopRecovery && ['awaiting_client', 'ops_review'].includes(order.shopRecovery.status)) {
+      order.shopRecovery.refundRequestId = request.id;
+      order.shopRecovery.status = 'refund_requested';
+    }
     eventKind = 'requested';
   } else if (action === 'destination') {
     if (!['requested', 'reviewed', 'approved', 'destination_review'].includes(request.status) || activeAttempt(store, request)) fail(409, 'refund_destination_locked', 'Reconcile the active payment before changing its destination.');
@@ -269,6 +280,10 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (action === 'withdraw' && (user.role !== 'client' || user.id !== request.clientId)) fail(403, 'forbidden', 'Only the owning client may withdraw.');
     request.status = action === 'reject' ? 'rejected' : 'withdrawn';
     eventKind = request.status;
+    if (order.shopRecovery?.refundRequestId === request.id) {
+      order.shopRecovery.status = action === 'withdraw' ? 'awaiting_client' : 'ops_review';
+      order.shopRecovery.refundRequestId = null;
+    }
   } else if (action === 'payment-attempts') {
     if (request.status !== 'approved' || activeAttempt(store, request)) fail(409, 'refund_payment_reserved', 'A payer already reserved this refund, or approval is required. Do not send another transfer.');
     if (body.destinationRevision !== request.destination?.revision || body.destinationVerified !== true) fail(409, 'refund_destination_stale', 'Verify the approved destination before sending.');
@@ -330,6 +345,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     const returnedPlatform = sumMinor([settlement.feeMinor, settlement.platformDeliveryMinor]);
     if (returnedPlatform) order.revenueAdjustments.push({ id: id('rev'), kind: 'refund', amountMinor: -returnedPlatform,
       reason: `Client refund ${request.id}`, createdBy: user.id, createdAt: at });
+    if (order.shopRecovery?.refundRequestId === request.id) order.shopRecovery.status = 'refunded';
     eventKind = 'paid'; eventData = { paymentId: payment.id, receiptFileId: receipt.fileId };
   }
   if (action !== 'request') request.version += 1;

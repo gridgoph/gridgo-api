@@ -1377,3 +1377,8 @@ Settlements supersede unpaid original milestones without changing their amounts 
 See [Late-production warnings and deductions](PRODUCTION_PENALTIES_API.md) for tiers,
 Super Admin settings, the default-off deduction gate, supplier/Operations reads,
 reassignment eligibility, and net payout amounts.
+
+## Shop acceptance and recovery
+
+See [Shop acceptance and recovery](SHOP_RECOVERY_API.md) for the opening-hour deadline,
+shop cancellation, client-approved replacement or full-refund choice, and dashboard failure history.
