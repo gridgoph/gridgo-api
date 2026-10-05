@@ -180,10 +180,10 @@ test("sniffs supported signatures and tolerates only empty/generic declared MIME
 });
 
 test("rejects declared type, signature mismatch, HEIC, empty, and oversize specifically", () => {
-  expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "text/plain", sniffBytes: Buffer.from("%PDF-"), size: 12 }), 415, "content_type_not_allowed");
-  expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from("%PDF-"), size: 12 }), 415, "file_type_mismatch");
+  expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "text/plain", sniffBytes: Buffer.from("%PDF-"), size: 12 }), 415, "invalid_file_type");
+  expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from("%PDF-"), size: 12 }), 415, "invalid_file_type");
   const heic = Buffer.concat([Buffer.alloc(4), Buffer.from("ftypheic"), Buffer.alloc(8)]);
-  expectError(() => validateUpload({ originalFilename: "x.heic", declaredContentType: "image/heic", sniffBytes: heic, size: 20 }), 415, "heic_not_supported");
+  expectError(() => validateUpload({ originalFilename: "x.heic", declaredContentType: "image/heic", sniffBytes: heic, size: 20 }), 415, "invalid_file_type");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.alloc(0), size: 0 }), 400, "file_empty");
   expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: MAX_FILE_SIZE + 1 }), 413, "file_too_large");
 });
@@ -194,7 +194,7 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   assert.doesNotThrow(() => authorizeFileUpload(client, "payment_proof"));
   assert.equal(validateUpload({ originalFilename: "mockup.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "mockup"), "application/pdf");
   assert.equal(validateUpload({ originalFilename: "qr.png", declaredContentType: "image/png", sniffBytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), size: 12 }, "payment_proof"), "image/png");
-  expectError(() => validateUpload({ originalFilename: "qr.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "payment_proof"), 415, "purpose_media_type_not_allowed");
+  expectError(() => validateUpload({ originalFilename: "qr.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "payment_proof"), 415, "invalid_file_type");
   expectError(() => authorizeFileUpload(supplier, "mockup"), 403, "forbidden");
   assert.doesNotThrow(() => authorizeFileUpload(supplier, "fulfilment_proof"));
   assert.doesNotThrow(() => authorizeFileUpload(rider, "fulfilment_proof"));
@@ -215,15 +215,15 @@ test("purpose policies gate role, media family, and the 20 MiB image limit", () 
   expectError(() => authorizeFileUpload(client, "supplier_payout_qr"), 403, "forbidden");
   expectError(() => authorizeFileUpload(rider, "supplier_payout_qr"), 403, "forbidden");
   expectError(() => resolveFileTarget({}, "supplier_payout_qr", {}, supplier), 400, "supplier_payout_qr_not_attachable");
-  assert.equal(validateUpload({ originalFilename: "gcash.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 2 * 1024 * 1024 }, "supplier_payout_qr"), "image/jpeg");
-  expectError(() => validateUpload({ originalFilename: "gcash.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 5 * 1024 * 1024 + 1 }, "supplier_payout_qr"), 413, "file_too_large");
-  expectError(() => validateUpload({ originalFilename: "gcash.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "supplier_payout_qr"), 415, "purpose_media_type_not_allowed");
+  assert.equal(validateUpload({ originalFilename: "qr.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 2 * 1024 * 1024 }, "supplier_payout_qr"), "image/jpeg");
+  expectError(() => validateUpload({ originalFilename: "qr.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 5 * 1024 * 1024 + 1 }, "supplier_payout_qr"), 413, "file_too_large");
+  expectError(() => validateUpload({ originalFilename: "qr.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "supplier_payout_qr"), 415, "invalid_file_type");
   expectError(() => authorizeFileUpload(client, "fulfilment_proof"), 403, "forbidden");
   expectError(() => authorizeFileUpload(client, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(rider, "verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(supplier, "rider_verification_document"), 403, "forbidden");
   expectError(() => authorizeFileUpload(supplier, "proof"), 400, "invalid_file_purpose");
-  expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "purpose_media_type_not_allowed");
+  expectError(() => validateUpload({ originalFilename: "x.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-"), size: 12 }, "delivery_photo"), 415, "invalid_file_type");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 20 * 1024 * 1024 + 1 }, "service_image"), 413, "file_too_large");
   expectError(() => validateUpload({ originalFilename: "x.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 1024 * 1024 + 1 }, "announcement_image"), 413, "file_too_large");
   assert.equal(validateUpload({ originalFilename: "qr.jpg", declaredContentType: "image/jpeg", sniffBytes: Buffer.from([0xff, 0xd8, 0xff]), size: 2 * 1024 * 1024 }, "payment_qr"), "image/jpeg");
@@ -719,7 +719,7 @@ test("a handoff signature is a small PNG the assigned rider attaches before the 
   expectError(() => authorizeFileUpload(ops, "handoff_signature"), 403, "forbidden");
   // PNG only, and small.
   assert.equal(validateUpload({ originalFilename: "sign.png", declaredContentType: "image/png", sniffBytes: PNG, size: 2 * 1024 * 1024 }, "handoff_signature"), "image/png");
-  expectError(() => validateUpload({ originalFilename: "sign.jpg", declaredContentType: "image/jpeg", sniffBytes: JPEG, size: 12 }, "handoff_signature"), 415, "purpose_media_type_not_allowed");
+  expectError(() => validateUpload({ originalFilename: "sign.jpg", declaredContentType: "image/jpeg", sniffBytes: JPEG, size: 12 }, "handoff_signature"), 415, "invalid_file_type");
   expectError(() => validateUpload({ originalFilename: "sign.png", declaredContentType: "image/png", sniffBytes: PNG, size: 2 * 1024 * 1024 + 1 }, "handoff_signature"), 413, "file_too_large");
 
   const file = readyFile("handoff_signature", { ownerId: rider.id, originalFilename: "sign.png", detectedContentType: "image/png" });
@@ -752,7 +752,7 @@ test("a handoff signature is a small PNG the assigned rider attaches before the 
 test("production photos are supplier-owned images attached to assigned production work", () => {
   authorizeFileUpload(supplier, "production_photo");
   for (const actor of [client, rider, ops]) expectError(() => authorizeFileUpload(actor, "production_photo"), 403, "forbidden");
-  expectError(() => validateUpload({ originalFilename: "proof.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-1.7\n"), size: 20 }, "production_photo"), 415, "purpose_media_type_not_allowed");
+  expectError(() => validateUpload({ originalFilename: "proof.pdf", declaredContentType: "application/pdf", sniffBytes: Buffer.from("%PDF-1.7\n"), size: 20 }, "production_photo"), 415, "invalid_file_type");
   const record = order({ state: "production" });
   const file = readyFile("production_photo");
   const store = { orders: [record], files: [file] };

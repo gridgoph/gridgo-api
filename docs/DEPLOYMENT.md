@@ -94,6 +94,8 @@ GRIDGO_FILE_RETENTION_DELETE_ENABLED=false
 
 Local `.env` also uses `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, and a loopback `DATABASE_URL`. `POSTGRES_PORT` is intentionally local-only; production has no database port mapping.
 
+The support desk uses only Clerk sessions and `SUPPORT_DESK_ALLOWED_EMAILS`. Remove retired desk username/password/JWT-secret settings from deployment configuration; startup never seeds a password desk administrator. The legacy `support_admins` table remains unused for schema compatibility.
+
 There is no `AUTH_MODE`, `STORE_PATH`, demo password, `GRIDGO_*_PASSWORD`, or local session configuration. Leaving one of the required Clerk/database values out makes the process refuse before listening; errors name variable names but never values.
 
 ## 3. Clean cutover procedure

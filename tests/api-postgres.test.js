@@ -4485,6 +4485,154 @@ test("listing take-down survives PostgreSQL own-list reads and restore keeps it 
   assert.match(notice.body, /still hidden/);
 });
 
+test("claim holds block both packing paths until Operations clears every claim", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find((row) => row.id === "ord_payout").state = "production";
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const claims = [];
+    for (const hold of [true, false]) {
+      const raised = await request(instance.api, "/claims", {
+        method: "POST", subject: "clerk_ops", body: { orderId: "ord_payout", reason: "Review required", hold },
+      });
+      assert.equal(raised.status, 201, JSON.stringify(raised.body));
+      claims.push(raised.body.claim.id);
+    }
+    async function assertBlocked() {
+      const before = await loadStore(database);
+      for (const subject of ["clerk_supplier", "clerk_ops", "clerk_super"]) {
+        for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+          const result = await request(instance.api, "/orders/ord_payout/transition", {
+            method: "POST", subject, body: { state, reason: "Correction requested" },
+          });
+          assert.equal(result.status, 409, JSON.stringify(result.body));
+          assert.equal(result.body.error, "claim_hold_active");
+          assert.match(result.body.message, /Operations must clear the claim/);
+        }
+      }
+      const after = await loadStore(database);
+      assert.equal(after.orders.find((row) => row.id === "ord_payout").state, "production");
+      assert.equal(after.auditLog.length, before.auditLog.length);
+      assert.equal(after.notifications.length, before.notifications.length);
+    }
+    await assertBlocked();
+    const supplierRelease = await request(instance.api, `/claims/${claims[0]}/release`, {
+      method: "POST", subject: "clerk_supplier", body: { reason: "Clear claim" },
+    });
+    assert.equal(supplierRelease.status, 403);
+    for (let index = 0; index < claims.length; index += 1) {
+      const cleared = await request(instance.api, `/claims/${claims[index]}/release`, {
+        method: "POST", subject: "clerk_ops", body: { reason: "Review completed" },
+      });
+      assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+      if (index === 0) await assertBlocked();
+    }
+    for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
+      const packed = await request(instance.api, "/orders/ord_payout/transition", {
+        method: "POST", subject: "clerk_supplier", body: { state },
+      });
+      assert.equal(packed.status, 200, JSON.stringify(packed.body));
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("upload validation reports type and size errors even when storage is unavailable", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi({ MINIO_ENDPOINT: "http://127.0.0.1:1" });
+  try {
+    const before = await loadStore(database);
+    const cases = [
+      { purpose: "fulfilment_proof", subject: "clerk_supplier", filename: "proof.txt", type: "text/plain", bytes: Buffer.from("unsupported"), status: 415, error: "invalid_file_type", reason: "content_type_not_allowed" },
+      { purpose: "fulfilment_proof", subject: "clerk_supplier", filename: "proof.jpg", type: "image/jpeg", bytes: Buffer.from("%PDF-1.7\n"), status: 415, error: "invalid_file_type", reason: "file_type_mismatch" },
+      { purpose: "production_photo", subject: "clerk_supplier", filename: "proof.pdf", type: "application/pdf", bytes: Buffer.from("%PDF-1.7\n"), status: 415, error: "invalid_file_type", reason: "purpose_media_type_not_allowed" },
+      { purpose: "payout_receipt", subject: "clerk_ops", filename: "receipt.jpg", type: "image/jpeg", bytes: Buffer.alloc(15 * 1024 * 1024 + 1, 0xff), status: 413, error: "file_too_large", maxMiB: 15 },
+    ];
+    for (const item of cases) {
+      const form = new FormData();
+      form.set("purpose", item.purpose);
+      form.set("file", new Blob([item.bytes], { type: item.type }), item.filename);
+      const response = await fetch(`${instance.api}/files`, {
+        method: "POST", headers: { Authorization: `Bearer ${token(item.subject)}` }, body: form,
+      });
+      const body = await response.json();
+      assert.equal(response.status, item.status, JSON.stringify(body));
+      assert.equal(body.error, item.error);
+      assert.equal(body.purpose, item.purpose);
+      assert.ok(body.message);
+      if (item.reason) {
+        assert.equal(body.reason, item.reason);
+        assert.ok(body.allowedContentTypes.length);
+      }
+      if (item.maxMiB) {
+        assert.equal(body.maxMiB, item.maxMiB);
+        assert.equal(body.maxBytes, item.maxMiB * 1024 * 1024);
+      }
+    }
+    assert.equal((await loadStore(database)).files.length, before.files.length);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("paper-invoice promise commits one client inbox notice and notifies changed dates", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find((row) => row.id === "ord_payout").physicalInvoiceRequest = {
+      contactPerson: "Office contact", officeAddress: "Office address", operatingHours: "Weekdays", requestedAt: AT,
+    };
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const path = "/orders/ord_payout/physical-invoice";
+    const first = "2026-10-06T02:00:00.000Z";
+    const notices = (store) => store.notifications.filter((row) => row.type === "physical_invoice_promised");
+    const forbidden = await request(instance.api, path, {
+      method: "PATCH", subject: "clerk_supplier", body: { promisedDeliveryAt: first },
+    });
+    assert.equal(forbidden.status, 403);
+    const invalid = await request(instance.api, path, {
+      method: "PATCH", subject: "clerk_ops", body: { promisedDeliveryAt: "2026-10-10T02:00:00.000Z" },
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(notices(await loadStore(database)).length, 0);
+    for (const [subject, promisedDeliveryAt, expected] of [
+      ["clerk_ops", first, 1], ["clerk_ops", first, 1], ["clerk_super", "2026-10-07T03:00:00.000Z", 2],
+    ]) {
+      const result = await request(instance.api, path, { method: "PATCH", subject, body: { promisedDeliveryAt } });
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      const saved = await loadStore(database);
+      assert.equal(saved.orders.find((row) => row.id === "ord_payout").physicalInvoiceRequest.promisedDeliveryAt, promisedDeliveryAt);
+      const rows = notices(saved);
+      assert.equal(rows.length, expected);
+      assert.ok(rows.every((row) => row.userId === "user_client" && row.appRole === "client" && row.orderId === "ord_payout"));
+      assert.match(rows.at(-1).body, /GRIDGO will deliver your paper invoice/);
+      assert.ok(saved.auditLog.some((row) => row.action === "order.physical_invoice_promised" && row.detail.promisedDeliveryAt === promisedDeliveryAt));
+    }
+    const inbox = await request(instance.api, "/notifications", { subject: "clerk_client" });
+    assert.equal(inbox.status, 200);
+    assert.equal(inbox.body.notifications.filter((row) => row.type === "physical_invoice_promised").length, 2);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test('organization verification, handover, notices and code attempts persist through HTTP and restart', { skip: !DATABASE_URL }, async () => {
   const { requestOrganizationCode } = await import('../src/organization-email.js');
   const { sweepOfficerConfirmations } = await import('../src/organization-routes.js');

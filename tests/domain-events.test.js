@@ -527,3 +527,35 @@ test("notifyAdmins writes one staff row per membership and no party row", () => 
   notifyAdmins(store, "ops_issue_report_filed", "A new issue report was filed", null, "report-1", options);
   assert.equal(store.notifications.length, 4);
 });
+
+test("paper-invoice promises notify only the owning client and changes notify again", () => {
+  const before = fixture();
+  before.orders[0].physicalInvoiceRequest = { requestedAt: "2026-10-05T01:00:00Z" };
+  const store = structuredClone(before);
+  store.orders[0].physicalInvoiceRequest.promisedDeliveryAt = "2026-10-06T02:00:00Z";
+  store.orders[0].updatedAt = "2026-10-05T02:00:00Z";
+  deriveDomainEvents(store, before, options);
+  const rows = store.notifications.filter((row) => row.type === "physical_invoice_promised");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].userId, "c");
+  assert.equal(rows[0].appRole, "client");
+  assert.equal(rows[0].orderId, "o");
+  assert.equal(rows[0].title, "Your paper invoice delivery is scheduled");
+  assert.match(rows[0].body, /GRIDGO will deliver your paper invoice on October 6, 2026/);
+  assert.match(rows[0].body, /10:00.*Philippine time/);
+  deriveDomainEvents(store, before, options);
+  assert.equal(store.notifications.filter((row) => row.type === "physical_invoice_promised").length, 1);
+
+  const unchanged = structuredClone(store);
+  store.orders[0].updatedAt = "2026-10-05T03:00:00Z";
+  deriveDomainEvents(store, unchanged, options);
+  assert.equal(store.notifications.filter((row) => row.type === "physical_invoice_promised").length, 1);
+
+  const previous = structuredClone(store);
+  store.orders[0].physicalInvoiceRequest.promisedDeliveryAt = "2026-10-07T03:00:00Z";
+  deriveDomainEvents(store, previous, options);
+  const updated = store.notifications.filter((row) => row.type === "physical_invoice_promised");
+  assert.equal(updated.length, 2);
+  assert.match(updated[1].body, /October 7, 2026/);
+  assert.notEqual(updated[0].occurrenceKey, updated[1].occurrenceKey);
+});

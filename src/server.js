@@ -203,7 +203,6 @@ import { createSupportMailer, emailConfigured } from "./support-mail.js";
 import {
   isSupportDeskRoute,
   routeSupportDesk,
-  seedSupportDeskAdmin,
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
 import {
@@ -2617,7 +2616,6 @@ async function handleRequest(req, res) {
     }
 
     const needsInitializedStorage =
-      (req.method === "POST" && pathname === "/files") ||
       (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
       (req.method === "GET" && /^\/files\/[^/]+\/download-url$/.test(pathname)) ||
       (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
@@ -2648,6 +2646,9 @@ async function handleRequest(req, res) {
         const purpose = String(fields.purpose || "");
         authorizeFileUpload(user, purpose);
         const detectedContentType = validateUpload(file, purpose);
+        if (storageInitializing) {
+          throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
+        }
         const fileId = id("file");
         const createdAt = now();
         const datePath = createdAt.slice(0, 10).replaceAll("-", "/");
@@ -5445,6 +5446,12 @@ async function handleRequest(req, res) {
         });
       }
       if (["supplier_self_qc", "ready_for_dispatch"].includes(next)) {
+        if (order.payoutHold || activePayoutHold(store, order.id)) {
+          return send(res, 409, {
+            error: "claim_hold_active",
+            message: "This order cannot be packaged for pickup while a claim holds payouts. Operations must clear the claim first.",
+          });
+        }
         const photoMissing = productionPhotoFiles(store, order).length === 0;
         if (["ops_admin", "super_admin"].includes(user.role)) {
           const reason = typeof body.reason === "string" ? body.reason.trim() : "";
@@ -6369,9 +6376,8 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (mutatesStore && isSupportDeskRoute(pathname)) {
-    // Public ticket submit and the desk JWT are not Clerk. They commit under
-    // their own advisory lock inside the handler, the same way anonymous
-    // device registration does, so they never wait on JWKS or the domain lock.
+    // Public ticket submissions and Clerk desk writes commit under their own
+    // advisory lock inside the handler rather than the domain lock.
     void readBody(req)
       .then(() => handleRequest(req, res))
       .catch((error) => {
@@ -6500,7 +6506,6 @@ async function runLifecycleWork() {
 // creates schema or data; it refuses before listening when PostgreSQL is not ready.
 await database.assertReady();
 await realtimeTransport.start();
-await seedSupportDeskAdmin(database);
 
 server.listen(PORT, HOST, () => {
   const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));

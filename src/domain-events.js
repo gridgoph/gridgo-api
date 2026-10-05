@@ -344,6 +344,21 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         },
       );
     }
+    const promisedDeliveryAt = order.physicalInvoiceRequest?.promisedDeliveryAt;
+    if (promisedDeliveryAt && promisedDeliveryAt !== old?.physicalInvoiceRequest?.promisedDeliveryAt) {
+      const promisedTime = new Intl.DateTimeFormat("en-PH", {
+        timeZone: "Asia/Manila", dateStyle: "long", timeStyle: "short",
+      }).format(new Date(promisedDeliveryAt));
+      notify(
+        order.clientId,
+        "physical_invoice_promised",
+        "Your paper invoice delivery is scheduled",
+        order,
+        `${occurrence}:physical_invoice_promised:${promisedDeliveryAt}`,
+        "client",
+        { body: `GRIDGO will deliver your paper invoice on ${promisedTime} (Philippine time).` },
+      );
+    }
     if (!old && order.state !== "draft")
       notify(
         order.clientId,
