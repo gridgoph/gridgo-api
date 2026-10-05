@@ -1569,6 +1569,9 @@ test("listing review: submission rejects missing spec variants and approval neve
   await catalogCall(complete, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, basePriceMinor: 500, active: false } });
   await reviewCall(complete, "/ops/catalog-reviews/item/decision", { expectedVersion: 4, status: "approved", photosUnbranded: true });
   assert.equal(publicCatalogItem(complete, complete.catalogItems[0]), null);
+  complete.catalogItems[0].active = true;
+  complete.catalogItems[0].suspendedAt = AT;
+  assert.equal(publicCatalogItem(complete, complete.catalogItems[0]), null, "take-down still blocks approved listings");
 });
 
 test("listing review: product type requests are private and only staff approval adds a picker type", async () => {
@@ -1647,4 +1650,11 @@ test("listing review: readiness reports new pending listings and uses approved r
   await catalogCall(store, { method: "DELETE", path: "/me/catalog-items/item/option-groups/size", body: { expectedVersion: 1 } });
   const revision = await readinessResponse(store);
   assert.equal(revision.operational.ready, true);
+});
+
+test("listing review: text-only changes on approved listings never start review", async () => {
+  const store = fixture();
+  const edited = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, name: "Updated banner", description: "Updated description" } });
+  assert.equal(edited.body.item.reviewStatus, "approved");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).name, "Updated banner");
 });

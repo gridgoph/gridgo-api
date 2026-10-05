@@ -80,7 +80,7 @@ export async function routeCatalogReview({ req, url, store, user, readBody, id, 
     if (!staff) {
       complete(store, item);
       if ((item.reviewStatus || "approved") === "approved") fail(409, "listing_already_approved", "Edit the listing to submit a revision.");
-      item.reviewStatus = "pending"; item.reviewReason = null;
+      item.reviewStatus = "pending"; item.reviewReason = null; item.reviewedAt = null; item.reviewedBy = null;
     } else {
       if (item.reviewStatus !== "pending") fail(409, "listing_not_pending", "Refresh the review queue.");
       if (!["approved", "needs_revision"].includes(body.status)) fail(400, "invalid_review_status", "Choose approved or needs_revision.");

@@ -1424,13 +1424,18 @@ test("listing review: carts and checkout use approved prices while preserving th
   await routeSupplierCatalog({ req: { method: "PATCH" }, url: new URL("http://localhost/me/catalog-items/item_a"), store,
     user: store.users.find(row => row.id === "supplier_a"), readBody: async () => ({ expectedVersion: 1, basePriceMinor: 99000 }),
     id: prefix => `${prefix}_review`, now: () => AT, audit: () => {} });
-  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  await routeSupplierCatalog({ req: { method: "PATCH" }, url: new URL("http://localhost/me/catalog-items/item_b"), store,
+    user: store.users.find(row => row.id === "supplier_b"), readBody: async () => ({ expectedVersion: 1, basePriceMinor: 88000 }),
+    id: prefix => `${prefix}_review_b`, now: () => AT, audit: () => {} });
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup", deadline: "2026-09-10T00:00:00Z" })).body.cart.id;
   await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_b", optionIds: [], quantity: 1, artworkFileId: "file_art" });
   const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
   assert.equal(cart.lines[0].listing.basePriceMinor, 10000);
   const result = await call("POST", `/me/carts/${cartId}/checkout`, { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "APPROVED" } });
   assert.equal(result.status, 201);
-  assert.equal(store.orderLineItems[0].baseUnitPriceMinor, 10000);
+  assert.deepEqual(store.orderLineItems.map(row => row.baseUnitPriceMinor), [10000, 20000]);
+  assert.equal(store.orders.length, 2);
   assert.equal(store.catalogItems[0].basePriceMinor, 99000);
   assert.equal(store.catalogItems[0].reviewStatus, "pending");
 });

@@ -1057,6 +1057,7 @@ export async function prepareArtworkCheckout({ req, pathname, store, user, check
 }
 
 export async function routeOrderMatch(args) {
+  if (!isOrderMatchRoute(args.req.method, args.url.pathname)) return null;
   const { store } = args;
   const view = approvedCatalogView(store);
   if (view === store) return routeOrderMatchApproved(args);

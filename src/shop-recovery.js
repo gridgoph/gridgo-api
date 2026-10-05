@@ -1,3 +1,4 @@
+import { approvedCatalogView } from "./catalog-review-state.js";
 import { addOpeningMilliseconds, defaultShopSchedule } from './availability.js';
 import { matchShop, MatchError, projectShopFinish } from './order-match.js';
 import { catalogGroupsForItem, publicCatalogItem, selectedCatalogPrice, priceCatalogSelection, listingFitsPrinterCap } from './supplier-catalog.js';
@@ -62,6 +63,7 @@ function compatibleLines(store, order, supplierId) {
 }
 
 export function findReplacementShop(store, order, at, reserve = true) {
+  store = approvedCatalogView(store);
   const expiresAt = new Date(Date.parse(at) + 15 * 60000).toISOString();
   const projectionAt = reserve ? expiresAt : at;
   const lines = (store.orderLineItems || []).filter((line) => line.orderId === order.id);
