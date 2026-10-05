@@ -196,3 +196,12 @@ test('malformed staff role input is rejected before any role is created', async 
   await rejects(call(store, 'admin', '/admin/staff/roles', { name: 'Desk', canHandout: true }), 'invalid_staff_role');
   assert.equal(store.staffRoles.length, 1);
 });
+
+test('staff-management and each hub reminder event write both administrator inboxes without sharing invite secrets', async () => {
+  const store = setup();
+  const invite = await call(store, 'admin', '/admin/staff/invites', { roleCode: 'hub_staff' });
+  for (const userId of ['ops', 'admin']) assert.ok(store.notifications.some(n => n.userId === userId && n.type === 'staff_invite_created'));
+  assert.equal(JSON.stringify(store.notifications).includes(invite.body.code), false);
+  sweepHubReminders(store, { at: '2026-10-05T10:00:00Z', id });
+  for (const userId of ['ops', 'admin']) assert.ok(store.notifications.some(n => n.userId === userId && n.type === 'ops_hub_unclaimed_reminder'));
+});

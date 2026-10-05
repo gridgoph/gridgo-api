@@ -64,6 +64,7 @@ export function completeHandover(store, order, { actor, at, id, note, fileId }) 
 }
 function clientNotice(store, order, type, body, at, id) {
   store.notifications.push({ id: id('ntf'), userId: order.clientId, appRole: 'client', orderId: order.id, type, title: 'Pickup at GRIDGO', body, read: false, at });
+  notifyAdmins(store, `ops_${type}`, 'Hub pickup reminder', order, `${type}:${order.id}:${order.handover.missedDays}`, { createId: id, at });
 }
 export function sweepHubReminders(store, { at, id }) {
   let changed = false;

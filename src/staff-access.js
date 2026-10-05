@@ -1,3 +1,4 @@
+import { notifyAdmins } from './domain-events.js';
 import { authorizationContextFor, contextHasMembership } from './authorization-context.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { clerkClientProfile } from './auth.js';
@@ -56,7 +57,10 @@ export async function routeStaffAccess({ req, url, store, user, readBody, now, i
   }
   if (!hasMembership(store, user, 'super_admin')) staffError(403, 'forbidden');
   const at = now();
-  const record = (action, entityId, detail) => audit(store, { actor: user, action, entityId, entityType: 'staff', detail });
+  const record = (action, entityId, detail) => {
+    audit(store, { actor: user, action, entityId, entityType: 'staff', detail });
+    notifyAdmins(store, action.replaceAll('.', '_'), 'Staff access updated', null, id('staff_event'), { createId: id, at });
+  };
   if (path === '/admin/staff/roles') {
     if (req.method === 'GET') return { status: 200, body: { roles: store.staffRoles } };
     if (req.method === 'POST') {
