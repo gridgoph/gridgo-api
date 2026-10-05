@@ -36,6 +36,8 @@ Client catalogue privacy is staged: `docs/CLIENT_CATALOG_PRIVACY.md` defines cli
 
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
 
+Multi-shop basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md`. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
+
 - New requests opt into pre-match delivery/hub pickup via `fulfillmentMode`; token selection locks the cart choice. Hub hours/fees are Super Admin settings; pickup fee defaults to zero and occupies the existing fulfillment charge slot. Contract and released-build compatibility: `docs/ORDER_MATCH_API.md#fulfillment-before-matching`.
 - Match priority, reason badges, anonymous alternatives, and expiring selection-token/cart-deadline semantics are defined in `docs/ORDER_MATCH_API.md`. Rank only deadline-capable listings; never restore weighted or same-shop boosts.
 - Match and cart responses must run through `decorateCatalogPhotoUrls` (`src/catalog-photo-urls.js`) the same way catalog does. `publicPhotos` only sets metadata `url` (`/catalog/media/:fileId`); the client needs signed `downloadUrl` on `body.listings` and `body.cart.lines[].listing`. Skipping the decorator is the empty match thumbnail. `POST`/`PATCH`/`DELETE` `/me/carts/:id/lines` return compact listing stubs without photos so add/save does not wait on MinIO signing; `GET /me/carts/:id` stays the full projection.

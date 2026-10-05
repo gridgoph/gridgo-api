@@ -1,4 +1,6 @@
 import { approvedCatalogView, CATALOG_REVIEW_TABLES } from "./catalog-review-state.js";
+import { clientInvoice } from "./invoice-projection.js";
+import { basketForOrder, publicBasket, shopLabel, splitBasketFee } from "./baskets.js";
 import { fileCheckProjection } from "./artwork-gates.js";
 import { publicHubPickup } from "./hub-pickup.js";
 import { createHash, randomBytes } from "node:crypto";
@@ -412,13 +414,15 @@ function clientCartQuote(store, cart, lines) {
     if (amount == null) reasons.push({ lineId: line.id, code: unavailable ? "catalog_item_stale" : "line_unpriced" });
     return amount;
   });
-  const clientItemSubtotalMinor = subtotals.some((amount) => amount == null) ? null
-    : clientMoneyMinor(store, addMinor(subtotals, "quote.items"));
+
   const grouped = new Map();
   for (const line of lines) {
     if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
     grouped.get(line.supplierId).push(line);
   }
+  const clientItemSubtotalMinor = subtotals.some((amount) => amount == null) ? null
+    : addMinor([...grouped.values()].map((entries) => clientMoneyMinor(store,
+      addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"))), "quote.items");
   const deliveryLines = cart.fulfillmentMode === "pickup" ? [] : [...grouped.entries()].map(([supplierId, entries]) => {
     const delivery = cartDelivery(store, cart, supplierId, entries);
     const lineIds = entries.map((line) => line.id);
@@ -434,7 +438,7 @@ function clientCartQuote(store, cart, lines) {
     : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
   const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
     : addMinor([clientItemSubtotalMinor, deliveryFeeMinor], "quote.total");
-  const downpaymentPercent = downpaymentPercentSetting(store.settings);
+  const downpaymentPercent = grouped.size > 1 ? 100 : downpaymentPercentSetting(store.settings);
   const downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
@@ -488,19 +492,50 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       clientLineSubtotalMinor: clientMoneyMinor(store, lineSubtotalMinor),
     };
   });
+  const supplierIds = [...new Set(lines.map((line) => line.supplierId))];
+  const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, supplierIds.length);
+  const groups = supplierIds.map((supplierId, index) => {
+    const groupLines = lines.filter((line) => line.supplierId === supplierId);
+    const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
+    const dropoffs = groupLines.map((line) => line.dropoff || cart.defaultDropoff);
+    const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? pickupShares[index]
+      : profile?.shop && dropoffs.every(Boolean)
+        ? deliveryFeeForDistance(Math.max(...dropoffs.map((dropoff) => distanceMetersBetween(profile.shop, dropoff))), store.settings) : null;
+    const amounts = groupLines.map((line) => cartLineSubtotal(store, line));
+    const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
+    const serviceFeeMinor = itemSubtotalMinor == null ? null : roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
+    return { id: groupLines[0].id, label: shopLabel(index), lineIds: groupLines.map((line) => line.id),
+      ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
+      clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
+      totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
+  });
+  if (groups.length > 1) {
+    for (const line of publicLines) {
+      line.groupId = groups.find((group) => group.lineIds.includes(line.id)).id;
+      delete line.supplierId;
+      if (line.listing) {
+        delete line.listing.supplierId;
+        delete line.listing.supplierServiceId;
+        delete line.listing.shop;
+      }
+    }
+  }
   return {
     id: cart.id,
     state: cart.state,
     version: cart.version,
     serviceLevel: cart.serviceLevel,
     scheduledFor: cart.scheduledFor ?? null,
+    deadline: cart.deadline ?? null,
     fulfillmentMode: cart.fulfillmentMode,
     requestFulfillment: cart.requestFulfillment ? structuredClone(cart.requestFulfillment) : null,
     ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { hubPickup: publicHubPickup(store.settings) } : {}),
     defaultDropoff: cart.defaultDropoff ? { ...cart.defaultDropoff } : null,
     lines: publicLines,
+    shops: groups.length > 1 ? groups.map(({ id, label }) => ({ id, label })) : cartShops(store, lines),
+    groups,
+    ...(cart.checkedOutOrderId && basketForOrder(store, cart.checkedOutOrderId) ? { basketId: basketForOrder(store, cart.checkedOutOrderId).id } : {}),
     clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines) : null,
-    shops: cartShops(store, lines),
     checkedOutOrderId: cart.checkedOutOrderId ?? null,
     createdAt: cart.createdAt,
     updatedAt: cart.updatedAt,
@@ -535,7 +570,12 @@ function fulfillmentInput(body, current) {
   let defaultDropoff = current.defaultDropoff ?? null;
   if (Object.hasOwn(body, "defaultDropoff")) defaultDropoff = point(body.defaultDropoff, "defaultDropoff", { required: false });
   if (fulfillmentMode === "pickup") defaultDropoff = null;
-  return { fulfillmentMode, serviceLevel, scheduledFor, defaultDropoff };
+  let deadline = current.deadline ?? null;
+  if (Object.hasOwn(body, "deadline")) {
+    if (typeof body.deadline !== "string" || !Number.isFinite(Date.parse(body.deadline))) fail(400, "invalid_deadline", "deadline must be an ISO date-time.");
+    deadline = new Date(body.deadline).toISOString();
+  }
+  return { fulfillmentMode, serviceLevel, scheduledFor, defaultDropoff, deadline };
 }
 
 function addressPoint(store, userId, body) {
@@ -561,7 +601,7 @@ function publicMatchedOrder(store, order) {
     .sort((left, right) => left.id.localeCompare(right.id))
     .map((job) => ({
       id: job.id,
-      shop: publicSupplierShop(store, job.supplierId),
+      shop: order.basketId ? { label: order.groupLabel } : publicSupplierShop(store, job.supplierId),
       state: job.state,
       fulfillmentMode: job.fulfillmentMode,
       // Client-facing: a collected job is collected at GRIDGO's own counter,
@@ -577,10 +617,13 @@ function publicMatchedOrder(store, order) {
     }));
   return {
     id: order.id,
+    ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
     state: order.state,
-    itemSubtotalMinor: order.supplierSubtotalMinor,
-    serviceFeeRateBps: order.serviceFeeRateBps,
-    serviceFeeMinor: order.serviceFeeMinor,
+    ...(order.basketId ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + order.serviceFeeMinor } : {
+      itemSubtotalMinor: order.supplierSubtotalMinor,
+      serviceFeeRateBps: order.serviceFeeRateBps,
+      serviceFeeMinor: order.serviceFeeMinor,
+    }),
     deliveryFeeMinor: order.deliveryFeeMinor,
     totalMinor: order.totalMinor,
     fulfillmentMode: order.fulfillmentMode,
@@ -612,18 +655,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function clientInvoice(snapshot) {
-  const invoice = structuredClone(snapshot);
-  const pricing = { settings: { serviceFeeRateBps: invoice.serviceFeeRateBps } };
-  invoice.clientItemSubtotalMinor = addMinor([invoice.itemSubtotalMinor, invoice.serviceFeeMinor], "invoice.items");
-  for (const line of invoice.lines || []) {
-    line.clientUnitPriceMinor = clientMoneyMinor(pricing, line.unitPriceMinor);
-    line.clientAmountMinor = clientMoneyMinor(pricing, line.amountMinor);
-  }
-  return invoice;
-}
-
-function checkout(store, user, cart, body, createId, at, req) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null } = {}) {
   assertRequestFulfillment(cart, body);
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
@@ -631,17 +663,18 @@ function checkout(store, user, cart, body, createId, at, req) {
   }
   const reference = text(payment.reference, "payment.reference", 100);
   const proof = fileFor(store, user, text(payment.proofFileId, "payment.proofFileId", 120), "payment_proof", "payment.proofFileId");
-  const cartLines = (store.cartLines || [])
+  const cartLines = (groupLines || store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
     .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
   if (cartLines.length === 0) fail(409, "cart_empty", "Add at least one listing before checkout.");
   const orderId = createId("ord");
   // Snapshotted here, like the rider delivery split: the setting moving later
   // never changes what this client owes.
-  const downpaymentPercent = downpaymentPercentSetting(store.settings);
+  const downpaymentPercent = basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
     clientId: user.id,
+    ...(basketId ? { basketId, groupLabel, basketDeadline: cart.deadline } : {}),
     // One shop per order, known since the match. It was null here, with the
     // shop recorded per job instead -- which is why no supplier surface ever
     // showed a checkout order: every one of them reads order.supplierId.
@@ -660,7 +693,8 @@ function checkout(store, user, cart, body, createId, at, req) {
     fulfillmentMode: cart.fulfillmentMode,
     ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
     ...(cart.requestFulfillment?.fulfillmentMode === "pickup"
-      ? { hubPickup: publicHubPickup(store.settings), pickupFeeMinor: publicHubPickup(store.settings).feeMinor } : {}),
+      ? { hubPickup: { ...publicHubPickup(store.settings), feeMinor: pickupFeeMinor ?? publicHubPickup(store.settings).feeMinor },
+        pickupFeeMinor: pickupFeeMinor ?? publicHubPickup(store.settings).feeMinor } : {}),
     // The order-match QR plan. The name predates 100 percent checkout; the
     // split this order was placed under is `downpaymentPercent`.
     paymentPlan: "order_match_qr_75_25",
@@ -722,7 +756,7 @@ function checkout(store, user, cart, body, createId, at, req) {
   const snapshots = [];
   for (const [supplierId, entries] of [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
-    if (!profile?.shop || profile.isClosed) fail(409, "shop_unavailable", "A shop in this cart is no longer available.", { supplierId });
+    if (!profile?.shop || profile.isClosed) fail(409, "shop_unavailable", "A shop in this cart is no longer available.", basketId ? { groupLabel } : { supplierId });
     const delivery = cartDelivery(store, cart, supplierId, entries.map(({ line }) => line));
     if (delivery.error) fail(409, delivery.error, "Set a delivery drop-off for every cart line.");
     const { dropoff: jobDropoff, distance, feeMinor: deliveryFeeMinor } = delivery;
@@ -774,7 +808,7 @@ function checkout(store, user, cart, body, createId, at, req) {
     units: orderedUnits,
   });
   for (const line of cartLines) {
-    if (line.matchDeadline && !fitsDeadline(projection, line.matchDeadline)) {
+    if ((cart.deadline || line.matchDeadline) && !fitsDeadline(projection, cart.deadline || line.matchDeadline)) {
       fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.");
     }
   }
@@ -890,11 +924,13 @@ function checkout(store, user, cart, body, createId, at, req) {
     totalMinor,
     paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor, balanceMinor },
   };
-  store.orderInvoices.push({ orderId, invoiceNumber: order.invoiceNumber, issuedAt: at, snapshot: invoice });
-  cart.state = "checked_out";
-  cart.checkedOutOrderId = orderId;
-  cart.checkedOutAt = at;
-  updateCart(cart, at);
+  if (!basketId) store.orderInvoices.push({ orderId, invoiceNumber: order.invoiceNumber, issuedAt: at, snapshot: invoice });
+  if (!basketId) {
+    cart.state = "checked_out";
+    cart.checkedOutOrderId = orderId;
+    cart.checkedOutAt = at;
+    updateCart(cart, at);
+  }
   store.auditLog ||= [];
   store.auditLog.push({
     id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "order_match.checkout",
@@ -902,10 +938,64 @@ function checkout(store, user, cart, body, createId, at, req) {
     detail: { jobCount: jobs.length, itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
   notifyOpsJobNeedsQa(store, order, { createId, at });
-  notifyOpsPaymentSubmitted(store, order, { createId, at });
-  notifyClientReceiptReady(store, order, { createId, at });
+  if (!basketId) {
+    notifyOpsPaymentSubmitted(store, order, { createId, at });
+    notifyClientReceiptReady(store, order, { createId, at });
+  }
   queueOrderInvalidate(store, order, ["orders"]);
   return { order: publicMatchedOrder(store, order), invoice: clientInvoice(invoice) };
+}
+
+function checkoutBasket(store, user, cart, body, createId, at, req) {
+  const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+  const suppliers = [...new Set(lines.map((line) => line.supplierId))];
+  if (suppliers.length < 2) return checkout(store, user, cart, body, createId, at, req);
+  if (!cart.deadline) fail(400, "basket_deadline_required", "Set one deadline for the basket before checkout.");
+  const basketId = createId("bsk");
+  const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
+  const pickupShares = splitBasketFee(hubPickup?.feeMinor ?? 0, suppliers.length);
+  const results = suppliers.map((supplierId, index) => checkout(store, user, cart, body, createId, at, req, {
+    groupLines: lines.filter((line) => line.supplierId === supplierId), basketId, groupLabel: shopLabel(index), pickupFeeMinor: hubPickup ? pickupShares[index] : null,
+  }));
+  const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
+  const first = orders[0];
+  const basket = { id: basketId, clientId: user.id, receiptOrderId: first.id,
+    orderIds: orders.map((order) => order.id), totalMinor: addMinor(orders.map((order) => order.totalMinor), "basket.totalMinor"),
+    deadline: cart.deadline, fulfillmentMode: cart.fulfillmentMode,
+    ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
+    payment: { ...first.payments.initial }, createdAt: at, updatedAt: at };
+  delete basket.payment.amountMinor;
+  store.baskets ||= [];
+  store.baskets.push(basket);
+  const invoice = { invoiceNumber: first.invoiceNumber, orderId: first.id, basketId, issuedAt: at, currency: "PHP",
+    ...(hubPickup ? { hubPickup, pickupFeeMinor: hubPickup.feeMinor } : {}),
+    ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
+    lines: results.flatMap((result) => result.invoice.lines),
+    groups: results.map((result, index) => ({ orderId: result.order.id, label: shopLabel(index),
+      lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
+      serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
+      ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
+    itemSubtotalMinor: addMinor(orders.map((order) => order.supplierSubtotalMinor), "basket.itemSubtotalMinor"),
+    serviceFeeRateBps: first.serviceFeeRateBps,
+    serviceFeeMinor: addMinor(orders.map((order) => order.serviceFeeMinor), "basket.serviceFeeMinor"),
+    deliveryLines: results.flatMap((result, index) => result.invoice.deliveryLines.map((line) => ({ jobId: line.jobId, shopName: shopLabel(index), amountMinor: line.amountMinor }))),
+    deliveryFeeMinor: addMinor(orders.map((order) => order.deliveryFeeMinor), "basket.deliveryFeeMinor"),
+    totalMinor: basket.totalMinor,
+    paymentPlan: { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
+  };
+  for (const order of orders) order.invoiceNumber = first.invoiceNumber;
+  store.orderInvoices.push({ orderId: first.id, invoiceNumber: first.invoiceNumber, issuedAt: at, snapshot: invoice });
+  cart.state = "checked_out";
+  cart.checkedOutOrderId = first.id;
+  cart.checkedOutAt = at;
+  updateCart(cart, at);
+  store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
+    action: "basket.checkout", entityType: "basket", entityId: basket.id,
+    detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
+  notifyOpsPaymentSubmitted(store, first, { createId, at });
+  notifyClientReceiptReady(store, first, { createId, at });
+  return { order: results[0].order, basket: publicBasket(store, basket, user), invoice: clientInvoice(invoice, { hideSupplierAmounts: true }) };
 }
 
 export function isOrderMatchRoute(method, pathname) {
@@ -990,9 +1080,10 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (!order) fail(404, "order_not_found", "That order no longer exists.");
     const privileged = identityHasMembership(user, "ops_admin") || identityHasMembership(user, "super_admin");
     if (order.clientId !== user.id && !privileged) fail(403, "forbidden", "That invoice belongs to another client.");
-    const invoice = (store.orderInvoices || []).find((row) => row.orderId === orderId);
+    const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
+    const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = clientInvoice(invoice.snapshot);
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId)) && !privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
@@ -1099,27 +1190,37 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (pathname.endsWith("/next") && (!Array.isArray(body.excludedSupplierIds) || body.excludedSupplierIds.length === 0)) {
       fail(400, "excluded_shops_required", "Send at least one already-seen shop id.", { field: "excludedSupplierIds" });
     }
+    if (body.excludedSupplierIds != null && !Array.isArray(body.excludedSupplierIds)) {
+      fail(400, "invalid_excluded_shops", "excludedSupplierIds must be an array.");
+    }
     const cartId = body.cartId == null ? null : String(body.cartId);
     const cartLines = cartId
       ? (store.cartLines || []).filter((row) => row.cartId === cartId)
       : [];
-    if (cartId) ownCart(store, user, cartId);
+    const matchCart = cartId ? ownCart(store, user, cartId, { draft: true }) : null;
+    if (matchCart?.deadline && body.deadline && Date.parse(matchCart.deadline) !== Date.parse(body.deadline)) {
+      fail(409, "basket_deadline_mismatch", "Use the basket deadline when matching.");
+    }
     const at = now();
-    let requestFulfillment = null;
+    let requestFulfillment = matchCart?.requestFulfillment ?? null;
     if (Object.hasOwn(body, "fulfillmentMode")) {
       if (!["delivery", "pickup"].includes(body.fulfillmentMode)) {
         fail(400, "invalid_fulfillment_mode", "Choose delivery or pickup before matching.");
       }
-      const dropoff = body.fulfillmentMode === "pickup" ? gridgoOfficePoint() : addressPoint(store, user.id, body);
+      if (matchCart) assertRequestFulfillment(matchCart, body);
+      const dropoff = body.fulfillmentMode === "pickup" ? gridgoOfficePoint() : addressPoint(store, user.id, body) ?? matchCart?.defaultDropoff;
       if (!dropoff) fail(400, "dropoff_required", "Choose a delivery drop-off before matching.");
       requestFulfillment = { fulfillmentMode: body.fulfillmentMode, dropoff };
     }
+    const groupLine = body.groupId == null ? null : cartLines.find((line) => line.id === body.groupId);
+    if (body.groupId != null && !groupLine) fail(404, "cart_group_not_found", "That group does not belong to this cart.");
+    const groupExclusions = groupLine ? (store.supplierProfiles || []).filter((profile) => profile.userId !== groupLine.supplierId).map((profile) => profile.userId) : [];
     const input = {
       subcategoryCode: body.subcategoryCode,
       ranking: body.ranking ?? publicPreference(store, user.id).ranking,
-      dropoff: requestFulfillment?.dropoff ?? addressPoint(store, user.id, body),
-      excludedSupplierIds: body.excludedSupplierIds || [],
-      deadline: body.deadline ?? null,
+      dropoff: requestFulfillment?.dropoff ?? addressPoint(store, user.id, body) ?? matchCart?.defaultDropoff ?? null,
+      excludedSupplierIds: [...(body.excludedSupplierIds || []), ...groupExclusions],
+      deadline: matchCart?.deadline ?? body.deadline ?? null,
       units: body.units == null ? undefined : positiveInteger(body.units, "units"),
       now: at, measurement: body.measurement, structuredSpec: body.structuredSpec,
       optionIds: body.optionIds, widthFeet: body.widthFeet, cartLines,
@@ -1148,6 +1249,17 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
           ...(requestFulfillment ? { requestFulfillment } : {}),
           subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
       listing.selectToken = token;
+    }
+    if (new Set(cartLines.map((line) => line.supplierId)).size > 1 || groupLine) {
+      const suppliers = [...new Set(cartLines.map((line) => line.supplierId))];
+      const selectedSupplier = match.shop?.supplierId;
+      const index = suppliers.indexOf(selectedSupplier);
+      match.shop = { label: shopLabel(index < 0 ? suppliers.length : index) };
+      for (const listing of [...match.listings, ...match.otherListings]) {
+        delete listing.supplierId;
+        delete listing.supplierServiceId;
+        delete listing.shop;
+      }
     }
     return { status: 200, body: { ...match, matchRequestId: requestId, selectTokenExpiresAt: expiresAt }, mutated: true };
   }
@@ -1180,7 +1292,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
-    const result = checkout(store, user, cart, record(await readBody(req)), id, now(), req);
+    const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
     return { status: 201, body: result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {
@@ -1222,22 +1334,16 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     selectedCatalogPrice(store, item, body.optionIds);
     const at = now();
     const lines = (store.cartLines || []).filter((row) => row.cartId === cart.id);
-    // One shop per order. A basket spanning two shops needs two of everything
-    // downstream -- two quality checks, two accept decisions, two pickups, two
-    // payouts -- and none of that was ever wired, so the second shop's half
-    // simply stopped. Wanting a second shop starts a second order.
-    const otherShop = lines.find((row) => row.supplierId !== item.supplierId);
-    if (otherShop) {
-      fail(409, "cart_belongs_to_another_shop", "This basket is already with another shop. Check it out, or start a new order for this.", {
-        field: "catalogItemId",
-      });
-    }
     if (selection && (item.supplierId !== selection.supplierId || item.subcategoryCode !== selection.subcategoryCode)) {
       fail(409, "catalog_item_stale", "That listing changed since matching; match again.");
     }
     if (selection && (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.isClosed) {
       fail(409, "catalog_item_stale", "That shop is no longer accepting work; match again.");
     }
+    if (selection?.deadline && cart.deadline && Date.parse(selection.deadline) !== Date.parse(cart.deadline)) {
+      fail(409, "basket_deadline_mismatch", "Match again using this basket's deadline.");
+    }
+    if (!cart.deadline && selection?.deadline) cart.deadline = selection.deadline;
     const measurement = measurementFor(item, body);
     const structuredSpec = body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec"));
     assertPrinterCap(store, item, { measurement, structuredSpec, optionIds: body.optionIds });
@@ -1245,7 +1351,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id,
       optionIds: [...body.optionIds], quantity: positiveInteger(body.quantity, "quantity"),
       measurement,
-      ...(selection?.deadline ? { matchDeadline: selection.deadline } : {}),
+      ...((cart.deadline || selection?.deadline) ? { matchDeadline: cart.deadline || selection.deadline } : {}),
       structuredSpec,
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
