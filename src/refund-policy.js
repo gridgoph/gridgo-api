@@ -1,3 +1,4 @@
+import { rescheduleHold } from './order-reschedule-policy.js';
 /** Option B: cash already collected, with earned obligations protected. */
 export class RefundError extends Error {
   constructor(status, code, message, details = {}) {
@@ -61,6 +62,7 @@ export function supplierRefundPayouts(store, order) {
 }
 
 export function assertRefundWorkAllowed(store, order) {
+  if (rescheduleHold(order)) refundFail(409, 'reschedule_fulfillment_stopped', 'Resolve the deadline request before continuing production or fulfillment.');
   if (order.shopRecovery && order.shopRecovery.status !== 'accepted') {
     refundFail(409, 'shop_recovery_pending', 'Resolve the shop replacement or refund before continuing.');
   }

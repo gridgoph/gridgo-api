@@ -120,6 +120,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791244800000_shop_recovery_penalty_ownership",
         "1791248400000_hub_pickup_request",
         "1791252000000_multi_shop_baskets",
+        "1791255600000_order_reschedule_request",
       ],
     );
 
@@ -298,6 +299,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reschedule protection reverses before the earlier domain migrations.
+    assert.notEqual((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
 
     // Empty basket schema can be reversed without touching existing orders.
     await runner(migrationOptions(schema, "down", 1, client));
@@ -1076,13 +1082,15 @@ for (const [baseFeeMinor, perKmMinor] of [[7500, 1000], [8000, 1200], [7500, 120
 test("hub pickup migration adds a zero fee without replacing configured settings", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 2, client));
+    const { rows: [{ count: rollbackCount }] } = await client.query(`SELECT count(*)::integer AS count FROM pgmigrations
+      WHERE name >= '1791248400000_hub_pickup_request'`);
+    await runner(migrationOptions(schema, "down", rollbackCount, client));
     await client.query(`INSERT INTO platform_settings (singleton,version,settings) VALUES (true,7,'{}')`);
     await runner(migrationOptions(schema, "up", undefined, client));
     let settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
     assert.deepEqual(settings.hubPickup, { schedule: null, feeMinor: 0 });
     await client.query(`UPDATE platform_settings SET settings=jsonb_set(settings,'{hubPickup,feeMinor}','2500')`);
-    await runner(migrationOptions(schema, "down", 2, client));
+    await runner(migrationOptions(schema, "down", rollbackCount, client));
     await runner(migrationOptions(schema, "up", undefined, client));
     settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
     assert.equal(settings.hubPickup.feeMinor, 2500);

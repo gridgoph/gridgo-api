@@ -28,6 +28,8 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
+Production deadline requests, client consent, replacement/refund holds and applied-deduction escalation: `docs/ORDER_RESCHEDULE_API.md`. The single request stays in `orders.data`; preserve its immutable original facts and role-safe projection.
+
 Shop acceptance, cancellation and client-approved recovery follow `docs/SHOP_RECOVERY_API.md`; `shopRecovery` is an independent work/payout hold. Never reassign automatically after any shop payout release.
 
 Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/transfer evidence, reserved manual attempts). `src/refund-policy.js` owns independent work/payout holds; never let claim release bypass them. Settlements preserve original money/stage snapshots, supersede unpaid stages, and pay any agreed shop remainder through the separate settlement item.
