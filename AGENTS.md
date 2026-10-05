@@ -28,6 +28,8 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
+Shop acceptance, cancellation and client-approved recovery follow `docs/SHOP_RECOVERY_API.md`; `shopRecovery` is an independent work/payout hold. Never reassign automatically after any shop payout release.
+
 Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/transfer evidence, reserved manual attempts). `src/refund-policy.js` owns independent work/payout holds; never let claim release bypass them. Settlements preserve original money/stage snapshots, supersede unpaid stages, and pay any agreed shop remainder through the separate settlement item.
 
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
