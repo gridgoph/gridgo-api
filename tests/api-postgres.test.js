@@ -2045,8 +2045,16 @@ async function startMockClerkApi(usersBySubject) {
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function startMockObjectStorage({ size } = {}) {
+async function startMockObjectStorage({ size, bytes } = {}) {
+  const requests = [];
   const server = http.createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    if (bytes && (/\/(missing-object|unavailable)$/.test(req.url)
+      || (req.method === "GET" && req.url.endsWith("/missing-on-get")))) {
+      res.writeHead(req.url.endsWith("/unavailable") ? 503 : 404);
+      res.end();
+      return;
+    }
     if (req.method === "HEAD") {
       res.writeHead(200, size == null ? {} : { "Content-Length": size });
       res.end();
@@ -2057,12 +2065,106 @@ async function startMockObjectStorage({ size } = {}) {
       res.end();
       return;
     }
+    if (req.method === "GET" && bytes) {
+      res.writeHead(200, { "Content-Length": bytes.length });
+      res.end(bytes);
+      return;
+    }
     res.writeHead(404);
     res.end();
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, url: `http://127.0.0.1:${server.address().port}` };
+  return { server, requests, url: `http://127.0.0.1:${server.address().port}` };
 }
+
+test("private payment content streams exact bytes with signed-read authorization and no caching", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 255, 10]);
+  const storage = await startMockObjectStorage({ size: bytes.length, bytes });
+  t.after(() => new Promise((resolve) => storage.server.close(resolve)));
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const ready = (fileId, purpose, ownerId, extra = {}) => ({
+      fileId, purpose, ownerId, state: "ready", originalFilename: "receipt.png",
+      declaredContentType: "image/png", detectedContentType: "image/png", size: bytes.length,
+      objectKey: `private/${fileId}`, references: [], createdAt: AT, readyAt: AT, ...extra,
+    });
+    store.files.push(
+      ready("file_payment", "payment_proof", "user_client"),
+      ready("file_payout", "payout_receipt", "user_ops", {
+        references: [{ type: "order", id: "ord_payout", field: "payoutReceiptFileIds" }],
+      }),
+      ready("file_unbound_payout", "payout_receipt", "user_ops"),
+      ready("file_mismatch", "payment_proof", "user_client", { size: bytes.length + 1 }),
+      ready("file_missing", "payment_proof", "user_client", { objectKey: "private/missing-object" }),
+      ready("file_missing_on_get", "payment_proof", "user_client", { objectKey: "private/missing-on-get" }),
+      ready("file_outage", "payment_proof", "user_client", { objectKey: "private/unavailable" }),
+      ready("file_pending", "payment_proof", "user_client", { state: "pending_upload", readyAt: null }),
+      ready("file_deleted", "payment_proof", "user_client", { state: "deleted", objectKey: null, deletedAt: AT }),
+    );
+    await saveStore(database, store);
+  });
+  const instance = await startApi({ MINIO_ENDPOINT: storage.url, MINIO_PUBLIC_URL: storage.url,
+    CORS_ALLOWED_ORIGINS: AUTHORIZED_PARTY, GRIDGO_LIFECYCLE_INTERVAL_MS: "3600000" });
+  t.after(async () => {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+  });
+  for (const [fileId, allowed] of [
+    ["file_payment", ["clerk_client", "clerk_ops", "clerk_super"]],
+    ["file_payout", ["clerk_supplier", "clerk_ops", "clerk_super"]],
+    ["file_unbound_payout", ["clerk_ops", "clerk_super"]],
+  ]) {
+    for (const subject of [undefined, "clerk_client", "clerk_supplier", "clerk_rider", "clerk_promote", "clerk_ops", "clerk_super"]) {
+      const signed = await request(instance.api, `/files/${fileId}/download-url`, { subject });
+      const before = storage.requests.length;
+      const response = await fetch(`${instance.api}/files/${fileId}/content`, {
+        headers: { Origin: AUTHORIZED_PARTY, ...(subject ? { Authorization: `Bearer ${token(subject)}` } : {}) },
+      });
+      assert.equal(response.status, signed.status);
+      if (allowed.includes(subject)) {
+        assert.equal(response.status, 200);
+        assert.equal(response.headers.get("content-type"), "image/png");
+        assert.equal(response.headers.get("content-length"), String(bytes.length));
+        assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0");
+        assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+        assert.equal(response.headers.get("access-control-allow-origin"), AUTHORIZED_PARTY);
+        assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+      } else {
+        assert.equal(response.status, subject ? 403 : 401);
+        assert.equal((await response.json()).error, subject ? "forbidden" : "unauthorized");
+        assert.equal(storage.requests.length, before, "refused reads must not touch storage");
+      }
+    }
+  }
+  for (const [fileId, status, error] of [
+    ["unknown", 404, "file_not_found"], ["file_pending", 404, "file_not_found"],
+    ["file_deleted", 404, "file_not_found"], ["file_pof", 400, "file_content_not_supported"],
+    ["file_mismatch", 409, "storage_object_mismatch"], ["file_missing", 409, "storage_object_missing"],
+    ["file_missing_on_get", 409, "storage_object_missing"],
+    ["file_outage", 503, "minio_unavailable"],
+  ]) {
+    const result = await request(instance.api, `/files/${fileId}/content`, { subject: "clerk_ops" });
+    assert.equal(result.status, status, fileId);
+    assert.equal(result.body.error, error, fileId);
+  }
+  const spoofed = await request(instance.api, "/files/file_payment/content", {
+    subject: "clerk_promote", claims: { role: "super_admin" }, headers: { "X-GRIDGO-Role": "super_admin" },
+  });
+  assert.equal(spoofed.status, 403);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    Object.assign(store.approvalCases.find((row) => row.id === "case_supplier"), {
+      status: "suspended", suspensionReason: "Approval review",
+    });
+    await saveStore(database, store);
+  });
+  for (const suffix of ["download-url", "content"]) {
+    assert.equal((await request(instance.api, `/files/file_payout/${suffix}`, { subject: "clerk_supplier" })).status, 403);
+  }
+});
 
 test("Clerk activation provisions only a client through the live API and PostgreSQL", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });

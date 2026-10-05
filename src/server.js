@@ -2617,7 +2617,7 @@ async function handleRequest(req, res) {
 
     const needsInitializedStorage =
       (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
-      (req.method === "GET" && /^\/files\/[^/]+\/download-url$/.test(pathname)) ||
+      (req.method === "GET" && /^\/files\/[^/]+\/(download-url|content)$/.test(pathname)) ||
       (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
     if (storageInitializing && needsInitializedStorage) {
       throw new AttachmentError(
@@ -2737,9 +2737,14 @@ async function handleRequest(req, res) {
       return send(res, 200, { file: publicFile(file, user) });
     }
 
-    if (req.method === "GET" && /^\/files\/[^/]+\/download-url$/.test(pathname)) {
+    if (req.method === "GET" && /^\/files\/[^/]+\/(download-url|content)$/.test(pathname)) {
+      const serveContent = pathname.endsWith("/content");
+      if (serveContent) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
+      if (serveContent && !["payment_proof", "payout_receipt", "refund_receipt"].includes(file.purpose)) {
+        throw new AttachmentError(400, "file_content_not_supported", "Only payment proofs and payout or refund receipts can be read through this route.");
+      }
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
         throw new AttachmentError(
@@ -2747,6 +2752,23 @@ async function handleRequest(req, res) {
           "storage_object_mismatch",
           "The stored object size does not match its file record. Upload the file again before using it.",
         );
+      }
+      if (serveContent) {
+        const stream = await objectStorage.getObject(file.objectKey);
+        if (res.destroyed) {
+          stream.destroy();
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": file.detectedContentType || "application/octet-stream",
+          "Content-Length": String(file.size),
+          "X-Content-Type-Options": "nosniff",
+          ...(res.gridgoCorsHeaders || {}),
+        });
+        stream.once("error", () => res.destroy());
+        res.once("close", () => stream.destroy());
+        stream.pipe(res);
+        return;
       }
       const privateFinancial = file.purpose.startsWith("refund_");
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
