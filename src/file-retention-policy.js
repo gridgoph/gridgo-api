@@ -1,7 +1,7 @@
 // Retention operates on domain relationships, never object-key naming conventions.
 const DAY = 86_400_000;
 const ARTWORK = new Set(['artwork', 'mockup']);
-const MONEY = new Set(['payment_proof', 'payout_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
+const MONEY = new Set(['supplier_invoice', 'payment_proof', 'payout_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
 const PHOTOS = new Set(['production_photo', 'fulfilment_proof', 'delivery_photo', 'handoff_signature']);
 const CLOSED = new Set(['completed', 'payout_released', 'cancelled']);
 const CASE_TERMINALS = {

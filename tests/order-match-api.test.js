@@ -114,6 +114,7 @@ async function fixture(database) {
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
+    store.settings.handoverOtpEnabled = true;
     store.users.push(
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
       { id: "supplier_a", clerkUserId: "clerk_supplier_a", email: "a@gridgo.test", name: "A", role: "supplier", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, createdAt: AT },
@@ -248,7 +249,8 @@ async function dispatchAndDeliver({ call, database, orderId }) {
     store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
     await saveStore(database, store);
   });
-  const delivered = await post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop" });
+  const handover = (await call(`/orders/${orderId}/handover`, { subject: "clerk_rider" })).body.handover;
+  const delivered = await post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop", otp: handover.otp });
   assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
   assert.equal(delivered.body.order.state, "issue_window_open");
   return delivered.body.order;
@@ -1165,35 +1167,30 @@ test("a collected order stops on the counter, and only the counter hands it over
   // Nothing has been given to the client yet, so nothing about the job is over.
   assert.equal(dropped.body.order.issueWindowOpenedAt ?? null, null);
 
-  // The counter is where the money is owed, and it refuses without it.
-  const early = await call(`/orders/${orderId}/collection`, {
-    method: "POST", subject: "clerk_ops", body: { receivedBy: "Ana Cruz" },
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships.push({ userId: 'user_ops', role: 'staff', createdAt: AT });
+    store.staffProfiles.push({ userId: 'user_ops', roleCode: 'hub_staff', active: true, updatedAt: AT });
+    await saveStore(database, store);
   });
-  assert.equal(early.status, 409, JSON.stringify(early.body));
-  assert.equal(early.body.error, "final_payment_not_confirmed");
+  const handover = (await call(`/orders/${orderId}/handover`, { subject: 'clerk_client' })).body.handover;
+  const claim = body => call('/staff/hub/claims', { method: 'POST', subject: 'clerk_ops', body });
+  const early = await claim(handover);
+  assert.equal(early.status, 409);
+  assert.equal(early.body.error, 'final_payment_not_confirmed');
 
   await call(`/orders/${orderId}/payments/final_online/submit`, {
-    method: "POST", subject: "clerk_client",
-    body: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-901" },
+    method: 'POST', subject: 'clerk_client',
+    body: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'QR-901' },
   });
-  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
-
-  // A hand-over with no name is a hand-over nobody can check afterwards.
-  const nameless = await call(`/orders/${orderId}/collection`, {
-    method: "POST", subject: "clerk_ops", body: {},
-  });
-  assert.equal(nameless.status, 400, JSON.stringify(nameless.body));
-
-  const released = await call(`/orders/${orderId}/collection`, {
-    method: "POST", subject: "clerk_ops", body: { receivedBy: "Ana Cruz" },
-  });
+  await call(`/orders/${orderId}/payments/final_online/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  assert.equal((await claim({ qrToken: handover.qrToken })).body.error, 'handover_otp_mismatch');
+  const released = await claim(handover);
   assert.equal(released.status, 200, JSON.stringify(released.body));
-  assert.equal(released.body.order.state, "issue_window_open");
-  assert.ok(released.body.order.issueWindowOpenedAt, "the complaint window starts when the client has it");
-  assert.ok(
-    released.body.order.timeline.some((entry) => entry.note?.includes("Ana Cruz")),
-    "who collected it is written into the record",
-  );
+  const collected = (await call(`/orders/${orderId}`, { subject: 'clerk_ops' })).body.order;
+  assert.equal(collected.state, 'issue_window_open');
+  assert.ok(collected.issueWindowOpenedAt);
+  assert.equal(released.body.handout.staffId, 'user_ops');
 });
 
 /**
@@ -1658,7 +1655,8 @@ test("a legacy 75/25 order still needs its balance before delivery", { skip: !DA
     store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
     await saveStore(database, store);
   });
-  const deliver = () => post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop" });
+  const handover = (await call(`/orders/${orderId}/handover`, { subject: "clerk_rider" })).body.handover;
+  const deliver = () => post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop", otp: handover.otp });
 
   const blocked = await deliver();
   assert.equal(blocked.status, 409);

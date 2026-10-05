@@ -59,6 +59,7 @@ Multi-shop basket payment/receipt and independent group order contracts: `docs/M
 
 Late-production warnings, the Super Admin deductions gate (off by default), net payout adjustments, and recent-lapse matching weight: `docs/PRODUCTION_PENALTIES_API.md`. Published payout shares remain gross; stage `amountMinor` is net of `productionDeductionMinor`.
 
+Hub QR claims, invited `staff` memberships/configurable role profiles, handout logs, delivery OTPs, unclaimed reminders and private supplier invoice scans: `docs/HUB_HANDOVER_API.md`. Never bypass a governed handover through the legacy collection or transition routes; issued credentials are immutable and ordinary order projections must omit them.
 Organization discounts and non-tax statements: `docs/ORGANIZATION_MONEY_API.md`. Discounts reduce only each shop group's service fee; order discount snapshots are immutable.
 
 ## Geography
