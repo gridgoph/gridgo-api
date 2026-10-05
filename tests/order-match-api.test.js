@@ -434,6 +434,7 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const assertHeld = async () => {
       for (const subject of ["clerk_supplier_a", "clerk_supplier_b"]) {
         assert.equal((await call(`/orders/${orderId}`, { subject })).status, 403);
+        assert.equal((await call(`/orders/${orderId}/shop-recovery`, { subject })).status, 403);
         assert.deepEqual((await call("/jobs", { subject })).body.jobs, []);
         assert.deepEqual((await call("/orders", { subject })).body.orders, []);
         assert.equal((await call("/files/file_art", { subject })).status, 403);
@@ -444,6 +445,7 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     await assertHeld();
     const waiting = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.fileCheck;
     assert.equal(waiting.status, "pending");
+    assert.equal((await loadStore(database)).orders[0].shopAcceptance, undefined);
     assert.ok(waiting.waitingSeconds >= 0);
     const inbox = await call("/notifications", { subject: "clerk_ops" });
     assert.ok(inbox.body.notifications.some(n => n.orderId === orderId && n.type === "ops_job_needs_qa"));
@@ -489,6 +491,7 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     assert.equal(approved.body.order.supplierId, "supplier_a");
     assert.equal(approved.body.order.fileCheck.status, "passed");
     assert.equal(approved.body.order.fileCheck.reviewedBy, "user_ops");
+    assert.equal(approved.body.order.shopAcceptance.assignedAt, approved.body.order.updatedAt);
     const released = await loadStore(database);
     assert.equal(released.notifications.filter(n => n.orderId === orderId && n.type === "shop_job_assigned").length, 1);
     assert.ok(released.auditLog.some(row => row.orderId === orderId && row.action === "order.file_check" && row.detail.fileCheck.status === "passed"));
@@ -555,25 +558,30 @@ test("a shop that cannot take the work hands it on rather than stopping it", asy
 
   // Supplier B is dearer than the job was sold for, so it is not a candidate.
   // The order lands on Operations rather than costing the client more.
-  assert.equal(declined.body.replaced, false);
-  assert.equal(declined.body.order.state, "approved_for_matching");
+  assert.equal(declined.body.recovery.status, "awaiting_client");
+  assert.equal(declined.body.order.state, "supplier_assigned");
   assert.equal(declined.body.order.supplierId, undefined);
 
-  // And the shop that declined no longer sees it.
+  // The original shop can read the held order until replacement is accepted.
   const inbox = await call("/jobs", { subject: "clerk_supplier_a" });
-  assert.equal(inbox.body.jobs.length, 0);
+  assert.equal(inbox.body.jobs.length, 1);
 
   // Declining twice is not a way to loop.
   const again = await call(`/orders/${orderId}/decline`, {
     method: "POST", subject: "clerk_supplier_a", body: { reason: "still down" },
   });
-  assert.equal(again.status, 403, JSON.stringify(again.body));
+  assert.equal(again.status, 409, JSON.stringify(again.body));
 });
 
 test("a declined job moves to a shop that can still make the date, at no more cost", async (t) => {
   // Placed with the dearer, slower shop, so a cheaper and faster one exists to
   // take it on.
-  const { call, orderId, output } = await placedOrder(t, { catalogItemId: "item_supplier_b" });
+  const { call, database, orderId, output } = await placedOrder(t, { catalogItemId: "item_supplier_b" });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.catalogItems.find((row) => row.id === 'item_supplier_a').name = store.orderLineItems[0].itemNameSnapshot;
+    await saveStore(database, store);
+  });
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, {
     method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
@@ -586,7 +594,13 @@ test("a declined job moves to a shop that can still make the date, at no more co
     method: "POST", subject: "clerk_supplier_b", body: { reason: "Fully booked" },
   });
   assert.equal(declined.status, 200, `${JSON.stringify(declined.body)}\n${output()}`);
-  assert.equal(declined.body.replaced, true);
+  assert.equal(declined.body.recovery.status, 'awaiting_client');
+  const offer = await call(`/orders/${orderId}/shop-recovery`, { subject: 'clerk_client' });
+  assert.equal(offer.body.recovery.canAccept, true, JSON.stringify(offer.body));
+  const accepted = await call(`/orders/${orderId}/shop-recovery/accept`, {
+    method: 'POST', subject: 'clerk_client', body: { recoveryId: offer.body.recovery.id },
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
 
   const after = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
   assert.equal(after.supplierId, "supplier_a", "the job moved to the shop that can take it");
@@ -598,7 +612,7 @@ test("a declined job moves to a shop that can still make the date, at no more co
   assert.equal(after.supplierSubtotalMinor, before.supplierSubtotalMinor);
 
   // And the new shop is not promised later than the client already was.
-  assert.ok(Date.parse(after.promiseBy) <= Date.parse(before.promiseBy));
+  assert.equal(after.promiseBy, offer.body.recovery.replacement.promiseBy);
 
   // The new shop sees it; the one that declined does not.
   assert.equal((await call("/jobs", { subject: "clerk_supplier_a" })).body.jobs.length, 1);
@@ -2179,6 +2193,188 @@ test('artwork uploads persist their automatic verdict and checkout refuses a cor
   assert.equal((await loadStore(database)).files.find(file => file.fileId === valid.fileId).artworkCheck.status, 'passed');
   await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { method: 'PATCH', body: { artworkFileId: valid.fileId } });
   assert.equal((await checkout()).status, 201);
+});
+
+test("hub pickup settings are Super Admin-only and early choices survive PostgreSQL round trips", async (t) => {
+  const database = createDatabase();
+  await fixture(database);
+  t.after(() => database.close());
+  const { api, child } = await startApi();
+  t.after(async () => {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => child.once("exit", resolve));
+  });
+  const patch = (body, subject = "clerk_ops") => request(api, "/settings", { method: "PATCH", subject, body });
+  const initial = await request(api, "/settings", { subject: "clerk_client" });
+  assert.equal(initial.body.settings.hubPickup.feeMinor, 0);
+  assert.equal(initial.body.settings.hubPickup.schedule, null);
+  const hubPickup = { feeMinor: 2500, schedule: { utcOffsetMinutes: 480,
+    week: [1, 3, 5].map((weekday) => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] } };
+  for (const subject of ["clerk_client", "clerk_supplier_a", "clerk_rider", "clerk_ops"]) {
+    assert.equal((await patch({ expectedVersion: initial.body.version, reason: "Configure pickup", hubPickup }, subject)).status, 403);
+  }
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships.push({ userId: "user_ops", role: "super_admin", createdAt: AT });
+    await saveStore(database, store);
+  });
+  for (const bad of [null, { feeMinor: -1, schedule: null }, { feeMinor: 1.5, schedule: null },
+    { feeMinor: "0", schedule: null }, { feeMinor: Number.MAX_SAFE_INTEGER + 1, schedule: null },
+    { feeMinor: 0, schedule: {} }]) {
+    assert.equal((await patch({ expectedVersion: initial.body.version, reason: "Invalid pickup", hubPickup: bad })).status, 400);
+  }
+  assert.equal((await patch({ expectedVersion: initial.body.version - 1, reason: "Configure pickup", hubPickup })).body.error, "settings_version_conflict");
+  assert.equal((await patch({ expectedVersion: initial.body.version, hubPickup })).body.error, "settings_reason_required");
+  const configured = await patch({ expectedVersion: initial.body.version, reason: "Configure pickup", hubPickup });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+  assert.equal(configured.body.settings.hubPickup.feeMinor, 2500);
+  const unrelated = await patch({ expectedVersion: configured.body.version, reason: "Window update", issueWindowHours: 48 });
+  assert.equal(unrelated.status, 200);
+  assert.deepEqual(unrelated.body.settings.hubPickup, configured.body.settings.hubPickup);
+
+  const post = (path, body) => request(api, path, { method: "POST", subject: "clerk_client", body });
+  const orders = [];
+  for (const fulfillmentMode of ["delivery", "pickup"]) {
+    const dropoff = { lat: 7.28, lng: 125.62, label: "Recipient" };
+    const match = await post("/me/matches", { subcategoryCode: "flyers", fulfillmentMode, dropoff });
+    assert.equal(match.status, 200, JSON.stringify(match.body));
+    const selected = match.body.listings[0];
+    const created = await post("/me/carts", {});
+    const cartId = created.body.cart.id;
+    const added = await post(`/me/carts/${cartId}/lines`, {
+      selectToken: selected.selectToken, matchRequestId: match.body.matchRequestId,
+      optionIds: [], quantity: 1, artworkFileId: "file_art",
+    });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    const read = await request(api, `/me/carts/${cartId}`, { subject: "clerk_client" });
+    assert.deepEqual(read.body.cart.requestFulfillment, match.body.requestFulfillment);
+    const quote = await request(api, `/me/carts/${cartId}/quote`, { subject: "clerk_client" });
+    assert.equal(quote.body.quote.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(quote.body.quote.totalMinor, quote.body.quote.clientItemSubtotalMinor + quote.body.quote.deliveryFeeMinor);
+    assert.equal(quote.body.quote.pickupFeeMinor, fulfillmentMode === "pickup" ? 2500 : undefined);
+    for (const field of ["supplierSubtotalMinor", "shop", "shopName", "pickup"]) {
+      assert.equal(Object.hasOwn(quote.body.quote, field), false, field);
+    }
+    const changed = await request(api, `/me/carts/${cartId}/fulfillment`, { method: "PUT", subject: "clerk_client",
+      body: { fulfillmentMode: fulfillmentMode === "pickup" ? "delivery" : "pickup" } });
+    assert.equal(changed.status, 409);
+    assert.equal(changed.body.error, "request_fulfillment_locked");
+    const checked = await post(`/me/carts/${cartId}/checkout`, { payment: {
+      method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123",
+    } });
+    assert.equal(checked.status, 201, JSON.stringify(checked.body));
+    assert.equal(checked.body.order.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(checked.body.order.totalMinor, quote.body.quote.totalMinor);
+    assert.equal(checked.body.invoice.clientItemSubtotalMinor, quote.body.quote.clientItemSubtotalMinor);
+    orders.push(checked.body.order);
+    const saved = await loadStore(database);
+    const order = saved.orders.find((row) => row.id === checked.body.order.id);
+    assert.deepEqual(order.requestFulfillment, match.body.requestFulfillment);
+    assert.equal(order.totalMinor, order.supplierSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+    assert.equal(order.paymentAllocations.reduce((sum, row) => sum + row.amountMinor, 0), order.totalMinor);
+    if (fulfillmentMode === "pickup") {
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.equal(order.riderPayoutMinor, 0);
+      assert.equal(order.platformDeliveryShareMinor, 2500);
+      const confirmed = await request(api, `/orders/${order.id}/payments/initial/confirm`, {
+        method: "POST", subject: "clerk_ops", body: {},
+      });
+      assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+      const assigned = await request(api, `/orders/${order.id}/transition`, {
+        method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" },
+      });
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+      assert.equal(assigned.body.order.pickupFeeMinor, 2500);
+      await assert.rejects(database.query(`UPDATE orders SET data=jsonb_set(data,'{pickupFeeMinor}','3000') WHERE id=$1`, [order.id]),
+        (error) => error.constraint === "orders_request_fulfillment_immutable");
+    }
+  }
+  const changed = await patch({ expectedVersion: unrelated.body.version, reason: "Later fee", hubPickup: { ...hubPickup, feeMinor: 9000 } });
+  assert.equal(changed.status, 200);
+  const saved = await loadStore(database);
+  assert.equal(saved.orders.find((row) => row.id === orders[1].id).pickupFeeMinor, 2500);
+  assert.ok(saved.auditLog.some((row) => row.action === "settings.operational_update" && row.detail.current.hubPickup.feeMinor === 2500));
+});
+
+test('shop acceptance timeout is enforced by HTTP before the lifecycle sweep and cannot release payouts', { skip: !DATABASE_URL }, async (t) => {
+  const { call, orderId, database } = await placedOrder(t);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  const assignment = await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  assert.equal(assignment.status, 200);
+  assert.equal(assignment.body.order.shopAcceptance.workingMinutes, 60);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders[0].shopAcceptance.deadlineAt = '2020-01-01T00:00:00.000Z';
+    await saveStore(database, store);
+  });
+  const accept = await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_supplier_a', body: { state: 'payment_authorized' } });
+  assert.equal(accept.status, 409, JSON.stringify(accept.body));
+  assert.equal(accept.body.error, 'shop_acceptance_expired');
+  const events = await call('/ops/shop-failures?supplierId=supplier_a', { subject: 'clerk_ops' });
+  assert.equal(events.body.events[0].kind, 'timed_out');
+  assert.equal(events.body.events[0].stage, 'supplier_assigned');
+  assert.equal((await call('/ops/shop-failures', { subject: 'clerk_client' })).status, 403);
+  const blocked = await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  assert.equal(blocked.body.error, 'shop_recovery_pending');
+});
+
+test('lifecycle sweep auto-declines once without a supplier request', { skip: !DATABASE_URL }, async (t) => {
+  const { call, orderId, database } = await placedOrder(t, { extraEnv: { GRIDGO_LIFECYCLE_INTERVAL_MS: '1000' } });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders[0].shopAcceptance.deadlineAt = '2020-01-01T00:00:00.000Z';
+    await saveStore(database, store);
+  });
+  // Poll durable state while the isolated API's real lifecycle timer runs.
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const store = await loadStore(database);
+    if (store.orders[0].shopFailureEvents?.length) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal((await loadStore(database)).orders[0].shopFailureEvents.length, 1);
+});
+
+test('replacement preserves an applied original-shop penalty ledger and resets only unpaid stages', { skip: !DATABASE_URL }, async (t) => {
+  const { assessProductionLapses } = await import('../src/production-penalties.js');
+  const { call, orderId, database } = await placedOrder(t, { catalogItemId: 'item_supplier_b' });
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  await database.transaction(async () => {
+    const store = await loadStore(database), order = store.orders[0];
+    store.catalogItems.find((row) => row.id === 'item_supplier_a').name = store.orderLineItems[0].itemNameSnapshot;
+    store.settings.productionPenalty.deductionsEnabled = true;
+    order.fileCheck.status = 'passed';
+    order.state = 'production'; order.readyBy = '2026-01-01T00:00:00.000Z';
+    const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
+    assessProductionLapses(store, { at: '2026-01-03T00:00:00.000Z', createId });
+    assessProductionLapses(store, { at: '2026-01-03T00:01:00.000Z', createId });
+    await saveStore(database, store);
+  });
+  const before = (await loadStore(database)).productionLapses[0];
+  assert.ok(before.deductionMinor > 0);
+  const cancel = await call(`/orders/${orderId}/shop-cancel`, { method: 'POST', subject: 'clerk_supplier_b', body: { reason: 'Unable to finish' } });
+  assert.equal(cancel.status, 200, JSON.stringify(cancel.body));
+  const accept = await call(`/orders/${orderId}/shop-recovery/accept`, { method: 'POST', subject: 'clerk_client', body: { recoveryId: cancel.body.recovery.id } });
+  assert.equal(accept.status, 200, JSON.stringify(accept.body));
+  const store = await loadStore(database);
+  assert.deepEqual(store.productionLapses[0], before);
+  assert.ok(store.orders[0].payoutMilestones.every((row) => !row.productionDeductionMinor));
+  assert.equal(store.orders[0].supplierId, 'supplier_a');
+  assert.equal(store.orderJobs[0].supplierId, 'supplier_a');
+  await database.transaction(async () => {
+    const current = await loadStore(database);
+    current.orders[0].state = 'production';
+    current.orders[0].readyBy = '2026-01-04T00:00:00.000Z';
+    const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
+    assessProductionLapses(current, { at: '2026-01-06T00:00:00.000Z', createId });
+    assessProductionLapses(current, { at: '2026-01-06T00:01:00.000Z', createId });
+    await saveStore(database, current);
+  });
+  const later = await loadStore(database);
+  assert.equal(later.productionLapses.length, 2);
+  assert.deepEqual(later.productionLapses.find((row) => row.supplierId === 'supplier_b'), before);
+  assert.ok(later.productionLapses.find((row) => row.supplierId === 'supplier_a').deductionMinor > 0);
 });
 
 test("signed catalogue reads protect full shop details and quotes expose client amounts only", { skip: !DATABASE_URL }, async (t) => {
