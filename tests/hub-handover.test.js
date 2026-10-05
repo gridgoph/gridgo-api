@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, id, audit, AT } from './fixtures/reschedule.js';
 import { routeHubHandover, prepareHandover, sweepHubReminders, verifyHandoverOtp } from '../src/hub-handover.js';
+import { publicHubPickup } from '../src/hub-pickup.js';
 import { publicOrderFor } from '../src/operational-model.js';
 
 function setup() {
@@ -204,4 +205,25 @@ test('staff-management and each hub reminder event write both administrator inbo
   assert.equal(JSON.stringify(store.notifications).includes(invite.body.code), false);
   sweepHubReminders(store, { at: '2026-10-05T10:00:00Z', id });
   for (const userId of ['ops', 'admin']) assert.ok(store.notifications.some(n => n.userId === userId && n.type === 'ops_hub_unclaimed_reminder'));
+});
+
+test('public pickup and staff hub publish the same effective default and configured schedule', async () => {
+  const expected = { utcOffsetMinutes: 480,
+    week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
+  const custom = { utcOffsetMinutes: 480,
+    week: [{ weekday: 2, opensMinute: 600, closesMinute: 900 }],
+    closures: [{ startDay: '2026-10-06', endDay: '2026-10-06' }] };
+  for (const hubPickup of [undefined, { schedule: null, feeMinor: 0 }, { schedule: custom, feeMinor: 2500 }]) {
+    const store = setup();
+    store.settings.hubPickup = hubPickup;
+    const before = structuredClone(store.settings);
+    const pickup = publicHubPickup(store.settings);
+    const hub = (await call(store, 'other', '/staff/hub', {}, 'GET')).body.hub;
+    assert.deepEqual(pickup.schedule, hubPickup?.schedule ?? expected);
+    assert.deepEqual(pickup.schedule, hub.schedule);
+    assert.deepEqual(store.settings, before);
+    pickup.schedule.week[0].opensMinute = 0;
+    assert.deepEqual(publicHubPickup(store.settings).schedule, hub.schedule);
+    assert.deepEqual(store.orders[0].handover.schedule, expected);
+  }
 });

@@ -2235,6 +2235,13 @@ test('checkout checks links for released clients, refuses every failed or inconc
   assert.equal(added.status, 201);
   const checkout = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'ARTWORK-GATE' }, artworkCheck: { ok: true } } });
   for (mode of ['missing', 'private', 'challenged', 'unknown', 'unreachable']) {
+    if (mode === 'missing') {
+      const check = await call('/artwork/link-check', { method: 'POST', body: links[0] });
+      assert.equal(check.status, 200);
+      assert.equal(check.body.ok, false);
+      assert.match(check.body.message, /Make the link viewable by anyone with the link, then retry\.$/);
+      assert.doesNotMatch(check.body.message, /or upload the file instead/i);
+    }
     const result = await checkout();
     assert.equal(result.status, 409, JSON.stringify(result.body));
     assert.equal(result.body.error, 'artwork_link_check_failed');
@@ -2382,7 +2389,9 @@ test("hub pickup settings are Super Admin-only and early choices survive Postgre
   const patch = (body, subject = "clerk_ops") => request(api, "/settings", { method: "PATCH", subject, body });
   const initial = await request(api, "/settings", { subject: "clerk_client" });
   assert.equal(initial.body.settings.hubPickup.feeMinor, 0);
-  assert.equal(initial.body.settings.hubPickup.schedule, null);
+  assert.deepEqual(initial.body.settings.hubPickup.schedule, { utcOffsetMinutes: 480,
+    week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] });
+  assert.equal((await loadStore(database)).settings.hubPickup.schedule, null);
   const hubPickup = { feeMinor: 2500, schedule: { utcOffsetMinutes: 480,
     week: [1, 3, 5].map((weekday) => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] } };
   for (const subject of ["clerk_client", "clerk_supplier_a", "clerk_rider", "clerk_ops"]) {

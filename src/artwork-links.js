@@ -319,6 +319,6 @@ export async function routeArtworkLinkCheck({ req, url, user, readBody }) {
   if (!user) fail(401, "unauthorized", "Sign in to check an artwork link.");
   if (!identityHasMembership(user, "client")) fail(403, "forbidden", "Only clients can check artwork links.");
   const check = await checkArtworkLinkForUser(user.id, await readBody(req));
-  if (!check.ok) check.message += " Make the link viewable by anyone with the link, then retry; or upload the file instead.";
+  if (!check.ok) check.message += " Make the link viewable by anyone with the link, then retry.";
   return { status: 200, body: check };
 }

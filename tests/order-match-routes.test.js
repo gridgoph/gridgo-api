@@ -1260,7 +1260,7 @@ test("explicit delivery needs a destination even without distance-first ranking;
   assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).status, 200);
   const pickup = await call("POST", "/me/matches/next", { subcategoryCode: "flyers", fulfillmentMode: "pickup", excludedSupplierIds: ["supplier_b"] });
   assert.equal(pickup.body.hubPickup.feeMinor, 0);
-  assert.equal(pickup.body.hubPickup.schedule, null);
+  assert.deepEqual(pickup.body.hubPickup.schedule.week, [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })));
   assert.equal(pickup.body.listings[0].deliveryFeeMinor, 0);
 });
 

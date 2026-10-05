@@ -173,3 +173,33 @@ test('a newly invited Clerk subject persists as staff without client or privileg
   const store = await loadStore(db);
   assert.deepEqual(store.userRoleMemberships.filter(m => m.userId === me.body.staff.id).map(m => m.role), ['staff']);
 });
+
+test('HTTP settings and staff hub agree on default, configured and cleared schedules', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await setup(t);
+  await enroll(api);
+  const expected = { utcOffsetMinutes: 480,
+    week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
+  const custom = { utcOffsetMinutes: 480,
+    week: [{ weekday: 2, opensMinute: 600, closesMinute: 900 }],
+    closures: [{ startDay: '2026-10-06', endDay: '2026-10-06' }] };
+  const compare = async schedule => {
+    const settings = await api('client', 'GET', '/settings');
+    const hub = await api('other', 'GET', '/staff/hub');
+    assert.equal(settings.status, 200);
+    assert.equal(hub.status, 200);
+    assert.deepEqual(settings.body.settings.hubPickup.schedule, schedule);
+    assert.deepEqual(hub.body.hub.schedule, schedule);
+    return settings.body.version;
+  };
+  let version = await compare(expected);
+  for (const schedule of [custom, null]) {
+    const result = await api('admin', 'PATCH', '/settings', {
+      expectedVersion: version, reason: 'Update collection hours', hubPickup: { schedule, feeMinor: 0 },
+    });
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    version = await compare(schedule ?? expected);
+    const store = await loadStore(db);
+    assert.deepEqual(store.settings.hubPickup.schedule, schedule);
+    assert.deepEqual(store.orders[0].handover.schedule, expected);
+  }
+});

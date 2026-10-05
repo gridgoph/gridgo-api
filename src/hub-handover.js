@@ -1,6 +1,6 @@
 import { assertRefundWorkAllowed } from './refund-policy.js';
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import { hubPickupSettings, publicHubPickup } from './hub-pickup.js';
+import { publicHubPickup } from './hub-pickup.js';
 import { paymentSettled, issueWindowExpiresAt, carriedToOffice } from './operational-model.js';
 import { notifyOrderParties } from './client-order-notifications.js';
 import { notifyAdmins } from './domain-events.js';
@@ -8,8 +8,7 @@ import { queueOrderInvalidate } from './notifications.js';
 import { staffError as fail, staffAccess, activeAccount, hasMembership, routeStaffAccess } from './staff-access.js';
 
 const READY_STATES = ['ready_for_dispatch', 'rider_assigned', 'picked_up', 'out_for_delivery'];
-const DEFAULT_SCHEDULE = { utcOffsetMinutes: 480, week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
-export const hubRecord = settings => ({ id: 'primary', name: 'GRIDGO pickup hub', ...publicHubPickup(settings), schedule: hubPickupSettings(settings).schedule || structuredClone(DEFAULT_SCHEDULE) });
+export const hubRecord = settings => ({ id: 'primary', name: 'GRIDGO pickup hub', ...publicHubPickup(settings) });
 
 /** Mint once at the physical handover boundary, never on a read. */
 export function prepareHandover(store, order, { at }) {
