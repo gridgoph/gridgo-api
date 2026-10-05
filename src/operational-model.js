@@ -953,6 +953,10 @@ function clientCorrectionFor(order) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (order.basketId && user?.role === "client") {
+    publicRecord.clientItemSubtotalMinor = order.supplierSubtotalMinor + order.serviceFeeMinor;
+    for (const field of ["supplierId", "subtotalMinor", "serviceFeeMinor", "serviceFeeRateBps"]) delete publicRecord[field];
+  }
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
   publicRecord.productionItems = user?.role === "supplier" && !supplierArtworkReleased(order) ? [] : productionItemsFor(store, order, user);
   if (["ops_admin", "super_admin", "client"].includes(user?.role) && order.fileCheck) {

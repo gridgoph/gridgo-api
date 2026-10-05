@@ -50,7 +50,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "order_invoices", "support_admins", "support_tickets",
+      "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
@@ -119,6 +119,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791158400000_retire_development_shops",
         "1791244800000_shop_recovery_penalty_ownership",
         "1791248400000_hub_pickup_request",
+        "1791252000000_multi_shop_baskets",
       ],
     );
 
@@ -297,6 +298,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Empty basket schema can be reversed without touching existing orders.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('order_baskets') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('order_basket_groups') AS t")).rows[0].t, null);
 
     await client.query(`INSERT INTO client_carts
       (id,client_id,state,version,service_level,fulfillment_mode,created_at,updated_at,request_fulfillment)
@@ -1070,13 +1076,13 @@ for (const [baseFeeMinor, perKmMinor] of [[7500, 1000], [8000, 1200], [7500, 120
 test("hub pickup migration adds a zero fee without replacing configured settings", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
-    await runner(migrationOptions(schema, "down", 1, client));
+    await runner(migrationOptions(schema, "down", 2, client));
     await client.query(`INSERT INTO platform_settings (singleton,version,settings) VALUES (true,7,'{}')`);
     await runner(migrationOptions(schema, "up", undefined, client));
     let settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
     assert.deepEqual(settings.hubPickup, { schedule: null, feeMinor: 0 });
     await client.query(`UPDATE platform_settings SET settings=jsonb_set(settings,'{hubPickup,feeMinor}','2500')`);
-    await runner(migrationOptions(schema, "down", 1, client));
+    await runner(migrationOptions(schema, "down", 2, client));
     await runner(migrationOptions(schema, "up", undefined, client));
     settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
     assert.equal(settings.hubPickup.feeMinor, 2500);

@@ -164,7 +164,7 @@ An explicit-choice match adds `requestFulfillment: {fulfillmentMode,dropoff}`; p
 
 Create an empty cart (existing `POST /me/carts`), then add a listing with its `selectToken` and `matchRequestId`. The server carries the choice and resolved destination from that token into the cart. The cart's `requestFulfillment` is returned on full and compact reads and persists across API restarts; pickup carts expose the current `hubPickup` settings. Checkout renders this choice read-only. A conflicting fulfillment or destination on cart PATCH, fulfillment/drop-off PUT, line add/PATCH, or checkout returns `409 request_fulfillment_locked`. To change it, rematch and use a new empty cart. Attaching an explicit-choice token to an existing legacy nonempty cart returns `409 request_fulfillment_requires_empty_cart`.
 
-At checkout the order and invoice snapshot `requestFulfillment`; pickup additionally snapshots `hubPickup` and `pickupFeeMinor` from current settings. A draft preview can change when settings change; a placed order's schedule and charge cannot. Shop recovery also matches against this snapshotted request point, including the hub for pickup, and preserves the fulfillment choice and charge when the client accepts a replacement. The fee is once per order, not per line. The server-owned `cart.clientQuote` and `GET/POST /me/carts/:id/quote` include the same fee in `deliveryFeeMinor` and the already-inclusive GRIDGO item amount in `clientItemSubtotalMinor`. Use their total rather than computing printing markup or delivery from shop details; conflicting quote-preview overrides also return `409 request_fulfillment_locked`. For compatibility with the existing financial model, `deliveryFeeMinor` remains the total fulfillment-charge slot and its `delivery_pass_through` payment allocation: on a new pickup order it **already includes** `pickupFeeMinor`. Do not add these two values together. Printing subtotal and service-fee calculations exclude the pickup fee; pickup fee earns no supplier payout or rider share. Internal pickup jobs retain their existing zero-charge trip contract. Existing collection/refund accounting handles the fee as platform-owned fulfillment funds.
+At checkout the order and invoice snapshot `requestFulfillment`; pickup additionally snapshots `hubPickup` and `pickupFeeMinor` from current settings. A draft preview can change when settings change; a placed order's schedule and charge cannot. Shop recovery also matches against this snapshotted request point, including the hub for pickup, and preserves the fulfillment choice and charge when the client accepts a replacement. The fee is once per single-shop order, not per line. A multi-shop basket charges it once and allocates minor units evenly across groups, with remainder in group order; see [basket pickup allocation](MULTI_SHOP_CHECKOUT_API.md#one-hub-pickup-fee). The server-owned `cart.clientQuote` and `GET/POST /me/carts/:id/quote` include the same fee in `deliveryFeeMinor` and the already-inclusive GRIDGO item amount in `clientItemSubtotalMinor`. Use their total rather than computing printing markup or delivery from shop details; conflicting quote-preview overrides also return `409 request_fulfillment_locked`. For compatibility with the existing financial model, `deliveryFeeMinor` remains the total fulfillment-charge slot and its `delivery_pass_through` payment allocation: on a new pickup order it **already includes** `pickupFeeMinor`. Do not add these two values together. Printing subtotal and service-fee calculations exclude the pickup fee; pickup fee earns no supplier payout or rider share. Internal pickup jobs retain their existing zero-charge trip contract. Existing collection/refund accounting handles the fee as platform-owned fulfillment funds.
 
 Compatibility: omitting `fulfillmentMode` from matching preserves released-build behavior, including its optional destination and checkout-time choice. Existing tokens, carts, and orders are not upgraded or locked, and legacy pickup carts keep their zero-charge checkout even after a hub fee is configured. The client follow-up must enable the new step only for new request drafts; resume old drafts/orders through their existing flow.
 
@@ -366,6 +366,10 @@ Set drop-offs in one call with:
 
 ## Checkout and invoice
 
+Multi-shop baskets use the additive [multi-shop checkout contract](MULTI_SHOP_CHECKOUT_API.md):
+one basket deadline and fulfillment choice, 100% upfront, one combined receipt,
+and independent order ledgers per shop. The single-shop flow below is unchanged.
+
 Upload the QR Ph screenshot with `POST /files`, `purpose=payment_proof`, then:
 
 ```text
@@ -382,7 +386,7 @@ POST /me/carts/:cartId/checkout
 }
 ```
 
-No other payment method is accepted. Checkout groups lines by shop into one job per shop, snapshots listings/options/artwork/mockups/drop-offs, and calculates each delivery line independently from that shop pin to the job's farthest effective drop-off. Pickup jobs have zero delivery fee.
+No other payment method is accepted. Single-shop checkout creates one job, snapshots listings/options/artwork/mockups/drop-offs, and calculates delivery from the shop pin to the job's farthest effective drop-off. Pickup jobs have zero delivery fee. Multi-shop checkout creates independent orders as specified in the linked contract.
 
 Order totals are:
 

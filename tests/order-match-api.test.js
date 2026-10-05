@@ -302,15 +302,6 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   });
   assert.equal(second.status, 201, JSON.stringify(second.body));
 
-  // A basket belongs to one shop. Adding another shop's listing is refused
-  // rather than quietly splitting the order in two.
-  const otherShop = await request(instance.api, `/me/carts/${cartId}/lines`, {
-    method: "POST", subject: "clerk_client",
-    body: { catalogItemId: "item_supplier_b", optionIds: [], quantity: 1 },
-  });
-  assert.equal(otherShop.status, 409, JSON.stringify(otherShop.body));
-  assert.equal(otherShop.body.error, "cart_belongs_to_another_shop");
-
   const rejected = await request(instance.api, `/me/carts/${cartId}/checkout`, {
     method: "POST", subject: "clerk_client",
     body: { payment: { method: "cash", proofFileId: "file_qr", reference: "QR-123" } },
@@ -1927,14 +1918,14 @@ test("match tokens persist across requests, select another shop and keep deadlin
   const persistedLine = (await database.query("SELECT supplier_id, match_deadline FROM client_cart_lines WHERE cart_id=$1", [cartId])).rows[0];
   assert.equal(persistedLine.supplier_id, "supplier_b");
   assert.equal(persistedLine.match_deadline, deadline);
-  // Queue changes after selection cannot silently miss the requested date at checkout.
-  await database.query("UPDATE client_cart_lines SET match_deadline = $1 WHERE cart_id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
+  // The basket deadline is revalidated at checkout after a change.
+  await database.query("UPDATE client_carts SET deadline = $1 WHERE id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
   const payment = { method: "qr_manual", proofFileId: "file_qr", reference: "OTHER-SHOP" };
   const late = await post(`/me/carts/${cartId}/checkout`, { payment });
   assert.equal(late.status, 409, JSON.stringify(late.body));
   assert.equal(late.body.error, "deadline_not_met");
   assert.equal(Number((await database.query("SELECT count(*) FROM orders")).rows[0].count), 0, "failed checkout rolls back");
-  await database.query("UPDATE client_cart_lines SET match_deadline = $1 WHERE cart_id = $2", [deadline, cartId]);
+  await database.query("UPDATE client_carts SET deadline = $1 WHERE id = $2", [deadline, cartId]);
   const placed = await post(`/me/carts/${cartId}/checkout`, { payment });
   assert.equal(placed.status, 201, JSON.stringify(placed.body));
   const order = (await loadStore(database)).orders.find((row) => row.id === placed.body.order.id);
@@ -2031,6 +2022,187 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
   assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
 });
 
+for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [2, 'pickup'], [3, 'pickup']]) {
+  test(`multi-shop ${groupCount} ${fulfillmentMode} groups persist one payment and receipt, with independent payouts and refunds`, { skip: !DATABASE_URL }, async (t) => {
+    const database = createDatabase({ DATABASE_URL });
+    t.after(() => database.close());
+    await fixture(database);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.settings.downpaymentPercent = 75;
+      store.settings.hubPickup.feeMinor = 2501;
+      if (groupCount === 3) {
+        const copy = (rows, key, from, to) => rows.push({ ...structuredClone(rows.find((row) => row[key] === from)), [key]: to });
+        copy(store.users, 'id', 'supplier_b', 'supplier_c');
+        Object.assign(store.users.at(-1), { clerkUserId: 'clerk_supplier_c', email: 'c@gridgo.test' });
+        copy(store.userRoleMemberships, 'userId', 'supplier_b', 'supplier_c');
+        copy(store.supplierProfiles, 'userId', 'supplier_b', 'supplier_c');
+        copy(store.approvalCases, 'userId', 'supplier_b', 'supplier_c');
+        store.approvalCases.at(-1).id = 'case_c';
+        const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+        store.supplierServices.push({ ...structuredClone(service), id: 'service_c', supplierId: 'supplier_c' });
+        store.supplierServiceFileFormats.push({ supplierServiceId: 'service_c', formatCode: 'pdf' });
+        store.files.push({ ...structuredClone(store.files.find((file) => file.fileId === 'photo_supplier_b')),
+          fileId: 'photo_supplier_c', ownerId: 'supplier_c', objectKey: 'supplier_c/photo.jpg' });
+        store.catalogItemPhotos.push({ catalogItemId: 'item_supplier_c', fileId: 'photo_supplier_c', sortOrder: 0, createdAt: AT });
+        store.catalogItems.push({ ...structuredClone(store.catalogItems.find((row) => row.id === 'item_supplier_b')),
+          id: 'item_supplier_c', supplierId: 'supplier_c', supplierServiceId: 'service_c' });
+      }
+      store.files.push({ fileId: 'file_refund_qr', ownerId: 'user_client', purpose: 'refund_qr', state: 'ready',
+        originalFilename: 'destination.png', declaredContentType: 'image/png', detectedContentType: 'image/png',
+        objectKey: 'client/refund.png', size: 100, createdAt: AT, references: [] });
+      await saveStore(database, store);
+    });
+    const instance = await startApi();
+    t.after(async () => { instance.child.kill('SIGTERM'); await new Promise((resolve) => instance.child.once('exit', resolve)); });
+    const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+    const post = (pathname, body = {}, subject = 'clerk_ops') => call(pathname, { method: 'POST', subject, body });
+    const deadline = new Date(Date.now() + 90 * 86400000).toISOString();
+    const created = await post('/me/carts', { fulfillmentMode, deadline,
+      defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } }, 'clerk_client');
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const cartId = created.body.cart.id;
+    for (const suffix of ['a', 'b', 'c'].slice(0, groupCount)) {
+      let selection = {};
+      if (fulfillmentMode === 'pickup') {
+        const match = await post('/me/matches', { subcategoryCode: 'flyers', cartId, fulfillmentMode }, 'clerk_client');
+        assert.equal(match.status, 200, JSON.stringify(match.body));
+        const listing = [...match.body.listings, ...match.body.otherListings].find(row => row.id === `item_supplier_${suffix}`);
+        assert.ok(listing, JSON.stringify(match.body));
+        selection = { selectToken: listing.selectToken, matchRequestId: match.body.matchRequestId };
+      }
+      const added = await post(`/me/carts/${cartId}/lines`, { catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...selection }, 'clerk_client');
+      assert.equal(added.status, 201, JSON.stringify(added.body));
+    }
+    // A failure in a later group must roll back earlier groups and file bindings.
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.carts.find((cart) => cart.id === cartId).deadline = new Date(Date.now() + 2 * 86400000).toISOString();
+      const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+      service.turnaroundHours = 500;
+      service.standardTurnaroundHours = 500;
+      await saveStore(database, store);
+    });
+    const late = await post(`/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'TOO-LATE', proofFileId: 'file_qr' } }, 'clerk_client');
+    assert.equal(late.body.error, 'deadline_not_met', JSON.stringify(late.body));
+    assert.equal(Number((await database.query('SELECT count(*) FROM orders')).rows[0].count), 0);
+    assert.equal(Number((await database.query('SELECT count(*) FROM order_invoices')).rows[0].count), 0);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      const cart = store.carts.find((row) => row.id === cartId);
+      assert.equal(cart.state, 'draft');
+      cart.deadline = deadline;
+      const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+      service.turnaroundHours = 24;
+      service.standardTurnaroundHours = 24;
+      await saveStore(database, store);
+    });
+    const before = (await call(`/me/carts/${cartId}`)).body.cart;
+    const secondLine = before.lines[1].id;
+    assert.equal((await call(`/me/carts/${cartId}/lines/${secondLine}`, { method: 'PATCH', body: { artworkFileId: null } })).status, 200);
+    const missing = await post(`/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'MISSING-ART', proofFileId: 'file_qr' } }, 'clerk_client');
+    assert.equal(missing.body.error, 'artwork_required');
+    assert.equal(Number((await database.query('SELECT count(*) FROM orders')).rows[0].count), 0);
+    assert.equal((await call(`/me/carts/${cartId}/lines/${secondLine}`, { method: 'PATCH', body: { artworkFileId: 'file_art' } })).status, 200);
+    const placed = await post(`/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'BASKET-ONE', proofFileId: 'file_qr' } }, 'clerk_client');
+    assert.equal(placed.status, 201, `${JSON.stringify(placed.body)}\n${instance.output()}`);
+    const { basket, invoice } = placed.body;
+    const [first, second] = basket.groups.map((group) => group.orderId);
+    assert.equal(basket.groups.length, groupCount);
+    assert.equal(basket.totalMinor, before.clientQuote.totalMinor);
+    assert.equal((await call(`/orders/${first}`, { subject: 'clerk_supplier_a' })).status, 403);
+    const expectedPickup = groupCount === 2 ? [1251, 1250] : [834, 834, 833];
+    if (fulfillmentMode === 'pickup') {
+      assert.equal(basket.pickupFeeMinor, 2501);
+      assert.equal(invoice.pickupFeeMinor, 2501);
+      assert.deepEqual(before.groups.map(group => group.pickupFeeMinor), expectedPickup);
+      assert.deepEqual(basket.groups.map(group => group.pickupFeeMinor), expectedPickup);
+      assert.deepEqual(invoice.groups.map(group => group.pickupFeeMinor), expectedPickup);
+      const stored = await loadStore(database);
+      assert.equal(stored.baskets[0].pickupFeeMinor, 2501);
+      assert.deepEqual(stored.baskets[0].orderIds.map(id => stored.orders.find(order => order.id === id).pickupFeeMinor), expectedPickup);
+      assert.ok(stored.orders.every(order => order.riderPayoutMinor === 0));
+      assert.ok(stored.orderJobs.every(job => job.deliveryFeeMinor === 0));
+      await assert.rejects(database.query('UPDATE order_baskets SET pickup_fee_minor=2502 WHERE id=$1', [basket.id]), /basket snapshot/);
+      await database.transaction(async () => {
+        const current = await loadStore(database);
+        current.settings.hubPickup.feeMinor = 9000;
+        await saveStore(database, current);
+      });
+      assert.equal((await call(`/baskets/${basket.id}`)).body.basket.pickupFeeMinor, 2501);
+    }
+    const intake = await loadStore(database);
+    assert.equal(intake.notifications.filter(row => row.type === 'ops_job_needs_qa' && row.userId === 'user_ops').length, groupCount);
+    assert.equal(basket.payment.amountMinor, invoice.totalMinor);
+    assert.equal((await post(`/orders/${first}/payments/initial/confirm`)).body.error, 'basket_payment_required');
+    assert.equal((await call(`/baskets/${basket.id}`, { subject: 'clerk_supplier_a' })).status, 403);
+    assert.equal((await post(`/baskets/${basket.id}/payment/confirm`, {}, 'clerk_client')).status, 403);
+    assert.equal((await post(`/baskets/${basket.id}/payment/reject`, { reason: 'Reference needs correction' })).status, 200);
+    assert.equal((await post(`/baskets/${basket.id}/payment/submit`, { method: 'qr_manual', proofFileId: 'file_qr', reference: 'BASKET-CORRECTED' }, 'clerk_client')).status, 200);
+    const confirmed = await post(`/baskets/${basket.id}/payment/confirm`);
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.ok(confirmed.body.basket.groups.every((group) => group.state === 'needs_qa'));
+    assert.equal((await post(`/baskets/${basket.id}/payment/confirm`)).status, 409);
+    for (const group of basket.groups) {
+      const receipt = await call(`/orders/${group.orderId}/invoice`);
+      assert.deepEqual(receipt.body.invoice, invoice);
+    }
+    const ops = await call(`/baskets/${basket.id}`, { subject: 'clerk_ops' });
+    assert.equal(ops.body.basket.groups[0].order.supplierId, 'supplier_a');
+    assert.equal(ops.body.basket.groups[0].order.payoutMilestones.length, 3);
+    const clientRead = await call(`/orders/${first}`);
+    assert.equal(clientRead.body.order.supplierId, undefined);
+    assert.equal(clientRead.body.order.payoutMilestones, undefined);
+    for (const [state, actor] of [['supplier_assigned', 'clerk_ops'], ['payment_authorized', 'clerk_supplier_a'], ['production', 'clerk_supplier_a']]) {
+      const moved = await post(`/orders/${first}/transition`, { state }, actor);
+      assert.equal(moved.status, 200, JSON.stringify(moved.body));
+    }
+    await attachProofDirectly(database, first, 'production_started');
+    const released = await post(`/orders/${first}/milestones/production_started/release`);
+    assert.equal(released.status, 200, JSON.stringify(released.body));
+    let persisted = await loadStore(database);
+    assert.equal(persisted.orders.find((order) => order.id === first).payoutMilestones[0].status, 'released');
+    assert.ok(persisted.orders.find((order) => order.id === second).payoutMilestones.every((stage) => stage.status !== 'released'));
+    assert.equal(persisted.orderInvoices.length, 1);
+    assert.equal(persisted.baskets.length, 1);
+    assert.equal(persisted.orders.reduce((sum, order) => sum + order.payments.initial.amountMinor, 0), basket.totalMinor);
+
+    const refundCall = async (pathname, body, subject = 'clerk_ops') => {
+      const response = await fetch(`${instance.api}${pathname}`, { method: 'POST',
+        headers: { Authorization: `Bearer ${token(subject)}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify(body) });
+      const result = await response.json();
+      assert.ok(response.ok, JSON.stringify(result));
+      return result.refund;
+    };
+    if (groupCount === 2) {
+      const assigned = await post(`/orders/${second}/transition`, { state: 'supplier_assigned' });
+      assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+      assert.equal(assigned.body.order.shopAcceptance.workingMinutes, 60);
+      const declined = await post(`/orders/${second}/decline`, { reason: 'Unable to fulfil this group' }, 'clerk_supplier_b');
+      assert.equal(declined.status, 200, JSON.stringify(declined.body));
+      assert.equal((await loadStore(database)).orders.find((order) => order.id === first).state, 'production');
+    }
+    let refund = await refundCall(`/orders/${second}/refund-requests`, { kind: 'cancellation', reason: 'Cancel this group only',
+      destination: { qrFileId: 'file_refund_qr', provider: 'other', accountName: 'Account holder', ownershipConfirmed: true } }, 'clerk_client');
+    refund = await refundCall(`/refund-requests/${refund.id}/review`, { expectedVersion: refund.version,
+      destinationVerified: true, reason: 'Destination verified' });
+    const secondTotal = basket.groups[1].totalMinor;
+    refund = await refundCall(`/refund-requests/${refund.id}/settle`, { expectedVersion: refund.version,
+      shopEntitlementMinor: 0, riderEntitlementMinor: 0, totalMinor: secondTotal, workStopped: true,
+      shopAgreement: 'No work performed', deliveryEvidence: 'No trip performed', reason: 'Full group refund' });
+    assert.equal(refund.settlement.totalMinor, secondTotal);
+    if (fulfillmentMode === 'pickup') assert.equal(refund.settlement.deliveryMinor, expectedPickup[1]);
+    persisted = await loadStore(database);
+    assert.equal(persisted.orders.find((order) => order.id === second).state, 'cancelled');
+    assert.equal(persisted.orders.find((order) => order.id === first).state, 'production');
+    assert.equal(persisted.orders.find((order) => order.id === first).payoutMilestones[0].status, 'released');
+    assert.deepEqual((await call(`/baskets/${basket.id}/invoice`)).body.invoice, invoice);
+    await assert.rejects(database.transaction(async () => {
+      await database.query("UPDATE order_payments SET status='not_submitted' WHERE order_id=$1 AND code='initial'", [first]);
+    }), /basket payment/);
+  });
+}
 test('checkout checks links for released clients, refuses every failed or inconclusive verdict, and rolls back', { skip: !DATABASE_URL }, async t => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
