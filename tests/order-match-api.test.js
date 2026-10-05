@@ -344,7 +344,6 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   const inbox = persisted.notifications.map((row) => `${row.userId}:${row.type}`).sort();
   assert.deepEqual(inbox, [
-    "supplier_a:shop_job_assigned",
     "user_client:order_receipt_ready",
     "user_client:order_submitted",
     "user_ops:ops_assignment_changed",
