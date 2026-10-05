@@ -1467,6 +1467,17 @@ async function sweepSeasonWindows() {
   });
 }
 
+async function sweepOrganizationOfficers() {
+  // An empty or not-yet-due roster must not acquire the domain lock on every tick.
+  const candidate = await database.query(`SELECT 1 FROM organization_accounts
+    WHERE (data->>'nextConfirmationAt')::timestamptz <= now() LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    if (sweepOfficerConfirmations(store, { at: now(), createId: id })) await save(store);
+  });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -6435,10 +6446,7 @@ async function runLifecycleWork() {
       expireElapsedIssueWindows,
       sweepProductionInactivity,
       sweepSeasonWindows,
-      async () => enqueueMutation(async () => {
-        const store = await load();
-        if (sweepOfficerConfirmations(store, { at: now(), createId: id })) await save(store);
-      }),
+      sweepOrganizationOfficers,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }
