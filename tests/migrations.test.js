@@ -123,6 +123,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791255600000_order_reschedule_request",
         "1791331200000_catalog_listing_suspension",
         "1791417600000_listing_reviews",
+        "1791504000000_organization_discount",
       ],
     );
 
@@ -301,6 +302,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.guard_organization_discount()`])).rows[0].fn, null);
 
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(
