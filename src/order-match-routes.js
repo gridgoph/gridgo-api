@@ -1,3 +1,4 @@
+import { officerSnapshot } from "./client-applications.js";
 import { approvedCatalogView, CATALOG_REVIEW_TABLES } from "./catalog-review-state.js";
 import { clientInvoice } from "./invoice-projection.js";
 import { basketForOrder, publicBasket, shopLabel, splitBasketFee } from "./baskets.js";
@@ -645,6 +646,7 @@ function publicMatchedOrder(store, order) {
     },
     jobs,
     invoiceNumber: order.invoiceNumber,
+    organizationOfficer: structuredClone(order.organizationOfficer || null),
     fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
     createdAt: order.createdAt,
   };
@@ -674,6 +676,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const order = {
     id: orderId,
     clientId: user.id,
+    organizationOfficer: officerSnapshot(store, user.id),
     ...(basketId ? { basketId, groupLabel, basketDeadline: cart.deadline } : {}),
     // One shop per order, known since the match. It was null here, with the
     // shop recorded per job instead -- which is why no supplier surface ever
@@ -899,6 +902,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
 
   const invoice = {
     invoiceNumber: order.invoiceNumber,
+    organizationOfficer: structuredClone(order.organizationOfficer),
     orderId,
     issuedAt: at,
     currency: "PHP",
@@ -968,7 +972,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   delete basket.payment.amountMinor;
   store.baskets ||= [];
   store.baskets.push(basket);
-  const invoice = { invoiceNumber: first.invoiceNumber, orderId: first.id, basketId, issuedAt: at, currency: "PHP",
+  const invoice = { organizationOfficer: structuredClone(first.organizationOfficer), invoiceNumber: first.invoiceNumber, orderId: first.id, basketId, issuedAt: at, currency: "PHP",
     ...(hubPickup ? { hubPickup, pickupFeeMinor: hubPickup.feeMinor } : {}),
     ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
     lines: results.flatMap((result) => result.invoice.lines),

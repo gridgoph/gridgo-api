@@ -35,6 +35,8 @@ const TABLES = [
   { name: "season_windows", keys: ["id"], columns: ["id", "name", "start_date", "end_date", "demand_level", "message", "version", "notice_queued_at", "created_at", "updated_at"] },
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
   { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
+  { name: "organization_accounts", keys: ["user_id"], columns: ["user_id", "name_key", "school_key", "data"] },
+  { name: "organization_email_challenges", keys: ["user_id"], columns: ["user_id", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
@@ -44,7 +46,7 @@ const TABLES = [
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
-  { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
+  { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "business_permit_required", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
   { name: "approval_case_events", keys: ["id"], columns: ["id", "approval_case_id", "application_revision", "from_status", "to_status", "actor_user_id", "actor_kind", "reason", "request_id", "snapshot", "created_at"], appendOnly: true },
   { name: "catalog_products", keys: ["id"], columns: ["id", "name", "family", "base_price_minor", "unit", "position", "data"] },
   { name: "taxonomy_categories", keys: ["id"], columns: ["id", "code", "name", "active", "sort_order", "position", "data"] },
@@ -107,6 +109,8 @@ export function emptyStore() {
     users: [],
     userRoleMemberships: [],
     clientProfiles: [],
+    organizationAccounts: [],
+    organizationEmailChallenges: [],
     clientPreferences: [],
     matchSelections: [],
     clientAddresses: [],
@@ -174,6 +178,13 @@ function rowsFromStore(store) {
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
     notice_queued_at: item.noticeQueuedAt ?? null, created_at: item.createdAt, updated_at: item.updatedAt,
+  });
+  for (const account of store.organizationAccounts || []) rows.organization_accounts.push({
+    user_id: account.userId, name_key: account.nameKey, school_key: account.schoolKey,
+    data: without(account, ["userId", "nameKey", "schoolKey"]),
+  });
+  for (const challenge of store.organizationEmailChallenges || []) rows.organization_email_challenges.push({
+    user_id: challenge.userId, data: without(challenge, ["userId"]),
   });
   rows.platform_settings.push({ singleton: true, version: store.version || 3, settings: store.settings || {} });
 
@@ -281,6 +292,7 @@ function rowsFromStore(store) {
     rows.approval_cases.push({
       id: approvalCase.id, user_id: approvalCase.userId, kind: approvalCase.kind, status: approvalCase.status,
       version: approvalCase.version, application_revision: approvalCase.applicationRevision,
+      business_permit_required: Boolean(approvalCase.businessPermitRequired),
       submitted_at: approvalCase.submittedAt ?? null, decided_at: approvalCase.decidedAt ?? null,
       decided_by: approvalCase.decidedBy ?? null, rejection_reason: approvalCase.rejectionReason ?? null,
       suspension_reason: approvalCase.suspensionReason ?? null, created_at: approvalCase.createdAt,
@@ -734,6 +746,8 @@ export async function loadStore(database) {
     loaded[table.name] = (await database.query(`SELECT ${table.columns.join(", ")} FROM ${table.name}`)).rows;
   }
   const store = emptyStore();
+  store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
+  store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
   const settings = loaded.platform_settings[0];
   if (settings) { store.version = settings.version; store.settings = settings.settings; }
 
@@ -816,6 +830,7 @@ export async function loadStore(database) {
   });
   store.approvalCases = orderedBy(loaded.approval_cases, "created_at", "id").map((row) => {
     const item = { id: row.id, userId: row.user_id, kind: row.kind, status: row.status, version: row.version, applicationRevision: row.application_revision, createdAt: row.created_at, updatedAt: row.updated_at };
+    if (row.business_permit_required) item.businessPermitRequired = true;
     present(item, "submittedAt", row.submitted_at);
     present(item, "decidedAt", row.decided_at);
     present(item, "decidedBy", row.decided_by);

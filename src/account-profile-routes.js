@@ -1,3 +1,4 @@
+import { CLIENT_APPLICATION_FIELDS } from "./client-applications.js";
 import { approvalCaseSummary, identityHasMembership } from "./authorization-context.js";
 import { applyForBusiness } from "./enrollment.js";
 import { philippineMobileNumber } from "./phone.js";
@@ -225,6 +226,7 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
 
     if (name != null) updateName(user, name);
     if (phone != null) user.phone = phone;
+    if (orgName != null && user.accountType === "organization") fail(409, "organization_identity_immutable", "Organization identity is set by its verified application.");
     if (orgName != null) user.orgName = orgName;
     bumpVersion(user);
     if (typeof audit === "function") {
@@ -240,7 +242,7 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
   }
 
   const body = record(await readBody(req));
-  rejectUnexpected(body, ["accountType", "businessName", "businessNature", "contactName", "contactPhone", "phone", "address"]);
+  rejectUnexpected(body, [...CLIENT_APPLICATION_FIELDS, "expectedVersion", "contactName", "contactPhone", "phone", "address"]);
   if (Object.hasOwn(body, "contactPhone") && Object.hasOwn(body, "phone")) {
     fail(400, "invalid_account_profile", "Send contactPhone only once.", { field: "contactPhone" });
   }
@@ -292,8 +294,8 @@ export async function routeAccountProfile({ req, url, store, user, readBody, cre
   const application = applyForBusiness({
     store,
     user,
-    body: { businessName, businessNature, accountType },
-    idempotencyKey: `legacy-apply:${user.id}`,
+    body: { ...Object.fromEntries([...CLIENT_APPLICATION_FIELDS, "expectedVersion"].filter((key) => Object.hasOwn(body, key)).map((key) => [key, body[key]])), businessName, businessNature, accountType },
+    idempotencyKey: req.headers?.["idempotency-key"] || `legacy-apply:${user.id}:${body.expectedVersion || 0}`,
     createId,
     now,
   });
