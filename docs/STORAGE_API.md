@@ -142,7 +142,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
 
-Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
+Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 invalid_file_type` with `reason: "heic_not_supported"`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
 
 The upload request timeout defaults to 15 minutes. Clients may show transfer progress, but progress reaching 100% is **not success**. Only a `201` response containing `file.fileId` means MinIO storage and `ready` metadata both completed. Retry after any lost connection or non-201 response; never invent or reuse a guessed ID.
 
@@ -421,12 +421,11 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 413 | `file_too_large` | Purpose limit exceeded; choose a smaller file. Response includes `purpose`, `maxBytes`, `maxMiB` when known. |
 | 413 | `request_body_too_large` | Non-file JSON exceeds 1 MiB; remove extra data. |
 | 415 | `multipart_required` | Upload is not multipart; send `FormData`. |
-| 415 | `content_type_not_allowed` | Specific declared MIME is unsupported; export to an accepted format. |
-| 415 | `purpose_media_type_not_allowed` | Valid detected format is not allowed for that purpose (for example PDF delivery photo); use an allowed image. |
-| 415 | `file_type_mismatch` | Extension, specific declared MIME, and magic bytes disagree or signature is unknown; export correctly. |
-| 415 | `heic_not_supported` | HEIC/HEIF detected; convert/capture as JPEG or PNG. |
+| 415 | `invalid_file_type` | Unsupported, mismatched, or purpose-ineligible format. Response includes a plain `message`, `purpose`, `allowedContentTypes`, and `reason`: `content_type_not_allowed`, `file_type_mismatch`, `purpose_media_type_not_allowed`, or `heic_not_supported`. Export to an accepted format. |
 | 503 | `minio_unavailable` | MinIO is unreachable; run `docker compose up -d --wait` and retry. Non-file endpoints remain available. |
 | 503 | `storage_initializing` | Boot-time MinIO recovery is still running; wait briefly and retry the file action. |
+
+Upload validation runs before storage access, including during storage recovery. Dashboards should show the response `message` for `invalid_file_type`, and the `maxMiB`/`maxBytes` limit for `file_too_large`; reserve a storage-unavailable message for `503 minio_unavailable` or `storage_initializing`. Type errors formerly returned the individual reason as the top-level `error`; that detail now lives in `reason`.
 
 No file route returns raw SDK exceptions, stack traces, credentials, or standalone bucket/key metadata. The one deliberate exception is the authorized presigned URL, whose signed path necessarily contains the bucket and key and must remain opaque.
 

@@ -411,9 +411,9 @@ export function validateUpload(file, purpose = "artwork") {
   if (HEIC_EXTENSIONS.has(extension) || sniffedContentType === "image/heic") {
     fail(
       415,
-      "heic_not_supported",
+      "invalid_file_type",
       "HEIC files are not supported. Export or capture the image as JPEG or PNG, then try again.",
-      { allowedContentTypes: [...CONTENT_TYPES] },
+      { reason: "heic_not_supported", purpose, allowedContentTypes: policy.contentTypes },
     );
   }
 
@@ -423,11 +423,11 @@ export function validateUpload(file, purpose = "artwork") {
   if (!GENERIC_CONTENT_TYPES.has(declaredContentType) && !declaredAllowed.has(declaredContentType)) {
     fail(
       415,
-      "content_type_not_allowed",
+      "invalid_file_type",
       purpose === "artwork"
         ? "This file type is not supported. Choose a JPEG, PNG, WebP, PDF, or Photoshop file and try again."
         : "This file type is not supported. Choose a JPEG, PNG, WebP, or PDF file and try again.",
-      { allowedContentTypes: [...declaredAllowed] },
+      { reason: "content_type_not_allowed", purpose, allowedContentTypes: policy.contentTypes },
     );
   }
 
@@ -437,11 +437,14 @@ export function validateUpload(file, purpose = "artwork") {
   if (!extensionContentType || !sniffedContentType || extensionContentType !== sniffedContentType || explicitTypeMismatch) {
     fail(
       415,
-      "file_type_mismatch",
+      "invalid_file_type",
       purpose === "artwork"
         ? "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, PDF, or Photoshop and try again."
         : "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, or PDF and try again.",
       {
+        reason: "file_type_mismatch",
+        purpose,
+        allowedContentTypes: policy.contentTypes,
         extension,
         declaredContentType: declaredContentType || null,
         sniffedContentType,
@@ -451,9 +454,9 @@ export function validateUpload(file, purpose = "artwork") {
   if (!policy.contentTypes.includes(sniffedContentType)) {
     fail(
       415,
-      "purpose_media_type_not_allowed",
+      "invalid_file_type",
       `${purpose} does not accept ${sniffedContentType}. Choose ${policy.contentTypes.join(", ")} and try again.`,
-      { purpose, detectedContentType: sniffedContentType, allowedContentTypes: policy.contentTypes },
+      { reason: "purpose_media_type_not_allowed", purpose, detectedContentType: sniffedContentType, allowedContentTypes: policy.contentTypes },
     );
   }
   return sniffedContentType;

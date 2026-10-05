@@ -90,3 +90,5 @@ Local tests use disposable PostgreSQL and signed test-only Clerk JWTs. The exist
 An own-account `role_changed` push may reach the account's still-owned device whose app role was just removed, provided the notification has no order/case pointer. Its title/body remain generic. This narrow delivery exception does not permit opening protected work or receiving old role notifications.
 
 Listing review and product-type requests emit `catalog_review_pending` / `catalog_review_decided` durable inbox rows to the owning supplier and every current Operations/Super Admin membership, plus scoped `catalog` invalidation. Review changes use the transaction/save/outbox boundary. See [listing review](SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker).
+
+Paper-invoice promises write `physical_invoice_promised` to the owning client's inbox when Operations/Super Admin first sets or changes `promisedDeliveryAt`. The body states the paper invoice delivery date and time in Asia/Manila. Repeating the same promise does not notify again. This uses the ordinary notification/outbox boundary at `save()`; no separate push sender is required.
