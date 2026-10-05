@@ -2155,10 +2155,17 @@ test('artwork uploads persist their automatic verdict and checkout refuses a cor
     const form = new FormData();
     form.set('purpose', 'artwork');
     form.set('file', new Blob([bytes], { type: 'application/pdf' }), 'design.pdf');
-    const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
-    const body = await response.json();
-    assert.equal(response.status, 201, JSON.stringify(body) + instance.output());
-    return body.file;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
+      const body = await response.json();
+      if (body.error === 'storage_initializing') {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        continue;
+      }
+      assert.equal(response.status, 201, JSON.stringify(body) + instance.output());
+      return body.file;
+    }
+    assert.fail(`Storage recovery did not finish: ${instance.output()}`);
   };
   const invalid = await upload(Buffer.from('%PDF-1.7 truncated'));
   assert.equal(invalid.artworkCheck.status, 'failed');
@@ -2172,4 +2179,56 @@ test('artwork uploads persist their automatic verdict and checkout refuses a cor
   assert.equal((await loadStore(database)).files.find(file => file.fileId === valid.fileId).artworkCheck.status, 'passed');
   await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { method: 'PATCH', body: { artworkFileId: valid.fileId } });
   assert.equal((await checkout()).status, 201);
+});
+
+test("signed catalogue reads protect full shop details and quotes expose client amounts only", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase();
+  t.after(() => database.close());
+  await fixture(database);
+  const { api, child } = await startApi();
+  t.after(() => child.kill("SIGTERM"));
+  for (const pathname of ["/ops/catalog/shops", "/ops/catalog/shops/supplier_a", "/ops/catalog/items/item_supplier_a", "/me/catalog-preview"]) {
+    assert.equal((await request(api, pathname)).status, 401, pathname);
+    assert.equal((await request(api, pathname, { subject: "clerk_client" })).status, 403, pathname);
+  }
+  for (const pathname of ["/ops/catalog/shops", "/ops/catalog/shops/supplier_a", "/ops/catalog/items/item_supplier_a"]) {
+    assert.equal((await request(api, pathname, { subject: "clerk_supplier_a" })).status, 403);
+    const ops = await request(api, pathname, { subject: "clerk_ops" });
+    assert.equal(ops.status, 200, JSON.stringify(ops.body));
+    if (ops.body.item) assert.equal(ops.body.item.basePriceMinor, 10000);
+    else assert.ok((ops.body.shop || ops.body.shops[0]).shop.lat);
+  }
+  const preview = await request(api, "/me/catalog-preview", { subject: "clerk_supplier_a" });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.shop.supplierId, "supplier_a");
+  assert.equal(preview.body.shop.services[0].items[0].basePriceMinor, 10000);
+  const own = await request(api, "/me/catalog-items/item_supplier_a", { subject: "clerk_supplier_a" });
+  assert.equal(own.body.item.basePriceMinor, 10000);
+  const publicItem = await request(api, "/catalog/items/item_supplier_a");
+  assert.equal(publicItem.body.item.clientBasePriceMinor, 11000);
+  assert.equal(publicItem.body.item.basePriceMinor, 10000, "legacy fields survive phase one");
+  const quoteInput = { catalogItemId: "item_supplier_a", quantity: 2 };
+  assert.equal((await request(api, "/me/catalog-quotes", { method: "POST", body: quoteInput })).status, 401);
+  assert.equal((await request(api, "/me/catalog-quotes", { method: "POST", subject: "clerk_supplier_a", body: quoteInput })).status, 403);
+  const priced = await request(api, "/me/catalog-quotes", { method: "POST", subject: "clerk_client", body: quoteInput });
+  assert.equal(priced.status, 200);
+  assert.equal(priced.body.quote.clientLineSubtotalMinor, 22000);
+  for (const field of ["basePriceMinor", "lineSubtotalMinor", "unitRateMinor", "shop", "shopName", "pickup", "supplierSubtotalMinor"]) {
+    assert.equal(JSON.stringify(priced.body).includes(`"${field}"`), false, field);
+  }
+  const cart = (await request(api, "/me/carts", { method: "POST", subject: "clerk_client", body: {} })).body.cart;
+  await request(api, `/me/carts/${cart.id}/lines`, {
+    method: "POST", subject: "clerk_client", body: { ...quoteInput, optionIds: [] },
+  });
+  const quotePath = `/me/carts/${cart.id}/quote`;
+  assert.equal((await request(api, quotePath)).status, 401);
+  assert.equal((await request(api, quotePath, { subject: "clerk_supplier_a" })).status, 403);
+  const previewQuote = await request(api, quotePath, {
+    method: "POST", subject: "clerk_client", body: { fulfillmentMode: "pickup" },
+  });
+  assert.equal(previewQuote.body.quote.totalMinor, 22000);
+  const savedCart = (await request(api, `/me/carts/${cart.id}`, { subject: "clerk_client" })).body.cart;
+  assert.equal(savedCart.fulfillmentMode, "delivery");
+  assert.equal(savedCart.clientQuote.totalMinor, null);
+  assert.equal(savedCart.version, 2);
 });
