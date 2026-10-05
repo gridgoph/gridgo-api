@@ -1,9 +1,10 @@
 import { routeBaskets } from "../src/baskets.js";
-import { defaultOperationalSettings, publicOrderFor } from "../src/operational-model.js";
+import { calculateRefundSettlement } from "../src/refund-policy.js";
+import { defaultOperationalSettings, publicOrderFor, moneyReportingForOrder } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { routeOrderMatch, prepareCartArtworkLinks } from "../src/order-match-routes.js";
+import { routeOrderMatch, prepareCartArtworkLinks, prepareArtworkCheckout } from "../src/order-match-routes.js";
 import { defaultTaxonomy } from "../src/taxonomy.js";
 
 const AT = "2026-08-24T01:00:00.000Z";
@@ -64,7 +65,7 @@ function fixture() {
     shop: { lat: 7.09, lng: 125.63, label: "Shop B" }, turnaroundHours: 24,
   });
   store.files.push(
-    { fileId: "file_art", ownerId: client.id, purpose: "artwork", state: "ready", objectKey: "client/art.pdf", references: [] },
+    { fileId: "file_art", ownerId: client.id, purpose: "artwork", artworkCheck: { status: "passed", checkedAt: AT }, state: "ready", objectKey: "client/art.pdf", references: [] },
     { fileId: "file_mock", ownerId: client.id, purpose: "mockup", state: "ready", objectKey: "client/mock.jpg", references: [] },
     { fileId: "file_qr", ownerId: client.id, purpose: "payment_proof", state: "ready", objectKey: "client/qr.jpg", references: [] },
   );
@@ -73,15 +74,12 @@ function fixture() {
 
 function caller(store, user, at = AT) {
   let sequence = 0;
-  return async (method, pathname, body) => routeOrderMatch({
-    req: { method },
-    url: new URL(`http://gridgo.test${pathname}`),
-    store,
-    user,
-    readBody: async () => body || {},
-    id: (prefix) => `${prefix}_${++sequence}`,
-    now: () => at,
-  });
+  return async (method, pathname, body) => {
+    const req = { method };
+    await prepareArtworkCheckout({ req, pathname, store, user, checker: async () => ({ ok: true }) });
+    return routeOrderMatch({ req, url: new URL(`http://gridgo.test${pathname}`), store, user,
+      readBody: async () => body || {}, id: (prefix) => `${prefix}_${++sequence}`, now: () => at });
+  };
 }
 
 test("a removed shop is not matched until its account is restored", async () => {
@@ -132,7 +130,7 @@ for (const queued of [false, true]) {
     assert.equal(match.body.queue.jobsAhead, queued ? 2 : 0);
     const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
     const added = await call("POST", `/me/carts/${cartId}/lines`, {
-      catalogItemId: "item_a", optionIds: [], quantity: 1,
+      catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
     });
     const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
     const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
@@ -162,7 +160,7 @@ test("cart promise uses quantity capacity, closures, and the current request tim
   };
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 200,
+    catalogItemId: "item_a", optionIds: [], quantity: 200, artworkFileId: "file_art",
   });
   const expected = "2026-09-29T10:00:00.000Z"; // End of the second open day.
   assert.equal(added.body.cart.lines[0].promiseBy, expected);
@@ -196,7 +194,7 @@ test("cart promise is explicitly null when its listing or calendar is unavailabl
       const call = caller(store, client);
       const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
       const added = await call("POST", `/me/carts/${cartId}/lines`, {
-        catalogItemId: "item_a", optionIds: [], quantity: 1,
+        catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
       });
       assert.ok(added.body.cart.lines[0].promiseBy);
       invalidate(store);
@@ -251,7 +249,7 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   const lineId = firstLine.body.cart.lines[0].id;
   await call("PUT", `/me/carts/${cartId}/lines/${lineId}/mockup`, { fileId: "file_mock" });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a2", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
   assert.equal(cart.lines.length, 2);
@@ -351,7 +349,7 @@ test("with the setting at 75, checkout snapshots a 75/25 split and a balance to 
   });
   const cartId = created.body.cart.id;
   await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
-  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a2", optionIds: [], quantity: 1 });
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art" });
   const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
     payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" },
   });
@@ -423,7 +421,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     catalogItemId: "item_a", optionIds: ["option_item_a_matte"], quantity: 2,
   });
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a2", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
 
   assert.equal(added.status, 201);
@@ -467,10 +465,10 @@ test("cart payloads include one shop counter per selected supplier", async () =>
   const cartId = created.body.cart.id;
 
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a2", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
     catalogItemId: "item_a2", optionIds: [], quantity: 2,
@@ -521,7 +519,7 @@ test("a tarpaulin priced by the square foot can actually be ordered", async () =
 
   // 3ft x 5ft, in thousandths, is 15 square feet at PHP 25.
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
     measurement: { width: 3_000, height: 5_000 },
   });
   assert.equal(added.status, 201);
@@ -540,7 +538,7 @@ test("a tarpaulin priced by the square foot can actually be ordered", async () =
   // is silently dropped bills the client for something they did not fill in.
   await assert.rejects(
     call("POST", `/me/carts/${cartId}/lines`, {
-      catalogItemId: "item_a2", optionIds: [], quantity: 1,
+      catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
       measurement: { width: 3_000, height: 5_000 },
     }),
     (error) => error.code === "measurement_not_accepted",
@@ -560,7 +558,7 @@ test("a tarpaulin cart line is refused when requested width exceeds the printer 
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
 
   const fits = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
     measurement: { width: 5_000, height: 8_000 },
   });
   assert.equal(fits.status, 201);
@@ -576,7 +574,7 @@ test("a tarpaulin cart line is refused when requested width exceeds the printer 
   const cartId2 = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
   await assert.rejects(
     call("POST", `/me/carts/${cartId2}/lines`, {
-      catalogItemId: "item_a", optionIds: [], quantity: 1,
+      catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
       measurement: { width: 6_000, height: 8_000 },
     }),
     (error) => error.status === 409 && error.code === "printer_cap_exceeded",
@@ -718,7 +716,7 @@ test("match and cart client projections include GRIDGO amounts beside shop amoun
   store.settings.serviceFeeRateBps = 4_500;
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 1_200);
   assert.equal(added.body.cart.lines[0].clientLineSubtotalMinor, 1_740);
@@ -938,7 +936,7 @@ for (const [meters, key, label, feeMinor, km] of [
   }
   assert.ok(match.body.otherListings.length > 0);
   const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: dropoff })).body.cart.id;
-  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1 });
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkFileId: 'file_art' });
   const cart = (await call('GET', `/me/carts/${cartId}`)).body.cart;
   assert.deepEqual(cart.lines[0].listing.distanceZone, { key, label });
   assert.equal(cart.lines[0].listing.distanceKm, km);
@@ -968,7 +966,7 @@ test("Out of Zone stays available, cart listings carry zones and ratings, checko
   store.shopReviews = Array.from({ length: 5 }, () => ({ supplierId: "supplier_a", qualityStars: 5 }));
   const dropoff = { lat: 16001 / 6371000 * 180 / Math.PI, lng: 0, label: "Home" };
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "delivery", defaultDropoff: dropoff })).body.cart.id;
-  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 });
+  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
   const full = await call("GET", `/me/carts/${cartId}`);
   for (const response of [added, full]) {
     const listing = response.body.cart.lines[0].listing;
@@ -1080,7 +1078,7 @@ for (const [count, mode] of [[2, "delivery"], [3, "delivery"], [2, "pickup"]]) {
     const cart = (await call('POST', '/me/carts', { deadline, fulfillmentMode: mode,
       defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
     for (const item of ['item_a', 'item_b', 'item_c'].slice(0, count)) {
-      await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, optionIds: [], quantity: 1, artworkFileId: 'file_art' });
+      await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', optionIds: [], quantity: 1, artworkFileId: 'file_art' });
     }
     const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
     const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: {
@@ -1107,12 +1105,94 @@ for (const [count, mode] of [[2, "delivery"], [3, "delivery"], [2, "pickup"]]) {
   });
 }
 
+test('route checkout cannot trust a client verdict or omit its server preflight', async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkLinks: DESIGN_LINKS });
+  await assert.rejects(routeOrderMatch({ req: { method: 'POST' }, url: new URL(`http://gridgo.test/me/carts/${cartId}/checkout`), store, user: client,
+    readBody: async () => ({ artworkCheck: { ok: true }, payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'UNTRUSTED-CHECK' } }),
+    id: prefix => `${prefix}_untrusted`, now: () => AT }), { code: 'artwork_check_required' });
+});
+
+for (const fulfillmentMode of ["delivery", "pickup"]) {
+  test(`pre-match ${fulfillmentMode} carries the destination and charge through read-only checkout`, async () => {
+    const { store, client } = fixture();
+    const call = caller(store, client);
+    const dropoff = { lat: 7.28, lng: 125.62, label: "Recipient" };
+    store.settings.hubPickup = { schedule: { utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 540, closesMinute: 1020 }], closures: [] }, feeMinor: 2500 };
+    const match = await call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode, dropoff, deadline: "2026-09-01T00:00:00Z" });
+    const selected = match.body.listings[0];
+    const choice = match.body.requestFulfillment;
+    assert.equal(choice.fulfillmentMode, fulfillmentMode);
+    assert.deepEqual(choice.dropoff, fulfillmentMode === "delivery" ? dropoff : {
+      lat: 7.092287234449552, lng: 125.61651084538697, label: "GRIDGO Office",
+    });
+    assert.equal(selected.distanceZone.key, fulfillmentMode === "delivery" ? "out_of_zone" : "nearby");
+    const created = await call("POST", "/me/carts", {});
+    const cartId = created.body.cart.id;
+    const added = await call("POST", `/me/carts/${cartId}/lines`, {
+      selectToken: selected.selectToken, matchRequestId: match.body.matchRequestId,
+      optionIds: [], quantity: 1, artworkFileId: "file_art",
+    });
+    assert.deepEqual(added.body.cart.requestFulfillment, choice);
+    assert.equal(added.body.cart.fulfillmentMode, fulfillmentMode);
+    const quote = (await call("GET", `/me/carts/${cartId}/quote`)).body.quote;
+    assert.equal(quote.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(quote.totalMinor, quote.clientItemSubtotalMinor + quote.deliveryFeeMinor);
+    assert.equal(added.body.cart.clientQuote.totalMinor, quote.totalMinor);
+    for (const field of ["supplierSubtotalMinor", "shop", "shopName", "pickup", "unitRateMinor"]) {
+      assert.equal(Object.hasOwn(quote, field), false, field);
+    }
+    const lineId = added.body.cart.lines[0].id;
+    for (const [method, path, body] of [
+      ["PATCH", `/me/carts/${cartId}`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["PUT", `/me/carts/${cartId}/dropoffs`, { defaultDropoff: { ...dropoff, lat: 7.4 } }],
+      ["PUT", `/me/carts/${cartId}/dropoffs`, { lines: [{ lineId, dropoff: { ...dropoff, lat: 7.4 } }] }],
+      ["PATCH", `/me/carts/${cartId}/lines/${lineId}`, { dropoff: { ...dropoff, lat: 7.4 } }],
+      ["POST", `/me/carts/${cartId}/checkout`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["POST", `/me/carts/${cartId}/quote`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["POST", `/me/carts/${cartId}/quote`, { lines: [{ lineId, dropoff: { ...dropoff, lat: 7.4 } }] }],
+    ]) {
+      await assert.rejects(call(method, path, body), (error) => error.code === "request_fulfillment_locked");
+    }
+    const checked = await call("POST", `/me/carts/${cartId}/checkout`, {
+      payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+    });
+    const order = checked.body.order;
+    assert.deepEqual(order.requestFulfillment, choice);
+    assert.equal(order.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(order.totalMinor, quote.totalMinor);
+    assert.equal(checked.body.invoice.clientItemSubtotalMinor, quote.clientItemSubtotalMinor);
+    assert.equal(order.totalMinor, order.itemSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+    if (fulfillmentMode === "pickup") {
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.deepEqual(order.hubPickup, match.body.hubPickup);
+      assert.equal(store.orders[0].riderPayoutMinor, 0);
+      assert.equal(store.orders[0].platformDeliveryShareMinor, 2500);
+      const storedOrder = store.orders[0];
+      storedOrder.payments.initial.status = "confirmed";
+      assert.equal(moneyReportingForOrder(storedOrder).platformRevenue.collectedMinor, order.serviceFeeMinor + 2500);
+      const refund = calculateRefundSettlement(storedOrder, {
+        beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0,
+      });
+      assert.equal(refund.totalMinor, order.totalMinor);
+      assert.equal(refund.deliveryMinor, 2500);
+      store.settings.hubPickup.feeMinor = 9999;
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.equal(checked.body.invoice.pickupFeeMinor, 2500);
+    }
+  });
+}
+
 test('a later shop missing the basket deadline rejects checkout, and matching uses the basket deadline', async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
   const deadline = '2026-08-29T00:00:00.000Z';
   const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline })).body.cart;
-  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, optionIds: [], quantity: 1 });
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', optionIds: [], quantity: 1 });
   for (const service of store.supplierServices.filter((service) => service.supplierId === 'supplier_b')) {
     service.turnaroundHours = 500; service.standardTurnaroundHours = 500;
   }
@@ -1128,7 +1208,7 @@ test('add-more matching uses an opaque cart group and preserves one delivery cha
   const call = caller(store, client);
   const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', deadline: '2026-09-10T00:00:00Z',
     defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
-  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, quantity: 1, optionIds: [] });
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', quantity: 1, optionIds: [] });
   const before = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
   const match = (await call('POST', '/me/matches', { cartId: cart.id, groupId: before.groups[0].id, subcategoryCode: 'brochures' })).body;
   assert.equal(match.listings[0].id, 'item_a2');
@@ -1147,7 +1227,7 @@ test('basket payment reconciliation never restarts a cancelled group', async () 
   const { store, client } = fixture();
   const call = caller(store, client);
   const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00Z' })).body.cart;
-  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, quantity: 1, optionIds: [] });
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', quantity: 1, optionIds: [] });
   const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', reference: 'RECONCILE', proofFileId: 'file_qr' } })).body;
   store.orders[1].state = 'cancelled';
   let seq = 0;
@@ -1170,6 +1250,36 @@ test('add-more matching filters capacity already consumed by the same draft grou
   const added = await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', quantity: 10, optionIds: [] });
   await assert.rejects(call('POST', '/me/matches', { cartId, groupId: added.body.cart.groups[0].id,
     subcategoryCode: 'flyers', units: 1 }), (error) => error.code === 'deadline_not_met' || error.code === 'match_not_found');
+});
+
+test("explicit delivery needs a destination even without distance-first ranking; legacy matches remain accepted", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  await assert.rejects(call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode: "delivery" }), (error) => error.code === "dropoff_required");
+  await assert.rejects(call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode: "invalid" }), (error) => error.code === "invalid_fulfillment_mode");
+  assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).status, 200);
+  const pickup = await call("POST", "/me/matches/next", { subcategoryCode: "flyers", fulfillmentMode: "pickup", excludedSupplierIds: ["supplier_b"] });
+  assert.equal(pickup.body.hubPickup.feeMinor, 0);
+  assert.equal(pickup.body.hubPickup.schedule, null);
+  assert.equal(pickup.body.listings[0].deliveryFeeMinor, 0);
+});
+
+
+test("legacy pickup carts remain free and editable after Super Admin sets a hub fee", async () => {
+  const { store, client } = fixture();
+  store.settings.hubPickup.feeMinor = 2500;
+  const call = caller(store, client);
+  const created = await call("POST", "/me/carts", { fulfillmentMode: "pickup" });
+  const cartId = created.body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  await call("PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: "delivery" });
+  await call("PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: "pickup" });
+  const checked = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+  });
+  assert.equal(checked.body.order.deliveryFeeMinor, 0);
+  assert.equal(checked.body.order.pickupFeeMinor, undefined);
+  assert.equal(checked.body.order.requestFulfillment, undefined);
 });
 
 test("listing quotes price measured selections on the server without supplier figures", async () => {
@@ -1313,7 +1423,7 @@ test('multi-shop client quotes and receipt sections use per-group rounding and f
   for (const item of store.catalogItems) item.basePriceMinor = 5;
   const call = caller(store, client);
   const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00Z' })).body.cart;
-  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, quantity: 1, optionIds: [] });
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', quantity: 1, optionIds: [] });
   const quoted = (await call('GET', `/me/carts/${cart.id}/quote`)).body.quote;
   assert.equal(quoted.totalMinor, 12);
   assert.equal(quoted.clientItemSubtotalMinor, 12);
@@ -1330,3 +1440,46 @@ test('multi-shop client quotes and receipt sections use per-group rounding and f
   assert.equal(placed.invoice.groups[0].lines[0].clientAmountMinor, 6);
   assert.equal(store.orderInvoices[0].snapshot.serviceFeeMinor, 2);
 });
+
+for (const [count, fee, expected] of [[2, 2501, [1251, 1250]], [3, 2501, [834, 834, 833]], [3, 1, [1, 0, 0]], [2, 0, [0, 0]]]) {
+  test(`one hub fee of ${fee} is allocated across ${count} groups and refunded independently`, async () => {
+    const { store, client } = fixture();
+    if (count === 3) addPublicListing(store, { supplierId: 'supplier_c', itemId: 'item_c', priceMinor: 10005,
+      shop: { lat: 7.07, lng: 125.62, label: 'Private counter' }, turnaroundHours: 12 });
+    store.settings.hubPickup.feeMinor = fee;
+    const call = caller(store, client);
+    const cart = (await call('POST', '/me/carts', { deadline: '2026-09-10T00:00:00Z' })).body.cart;
+    const match = (await call('POST', '/me/matches', { subcategoryCode: 'flyers', cartId: cart.id, fulfillmentMode: 'pickup' })).body;
+    const first = match.listings[0];
+    await call('POST', `/me/carts/${cart.id}/lines`, { selectToken: first.selectToken, matchRequestId: match.matchRequestId,
+      artworkFileId: 'file_art', optionIds: [], quantity: 1 });
+    for (const item of ['item_a', 'item_b', 'item_c'].slice(0, count).filter(id => id !== first.id)) {
+      await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', optionIds: [], quantity: 1 });
+    }
+    const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+    assert.deepEqual(preview.groups.map(group => group.pickupFeeMinor), expected);
+    assert.equal(preview.clientQuote.pickupFeeMinor, fee);
+    assert.equal(preview.clientQuote.totalMinor, preview.groups.reduce((sum, group) => sum + group.totalMinor, 0));
+    const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, {
+      payment: { method: 'qr_manual', reference: 'ONE-HUB-FEE', proofFileId: 'file_qr' },
+    })).body;
+    assert.equal(placed.basket.totalMinor, preview.clientQuote.totalMinor);
+    assert.equal(placed.basket.hubPickup.feeMinor, fee);
+    assert.equal(placed.invoice.pickupFeeMinor, fee);
+    assert.equal(placed.invoice.deliveryFeeMinor, fee);
+    assert.deepEqual(placed.invoice.groups.map(group => group.pickupFeeMinor), expected);
+    assert.deepEqual(store.orders.map(order => order.pickupFeeMinor), expected);
+    for (const [index, order] of store.orders.entries()) {
+      assert.equal(order.hubPickup.feeMinor, expected[index]);
+      assert.equal(order.riderPayoutMinor, 0);
+      assert.equal(order.platformDeliveryShareMinor, expected[index]);
+      order.payments.initial.status = 'confirmed';
+      const refund = calculateRefundSettlement(order, { beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0 });
+      assert.equal(refund.deliveryMinor, expected[index]);
+      assert.equal(refund.totalMinor, order.totalMinor);
+    }
+    assert.ok(store.orderJobs.every(job => job.deliveryFeeMinor === 0));
+    store.settings.hubPickup.feeMinor = fee + 100;
+    assert.deepEqual((await call('GET', `/orders/${store.orders[0].id}/invoice`)).body.invoice, placed.invoice);
+  });
+}

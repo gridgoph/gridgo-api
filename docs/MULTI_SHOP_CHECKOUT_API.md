@@ -49,8 +49,8 @@ This restricts matching to that group without accepting a supplier identity from
 the client. New products use matching without `groupId`.
 
 Several items in the same shop still incur one delivery fee, calculated to that
-group's farthest effective drop-off using the existing distance bands. Pickup
-has zero delivery fee. An unavailable price or missing delivery point makes the
+group's farthest effective drop-off using the existing distance bands. Legacy pickup
+remains free. Explicit pre-match hub pickup includes the allocated fee described below. An unavailable price or missing delivery point makes the
 corresponding preview total `null`; checkout refuses invalid lines. Previews are
 live estimates, not payment reservations.
 
@@ -139,9 +139,37 @@ totalMinor = item subtotal + service fee + group delivery fee
 basket.totalMinor = sum(group.totalMinor)
 ```
 
-Service-fee rounding is per group. Each order snapshots the current delivery split
-(default 85% rider / 15% GRIDGO) and existing payout plan. No new commission tiers,
-organization discounts, payout shares, or cross-group subsidies are introduced.
+Service-fee rounding is per group. Delivery orders snapshot the current delivery
+split (default 85% rider / 15% GRIDGO) and existing payout plan. No new commission
+tiers, organization discounts, or supplier payout shares are introduced.
+
+### One hub pickup fee
+
+For the explicit pre-match pickup flow, charge the configured hub fee **once per
+basket**. Divide integer minor units equally among groups in their stable order;
+assign one extra minor unit to each earliest group until the remainder is exhausted.
+For example, a fee of 2501 allocates as `[1251, 1250]` for two groups or
+`[834, 834, 833]` for three. A fee of 1 across three groups allocates `[1, 0, 0]`.
+
+`cart.clientQuote.pickupFeeMinor`, `basket.pickupFeeMinor`, and the combined
+`invoice.pickupFeeMinor` are the full fee. Each cart/basket/invoice group's
+`pickupFeeMinor` is its allocation. Each underlying order snapshots that allocation
+in `pickupFeeMinor` and `hubPickup.feeMinor`; the basket and combined receipt's
+`hubPickup.feeMinor` are the full snapshotted fee. Point and schedule remain the
+shared hub snapshot. These amounts already occupy `deliveryFeeMinor`; do not add
+the pickup fee to the total again.
+
+Allocated pickup funds are platform-owned, with zero rider share and zero-charge
+internal delivery jobs, as in the existing hub pickup model. Each group's
+`available_funds_v1` settlement refunds only its allocated funds; it never
+redistributes fees to remaining groups or changes the immutable receipt. Later
+settings changes do not change any placed allocation. Single-shop explicit pickup
+retains the full configured fee, and legacy pickup retains its zero-charge flow.
+
+Checkout checks artwork on every line before any group is committed. Each group
+gets its own pending `fileCheck` and immediate Operations QA alert. Shops remain
+held until Operations passes that group's artwork, even after the shared payment
+is confirmed; see [artwork checkout and handoff](ORDER_MATCH_API.md#artwork-checkout-gate-and-operations-handoff).
 
 ## Basket endpoints
 

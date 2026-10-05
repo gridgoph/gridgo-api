@@ -10,6 +10,13 @@ export function shopLabel(index) {
   for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) letters = String.fromCharCode(65 + (n - 1) % 26) + letters;
   return `Shop ${letters}`;
 }
+// One hub collection fee, with remainder minor units assigned in group order.
+export function splitBasketFee(totalMinor, groupCount) {
+  if (!Number.isSafeInteger(totalMinor) || totalMinor < 0 || !Number.isSafeInteger(groupCount) || groupCount < 0) throw new RangeError('Invalid basket fee allocation');
+  if (!groupCount) return [];
+  const total = BigInt(totalMinor), count = BigInt(groupCount);
+  return Array.from({ length: groupCount }, (_, index) => Number(total / count + (BigInt(index) < total % count ? 1n : 0n)));
+}
 export function basketForOrder(store, orderId) {
   return (store.baskets || []).find((basket) => basket.orderIds.includes(orderId));
 }
@@ -23,11 +30,14 @@ export function publicBasket(store, basket, user) {
     id: basket.id, receiptOrderId: basket.receiptOrderId, totalMinor: basket.totalMinor,
     deadline: basket.deadline, fulfillmentMode: basket.fulfillmentMode, createdAt: basket.createdAt,
     payment: { ...basket.payment, amountMinor: basket.totalMinor },
+    ...(basket.pickupFeeMinor != null ? { pickupFeeMinor: basket.pickupFeeMinor,
+      hubPickup: { ...structuredClone(orders[0].hubPickup), feeMinor: basket.pickupFeeMinor } } : {}),
     groups: orders.map((order, index) => ({
       orderId: order.id, label: shopLabel(index), state: order.state,
       clientItemSubtotalMinor: order.supplierSubtotalMinor + order.serviceFeeMinor,
       ...(privileged ? { itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor } : {}),
       deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor,
+      ...(order.pickupFeeMinor != null ? { pickupFeeMinor: order.pickupFeeMinor } : {}),
       order: publicOrderFor(order, privileged ? { ...user, role: 'ops_admin' } : { ...user, role: 'client' }, store),
     })),
   };

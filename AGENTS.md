@@ -38,6 +38,7 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkou
 
 Multi-shop basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md`. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
 
+- New requests opt into pre-match delivery/hub pickup via `fulfillmentMode`; token selection locks the cart choice. Hub hours/fees are Super Admin settings; pickup fee defaults to zero and occupies the existing fulfillment charge slot. Contract and released-build compatibility: `docs/ORDER_MATCH_API.md#fulfillment-before-matching`.
 - Match priority, reason badges, anonymous alternatives, and expiring selection-token/cart-deadline semantics are defined in `docs/ORDER_MATCH_API.md`. Rank only deadline-capable listings; never restore weighted or same-shop boosts.
 - Match and cart responses must run through `decorateCatalogPhotoUrls` (`src/catalog-photo-urls.js`) the same way catalog does. `publicPhotos` only sets metadata `url` (`/catalog/media/:fileId`); the client needs signed `downloadUrl` on `body.listings` and `body.cart.lines[].listing`. Skipping the decorator is the empty match thumbnail. `POST`/`PATCH`/`DELETE` `/me/carts/:id/lines` return compact listing stubs without photos so add/save does not wait on MinIO signing; `GET /me/carts/:id` stays the full projection.
 - Delivery zones, inclusive bounds, Out of Zone pricing, and settings migration: `docs/OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones`. Match/listing distance and rating projections: `docs/ORDER_MATCH_API.md#distance-and-rating-fields`. Use the shared band lookup; never recalculate an existing order fee from current settings.
@@ -68,6 +69,7 @@ A category or subcategory can be deleted (`DELETE /taxonomy/{categories,subcateg
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 
 Artwork design links are cart-line `artworkLinks`, snapshotted immutably at checkout and projected with scoped `productionItems`; `POST /artwork/link-check` is an anonymous-provider probe for signed-in clients, never proof of edit permission. Contract: `docs/ORDER_MATCH_API.md#artwork-design-links`.
+Checkout enforces fresh link probes and server upload verdicts; supplier access/inbox/realtime stay held until Operations passes `order.fileCheck`. See `docs/ORDER_MATCH_API.md#artwork-checkout-gate-and-operations-handoff` and shared gates in `src/artwork-gates.js`.
 
 Supplier readiness separates legacy setup checks, operational listing eligibility, and request-specific capacity/deadline diagnostics; see `docs/SUPPLIER_CATALOG_API.md#supplier-readiness-diagnostics`. Matching and readiness share shop gates in `src/supplier-eligibility.js`.
 

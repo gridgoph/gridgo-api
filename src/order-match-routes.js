@@ -1,5 +1,7 @@
 import { clientInvoice } from "./invoice-projection.js";
-import { basketForOrder, publicBasket, shopLabel } from "./baskets.js";
+import { basketForOrder, publicBasket, shopLabel, splitBasketFee } from "./baskets.js";
+import { fileCheckProjection } from "./artwork-gates.js";
+import { publicHubPickup } from "./hub-pickup.js";
 import { createHash, randomBytes } from "node:crypto";
 import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
@@ -183,6 +185,34 @@ function selectionHash(token) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function samePoint(left, right) {
+  return left?.lat === right?.lat && left?.lng === right?.lng;
+}
+
+function assertRequestFulfillment(cart, body) {
+  const choice = cart.requestFulfillment;
+  if (!choice) return;
+  if ((Object.hasOwn(body, "fulfillmentMode") && body.fulfillmentMode !== choice.fulfillmentMode)
+      || ["defaultDropoff", "dropoff"].some((field) => Object.hasOwn(body, field)
+        && !samePoint(body[field], choice.dropoff))) {
+    fail(409, "request_fulfillment_locked", "Start a new match and cart to change the chosen fulfillment.");
+  }
+}
+
+function adoptRequestFulfillment(store, cart, choice) {
+  if (!choice) return;
+  if (cart.requestFulfillment) {
+    assertRequestFulfillment(cart, { fulfillmentMode: choice.fulfillmentMode, dropoff: choice.dropoff });
+    return;
+  }
+  if ((store.cartLines || []).some((line) => line.cartId === cart.id)) {
+    fail(409, "request_fulfillment_requires_empty_cart", "Use a new cart for the fulfillment selected before matching.");
+  }
+  cart.requestFulfillment = structuredClone(choice);
+  cart.fulfillmentMode = choice.fulfillmentMode;
+  cart.defaultDropoff = choice.fulfillmentMode === "delivery" ? { ...choice.dropoff } : null;
+}
+
 function resolveMatchSelection(store, user, cart, body, at) {
   if (!Object.hasOwn(body, "selectToken")) return null;
   if (typeof body.selectToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(body.selectToken)) {
@@ -204,6 +234,7 @@ function resolveMatchSelection(store, user, cart, body, at) {
       fail(409, "select_token_dropoff_mismatch", "Match again to change the delivery location.");
     }
   }
+  adoptRequestFulfillment(store, cart, selection.requestFulfillment);
   body.catalogItemId = selection.catalogItemId;
   if (selection.dropoff) body.dropoff = selection.dropoff;
   return selection;
@@ -401,8 +432,9 @@ function clientCartQuote(store, cart, lines) {
       ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((delivery.distance / 1000).toFixed(1)) } : {}),
     };
   });
+  const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
   const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
-    : addMinor(deliveryLines.map((line) => line.deliveryFeeMinor), "quote.delivery");
+    : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
   const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
     : addMinor([clientItemSubtotalMinor, deliveryFeeMinor], "quote.total");
   const downpaymentPercent = grouped.size > 1 ? 100 : downpaymentPercentSetting(store.settings);
@@ -410,6 +442,7 @@ function clientCartQuote(store, cart, lines) {
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor,
+    ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     downpaymentPercent, downpaymentMinor, balanceMinor: totalMinor == null ? null : totalMinor - downpaymentMinor,
   };
 }
@@ -427,7 +460,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       : null;
     if (listing) {
       const shop = (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.shop;
-      const dropoff = line.dropoff ?? cart.defaultDropoff;
+      const dropoff = cart.requestFulfillment?.dropoff ?? line.dropoff ?? cart.defaultDropoff;
       const distance = shop && dropoff ? distanceMetersBetween(shop, dropoff) : null;
       listing.distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
       if (listing.distanceZone?.key === "out_of_zone") listing.distanceKm = Number((distance / 1000).toFixed(1));
@@ -459,17 +492,19 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     };
   });
   const supplierIds = [...new Set(lines.map((line) => line.supplierId))];
+  const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, supplierIds.length);
   const groups = supplierIds.map((supplierId, index) => {
     const groupLines = lines.filter((line) => line.supplierId === supplierId);
     const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
     const dropoffs = groupLines.map((line) => line.dropoff || cart.defaultDropoff);
-    const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? 0
+    const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? pickupShares[index]
       : profile?.shop && dropoffs.every(Boolean)
         ? deliveryFeeForDistance(Math.max(...dropoffs.map((dropoff) => distanceMetersBetween(profile.shop, dropoff))), store.settings) : null;
     const amounts = groupLines.map((line) => cartLineSubtotal(store, line));
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
     const serviceFeeMinor = itemSubtotalMinor == null ? null : roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
     return { id: groupLines[0].id, label: shopLabel(index), lineIds: groupLines.map((line) => line.id),
+      ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
   });
@@ -492,6 +527,8 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     scheduledFor: cart.scheduledFor ?? null,
     deadline: cart.deadline ?? null,
     fulfillmentMode: cart.fulfillmentMode,
+    requestFulfillment: cart.requestFulfillment ? structuredClone(cart.requestFulfillment) : null,
+    ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { hubPickup: publicHubPickup(store.settings) } : {}),
     defaultDropoff: cart.defaultDropoff ? { ...cart.defaultDropoff } : null,
     lines: publicLines,
     shops: groups.length > 1 ? groups.map(({ id, label }) => ({ id, label })) : cartShops(store, lines),
@@ -510,6 +547,7 @@ function updateCart(cart, at) {
 }
 
 function fulfillmentInput(body, current) {
+  assertRequestFulfillment(current, body);
   const fulfillmentMode = body.fulfillmentMode == null ? current.fulfillmentMode : String(body.fulfillmentMode);
   if (!["delivery", "pickup"].includes(fulfillmentMode)) {
     fail(400, "invalid_fulfillment_mode", "fulfillmentMode must be delivery or pickup.", { field: "fulfillmentMode" });
@@ -588,6 +626,8 @@ function publicMatchedOrder(store, order) {
     deliveryFeeMinor: order.deliveryFeeMinor,
     totalMinor: order.totalMinor,
     fulfillmentMode: order.fulfillmentMode,
+    ...(order.requestFulfillment ? { requestFulfillment: structuredClone(order.requestFulfillment) } : {}),
+    ...(order.hubPickup ? { hubPickup: structuredClone(order.hubPickup), pickupFeeMinor: order.pickupFeeMinor } : {}),
     serviceLevel: order.serviceLevel,
     scheduledFor: order.scheduledFor ?? null,
     // The promised date, never the shop's own. A client who can see both can
@@ -604,6 +644,7 @@ function publicMatchedOrder(store, order) {
     },
     jobs,
     invoiceNumber: order.invoiceNumber,
+    fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
     createdAt: order.createdAt,
   };
 }
@@ -613,7 +654,8 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, { groupLines = null, basketId = null, groupLabel = null } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null } = {}) {
+  assertRequestFulfillment(cart, body);
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
     fail(400, "payment_method_not_allowed", "Checkout accepts QR Ph manual payment only.", { allowed: ["qr_manual"] });
@@ -640,6 +682,7 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     // Money first. Operations confirms the transfer, then checks the artwork,
     // and only then does the shop see the job.
     state: "initial_payment_review",
+    fileCheck: { status: "pending", requestedAt: at, reviewedAt: null, reviewedBy: null, reason: null },
     supplierSubtotalMinor: 0,
     subtotalMinor: 0,
     serviceFeeRateBps: store.settings.serviceFeeRateBps,
@@ -647,6 +690,10 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     deliveryFeeMinor: 0,
     totalMinor: 0,
     fulfillmentMode: cart.fulfillmentMode,
+    ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
+    ...(cart.requestFulfillment?.fulfillmentMode === "pickup"
+      ? { hubPickup: { ...publicHubPickup(store.settings), feeMinor: pickupFeeMinor ?? publicHubPickup(store.settings).feeMinor },
+        pickupFeeMinor: pickupFeeMinor ?? publicHubPickup(store.settings).feeMinor } : {}),
     // The order-match QR plan. The name predates 100 percent checkout; the
     // split this order was placed under is `downpaymentPercent`.
     paymentPlan: "order_match_qr_75_25",
@@ -686,7 +733,19 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     }
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
-    if (line.artworkFileId) fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
+    if (!line.artworkFileId && !(line.artworkLinks || []).length) {
+      fail(409, "artwork_required", "Upload artwork or add a publicly viewable design link before checkout.", { lineId: line.id, field: "artwork" });
+    }
+    if (line.artworkFileId) {
+      const file = fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
+      if (file.artworkCheck?.status !== "passed") fail(409, "artwork_file_check_failed",
+        file.artworkCheck?.message || "This artwork has not passed its file check. Upload the original file again and replace the cart artwork.",
+        { lineId: line.id, fileId: file.fileId, field: "artwork", reason: file.artworkCheck?.reason || "file_check_required" });
+    }
+    const links = line.artworkLinks || [];
+    if (links.length && req[checkoutChecks]?.get(line.id) !== artworkFingerprint(line)) {
+      fail(409, "artwork_check_required", "The cart artwork changed while being checked. Retry checkout to check the current links.", { lineId: line.id, field: "artwork" });
+    }
     if (line.mockupFileId) fileFor(store, user, line.mockupFileId, "mockup", "mockupFileId");
     if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
     grouped.get(line.supplierId).push({ line, item, listing });
@@ -729,7 +788,7 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
       fulfillmentMode: cart.fulfillmentMode, pickup: { ...profile.shop },
       ...(jobDropoff ? { dropoff: jobDropoff } : {}),
       supplierSubtotalMinor, deliveryDistanceMeters: distance, deliveryFeeMinor,
-      ...deliverySplit(deliveryFeeMinor, store.settings.riderCommissionBps ?? 8_500),
+      ...deliverySplit(deliveryFeeMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
       estimatedHours, ...(cart.scheduledFor ? { scheduledFor: cart.scheduledFor } : {}),
       createdAt: at, updatedAt: at,
     };
@@ -760,7 +819,9 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
   order.promiseBy = projection.promiseBy;
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
-  const deliveryTotalMinor = addMinor(jobs.map((job) => job.deliveryFeeMinor), "order.deliveryFeeMinor");
+  // Pickup is a per-order platform charge. The internal trip to the hub keeps
+  // the existing zero-charge job contract and never earns a share of this fee.
+  const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
   const serviceFeeMinor = roundBps(itemSubtotalMinor, store.settings.serviceFeeRateBps);
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
@@ -772,7 +833,7 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     subtotalMinor: itemSubtotalMinor,
     serviceFeeMinor,
     deliveryFeeMinor: deliveryTotalMinor,
-    ...deliverySplit(deliveryTotalMinor, store.settings.riderCommissionBps ?? 8_500),
+    ...deliverySplit(deliveryTotalMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
     totalMinor,
     onlineDueMinor: totalMinor,
     supplierPlatformPayoutMinor: itemSubtotalMinor,
@@ -857,6 +918,8 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     serviceFeeMinor,
     deliveryLines: jobs.map((job) => ({ jobId: job.id, shopName: publicSupplierShop(store, job.supplierId)?.shopName || "Shop", amountMinor: job.deliveryFeeMinor })),
     deliveryFeeMinor: deliveryTotalMinor,
+    ...(order.hubPickup ? { hubPickup: structuredClone(order.hubPickup), pickupFeeMinor: order.pickupFeeMinor } : {}),
+    ...(order.requestFulfillment ? { requestFulfillment: structuredClone(order.requestFulfillment) } : {}),
     totalMinor,
     paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor, balanceMinor },
   };
@@ -873,8 +936,8 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
     entityType: "order", entityId: orderId, orderId,
     detail: { jobCount: jobs.length, itemSubtotalMinor, serviceFeeMinor, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
+  notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
-    notifyOpsJobNeedsQa(store, order, { createId, at });
     notifyOpsPaymentSubmitted(store, order, { createId, at });
     notifyClientReceiptReady(store, order, { createId, at });
   }
@@ -882,30 +945,36 @@ function checkout(store, user, cart, body, createId, at, { groupLines = null, ba
   return { order: publicMatchedOrder(store, order), invoice: clientInvoice(invoice) };
 }
 
-function checkoutBasket(store, user, cart, body, createId, at) {
+function checkoutBasket(store, user, cart, body, createId, at, req) {
   const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
-  if (suppliers.length < 2) return checkout(store, user, cart, body, createId, at);
+  if (suppliers.length < 2) return checkout(store, user, cart, body, createId, at, req);
   if (!cart.deadline) fail(400, "basket_deadline_required", "Set one deadline for the basket before checkout.");
   const basketId = createId("bsk");
-  const results = suppliers.map((supplierId, index) => checkout(store, user, cart, body, createId, at, {
-    groupLines: lines.filter((line) => line.supplierId === supplierId), basketId, groupLabel: shopLabel(index),
+  const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
+  const pickupShares = splitBasketFee(hubPickup?.feeMinor ?? 0, suppliers.length);
+  const results = suppliers.map((supplierId, index) => checkout(store, user, cart, body, createId, at, req, {
+    groupLines: lines.filter((line) => line.supplierId === supplierId), basketId, groupLabel: shopLabel(index), pickupFeeMinor: hubPickup ? pickupShares[index] : null,
   }));
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
   const first = orders[0];
   const basket = { id: basketId, clientId: user.id, receiptOrderId: first.id,
     orderIds: orders.map((order) => order.id), totalMinor: addMinor(orders.map((order) => order.totalMinor), "basket.totalMinor"),
     deadline: cart.deadline, fulfillmentMode: cart.fulfillmentMode,
+    ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     payment: { ...first.payments.initial }, createdAt: at, updatedAt: at };
   delete basket.payment.amountMinor;
   store.baskets ||= [];
   store.baskets.push(basket);
   const invoice = { invoiceNumber: first.invoiceNumber, orderId: first.id, basketId, issuedAt: at, currency: "PHP",
+    ...(hubPickup ? { hubPickup, pickupFeeMinor: hubPickup.feeMinor } : {}),
+    ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
     lines: results.flatMap((result) => result.invoice.lines),
     groups: results.map((result, index) => ({ orderId: result.order.id, label: shopLabel(index),
       lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
-      serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor })),
+      serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
+      ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
     itemSubtotalMinor: addMinor(orders.map((order) => order.supplierSubtotalMinor), "basket.itemSubtotalMinor"),
     serviceFeeRateBps: first.serviceFeeRateBps,
     serviceFeeMinor: addMinor(orders.map((order) => order.serviceFeeMinor), "basket.serviceFeeMinor"),
@@ -956,6 +1025,34 @@ export async function prepareCartArtworkLinks({ req, pathname, store, user, body
   const item = (store.catalogItems || []).find((row) => row.id === itemId);
   body.artworkLinks = await resolveArtworkLinks(body.artworkLinks, item ? publicCatalogItem(store, item)?.acceptedFormats : [],
     checker || ((link) => checkArtworkLinkForUser(user.id, link)));
+}
+
+const checkoutChecks = Symbol("artworkCheckoutChecks");
+const artworkFingerprint = line => JSON.stringify([line.artworkFileId || null, line.artworkLinks || []]);
+export function isArtworkCheckout(method, pathname) {
+  return method === "POST" && /^\/me\/carts\/[^/]+\/checkout$/.test(pathname);
+}
+
+// Probe fresh links for every checkout, including released clients that skip
+// link-check. Bind results to this request and revalidate under the domain lock.
+export async function prepareArtworkCheckout({ req, pathname, store, user, checker }) {
+  if (!isArtworkCheckout(req.method, pathname)) return;
+  requireClient(user);
+  const cart = ownCart(store, user, decodeURIComponent(pathname.split("/")[3]), { draft: true });
+  req[checkoutChecks] = new Map();
+  for (const line of (store.cartLines || []).filter(row => row.cartId === cart.id)) {
+    const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
+    const listing = item && publicCatalogItem(store, item);
+    if (!listing) continue; // Locked checkout reports stale listings.
+    const links = validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
+    for (const link of links) {
+      const check = await (checker || (link => checkArtworkLinkForUser(user.id, link)))(link);
+      if (!check.ok) fail(409, "artwork_link_check_failed",
+        `${check.message} Make the link viewable by anyone with the link, then retry checkout; or remove the link and upload the file instead.`,
+        { lineId: line.id, field: "artwork", url: link.url, access: check.access });
+    }
+    req[checkoutChecks].set(line.id, artworkFingerprint(line));
+  }
 }
 
 export async function routeOrderMatch({ req, url, store, user, readBody, id, now }) {
@@ -1017,6 +1114,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
         record(input, "line");
         const line = lines.find((row) => row.id === input.lineId);
         if (!line) fail(404, "cart_line_not_found", "A cart line no longer exists.");
+        assertRequestFulfillment(cart, input);
         line.dropoff = point(input.dropoff, "dropoff", { required: false });
       }
     }
@@ -1090,13 +1188,23 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       fail(409, "basket_deadline_mismatch", "Use the basket deadline when matching.");
     }
     const at = now();
+    let requestFulfillment = matchCart?.requestFulfillment ?? null;
+    if (Object.hasOwn(body, "fulfillmentMode")) {
+      if (!["delivery", "pickup"].includes(body.fulfillmentMode)) {
+        fail(400, "invalid_fulfillment_mode", "Choose delivery or pickup before matching.");
+      }
+      if (matchCart) assertRequestFulfillment(matchCart, body);
+      const dropoff = body.fulfillmentMode === "pickup" ? gridgoOfficePoint() : addressPoint(store, user.id, body) ?? matchCart?.defaultDropoff;
+      if (!dropoff) fail(400, "dropoff_required", "Choose a delivery drop-off before matching.");
+      requestFulfillment = { fulfillmentMode: body.fulfillmentMode, dropoff };
+    }
     const groupLine = body.groupId == null ? null : cartLines.find((line) => line.id === body.groupId);
     if (body.groupId != null && !groupLine) fail(404, "cart_group_not_found", "That group does not belong to this cart.");
     const groupExclusions = groupLine ? (store.supplierProfiles || []).filter((profile) => profile.userId !== groupLine.supplierId).map((profile) => profile.userId) : [];
     const input = {
       subcategoryCode: body.subcategoryCode,
       ranking: body.ranking ?? publicPreference(store, user.id).ranking,
-      dropoff: addressPoint(store, user.id, body) ?? matchCart?.defaultDropoff ?? null,
+      dropoff: requestFulfillment?.dropoff ?? addressPoint(store, user.id, body) ?? matchCart?.defaultDropoff ?? null,
       excludedSupplierIds: [...(body.excludedSupplierIds || []), ...groupExclusions],
       deadline: matchCart?.deadline ?? body.deadline ?? null,
       units: body.units == null ? undefined : positiveInteger(body.units, "units"),
@@ -1104,6 +1212,17 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       optionIds: body.optionIds, widthFeet: body.widthFeet, cartLines,
     };
     const match = clientFacingMatch(matchShop(store, input));
+    if (requestFulfillment) {
+      match.requestFulfillment = structuredClone(requestFulfillment);
+      if (requestFulfillment.fulfillmentMode === "pickup") match.hubPickup = publicHubPickup(store.settings);
+      for (const listing of [...match.listings, ...match.otherListings]) {
+        const item = store.catalogItems.find((row) => row.id === listing.id);
+        const shop = store.supplierProfiles.find((row) => row.userId === item.supplierId).shop;
+        listing.deliveryFeeMinor = requestFulfillment.fulfillmentMode === "pickup"
+          ? match.hubPickup.feeMinor : deliveryFeeForDistance(distanceMetersBetween(shop, input.dropoff), store.settings);
+        if (match.hubPickup) listing.pickupFeeMinor = match.hubPickup.feeMinor;
+      }
+    }
     const requestId = randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.parse(at) + 15 * 60_000).toISOString();
     // Keep expired records for a day so ordinary expiry has a distinct error.
@@ -1113,6 +1232,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
       store.matchSelections.push({ tokenHash: selectionHash(token), clientId: user.id, requestId, expiresAt,
         selection: { catalogItemId: listing.id, supplierId: store.catalogItems.find((row) => row.id === listing.id).supplierId,
           cartId, deadline: input.deadline, dropoff: input.dropoff,
+          ...(requestFulfillment ? { requestFulfillment } : {}),
           subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
       listing.selectToken = token;
     }
@@ -1158,7 +1278,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
-    const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now());
+    const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
     return { status: 201, body: result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {
@@ -1170,12 +1290,14 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
   if (specialCartMatch && specialCartMatch[2] === "dropoffs" && req.method === "PUT") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     const body = record(await readBody(req));
+    assertRequestFulfillment(cart, body);
     if (Object.hasOwn(body, "defaultDropoff")) cart.defaultDropoff = point(body.defaultDropoff, "defaultDropoff", { required: false });
     if (body.lines != null) {
       if (!Array.isArray(body.lines)) fail(400, "invalid_request", "lines must be an array.", { field: "lines" });
       for (const input of body.lines) {
         const line = (store.cartLines || []).find((row) => row.id === input.lineId && row.cartId === cart.id);
         if (!line) fail(404, "cart_line_not_found", "A cart line no longer exists.", { lineId: input.lineId });
+        assertRequestFulfillment(cart, input);
         line.dropoff = point(input.dropoff, "dropoff", { required: false });
         line.updatedAt = now();
       }
@@ -1189,6 +1311,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     const cart = ownCart(store, user, decodeURIComponent(linesMatch[1]), { draft: true });
     const body = { ...record(await readBody(req)) };
     const selection = resolveMatchSelection(store, user, cart, body, now());
+    assertRequestFulfillment(cart, body);
     const item = (store.catalogItems || []).find((row) => row.id === text(body.catalogItemId, "catalogItemId", 120));
     if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
       fail(409, "catalog_item_stale", "That listing changed or is no longer public.");
@@ -1244,6 +1367,7 @@ export async function routeOrderMatch({ req, url, store, user, readBody, id, now
     }
     const body = record(await readBody(req));
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
+    assertRequestFulfillment(cart, body);
     if (Object.hasOwn(body, "quantity")) line.quantity = positiveInteger(body.quantity, "quantity");
     if (Object.hasOwn(body, "optionIds")) {
       if (!Array.isArray(body.optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.", { field: "optionIds" });

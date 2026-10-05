@@ -7,8 +7,10 @@ export async function up(pgm) {
       client_id text NOT NULL REFERENCES users(id),
       receipt_order_id text NOT NULL REFERENCES orders(id),
       total_minor bigint NOT NULL CHECK (total_minor BETWEEN 0 AND 9007199254740991),
+      pickup_fee_minor bigint CHECK (pickup_fee_minor BETWEEN 0 AND 9007199254740991),
       deadline timestamptz NOT NULL,
       fulfillment_mode text NOT NULL CHECK (fulfillment_mode IN ('delivery','pickup')),
+      CHECK (pickup_fee_minor IS NULL OR fulfillment_mode = 'pickup'),
       payment jsonb NOT NULL,
       created_at timestamptz NOT NULL,
       updated_at timestamptz NOT NULL
@@ -58,6 +60,11 @@ export async function up(pgm) {
             OR p.amount_minor IS DISTINCT FROM o.total_minor OR p.status IS DISTINCT FROM b.payment->>'status'
             OR p.method IS DISTINCT FROM 'qr_manual' OR p.data->>'reference' IS DISTINCT FROM b.payment->>'reference'
             OR p.data->>'proofFileId' IS DISTINCT FROM b.payment->>'proofFileId'
+            OR (b.pickup_fee_minor IS NOT NULL AND (
+              o.data->'hubPickup' IS NULL OR o.rider_commission_bps IS DISTINCT FROM 0
+              OR o.delivery_fee_minor IS DISTINCT FROM b.pickup_fee_minor / group_count
+                + CASE WHEN g.position < b.pickup_fee_minor % group_count THEN 1 ELSE 0 END
+              OR g.position >= group_count))
             OR f.amount_minor IS DISTINCT FROM 0::bigint OR f.status IS DISTINCT FROM 'not_required')) THEN
         RAISE EXCEPTION 'basket payment must cover every group exactly once' USING ERRCODE = '23514';
       END IF;
