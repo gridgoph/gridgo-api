@@ -241,6 +241,8 @@ test('client projection keeps alternative identity, pickup, specs mapping and in
   const view = publicOrderFor(order, { id: 'client', role: 'client' }, store);
   assert.equal(view.shopRecovery.canAccept, true);
   assert.equal(view.shopRecovery.proposal, undefined);
+  assert.deepEqual(Object.keys(view.shopRecovery).sort(), ['canAccept', 'canRefund', 'createdAt', 'id', 'refundRequestId', 'replacement', 'status']);
+  assert.deepEqual(Object.keys(view.shopRecovery.replacement), ['promiseBy']);
   assert.equal(view.shopFailureEvents, undefined);
 });
 

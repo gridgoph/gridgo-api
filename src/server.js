@@ -2188,6 +2188,10 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
+        || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
     const catalogResponse = await routeSupplierCatalog({
       req,
       url,
