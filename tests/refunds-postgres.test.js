@@ -597,7 +597,7 @@ test('replacing the platform receiving QR leaves old bytes for gated retention c
     await saveStore(db, store);
   });
   const api = await apiForTest(t);
-  const replaced = await api('ops', 'POST', '/settings/payment-qr', { fileId: 'platform_new', reason: 'Replace receiving image' });
+  const replaced = await api('super', 'POST', '/settings/payment-qr', { fileId: 'platform_new', reason: 'Replace receiving image' });
   assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
   const store = await loadStore(db);
   assert.equal(store.settings.paymentQrFileId, 'platform_new');

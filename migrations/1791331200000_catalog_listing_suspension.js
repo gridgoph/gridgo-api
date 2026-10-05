@@ -1,5 +1,5 @@
 /**
- * Operations can take one listing off the board and say why.
+ * A Super Admin can take one listing off the board and say why.
  *
  * The shop's own `active` flag stays the board switch. A suspension is the
  * reason beside it: clients stop seeing that listing, and the shop cannot

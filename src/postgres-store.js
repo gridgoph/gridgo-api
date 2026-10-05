@@ -1326,7 +1326,7 @@ function catalogHitsCte() {
              item.package_qty, item.turnaround_mode, item.turnaround_hours,
              item.file_format_mode, item.active, item.sort_order, item.version,
              item.created_at, item.updated_at, item.search_text, item.search_tsv,
-             item.printer_max_width_feet,
+             item.printer_max_width_feet, item.suspend_reason, item.suspended_at,
              COALESCE(item.turnaround_hours, service.standard_turnaround_hours, service.turnaround_hours)
                AS effective_hours
         FROM supplier_catalog_items item
@@ -1383,6 +1383,8 @@ function catalogItemFromListRow(row) {
     turnaroundHours: row.turnaround_hours,
     fileFormatMode: row.file_format_mode,
     active: row.active,
+    suspendReason: row.suspend_reason ?? undefined,
+    suspendedAt: row.suspended_at ?? undefined,
     sortOrder: row.sort_order,
     version: row.version,
     createdAt: row.created_at,

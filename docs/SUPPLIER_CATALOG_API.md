@@ -189,3 +189,18 @@ Shop gates use `account_inactive`, `supplier_profile`, `shop_location`, `shop_cl
 Seeded file codes: `pdf`, `png`, `jpeg`, `webp`, `psd`, `3mf`, `stl` (`inputKind: "file"`). Seeded URL codes: `canva_link`, `google_drive`, `dropbox`, `we_transfer`, `other_link` (`inputKind: "url"`). Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format. A plus-finder query resolves against this registry and its aliases; it never stores a shop-invented type.
 
 `src/supplier-catalog.js` exports `createOrderLineSnapshot` and `appendOrderLineSnapshot`. They write the immutable line/option snapshot shape, including pricing unit, package qty, ready-in hours, and group kind. Checkout is not wired in this slice.
+
+## Staff listing index and take-down
+
+`GET /ops/catalog-items` and `GET /ops/catalog-items/:id` are readable only by Operations and Super Admin. The index returns `{ items: [{ shop: { supplierId, shopName }, item }], shops, total, nextCursor? }`; the detail returns `{ shop, item }`. Each private item includes prices and units, specs, photos, the shop's `active` switch, version and timestamps. These staff projections are never exposed to clients.
+
+The index accepts `q` (trimmed, at most 80 characters), `subcategoryCode`, `supplierId`, `minPriceMinor`, `maxPriceMinor`, `limit` (1–50, default 50) and an opaque `cursor`. Prices are integer PHP minor units; invalid filters return `400 invalid_catalog_query`. Missing detail items return `404 catalog_item_not_found`. Photos use the same signed download decoration as the supplier catalogue.
+
+Only Super Admin may call either action; Operations, suppliers, riders and clients receive `403 forbidden`:
+
+- `POST /catalog-items/:id/suspend` with `{ "reason": "Correct the listing sample" }` takes one listing off the client board. The trimmed reason is required (`400 reason_required`) and capped at 2,000 characters (`400 reason_too_long`). It sets `active=false`, records the reason, timestamp and actor, and bumps the version. Repeating a take-down returns `409 listing_suspended` without replacing the reason, changing the version, or sending another notice. Sibling listings and the service line are unchanged.
+- `POST /catalog-items/:id/restore` clears the take-down fields and bumps the version, but **leaves `active=false`**. The shop decides when to put it back on the board using its ordinary versioned `PATCH /me/catalog-items/:id`. A listing without a take-down returns `409 listing_not_suspended`.
+
+Private listing detail, the staff index, and `GET /me/catalog-items` (including PostgreSQL search and pagination) carry `suspendReason` and `suspendedAt`, both null when there is no take-down. While a reason is set, the shop cannot PATCH `active=true`: the API returns `409 listing_suspended` with the reason. Taken-down listings cannot appear on the client board or in matching.
+
+Each successful action commits the item, audit (`catalog_item.suspend` or `catalog_item.restore`, entity type `supplier_catalog_item`) and shop inbox notice together. `listing_suspended` tells the owning shop the reason. `listing_restored` tells it the take-down is lifted and the listing remains hidden until the shop turns it on. Both notices carry `catalogItemId`, use the supplier role, and invalidate the shop's notifications and catalogue after commit. Push data retains its existing privacy allowlist.

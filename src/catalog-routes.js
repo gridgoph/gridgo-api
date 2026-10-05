@@ -79,20 +79,20 @@ function requireSupplier(user) {
   if (!user || !identityHasMembership(user, "supplier")) fail(403, "forbidden", "A supplier membership is required.");
 }
 
-function notifyListingTakenDown(store, item, reason, createId, at) {
+function notifyListingStanding(store, item, reason, createId, at) {
   if (!item?.supplierId) return;
   if (!Array.isArray(store.notifications)) store.notifications = [];
   store.notifications.push({
     id: createId("ntf"),
     userId: item.supplierId,
     appRole: "supplier",
-    type: "listing_suspended",
-    title: "A listing was taken down",
-    body: reason,
+    type: reason ? "listing_suspended" : "listing_restored",
+    title: reason ? "A listing was taken down" : "You can put your listing back on the board",
+    body: reason || "GRIDGO lifted the take-down. Your listing is still hidden; you can turn it on when you are ready.",
     catalogItemId: item.id,
     read: false,
     at,
-    occurrenceKey: `listing_suspended:${item.id}:${item.version ?? 0}`,
+    occurrenceKey: `${reason ? "listing_suspended" : "listing_restored"}:${item.id}:${item.version ?? 0}`,
   });
   queueInvalidate(store, {
     resource: "notifications",
@@ -1339,7 +1339,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
   }
 
   // One listing, not the whole service line. Only a Super Admin may take it
-  // down or put it back. `suspendReason` is the staff take-down; the shop's
+  // down or clear the take-down. `suspendReason` is the staff take-down; the shop's
   // own `active` switch is turned off with it so clients lose the listing,
   // and the shop cannot turn that switch back on while the reason is set.
   if (req.method === "POST" && /^\/catalog-items\/[^/]+\/(suspend|restore)$/.test(pathname)) {
@@ -1359,28 +1359,31 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const item = (store.catalogItems || []).find((candidate) => candidate.id === pathIdentifier(pathname.split("/")[2]));
     if (!item) fail(404, "catalog_item_not_found", "That catalog item no longer exists.");
     if (action === "suspend") {
+      if (item.suspendReason) fail(409, "listing_suspended", "That listing is already taken down.");
       const body = catalogRecord(await readBody(req));
       const reason = typeof body.reason === "string" ? body.reason.trim() : "";
       if (!reason) {
         fail(400, "reason_required", "Enter a reason. The shop sees it, and GRIDGO stores it on the listing.");
       }
+      if (reason.length > 2000) fail(400, "reason_too_long", "The reason must be at most 2,000 characters.");
       item.active = false;
       item.suspendReason = reason;
       item.suspendedAt = now();
       item.suspendedBy = user.id;
       bumpVersion(item, now());
-      notifyListingTakenDown(store, item, reason, id, now());
+      notifyListingStanding(store, item, reason, id, now());
       auditChange(audit, store, user, "catalog_item.suspend", "supplier_catalog_item", item.id, { reason });
       return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
     }
     if (!item.suspendReason) {
       fail(409, "listing_not_suspended", "That listing is not suspended.");
     }
-    item.active = true;
+    item.active = false;
     delete item.suspendReason;
     delete item.suspendedAt;
     delete item.suspendedBy;
     bumpVersion(item, now());
+    notifyListingStanding(store, item, null, id, now());
     auditChange(audit, store, user, "catalog_item.restore", "supplier_catalog_item", item.id);
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }

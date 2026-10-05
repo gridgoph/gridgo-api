@@ -1822,7 +1822,7 @@ test('delivery zone limit updates persist with the settings handshake and preser
     const current = (await request(instance.api, '/settings', { subject: 'clerk_ops' })).body;
     const before = (await database.query("SELECT * FROM orders WHERE id = 'ord_payout'")).rows;
     const jobsBefore = (await database.query("SELECT * FROM order_jobs WHERE id = 'job_snapshot'")).rows;
-    const patch = (body, subject = 'clerk_ops') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
+    const patch = (body, subject = 'clerk_super') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
     const limits = [1200, 6500, 23000];
     const deliveryFeeBands = current.settings.deliveryFeeBands.map((band, index) => ({
       ...band, maxDistanceMeters: limits[index] ?? null,
@@ -1831,6 +1831,7 @@ test('delivery zone limit updates persist with the settings handshake and preser
     assert.equal((await patch(input, 'clerk_client')).status, 403);
     assert.equal((await patch(input, 'clerk_supplier')).status, 403);
     assert.equal((await patch(input, 'clerk_rider')).status, 403);
+    assert.equal((await patch(input, 'clerk_ops')).status, 403);
     assert.equal((await patch({ ...input, reason: '' })).body.error, 'settings_reason_required');
     assert.equal((await patch({ ...input, expectedVersion: current.version - 1 })).body.error, 'settings_version_conflict');
     for (const [index, limit, error] of [
@@ -4322,4 +4323,147 @@ test('production penalties: Operations confirms no communication with a reason; 
   assert.equal(store.auditLog.filter((row) => row.action === 'production_lapse.no_communication').length, 1);
   assert.equal(store.productionLapses[0].warnings.length, 1);
   assert.equal(store.productionLapses[0].deductionMinor, 0);
+});
+
+test("Operations account changes refuse every privileged membership and allow client, shop and rider holds", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    // Privileged memberships must protect an identity even when its legacy role is client.
+    store.userRoleMemberships.push({ userId: "user_promote", role: "ops_admin", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "user_client", role: "super_admin", createdAt: AT });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise(resolve => instance.child.once("exit", resolve)); });
+  const change = (id, status, subject = "clerk_ops") => request(instance.api, `/users/${id}/account`, {
+    method: "PATCH", subject, body: { status, reason: "Account review" },
+  });
+  for (const target of ["user_super", "user_ops", "user_promote", "user_client"]) {
+    const denied = await change(target, "suspended");
+    assert.equal(denied.status, 403, `${target}: ${JSON.stringify(denied.body)}`);
+    assert.equal(denied.body.error, "forbidden");
+  }
+  for (const target of ["user_promote", "user_client"]) {
+    assert.equal((await change(target, "suspended", "clerk_super")).status, 200);
+    const denied = await change(target, "active");
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error, "forbidden");
+    assert.equal((await change(target, "active", "clerk_super")).status, 200);
+  }
+  // Remove the added membership to exercise the ordinary personal account path.
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships = store.userRoleMemberships.filter(row => !(row.userId === "user_client" && row.role === "super_admin"));
+    await saveStore(database, store);
+  });
+  for (const target of ["user_client", "user_supplier", "user_rider"]) {
+    assert.equal((await change(target, "suspended")).status, 200, target);
+    assert.equal((await change(target, "active")).status, 200, target);
+  }
+  const store = await loadStore(database);
+  assert.equal(store.users.find(row => row.id === "user_super").accountStatus, "active");
+  assert.equal(store.auditLog.some(row => row.actorId === "user_ops" && ["user_super", "user_ops", "user_promote"].includes(row.entityId)), false);
+});
+
+test("Operations audit reads are limited to workspace actions or one file", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  const rows = [
+    { id: "aud_override", action: "order.production_override", entityType: "order", entityId: "ord_payout", orderId: "ord_payout" },
+    { id: "aud_early", action: "file.early_delete", entityType: "file", entityId: "file_pof" },
+    { id: "aud_retention", action: "file.retention_delete", entityType: "file", entityId: "file_other" },
+    { id: "aud_file", action: "file.attach", entityType: "file", entityId: "file_pof" },
+    { id: "aud_private", action: "settings.operational_update", entityType: "settings", entityId: "platform" },
+  ];
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.auditLog.push(...rows.map(row => ({ ...row, at: AT, actorId: "user_super", actorRole: "super_admin", reason: "Review record" })));
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise(resolve => instance.child.once("exit", resolve)); });
+  for (const [query, expected] of [
+    ["action=order.production_override&orderId=ord_payout", ["aud_override"]],
+    ["action=file.early_delete", ["aud_early"]],
+    ["action=file.retention_delete", ["aud_retention"]],
+    ["entityType=file&entityId=file_pof", ["aud_early", "aud_file"]],
+    ["entityType=file&entityId=file_pof&action=file.attach", ["aud_file"]],
+  ]) {
+    const result = await request(instance.api, `/audit?${query}`, { subject: "clerk_ops" });
+    assert.equal(result.status, 200, query);
+    assert.deepEqual(result.body.audit.map(row => row.id).sort(), expected.sort());
+  }
+  for (const query of ["", "?action=settings.operational_update", "?orderId=ord_payout", "?entityType=file", "?entityType=file&entityId=%20", "?entityId=file_pof", "?entityType=order&entityId=ord_payout", "?action=file.early_delete.extra"]) {
+    const result = await request(instance.api, `/audit${query}`, { subject: "clerk_ops" });
+    assert.equal(result.status, 403, query);
+    assert.equal(result.body.error, "forbidden");
+  }
+  for (const subject of ["clerk_client", "clerk_supplier", "clerk_rider"]) {
+    for (const query of ["action=file.early_delete", "entityType=file&entityId=file_pof"]) {
+      assert.equal((await request(instance.api, `/audit?${query}`, { subject })).status, 403);
+    }
+  }
+  assert.equal((await request(instance.api, "/audit?action=file.early_delete")).status, 401);
+  const unrestricted = await request(instance.api, "/audit", { subject: "clerk_super" });
+  assert.equal(unrestricted.status, 200);
+  assert.deepEqual(unrestricted.body.audit.map(row => row.id).sort(), rows.map(row => row.id).sort());
+});
+
+test("listing take-down survives PostgreSQL own-list reads and restore keeps it hidden with a shop notice", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.catalogItems.push({
+      id: "item_takedown", supplierId: "user_supplier", supplierServiceId: "svc_banner",
+      subcategoryCode: "tarpaulins_outdoor_banners", name: "Sample listing", description: "",
+      basePriceMinor: 1000, pricingUnit: "per_unit", turnaroundMode: "inherit", fileFormatMode: "inherit",
+      printerMaxWidthFeet: 10, active: true, sortOrder: 0, version: 1, createdAt: AT, updatedAt: AT,
+    });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill("SIGTERM"); await new Promise(resolve => instance.child.once("exit", resolve)); });
+  const suspend = (reason, subject = "clerk_super") => request(instance.api, "/catalog-items/item_takedown/suspend", {
+    method: "POST", subject, body: { reason },
+  });
+  for (const subject of ["clerk_ops", "clerk_client", "clerk_supplier", "clerk_rider"]) {
+    assert.equal((await suspend("Review needed", subject)).status, 403);
+  }
+  const longReason = await suspend("x".repeat(2001));
+  assert.equal(longReason.status, 400);
+  assert.equal(longReason.body.error, "reason_too_long");
+  const suspended = await suspend("  Correct the sample  ");
+  assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+  for (const query of ["", "?q=sample", "?active=false"]) {
+    const listed = await request(instance.api, `/me/catalog-items${query}`, { subject: "clerk_supplier" });
+    assert.equal(listed.status, 200);
+    const item = listed.body.items.find(row => row.id === "item_takedown");
+    assert.equal(item.active, false);
+    assert.equal(item.suspendReason, "Correct the sample");
+    assert.equal(item.suspendedAt, suspended.body.item.suspendedAt);
+  }
+  const repeated = await suspend("Replace the original reason");
+  assert.equal(repeated.status, 409);
+  assert.equal(repeated.body.error, "listing_suspended");
+  const beforeRestore = await loadStore(database);
+  assert.equal(beforeRestore.catalogItems[0].suspendReason, "Correct the sample");
+  assert.equal(beforeRestore.notifications.filter(row => row.type === "listing_suspended").length, 1);
+  assert.equal(beforeRestore.auditLog.filter(row => row.action === "catalog_item.suspend").length, 1);
+  const restored = await request(instance.api, "/catalog-items/item_takedown/restore", { method: "POST", subject: "clerk_super" });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.item.active, false);
+  const listed = await request(instance.api, "/me/catalog-items", { subject: "clerk_supplier" });
+  assert.equal(listed.body.items[0].active, false);
+  assert.equal(listed.body.items[0].suspendReason, null);
+  assert.equal(listed.body.items[0].suspendedAt, null);
+  const inbox = await request(instance.api, "/notifications", { subject: "clerk_supplier" });
+  const notice = inbox.body.notifications.find(row => row.type === "listing_restored");
+  assert.equal(notice.catalogItemId, "item_takedown");
+  assert.match(notice.body, /still hidden/);
 });

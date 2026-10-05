@@ -312,6 +312,15 @@ test("suspending one listing hides it from clients and leaves its sibling live",
   );
   assert.equal(opsDenied, undefined);
 
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, { reason: "x".repeat(2001) }),
+    (error) => error.status === 400 && error.code === "reason_too_long",
+  );
+  assert.equal(store.catalogItems[0].active, true);
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", { id: "client", role: "client" }, { reason: "Sample" }),
+    (error) => error.code === "forbidden",
+  );
   const suspended = await route("POST", "/catalog-items/item/suspend", admin, { reason: "  Blurry sample  " });
   assert.equal(suspended.status, 200);
   assert.equal(suspended.body.item.active, false);
@@ -322,6 +331,15 @@ test("suspending one listing hides it from clients and leaves its sibling live",
   assert.equal(store.supplierServices[0].state, "live");
   assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
   assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+
+  const firstSuspension = structuredClone(store.catalogItems[0]);
+  const noticesBeforeRepeat = (store.notifications || []).length;
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, { reason: "Replacement reason" }),
+    (error) => error.status === 409 && error.code === "listing_suspended",
+  );
+  assert.deepEqual(store.catalogItems[0], firstSuspension);
+  assert.equal(store.notifications.length, noticesBeforeRepeat);
 
   const shopView = await route("GET", "/me/catalog-items/item", supplier);
   assert.equal(shopView.status, 200);
@@ -348,9 +366,26 @@ test("suspending one listing hides it from clients and leaves its sibling live",
 
   const restored = await route("POST", "/catalog-items/item/restore", admin);
   assert.equal(restored.status, 200);
-  assert.equal(restored.body.item.active, true);
+  assert.equal(restored.body.item.active, false);
   assert.equal(restored.body.item.suspendReason, null);
-  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item"))?.id, "item");
+  assert.equal(restored.body.item.suspendedAt, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
+  const restoreNotice = store.notifications.find((row) => row.type === "listing_restored");
+  assert.equal(restoreNotice.userId, "supplier");
+  assert.equal(restoreNotice.appRole, "supplier");
+  assert.equal(restoreNotice.catalogItemId, "item");
+  assert.match(restoreNotice.body, /still hidden/);
+  const published = await route("PATCH", "/me/catalog-items/item", supplier, {
+    active: true, expectedVersion: restored.body.item.version,
+  });
+  assert.equal(published.body.item.active, true);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0])?.id, "item");
+
+  // A listing the shop already hid also stays hidden after take-down and restore.
+  store.catalogItems[0].active = false;
+  await route("POST", "/catalog-items/item/suspend", admin, { reason: "x".repeat(2000) });
+  const hiddenRestore = await route("POST", "/catalog-items/item/restore", admin);
+  assert.equal(hiddenRestore.body.item.active, false);
   assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
 });
 

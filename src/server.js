@@ -782,10 +782,14 @@ function accountHoldDenial(user) {
   };
 }
 
-function targetIsSuperAdmin(store, target) {
-  return target?.role === "super_admin" || (store.userRoleMemberships || []).some(
-    (membership) => membership.userId === target.id && membership.role === "super_admin",
+function targetHasMembership(store, target, role) {
+  return target?.role === role || (store.userRoleMemberships || []).some(
+    (membership) => membership.userId === target.id && membership.role === role,
   );
+}
+
+function targetIsSuperAdmin(store, target) {
+  return targetHasMembership(store, target, "super_admin");
 }
 
 /** Active means the membership can still open GRIDGO. A held Super Admin cannot. */
@@ -3549,7 +3553,8 @@ async function handleRequest(req, res) {
     }
 
     // Account standing. Accreditation is a different field.
-    // Operations may suspend or restore. Only a Super Admin may remove.
+    // Operations may suspend or restore clients, shops and riders.
+    // Privileged accounts and removal require a Super Admin.
     // `removed` still only sets accountStatus: the row, memberships, orders,
     // and Clerk user stay. Cutting off login is not implemented here — this
     // API only loads a Clerk user, it does not ban or delete one.
@@ -3568,6 +3573,9 @@ async function handleRequest(req, res) {
         });
       }
       if ((body.status === "removed" || target.accountStatus === "removed") && !isSuper(user)) {
+        return send(res, 403, { error: "forbidden" });
+      }
+      if (!isSuper(user) && (targetIsSuperAdmin(store, target) || targetHasMembership(store, target, "ops_admin"))) {
         return send(res, 403, { error: "forbidden" });
       }
       const reason = typeof body.reason === "string" ? body.reason.trim() : "";
@@ -4729,13 +4737,20 @@ async function handleRequest(req, res) {
 
     // ---- audit trail ----
     if (req.method === "GET" && pathname === "/audit") {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       let list = store.auditLog || [];
       const entityType = url.searchParams.get("entityType");
       const entityId = url.searchParams.get("entityId");
       const orderId = url.searchParams.get("orderId");
       const actorId = url.searchParams.get("actorId");
       const action = url.searchParams.get("action");
+      // Operations needs correction/deletion bylines in daily workspaces,
+      // while the unrestricted audit log remains Super Admin only.
+      const operationalAction = ["order.production_override", "file.early_delete", "file.retention_delete"].includes(action);
+      const specificFile = entityType === "file" && Boolean(entityId?.trim());
+      if (!isSuper(user) && !operationalAction && !specificFile) {
+        return send(res, 403, { error: "forbidden" });
+      }
       const limit = Math.min(Number(url.searchParams.get("limit") || 100), 500);
       if (entityType) list = list.filter((e) => e.entityType === entityType);
       if (entityId) list = list.filter((e) => e.entityId === entityId);

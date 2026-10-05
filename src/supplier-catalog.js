@@ -1112,10 +1112,8 @@ export function listOwnCatalogItemsFromGraph(store, params) {
 /**
  * Every shop's listings, for Operations and Super Admin.
  *
- * The only listing state this returns is the shop's own `active` flag, already
- * stored on the catalog item. Approval (gridgo-supplier#97) and a staff
- * suspend-with-reason (gridgo-web#116) are not on the item, so this list does
- * not invent either one.
+ * Includes the shop's own `active` flag and the Super Admin take-down reason
+ * and timestamp. Listing approval (gridgo-supplier#97) is not stored here.
  */
 export function listStaffCatalogItemsFromGraph(store, params) {
   const {

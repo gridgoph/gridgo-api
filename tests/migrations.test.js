@@ -114,10 +114,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1790812800000_delivery_distance_zones",
         "1790899200000_match_selection_tokens",
         "1790985600000_out_of_zone_delivery_price",
-        "1790989200000_catalog_listing_suspension",
         "1791072000000_season_windows",
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
+        "1791331200000_catalog_listing_suspension",
       ],
     );
 
@@ -296,6 +296,16 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    assert.equal((await client.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'suspend_reason'",
+      [schema],
+    )).rowCount, 1);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'suspend_reason'",
+      [schema],
+    )).rowCount, 0);
 
     // Retirement has no automatic restore; its down only removes the migration marker.
     await runner(migrationOptions(schema, "down", 1, client));

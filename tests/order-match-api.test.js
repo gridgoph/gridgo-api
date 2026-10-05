@@ -1651,6 +1651,8 @@ test("the downpayment setting switches new checkouts between 75 and 100 and vali
   // A settings row written before the field existed reads as 100.
   await database.transaction(async () => {
     const store = await loadStore(database);
+    store.users.push({ id: "user_super", clerkUserId: "clerk_super", email: "super@gridgo.test", name: "Super", role: "super_admin", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "user_super", role: "super_admin", createdAt: AT });
     delete store.settings.downpaymentPercent;
     await saveStore(database, store);
   });

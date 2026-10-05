@@ -26,6 +26,8 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 ## Operational model
 
+Settings writes are Super Admin only. Operations audit reads are limited to workspace correction/deletion scopes; account standing changes cannot target privileged memberships. Contracts: `docs/OPERATIONAL_MODEL_V2_API.md#audit-access` and its account/settings sections.
+
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 
 Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/transfer evidence, reserved manual attempts). `src/refund-policy.js` owns independent work/payout holds; never let claim release bypass them. Settlements preserve original money/stage snapshots, supersede unpaid stages, and pay any agreed shop remainder through the separate settlement item.
@@ -66,6 +68,8 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 Artwork design links are cart-line `artworkLinks`, snapshotted immutably at checkout and projected with scoped `productionItems`; `POST /artwork/link-check` is an anonymous-provider probe for signed-in clients, never proof of edit permission. Contract: `docs/ORDER_MATCH_API.md#artwork-design-links`.
 
 Supplier readiness separates legacy setup checks, operational listing eligibility, and request-specific capacity/deadline diagnostics; see `docs/SUPPLIER_CATALOG_API.md#supplier-readiness-diagnostics`. Matching and readiness share shop gates in `src/supplier-eligibility.js`.
+
+Super Admin listing take-downs and shop-controlled republication follow `docs/SUPPLIER_CATALOG_API.md#staff-listing-index-and-take-down`.
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 

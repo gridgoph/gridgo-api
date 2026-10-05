@@ -153,7 +153,7 @@ Handles `user.updated` and `user.created` with the same person-copy rule as `/au
 
 `PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
 
-`PATCH /users/:id/account` is Super Admin only, same blast radius as the role route. Body: `{ status: "suspended" | "removed" | "active", reason: string }`. `reason` is required for every status, trimmed, and rejected with `400` when empty. `suspended` and `removed` store the trimmed reason, the time, and the actor. `active` restores the account and clears those three fields; the request reason is still written to the audit log. This is account standing, not accreditation: it does not write `users.verification_status` and it does not call approval-case suspend. `removed` does not delete the user row, memberships, orders, or the Clerk user. Both held states remain in the Roles directory so an admin can read the reason. Anyone who is not a Super Admin receives `403`. An unknown user is `404 user_not_found`. An unknown status is `400`. The caller cannot change their own account. Suspending or removing the platform's last active Super Admin returns the same `409 last_super_admin` as the role route. Audit actions are `user.account_suspend`, `user.account_remove`, and `user.account_restore`, entity type `user`, with the reason set. `GET /users`, `GET /auth/me`, and the fixed role projections include `accountStatus`, `accountStatusReason`, and `accountStatusAt`. After authentication, other domain routes for a held account return `403` `{ error: "account_suspended" | "account_removed", message, reason }`. `GET /auth/me` stays `200` so the apps can show the reason. The Clerk session stays valid.
+`PATCH /users/:id/account` allows Operations to suspend or restore clients, shops and riders. Only Super Admin may change an identity with an Operations or Super Admin membership (including identities whose legacy role is client), set `removed`, or restore a removed account. Body: `{ status: "suspended" | "removed" | "active", reason: string }`. `reason` is required for every status, trimmed, and rejected with `400` when empty. `suspended` and `removed` store the trimmed reason, the time, and the actor. `active` restores the account and clears those three fields; the request reason is still written to the audit log. This is account standing, not accreditation: it does not write `users.verification_status` and it does not call approval-case suspend. `removed` does not delete the user row, memberships, orders, or the Clerk user. Both held states remain in the Roles directory so an admin can read the reason. Callers outside these permissions receive `403 forbidden`. An unknown user is `404 user_not_found`. An unknown status is `400`. The caller cannot change their own account. Suspending or removing the platform's last active Super Admin returns the same `409 last_super_admin` as the role route. Audit actions are `user.account_suspend`, `user.account_remove`, and `user.account_restore`, entity type `user`, with the reason set. `GET /users`, `GET /auth/me`, and the fixed role projections include `accountStatus`, `accountStatusReason`, and `accountStatusAt`. After authentication, other domain routes for a held account return `403` `{ error: "account_suspended" | "account_removed", message, reason }`. `GET /auth/me` stays `200` so the apps can show the reason. The Clerk session stays valid.
 
 ### `POST /auth/clerk/activate`
 
@@ -705,7 +705,15 @@ Returns `200 {"updatedCount":2}`. A missing/empty snapshot returns `400 {"error"
 
 Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying the same owner delete returns the same response. Deletion is a durable soft delete: the record remains as internal lifecycle evidence (assignment notifications gate payment), but it never appears in `GET /notifications` again. This makes swipe-to-delete persistent without breaking order invariants.
 
+## Audit access
+
+`GET /audit` returns `{ audit }`, newest first, with optional `action`, `entityType`, `entityId`, `orderId`, `actorId`, and `limit` (default 100, maximum 500) filters. The unrestricted audit log is Super Admin only.
+
+Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
+
 ## Settings and distance fee
+
+`GET /settings` remains readable by signed-in roles for operational views. All writes through `PATCH /settings` and `POST /settings/payment-qr` require Super Admin; Operations receives `403 forbidden`, including for delivery-zone limits and prices.
 
 Default `GET /settings` response:
 
@@ -737,9 +745,9 @@ Default `GET /settings` response:
 }
 ```
 
-`paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Operations has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
+`paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
 
-Upload is two steps, both `ops_admin` / `super_admin`:
+Upload is two steps: Operations or Super Admin may upload the file; only Super Admin may activate it:
 
 1. `POST /files` with `purpose=payment_qr` and a JPEG, PNG, or WebP (up to 5 MiB). Not attachable to an order (`400 payment_qr_not_attachable`).
 2. `POST /settings/payment-qr` `{ "fileId": "file_…", "reason": "…" }` activates that ready file as the platform QR, retires the previous one, and is audited. Repeating the same `fileId` is a no-op.
@@ -752,7 +760,7 @@ Unauthenticated. Streams the current ready plate so checkout and the ops preview
 
 ### Delivery distance zones
 
-`settings.deliveryFeeBands` is the single source for distance labels and delivery prices (`src/operational-model.js`). The four zone keys, names, and order stay fixed: Nearby, Away, Long Distance, Out of Zone. Operations/Super Admin can edit the first three `maxDistanceMeters` values. Bounds are inclusive: a distance exactly at an upper limit stays in that zone, and the next zone starts above that limit. Defaults remain 5,000 / 10,000 / 15,000 m; Out of Zone starts above the saved Long Distance limit and has `maxDistanceMeters: null` (no maximum). Distances computed from coordinates are rounded to whole metres before band selection, as before. The former 4,999 m default becomes 5,000 m for future quotes.
+`settings.deliveryFeeBands` is the single source for distance labels and delivery prices (`src/operational-model.js`). The four zone keys, names, and order stay fixed: Nearby, Away, Long Distance, Out of Zone. Only Super Admin can edit the first three `maxDistanceMeters` values. Bounds are inclusive: a distance exactly at an upper limit stays in that zone, and the next zone starts above that limit. Defaults remain 5,000 / 10,000 / 15,000 m; Out of Zone starts above the saved Long Distance limit and has `maxDistanceMeters: null` (no maximum). Distances computed from coordinates are rounded to whole metres before band selection, as before. The former 4,999 m default becomes 5,000 m for future quotes.
 
 The first three bands use `feeMinor`. Out of Zone has **no `feeMinor`**; its price is `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)`, applied to the **whole** distance, not only the excess beyond the saved Long Distance limit. With the defaults, 15,001 m costs 28,000 minor units (PHP 280), 16,000 m costs the same, and 16,001 m or 16,200 m costs 29,500 (PHP 295). Integer arithmetic rejects overflow. Out of Zone is never excluded because of its distance. The snapshotted rider/GRIDGO split remains 85/15 by default.
 
@@ -760,7 +768,7 @@ Migration `1790812800000_delivery_distance_zones` preserves the three stored fla
 
 Out of Zone defaults to **PHP 40 base + PHP 15 per kilometre**. Migration `1790985600000_out_of_zone_delivery_price` replaces only the shipped Out of Zone placeholder (7500/1000), increments the settings version only on change, and preserves customized prices and all three flat fees (including production PHP 89/149/229). Its down step restores 7500/1000 only when the band still holds 4000/1500. Existing order/job snapshots stay unchanged.
 
-Fresh settings use PHP 89 / 149 / 229 for the three flat fees. Existing configured fees are preserved by seed and migration. Editable limits reuse the existing meter fields, so no new schema/data migration is needed; existing migrations retain the 5 / 10 / 15 km limits and stored flat prices. Operations/Super Admin can change limits and prices without a release:
+Fresh settings use PHP 89 / 149 / 229 for the three flat fees. Existing configured fees are preserved by seed and migration. Editable limits reuse the existing meter fields, so no new schema/data migration is needed; existing migrations retain the 5 / 10 / 15 km limits and stored flat prices. Only Super Admin can change limits and prices without a release:
 
 ```http
 PATCH /settings
@@ -866,7 +874,7 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 
 ### Rider delivery split
 
-`riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Operations and Super Admin edit it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
+`riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Only Super Admin edits it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
 
 Quote acceptance and cart checkout snapshot the setting when the delivery fee is set. Each order and its checkout job store the rate; later settings, assignment, or state changes do not reprice it. Migration `1786978800000` preserves all pre-existing orders/jobs at `10000` (their original full rider pass-through), while seeding `8500` for new commitments. A permitted quote supersession creates a new commercial commitment with the then-current rate. Zero-fee pickup jobs have zero rider payout and zero GRIDGO delivery share.
 
@@ -969,7 +977,7 @@ Statuses: `not_submitted | pending_confirmation | confirmed | not_required`. `no
 
 ### Upfront checkout
 
-The captain decided on 2026-09-25 (gridgo-api#66) that new orders are paid **100% up front**. The split is the Operations/Super Admin setting `downpaymentPercent` (`100` default, or `75`) on `PATCH /settings` with the usual `expectedVersion` handshake, so the business can return to 75/25 without a release.
+The captain decided on 2026-09-25 (gridgo-api#66) that new orders are paid **100% up front**. The split is the Super Admin setting `downpaymentPercent` (`100` default, or `75`) on `PATCH /settings` with the usual `expectedVersion` handshake, so the business can return to 75/25 without a release.
 
 - Cart checkout snapshots the setting on the order as `downpaymentPercent`, like the rider delivery split. The setting changing later never changes an order already placed.
 - At `100`: `downpaymentMinor = totalMinor` and `balanceMinor = 0`. `payments.initial` carries the whole total (label `Full payment`), and `payments.final_online` stays in the installment list at `amountMinor: 0`, `status: "not_required"` (label `No balance`). All payment allocations sit on `initial`.
