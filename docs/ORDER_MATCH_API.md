@@ -4,6 +4,11 @@ This is the authoritative first-drop contract for client matching and cart check
 
 All routes require a Clerk bearer mapped to a PostgreSQL `client` membership, except Operations/Super Admin may also read an invoice. Money is integer PHP minor units.
 
+Client-price migration: [staged privacy contract](CLIENT_CATALOG_PRIVACY.md) defines
+`POST /me/catalog-quotes`, basket quotes (`cart.clientQuote` and
+`GET/POST /me/carts/:id/quote`), invoice client amounts, deprecated fields and the
+required release order. Phase 1 remains additive; legacy shop fields still exist.
+
 ## Preferences and addresses
 
 ```text
