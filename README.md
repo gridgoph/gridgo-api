@@ -2,6 +2,8 @@
 
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
 
+Staff invitations, QR/OTP handovers, hub reminders and receipt scans are documented in [Hub handovers](docs/HUB_HANDOVER_API.md). OTP rollout defaults off until the companion app updates are ready.
+
 The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_MODEL_V2_API.md), [Client refunds](docs/REFUNDS_API.md), [Storage API](docs/STORAGE_API.md), and [Taxonomy API](docs/TAXONOMY_API.md). Production setup, cutover, backup, and recovery are in [Deployment](docs/DEPLOYMENT.md).
 
 ## Architecture decisions

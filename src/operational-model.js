@@ -220,6 +220,7 @@ export function defaultOperationalSettings() {
     riderCommissionBps: 8_500,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
+    handoverOtpEnabled: false,
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
@@ -236,6 +237,9 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.handoverOtpEnabled !== undefined && typeof settings.handoverOtpEnabled !== 'boolean') {
+    fail(400, 'invalid_handover_otp_setting', 'handoverOtpEnabled must be a boolean.');
+  }
   if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
@@ -1026,6 +1030,8 @@ export function publicOrderFor(order, user, store = null) {
   }
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order, store) : null;
   delete publicRecord.attachments;
+  // Credentials are available only from the caller-scoped handover endpoint.
+  delete publicRecord.handover;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   delete publicRecord.shopRecoveryHistory;
   delete publicRecord.shopFailureEvents;
@@ -1117,6 +1123,7 @@ export function publicOrderFor(order, user, store = null) {
   if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
 
   if (!ops && !assignedSupplier) {
+    delete publicRecord.supplierInvoiceFileIds;
     delete publicRecord.productionReassignmentEligible;
     delete publicRecord.productionNoCommunication;
     delete publicRecord.supplierPriceMinor;

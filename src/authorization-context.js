@@ -4,6 +4,7 @@ const ROLE_ORDER = new Map([
   ["rider", 2],
   ["ops_admin", 3],
   ["super_admin", 4],
+  ["staff", 5],
 ]);
 
 const contextByUser = new WeakMap();
