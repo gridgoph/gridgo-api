@@ -2060,4 +2060,17 @@ test('replacement preserves an applied original-shop penalty ledger and resets o
   assert.ok(store.orders[0].payoutMilestones.every((row) => !row.productionDeductionMinor));
   assert.equal(store.orders[0].supplierId, 'supplier_a');
   assert.equal(store.orderJobs[0].supplierId, 'supplier_a');
+  await database.transaction(async () => {
+    const current = await loadStore(database);
+    current.orders[0].state = 'production';
+    current.orders[0].readyBy = '2026-01-04T00:00:00.000Z';
+    const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
+    assessProductionLapses(current, { at: '2026-01-06T00:00:00.000Z', createId });
+    assessProductionLapses(current, { at: '2026-01-06T00:01:00.000Z', createId });
+    await saveStore(database, current);
+  });
+  const later = await loadStore(database);
+  assert.equal(later.productionLapses.length, 2);
+  assert.deepEqual(later.productionLapses.find((row) => row.supplierId === 'supplier_b'), before);
+  assert.ok(later.productionLapses.find((row) => row.supplierId === 'supplier_a').deductionMinor > 0);
 });

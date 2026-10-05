@@ -117,6 +117,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791072000000_season_windows",
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
+        "1791244800000_shop_recovery_penalty_ownership",
       ],
     );
 
@@ -296,6 +297,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    // Reverse shop-specific lapse ownership before the earlier migrations.
+    await runner(migrationOptions(schema, "down", 1, client));
     // Retirement has no automatic restore; its down only removes the migration marker.
     await runner(migrationOptions(schema, "down", 1, client));
 
