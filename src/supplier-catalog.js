@@ -1,3 +1,4 @@
+import { approvedCatalogView } from "./catalog-review-state.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { gridgoAmountMinor, measurementKindFor, priceLine } from "./pricing.js";
@@ -358,6 +359,8 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
     }
   }
   if (publicOnly) {
+    if (item.reviewStatus && item.reviewStatus !== "approved") blockers.push("listing_not_approved");
+    if (item.suspendedAt) blockers.push("listing_suspended");
     if (item.active === false) blockers.push("item_inactive");
     if (service.state !== "live") blockers.push("service_not_live");
     const membership = (store.userRoleMemberships || []).some(
@@ -373,6 +376,8 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
 }
 
 export function selectedCatalogPrice(store, item, selectedOptionIds = []) {
+  store = approvedCatalogView(store);
+  item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   const selectedIds = [...new Set(selectedOptionIds.map(String))];
   if (selectedIds.length !== selectedOptionIds.length) {
     throw new CatalogError(400, "invalid_catalog_options", "Choose each catalog option at most once.");
@@ -467,6 +472,8 @@ function clientModifierMinor(store, amount) {
 }
 
 export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
+  store = approvedCatalogView(store);
+  item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
   const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false }).map((group) => ({
@@ -748,6 +755,7 @@ function publicCatalogMediaEligible(store, file) {
 }
 
 export function publicCatalogMediaFile(store, fileId) {
+  store = approvedCatalogView(store);
   const file = (store.files || []).find((candidate) => candidate.fileId === fileId);
   return publicCatalogMediaEligible(store, file) ? file : null;
 }
@@ -778,6 +786,7 @@ function normalizedSnapshotSelection(selection) {
 }
 
 export function createOrderLineSnapshot(store, selection, createId) {
+  store = approvedCatalogView(store);
   selection = normalizedSnapshotSelection(selection);
   if (selection.expectedVersion == null) {
     throw new CatalogError(400, "expected_version_required", "expectedVersion is required before checkout.");
@@ -860,8 +869,8 @@ export function createOrderLineSnapshot(store, selection, createId) {
       return {
         id: createId?.("olo") || `${lineItemId}_option_${optionOrder}`,
         orderLineItemId: lineItemId,
-        sourceOptionGroupId: group.id,
-        sourceOptionId: option.id,
+        sourceOptionGroupId: Object.hasOwn(group, "sourceOptionGroupId") ? group.sourceOptionGroupId : group.id,
+        sourceOptionId: Object.hasOwn(option, "sourceOptionId") ? option.sourceOptionId : option.id,
         groupNameSnapshot: group.name,
         groupKindSnapshot: group.kind || "spec",
         optionLabelSnapshot: option.label,
@@ -912,6 +921,8 @@ export function createOrderLineSnapshot(store, selection, createId) {
  * 3x5 tarpaulin saw one number in the basket and paid another at checkout.
  */
 export function priceCatalogSelection(store, item, { selectedOptions, quantity, measurement = null, speedTier = null }) {
+  store = approvedCatalogView(store);
+  item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   return priceLine({
     basePriceMinor: item.basePriceMinor,
     unit: item.pricingUnit || "per_unit",
@@ -1113,6 +1124,10 @@ export function privateCatalogItem(store, item) {
   const groups = catalogGroupsForItem(store, item.id);
   return {
     id: item.id,
+    reviewStatus: item.reviewStatus || "approved",
+    reviewReason: item.reviewReason ?? null,
+    reviewedAt: item.reviewedAt ?? null,
+    hasApprovedVersion: Boolean(item.approvedSnapshot) || (item.reviewStatus || "approved") === "approved",
     supplierId: item.supplierId,
     supplierServiceId: item.supplierServiceId,
     subcategoryCode: item.subcategoryCode,

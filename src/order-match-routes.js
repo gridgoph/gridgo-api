@@ -1,3 +1,4 @@
+import { approvedCatalogView, CATALOG_REVIEW_TABLES } from "./catalog-review-state.js";
 import { fileCheckProjection } from "./artwork-gates.js";
 import { publicHubPickup } from "./hub-pickup.js";
 import { createHash, randomBytes } from "node:crypto";
@@ -965,7 +966,20 @@ export async function prepareArtworkCheckout({ req, pathname, store, user, check
   }
 }
 
-export async function routeOrderMatch({ req, url, store, user, readBody, id, now }) {
+export async function routeOrderMatch(args) {
+  const { store } = args;
+  const view = approvedCatalogView(store);
+  if (view === store) return routeOrderMatchApproved(args);
+  const original = Object.fromEntries(CATALOG_REVIEW_TABLES.map(key => [key, store[key]]));
+  try {
+    for (const key of CATALOG_REVIEW_TABLES) store[key] = view[key];
+    return await routeOrderMatchApproved(args);
+  } finally {
+    Object.assign(store, original);
+  }
+}
+
+async function routeOrderMatchApproved({ req, url, store, user, readBody, id, now }) {
   const { pathname } = url;
   if (!isOrderMatchRoute(req.method, pathname)) return null;
 

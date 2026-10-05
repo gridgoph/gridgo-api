@@ -63,11 +63,12 @@ function ordersOnListings(store, listingIds) {
 }
 
 function subcategoryUsage(store, codes) {
-  const listings = (store.catalogItems || []).filter((item) => codes.has(item.subcategoryCode));
+  const listings = (store.catalogItems || []).filter((item) => codes.has(item.subcategoryCode) || codes.has(item.approvedSnapshot?.item?.subcategoryCode));
   const listingIds = new Set(listings.map((item) => item.id));
   const shopIds = [...new Set(listings.map((item) => item.supplierId))];
   return {
     listings: listings.length,
+    ...((store.productTypeRequests || []).some(row => codes.has(row.productTypeCode)) ? { productTypeRequests: store.productTypeRequests.filter(row => codes.has(row.productTypeCode)).length } : {}),
     shops: shopIds.map((supplierId) => shopFor(store, supplierId)),
     orders: ordersOnListings(store, listingIds),
     starters: (store.listingStarters || []).filter((starter) => codes.has(starter.subcategoryCode)).length,
@@ -91,6 +92,7 @@ export function taxonomyEntryUsage(store, collection, entry) {
   const shopIds = [...new Set([...services.map((service) => service.supplierId), ...under.shops.map((shop) => shop.supplierId)])];
   return {
     printJobs: printJobs.length,
+    ...((store.productTypeRequests || []).some(row => row.categoryCode === entry.code) ? { productTypeRequests: store.productTypeRequests.filter(row => row.categoryCode === entry.code).length } : {}),
     services: services.length,
     aliases: (store.taxonomy?.categoryAliases || []).filter((alias) => alias.categoryCode === entry.code).length,
     listings: under.listings,

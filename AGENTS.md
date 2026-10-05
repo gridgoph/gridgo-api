@@ -71,6 +71,8 @@ Checkout enforces fresh link probes and server upload verdicts; supplier access/
 
 Supplier readiness separates legacy setup checks, operational listing eligibility, and request-specific capacity/deadline diagnostics; see `docs/SUPPLIER_CATALOG_API.md#supplier-readiness-diagnostics`. Matching and readiness share shop gates in `src/supplier-eligibility.js`.
 
+Listing approval, grandfathered live rows, private revisions, required specs, and product-type requests follow `docs/SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker`. Client pricing and matching must use `approvedCatalogView`; review decisions never clear visibility or take-down holds.
+
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
 Season awareness windows and Super Admin-only rollout controls are defined in `docs/SEASON_WINDOWS_API.md`. Scheduled season pushes default off; `noticeQueuedAt` is immutable and never reset by edits.

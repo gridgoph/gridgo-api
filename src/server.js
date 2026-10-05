@@ -1,3 +1,4 @@
+import { catalogReviewNotice } from "./catalog-review-routes.js";
 import { isArtworkCheckout, prepareArtworkCheckout } from "./order-match-routes.js";
 import { checkArtworkUpload } from "./artwork-file-check.js";
 import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-gates.js";
@@ -2669,7 +2670,9 @@ async function handleRequest(req, res) {
         authorizeFileAttach(latestUser, latestFile, latestTarget);
         if (latestTarget.type === "order") assertRefundWorkAllowed(latestStore, latestTarget.record);
         if (latestTarget.type === "supplier_catalog_item") {
+          const priorReviewStatus = latestTarget.record.reviewStatus;
           const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
+          if (priorReviewStatus !== "pending") catalogReviewNotice(latestStore, attached.item, { id, now }, "catalog_review_pending");
           await save(latestStore);
           const item = privateCatalogItem(latestStore, attached.item);
           await decorateCatalogPhotoUrls(latestStore, { item });
