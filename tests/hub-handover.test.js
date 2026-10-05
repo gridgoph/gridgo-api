@@ -5,9 +5,10 @@ import { routeHubHandover, prepareHandover, sweepHubReminders, verifyHandoverOtp
 import { publicHubPickup } from '../src/hub-pickup.js';
 import { publicOrderFor } from '../src/operational-model.js';
 
-function setup() {
+function setup(schedule = { utcOffsetMinutes: 480, week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] }) {
   const store = fixture();
   store.settings.handoverOtpEnabled = true;
+  store.settings.hubPickup = { schedule, feeMinor: 0 };
   store.staffRoles = [{ code: 'hub_staff', name: 'Hub staff', canHandout: true }];
   store.staffProfiles = [{ userId: 'other', roleCode: 'hub_staff', active: true, updatedAt: AT }];
   store.staffInvites = []; store.hubHandouts = [];
@@ -207,7 +208,7 @@ test('staff-management and each hub reminder event write both administrator inbo
   for (const userId of ['ops', 'admin']) assert.ok(store.notifications.some(n => n.userId === userId && n.type === 'ops_hub_unclaimed_reminder'));
 });
 
-test('public pickup and staff hub publish the same effective default and configured schedule', async () => {
+test('public pickup and staff hub publish the same unset and configured schedule', async () => {
   const expected = { utcOffsetMinutes: 480,
     week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
   const custom = { utcOffsetMinutes: 480,
@@ -219,11 +220,28 @@ test('public pickup and staff hub publish the same effective default and configu
     const before = structuredClone(store.settings);
     const pickup = publicHubPickup(store.settings);
     const hub = (await call(store, 'other', '/staff/hub', {}, 'GET')).body.hub;
-    assert.deepEqual(pickup.schedule, hubPickup?.schedule ?? expected);
+    assert.deepEqual(pickup.schedule, hubPickup?.schedule ?? null);
     assert.deepEqual(pickup.schedule, hub.schedule);
     assert.deepEqual(store.settings, before);
-    pickup.schedule.week[0].opensMinute = 0;
+    if (pickup.schedule) pickup.schedule.week[0].opensMinute = 0;
     assert.deepEqual(publicHubPickup(store.settings).schedule, hub.schedule);
     assert.deepEqual(store.orders[0].handover.schedule, expected);
   }
+});
+
+test('unset hub hours allow pickup readiness and claims without counting invented missed days', async () => {
+  const store = setup(null), order = store.orders[0];
+  assert.equal(order.handover.schedule, null);
+  assert.equal(sweepHubReminders(store, { at: '2026-10-12T10:00:00Z', id }), true);
+  assert.equal(order.handover.missedDays, 0);
+  assert.equal(order.handover.operationsRequired, false);
+  assert.deepEqual(order.handover.notifiedDays, []);
+  const ready = store.notifications.find(n => n.type === 'hub_ready');
+  assert.match(ready.body, /Collection hours are not set yet/);
+  assert.equal(sweepHubReminders(store, { at: '2026-10-14T10:00:00Z', id }), false);
+  assert.equal(store.notifications.some(n => n.type.startsWith('hub_unclaimed')), false);
+  const handover = (await call(store, 'client', '/orders/order/handover', {}, 'GET')).body.handover;
+  assert.equal(handover.hub.schedule, null);
+  const claim = await call(store, 'other', '/staff/hub/claims', { qrToken: handover.qrToken, otp: handover.otp });
+  assert.equal(claim.status, 200);
 });

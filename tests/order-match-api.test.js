@@ -2389,8 +2389,7 @@ test("hub pickup settings are Super Admin-only and early choices survive Postgre
   const patch = (body, subject = "clerk_ops") => request(api, "/settings", { method: "PATCH", subject, body });
   const initial = await request(api, "/settings", { subject: "clerk_client" });
   assert.equal(initial.body.settings.hubPickup.feeMinor, 0);
-  assert.deepEqual(initial.body.settings.hubPickup.schedule, { utcOffsetMinutes: 480,
-    week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] });
+  assert.equal(initial.body.settings.hubPickup.schedule, null);
   assert.equal((await loadStore(database)).settings.hubPickup.schedule, null);
   const hubPickup = { feeMinor: 2500, schedule: { utcOffsetMinutes: 480,
     week: [1, 3, 5].map((weekday) => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] } };

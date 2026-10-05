@@ -70,14 +70,21 @@ export function sweepHubReminders(store, { at, id }) {
   for (const order of store.orders || []) {
     const h = order.handover;
     if (order.state !== 'awaiting_collection' || !h?.qrToken || h.consumedAt) continue;
-    const schedule = h.schedule, offset = schedule.utcOffsetMinutes * 60000;
+    const schedule = h.schedule;
     const readyMs = Date.parse(h.readyAt), nowMs = Date.parse(at);
     if (nowMs < readyMs) continue;
     if (!h.readyNotifiedAt) {
       const alreadyNotified = store.notifications.some(n => n.orderId === order.id && n.userId === order.clientId && n.type === 'order_ready_for_pickup');
-      if (!alreadyNotified) clientNotice(store, order, 'hub_ready', 'Your order is ready. Bring its QR and matching code during hub hours.', at, id);
+      if (!alreadyNotified) clientNotice(store, order, 'hub_ready', schedule
+        ? 'Your order is ready. Bring its QR and matching code during hub hours.'
+        : 'Your order is ready. Collection hours are not set yet. Contact Operations to arrange pickup.', at, id);
       h.readyNotifiedAt = at; changed = true;
     }
+    if (!schedule) {
+      if (changed) queueOrderInvalidate(store, order, ['orders']);
+      continue;
+    }
+    const offset = schedule.utcOffsetMinutes * 60000;
     const first = Date.parse(new Date(readyMs + offset).toISOString().slice(0, 10) + 'T00:00:00Z');
     const last = Date.parse(new Date(nowMs + offset).toISOString().slice(0, 10) + 'T00:00:00Z');
     for (let day = first; day <= last; day += 86400000) {

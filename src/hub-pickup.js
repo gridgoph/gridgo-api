@@ -1,16 +1,12 @@
 import { AvailabilityError, validateShopSchedule } from "./availability.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 
-const DEFAULT_SCHEDULE = { utcOffsetMinutes: 480,
-  week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
-
 export function hubPickupSettings(settings) {
   return structuredClone(settings?.hubPickup ?? { schedule: null, feeMinor: 0 });
 }
 
 export function publicHubPickup(settings) {
-  const pickup = hubPickupSettings(settings);
-  return { ...pickup, schedule: pickup.schedule ?? structuredClone(DEFAULT_SCHEDULE), point: gridgoOfficePoint() };
+  return { ...hubPickupSettings(settings), point: gridgoOfficePoint() };
 }
 
 export function validateHubPickup(value, fail) {
