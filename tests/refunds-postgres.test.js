@@ -325,10 +325,11 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
-async function apiForTest(t) {
+async function apiForTest(t, { bytes } = {}) {
   const storage = http.createServer((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
     else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
+    else if (req.method === 'GET' && bytes) { res.writeHead(200, { 'Content-Length': bytes.length }); res.end(bytes); }
     else { res.writeHead(404); res.end(); }
   });
   await new Promise((resolve) => storage.listen(0, '127.0.0.1', resolve));
@@ -358,9 +359,37 @@ async function apiForTest(t) {
       headers: { ...(key ? { Authorization: `Bearer ${token(key, opts.claims)}` } : {}),
         'Content-Type': 'application/json', 'Idempotency-Key': opts.key || id('httpkey'), ...opts.headers },
       ...(body ? { body: JSON.stringify(body) } : {}) });
-    return { status: res.status, body: await res.json(), headers: res.headers };
+    return { status: res.status, body: opts.raw ? Buffer.from(await res.arrayBuffer()) : await res.json(), headers: res.headers };
   };
 }
+
+test('refund receipt content preserves bound-client privacy and signed-read access', { skip: !DATABASE_URL }, async (t) => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db);
+  const bytes = Buffer.alloc(100, 0x5a);
+  const api = await apiForTest(t, { bytes });
+  for (const key of ['client', 'other', 'supplier', 'rider']) {
+    assert.equal((await api(key, 'GET', '/files/receipt/content')).status, 403);
+  }
+  let refund = await request(db);
+  refund = await review(db, refund);
+  refund = await settle(db, refund);
+  refund = await reserve(db, refund);
+  await pay(db, refund);
+  for (const key of [null, 'client', 'other', 'supplier', 'rider', 'ops', 'super']) {
+    const signed = await api(key, 'GET', '/files/receipt/download-url');
+    const content = await api(key, 'GET', '/files/receipt/content', null, { raw: true });
+    assert.equal(content.status, signed.status);
+    if (['client', 'ops', 'super'].includes(key)) {
+      assert.equal(content.status, 200);
+      assert.deepEqual(content.body, bytes);
+      assert.equal(content.headers.get('content-type'), 'image/png');
+      assert.equal(content.headers.get('cache-control'), 'private, no-store, max-age=0');
+    } else {
+      assert.equal(content.status, key ? 403 : 401);
+    }
+  }
+});
 
 test('live HTTP refund authorization, signed QR privacy, production race and durable inbox', { skip: !DATABASE_URL }, async (t) => {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
@@ -597,10 +626,40 @@ test('replacing the platform receiving QR leaves old bytes for gated retention c
     await saveStore(db, store);
   });
   const api = await apiForTest(t);
-  const replaced = await api('ops', 'POST', '/settings/payment-qr', { fileId: 'platform_new', reason: 'Replace receiving image' });
+  const replaced = await api('super', 'POST', '/settings/payment-qr', { fileId: 'platform_new', reason: 'Replace receiving image' });
   assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
   const store = await loadStore(db);
   assert.equal(store.settings.paymentQrFileId, 'platform_new');
   assert.equal(store.files.find((file) => file.fileId === 'platform_old').state, 'ready');
   assert.equal(store.files.find((file) => file.fileId === 'platform_old').deleteRequestedAt, undefined);
+});
+
+test('shop recovery full-refund choice persists, rejects partial settlement and pays through reserved transfer', { skip: !DATABASE_URL }, async (t) => {
+  const { recordShopFailure } = await import('../src/shop-recovery.js');
+  const { routeShopRecovery } = await import('../src/shop-recovery-routes.js');
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'supplier_self_qc' });
+  await db.transaction(async () => {
+    const store = await loadStore(db), order = store.orders[0];
+    recordShopFailure(store, order, { kind: 'cancelled', reason: 'Cannot complete the run', at: AT, createId: id, actorId: 'supplier' });
+    const result = await routeShopRecovery({ req: { method: 'POST', headers: { 'idempotency-key': id('key') } },
+      url: new URL('http://test/orders/order/shop-recovery/refund'), store, user: actor(store, 'client'),
+      readBody: async () => ({ recoveryId: order.shopRecovery.id, destination: qr }), now: () => AT, id, audit });
+    assert.equal(result.status, 200);
+    await saveStore(db, store);
+  });
+  let store = await loadStore(db);
+  assert.equal(store.orders[0].shopFailureEvents[0].stage, 'supplier_self_qc');
+  const requestId = store.orders[0].shopRecovery.refundRequestId;
+  let refund = (await call(db, 'client', 'GET', `/refund-requests/${requestId}`)).body.refund;
+  refund = await review(db, refund);
+  await assert.rejects(settle(db, refund, { shop: 10000, total: 104000 }), errorCode('shop_recovery_full_refund_required'));
+  await assert.rejects(settle(db, refund, { principal: 50000, total: 60000 }), errorCode('shop_recovery_full_refund_required'));
+  refund = await settle(db, refund);
+  assert.equal(refund.settlement.totalMinor, 115000);
+  refund = await pay(db, await reserve(db, refund));
+  assert.equal(refund.status, 'paid');
+  store = await loadStore(db);
+  assert.equal(store.orders[0].state, 'cancelled');
+  assert.equal(store.refundPayments[0].amountMinor, 115000);
 });

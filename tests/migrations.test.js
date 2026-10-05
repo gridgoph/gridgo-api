@@ -46,11 +46,13 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rows.map((row) => row.table_name));
     for (const table of [
+      "staff_roles", "staff_profiles", "staff_invites", "hub_handouts",
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
+      "organization_accounts", "organization_email_challenges",
       "order_payment_allocations", "platform_revenue_adjustments",
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
-      "order_jobs", "order_invoices", "support_admins", "support_tickets",
+      "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
@@ -117,6 +119,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791072000000_season_windows",
         "1791075600000_production_penalties",
         "1791158400000_retire_development_shops",
+        "1791244800000_shop_recovery_penalty_ownership",
+        "1791248400000_hub_pickup_request",
+        "1791252000000_multi_shop_baskets",
+        "1791255600000_order_reschedule_request",
+        "1791331200000_catalog_listing_suspension",
+        "1791417600000_listing_reviews",
+      "1791504000000_organization_discount",
+      "1791590400000_organization_accounts",
+        "1791676800000_staff_hub_handovers",
       ],
     );
 
@@ -296,6 +307,61 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    // Rollback is allowed only before staff configuration or handovers exist.
+    await client.query("INSERT INTO staff_roles VALUES ('counter_assistant', 'Counter assistant', false)");
+    await client.query('BEGIN');
+    await assert.rejects(runner(migrationOptions(schema, 'down', 1, client)), /Staff handovers require a forward migration once used/);
+    await client.query('ROLLBACK');
+    await client.query("DELETE FROM staff_roles WHERE code = 'counter_assistant'");
+    await runner(migrationOptions(schema, 'down', 1, client));
+    assert.equal((await client.query("SELECT to_regclass('hub_handouts') AS t")).rows[0].t, null);
+
+    await client.query(`INSERT INTO organization_accounts (user_id, name_key, school_key, data)
+      VALUES ('multi_role_shop', 'test organization', 'test school', '{}')`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /client verification records exist/);
+    await client.query("ROLLBACK");
+    await client.query('DELETE FROM organization_accounts');
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('organization_accounts') AS t")).rows[0].t, null);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.guard_organization_discount()`])).rows[0].fn, null);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'suspend_reason'",
+      [schema],
+    )).rowCount, 1);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'supplier_catalog_items' AND column_name = 'suspend_reason'",
+      [schema],
+    )).rowCount, 0);
+
+    // Reschedule protection reverses before the earlier domain migrations.
+    assert.notEqual((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regprocedure($1) AS fn", [`${schema}.protect_order_reschedule_request()`])).rows[0].fn, null);
+
+    // Empty basket schema can be reversed without touching existing orders.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('order_baskets') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('order_basket_groups') AS t")).rows[0].t, null);
+
+    await client.query(`INSERT INTO client_carts
+      (id,client_id,state,version,service_level,fulfillment_mode,created_at,updated_at,request_fulfillment)
+      VALUES ('chosen_cart','multi_role_shop','draft',1,'standard','pickup',now(),now(),
+        '{"fulfillmentMode":"pickup","dropoff":{"lat":7,"lng":125,"label":"Hub"}}')`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /request fulfillment snapshots exist/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM client_carts WHERE id='chosen_cart'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='client_carts' AND column_name='request_fulfillment'", [schema])).rowCount, 0);
+
+    // Reverse shop-specific lapse ownership before the earlier migrations.
+    await runner(migrationOptions(schema, "down", 1, client));
     // Retirement has no automatic restore; its down only removes the migration marker.
     await runner(migrationOptions(schema, "down", 1, client));
 
@@ -1050,3 +1116,54 @@ for (const [baseFeeMinor, perKmMinor] of [[7500, 1000], [8000, 1200], [7500, 120
     });
   });
 }
+
+
+test("hub pickup migration adds a zero fee without replacing configured settings", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    const { readdir } = await import("node:fs/promises");
+    const count = (await readdir(MIGRATIONS_DIR)).filter(name => name.endsWith(".js") && name < "1791252000000").length;
+    await runner(migrationOptions(schema, "up", count, client));
+    await runner(migrationOptions(schema, "down", 1, client));
+    await client.query(`INSERT INTO platform_settings (singleton,version,settings) VALUES (true,7,'{}')`);
+    await runner(migrationOptions(schema, "up", 1, client));
+    let settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
+    assert.deepEqual(settings.hubPickup, { schedule: null, feeMinor: 0 });
+    await client.query(`UPDATE platform_settings SET settings=jsonb_set(settings,'{hubPickup,feeMinor}','2500')`);
+    await runner(migrationOptions(schema, "down", 1, client));
+    await runner(migrationOptions(schema, "up", 1, client));
+    settings = (await client.query("SELECT settings FROM platform_settings")).rows[0].settings;
+    assert.equal(settings.hubPickup.feeMinor, 2500);
+    assert.equal((await client.query("SELECT version FROM platform_settings")).rows[0].version, 7);
+  });
+});
+
+test("listing review migration grandfathers live listings and defaults new records to pending", { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    const { readdir } = await import("node:fs/promises");
+    const before = (await readdir(MIGRATIONS_DIR)).filter(name => name.endsWith(".js") && name < "1791417600000").length;
+    await runner(migrationOptions(schema, "up", before, client));
+    await client.query(`
+      INSERT INTO users(id,clerk_user_id,email,name,role,verification_status,created_at,position)
+        VALUES ('review_supplier','review_subject','review@example.invalid','Supplier','supplier','approved',now(),0);
+      INSERT INTO taxonomy_categories(id,code,name,active,sort_order,position)
+        VALUES ('review_category','review_category','Category',true,0,0);
+      INSERT INTO taxonomy_subcategories(id,code,category_code,name,active,sort_order,position)
+        VALUES ('review_type','review_type','review_category','Type',true,0,0);
+      INSERT INTO supplier_services(id,supplier_id,category_code,state,reference_rate_minor,turnaround_hours,created_at,updated_at,position)
+        VALUES ('review_service','review_supplier','review_category','live',1000,24,now(),now(),0);
+      INSERT INTO supplier_catalog_items(id,supplier_id,supplier_service_id,subcategory_code,name,base_price_minor,active,sort_order,created_at,updated_at)
+        VALUES ('live','review_supplier','review_service','review_type','Listing',1000,true,0,now(),now()),
+               ('hidden','review_supplier','review_service','review_type','Listing',1000,false,1,now(),now());
+    `);
+    await runner(migrationOptions(schema, "up", 1, client));
+    assert.deepEqual((await client.query("SELECT id,review_status FROM supplier_catalog_items ORDER BY id")).rows,
+      [{ id: "hidden", review_status: "pending" }, { id: "live", review_status: "approved" }]);
+    await client.query(`INSERT INTO supplier_catalog_items(id,supplier_id,supplier_service_id,subcategory_code,name,base_price_minor,sort_order,created_at,updated_at)
+      VALUES ('new','review_supplier','review_service','review_type','Listing',1000,2,now(),now())`);
+    assert.equal((await client.query("SELECT review_status FROM supplier_catalog_items WHERE id='new'")).rows[0].review_status, "pending");
+    await assert.rejects(client.query("UPDATE supplier_catalog_items SET review_status='needs_revision' WHERE id='new'"), error => error.code === "23514");
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /listing reviews exist/);
+    await client.query("ROLLBACK");
+  });
+});

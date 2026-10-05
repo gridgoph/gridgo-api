@@ -1,8 +1,10 @@
-import { defaultOperationalSettings, publicOrderFor } from "../src/operational-model.js";
+import { routeBaskets } from "../src/baskets.js";
+import { calculateRefundSettlement } from "../src/refund-policy.js";
+import { defaultOperationalSettings, publicOrderFor, moneyReportingForOrder } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { routeOrderMatch, prepareCartArtworkLinks } from "../src/order-match-routes.js";
+import { routeOrderMatch, prepareCartArtworkLinks, prepareArtworkCheckout } from "../src/order-match-routes.js";
 import { defaultTaxonomy } from "../src/taxonomy.js";
 
 const AT = "2026-08-24T01:00:00.000Z";
@@ -63,7 +65,7 @@ function fixture() {
     shop: { lat: 7.09, lng: 125.63, label: "Shop B" }, turnaroundHours: 24,
   });
   store.files.push(
-    { fileId: "file_art", ownerId: client.id, purpose: "artwork", state: "ready", objectKey: "client/art.pdf", references: [] },
+    { fileId: "file_art", ownerId: client.id, purpose: "artwork", artworkCheck: { status: "passed", checkedAt: AT }, state: "ready", objectKey: "client/art.pdf", references: [] },
     { fileId: "file_mock", ownerId: client.id, purpose: "mockup", state: "ready", objectKey: "client/mock.jpg", references: [] },
     { fileId: "file_qr", ownerId: client.id, purpose: "payment_proof", state: "ready", objectKey: "client/qr.jpg", references: [] },
   );
@@ -72,15 +74,12 @@ function fixture() {
 
 function caller(store, user, at = AT) {
   let sequence = 0;
-  return async (method, pathname, body) => routeOrderMatch({
-    req: { method },
-    url: new URL(`http://gridgo.test${pathname}`),
-    store,
-    user,
-    readBody: async () => body || {},
-    id: (prefix) => `${prefix}_${++sequence}`,
-    now: () => at,
-  });
+  return async (method, pathname, body) => {
+    const req = { method };
+    await prepareArtworkCheckout({ req, pathname, store, user, checker: async () => ({ ok: true }) });
+    return routeOrderMatch({ req, url: new URL(`http://gridgo.test${pathname}`), store, user,
+      readBody: async () => body || {}, id: (prefix) => `${prefix}_${++sequence}`, now: () => at });
+  };
 }
 
 test("a removed shop is not matched until its account is restored", async () => {
@@ -131,7 +130,7 @@ for (const queued of [false, true]) {
     assert.equal(match.body.queue.jobsAhead, queued ? 2 : 0);
     const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
     const added = await call("POST", `/me/carts/${cartId}/lines`, {
-      catalogItemId: "item_a", optionIds: [], quantity: 1,
+      catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
     });
     const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
     const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
@@ -161,7 +160,7 @@ test("cart promise uses quantity capacity, closures, and the current request tim
   };
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 200,
+    catalogItemId: "item_a", optionIds: [], quantity: 200, artworkFileId: "file_art",
   });
   const expected = "2026-09-29T10:00:00.000Z"; // End of the second open day.
   assert.equal(added.body.cart.lines[0].promiseBy, expected);
@@ -195,7 +194,7 @@ test("cart promise is explicitly null when its listing or calendar is unavailabl
       const call = caller(store, client);
       const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
       const added = await call("POST", `/me/carts/${cartId}/lines`, {
-        catalogItemId: "item_a", optionIds: [], quantity: 1,
+        catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
       });
       assert.ok(added.body.cart.lines[0].promiseBy);
       invalidate(store);
@@ -250,7 +249,7 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
   const lineId = firstLine.body.cart.lines[0].id;
   await call("PUT", `/me/carts/${cartId}/lines/${lineId}/mockup`, { fileId: "file_mock" });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a2", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
   assert.equal(cart.lines.length, 2);
@@ -350,7 +349,7 @@ test("with the setting at 75, checkout snapshots a 75/25 split and a balance to 
   });
   const cartId = created.body.cart.id;
   await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
-  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a2", optionIds: [], quantity: 1 });
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art" });
   const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
     payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" },
   });
@@ -422,7 +421,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     catalogItemId: "item_a", optionIds: ["option_item_a_matte"], quantity: 2,
   });
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a2", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
 
   assert.equal(added.status, 201);
@@ -466,10 +465,10 @@ test("cart payloads include one shop counter per selected supplier", async () =>
   const cartId = created.body.cart.id;
 
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a2", optionIds: [], quantity: 1,
+    catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   await call("POST", `/me/carts/${cartId}/lines`, {
     catalogItemId: "item_a2", optionIds: [], quantity: 2,
@@ -485,12 +484,11 @@ test("cart payloads include one shop counter per selected supplier", async () =>
     },
   ]);
 
-  // And a listing from a second shop is refused rather than quietly splitting
-  // the order in two.
-  await assert.rejects(
-    call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_b", optionIds: [], quantity: 1 }),
-    (error) => error.code === "cart_belongs_to_another_shop",
-  );
+  const grouped = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_b", optionIds: [], quantity: 1 });
+  assert.deepEqual(grouped.body.cart.groups.map((group) => group.label), ["Shop A", "Shop B"]);
+  assert.equal(grouped.body.cart.groups[0].lineIds.length, 3);
+  assert.ok(grouped.body.cart.shops.every((shop) => !shop.supplierId && !shop.shop));
+
 });
 
 test("a tarpaulin priced by the square foot can actually be ordered", async () => {
@@ -521,7 +519,7 @@ test("a tarpaulin priced by the square foot can actually be ordered", async () =
 
   // 3ft x 5ft, in thousandths, is 15 square feet at PHP 25.
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
     measurement: { width: 3_000, height: 5_000 },
   });
   assert.equal(added.status, 201);
@@ -540,7 +538,7 @@ test("a tarpaulin priced by the square foot can actually be ordered", async () =
   // is silently dropped bills the client for something they did not fill in.
   await assert.rejects(
     call("POST", `/me/carts/${cartId}/lines`, {
-      catalogItemId: "item_a2", optionIds: [], quantity: 1,
+      catalogItemId: "item_a2", optionIds: [], quantity: 1, artworkFileId: "file_art",
       measurement: { width: 3_000, height: 5_000 },
     }),
     (error) => error.code === "measurement_not_accepted",
@@ -560,7 +558,7 @@ test("a tarpaulin cart line is refused when requested width exceeds the printer 
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
 
   const fits = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
     measurement: { width: 5_000, height: 8_000 },
   });
   assert.equal(fits.status, 201);
@@ -576,7 +574,7 @@ test("a tarpaulin cart line is refused when requested width exceeds the printer 
   const cartId2 = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
   await assert.rejects(
     call("POST", `/me/carts/${cartId2}/lines`, {
-      catalogItemId: "item_a", optionIds: [], quantity: 1,
+      catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
       measurement: { width: 6_000, height: 8_000 },
     }),
     (error) => error.status === 409 && error.code === "printer_cap_exceeded",
@@ -718,7 +716,7 @@ test("match and cart client projections include GRIDGO amounts beside shop amoun
   store.settings.serviceFeeRateBps = 4_500;
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 1,
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art",
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 1_200);
   assert.equal(added.body.cart.lines[0].clientLineSubtotalMinor, 1_740);
@@ -938,7 +936,7 @@ for (const [meters, key, label, feeMinor, km] of [
   }
   assert.ok(match.body.otherListings.length > 0);
   const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: dropoff })).body.cart.id;
-  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1 });
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkFileId: 'file_art' });
   const cart = (await call('GET', `/me/carts/${cartId}`)).body.cart;
   assert.deepEqual(cart.lines[0].listing.distanceZone, { key, label });
   assert.equal(cart.lines[0].listing.distanceKm, km);
@@ -968,7 +966,7 @@ test("Out of Zone stays available, cart listings carry zones and ratings, checko
   store.shopReviews = Array.from({ length: 5 }, () => ({ supplierId: "supplier_a", qualityStars: 5 }));
   const dropoff = { lat: 16001 / 6371000 * 180 / Math.PI, lng: 0, label: "Home" };
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "delivery", defaultDropoff: dropoff })).body.cart.id;
-  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 });
+  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
   const full = await call("GET", `/me/carts/${cartId}`);
   for (const response of [added, full]) {
     const listing = response.body.cart.lines[0].listing;
@@ -1035,7 +1033,7 @@ test("anonymous alternatives select the right shop with request-bound tokens and
   assert.deepEqual(store.cartLines[0].dropoff, dropoff);
   assert.equal(store.cartLines[0].matchDeadline, deadline);
   assert.equal(store.cartLines[0].catalogItemId, "item_b");
-  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, { ...selection, selectToken: match.listings[0].selectToken }), (e) => e.code === "cart_belongs_to_another_shop");
+  assert.equal((await call("POST", `/me/carts/${cart.id}/lines`, { ...selection, selectToken: match.listings[0].selectToken })).status, 201);
 });
 
 test("token selection rechecks changed listing availability and deadline", async () => {
@@ -1066,4 +1064,553 @@ test("selection rejects malformed/unknown tokens and cart rebinding; labels are 
   await assert.rejects(call("POST", `/me/carts/${first.id}/lines`, body), (e) => e.code === "catalog_item_stale");
   store.supplierProfiles.find((row) => row.userId === "supplier_b").isClosed = false;
   assert.equal((await call("POST", `/me/carts/${first.id}/lines`, { ...body, dropoff: { lat: 7.07, lng: 125.61 } })).status, 201);
+});
+
+for (const [count, mode] of [[2, "delivery"], [3, "delivery"], [2, "pickup"]]) {
+  test(`multi-shop ${mode} checkout creates ${count} independent ledgers with one anonymous receipt`, async () => {
+    const { store, client } = fixture();
+    if (count === 3) addPublicListing(store, { supplierId: 'supplier_c', itemId: 'item_c', priceMinor: 10_005,
+      shop: { lat: 7.07, lng: 125.62, label: 'Private counter' }, turnaroundHours: 12 });
+    store.settings.downpaymentPercent = 75;
+    for (const item of store.catalogItems) item.name = "Flyers";
+    const call = caller(store, client);
+    const deadline = '2026-09-10T00:00:00.000Z';
+    const cart = (await call('POST', '/me/carts', { deadline, fulfillmentMode: mode,
+      defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
+    for (const item of ['item_a', 'item_b', 'item_c'].slice(0, count)) {
+      await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', optionIds: [], quantity: 1, artworkFileId: 'file_art' });
+    }
+    const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+    const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: {
+      method: 'qr_manual', reference: 'COMBINED', proofFileId: 'file_qr',
+    } })).body;
+    assert.equal(store.orders.length, count);
+    assert.equal(store.orderJobs.length, count);
+    assert.equal(store.orderInvoices.length, 1);
+    assert.equal(store.notifications.filter((row) => row.type === 'order_receipt_ready').length, 1);
+    assert.equal(placed.basket.totalMinor, preview.groups.reduce((sum, group) => sum + group.totalMinor, 0));
+    assert.equal(placed.invoice.totalMinor, placed.basket.totalMinor);
+    assert.deepEqual(placed.invoice.groups.map((group) => group.label), ['Shop A', 'Shop B', 'Shop C'].slice(0, count));
+    assert.ok(!JSON.stringify(placed).includes('supplier_a'));
+    assert.ok(!JSON.stringify(preview).includes('supplier_b'));
+    for (const order of store.orders) {
+      assert.equal(order.downpaymentPercent, 100);
+      assert.equal(order.payments.final_online.status, 'not_required');
+      assert.equal(order.payments.initial.amountMinor, order.totalMinor);
+      assert.equal(order.payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), order.supplierSubtotalMinor);
+      assert.equal(order.riderPayoutMinor + order.platformDeliveryShareMinor, order.deliveryFeeMinor);
+      assert.equal(order.riderCommissionBps, 8500);
+      assert.equal((await call('GET', `/orders/${order.id}/invoice`)).body.invoice.invoiceNumber, placed.invoice.invoiceNumber);
+    }
+  });
+}
+
+test('route checkout cannot trust a client verdict or omit its server preflight', async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkLinks: DESIGN_LINKS });
+  await assert.rejects(routeOrderMatch({ req: { method: 'POST' }, url: new URL(`http://gridgo.test/me/carts/${cartId}/checkout`), store, user: client,
+    readBody: async () => ({ artworkCheck: { ok: true }, payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'UNTRUSTED-CHECK' } }),
+    id: prefix => `${prefix}_untrusted`, now: () => AT }), { code: 'artwork_check_required' });
+});
+
+for (const fulfillmentMode of ["delivery", "pickup"]) {
+  test(`pre-match ${fulfillmentMode} carries the destination and charge through read-only checkout`, async () => {
+    const { store, client } = fixture();
+    const call = caller(store, client);
+    const dropoff = { lat: 7.28, lng: 125.62, label: "Recipient" };
+    store.settings.hubPickup = { schedule: { utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 540, closesMinute: 1020 }], closures: [] }, feeMinor: 2500 };
+    const match = await call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode, dropoff, deadline: "2026-09-01T00:00:00Z" });
+    const selected = match.body.listings[0];
+    const choice = match.body.requestFulfillment;
+    assert.equal(choice.fulfillmentMode, fulfillmentMode);
+    assert.deepEqual(choice.dropoff, fulfillmentMode === "delivery" ? dropoff : {
+      lat: 7.092287234449552, lng: 125.61651084538697, label: "GRIDGO Office",
+    });
+    assert.equal(selected.distanceZone.key, fulfillmentMode === "delivery" ? "out_of_zone" : "nearby");
+    const created = await call("POST", "/me/carts", {});
+    const cartId = created.body.cart.id;
+    const added = await call("POST", `/me/carts/${cartId}/lines`, {
+      selectToken: selected.selectToken, matchRequestId: match.body.matchRequestId,
+      optionIds: [], quantity: 1, artworkFileId: "file_art",
+    });
+    assert.deepEqual(added.body.cart.requestFulfillment, choice);
+    assert.equal(added.body.cart.fulfillmentMode, fulfillmentMode);
+    const quote = (await call("GET", `/me/carts/${cartId}/quote`)).body.quote;
+    assert.equal(quote.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(quote.totalMinor, quote.clientItemSubtotalMinor + quote.deliveryFeeMinor);
+    assert.equal(added.body.cart.clientQuote.totalMinor, quote.totalMinor);
+    for (const field of ["supplierSubtotalMinor", "shop", "shopName", "pickup", "unitRateMinor"]) {
+      assert.equal(Object.hasOwn(quote, field), false, field);
+    }
+    const lineId = added.body.cart.lines[0].id;
+    for (const [method, path, body] of [
+      ["PATCH", `/me/carts/${cartId}`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["PUT", `/me/carts/${cartId}/dropoffs`, { defaultDropoff: { ...dropoff, lat: 7.4 } }],
+      ["PUT", `/me/carts/${cartId}/dropoffs`, { lines: [{ lineId, dropoff: { ...dropoff, lat: 7.4 } }] }],
+      ["PATCH", `/me/carts/${cartId}/lines/${lineId}`, { dropoff: { ...dropoff, lat: 7.4 } }],
+      ["POST", `/me/carts/${cartId}/checkout`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["POST", `/me/carts/${cartId}/quote`, { fulfillmentMode: fulfillmentMode === "delivery" ? "pickup" : "delivery" }],
+      ["POST", `/me/carts/${cartId}/quote`, { lines: [{ lineId, dropoff: { ...dropoff, lat: 7.4 } }] }],
+    ]) {
+      await assert.rejects(call(method, path, body), (error) => error.code === "request_fulfillment_locked");
+    }
+    const checked = await call("POST", `/me/carts/${cartId}/checkout`, {
+      payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+    });
+    const order = checked.body.order;
+    assert.deepEqual(order.requestFulfillment, choice);
+    assert.equal(order.deliveryFeeMinor, selected.deliveryFeeMinor);
+    assert.equal(order.totalMinor, quote.totalMinor);
+    assert.equal(checked.body.invoice.clientItemSubtotalMinor, quote.clientItemSubtotalMinor);
+    assert.equal(order.totalMinor, order.itemSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+    if (fulfillmentMode === "pickup") {
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.deepEqual(order.hubPickup, match.body.hubPickup);
+      assert.equal(store.orders[0].riderPayoutMinor, 0);
+      assert.equal(store.orders[0].platformDeliveryShareMinor, 2500);
+      const storedOrder = store.orders[0];
+      storedOrder.payments.initial.status = "confirmed";
+      assert.equal(moneyReportingForOrder(storedOrder).platformRevenue.collectedMinor, order.serviceFeeMinor + 2500);
+      const refund = calculateRefundSettlement(storedOrder, {
+        beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0,
+      });
+      assert.equal(refund.totalMinor, order.totalMinor);
+      assert.equal(refund.deliveryMinor, 2500);
+      store.settings.hubPickup.feeMinor = 9999;
+      assert.equal(order.pickupFeeMinor, 2500);
+      assert.equal(checked.body.invoice.pickupFeeMinor, 2500);
+    }
+  });
+}
+
+test('a later shop missing the basket deadline rejects checkout, and matching uses the basket deadline', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const deadline = '2026-08-29T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline })).body.cart;
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', optionIds: [], quantity: 1 });
+  for (const service of store.supplierServices.filter((service) => service.supplierId === 'supplier_b')) {
+    service.turnaroundHours = 500; service.standardTurnaroundHours = 500;
+  }
+  const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers' })).body;
+  assert.ok([...match.listings, ...match.otherListings].every((item) => item.id !== 'item_b'));
+  await assert.rejects(call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-09-20T00:00:00Z' }), { code: 'basket_deadline_mismatch' });
+  await assert.rejects(call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'LATE' } }), { code: 'deadline_not_met' });
+});
+
+test('add-more matching uses an opaque cart group and preserves one delivery charge', async () => {
+  const { store, client } = fixture();
+  for (const item of store.catalogItems) item.name = 'Flyers';
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', deadline: '2026-09-10T00:00:00Z',
+    defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', quantity: 1, optionIds: [] });
+  const before = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  const match = (await call('POST', '/me/matches', { cartId: cart.id, groupId: before.groups[0].id, subcategoryCode: 'brochures' })).body;
+  assert.equal(match.listings[0].id, 'item_a2');
+  assert.equal(match.shop.label, 'Shop A');
+  assert.equal(match.shop.supplierId, undefined);
+  assert.equal(match.listings[0].supplierId, undefined);
+  const after = (await call('POST', `/me/carts/${cart.id}/lines`, { selectToken: match.listings[0].selectToken,
+    matchRequestId: match.matchRequestId, optionIds: [], quantity: 1 })).body.cart;
+  assert.equal(after.groups.length, 2);
+  assert.equal(after.groups[0].lineIds.length, 2);
+  assert.equal(after.groups[0].deliveryFeeMinor, before.groups[0].deliveryFeeMinor);
+  await assert.rejects(call('POST', '/me/matches', { cartId: cart.id, groupId: 'foreign', subcategoryCode: 'flyers' }), { code: 'cart_group_not_found' });
+});
+
+test('basket payment reconciliation never restarts a cancelled group', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00Z' })).body.cart;
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', quantity: 1, optionIds: [] });
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', reference: 'RECONCILE', proofFileId: 'file_qr' } })).body;
+  store.orders[1].state = 'cancelled';
+  let seq = 0;
+  const result = await routeBaskets({ req: { method: 'POST' }, url: new URL(`http://gridgo.test/baskets/${placed.basket.id}/payment/confirm`),
+    store, user: { id: 'ops', role: 'ops_admin' }, readBody: async () => ({}), id: () => `audit_reconcile_${++seq}`, now: () => AT });
+  assert.equal(result.status, 200);
+  assert.deepEqual(store.orders.map((order) => order.state), ['needs_qa', 'cancelled']);
+  assert.ok(store.orders.every((order) => order.payments.initial.status === 'confirmed'));
+});
+
+test('add-more matching filters capacity already consumed by the same draft group', async () => {
+  const { store, client } = fixture();
+  store.settings.promiseAllowanceMinutes = 0;
+  const service = store.supplierServices.find((row) => row.supplierId === 'supplier_a');
+  Object.assign(service, { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
+  const call = caller(store, client);
+  const deadline = '2026-08-24T10:00:00.000Z';
+  const created = await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline });
+  const cartId = created.body.cart.id;
+  const added = await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', quantity: 10, optionIds: [] });
+  await assert.rejects(call('POST', '/me/matches', { cartId, groupId: added.body.cart.groups[0].id,
+    subcategoryCode: 'flyers', units: 1 }), (error) => error.code === 'deadline_not_met' || error.code === 'match_not_found');
+});
+
+test("explicit delivery needs a destination even without distance-first ranking; legacy matches remain accepted", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  await assert.rejects(call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode: "delivery" }), (error) => error.code === "dropoff_required");
+  await assert.rejects(call("POST", "/me/matches", { subcategoryCode: "flyers", fulfillmentMode: "invalid" }), (error) => error.code === "invalid_fulfillment_mode");
+  assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).status, 200);
+  const pickup = await call("POST", "/me/matches/next", { subcategoryCode: "flyers", fulfillmentMode: "pickup", excludedSupplierIds: ["supplier_b"] });
+  assert.equal(pickup.body.hubPickup.feeMinor, 0);
+  assert.equal(pickup.body.hubPickup.schedule, null);
+  assert.equal(pickup.body.listings[0].deliveryFeeMinor, 0);
+});
+
+
+test("legacy pickup carts remain free and editable after Super Admin sets a hub fee", async () => {
+  const { store, client } = fixture();
+  store.settings.hubPickup.feeMinor = 2500;
+  const call = caller(store, client);
+  const created = await call("POST", "/me/carts", { fulfillmentMode: "pickup" });
+  const cartId = created.body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  await call("PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: "delivery" });
+  await call("PUT", `/me/carts/${cartId}/fulfillment`, { fulfillmentMode: "pickup" });
+  const checked = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+  });
+  assert.equal(checked.body.order.deliveryFeeMinor, 0);
+  assert.equal(checked.body.order.pickupFeeMinor, undefined);
+  assert.equal(checked.body.order.requestFulfillment, undefined);
+});
+
+test("listing quotes price measured selections on the server without supplier figures", async () => {
+  const { store, client } = fixture();
+  const item = store.catalogItems[0];
+  Object.assign(item, { pricingUnit: "per_area", measureUnit: "ft", basePriceMinor: 105 });
+  const call = caller(store, client);
+  const response = await call("POST", "/me/catalog-quotes", {
+    catalogItemId: item.id, quantity: 3, measurement: { width: 1500, height: 1000 },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.quote, {
+    catalogItemId: item.id, version: 1, serviceVersion: 1, quantity: 3,
+    clientUnitRateMinor: 116, clientLineSubtotalMinor: 520,
+    billableMilliUnits: 4500, minimumMeasurementApplied: false,
+  });
+  assert.equal(response.mutated, false);
+  await assert.rejects(() => call("POST", "/me/catalog-quotes", {
+    catalogItemId: item.id, quantity: 3,
+  }), (error) => error.status === 400);
+});
+
+test("basket quotes use the farthest dropoff, agree with checkout, and never expose the origin", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", { defaultDropoff: { lat: 7.064, lng: 125.6085, label: "Destination" } })).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a2", quantity: 1, optionIds: [], artworkFileId: "file_art", dropoff: { lat: 7.14, lng: 125.6085, label: "Destination" } });
+  const quoted = await call("GET", `/me/carts/${cart.id}/quote`);
+  assert.equal(quoted.status, 200);
+  const quote = quoted.body.quote;
+  assert.equal(quote.clientItemSubtotalMinor, 33000);
+  assert.equal(quote.deliveryLines.length, 1);
+  assert.equal(quote.deliveryLines[0].lineIds.length, 2);
+  assert.deepEqual(quote.deliveryLines[0].distanceZone, { key: "away", label: "Away" });
+  assert.equal(quote.deliveryFeeMinor, 14900);
+  for (const field of ["shop", "shopName", "pickup", "supplierSubtotalMinor", "basePriceMinor", "distanceMeters", "distanceKm"]) {
+    assert.equal(JSON.stringify(quote).includes(`"${field}"`), false, field);
+  }
+  const checked = await call("POST", `/me/carts/${cart.id}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QUOTE-PARITY" },
+  });
+  assert.equal(quote.totalMinor, checked.body.order.totalMinor);
+  assert.equal(quote.deliveryFeeMinor, checked.body.order.deliveryFeeMinor);
+  assert.equal(quote.downpaymentMinor, checked.body.invoice.paymentPlan.downpaymentMinor);
+});
+
+test("basket quote preview does not save dropoffs and missing destinations stay unpriced", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", {})).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [] });
+  const before = structuredClone(store);
+  const missing = (await call("GET", `/me/carts/${cart.id}/quote`)).body.quote;
+  assert.equal(missing.deliveryFeeMinor, null);
+  assert.equal(missing.totalMinor, null);
+  const preview = await call("POST", `/me/carts/${cart.id}/quote`, { defaultDropoff: { lat: 8, lng: 125.6, label: "Destination" } });
+  assert.equal(preview.body.quote.deliveryLines[0].distanceZone.key, "out_of_zone");
+  assert.ok(preview.body.quote.deliveryLines[0].distanceKm > 20);
+  const pickup = await call("POST", `/me/carts/${cart.id}/quote`, { fulfillmentMode: "pickup" });
+  assert.equal(pickup.body.quote.deliveryFeeMinor, 0);
+  assert.equal(pickup.body.quote.totalMinor, 11000);
+  assert.deepEqual(store, before);
+  await assert.rejects(() => caller(store, { id: "another", role: "client" })("GET", `/me/carts/${cart.id}/quote`), (e) => e.status === 403);
+});
+
+test("basket quote rounds the aggregate once, preserves 75 percent installments and refuses unavailable lines", async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  store.catalogItems[0].basePriceMinor = 5;
+  store.catalogItems[1].basePriceMinor = 5;
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  const added = await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a2", quantity: 1, optionIds: [], artworkFileId: "file_art" });
+  assert.deepEqual(added.body.cart.lines.map((line) => line.clientLineSubtotalMinor), [6, 6]);
+  assert.equal(added.body.cart.clientQuote.clientItemSubtotalMinor, 11);
+  assert.equal(added.body.cart.clientQuote.downpaymentMinor, 8);
+  assert.equal(added.body.cart.clientQuote.balanceMinor, 3);
+  store.catalogItems[0].active = false;
+  const stale = (await call("GET", `/me/carts/${cart.id}/quote`)).body.quote;
+  assert.equal(stale.totalMinor, null);
+  assert.equal(stale.clientItemSubtotalMinor, null);
+  assert.equal(stale.reasons[0].code, "catalog_item_stale");
+  store.catalogItems[0].active = true;
+  const checkout = await call("POST", `/me/carts/${cart.id}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "ROUNDING-PARITY" },
+  });
+  assert.equal(checkout.body.order.totalMinor, 11);
+  assert.equal(checkout.body.invoice.paymentPlan.downpaymentMinor, 8);
+});
+
+test("listing quotes enforce options, quantity tiers, multipliers, minimums and current listing eligibility", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const item = store.catalogItems[0];
+  item.minimumOrderQuantity = 10;
+  store.catalogPriceTiers = [{ catalogItemId: item.id, minQuantity: 10, unitPriceMinor: 105 }];
+  store.catalogOptionGroups.push({ id: "finish", catalogItemId: item.id, required: true, kind: "spec" });
+  store.catalogOptions.push({ id: "double", optionGroupId: "finish", priceModifierMinor: 0, priceMultiplierBps: 20000 });
+  const input = { catalogItemId: item.id, quantity: 10, optionIds: ["double"] };
+  assert.equal((await call("POST", "/me/catalog-quotes", input)).body.quote.clientLineSubtotalMinor, 2310);
+  for (const [patch, code] of [
+    [{ quantity: 9 }, "below_minimum_quantity"],
+    [{ optionIds: [] }, "invalid_catalog_options"],
+    [{ optionIds: ["unknown"] }, "invalid_catalog_options"],
+    [{ speedTierId: "arbitrary" }, "invalid_service_level"],
+  ]) {
+    await assert.rejects(() => call("POST", "/me/catalog-quotes", { ...input, ...patch }), (error) => error.code === code);
+  }
+  item.active = false;
+  await assert.rejects(() => call("POST", "/me/catalog-quotes", input), (error) => error.status === 404);
+});
+
+test("invoice client amounts use immutable invoice pricing after the live fee changes", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart;
+  await call("POST", `/me/carts/${cart.id}/lines`, { catalogItemId: "item_a", quantity: 2, optionIds: [], artworkFileId: "file_art" });
+  const checked = await call("POST", `/me/carts/${cart.id}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "INVOICE-QUOTE" },
+  });
+  assert.equal(checked.body.invoice.clientItemSubtotalMinor, 22000);
+  assert.equal(checked.body.invoice.lines[0].clientAmountMinor, 22000);
+  assert.equal(checked.body.invoice.lines[0].clientUnitPriceMinor, 11000);
+  const saved = structuredClone(store.orderInvoices);
+  store.settings.serviceFeeRateBps = 4500;
+  const invoice = (await call("GET", `/orders/${checked.body.order.id}/invoice`)).body.invoice;
+  assert.equal(invoice.clientItemSubtotalMinor, 22000);
+  assert.equal(invoice.lines[0].clientAmountMinor, 22000);
+  assert.equal(invoice.lines[0].clientUnitPriceMinor, 11000);
+  assert.equal(invoice.lines[0].amountMinor, 20000);
+  assert.deepEqual(store.orderInvoices, saved);
+  assert.equal((await call("GET", `/me/carts/${cart.id}`)).body.cart.clientQuote, null);
+  await assert.rejects(() => call("GET", `/me/carts/${cart.id}/quote`), (error) => error.code === "cart_checked_out");
+});
+
+test("listing review: carts and checkout use approved prices while preserving the supplier draft", async () => {
+  const { routeSupplierCatalog } = await import("../src/catalog-routes.js");
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  await routeSupplierCatalog({ req: { method: "PATCH" }, url: new URL("http://localhost/me/catalog-items/item_a"), store,
+    user: store.users.find(row => row.id === "supplier_a"), readBody: async () => ({ expectedVersion: 1, basePriceMinor: 99000 }),
+    id: prefix => `${prefix}_review`, now: () => AT, audit: () => {} });
+  await routeSupplierCatalog({ req: { method: "PATCH" }, url: new URL("http://localhost/me/catalog-items/item_b"), store,
+    user: store.users.find(row => row.id === "supplier_b"), readBody: async () => ({ expectedVersion: 1, basePriceMinor: 88000 }),
+    id: prefix => `${prefix}_review_b`, now: () => AT, audit: () => {} });
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup", deadline: "2026-09-10T00:00:00Z" })).body.cart.id;
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: "file_art" });
+  await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_b", optionIds: [], quantity: 1, artworkFileId: "file_art" });
+  const cart = (await call("GET", `/me/carts/${cartId}`)).body.cart;
+  assert.equal(cart.lines[0].listing.basePriceMinor, 10000);
+  const result = await call("POST", `/me/carts/${cartId}/checkout`, { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "APPROVED" } });
+  assert.equal(result.status, 201);
+  assert.deepEqual(store.orderLineItems.map(row => row.baseUnitPriceMinor), [10000, 20000]);
+  assert.equal(store.orders.length, 2);
+  assert.equal(store.catalogItems[0].basePriceMinor, 99000);
+  assert.equal(store.catalogItems[0].reviewStatus, "pending");
+});
+
+test("listing review: a direct cart add cannot bypass pending approval", async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  store.catalogItems[0].reviewStatus = "pending";
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  await assert.rejects(call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1 }), error => error.status === 409);
+  assert.equal(store.cartLines.length, 0);
+});
+test('multi-shop client quotes and receipt sections use per-group rounding and full upfront payment', async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  for (const item of store.catalogItems) item.basePriceMinor = 5;
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00Z' })).body.cart;
+  for (const item of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', quantity: 1, optionIds: [] });
+  const quoted = (await call('GET', `/me/carts/${cart.id}/quote`)).body.quote;
+  assert.equal(quoted.totalMinor, 12);
+  assert.equal(quoted.clientItemSubtotalMinor, 12);
+  assert.equal(quoted.downpaymentPercent, 100);
+  assert.equal(quoted.balanceMinor, 0);
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'ROUNDING' } })).body;
+  assert.equal(placed.invoice.totalMinor, quoted.totalMinor);
+  assert.equal(placed.invoice.clientItemSubtotalMinor, 12);
+  assert.deepEqual(placed.invoice.groups.map((group) => group.clientItemSubtotalMinor), [6, 6]);
+  assert.equal(placed.invoice.serviceFeeMinor, undefined);
+  assert.equal(placed.invoice.groups[0].itemSubtotalMinor, undefined);
+  assert.equal(placed.invoice.lines[0].amountMinor, undefined);
+  assert.equal(placed.invoice.lines[0].clientAmountMinor, 6);
+  assert.equal(placed.invoice.groups[0].lines[0].clientAmountMinor, 6);
+  assert.equal(store.orderInvoices[0].snapshot.serviceFeeMinor, 2);
+});
+
+for (const [count, fee, expected] of [[2, 2501, [1251, 1250]], [3, 2501, [834, 834, 833]], [3, 1, [1, 0, 0]], [2, 0, [0, 0]]]) {
+  test(`one hub fee of ${fee} is allocated across ${count} groups and refunded independently`, async () => {
+    const { store, client } = fixture();
+    if (count === 3) addPublicListing(store, { supplierId: 'supplier_c', itemId: 'item_c', priceMinor: 10005,
+      shop: { lat: 7.07, lng: 125.62, label: 'Private counter' }, turnaroundHours: 12 });
+    store.settings.hubPickup.feeMinor = fee;
+    const call = caller(store, client);
+    const cart = (await call('POST', '/me/carts', { deadline: '2026-09-10T00:00:00Z' })).body.cart;
+    const match = (await call('POST', '/me/matches', { subcategoryCode: 'flyers', cartId: cart.id, fulfillmentMode: 'pickup' })).body;
+    const first = match.listings[0];
+    await call('POST', `/me/carts/${cart.id}/lines`, { selectToken: first.selectToken, matchRequestId: match.matchRequestId,
+      artworkFileId: 'file_art', optionIds: [], quantity: 1 });
+    for (const item of ['item_a', 'item_b', 'item_c'].slice(0, count).filter(id => id !== first.id)) {
+      await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, artworkFileId: 'file_art', optionIds: [], quantity: 1 });
+    }
+    const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+    assert.deepEqual(preview.groups.map(group => group.pickupFeeMinor), expected);
+    assert.equal(preview.clientQuote.pickupFeeMinor, fee);
+    assert.equal(preview.clientQuote.totalMinor, preview.groups.reduce((sum, group) => sum + group.totalMinor, 0));
+    const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, {
+      payment: { method: 'qr_manual', reference: 'ONE-HUB-FEE', proofFileId: 'file_qr' },
+    })).body;
+    assert.equal(placed.basket.totalMinor, preview.clientQuote.totalMinor);
+    assert.equal(placed.basket.hubPickup.feeMinor, fee);
+    assert.equal(placed.invoice.pickupFeeMinor, fee);
+    assert.equal(placed.invoice.deliveryFeeMinor, fee);
+    assert.deepEqual(placed.invoice.groups.map(group => group.pickupFeeMinor), expected);
+    assert.deepEqual(store.orders.map(order => order.pickupFeeMinor), expected);
+    for (const [index, order] of store.orders.entries()) {
+      assert.equal(order.hubPickup.feeMinor, expected[index]);
+      assert.equal(order.riderPayoutMinor, 0);
+      assert.equal(order.platformDeliveryShareMinor, expected[index]);
+      order.payments.initial.status = 'confirmed';
+      const refund = calculateRefundSettlement(order, { beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0 });
+      assert.equal(refund.deliveryMinor, expected[index]);
+      assert.equal(refund.totalMinor, order.totalMinor);
+    }
+    assert.ok(store.orderJobs.every(job => job.deliveryFeeMinor === 0));
+    store.settings.hubPickup.feeMinor = fee + 100;
+    assert.deepEqual((await call('GET', `/orders/${store.orders[0].id}/invoice`)).body.invoice, placed.invoice);
+  });
+}
+
+test('checkout and invoice preserve the order-time officer across later handovers', async () => {
+  const { store, client } = fixture();
+  const original = { id: 'officer_old', fullName: 'Officer One', verifiedAt: AT };
+  store.organizationAccounts = [{ userId: client.id, currentOfficer: { ...original } }];
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkFileId: 'file_art' });
+  const result = await call('POST', `/me/carts/${cartId}/checkout`, {
+    payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'OFFICER-SNAPSHOT' },
+  });
+  assert.deepEqual(result.body.order.organizationOfficer, original);
+  store.organizationAccounts[0].currentOfficer = { id: 'officer_new', fullName: 'Officer Two', verifiedAt: AT };
+  const invoice = await call('GET', `/orders/${result.body.order.id}/invoice`);
+  assert.deepEqual(invoice.body.invoice.organizationOfficer, original);
+  const order = store.orders.find((row) => row.id === result.body.order.id);
+  assert.deepEqual(publicOrderFor(order, client, store).organizationOfficer, original);
+  assert.equal(publicOrderFor(order, { id: 'supplier_a', role: 'supplier' }, store).organizationOfficer, undefined);
+});
+
+for (const count of [1, 2]) {
+  test(`approved organization discount funds ${count} shop group(s) without reducing payouts`, async () => {
+    const { store, client } = fixture();
+    client.accountType = 'organization';
+    store.approvalCases.push({ id: 'org_case', userId: client.id, kind: 'business_client', status: 'approved' });
+    const call = caller(store, client);
+    const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', deadline: '2026-09-10T00:00:00.000Z',
+      defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
+    for (const catalogItemId of ['item_a', 'item_b'].slice(0, count)) await call('POST', `/me/carts/${cart.id}/lines`, {
+      catalogItemId, quantity: 1, optionIds: [], artworkFileId: 'file_art',
+    });
+    const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+    assert.equal(preview.clientQuote.organizationDiscountMinor, count === 1 ? 500 : 1500);
+    const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: {
+      method: 'qr_manual', reference: 'ORG', proofFileId: 'file_qr',
+    } })).body;
+    assert.equal(placed.invoice.organizationDiscountMinor, count === 1 ? 500 : 1500);
+    assert.equal(placed.invoice.totalMinor, preview.clientQuote.totalMinor);
+    assert.ok(!JSON.stringify(placed).includes('serviceFeeMinor'));
+    for (const [index, order] of store.orders.entries()) {
+      assert.equal(order.organizationDiscountMinor, index === 0 ? 500 : 1000);
+      assert.equal(order.serviceFeeMinor, index === 0 ? 500 : 1000);
+      assert.equal(order.grossServiceFeeMinor, index === 0 ? 1000 : 2000);
+      assert.equal(order.totalMinor, order.supplierSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
+      assert.equal(order.payoutMilestones.reduce((sum, row) => sum + row.amountMinor, 0), index === 0 ? 10000 : 20000);
+      assert.equal(order.riderPayoutMinor, Math.round(order.deliveryFeeMinor * .85));
+      order.payments.initial.status = 'confirmed';
+      const revenue = moneyReportingForOrder(order).platformRevenue;
+      assert.equal(revenue.organizationDiscountMinor, index === 0 ? 500 : 1000);
+      assert.equal(revenue.billedMinor, order.serviceFeeMinor + order.platformDeliveryShareMinor);
+      assert.equal(revenue.collectedMinor, revenue.billedMinor);
+      const projected = publicOrderFor(order, client, store);
+      assert.equal(projected.serviceFeeMinor, undefined);
+      assert.equal(projected.grossServiceFeeMinor, undefined);
+      const receipt = (await call('GET', `/orders/${order.id}/invoice`)).body.invoice;
+      assert.equal(receipt.serviceFeeMinor, undefined);
+    }
+  });
+}
+
+test('organization group rounding is snapshotted and fee visibility does not hide the discount', async () => {
+  const { store, client } = fixture();
+  client.accountType = 'organization';
+  store.approvalCases.push({ id: 'org_case', userId: client.id, kind: 'business_client', status: 'approved' });
+  store.settings.serviceFeeVisibleToClient = false;
+  for (const item of store.catalogItems) item.basePriceMinor = 10;
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-10T00:00:00.000Z' })).body.cart;
+  for (const catalogItemId of ['item_a', 'item_b']) await call('POST', `/me/carts/${cart.id}/lines`, {
+    catalogItemId, quantity: 1, optionIds: [], artworkFileId: 'file_art',
+  });
+  const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  assert.equal(preview.clientQuote.organizationDiscountMinor, 2);
+  assert.equal(preview.clientQuote.totalMinor, 20);
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: {
+    method: 'qr_manual', reference: 'ROUNDING', proofFileId: 'file_qr',
+  } })).body;
+  assert.equal(placed.invoice.organizationDiscountMinor, 2);
+  assert.equal(placed.invoice.totalMinor, 20);
+  assert.deepEqual(placed.invoice.groups.map(row => row.organizationDiscountMinor), [1, 1]);
+  store.settings.organizationDiscountRateBps = 1000;
+  store.settings.serviceFeeRateBps = 1500;
+  store.approvalCases.find(row => row.id === 'org_case').status = 'suspended';
+  const receipt = (await call('GET', `/orders/${store.orders[0].id}/invoice`)).body.invoice;
+  assert.equal(receipt.organizationDiscountMinor, 2);
+  assert.equal(receipt.totalMinor, 20);
+});
+
+test('pending organization gets no discount and a client cannot supply its own discount', async () => {
+  const { store, client } = fixture();
+  client.accountType = 'organization';
+  store.approvalCases.push({ id: 'org_case', userId: client.id, kind: 'business_client', status: 'pending' });
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart;
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { organizationDiscountMinor: 1000, organizationDiscountRateBps: 1000,
+    payment: { method: 'qr_manual', reference: 'PENDING', proofFileId: 'file_qr' } })).body;
+  assert.equal(placed.invoice.organizationDiscountMinor, 0);
+  assert.equal(placed.invoice.totalMinor, 11000);
 });

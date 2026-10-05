@@ -7,11 +7,11 @@ import assert from 'node:assert/strict';
 
 const realLookup = dns.lookup;
 dns.lookup = async (hostname, options) => {
-  if (['canva.link', 'www.canva.com'].includes(hostname)) return [{ address: '93.184.216.34', family: 4 }];
+  if (['canva.link', 'www.canva.com', 'drive.google.com', 'www.dropbox.com', 'we.tl'].includes(hostname)) return [{ address: '93.184.216.34', family: 4 }];
   return realLookup(hostname, options);
 };
 https.request = (url, options, callback) => {
-  assert.ok(['canva.link', 'www.canva.com'].includes(url.hostname), 'unexpected outbound HTTPS request');
+  assert.ok(['canva.link', 'www.canva.com', 'drive.google.com', 'www.dropbox.com', 'we.tl'].includes(url.hostname), 'unexpected outbound HTTPS request');
   options.lookup(url.hostname, {}, (error, address, family) => {
     assert.ifError(error);
     assert.equal(address, '93.184.216.34');

@@ -22,9 +22,10 @@ export function catalogItemsWithPhotos(body) {
   if (Array.isArray(body?.items)) {
     for (const item of body.items) {
       if (item?.photos) items.push(item);
+      else if (item?.item?.photos) items.push(item.item);
     }
   }
-  for (const listings of [body?.listings, body?.otherListings]) {
+  for (const listings of [body?.listings, body?.otherListings, body?.productTypes]) {
     for (const item of listings || []) {
       if (item?.photos) items.push(item);
     }

@@ -94,6 +94,8 @@ GRIDGO_FILE_RETENTION_DELETE_ENABLED=false
 
 Local `.env` also uses `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, and a loopback `DATABASE_URL`. `POSTGRES_PORT` is intentionally local-only; production has no database port mapping.
 
+The support desk uses only Clerk sessions and `SUPPORT_DESK_ALLOWED_EMAILS`. Remove retired desk username/password/JWT-secret settings from deployment configuration; startup never seeds a password desk administrator. The legacy `support_admins` table remains unused for schema compatibility.
+
 There is no `AUTH_MODE`, `STORE_PATH`, demo password, `GRIDGO_*_PASSWORD`, or local session configuration. Leaving one of the required Clerk/database values out makes the process refuse before listening; errors name variable names but never values.
 
 ## 3. Clean cutover procedure
@@ -239,3 +241,7 @@ A production restore is destructive. Confirm the exact target container/database
 ## 11. Capacity and future geography
 
 Money is `BIGINT` minor units and application writes are checked against JavaScript's safe integer range. Location/pickup/dropoff columns are `DOUBLE PRECISION` with coordinate constraints. Current SQL queries filter pings by `order_id` and time; no spatial index is justified. Introduce PostGIS only with a forward migration when matching requires database-side radius/nearest-neighbor queries.
+
+## Organization email verification
+
+Organization applications require `EMAIL_USER` and `EMAIL_PASSWORD` for one-time email codes. Without them, the request-code endpoint returns `503 organization_email_not_configured`; other API routes remain available. Apply migration `1791504000000` before deploying this API. Roll out the client/dashboard checklist consumers together: old name-only applications can no longer be submitted or newly approved. See [Organization accounts](ORGANIZATION_ACCOUNTS_API.md) for the request bodies and legacy-account upgrade path.

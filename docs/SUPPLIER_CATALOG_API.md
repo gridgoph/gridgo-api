@@ -1,5 +1,10 @@
 # Supplier catalog API
 
+See [client catalogue privacy](CLIENT_CATALOG_PRIVACY.md) for additive GRIDGO
+price fields, signed-in `/ops/catalog/*` and `/me/catalog-preview` reads, and the
+staged removal of legacy public shop prices/identity. Phase 1 keeps existing
+responses compatible; new clients should use the client fields and quotes.
+
 Supplier catalog items are shop-owned listings under one taxonomy-governed service line. They do not replace `GET /catalog` platform products or make a non-live service matchable. Prices and modifiers are safe integer PHP minor units.
 
 Effective unit price is `max(0, basePriceMinor + selected modifiers)`. Matching stays on the service line.
@@ -14,7 +19,7 @@ Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `
 - `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. `fromPriceMinor` / `effectivePriceMinor` stay the shop amounts. Client-facing GRIDGO amounts (shop + live `serviceFeeRateBps`) are additive: `clientFromPriceMinor`, `clientEffectivePriceMinor`. Supplier `/me/catalog-items` is unchanged. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
 - `GET /catalog/media/:fileId` returns metadata for a photo or shop image that is already public.
 
-A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item is active, it has a ready photo, every option group has an active option, the effective accepted-format set is nonempty, and a `tarpaulins_outdoor_banners` listing has `printerMaxWidthFeet`.
+A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item has an approved version and is active, it has a ready photo, every option group has an active option, the effective accepted-format set is nonempty, and a `tarpaulins_outdoor_banners` listing has `printerMaxWidthFeet`.
 
 ## Shop self-service
 
@@ -78,7 +83,7 @@ Response (additive):
 
 `POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `minimumTurnaroundHours?`, `printerMaxWidthFeet?`. A starter is copied into catalog rows at create time and is never referenced after. `minimumTurnaroundHours` is the soonest the listing can be ready; `turnaroundHours` is the promised ready-in. On inherit both are null. A soonest later than the promise is `400 invalid_catalog_item`.
 
-`POST /me/catalog-items/:id/photos/reorder` takes `fileIds` of the samples that stay, in board order. A shorter list drops the missing photos and unreferences those files. Every sent id must already be on the listing; an unknown id is `409 catalog_item_stale`.
+`POST /me/catalog-items/:id/photos/reorder` takes `fileIds` of the samples that stay, in board order. A shorter list drops the missing photos from the draft. Files still used by its approved version stay referenced until replacement approval. Every sent id must already be on the listing; an unknown id is `409 catalog_item_stale`.
 
 ### Printer max width (`printerMaxWidthFeet`)
 
@@ -184,3 +189,93 @@ Shop gates use `account_inactive`, `supplier_profile`, `shop_location`, `shop_cl
 Seeded file codes: `pdf`, `png`, `jpeg`, `webp`, `psd`, `3mf`, `stl` (`inputKind: "file"`). Seeded URL codes: `canva_link`, `google_drive`, `dropbox`, `we_transfer`, `other_link` (`inputKind: "url"`). Service formats are defaults. Item `fileFormatMode=inherit` stores no item-format rows; `override` stores at least one active format. A plus-finder query resolves against this registry and its aliases; it never stores a shop-invented type.
 
 `src/supplier-catalog.js` exports `createOrderLineSnapshot` and `appendOrderLineSnapshot`. They write the immutable line/option snapshot shape, including pricing unit, package qty, ready-in hours, and group kind. Checkout is not wired in this slice.
+
+## Listing review and product-type picker
+
+Migration `1791417600000_listing_reviews` runs after the current development
+migrations. Existing active listings under live services are grandfathered as
+`approved`; existing hidden/draft-service listings become `pending`. New listings
+are always `pending`, including requests from released supplier builds. There is
+no client-controlled approval field.
+
+The existing create, PATCH, option-group/option, format, photo upload/attach,
+reorder, and delete endpoints retain their request and response shapes. Suppliers
+can save an incomplete listing incrementally. Creation and changes to price
+(including pricing shape/tiers), product type, specs/variants, artwork formats or
+photos automatically enter review. Name, description, prep text, ordering,
+turnaround, and active/hidden changes apply immediately. A submitted draft cannot
+be approved until it meets the completeness checks below.
+
+For an approved listing, review-sensitive edits retain an approved composite
+snapshot. Public catalogue, public media, matching, readiness, cart pricing and
+checkout use that version until Operations approves the replacement. The shop's
+GET/list/edit responses show its current draft. Text edits remain immediate even
+while a revision is pending. `needs_revision` also retains the approved version.
+Versions protect reviewer decisions from concurrent supplier edits. Approving a
+replacement changes the public listing version, so existing selection-token/cart
+staleness checks still apply.
+
+Private listing projections add:
+
+- `reviewStatus`: `pending | approved | needs_revision`.
+- `reviewReason`: a trimmed, shop-visible reason or null.
+- `reviewedAt`: decision timestamp or null.
+- `hasApprovedVersion`: whether an approved version exists, independently of
+  service/account/visibility gates.
+
+| Endpoint | Actor | Contract |
+| --- | --- | --- |
+| `GET /me/product-types?q=` | Supplier | `{productTypes}` for every active subcategory under an active category; case-insensitive name/code/examples search, max 120 characters. Each entry has `code`, `name`, `categoryCode`, `imageUrl` (nullable governed image), `photos` (at most one approved listing sample, with signed URLs), and `starters`. An empty photo set needs the app's placeholder. Choosing types never creates or expands service capability. Create one listing per selected type using the existing endpoint. |
+| `POST /me/catalog-items/:id/submit` | Owning supplier | `{expectedVersion}` (or `If-Match`); validates completeness and submits/resubmits a draft. Returns `{item}`. New clients call this for **Submit for Review**. Released clients continue saving through existing endpoints, which enter review automatically. |
+| `GET /ops/catalog-reviews?status=pending&after=` | Operations/Super Admin | `{items,nextCursor}`; status also accepts `approved` and `needs_revision`. Up to 50 items, cursor is the final item ID. Each draft includes `reviewBlockers`; existing `/ops/catalog/items/:id` reads its approved public version when available. |
+| `POST /ops/catalog-reviews/:id/decision` | Operations/Super Admin | `{expectedVersion,status:"approved",photosUnbranded:true}` or `{expectedVersion,status:"needs_revision",reason}`. Returns `{item}`. Reason is required, trimmed, 1–2,000 characters. Approval requires an explicit human attestation that **every photo has no watermark, logo or shop branding**. |
+| `POST /me/product-type-requests` | Supplier | `{categoryCode,name,description}`; active canonical category required; name 1–120 and description 1–2,000 trimmed characters. Returns `201 {request}` with `status:pending`. Does not create taxonomy or a listing. |
+| `GET /me/product-type-requests?status=&after=` | Owning supplier | `{requests,nextCursor}`, at most 50, only the caller's requests. |
+| `GET /ops/product-type-requests?status=&after=` | Operations/Super Admin | Same pagination across shops; optional review-state filter. |
+| `POST /ops/product-type-requests/:id/decision` | Operations/Super Admin | `{expectedVersion,status:"approved",code}` creates an active governed subcategory with the requested name/category. `code` is a unique lowercase identifier (`[a-z][a-z0-9_]*`, max 100). Or `{expectedVersion,status:"needs_revision",reason}` sends back the request; the shop may file a corrected request. Returns `{request}`. Neither action grants a supplier service line or approves a listing. |
+
+Submission and approval require all existing completeness rules plus at least one
+required `spec` option group with a nonblank active variant. Every group must have
+an active option, and the listing must have a ready photo and accepted artwork
+formats. Use existing starter groups or the existing option-group endpoints;
+there is no second free-text specs format. An incomplete submission/approval is
+`409 listing_incomplete` with `blockers` (including `specs_required`). Incomplete
+new listings can remain in the pending queue so released builds keep working.
+
+Other errors include `400 photo_review_required`, `400 reason_required`,
+`400 invalid_review_status`, `400 expected_version_required`,
+`409 catalog_item_stale`, `409 listing_not_pending`,
+`409 listing_already_approved`, `409 product_type_request_stale`, and
+`409 product_type_exists`. Wrong roles receive `403`; unauthenticated requests
+receive `401`. Supplier reads/submissions never reveal another supplier's draft.
+Readiness adds `listing_not_approved` / `view_listing_review` for a new listing;
+an approved version under revision remains operational if its other gates pass.
+
+Review state is independent of `active`, account/service holds, and the listing
+take-down fields from PR #153. Decisions never clear a suspension, change active
+visibility, or restore a service. Restoring a taken-down listing still leaves it
+hidden until the supplier republishes it. Photos used by the approved snapshot
+retain private file references even after draft replacement/removal; approval
+releases references to superseded samples. Pending photos never become public
+media merely because another version of the listing is approved.
+
+All writes use the existing domain transaction/lock and save/outbox boundary.
+Submission/review/type-request events persist supplier and current Operations
+and Super Admin inbox rows and queue catalogue invalidation. Audit records retain
+the decision, reason, reviewed version, photo IDs and unbranded-photo attestation.
+The migration refuses rollback while review state or type requests would be lost.
+
+## Staff listing index and take-down
+
+`GET /ops/catalog-items` and `GET /ops/catalog-items/:id` are readable only by Operations and Super Admin. The index returns `{ items: [{ shop: { supplierId, shopName }, item }], shops, total, nextCursor? }`; the detail returns `{ shop, item }`. Each private item includes prices and units, specs, photos, the shop's `active` switch, version and timestamps. These staff projections are never exposed to clients.
+
+The index accepts `q` (trimmed, at most 80 characters), `subcategoryCode`, `supplierId`, `minPriceMinor`, `maxPriceMinor`, `limit` (1–50, default 50) and an opaque `cursor`. Prices are integer PHP minor units; invalid filters return `400 invalid_catalog_query`. Missing detail items return `404 catalog_item_not_found`. Photos use the same signed download decoration as the supplier catalogue.
+
+Only Super Admin may call either action; Operations, suppliers, riders and clients receive `403 forbidden`:
+
+- `POST /catalog-items/:id/suspend` with `{ "reason": "Correct the listing sample" }` takes one listing off the client board. The trimmed reason is required (`400 reason_required`) and capped at 2,000 characters (`400 reason_too_long`). It sets `active=false`, records the reason, timestamp and actor, and bumps the version. Repeating a take-down returns `409 listing_suspended` without replacing the reason, changing the version, or sending another notice. Sibling listings and the service line are unchanged.
+- `POST /catalog-items/:id/restore` clears the take-down fields and bumps the version, but **leaves `active=false`**. The shop decides when to put it back on the board using its ordinary versioned `PATCH /me/catalog-items/:id`. A listing without a take-down returns `409 listing_not_suspended`.
+
+Private listing detail, the staff index, and `GET /me/catalog-items` (including PostgreSQL search and pagination) carry `suspendReason` and `suspendedAt`, both null when there is no take-down. While a reason is set, the shop cannot PATCH `active=true`: the API returns `409 listing_suspended` with the reason. Taken-down listings cannot appear on the client board or in matching.
+
+Each successful action commits the item, audit (`catalog_item.suspend` or `catalog_item.restore`, entity type `supplier_catalog_item`) and shop inbox notice together. `listing_suspended` tells the owning shop the reason. `listing_restored` tells it the take-down is lifted and the listing remains hidden until the shop turns it on. Both notices carry `catalogItemId`, use the supplier role, and invalidate the shop's notifications and catalogue after commit. Push data retains its existing privacy allowlist.

@@ -1,3 +1,4 @@
+import { supplierArtworkReleased } from "./artwork-gates.js";
 import { isContainedPickup, paymentSettled } from "./operational-model.js";
 export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
@@ -74,11 +75,17 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
+  if (notification.type === "organization_officer_confirmation") {
+    item.officerId = notification.officerId;
+    item.actions = ["confirm_officer", "change_officer"];
+  }
   if (CLIENT_EVENT_STATES[notification.type]) item.eventState = CLIENT_EVENT_STATES[notification.type];
   if (notification.orderId) item.orderId = notification.orderId;
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;
   if (notification.announcementId) item.announcementId = notification.announcementId;
   if (notification.approvalCaseId) item.approvalCaseId = notification.approvalCaseId;
+  if (notification.catalogItemId) item.catalogItemId = notification.catalogItemId;
   if (order?.title) item.orderTitle = order.title;
   if (order?.state) {
     const privateShopEvent = ["supplier", "ops_admin", "super_admin"].includes(notification.appRole);
@@ -218,6 +225,7 @@ export function orderFromNotification(store, notification) {
 export function invalidateAudienceIds(store, event) {
   if (STAFF_INVALIDATE_RESOURCES.includes(event?.resource)) return opsAdminRecipientIds(store);
   const ids = new Set(event.userIds || []);
+  const order = (store.orders || []).find(row => row.id === event.id);
   if (["notifications", "identity", "credits"].includes(event.resource)) return [...ids];
   if (event.resource === "location") {
     const order = (store.orders || []).find(o => o.id === event.id);
@@ -230,7 +238,7 @@ export function invalidateAudienceIds(store, event) {
     event.supplierId
     && (event.resource === "jobs" || event.resource === "orders" || event.resource === "payouts")
   ) {
-    ids.add(event.supplierId);
+    if (!order || supplierArtworkReleased(order)) ids.add(event.supplierId);
   }
   if (event.clientId && event.resource === "orders") ids.add(event.clientId);
   if (
@@ -238,6 +246,11 @@ export function invalidateAudienceIds(store, event) {
     && (event.resource === "dispatch" || event.resource === "orders" || event.resource === "jobs")
   ) {
     ids.add(event.riderId);
+  }
+  if (order && !supplierArtworkReleased(order) && ["jobs", "orders", "payouts"].includes(event.resource)) {
+    for (const userId of ids) {
+      if (hasRole(store, userId, "supplier") && !canAccessOrder(store, userId, order)) ids.delete(userId);
+    }
   }
   return [...ids];
 }
@@ -294,7 +307,7 @@ export function publishQueuedInvalidates(events, store) {
   }
 }
 
-export const EVENT_ROLES = Object.freeze(['client', 'supplier', 'rider', 'ops_admin', 'super_admin']);
+export const EVENT_ROLES = Object.freeze(['client', 'supplier', 'rider', 'ops_admin', 'super_admin', 'staff']);
 export function hasRole(store, userId, role) {
   return (store.userRoleMemberships || []).some(m => m.userId === userId && m.role === role);
 }
@@ -318,8 +331,8 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
     if (r === 'ops_admin' || r === 'super_admin') return true;
     if (r === 'client') return order.clientId === userId && (!location || order.fulfillmentMode !== 'pickup');
     if (!approvedRole(store,userId,r)) return false;
-    if (r === 'supplier') return order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled'));
-    return order.riderId === userId || (!location && offer && order.state === 'ready_for_dispatch' && !order.riderId && !isContainedPickup(order));
+    if (r === 'supplier') return supplierArtworkReleased(order) && (order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled')));
+    return r === 'rider' && (order.riderId === userId || (!location && offer && order.state === 'ready_for_dispatch' && !order.riderId && !isContainedPickup(order)));
   });
 }
 export function notificationVisible(store, notification, userId, role) {
@@ -341,6 +354,9 @@ export function notificationVisible(store, notification, userId, role) {
     const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);
     return Boolean(c && ((c.userId === userId && (!role || role === (c.kind === 'business_client' ? 'client' : c.kind))) || ((!role || ['ops_admin','super_admin'].includes(role)) && opsAdminRecipientIds(store).includes(userId))));
   }
+  // The requesting shop retains this bounded historical outcome after a replacement.
+  if (requiredRole === 'supplier' && notification.type?.startsWith('order_reschedule_')
+      && orderFromNotification(store, notification)?.rescheduleRequest?.supplierId === userId) return true;
   if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || (legacySuperSeesOps ? 'super_admin' : requiredRole),offer:notification.type === 'dispatch_available'});
   return true;
 }

@@ -1,3 +1,4 @@
+import { checkArtworkBytes } from "./artwork-file-check.js";
 import dns from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
@@ -165,10 +166,12 @@ function result(provider, reachable, httpStatus, access, message) {
 function publicArtworkBytes(response) {
   const type = String(response.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
   const bytes = response.bytes;
-  return (type === "application/pdf" && bytes.subarray(0, 5).toString() === "%PDF-")
+  const signature = (type === "application/pdf" && bytes.subarray(0, 5).toString() === "%PDF-")
     || (type === "image/png" && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")))
     || (type === "image/jpeg" && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
     || (type === "image/webp" && bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP");
+  return signature && !response.capped
+    && checkArtworkBytes(bytes, bytes, bytes.length, type, new Date().toISOString()).status === "passed";
 }
 
 // The resolved, validated IP is supplied directly to the socket lookup. There
@@ -256,7 +259,7 @@ export function createArtworkLinkChecker({
         if (shortCanva && canvaDesignId(url)) { canonicalUrl = url.href; provider = "canva"; }
         else if (shortCanva && !canonicalUrl) provider = providerFor(url);
         sawLogin ||= loginUrl(url);
-        if (response.headers["cf-mitigated"] === "challenge") return verdict(true, status, "unknown", "The provider challenged the link check. Open it yourself to check sharing access.");
+        if (response.headers["cf-mitigated"] === "challenge") return verdict(true, status, "unknown", "The provider challenged the link check. Use a direct public sharing link or upload the file.");
         if (REDIRECTS.has(status)) {
           if (!response.headers.location || redirects >= 3) return verdict(reachable, status, "unknown", "The link has too many redirects or an incomplete redirect. Try a direct sharing link.");
           let next;
@@ -291,11 +294,11 @@ export function createArtworkLinkChecker({
           if (driveAccess === "not_found" || canvaMissingPage(url, html)) return verdict(true, status, "not_found", "That design could not be found. Check the sharing link.");
           if (status === 200 && driveAccess === "public_view") return verdict(true, status, driveAccess, "Anyone with the link can view this Google Drive file. Edit permission is not verified.");
         }
-        if (response.capped) return verdict(true, status, "unknown", "The page is too large to check safely. Open it yourself to check sharing access.");
+        if (response.capped) return verdict(true, status, "unknown", "The page is too large to check safely. Use a direct public sharing link or upload the file.");
         const canvaEdit = provider === "canva" && /^\/design\/[^/]+\/edit\/?$/i.test(url.pathname);
         return verdict(true, status, "unknown", canvaEdit
           ? "This is a Canva edit link, but edit permission cannot be verified without signing in. Check its sharing settings."
-          : "The server responded, but public viewing and edit permission could not be verified. Check sharing settings or upload the artwork.");
+          : "The server responded, but the artwork could not be read or public viewing could not be verified. Check sharing settings or export and upload the artwork.");
       }
     };
     try { return await Promise.race([run(), timeout]); }
@@ -315,5 +318,7 @@ export async function routeArtworkLinkCheck({ req, url, user, readBody }) {
   if (req.method !== "POST" || url.pathname !== "/artwork/link-check") return null;
   if (!user) fail(401, "unauthorized", "Sign in to check an artwork link.");
   if (!identityHasMembership(user, "client")) fail(403, "forbidden", "Only clients can check artwork links.");
-  return { status: 200, body: await checkArtworkLinkForUser(user.id, await readBody(req)) };
+  const check = await checkArtworkLinkForUser(user.id, await readBody(req));
+  if (!check.ok) check.message += " Make the link viewable by anyone with the link, then retry.";
+  return { status: 200, body: check };
 }

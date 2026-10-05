@@ -1,3 +1,4 @@
+import { currentApplication, decideClientApplication } from "./client-applications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { assertRiderApprovalReady } from "./enrollment.js";
 
@@ -152,10 +153,13 @@ export function latestApplicantSnapshot(store, caseId) {
 }
 
 export function businessApplicationProjection(store, approvalCase) {
-  const snapshot = latestApplicantSnapshot(store, approvalCase.id);
+  const snapshot = currentApplication(store, approvalCase);
   const profile = (store.clientProfiles || []).find((candidate) => candidate.userId === approvalCase.userId);
   const accountType = snapshot.accountType === "organization" ? "organization" : "business";
+  const { requestPayloadHash, ...application } = snapshot;
   return {
+    ...application,
+    businessPermitRequired: Boolean(approvalCase.businessPermitRequired),
     businessName: nonblank(snapshot.businessName) || nonblank(profile?.businessName) || null,
     businessNature: nonblank(snapshot.businessNature) || nonblank(profile?.businessNature) || null,
     accountType,
@@ -400,6 +404,7 @@ export function decideApprovalCase({
     );
   }
 
+  decideClientApplication(store, approvalCase, action, at, createId);
   const fromStatus = approvalCase.status;
   approvalCase.status = transition.to;
   approvalCase.version += 1;

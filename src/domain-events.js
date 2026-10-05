@@ -1,3 +1,4 @@
+import { supplierArtworkReleased } from "./artwork-gates.js";
 import { activePayoutHold } from "./operational-model.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
@@ -88,7 +89,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
     });
   }
   function notify(userId, type, title, order, occurrence, appRole, extra = {}, preserveOccurrences = false) {
-    if (!userId) return;
+    if (!userId || (appRole === "supplier" && order && !supplierArtworkReleased(order))) return;
     // Existing route effect for the same recipient/purpose wins in this transaction.
     if (
       (store.notifications || []).some(
@@ -341,6 +342,21 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         {
           body: `${paper.contactPerson} · ${paper.officeAddress} · ${paper.operatingHours}`,
         },
+      );
+    }
+    const promisedDeliveryAt = order.physicalInvoiceRequest?.promisedDeliveryAt;
+    if (promisedDeliveryAt && promisedDeliveryAt !== old?.physicalInvoiceRequest?.promisedDeliveryAt) {
+      const promisedTime = new Intl.DateTimeFormat("en-PH", {
+        timeZone: "Asia/Manila", dateStyle: "long", timeStyle: "short",
+      }).format(new Date(promisedDeliveryAt));
+      notify(
+        order.clientId,
+        "physical_invoice_promised",
+        "Your paper invoice delivery is scheduled",
+        order,
+        `${occurrence}:physical_invoice_promised:${promisedDeliveryAt}`,
+        "client",
+        { body: `GRIDGO will deliver your paper invoice on ${promisedTime} (Philippine time).` },
       );
     }
     if (!old && order.state !== "draft")

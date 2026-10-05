@@ -4,6 +4,11 @@ This is the authoritative first-drop contract for client matching and cart check
 
 All routes require a Clerk bearer mapped to a PostgreSQL `client` membership, except Operations/Super Admin may also read an invoice. Money is integer PHP minor units.
 
+Client-price migration: [staged privacy contract](CLIENT_CATALOG_PRIVACY.md) defines
+`POST /me/catalog-quotes`, basket quotes (`cart.clientQuote` and
+`GET/POST /me/carts/:id/quote`), invoice client amounts, deprecated fields and the
+required release order. Phase 1 remains additive; legacy shop fields still exist.
+
 ## Preferences and addresses
 
 ```text
@@ -148,6 +153,23 @@ Legacy add-line by `catalogItemId` without a token remains supported and does no
 
 Expired records are retained for at least a day after expiry and pruned during subsequent matches; after cleanup an old token returns `invalid_select_token`. None of these refusals changes the cart or places an order.
 
+### Fulfillment before matching
+
+New requests choose Delivery or Pick-up immediately after the deadline, before calling either match endpoint. Send `fulfillmentMode: "delivery" | "pickup"` on **every** `/me/matches` and `/me/matches/next` request.
+
+- Delivery requires an owned `addressId` or inline `dropoff: {lat,lng,label}`, regardless of preference ranking. This is request input; activation/onboarding needs no address. Matching, listing distance zones, and checkout fees use that destination and the existing delivery band table.
+- Pick-up uses the fixed GRIDGO hub point returned by `GET /settings` at `settings.hubPickup.point`. The API overrides any supplied address for this path. Shop distance ranking is measured to the hub. The client's pickup charge is the configured flat hub fee, not a distance-band delivery charge.
+
+An explicit-choice match adds `requestFulfillment: {fulfillmentMode,dropoff}`; pickup also adds `hubPickup: {point,schedule,feeMinor}`. Every offered listing, including anonymous alternatives, has `deliveryFeeMinor` as its fulfillment-charge preview; pickup listings also have `pickupFeeMinor`, which names the same amount. Existing photo signing and selection-token expiry rules apply.
+
+Create an empty cart (existing `POST /me/carts`), then add a listing with its `selectToken` and `matchRequestId`. The server carries the choice and resolved destination from that token into the cart. The cart's `requestFulfillment` is returned on full and compact reads and persists across API restarts; pickup carts expose the current `hubPickup` settings. Checkout renders this choice read-only. A conflicting fulfillment or destination on cart PATCH, fulfillment/drop-off PUT, line add/PATCH, or checkout returns `409 request_fulfillment_locked`. To change it, rematch and use a new empty cart. Attaching an explicit-choice token to an existing legacy nonempty cart returns `409 request_fulfillment_requires_empty_cart`.
+
+At checkout the order and invoice snapshot `requestFulfillment`; pickup additionally snapshots `hubPickup` and `pickupFeeMinor` from current settings. A draft preview can change when settings change; a placed order's schedule and charge cannot. Shop recovery also matches against this snapshotted request point, including the hub for pickup, and preserves the fulfillment choice and charge when the client accepts a replacement. The fee is once per single-shop order, not per line. A multi-shop basket charges it once and allocates minor units evenly across groups, with remainder in group order; see [basket pickup allocation](MULTI_SHOP_CHECKOUT_API.md#one-hub-pickup-fee). The server-owned `cart.clientQuote` and `GET/POST /me/carts/:id/quote` include the same fee in `deliveryFeeMinor` and the already-inclusive GRIDGO item amount in `clientItemSubtotalMinor`. Use their total rather than computing printing markup or delivery from shop details; conflicting quote-preview overrides also return `409 request_fulfillment_locked`. For compatibility with the existing financial model, `deliveryFeeMinor` remains the total fulfillment-charge slot and its `delivery_pass_through` payment allocation: on a new pickup order it **already includes** `pickupFeeMinor`. Do not add these two values together. Printing subtotal and service-fee calculations exclude the pickup fee; pickup fee earns no supplier payout or rider share. Internal pickup jobs retain their existing zero-charge trip contract. Existing collection/refund accounting handles the fee as platform-owned fulfillment funds.
+
+Compatibility: omitting `fulfillmentMode` from matching preserves released-build behavior, including its optional destination and checkout-time choice. Existing tokens, carts, and orders are not upgraded or locked, and legacy pickup carts keep their zero-charge checkout even after a hub fee is configured. The client follow-up must enable the new step only for new request drafts; resume old drafts/orders through their existing flow.
+
+Hub operating hours are settings for the collection information shown by the client. They do not replace supplier production calendars, change the promised production deadline, or automatically select a collection appointment. `schedule: null` means Super Admin has not configured hours yet; the client must show that state instead of inventing opening days. QR collection and reminder workflows remain separate follow-ups.
+
 ### Distance and rating fields
 
 Both match routes return `distanceZone: { key, label }` at the response root (the Top Pick) and on each `listings[]` / `otherListings[]` item. Keys/labels come from the same [four delivery fee bands](OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones): `nearby` / Nearby, `away` / Away, `long_distance` / Long Distance, `out_of_zone` / Out of Zone. Without a drop-off, `distanceZone` is `null`; no zone is guessed. The existing rule requiring a pin when distance is ranked first remains.
@@ -226,13 +248,45 @@ The array has at most **3** entries. Each entry has `formatCode: "canva_link" | 
 | `we_transfer` | `wetransfer.com` and subdomains; `we.tl` |
 | `other_link` | Any otherwise-valid URL (including these providers for compatibility) |
 
-Canva short links are resolved through the same SSRF-safe checker before the cart mutation transaction, then stored as `canva_link` with the resolved HTTPS `canva.com/design/.../view` or `/edit` URL, including any sharing-token segment and query. This also applies when an older client sends a `canva.link` URL as `other_link`. The listing must therefore accept `canva_link`. A short link without a resolved HTTPS Canva design returns `400 artwork_link_unresolved`; paste the full design URL instead. This resolution shares the checker's per-user rate budget. Direct links need no provider round trip during cart writes. Canonicalization is not a grant of public access: a resolved private or unavailable design still requires the client's check UX.
+Canva short links are resolved through the same SSRF-safe checker before the cart mutation transaction, then stored as `canva_link` with the resolved HTTPS `canva.com/design/.../view` or `/edit` URL, including any sharing-token segment and query. This also applies when an older client sends a `canva.link` URL as `other_link`. The listing must therefore accept `canva_link`. A short link without a resolved HTTPS Canva design returns `400 artwork_link_unresolved`; paste the full design URL instead. This resolution shares the checker's per-user rate budget. Direct links need no provider round trip during cart writes. Canonicalization is not a grant of public access: checkout probes every design link again and refuses a private, unavailable, or inconclusive result.
 
 The listing's effective, active `acceptedFormats` must contain that exact code with `inputKind: "url"`. Listing overrides replace inherited service formats. These rules run on add, patch, and checkout, including a format withdrawn since the line was added.
 
 Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid. Invalid shape/URL returns `400 { "error": "invalid_artwork_links", "message": "..." }`; an unaccepted format returns `400 { "error": "artwork_link_format_not_accepted", "message": "..." }`.
 
 Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Top-level `artworkFileIds` and `mockupFileIds` follow the same job scope; metadata and signed downloads enforce it independently. Legacy fallback and combined-delivery rules are in [Storage API](STORAGE_API.md#get-filesfileid--metadata). Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
+
+### Artwork checkout gate and Operations handoff
+
+`POST /me/carts/:id/checkout` checks artwork on **every line**. No new client request field or check token is required. Released clients that skip `/artwork/link-check` receive the same explicit checkout errors; a client-supplied verdict never grants permission. The API probes every saved link afresh before taking the domain transaction lock, then verifies the exact line artwork is unchanged in the transaction. All supplied links must pass, even when the line also has an uploaded file. To use an upload instead, clear failed links with `artworkLinks: []`.
+
+| Checkout error | HTTP | Client fix |
+| --- | --- | --- |
+| `artwork_required` | 409 | Upload artwork or add a publicly viewable design link. |
+| `artwork_link_check_failed` | 409 | Show `message` in the Artwork tab. Make the design viewable by anyone with the link and retry, or remove the link and upload the file. Private, missing, unreachable, timed-out, bot-challenged, unreadable and inconclusive links all block. |
+| `artwork_file_check_failed` | 409 | Re-export, upload and replace the artwork. Old uploads without a stored verdict require re-upload. |
+| `artwork_check_required` | 409 | Artwork changed during the probe; retry checkout against the current cart. |
+
+Errors include `field: "artwork"` and `lineId`; link failures also include `url` and `access`, and file failures include `fileId` and `reason`. Existing unsafe URL, malformed format, not-ready file, and rate-limit errors still apply. A failed checkout commits no order, job, invoice, payment attachment or notification, and the cart stays draft. Link probes share the existing 10-checks-per-minute per-user budget with `/artwork/link-check`; retry after a minute on `429 artwork_link_rate_limited`.
+
+`POST /files` with `purpose=artwork` keeps its multipart request and `{ file }` response. The response and `GET /files/:id` add `file.artworkCheck: { status: "passed" | "failed", checkedAt, reason, message }`. The server checks bytes from its upload spool, independently of the editable/advisory `file.detected` measurements. Failed structural checks may still produce a ready file, so show `artworkCheck.message` and replace the file; **ready means uploaded, not approved for checkout**. PDF checks require readable page structure, a final cross-reference marker and end marker, and refuse encrypted files; PNG checks include chunk bounds and checksums; JPEG checks require a readable frame, scan and end marker; WebP/Photoshop checks require consistent container/image structure. These checks are bounded and cannot prove every decoder or print requirement. Operations opens the file and checks print readiness before handoff. Nothing supplied by a client can set these verdicts.
+
+Successful checkout returns state `initial_payment_review` and `order.fileCheck.status: "pending"`. It writes an immediate durable `ops_job_needs_qa` alert for each Operations and Super Admin membership, alongside the payment alert. Push and realtime enqueue after the same commit. The shop receives no order inbox row or refresh event while held, and `/jobs`, `/orders`, order detail, shop-recovery routes, and artwork metadata/download authorization exclude it. A snapshotted supplier/job ID alone grants no early access. There is no office-hours exception or timer release. The shop acceptance window begins at the staff handoff to `supplier_assigned`, never during the pending file check; its one-opening-hour deadline follows [Shop recovery API](SHOP_RECOVERY_API.md).
+
+Operations uses the existing `POST /orders/:id/payments/initial/confirm`, then `POST /orders/:id/transition`:
+
+| Action / transition | File review | Shop handoff |
+| --- | --- | --- |
+| Payment confirmed → `needs_qa` | Stays `pending`; wait begins at checkout, not payment confirmation. | Held. |
+| Operations/Super Admin: `needs_qa` → `client_correction`, with nonblank `note` | `failed`; reason is the note. Missing note returns `400 file_check_reason_required`. | Held. |
+| Owning client: `client_correction` → `needs_qa` (or legacy `submitted`) | Resets to `pending`, with a new `requestedAt`; alerts staff on resubmission. | Held until reviewed again. |
+| Operations/Super Admin: `needs_qa` → `supplier_assigned` | `passed`, with reviewer and review time; matched orders need no `supplierId` in the request. | Shop sees the job and receives `shop_job_assigned` after commit. |
+| Operations/Super Admin: `needs_qa` → `approved_for_matching` or `proof_approval` | Also records `passed` for the legacy assignment/proof flow. | Assignment notification follows the normal assignment step. |
+| Cancel before a pass | `cancelled`; no accumulating review wait. | Held. |
+
+`GET /orders` and `GET /orders/:id` expose `fileCheck: { status, requestedAt, reviewedAt, reviewedBy, reason, waitingSeconds }` to Operations/Super Admin; the owning client receives the same projection without `reviewedBy`. Suppliers/riders omit it. `waitingSeconds` is computed at read time, in elapsed wall-clock seconds while pending, and is zero after a decision/cancellation. The dashboard follow-up should filter pending checks, sort by `requestedAt` and render the elapsed wait on each row, including `initial_payment_review` orders, so out-of-hours backlogs stay visible. Existing production orders without this additive snapshot retain access; existing intake remains hidden until the quality-control handoff.
+
+Client follow-up: show upload/link-check failure guidance on the Artwork tab and route checkout errors to the indicated line; do not treat an `unknown` check as a warning. Dashboard follow-up: render the pending queue/wait and use the transitions above to pass or request correction. Backend delivery alone does not finish the issue's production + client-release acceptance gate.
 
 ### POST `/artwork/link-check`
 
@@ -272,7 +326,7 @@ The checker sends HEAD, then GET for a success needing content inspection or a H
 
 Access evidence is deliberately conservative:
 
-- Recognizable leading PDF/PNG/JPEG/WebP bytes with the matching Content-Type served successfully without authentication (including files larger than the cap) support `public_view` and “Anyone with the link can view this artwork.” A Content-Type header alone does not.
+- A complete PDF/PNG/JPEG/WebP body with matching Content-Type and a passing structural file check supports `public_view`. Leading magic bytes or a Content-Type header alone do not prove a usable file. Downloadable bodies over the 64 KiB check cap remain `unknown`; upload the file instead. Public provider viewer pages can still pass using the documented anonymous viewer evidence.
 - 401, a fetched login/sign-in URL, or an HTML password input gives `sign_in_required`; 404/410 gives `not_found`. A Drive redirect to `accounts.google.com` gives `sign_in_required` after validating the target DNS, without fetching the sign-in page. Drive “You need access” pages also require sharing changes.
 - Drive file view/preview HTML with the captured viewer config identifying the requested file and `isItemTrashed: false` supports `public_view`. A matching trashed config or explicit missing/deleted-file page gives `not_found`. Metadata alone is insufficient. Drive download redirects (including `drive.usercontent.google.com`) use the same per-hop DNS checks and redirect budget; their bytes require matching MIME and magic as above.
 - A Canva `/design/<id>[/<share-token>]/view` or `/edit` response with status 200 and the captured viewer bootstrap identifying that same design supports `public_view`, including when this evidence is within the retained 64 KiB prefix of a larger page. `/edit` plus viewer evidence establishes viewing only; this implementation never claims `public_edit`.
@@ -312,6 +366,10 @@ Set drop-offs in one call with:
 
 ## Checkout and invoice
 
+Multi-shop baskets use the additive [multi-shop checkout contract](MULTI_SHOP_CHECKOUT_API.md):
+one basket deadline and fulfillment choice, 100% upfront, one combined receipt,
+and independent order ledgers per shop. The single-shop flow below is unchanged.
+
 Upload the QR Ph screenshot with `POST /files`, `purpose=payment_proof`, then:
 
 ```text
@@ -328,7 +386,7 @@ POST /me/carts/:cartId/checkout
 }
 ```
 
-No other payment method is accepted. Checkout groups lines by shop into one job per shop, snapshots listings/options/artwork/mockups/drop-offs, and calculates each delivery line independently from that shop pin to the job's farthest effective drop-off. Pickup jobs have zero delivery fee.
+No other payment method is accepted. Single-shop checkout creates one job, snapshots listings/options/artwork/mockups/drop-offs, and calculates delivery from the shop pin to the job's farthest effective drop-off. Pickup jobs have zero delivery fee. Multi-shop checkout creates independent orders as specified in the linked contract.
 
 Order totals are:
 

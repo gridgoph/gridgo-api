@@ -11,7 +11,7 @@ GRIDGO uses the API as the **control plane** and MinIO as the **download data pl
 3. `POST /files/:fileId/attach` separately binds a ready file to a domain record. It rechecks lifecycle state, uploader, purpose, detected media type, target ownership/state, metadata integrity, and MinIO object existence and byte size.
 4. `GET /files/:fileId/download-url` authorizes the caller from current domain relationships, checks the object, and returns a short-lived presigned GET. MinIO serves the bytes.
 
-This deliberately replaces the earlier API-proxied-download proposal. Presigned GETs avoid routing 50–200 MiB artwork back through the single Node process. Uploads remain proxied because only the API can enforce byte limits and signature inspection before declaring a file ready.
+Presigned GETs avoid routing 50–200 MiB artwork back through the single Node process. Payment proofs and payout/refund receipts additionally support an authenticated API byte read for browser receipt reading when a LAN storage origin is blocked. Uploads remain proxied because only the API can enforce byte limits and signature inspection before declaring a file ready.
 
 The prior NestJS API's broader shape—upload, presigned URL, inspect, get, delete, and my-uploads—was evaluated. This contract adopts upload, metadata get, presigned GET, and safe delete. Binary inspection and `my-uploads` are deferred: inspection needs a defined analysis product, while current apps reach files from role-scoped orders/services. Those routes may be added later without changing this contract.
 
@@ -142,7 +142,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
 
-Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 heic_not_supported`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
+Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 invalid_file_type` with `reason: "heic_not_supported"`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
 
 The upload request timeout defaults to 15 minutes. Clients may show transfer progress, but progress reaching 100% is **not success**. Only a `201` response containing `file.fileId` means MinIO storage and `ready` metadata both completed. Retry after any lost connection or non-201 response; never invent or reuse a guessed ID.
 
@@ -305,6 +305,14 @@ curl -f "$DOWNLOAD_URL" --output ./artwork-readback.pdf
 cmp ./artwork.pdf ./artwork-readback.pdf
 ```
 
+## GET /files/:fileId/content — private payment image bytes
+
+Auth: exactly the same `authorizeFileRead` gate as `download-url`, including current role selection and approval. Supported purposes are `payment_proof`, `payout_receipt`, and `refund_receipt` only (each at most 15 MiB). Operations and Super Admin may read these; other readers retain the existing purpose-specific rules: payment proof owner, approved assigned supplier for a payout receipt, and the refund's owning client for a bound refund receipt. No new reader is granted access.
+
+Success: `200` with streamed MinIO bytes, `Content-Type` from the detected upload type, `Content-Length` from validated metadata, `Cache-Control: private, no-store, max-age=0`, and `X-Content-Type-Options: nosniff`. The object must exist and match the recorded size, as for `download-url`. Authorization failures and storage failures use the existing JSON error contract. A readable file of another purpose returns `400 file_content_not_supported`; non-ready or unknown files return `404 file_not_found`.
+
+Dashboard integration: fetch this API path with `Authorization: Bearer <Clerk session JWT>` and the same `X-GRIDGO-Role` header used for other file reads, read the response as a blob, and pass a local object URL/data URL to the receipt reader. Revoke object URLs when finished. Do not use this authenticated path directly as an `<img src>` without fetching the bytes first. This avoids a browser request to the LAN storage origin; the API uses its internal MinIO connection. Large artwork and all other file purposes continue using `download-url`.
+
 ## DELETE /files/:fileId — file deletion
 
 Auth: **Super Admin only**, or the owning client deleting their own `artwork` / `mockup` after every related order is `completed` or `payout_released`. Client artwork still used by a draft cart cannot be deleted. Clients cannot delete unattached uploads through this endpoint; unused uploads follow scheduled cleanup. Operations, suppliers and riders cannot delete files early, including their own verification evidence.
@@ -389,6 +397,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | HTTP | `error` | When / client fix |
 |---:|---|---|
 | 400 | `invalid_file_purpose` | Purpose is absent/unknown; send one documented enum. |
+| 400 | `file_content_not_supported` | Byte route requested for another readable purpose; use `download-url`. |
 | 400 | `invalid_multipart` | Multipart framing is malformed/incomplete; recreate `FormData` and retry. |
 | 400 | `unexpected_form_field` | Upload includes a text field other than `purpose`; remove it. |
 | 400 | `file_required` | Missing or multiple/wrong-named file part; send exactly one `file`. |
@@ -421,12 +430,11 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 413 | `file_too_large` | Purpose limit exceeded; choose a smaller file. Response includes `purpose`, `maxBytes`, `maxMiB` when known. |
 | 413 | `request_body_too_large` | Non-file JSON exceeds 1 MiB; remove extra data. |
 | 415 | `multipart_required` | Upload is not multipart; send `FormData`. |
-| 415 | `content_type_not_allowed` | Specific declared MIME is unsupported; export to an accepted format. |
-| 415 | `purpose_media_type_not_allowed` | Valid detected format is not allowed for that purpose (for example PDF delivery photo); use an allowed image. |
-| 415 | `file_type_mismatch` | Extension, specific declared MIME, and magic bytes disagree or signature is unknown; export correctly. |
-| 415 | `heic_not_supported` | HEIC/HEIF detected; convert/capture as JPEG or PNG. |
+| 415 | `invalid_file_type` | Unsupported, mismatched, or purpose-ineligible format. Response includes a plain `message`, `purpose`, `allowedContentTypes`, and `reason`: `content_type_not_allowed`, `file_type_mismatch`, `purpose_media_type_not_allowed`, or `heic_not_supported`. Export to an accepted format. |
 | 503 | `minio_unavailable` | MinIO is unreachable; run `docker compose up -d --wait` and retry. Non-file endpoints remain available. |
 | 503 | `storage_initializing` | Boot-time MinIO recovery is still running; wait briefly and retry the file action. |
+
+Upload validation runs before storage access, including during storage recovery. Dashboards should show the response `message` for `invalid_file_type`, and the `maxMiB`/`maxBytes` limit for `file_too_large`; reserve a storage-unavailable message for `503 minio_unavailable` or `storage_initializing`. Type errors formerly returned the individual reason as the top-level `error`; that detail now lives in `reason`.
 
 No file route returns raw SDK exceptions, stack traces, credentials, or standalone bucket/key metadata. The one deliberate exception is the authorized presigned URL, whose signed path necessarily contains the bucket and key and must remain opaque.
 
@@ -472,3 +480,7 @@ The separately authorized shop settlement payout uses existing `payout_receipt` 
 ## Production photo visibility
 
 Progress images use the same private read gate as artwork. The client gallery and packing refusal contract are [Production progress photos](OPERATIONAL_MODEL_V2_API.md#production-progress-photos). A start-of-production image counts, including legacy shop image proofs; PDFs do not. Client/rider file metadata strips internal reference fields and calls legacy fulfilment evidence `order_photo`. Attached evidence follows the retention and audited early-deletion policy above.
+
+### Client application documents
+
+`client_verification_document` uploads are client-owned JPEG/PNG/WebP/PDF files up to 20 MiB. Complete application submission attaches them through the existing file-reference mechanism. Only Operations and Super Admin can read metadata or signed bytes, including after submission; the owner receives the opaque file ID at upload. Track checklists, rejected-revision retention and handover rules are in [Organization accounts](ORGANIZATION_ACCOUNTS_API.md). Automatic deletion remains disabled by default.

@@ -47,8 +47,8 @@ async function fixture(db) {
     await db.query(`INSERT INTO supplier_services (id, supplier_id, category_code, state, reference_rate_minor, turnaround_hours, created_at, updated_at, position)
       VALUES ($1, $2, 'marketing_collateral', 'live', 100, 24, $3, $3, $4)`, [`service_${position}`, id, AT, position]);
     await db.query("INSERT INTO supplier_service_file_formats (supplier_service_id, format_code) VALUES ($1, 'pdf')", [`service_${position}`]);
-    await db.query(`INSERT INTO supplier_catalog_items (id, supplier_id, supplier_service_id, subcategory_code, name, base_price_minor, sort_order, created_at, updated_at)
-      VALUES ($1, $2, $3, 'flyers', 'Fixture listing', 100, 0, $4, $4)`, [`item_${position}`, id, `service_${position}`, AT]);
+    await db.query(`INSERT INTO supplier_catalog_items (id, supplier_id, supplier_service_id, subcategory_code, name, base_price_minor, sort_order, created_at, updated_at, review_status)
+      VALUES ($1, $2, $3, 'flyers', 'Fixture listing', 100, 0, $4, $4, 'approved')`, [`item_${position}`, id, `service_${position}`, AT]);
     await db.query(`INSERT INTO files (file_id, owner_id, purpose, original_filename, declared_content_type, state, object_key, created_at, position)
       VALUES ($1, $2, 'catalog_photo', 'sample.jpg', 'image/jpeg', 'ready', $1, $3, $4)`, [`photo_${position}`, id, AT, position]);
     await db.query("INSERT INTO supplier_catalog_item_photos (catalog_item_id, file_id, sort_order, created_at) VALUES ($1, $2, 0, $3)", [`item_${position}`, `photo_${position}`, AT]);

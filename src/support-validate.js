@@ -37,15 +37,3 @@ export function validateReply(body) {
   }
   return { ok: true, replyMessage };
 }
-
-export function validateLogin(body) {
-  if (!body || typeof body !== "object") {
-    return { ok: false, message: "Request body must be a JSON object." };
-  }
-  const username = asTrimmedString(body.username);
-  const password = typeof body.password === "string" ? body.password : "";
-  if (!username || !password) {
-    return { ok: false, message: "Username and password are required." };
-  }
-  return { ok: true, username, password };
-}

@@ -229,6 +229,20 @@ export function addWorkingMinutes(schedule, from, minutes) {
   })).toISOString();
 }
 
+/** Exact opening-time deadline for timers that must preserve seconds. */
+export function addOpeningMilliseconds(schedule, from, durationMs) {
+  const fromMs = instantOf(from, "from");
+  if (!Number.isSafeInteger(durationMs) || durationMs < 0) fail(400, "invalid_duration", "Use non-negative integer milliseconds.");
+  let remaining = durationMs;
+  return new Date(walkOpenTime(schedule, fromMs, ({ openedMs, closesMs }) => {
+    const start = Math.max(openedMs, fromMs);
+    const available = closesMs - start;
+    if (remaining <= available) return start + remaining;
+    remaining -= available;
+    return undefined;
+  })).toISOString();
+}
+
 /** Working minutes the shop actually has between two instants. */
 export function workingMinutesBetween(schedule, from, to) {
   const fromMs = instantOf(from, "from");

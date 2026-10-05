@@ -277,6 +277,118 @@ test("public catalog requires a complete active item under a live service", () =
   assert.equal(publicCatalogItem(draft, draft.catalogItems[0]), null);
 });
 
+test("suspending one listing hides it from clients and leaves its sibling live", async () => {
+  const store = fixture();
+  const sibling = { ...store.catalogItems[0], id: "sibling", name: "Sibling banner", sortOrder: 1 };
+  store.catalogItems.push(sibling);
+  store.catalogItemPhotos.push({ catalogItemId: "sibling", fileId: "photo", sortOrder: 0, createdAt: AT });
+  const ops = { id: "ops", role: "ops_admin" };
+  const admin = { id: "super", role: "super_admin" };
+  const supplier = { id: "supplier", role: "supplier" };
+  const route = (method, pathname, user, body = {}) => routeSupplierCatalog({
+    req: { method, headers: {} },
+    url: new URL(`http://127.0.0.1${pathname}`),
+    store,
+    user,
+    readBody: async () => body,
+    id: (prefix) => prefix,
+    now: () => AT,
+    audit: () => {},
+  });
+
+  const missing = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, {}),
+    (error) => error.code === "reason_required",
+  );
+  assert.equal(missing, undefined);
+  const shopDenied = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", supplier, { reason: "Blurry sample" }),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(shopDenied, undefined);
+  const opsDenied = await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", ops, { reason: "Blurry sample" }),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(opsDenied, undefined);
+
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, { reason: "x".repeat(2001) }),
+    (error) => error.status === 400 && error.code === "reason_too_long",
+  );
+  assert.equal(store.catalogItems[0].active, true);
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", { id: "client", role: "client" }, { reason: "Sample" }),
+    (error) => error.code === "forbidden",
+  );
+  const suspended = await route("POST", "/catalog-items/item/suspend", admin, { reason: "  Blurry sample  " });
+  assert.equal(suspended.status, 200);
+  assert.equal(suspended.body.item.active, false);
+  assert.equal(suspended.body.item.suspendReason, "Blurry sample");
+  assert.equal(suspended.body.item.suspendedAt, AT);
+  assert.equal(store.catalogItems.find((item) => item.id === "sibling").active, true);
+  assert.equal(store.catalogItems.find((item) => item.id === "sibling").suspendReason, undefined);
+  assert.equal(store.supplierServices[0].state, "live");
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+
+  const firstSuspension = structuredClone(store.catalogItems[0]);
+  const noticesBeforeRepeat = (store.notifications || []).length;
+  await assert.rejects(
+    () => route("POST", "/catalog-items/item/suspend", admin, { reason: "Replacement reason" }),
+    (error) => error.status === 409 && error.code === "listing_suspended",
+  );
+  assert.deepEqual(store.catalogItems[0], firstSuspension);
+  assert.equal(store.notifications.length, noticesBeforeRepeat);
+
+  const shopView = await route("GET", "/me/catalog-items/item", supplier);
+  assert.equal(shopView.status, 200);
+  assert.equal(shopView.body.item.suspendReason, "Blurry sample");
+  const notice = (store.notifications || []).find((row) => row.type === "listing_suspended");
+  assert.equal(notice.userId, "supplier");
+  assert.equal(notice.appRole, "supplier");
+  assert.equal(notice.body, "Blurry sample");
+  assert.equal(notice.catalogItemId, "item");
+
+  const opsRestore = await assert.rejects(
+    () => route("POST", "/catalog-items/item/restore", ops),
+    (error) => error.code === "forbidden",
+  );
+  assert.equal(opsRestore, undefined);
+
+  await assert.rejects(
+    () => route("PATCH", "/me/catalog-items/item", supplier, {
+      active: true,
+      expectedVersion: shopView.body.item.version,
+    }),
+    (error) => error.code === "listing_suspended" && error.details.reason === "Blurry sample",
+  );
+
+  const restored = await route("POST", "/catalog-items/item/restore", admin);
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.item.active, false);
+  assert.equal(restored.body.item.suspendReason, null);
+  assert.equal(restored.body.item.suspendedAt, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "item")), null);
+  const restoreNotice = store.notifications.find((row) => row.type === "listing_restored");
+  assert.equal(restoreNotice.userId, "supplier");
+  assert.equal(restoreNotice.appRole, "supplier");
+  assert.equal(restoreNotice.catalogItemId, "item");
+  assert.match(restoreNotice.body, /still hidden/);
+  const published = await route("PATCH", "/me/catalog-items/item", supplier, {
+    active: true, expectedVersion: restored.body.item.version,
+  });
+  assert.equal(published.body.item.active, true);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0])?.id, "item");
+
+  // A listing the shop already hid also stays hidden after take-down and restore.
+  store.catalogItems[0].active = false;
+  await route("POST", "/catalog-items/item/suspend", admin, { reason: "x".repeat(2000) });
+  const hiddenRestore = await route("POST", "/catalog-items/item/restore", admin);
+  assert.equal(hiddenRestore.body.item.active, false);
+  assert.equal(publicCatalogItem(store, store.catalogItems.find((item) => item.id === "sibling"))?.id, "sibling");
+});
+
 test("the platform registry lists uploadable types and resolves a plus query", async () => {
   const store = fixture();
   store.acceptedFileFormats = defaultAcceptedFileFormats();
@@ -618,6 +730,22 @@ test("GET item includes persisted photos after postgres round-trip", { skip: !DA
   assert.equal(item.photos[0].fileId, "file_sample");
   assert.equal(item.photos[0].sortOrder, 0);
   assert.equal(item.photos[0].altText, "Board sample");
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const result = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/sci_photo", body: { expectedVersion: 1, basePriceMinor: 9000 } });
+    assert.equal(result.body.item.reviewStatus, "pending");
+    await reviewCall(store, "/me/product-type-requests", { categoryCode: "marketing_collateral", name: "Custom inserts", description: "Printed inserts" }, store.users[0]);
+    await saveStore(database, store);
+  });
+  const revised = await loadStore(database);
+  const draft = revised.catalogItems.find(row => row.id === "sci_photo");
+  assert.equal(draft.reviewStatus, "pending");
+  assert.equal(draft.basePriceMinor, 9000);
+  assert.equal(draft.approvedSnapshot.item.basePriceMinor, 1000);
+  assert.equal(revised.productTypeRequests[0].status, "pending");
+  assert.equal(revised.productTypeRequests[0].supplierId, "user_supplier");
+  const ownList = await revised.listOwnCatalogItems({ supplierId: "user_supplier", sort: "board", limit: 20 });
+  assert.equal(ownList.items[0].reviewStatus, "pending");
   await database.close();
 });
 
@@ -904,6 +1032,51 @@ test("GET /listing-starters and public shop browse answer on the live API", { sk
   const invalidReadiness = await request(api, "/me/supplier-readiness?units=0", { subject: "clerk_supplier" });
   assert.equal(invalidReadiness.status, 400);
   assert.equal(invalidReadiness.body.error, "invalid_readiness_request");
+
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const supplier = store.users[0];
+    store.users.push({ ...supplier, id: "reviewer", clerkUserId: "clerk_reviewer", email: `reviewer-${supplier.email}`, role: "ops_admin", verificationStatus: null });
+    store.userRoleMemberships.push({ userId: "reviewer", role: "ops_admin", createdAt: AT });
+    store.approvalCases.push({ id: "supplier_review_case", userId: supplier.id, kind: "supplier", status: "approved", version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
+    store.supplierServices.push({ id: "review_service", supplierId: supplier.id, categoryCode: "marketing_collateral", state: "live", pricingBasis: "per_unit", referenceRateMinor: 1000, turnaroundHours: 24, version: 1, createdAt: AT, updatedAt: AT });
+    store.supplierServiceFileFormats.push({ supplierServiceId: "review_service", formatCode: "pdf" });
+    await saveStore(database, store);
+  });
+  assert.equal((await request(api, "/ops/catalog-reviews")).status, 401);
+  assert.equal((await request(api, "/ops/catalog-reviews", { subject: "clerk_supplier" })).status, 403);
+  const created = await request(api, "/me/catalog-items", { method: "POST", subject: "clerk_supplier", body: {
+    supplierServiceId: "review_service", starterId: starters.body.starters[0].id,
+    name: "Banner", basePriceMinor: 1000, printerMaxWidthFeet: 5, reviewStatus: "approved",
+  } });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.item.reviewStatus, "pending");
+  const listingId = created.body.item.id;
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.push({ fileId: "review_sample", ownerId: "user_supplier", purpose: "catalog_item_photo", originalFilename: "sample.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 12, state: "ready", objectKey: "sample.jpg", createdAt: AT });
+    store.catalogItemPhotos.push({ catalogItemId: listingId, fileId: "review_sample", sortOrder: 0, createdAt: AT });
+    await saveStore(database, store);
+  });
+  assert.equal((await request(api, `/catalog/items/${listingId}`)).status, 404);
+  const decisionPath = `/ops/catalog-reviews/${listingId}/decision`;
+  const denied = await request(api, decisionPath, { method: "POST", subject: "clerk_supplier", body: { expectedVersion: 1, status: "approved", photosUnbranded: true } });
+  assert.equal(denied.status, 403);
+  const sentBack = await request(api, decisionPath, { method: "POST", subject: "clerk_reviewer", body: { expectedVersion: 1, status: "needs_revision", reason: "Use a plain sample" } });
+  assert.equal(sentBack.status, 200, JSON.stringify(sentBack.body));
+  assert.equal(sentBack.body.item.reviewReason, "Use a plain sample");
+  const submit = await request(api, `/me/catalog-items/${listingId}/submit`, { method: "POST", subject: "clerk_supplier", body: { expectedVersion: 2 } });
+  assert.equal(submit.status, 200, JSON.stringify(submit.body));
+  const approved = await request(api, decisionPath, { method: "POST", subject: "clerk_reviewer", body: { expectedVersion: 3, status: "approved", photosUnbranded: true } });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal((await request(api, `/catalog/items/${listingId}`)).status, 200);
+  const requestedType = await request(api, "/me/product-type-requests", { method: "POST", subject: "clerk_supplier", body: { categoryCode: "marketing_collateral", name: "Custom inserts", description: "Printed inserts" } });
+  assert.equal(requestedType.status, 201, JSON.stringify(requestedType.body));
+  const approvedType = await request(api, `/ops/product-type-requests/${requestedType.body.request.id}/decision`, { method: "POST", subject: "clerk_reviewer", body: { expectedVersion: 1, status: "approved", code: "custom_inserts" } });
+  assert.equal(approvedType.status, 200, JSON.stringify(approvedType.body));
+  const stored = await loadStore(database);
+  assert.equal(stored.productTypeRequests[0].status, "approved");
+  assert.ok(stored.auditLog.some(row => row.action === "catalog_item.review" && row.detail.photosUnbranded === true));
 });
 
 /** The fixture's groups are required; these tests are about price, not choices. */
@@ -1218,7 +1391,7 @@ test("printerMaxWidthFeet is required on tarpaulin create and forbidden on every
   );
 });
 
-test("a shop can take a sample off a listing by sending the photos that stay", async () => {
+test("a shop can revise samples while the approved photo stays retained", async () => {
   const store = fixture();
   store.files.push({
     fileId: "photo_two", ownerId: "supplier", purpose: "catalog_item_photo",
@@ -1239,7 +1412,7 @@ test("a shop can take a sample off a listing by sending the photos that stay", a
   assert.equal(store.catalogItemPhotos.some((photo) => photo.fileId === "photo"), false);
   assert.equal(
     (store.files[0].references || []).some((reference) => reference.type === "supplier_catalog_item"),
-    false,
+    true,
   );
 });
 
@@ -1414,4 +1587,202 @@ test("setup lists incomplete fields separately and readiness never includes anot
   ]);
   assert.deepEqual(result.operational.listings.map(row => row.catalogItemId), ["item"]);
   assert.deepEqual(result.requestEligibility.listings, [{ catalogItemId: "item", evaluated: false, eligible: null, missing: [] }]);
+});
+
+test("client catalogue amounts include signed options, volume, speed and rush display prices", () => {
+  const store = fixture();
+  store.settings = { serviceFeeRateBps: 1000 };
+  store.catalogOptions[0].priceModifierMinor = -155;
+  store.catalogPriceTiers = [{ catalogItemId: "item", minQuantity: 10, unitPriceMinor: 55 }];
+  store.catalogSpeedTiers = [{ id: "speed", catalogItemId: "item", turnaroundHours: 12, surchargeMinor: 105 }];
+  Object.assign(store.supplierServices[0], { rushEnabled: true, rushPriceMinor: 105, rushTurnaroundHours: 12 });
+  const item = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(item.clientBasePriceMinor, 110);
+  assert.equal(item.optionGroups[0].options[0].clientPriceModifierMinor, -171);
+  assert.equal(item.priceTiers[0].clientUnitPriceMinor, 61);
+  assert.equal(item.speedTiers[0].clientPriceMinor, null);
+  assert.equal(item.speedTiers[0].clientSurchargeMinor, 116);
+  assert.equal(item.rush.clientPriceMinor, 116);
+  assert.equal(item.basePriceMinor, 100, "phase one preserves legacy amounts");
+  assert.equal(item.optionGroups[0].options[0].priceModifierMinor, -155);
+});
+
+test("staff catalogue membership and own preview cannot be selected by caller identifiers", async () => {
+  const store = fixture();
+  const { resolveAuthorizationContext } = await import("../src/authorization-context.js");
+  const call = (pathname, user) => routeSupplierCatalog({
+    req: { method: "GET" }, url: new URL(`http://gridgo.test${pathname}`), store, user,
+  });
+  const admin = { id: "admin", role: "client" };
+  store.userRoleMemberships.push({ userId: admin.id, role: "super_admin" });
+  resolveAuthorizationContext(store, admin);
+  const privileged = await call("/ops/catalog/shops/supplier", admin);
+  assert.equal(privileged.body.shop.shopName, store.supplierProfiles[0].shopName);
+  assert.deepEqual(privileged.body.shop.shop, store.supplierProfiles[0].shop);
+  assert.equal(privileged.body.shop.services[0].items[0].basePriceMinor, 100);
+  const forged = { id: "stranger", role: "super_admin" };
+  resolveAuthorizationContext(store, forged);
+  await assert.rejects(() => call("/ops/catalog/shops/supplier", forged), (error) => error.status === 403);
+  const own = await call("/me/catalog-preview?supplierId=stranger", store.users[0]);
+  assert.equal(own.body.shop.supplierId, "supplier");
+  assert.equal((await call("/ops/catalog/items/absent", admin)).status, 404);
+});
+
+test("listing review: new listings are pending and cannot match before approval", async () => {
+  const store = fixture();
+  const result = await catalogCall(store, { method: "POST", path: "/me/catalog-items", body: {
+    supplierServiceId: "service", subcategoryCode: "tarpaulins_outdoor_banners", starterId: "lst_tarpaulins_outdoor_banners",
+    name: "Banner", basePriceMinor: 500, printerMaxWidthFeet: 5,
+  } });
+  assert.equal(result.body.item.reviewStatus, "pending");
+  const item = store.catalogItems.find(row => row.id === result.body.item.id);
+  store.catalogItemPhotos.push({ catalogItemId: item.id, fileId: "photo", sortOrder: 0 });
+  assert.equal(publicCatalogItem(store, item), null);
+});
+
+test("listing review: price revisions preserve approved matching and text edits apply immediately", async () => {
+  const store = fixture();
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, basePriceMinor: 500 } });
+  assert.equal(privateCatalogItem(store, store.catalogItems[0]).reviewStatus, "pending");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).basePriceMinor, 100);
+  assert.equal(selectedCatalogPrice(store, store.catalogItems[0], ["a4"]).effectiveUnitPriceMinor, 125);
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 4, description: "Updated text" } });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).description, "Updated text");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).basePriceMinor, 100);
+});
+
+async function reviewCall(store, path, body, user = { id: "ops", role: "ops_admin" }, method = "POST") {
+  return routeSupplierCatalog({ req: { method, headers: {} }, url: new URL(`http://localhost${path}`), store, user,
+    readBody: async () => body, id: prefix => `${prefix}_${crypto.randomUUID()}`, now: () => AT, audit: () => {} });
+}
+
+test("listing review: staff decisions require specs, photo attestation, version and a send-back reason", async () => {
+  const store = fixture();
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, basePriceMinor: 500 } });
+  const path = "/ops/catalog-reviews/item/decision";
+  await assert.rejects(reviewCall(store, path, { expectedVersion: 4, status: "approved" }), e => e.code === "photo_review_required");
+  await assert.rejects(reviewCall(store, path, { expectedVersion: 4, status: "needs_revision" }), e => e.code === "reason_required");
+  await assert.rejects(reviewCall(store, path, { expectedVersion: 4, status: "approved", photosUnbranded: true }, store.users[0]), e => e.status === 403);
+  const rejected = await reviewCall(store, path, { expectedVersion: 4, status: "needs_revision", reason: "Replace branded sample" });
+  assert.equal(rejected.body.item.reviewReason, "Replace branded sample");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).basePriceMinor, 100);
+  await catalogCall(store, { method: "POST", path: "/me/catalog-items/item/submit", body: { expectedVersion: 5 } });
+  const approved = await reviewCall(store, path, { expectedVersion: 6, status: "approved", photosUnbranded: true });
+  assert.equal(approved.body.item.reviewStatus, "approved");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).basePriceMinor, 500);
+  assert.ok(store.notifications.some(row => row.userId === "supplier"));
+});
+
+test("listing review: submission rejects missing spec variants and approval never restores a hidden listing", async () => {
+  const store = fixture();
+  store.catalogOptionGroups = []; store.catalogOptions = [];
+  await assert.rejects(catalogCall(store, { method: "POST", path: "/me/catalog-items/item/submit", body: { expectedVersion: 3 } }), e => e.code === "listing_incomplete");
+  const complete = fixture();
+  await catalogCall(complete, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, basePriceMinor: 500, active: false } });
+  await reviewCall(complete, "/ops/catalog-reviews/item/decision", { expectedVersion: 4, status: "approved", photosUnbranded: true });
+  assert.equal(publicCatalogItem(complete, complete.catalogItems[0]), null);
+  complete.catalogItems[0].active = true;
+  complete.catalogItems[0].suspendedAt = AT;
+  assert.equal(publicCatalogItem(complete, complete.catalogItems[0]), null, "take-down still blocks approved listings");
+});
+
+test("listing review: product type requests are private and only staff approval adds a picker type", async () => {
+  const store = fixture();
+  const supplier = store.users[0];
+  const payload = { categoryCode: "marketing_collateral", name: "Custom inserts", description: "Printed packaging inserts" };
+  const result = await reviewCall(store, "/me/product-type-requests", payload, supplier);
+  const request = result.body.request;
+  assert.equal(request.status, "pending");
+  assert.equal(store.taxonomy.subcategories.some(row => row.name === payload.name), false);
+  const other = await reviewCall(store, "/me/product-type-requests", {}, { id: "other", role: "supplier" }, "GET");
+  assert.deepEqual(other.body.requests, []);
+  await assert.rejects(reviewCall(store, `/ops/product-type-requests/${request.id}/decision`, { expectedVersion: 1, status: "approved", code: "custom_inserts" }, supplier), e => e.status === 403);
+  const approved = await reviewCall(store, `/ops/product-type-requests/${request.id}/decision`, { expectedVersion: 1, status: "approved", code: "custom_inserts" });
+  assert.equal(approved.body.request.productTypeCode, "custom_inserts");
+  const picker = await reviewCall(store, "/me/product-types?q=inserts", {}, supplier, "GET");
+  assert.deepEqual(picker.body.productTypes.map(row => row.code), ["custom_inserts"]);
+  assert.equal(store.supplierServices.length, 1, "approving a type never creates shop capability");
+  await assert.rejects(reviewCall(store, `/ops/product-type-requests/${request.id}/decision`, { expectedVersion: 1, status: "approved", code: "custom_inserts" }), e => e.code === "product_type_request_stale");
+});
+
+test("listing review: photo replacement retains approved media and pending photos stay private", async () => {
+  const { attachCatalogItemPhoto, authorizeFileRead } = await import("../src/attachments.js");
+  const { publicCatalogMediaFile } = await import("../src/supplier-catalog.js");
+  const store = fixture();
+  const item = store.catalogItems[0];
+  const file = { ...store.files[0], fileId: "revision_photo", objectKey: "revision.jpg", references: [] };
+  store.files.push(file);
+  attachCatalogItemPhoto(store, file, { type: "supplier_catalog_item", record: item, sortOrder: 0 }, { at: AT });
+  assert.equal(item.reviewStatus, "pending");
+  assert.equal(publicCatalogItem(store, item).photos[0].fileId, "photo");
+  assert.equal(publicCatalogMediaFile(store, "revision_photo"), null);
+  assert.throws(() => authorizeFileRead({ id: "client", role: "client" }, store, file), error => error.status === 403);
+  assert.equal(publicCatalogMediaFile(store, "photo").fileId, "photo");
+  assert.ok(store.files[0].references.some(ref => ref.id === item.id));
+  await reviewCall(store, "/ops/catalog-reviews/item/decision", { expectedVersion: 4, status: "approved", photosUnbranded: true });
+  assert.equal(publicCatalogMediaFile(store, "photo"), null);
+  assert.equal(publicCatalogMediaFile(store, "revision_photo").fileId, "revision_photo");
+  assert.equal(store.files[0].references.length, 0);
+});
+
+test("listing review: changing product type and deleting variants preserves the approved match and checkout snapshot", async () => {
+  const store = fixture();
+  await catalogCall(store, { method: "DELETE", path: "/me/catalog-items/item/option-groups/size", body: { expectedVersion: 1 } });
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 4, subcategoryCode: "flyers" } });
+  const match = matchShop(store, { subcategoryCode: "tarpaulins_outdoor_banners", ranking: MATCH_FACTORS, now: AT });
+  assert.equal(match.listings[0].subcategoryCode, "tarpaulins_outdoor_banners");
+  assert.throws(() => matchShop(store, { subcategoryCode: "flyers", ranking: MATCH_FACTORS, now: AT }), e => e.code === "match_not_found");
+  const snapshot = createOrderLineSnapshot(store, { orderId: "order", catalogItemId: "item", optionIds: ["a4"], quantity: 1, expectedVersion: 3, expectedServiceVersion: 1 }, prefix => `${prefix}_review`);
+  assert.equal(snapshot.lineItem.effectiveUnitPriceMinor, 125);
+  assert.equal(snapshot.options[0].optionLabelSnapshot, "4x8");
+  assert.equal(snapshot.options[0].sourceOptionId, null, "deleted source rows must not break checkout foreign keys");
+  assert.equal(snapshot.options[0].sourceOptionGroupId, null);
+});
+
+test("listing review: pending matching is denied and review notices reach both staff memberships", async () => {
+  const store = fixture();
+  store.userRoleMemberships.push({ userId: "ops", role: "ops_admin" }, { userId: "super", role: "super_admin" });
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, basePriceMinor: 500 } });
+  assert.deepEqual(new Set(store.notifications.map(row => row.userId)), new Set(["supplier", "ops", "super"]));
+  store.catalogItems[0].approvedSnapshot = null;
+  assert.throws(() => matchShop(store, { subcategoryCode: "tarpaulins_outdoor_banners", ranking: MATCH_FACTORS, now: AT }), e => e.code === "match_not_found");
+  await assert.rejects(reviewCall(store, "/ops/catalog-reviews/item/decision", { expectedVersion: 3, status: "approved", photosUnbranded: true }), e => e.code === "catalog_item_stale");
+  const queue = await reviewCall(store, "/ops/catalog-reviews", {}, { id: "ops", role: "ops_admin" }, "GET");
+  assert.equal(queue.body.items.length, 1);
+  assert.equal(queue.body.items[0].approvedSnapshot, undefined);
+});
+
+test("listing review: readiness reports new pending listings and uses approved revisions", async () => {
+  const store = fixture();
+  store.catalogItems[0].reviewStatus = "pending";
+  const pending = await readinessResponse(store);
+  assert.equal(pending.operational.ready, false);
+  assert.ok(pending.operational.listings[0].missing.some(row => row.code === "listing_not_approved"));
+  store.catalogItems[0].reviewStatus = "approved";
+  await catalogCall(store, { method: "DELETE", path: "/me/catalog-items/item/option-groups/size", body: { expectedVersion: 1 } });
+  const revision = await readinessResponse(store);
+  assert.equal(revision.operational.ready, true);
+});
+
+test("listing review: text-only changes on approved listings never start review", async () => {
+  const store = fixture();
+  const edited = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, name: "Updated banner", description: "Updated description" } });
+  assert.equal(edited.body.item.reviewStatus, "approved");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).name, "Updated banner");
+});
+
+test("listing review: take-down and restore stay independent of a pending revision", async () => {
+  const store = fixture();
+  const admin = { id: "admin", role: "super_admin" };
+  await reviewCall(store, "/catalog-items/item/suspend", { reason: "Replace the sample" }, admin);
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 4, basePriceMinor: 500 } });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  await reviewCall(store, "/catalog-items/item/restore", {}, admin);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 6, active: true } });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0])?.basePriceMinor, 100);
+  await reviewCall(store, "/catalog-items/item/suspend", { reason: "Sample still needs replacement" }, admin);
+  await reviewCall(store, "/ops/catalog-reviews/item/decision", { expectedVersion: 8, status: "approved", photosUnbranded: true });
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
+  assert.equal(store.catalogItems[0].suspendReason, "Sample still needs replacement");
 });

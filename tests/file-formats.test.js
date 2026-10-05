@@ -71,7 +71,7 @@ test("Photoshop artwork sniffs 8BPS and a 3MF zip does not pass as artwork", () 
   const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0, 0, 0, 0, 0]);
   assert.throws(
     () => validateUpload({ originalFilename: "model.3mf", declaredContentType: "", sniffBytes: zip, size: 12 }, "artwork"),
-    (error) => error.code === "file_type_mismatch",
+    (error) => error.code === "invalid_file_type",
   );
 });
 

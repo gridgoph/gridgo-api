@@ -13,7 +13,7 @@ import { escapeHtml, toHtmlParagraphs } from "../src/support-html.js";
 import { buildReplyEmail, createSupportMailer, emailConfigured } from "../src/support-mail.js";
 import { clientKey, tooManyRequests } from "../src/support-rate-limit.js";
 import { interpretSmtpResult } from "../src/support-smtp.js";
-import { validateLogin, validateReply, validateTicket } from "../src/support-validate.js";
+import { validateReply, validateTicket } from "../src/support-validate.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
@@ -23,7 +23,6 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLen
 const JWT_KEY = publicKey.export({ type: "spki", format: "pem" });
 const DESK_USER = "desk";
 const DESK_PASSWORD = "desk-password-for-tests";
-const DESK_JWT_SECRET = "support-desk-jwt-secret-for-tests-not-clerk";
 const LANDING_ORIGIN = "https://gridgo.talasora.com";
 
 const DESK_EMAIL = "gridgo26@gmail.com";
@@ -67,9 +66,6 @@ async function startApi(extraEnv = {}) {
       PORT: String(port),
       GRIDGO_BUILD_SHA: "support-desk-test",
       GRIDGO_BUILD_TIME: AT,
-      SUPPORT_DESK_USERNAME: DESK_USER,
-      SUPPORT_DESK_PASSWORD: DESK_PASSWORD,
-      SUPPORT_DESK_JWT_SECRET: DESK_JWT_SECRET,
       SUPPORT_DESK_ALLOWED_EMAILS: DESK_EMAIL,
       EMAIL_USER: "",
       EMAIL_PASSWORD: "",
@@ -157,11 +153,6 @@ test("validateTicket rejects a missing email and an invalid email", () => {
 test("validateReply requires a non-empty replyMessage", () => {
   assert.equal(validateReply({ replyMessage: "   " }).ok, false);
   assert.equal(validateReply({ replyMessage: "We are on it." }).ok, true);
-});
-
-test("validateLogin requires both fields", () => {
-  assert.equal(validateLogin({ username: "desk" }).ok, false);
-  assert.equal(validateLogin({ username: "desk", password: "secret" }).ok, true);
 });
 
 test("escapeHtml encodes markup so ticket text cannot break the email layout", () => {
@@ -298,7 +289,7 @@ test("the desk gate needs an allowlisted email that Clerk has verified", async (
   assert.equal(unconfigured.error, "desk_unconfigured");
 });
 
-test("public submit, desk login, rate limit, mail, and CORS origin handling", { skip: !DATABASE_URL }, async () => {
+test("public submit, Clerk desk access, rate limit, mail, and CORS origin handling", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearTickets(database);
   const capturePath = path.join(os.tmpdir(), `gridgo-support-mail-${process.pid}.jsonl`);
@@ -385,6 +376,7 @@ test("public submit, desk login, rate limit, mail, and CORS origin handling", { 
       body: { username: DESK_USER, password: DESK_PASSWORD },
     });
     assert.equal(removedLogin.status, 404);
+    assert.equal((await database.query("SELECT count(*)::int AS count FROM support_admins")).rows[0].count, 0);
 
     const deskToken = clerkToken("clerk_desk", DESK_EMAIL);
 

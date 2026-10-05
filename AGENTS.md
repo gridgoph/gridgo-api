@@ -26,12 +26,23 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 ## Operational model
 
+Settings writes are Super Admin only. Operations audit reads are limited to workspace correction/deletion scopes; account standing changes cannot target privileged memberships. Contracts: `docs/OPERATIONAL_MODEL_V2_API.md#audit-access` and its account/settings sections.
+
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
+
+Production deadline requests, client consent, replacement/refund holds and applied-deduction escalation: `docs/ORDER_RESCHEDULE_API.md`. The single request stays in `orders.data`; preserve its immutable original facts and role-safe projection.
+
+Shop acceptance, cancellation and client-approved recovery follow `docs/SHOP_RECOVERY_API.md`; `shopRecovery` is an independent work/payout hold. Never reassign automatically after any shop payout release.
 
 Client refunds follow `docs/REFUNDS_API.md` (available-funds policy, private QR/transfer evidence, reserved manual attempts). `src/refund-policy.js` owns independent work/payout holds; never let claim release bypass them. Settlements preserve original money/stage snapshots, supersede unpaid stages, and pay any agreed shop remainder through the separate settlement item.
 
+Client catalogue privacy is staged: `docs/CLIENT_CATALOG_PRIVACY.md` defines client quotes, authenticated catalogue reads, deprecated fields and release gates. Keep legacy public fields until the compatible client release and old-build update coverage are confirmed; quotes use checkout arithmetic, never sums of marked-up display components.
+
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
 
+Multi-shop basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md`. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
+
+- New requests opt into pre-match delivery/hub pickup via `fulfillmentMode`; token selection locks the cart choice. Hub hours/fees are Super Admin settings; pickup fee defaults to zero and occupies the existing fulfillment charge slot. Contract and released-build compatibility: `docs/ORDER_MATCH_API.md#fulfillment-before-matching`.
 - Match priority, reason badges, anonymous alternatives, and expiring selection-token/cart-deadline semantics are defined in `docs/ORDER_MATCH_API.md`. Rank only deadline-capable listings; never restore weighted or same-shop boosts.
 - Match and cart responses must run through `decorateCatalogPhotoUrls` (`src/catalog-photo-urls.js`) the same way catalog does. `publicPhotos` only sets metadata `url` (`/catalog/media/:fileId`); the client needs signed `downloadUrl` on `body.listings` and `body.cart.lines[].listing`. Skipping the decorator is the empty match thumbnail. `POST`/`PATCH`/`DELETE` `/me/carts/:id/lines` return compact listing stubs without photos so add/save does not wait on MinIO signing; `GET /me/carts/:id` stays the full projection.
 - Delivery zones, inclusive bounds, Out of Zone pricing, and settings migration: `docs/OPERATIONAL_MODEL_V2_API.md#delivery-distance-zones`. Match/listing distance and rating projections: `docs/ORDER_MATCH_API.md#distance-and-rating-fields`. Use the shared band lookup; never recalculate an existing order fee from current settings.
@@ -44,8 +55,12 @@ Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkou
 - Claims/issue holds block payout. Confirmed supplier-principal collection caps automatic supplier payout. Rider pickup requires per-line counter counts plus the six-check gate (contract: `docs/OPERATIONAL_MODEL_V2_API.md#counter-count`); a count mismatch escalates and pays nobody. Six passes move nothing on their own: `POST /dispatch/:id/pickup-checklist` needs `signature.fileId` naming a `handoff_signature` file the rider attached, else `409 handoff_signature_required`. Contract, refusal codes and projection rules: `docs/OPERATIONAL_MODEL_V2_API.md#supplier-handoff-signature`. New purposes and order fields ride in `files.purpose` (free text) and `orders.data` jsonb, so this needed no migration.
 - Any path that suspends supplier lines with the account must tag each line `approvalSuspensionCaseId`/`approvalSuspensionPreviousState` (jsonb `data`); `suspendedWithAccount` in `src/approval-cases.js` decides what `POST /approval-cases/:id/restore` `restoreServiceIds` may bring back. Contract: `docs/OPERATIONAL_MODEL_V2_API.md#approval-queue-and-decisions`.
 - Client `accountType` is `individual | business | organization`; activation defaults to `individual`. Never infer it from `orgName`; non-client roles omit it. `POST /me/business-application` (and legacy `POST /me/business-apply`) opens a pending `business_client` case — do not flip `accountType` until Operations approves it. A pending application lives on its approval-case snapshot, never on the profile: `client_profiles_check` forbids business fields on a personal row and stays, because nothing clears them on reject.
+- Business/organization checklists, email codes, officer history/handover, quarterly confirmation and staff notices: `docs/ORGANIZATION_ACCOUNTS_API.md`. Officer snapshots belong to orders/invoices; handovers retain the current officer until approval. Client verification files are staff-read-only.
 
 Late-production warnings, the Super Admin deductions gate (off by default), net payout adjustments, and recent-lapse matching weight: `docs/PRODUCTION_PENALTIES_API.md`. Published payout shares remain gross; stage `amountMinor` is net of `productionDeductionMinor`.
+
+Hub QR claims, invited `staff` memberships/configurable role profiles, handout logs, delivery OTPs, unclaimed reminders and private supplier invoice scans: `docs/HUB_HANDOVER_API.md`. Never bypass a governed handover through the legacy collection or transition routes; issued credentials are immutable and ordinary order projections must omit them.
+Organization discounts and non-tax statements: `docs/ORGANIZATION_MONEY_API.md`. Discounts reduce only each shop group's service fee; order discount snapshots are immutable.
 
 ## Geography
 
@@ -62,8 +77,13 @@ A category or subcategory can be deleted (`DELETE /taxonomy/{categories,subcateg
 Supplier service states are `draft | pending_verification | live | suspended | withdrawn`. Only approved suppliers with eligible live services can be matched; assignment remains manual.
 
 Artwork design links are cart-line `artworkLinks`, snapshotted immutably at checkout and projected with scoped `productionItems`; `POST /artwork/link-check` is an anonymous-provider probe for signed-in clients, never proof of edit permission. Contract: `docs/ORDER_MATCH_API.md#artwork-design-links`.
+Checkout enforces fresh link probes and server upload verdicts; supplier access/inbox/realtime stay held until Operations passes `order.fileCheck`. See `docs/ORDER_MATCH_API.md#artwork-checkout-gate-and-operations-handoff` and shared gates in `src/artwork-gates.js`.
 
 Supplier readiness separates legacy setup checks, operational listing eligibility, and request-specific capacity/deadline diagnostics; see `docs/SUPPLIER_CATALOG_API.md#supplier-readiness-diagnostics`. Matching and readiness share shop gates in `src/supplier-eligibility.js`.
+
+Listing approval, grandfathered live rows, private revisions, required specs, and product-type requests follow `docs/SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker`. Client pricing and matching must use `approvedCatalogView`; review decisions never clear visibility or take-down holds.
+
+Super Admin listing take-downs and shop-controlled republication follow `docs/SUPPLIER_CATALOG_API.md#staff-listing-index-and-take-down`.
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 

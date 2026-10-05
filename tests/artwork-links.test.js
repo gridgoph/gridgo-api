@@ -80,7 +80,7 @@ test("HEAD refusal falls back to GET; actual public image content supports view 
   const { checker, seen } = await mockChecker(t, (req, res) => {
     if (req.method === "HEAD") { res.writeHead(405); return res.end(); }
     res.setHeader("Content-Type", "image/png");
-    res.end(Buffer.from("89504e470d0a1a0a", "hex"));
+    res.end(readFileSync(new URL('./fixtures/artwork-check/pixel.png', import.meta.url)));
   });
   const result = await checker({ url: "https://example.com/design.png", formatCode: "other_link" });
   assert.equal(result.ok, true);
@@ -194,7 +194,7 @@ test('Canva short links resolve to a canonical Canva design without trusting the
   assert.equal(loop.seen.length, 4);
 });
 
-test('large public artwork uses retained leading magic bytes without accepting MIME alone', async (t) => {
+test('capped file bodies remain uncheckable even with valid leading magic bytes', async (t) => {
   for (const file of fixtures.files) {
     for (const valid of [true, false]) {
       const { checker } = await mockChecker(t, (_req, res) => {
@@ -202,7 +202,7 @@ test('large public artwork uses retained leading magic bytes without accepting M
         res.end(Buffer.concat([valid ? Buffer.from(file.hex, 'hex') : Buffer.from('<html>'), Buffer.alloc(100_000)]));
       });
       const result = await checker({ url: 'https://example.com/file', formatCode: 'other_link' });
-      assert.equal(result.access, valid ? 'public_view' : 'unknown', file.type);
+      assert.equal(result.access, 'unknown', file.type);
     }
   }
 });
@@ -293,7 +293,7 @@ test('Drive metadata alone, a wrong file, lookalike hosts, and evidence outside 
 
 test('captured Drive uc redirect reaches anonymous PNG with GET and retains provider/input', async (t) => {
   const { checker, seen } = await mockChecker(t, (req, res) => {
-    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.downloadRedirect : driveFixtures.download);
+    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.downloadRedirect : driveFixtures.download, req.headers.host === 'drive.google.com' ? undefined : readFileSync(new URL('./fixtures/artwork-check/pixel.png', import.meta.url)));
   });
   const link = { url: driveFixtures.downloadRedirect.url, formatCode: 'google_drive' };
   const result = await checker(link);
@@ -307,7 +307,7 @@ test('Drive skips slow HEAD responses without extending the shared deadline', as
   const { checker, seen } = await mockChecker(t, (req, res) => {
     // HEAD did not provide access evidence and could consume the entire budget.
     if (req.method === 'HEAD') return;
-    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.downloadRedirect : driveFixtures.download);
+    serveDriveFixture(res, req.headers.host === 'drive.google.com' ? driveFixtures.downloadRedirect : driveFixtures.download, req.headers.host === 'drive.google.com' ? undefined : readFileSync(new URL('./fixtures/artwork-check/pixel.png', import.meta.url)));
   }, { timeoutMs: 100 });
   assert.equal((await checker({ url: driveFixtures.downloadRedirect.url, formatCode: 'google_drive' })).access, 'public_view');
   assert.equal(seen.length, 2);
@@ -392,4 +392,13 @@ test('missing-page detection ignores truncated scripts and file names that resem
   const { checker } = await mockChecker(t, (_req, res) => serveDriveFixture(res, driveFixtures.public,
     driveHtml.toString().replaceAll('Logo (Glow, Opaque Keys).png', 'You need access.png')));
   assert.equal((await checker({ url: driveFixtures.public.url, formatCode: 'google_drive' })).access, 'public_view');
+});
+
+test('truncated downloadable artwork never passes even when its MIME and magic agree', async t => {
+  for (const [type, bytes] of [['application/pdf', Buffer.from('%PDF-1.7')], ['image/png', readFileSync(new URL('./fixtures/artwork-links/drive-png-prefix.bin', import.meta.url))]]) {
+    const { checker } = await mockChecker(t, (_req, res) => { res.setHeader('Content-Type', type); res.end(bytes); });
+    const result = await checker({ url: 'https://example.com/truncated', formatCode: 'other_link' });
+    assert.equal(result.ok, false);
+    assert.equal(result.access, 'unknown');
+  }
 });

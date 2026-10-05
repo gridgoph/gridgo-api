@@ -1,3 +1,4 @@
+import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -97,6 +98,7 @@ test("PATCH /me rejects a stale phone version without changing the profile", asy
 test("POST /me/business-apply opens a pending case without flipping account type", async () => {
   const context = fixture();
   const body = {
+    ...businessApplication(context.store, context.user.id),
     accountType: "business",
     businessName: "GRIDGO Business Customer",
     address: {
@@ -157,10 +159,12 @@ test("primary client profile edits still respect selected membership isolation",
   const persisted = context.user;
   context.user = selectActorRole(context.store, persisted, "supplier", { restrictMemberships: true });
   await assert.rejects(call(context, "POST", "/me/business-apply", {
+    ...businessApplication(context.store, context.user.id),
     accountType: "business", businessName: "Client Business",
   }), { status: 403, code: "membership_required" });
   context.user = selectActorRole(context.store, persisted, "client", { restrictMemberships: true });
   const response = await call(context, "POST", "/me/business-apply", {
+    ...businessApplication(context.store, context.user.id),
     accountType: "business", businessName: "Client Business",
   });
   assert.equal(response.status, 200);

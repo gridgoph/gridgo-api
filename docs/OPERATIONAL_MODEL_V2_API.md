@@ -153,7 +153,7 @@ Handles `user.updated` and `user.created` with the same person-copy rule as `/au
 
 `PATCH /users/:id/role` refuses to demote the platform's only Super Admin: because administrator bootstrap closes permanently after first use, removing the last `super_admin` would lock role management. The attempt returns `409 last_super_admin`; promote another user to `super_admin` first.
 
-`PATCH /users/:id/account` is Super Admin only, same blast radius as the role route. Body: `{ status: "suspended" | "removed" | "active", reason: string }`. `reason` is required for every status, trimmed, and rejected with `400` when empty. `suspended` and `removed` store the trimmed reason, the time, and the actor. `active` restores the account and clears those three fields; the request reason is still written to the audit log. This is account standing, not accreditation: it does not write `users.verification_status` and it does not call approval-case suspend. `removed` does not delete the user row, memberships, orders, or the Clerk user. Both held states remain in the Roles directory so an admin can read the reason. Anyone who is not a Super Admin receives `403`. An unknown user is `404 user_not_found`. An unknown status is `400`. The caller cannot change their own account. Suspending or removing the platform's last active Super Admin returns the same `409 last_super_admin` as the role route. Audit actions are `user.account_suspend`, `user.account_remove`, and `user.account_restore`, entity type `user`, with the reason set. `GET /users`, `GET /auth/me`, and the fixed role projections include `accountStatus`, `accountStatusReason`, and `accountStatusAt`. After authentication, other domain routes for a held account return `403` `{ error: "account_suspended" | "account_removed", message, reason }`. `GET /auth/me` stays `200` so the apps can show the reason. The Clerk session stays valid.
+`PATCH /users/:id/account` allows Operations to suspend or restore clients, shops and riders. Only Super Admin may change an identity with an Operations or Super Admin membership (including identities whose legacy role is client), set `removed`, or restore a removed account. Body: `{ status: "suspended" | "removed" | "active", reason: string }`. `reason` is required for every status, trimmed, and rejected with `400` when empty. `suspended` and `removed` store the trimmed reason, the time, and the actor. `active` restores the account and clears those three fields; the request reason is still written to the audit log. This is account standing, not accreditation: it does not write `users.verification_status` and it does not call approval-case suspend. `removed` does not delete the user row, memberships, orders, or the Clerk user. Both held states remain in the Roles directory so an admin can read the reason. Callers outside these permissions receive `403 forbidden`. An unknown user is `404 user_not_found`. An unknown status is `400`. The caller cannot change their own account. Suspending or removing the platform's last active Super Admin returns the same `409 last_super_admin` as the role route. Audit actions are `user.account_suspend`, `user.account_remove`, and `user.account_restore`, entity type `user`, with the reason set. `GET /users`, `GET /auth/me`, and the fixed role projections include `accountStatus`, `accountStatusReason`, and `accountStatusAt`. After authentication, other domain routes for a held account return `403` `{ error: "account_suspended" | "account_removed", message, reason }`. `GET /auth/me` stays `200` so the apps can show the reason. The Clerk session stays valid.
 
 ### `POST /auth/clerk/activate`
 
@@ -705,7 +705,15 @@ Returns `200 {"updatedCount":2}`. A missing/empty snapshot returns `400 {"error"
 
 Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying the same owner delete returns the same response. Deletion is a durable soft delete: the record remains as internal lifecycle evidence (assignment notifications gate payment), but it never appears in `GET /notifications` again. This makes swipe-to-delete persistent without breaking order invariants.
 
+## Audit access
+
+`GET /audit` returns `{ audit }`, newest first, with optional `action`, `entityType`, `entityId`, `orderId`, `actorId`, and `limit` (default 100, maximum 500) filters. The unrestricted audit log is Super Admin only.
+
+Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
+
 ## Settings and distance fee
+
+`GET /settings` remains readable by signed-in roles for operational views. All writes through `PATCH /settings` and `POST /settings/payment-qr` require Super Admin; Operations receives `403 forbidden`, including for delivery-zone limits and prices.
 
 Default `GET /settings` response:
 
@@ -737,9 +745,9 @@ Default `GET /settings` response:
 }
 ```
 
-`paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Operations has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
+`paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
 
-Upload is two steps, both `ops_admin` / `super_admin`:
+Upload is two steps: Operations or Super Admin may upload the file; only Super Admin may activate it:
 
 1. `POST /files` with `purpose=payment_qr` and a JPEG, PNG, or WebP (up to 5 MiB). Not attachable to an order (`400 payment_qr_not_attachable`).
 2. `POST /settings/payment-qr` `{ "fileId": "file_…", "reason": "…" }` activates that ready file as the platform QR, retires the previous one, and is audited. Repeating the same `fileId` is a no-op.
@@ -752,7 +760,7 @@ Unauthenticated. Streams the current ready plate so checkout and the ops preview
 
 ### Delivery distance zones
 
-`settings.deliveryFeeBands` is the single source for distance labels and delivery prices (`src/operational-model.js`). The four zone keys, names, and order stay fixed: Nearby, Away, Long Distance, Out of Zone. Operations/Super Admin can edit the first three `maxDistanceMeters` values. Bounds are inclusive: a distance exactly at an upper limit stays in that zone, and the next zone starts above that limit. Defaults remain 5,000 / 10,000 / 15,000 m; Out of Zone starts above the saved Long Distance limit and has `maxDistanceMeters: null` (no maximum). Distances computed from coordinates are rounded to whole metres before band selection, as before. The former 4,999 m default becomes 5,000 m for future quotes.
+`settings.deliveryFeeBands` is the single source for distance labels and delivery prices (`src/operational-model.js`). The four zone keys, names, and order stay fixed: Nearby, Away, Long Distance, Out of Zone. Only Super Admin can edit the first three `maxDistanceMeters` values. Bounds are inclusive: a distance exactly at an upper limit stays in that zone, and the next zone starts above that limit. Defaults remain 5,000 / 10,000 / 15,000 m; Out of Zone starts above the saved Long Distance limit and has `maxDistanceMeters: null` (no maximum). Distances computed from coordinates are rounded to whole metres before band selection, as before. The former 4,999 m default becomes 5,000 m for future quotes.
 
 The first three bands use `feeMinor`. Out of Zone has **no `feeMinor`**; its price is `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)`, applied to the **whole** distance, not only the excess beyond the saved Long Distance limit. With the defaults, 15,001 m costs 28,000 minor units (PHP 280), 16,000 m costs the same, and 16,001 m or 16,200 m costs 29,500 (PHP 295). Integer arithmetic rejects overflow. Out of Zone is never excluded because of its distance. The snapshotted rider/GRIDGO split remains 85/15 by default.
 
@@ -760,7 +768,7 @@ Migration `1790812800000_delivery_distance_zones` preserves the three stored fla
 
 Out of Zone defaults to **PHP 40 base + PHP 15 per kilometre**. Migration `1790985600000_out_of_zone_delivery_price` replaces only the shipped Out of Zone placeholder (7500/1000), increments the settings version only on change, and preserves customized prices and all three flat fees (including production PHP 89/149/229). Its down step restores 7500/1000 only when the band still holds 4000/1500. Existing order/job snapshots stay unchanged.
 
-Fresh settings use PHP 89 / 149 / 229 for the three flat fees. Existing configured fees are preserved by seed and migration. Editable limits reuse the existing meter fields, so no new schema/data migration is needed; existing migrations retain the 5 / 10 / 15 km limits and stored flat prices. Operations/Super Admin can change limits and prices without a release:
+Fresh settings use PHP 89 / 149 / 229 for the three flat fees. Existing configured fees are preserved by seed and migration. Editable limits reuse the existing meter fields, so no new schema/data migration is needed; existing migrations retain the 5 / 10 / 15 km limits and stored flat prices. Only Super Admin can change limits and prices without a release:
 
 ```http
 PATCH /settings
@@ -864,9 +872,40 @@ Acceptance snapshots the service-fee setting and every money/fulfillment field, 
 
 Task G defines and validates both pickup financial shapes, but pickup commercial commitment remains contained until Task H owns handover. Selecting either pickup plan currently returns `409 pickup_fulfillment_not_available`; it does not create a payable pickup order or expose that order to rider dispatch.
 
+### Hub pick-up settings
+
+`GET /settings` exposes `settings.hubPickup: {point,schedule,feeMinor}` to authenticated apps. `point` is the existing GRIDGO hub from `src/gridgo-office.js` and is read-only. Defaults are `feeMinor: 0` (PHP minor units) and `schedule: null` (operating hours not yet configured). Migration adds these defaults to existing settings; no existing order or cart is changed.
+
+Only a Super Admin membership may include `hubPickup` in `PATCH /settings`, using the existing `expectedVersion` and nonblank `reason` handshake. Operations may continue editing its other settings but receives `403 forbidden` when attempting this field. Send the complete `{schedule,feeMinor}` object; omission preserves the previous value. Negative, fractional, string or unsafe fees return `400 invalid_hub_pickup`; invalid schedules return `400 invalid_hub_pickup_schedule`. Stale versions return `409 settings_version_conflict`. Success increments version and audits previous/current settings atomically.
+
+Example dashboard update (sample hours, not production defaults):
+
+```json
+{
+  "expectedVersion": 4,
+  "reason": "Configure collection hours",
+  "hubPickup": {
+    "feeMinor": 0,
+    "schedule": {
+      "utcOffsetMinutes": 480,
+      "week": [
+        { "weekday": 1, "opensMinute": 540, "closesMinute": 1020 },
+        { "weekday": 3, "opensMinute": 540, "closesMinute": 1020 },
+        { "weekday": 5, "opensMinute": 540, "closesMinute": 1020 }
+      ],
+      "closures": []
+    }
+  }
+}
+```
+
+Schedule follows the shared `src/availability.js` validation: weekday 0 is Sunday through 6 Saturday, times are whole minutes after midnight (0–1440), closing is after opening, and same-day windows cannot overlap. A configured schedule has at least one opening window (maximum 28); optional closures (maximum 120) use inclusive `startDay` / `endDay` date strings. `null` clears the schedule. The dashboard follow-up should place this editor next to delivery bands, restrict editing to Super Admin, and leave the fee at zero until explicitly configured. Read-only apps must distinguish an unconfigured schedule from an all-week opening claim.
+
+The opt-in pre-match request and read-only checkout contract, including compatibility and fulfillment-charge fields, is [Fulfillment before matching](ORDER_MATCH_API.md#fulfillment-before-matching). Placed pickup orders and their invoices preserve the schedule and fee at checkout; subsequent settings edits apply only to future checkouts.
+
 ### Rider delivery split
 
-`riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Operations and Super Admin edit it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
+`riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Only Super Admin edits it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
 
 Quote acceptance and cart checkout snapshot the setting when the delivery fee is set. Each order and its checkout job store the rate; later settings, assignment, or state changes do not reprice it. Migration `1786978800000` preserves all pre-existing orders/jobs at `10000` (their original full rider pass-through), while seeding `8500` for new commitments. A permitted quote supersession creates a new commercial commitment with the then-current rate. Zero-fee pickup jobs have zero rider payout and zero GRIDGO delivery share.
 
@@ -969,7 +1008,7 @@ Statuses: `not_submitted | pending_confirmation | confirmed | not_required`. `no
 
 ### Upfront checkout
 
-The captain decided on 2026-09-25 (gridgo-api#66) that new orders are paid **100% up front**. The split is the Operations/Super Admin setting `downpaymentPercent` (`100` default, or `75`) on `PATCH /settings` with the usual `expectedVersion` handshake, so the business can return to 75/25 without a release.
+The captain decided on 2026-09-25 (gridgo-api#66) that new orders are paid **100% up front**. The split is the Super Admin setting `downpaymentPercent` (`100` default, or `75`) on `PATCH /settings` with the usual `expectedVersion` handshake, so the business can return to 75/25 without a release.
 
 - Cart checkout snapshots the setting on the order as `downpaymentPercent`, like the rider delivery split. The setting changing later never changes an order already placed.
 - At `100`: `downpaymentMinor = totalMinor` and `balanceMinor = 0`. `payments.initial` carries the whole total (label `Full payment`), and `payments.final_online` stays in the installment list at `amountMinor: 0`, `status: "not_required"` (label `No balance`). All payment allocations sit on `initial`.
@@ -1092,6 +1131,8 @@ POST /orders/:id/milestones/:code/release
 Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release in any order their own gates allow; in practice that is plan order. A share that waits on a file and has none is `409 pof_required` (`production_started`, `delivered`; legacy `printing`, `packaging_qc`, `delivered`, `retention`); a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before the client has the job is `409 delivery_required`; `issue_window` or `retention` before the window closes is `409 issue_window_open`); a code the order does not carry is `404 milestone_not_found`; insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold blocks every remaining stage with `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
 
 ## Production progress photos
+
+Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 claim_hold_active` while the order's claim payout-hold flag is set or any claim is `open`/`payout_held`. This applies to the assigned supplier and Operations/Super Admin corrections, before photo/override checks. Operations must release or resolve all active claims before packing can continue; a correction reason cannot bypass the hold.
 
 `POST /orders/:id/transition` refuses a supplier moving `production -> supplier_self_qc`, `production -> ready_for_dispatch`, or `supplier_self_qc -> ready_for_dispatch` with `409 production_photo_required` until the job has at least one **ready, attached JPEG/PNG/WebP owned by its assigned supplier**. Body flags, unattached uploads, pending/deleted files, PDFs, another shop's files, artwork, and rider delivery evidence do not count.
 
@@ -1286,7 +1327,7 @@ The request rides in `orders.data` jsonb, so it needed no migration. It is not a
 
 Operations acts on the inbox row. Without it the request would sit in jsonb unread, because nothing else in the lifecycle asks anybody to courier a document.
 
-`PATCH /orders/:id/physical-invoice` with `{ "promisedDeliveryAt": "2026-09-21T10:00:00+08:00" }` is Operations/Super Admin only (`401 unauthorized` signed out, `403 forbidden` otherwise). It records when the paper copy will reach the office — not the print job's promised date. The instant must fall Monday–Friday, 08:00 inclusive to 17:00 exclusive, Asia/Manila (UTC+8, no daylight saving), else `400 promise_outside_business_hours`; an unparseable value is `400 invalid_physical_invoice`. The client's `operatingHours` is their own note and is not read as a clock. The stored value is normalized to UTC ISO. No request yet is `404 physical_invoice_not_found`. A later PATCH replaces the promise. Each one writes an audit row `order.physical_invoice_promised` with the instant, bumps `updatedAt` (so authorized views refresh), and answers `200 {request}`, which then carries `promisedDeliveryAt` for the owning client's `GET` too.
+`PATCH /orders/:id/physical-invoice` with `{ "promisedDeliveryAt": "2026-09-21T10:00:00+08:00" }` is Operations/Super Admin only (`401 unauthorized` signed out, `403 forbidden` otherwise). It records when the paper copy will reach the office — not the print job's promised date. The instant must fall Monday–Friday, 08:00 inclusive to 17:00 exclusive, Asia/Manila (UTC+8, no daylight saving), else `400 promise_outside_business_hours`; an unparseable value is `400 invalid_physical_invoice`. The client's `operatingHours` is their own note and is not read as a clock. The stored value is normalized to UTC ISO. No request yet is `404 physical_invoice_not_found`. A later PATCH replaces the promise. The first promise and each changed instant also write a durable `physical_invoice_promised` inbox notification to the owning client, with the delivery date/time in Philippine time and plain wording. Repeating the same instant or editing unrelated order fields sends no duplicate notice. Notification delivery uses the existing after-commit notification/outbox path. Each one writes an audit row `order.physical_invoice_promised` with the instant, bumps `updatedAt` (so authorized views refresh), and answers `200 {request}`, which then carries `promisedDeliveryAt` for the owning client's `GET` too.
 
 ## Rider location
 
@@ -1346,3 +1387,12 @@ Settlements supersede unpaid original milestones without changing their amounts 
 See [Late-production warnings and deductions](PRODUCTION_PENALTIES_API.md) for tiers,
 Super Admin settings, the default-off deduction gate, supplier/Operations reads,
 reassignment eligibility, and net payout amounts.
+
+## Production deadline rescheduling
+
+See [Production deadline requests](ORDER_RESCHEDULE_API.md) for the one-request rule, client answers, renewed-date penalties, 24-hour expiry, consented replacement, refund and Operations endpoints.
+
+## Shop acceptance and recovery
+
+See [Shop acceptance and recovery](SHOP_RECOVERY_API.md) for the opening-hour deadline,
+shop cancellation, client-approved replacement or full-refund choice, and dashboard failure history.

@@ -1,3 +1,4 @@
+import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
@@ -8,7 +9,7 @@ import { approvalCaseFor, authorizationContextFor, identityHasMembership } from 
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
 import { payoutPlanFor, payoutStageFor } from "./payout-plan.js";
-import { publicCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
+import { publicCatalogMediaFile, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
 export const MAX_MULTIPART_SIZE = MAX_FILE_SIZE + 1024 * 1024;
@@ -19,6 +20,7 @@ const KINDS = new Set([
   "production_photo",
   "delivery_photo",
   "handoff_signature",
+  "supplier_invoice",
   "service_image",
   "catalog_item_photo",
   "supplier_shop_image",
@@ -45,6 +47,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
+  supplier_invoice: { roles: ["supplier"], maxBytes: 15 * 1024 * 1024, contentTypes: [...CONTENT_TYPES] },
   production_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
@@ -104,6 +107,9 @@ export const PURPOSE_POLICIES = Object.freeze({
     roles: ["supplier"],
     maxBytes: 20 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
+  },
+  client_verification_document: {
+    roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: [...CONTENT_TYPES],
   },
   rider_verification_document: {
     roles: ["rider"],
@@ -410,9 +416,9 @@ export function validateUpload(file, purpose = "artwork") {
   if (HEIC_EXTENSIONS.has(extension) || sniffedContentType === "image/heic") {
     fail(
       415,
-      "heic_not_supported",
+      "invalid_file_type",
       "HEIC files are not supported. Export or capture the image as JPEG or PNG, then try again.",
-      { allowedContentTypes: [...CONTENT_TYPES] },
+      { reason: "heic_not_supported", purpose, allowedContentTypes: policy.contentTypes },
     );
   }
 
@@ -422,11 +428,11 @@ export function validateUpload(file, purpose = "artwork") {
   if (!GENERIC_CONTENT_TYPES.has(declaredContentType) && !declaredAllowed.has(declaredContentType)) {
     fail(
       415,
-      "content_type_not_allowed",
+      "invalid_file_type",
       purpose === "artwork"
         ? "This file type is not supported. Choose a JPEG, PNG, WebP, PDF, or Photoshop file and try again."
         : "This file type is not supported. Choose a JPEG, PNG, WebP, or PDF file and try again.",
-      { allowedContentTypes: [...declaredAllowed] },
+      { reason: "content_type_not_allowed", purpose, allowedContentTypes: policy.contentTypes },
     );
   }
 
@@ -436,11 +442,14 @@ export function validateUpload(file, purpose = "artwork") {
   if (!extensionContentType || !sniffedContentType || extensionContentType !== sniffedContentType || explicitTypeMismatch) {
     fail(
       415,
-      "file_type_mismatch",
+      "invalid_file_type",
       purpose === "artwork"
         ? "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, PDF, or Photoshop and try again."
         : "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, or PDF and try again.",
       {
+        reason: "file_type_mismatch",
+        purpose,
+        allowedContentTypes: policy.contentTypes,
         extension,
         declaredContentType: declaredContentType || null,
         sniffedContentType,
@@ -450,9 +459,9 @@ export function validateUpload(file, purpose = "artwork") {
   if (!policy.contentTypes.includes(sniffedContentType)) {
     fail(
       415,
-      "purpose_media_type_not_allowed",
+      "invalid_file_type",
       `${purpose} does not accept ${sniffedContentType}. Choose ${policy.contentTypes.join(", ")} and try again.`,
-      { purpose, detectedContentType: sniffedContentType, allowedContentTypes: policy.contentTypes },
+      { reason: "purpose_media_type_not_allowed", purpose, detectedContentType: sniffedContentType, allowedContentTypes: policy.contentTypes },
     );
   }
   return sniffedContentType;
@@ -657,6 +666,7 @@ export function publicFile(file, user = null) {
         : { ...reference }),
     // Only present when the file said something about itself, so a client can
     // tell "we read 210 x 297 mm" from "we could not tell".
+    ...(file.artworkCheck ? { artworkCheck: { ...file.artworkCheck } } : {}),
     ...(file.detected ? { detected: { ...file.detected } } : {}),
     ...(file.verificationDocumentType ? { verificationDocumentType: file.verificationDocumentType } : {}),
   };
@@ -921,6 +931,10 @@ function hasApprovedWorkRole(user, role) {
 export function authorizeFileAttach(user, file, target) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
+  if (file.purpose === 'supplier_invoice') {
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
+    return;
+  }
   if (file.purpose === "production_photo") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
@@ -1003,6 +1017,7 @@ export function attachCatalogItemPhoto(store, file, target, { at }) {
   if (!existingAtSlot && photos.length >= 8) {
     fail(409, "catalog_photo_limit", "A listing can have at most eight sample photos.");
   }
+  startListingReview(store, target.record);
   if (existingAtSlot) {
     const replaced = (store.files || []).find((candidate) => candidate.fileId === existingAtSlot.fileId);
     if (replaced) {
@@ -1023,6 +1038,7 @@ export function attachCatalogItemPhoto(store, file, target, { at }) {
   file.references.push({ type: "supplier_catalog_item", id: target.record.id, field: "photos" });
   target.record.version = (target.record.version || 1) + 1;
   target.record.updatedAt = at;
+  retainApprovedPhotos(store, target.record);
   return { photo: store.catalogItemPhotos.find((photo) => photo.fileId === file.fileId), item: target.record };
 }
 
@@ -1056,6 +1072,7 @@ export function attachSupplierShopImage(store, file, target, { at }) {
 
 export function attachFileReference(file, target) {
   const map = {
+    supplier_invoice: "supplierInvoiceFileIds",
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
     production_photo: "productionPhotoFileIds",
@@ -1135,7 +1152,7 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
   return { document, approvalCase: approvalCase || null };
 }
 
-function canReadReference(user, store, reference) {
+function canReadReference(user, store, reference, file) {
   if (reference.type === "supplier_payout_account") {
     return hasRole(user, "supplier") && reference.id === user.id;
   }
@@ -1143,7 +1160,7 @@ function canReadReference(user, store, reference) {
     const item = (store.catalogItems || []).find((candidate) => candidate.id === reference.id);
     if (!item) return false;
     if (hasRole(user, "supplier") && item.supplierId === user.id) return true;
-    return Boolean(publicCatalogItem(store, item));
+    return Boolean(publicCatalogMediaFile(store, file.fileId));
   }
   if (reference.type === "supplier_shop_media") {
     if (hasRole(user, "supplier") && reference.id === user.id) return true;
@@ -1181,10 +1198,15 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (file.purpose === "client_verification_document") forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"
         && (store.refundRequests || []).some((row) => row.id === ref.id && row.clientId === user.id)))) return;
+    forbidden();
+  }
+  if (file.purpose === 'supplier_invoice') {
+    if (hasApprovedWorkRole(user, 'supplier') && file.ownerId === user.id) return;
     forbidden();
   }
   if (file.purpose === "payment_proof") {
@@ -1205,7 +1227,7 @@ export function authorizeFileRead(user, store, file) {
     if (
       user.role === "supplier"
       && hasApprovedWorkRole(user, "supplier")
-      && (file.references || []).some((reference) => canReadReference(user, store, reference))
+      && (file.references || []).some((reference) => canReadReference(user, store, reference, file))
     ) return;
     forbidden();
   }
@@ -1223,6 +1245,6 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (file.ownerId === user.id) return;
-  if ((file.references || []).some((reference) => canReadReference(user, store, reference))) return;
+  if ((file.references || []).some((reference) => canReadReference(user, store, reference, file))) return;
   forbidden();
 }

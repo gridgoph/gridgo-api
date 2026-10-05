@@ -1,3 +1,8 @@
+import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
+import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
+import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
+import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
+import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
@@ -213,8 +218,11 @@ export function defaultProductionNudge() {
 export function defaultOperationalSettings() {
   return {
     serviceFeeRateBps: 1_000,
+    organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
+    hubPickup: hubPickupSettings(),
+    handoverOtpEnabled: false,
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
     issueWindowHours: 24,
@@ -231,6 +239,10 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.handoverOtpEnabled !== undefined && typeof settings.handoverOtpEnabled !== 'boolean') {
+    fail(400, 'invalid_handover_otp_setting', 'handoverOtpEnabled must be a boolean.');
+  }
+  if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
@@ -241,6 +253,7 @@ export function validateOperationalSettings(settings) {
       { field: "serviceFeeRateBps" },
     );
   }
+  validateOrganizationFee(settings);
   if (
     settings?.serviceFeeVisibleToClient !== undefined &&
     typeof settings.serviceFeeVisibleToClient !== "boolean"
@@ -428,6 +441,7 @@ export function deliveryFeeForDistance(distanceMeters, settings) {
 }
 
 export function calculateOrderMoney({
+  organizationEligible = false,
   supplierSubtotalMinor,
   fulfillmentMode,
   paymentPlan,
@@ -440,7 +454,8 @@ export function calculateOrderMoney({
   validateOperationalSettings(settings);
   const supplierSubtotal = finiteMinor(supplierSubtotalMinor, "supplierSubtotalMinor");
   const serviceFeeRateBps = finiteBps(settings.serviceFeeRateBps, "serviceFeeRateBps");
-  const serviceFeeMinor = roundBps(supplierSubtotal, serviceFeeRateBps);
+  const fee = organizationFeeMoney(supplierSubtotal, settings, organizationEligible);
+  const { serviceFeeMinor } = fee;
   const allowedPlans = new Set(["delivery_online", "pickup_full_online", "pickup_downpayment_store"]);
   if (!allowedPlans.has(paymentPlan)) {
     fail(400, "invalid_payment_plan", "Choose one of the payment plans offered for this quote.");
@@ -487,6 +502,7 @@ export function calculateOrderMoney({
 
   return {
     supplierSubtotalMinor: supplierSubtotal,
+    ...fee,
     subtotalMinor: supplierSubtotal,
     serviceFeeRateBps,
     serviceFeeMinor,
@@ -716,6 +732,9 @@ export function moneyReportingForOrder(order, store = null) {
       platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
     },
     platformRevenue: {
+      grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
+      organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
+      netServiceFeeMinor: order.serviceFeeMinor ?? 0,
       billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor : 0,
       collectedMinor: platformCollectedMinor,
       recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
@@ -727,7 +746,7 @@ export function moneyReportingForOrder(order, store = null) {
 
 export function activePayoutHold(store, order) {
   return Boolean(
-    refundHold(store, order) || order.payoutHold ||
+    refundHold(store, order) || rescheduleHold(order) || (order.shopRecovery && order.shopRecovery.status !== "accepted") || order.payoutHold ||
       (store?.claims || []).some(
         (claim) => claim.orderId === order.id && ["open", "payout_held"].includes(claim.status),
       ),
@@ -764,7 +783,8 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
   }
 
-  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id);
+  if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
+  const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
   if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
@@ -948,8 +968,31 @@ function clientCorrectionFor(order) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
+  if (user?.role === "client" && order.organizationDiscountRateBps > 0) {
+    for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
+      if (!record) continue;
+      if (record.supplierSubtotalMinor != null && record.serviceFeeMinor != null) record.clientItemSubtotalMinor = record.supplierSubtotalMinor + (record.grossServiceFeeMinor ?? record.serviceFeeMinor);
+      for (const field of ["subtotalMinor", "supplierSubtotalMinor", "serviceFeeMinor", "serviceFeeRateBps", "grossServiceFeeMinor", "organizationDiscountRateBps", "initialSupplierPrincipalMinor", "supplierRemainderMinor"]) delete record[field];
+      for (const payment of Object.values(record.payments || {})) delete payment.componentLines;
+    }
+  }
+  if (order.basketId && user?.role === "client") {
+    publicRecord.clientItemSubtotalMinor = order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor);
+    for (const field of ["supplierId", "subtotalMinor", "serviceFeeMinor", "serviceFeeRateBps", "grossServiceFeeMinor", "organizationDiscountRateBps"]) delete publicRecord[field];
+  }
   if (store) fillOrderSpecFromLineItems(store, publicRecord);
-  publicRecord.productionItems = productionItemsFor(store, order, user);
+  publicRecord.productionItems = user?.role === "supplier" && !supplierArtworkReleased(order) ? [] : productionItemsFor(store, order, user);
+  if (["ops_admin", "super_admin", "client"].includes(user?.role) && order.fileCheck) {
+    publicRecord.fileCheck = fileCheckProjection(order);
+    if (user.role === "client") delete publicRecord.fileCheck.reviewedBy;
+  } else delete publicRecord.fileCheck;
+  delete publicRecord.rescheduleRequest;
+  const reschedule = publicReschedule(order, user);
+  if (reschedule) publicRecord.rescheduleRequest = reschedule;
+  if (order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
+    publicRecord.promisedDate = user?.role === 'supplier' ? order.readyBy : order.promiseBy;
+  }
   if (["supplier", "rider"].includes(user?.role)) {
     const artworkIds = publicRecord.artworkFileIds || [];
     for (const purpose of ["artwork", "mockup"]) {
@@ -1005,7 +1048,17 @@ export function publicOrderFor(order, user, store = null) {
   }
   const reporting = order.commercialCommittedAt ? moneyReportingForOrder(order, store) : null;
   delete publicRecord.attachments;
+  // Credentials are available only from the caller-scoped handover endpoint.
+  delete publicRecord.handover;
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
+  delete publicRecord.shopRecoveryHistory;
+  delete publicRecord.shopFailureEvents;
+  delete publicRecord.declinedBy;
+  if (order.shopRecovery) publicRecord.shopRecovery = publicRecovery(order, user);
+  if (publicRecord.shopAcceptance) {
+    delete publicRecord.shopAcceptance.schedule;
+    if (!ops && user?.role !== 'supplier') delete publicRecord.shopAcceptance;
+  }
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
@@ -1088,6 +1141,7 @@ export function publicOrderFor(order, user, store = null) {
   if (!ops && !assignedSupplier && !rider) delete publicRecord.readyBy;
 
   if (!ops && !assignedSupplier) {
+    delete publicRecord.supplierInvoiceFileIds;
     delete publicRecord.productionReassignmentEligible;
     delete publicRecord.productionNoCommunication;
     delete publicRecord.supplierPriceMinor;

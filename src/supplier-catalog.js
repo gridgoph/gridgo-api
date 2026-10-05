@@ -1,3 +1,4 @@
+import { approvedCatalogView } from "./catalog-review-state.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { gridgoAmountMinor, measurementKindFor, priceLine } from "./pricing.js";
@@ -358,7 +359,8 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
     }
   }
   if (publicOnly) {
-    if (item.active === false) blockers.push("item_inactive");
+    if (item.reviewStatus && item.reviewStatus !== "approved") blockers.push("listing_not_approved");
+    if (item.active === false || item.suspendReason || item.suspendedAt) blockers.push("item_inactive");
     if (service.state !== "live") blockers.push("service_not_live");
     const membership = (store.userRoleMemberships || []).some(
       (row) => row.userId === item.supplierId && row.role === "supplier",
@@ -373,6 +375,8 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
 }
 
 export function selectedCatalogPrice(store, item, selectedOptionIds = []) {
+  store = approvedCatalogView(store);
+  item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   const selectedIds = [...new Set(selectedOptionIds.map(String))];
   if (selectedIds.length !== selectedOptionIds.length) {
     throw new CatalogError(400, "invalid_catalog_options", "Choose each catalog option at most once.");
@@ -460,7 +464,15 @@ export function clientMoneyMinor(store, supplierMinor) {
   return gridgoAmountMinor(supplierMinor, rate);
 }
 
+// Option discounts round the magnitude, then restore the sign, like the client UI.
+function clientModifierMinor(store, amount) {
+  if (!Number.isSafeInteger(amount)) return null;
+  return amount < 0 ? -clientMoneyMinor(store, -amount) : clientMoneyMinor(store, amount);
+}
+
 export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
+  store = approvedCatalogView(store);
+  item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
   const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false }).map((group) => ({
@@ -476,6 +488,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
       id: option.id,
       label: option.label,
       priceModifierMinor: option.priceModifierMinor,
+      clientPriceModifierMinor: clientModifierMinor(store, option.priceModifierMinor),
       priceMultiplierBps: option.priceMultiplierBps ?? null,
       specBinding: option.specBinding ?? null,
       sortOrder: option.sortOrder,
@@ -498,6 +511,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     name: item.name,
     description: item.description,
     basePriceMinor: item.basePriceMinor,
+    clientBasePriceMinor: clientMoneyMinor(store, item.basePriceMinor),
     fromPriceMinor,
     effectivePriceMinor,
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
@@ -512,8 +526,14 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
-    priceTiers: priceTiersFor(store, item.id),
-    speedTiers: speedTiersFor(store, item.id),
+    priceTiers: priceTiersFor(store, item.id).map((tier) => ({
+      ...tier, clientUnitPriceMinor: clientMoneyMinor(store, tier.unitPriceMinor),
+    })),
+    speedTiers: speedTiersFor(store, item.id).map((tier) => ({
+      ...tier,
+      clientPriceMinor: clientMoneyMinor(store, tier.priceMinor),
+      clientSurchargeMinor: clientMoneyMinor(store, tier.surchargeMinor),
+    })),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
     turnaroundHours: itemTurnaroundHours(item, service),
@@ -521,6 +541,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     rush: service.rushEnabled ? {
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
+      clientPriceMinor: clientMoneyMinor(store, service.rushPriceMinor),
     } : null,
     acceptedFormats: effectiveAcceptedFormats(store, item),
     photos: publicPhotos(store, item.id),
@@ -733,6 +754,7 @@ function publicCatalogMediaEligible(store, file) {
 }
 
 export function publicCatalogMediaFile(store, fileId) {
+  store = approvedCatalogView(store);
   const file = (store.files || []).find((candidate) => candidate.fileId === fileId);
   return publicCatalogMediaEligible(store, file) ? file : null;
 }
@@ -763,6 +785,7 @@ function normalizedSnapshotSelection(selection) {
 }
 
 export function createOrderLineSnapshot(store, selection, createId) {
+  store = approvedCatalogView(store);
   selection = normalizedSnapshotSelection(selection);
   if (selection.expectedVersion == null) {
     throw new CatalogError(400, "expected_version_required", "expectedVersion is required before checkout.");
@@ -845,8 +868,8 @@ export function createOrderLineSnapshot(store, selection, createId) {
       return {
         id: createId?.("olo") || `${lineItemId}_option_${optionOrder}`,
         orderLineItemId: lineItemId,
-        sourceOptionGroupId: group.id,
-        sourceOptionId: option.id,
+        sourceOptionGroupId: Object.hasOwn(group, "sourceOptionGroupId") ? group.sourceOptionGroupId : group.id,
+        sourceOptionId: Object.hasOwn(option, "sourceOptionId") ? option.sourceOptionId : option.id,
         groupNameSnapshot: group.name,
         groupKindSnapshot: group.kind || "spec",
         optionLabelSnapshot: option.label,
@@ -897,6 +920,8 @@ export function createOrderLineSnapshot(store, selection, createId) {
  * 3x5 tarpaulin saw one number in the basket and paid another at checkout.
  */
 export function priceCatalogSelection(store, item, { selectedOptions, quantity, measurement = null, speedTier = null }) {
+  store = approvedCatalogView(store);
+  item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   return priceLine({
     basePriceMinor: item.basePriceMinor,
     unit: item.pricingUnit || "per_unit",
@@ -1094,10 +1119,108 @@ export function listOwnCatalogItemsFromGraph(store, params) {
   };
 }
 
+/**
+ * Every shop's listings, for Operations and Super Admin.
+ *
+ * Includes the shop's own `active` flag and the Super Admin take-down reason
+ * and timestamp. Listing approval (gridgo-supplier#97) is not stored here.
+ */
+export function listStaffCatalogItemsFromGraph(store, params) {
+  const {
+    q = null,
+    limit = 20,
+    cursor = null,
+    subcategoryCode = null,
+    supplierId = null,
+    minPriceMinor = null,
+    maxPriceMinor = null,
+  } = params;
+
+  let items = [...(store.catalogItems || [])];
+  if (supplierId) items = items.filter((item) => item.supplierId === supplierId);
+  if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
+  if (minPriceMinor != null) items = items.filter((item) => item.basePriceMinor >= minPriceMinor);
+  if (maxPriceMinor != null) items = items.filter((item) => item.basePriceMinor <= maxPriceMinor);
+  if (q) {
+    items = items.filter((item) => {
+      const searchText = staffCatalogSearchText(store, item);
+      return ftsMatch(searchText, q) || trigramMatch(searchText, q);
+    });
+  }
+
+  items.sort((left, right) => {
+    const byTime = String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+    if (byTime) return byTime;
+    return String(left.id).localeCompare(String(right.id));
+  });
+
+  const total = items.length;
+  const remaining = items.filter((item) => staffCatalogAfterCursor(item, cursor));
+  const page = remaining.slice(0, limit);
+  const last = remaining.length > limit ? page[page.length - 1] : null;
+  return {
+    items: page,
+    shops: staffCatalogShops(store),
+    nextCursor: last
+      ? encodeCatalogListCursor({ at: last.updatedAt ?? null, id: last.id })
+      : null,
+    total,
+  };
+}
+
+function staffCatalogSearchText(store, item) {
+  const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === item.supplierId);
+  return [catalogItemSearchText(store, item), profile?.shopName]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function staffCatalogAfterCursor(item, cursor) {
+  if (!cursor) return true;
+  const at = String(item.updatedAt || "");
+  const cursorAt = String(cursor.at || "");
+  if (at < cursorAt) return true;
+  if (at > cursorAt) return false;
+  return String(item.id).localeCompare(String(cursor.id)) > 0;
+}
+
+function staffCatalogShops(store) {
+  const ids = [...new Set((store.catalogItems || []).map((item) => item.supplierId).filter(Boolean))];
+  return ids
+    .map((supplierId) => {
+      const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
+      const shopName = typeof profile?.shopName === "string" && profile.shopName.trim()
+        ? profile.shopName.trim()
+        : null;
+      return { supplierId, shopName };
+    })
+    .sort((left, right) => {
+      const name = String(left.shopName || left.supplierId).localeCompare(String(right.shopName || right.supplierId));
+      if (name) return name;
+      return left.supplierId.localeCompare(right.supplierId);
+    });
+}
+
+export function staffCatalogListing(store, item) {
+  const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === item.supplierId);
+  const shopName = typeof profile?.shopName === "string" && profile.shopName.trim()
+    ? profile.shopName.trim()
+    : null;
+  return {
+    shop: { supplierId: item.supplierId, shopName },
+    item: privateCatalogItem(store, item),
+  };
+}
+
 export function privateCatalogItem(store, item) {
   const groups = catalogGroupsForItem(store, item.id);
   return {
     id: item.id,
+    reviewStatus: item.reviewStatus || "approved",
+    reviewReason: item.reviewReason ?? null,
+    reviewedAt: item.reviewedAt ?? null,
+    hasApprovedVersion: Boolean(item.approvedSnapshot) || (item.reviewStatus || "approved") === "approved",
     supplierId: item.supplierId,
     supplierServiceId: item.supplierServiceId,
     subcategoryCode: item.subcategoryCode,
@@ -1120,6 +1243,8 @@ export function privateCatalogItem(store, item) {
     fileFormatMode: item.fileFormatMode || "inherit",
     acceptedFormats: effectiveAcceptedFormats(store, item),
     active: item.active !== false,
+    suspendReason: item.suspendReason ?? null,
+    suspendedAt: item.suspendedAt ?? null,
     sortOrder: item.sortOrder,
     version: item.version,
     photos: (store.catalogItemPhotos || [])

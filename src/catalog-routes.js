@@ -1,3 +1,5 @@
+import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
+import { routeCatalogReview, catalogReviewNotice } from "./catalog-review-routes.js";
 import {
   MEASURE_UNITS,
   PRICING_UNITS,
@@ -6,6 +8,7 @@ import {
   measurementKindFor,
 } from "./pricing.js";
 import { identityHasMembership } from "./authorization-context.js";
+import { queueInvalidate } from "./notifications.js";
 import {
   FORMAT_QUERY_MAX,
   publicAcceptedFormats,
@@ -22,8 +25,10 @@ import {
   copyStarterIntoItem,
   listingStartersFor,
   listOwnCatalogItemsFromGraph,
+  listStaffCatalogItemsFromGraph,
   prepStepsForItem,
   privateCatalogItem,
+  staffCatalogListing,
   publicCatalogItem,
   publicCatalogMediaFile,
   publicSupplierShop,
@@ -74,6 +79,122 @@ function catalogRecord(value, { code = "invalid_catalog_item", field = "body", m
 
 function requireSupplier(user) {
   if (!user || !identityHasMembership(user, "supplier")) fail(403, "forbidden", "A supplier membership is required.");
+}
+
+function notifyListingStanding(store, item, reason, createId, at) {
+  if (!item?.supplierId) return;
+  if (!Array.isArray(store.notifications)) store.notifications = [];
+  store.notifications.push({
+    id: createId("ntf"),
+    userId: item.supplierId,
+    appRole: "supplier",
+    type: reason ? "listing_suspended" : "listing_restored",
+    title: reason ? "A listing was taken down" : "You can put your listing back on the board",
+    body: reason || "GRIDGO lifted the take-down. Your listing is still hidden; you can turn it on when you are ready.",
+    catalogItemId: item.id,
+    read: false,
+    at,
+    occurrenceKey: `${reason ? "listing_suspended" : "listing_restored"}:${item.id}:${item.version ?? 0}`,
+  });
+  queueInvalidate(store, {
+    resource: "notifications",
+    userIds: [item.supplierId],
+  });
+  queueInvalidate(store, {
+    resource: "catalog",
+    id: item.id,
+    supplierId: item.supplierId,
+    userIds: [item.supplierId],
+  });
+}
+
+function requireStaff(user) {
+  if (!user) {
+    fail(401, "unauthorized", "Sign in to GRIDGO, then retry this request with the new access token.");
+  }
+  if (!(identityHasMembership(user, "ops_admin") || identityHasMembership(user, "super_admin"))) {
+    fail(403, "forbidden", "Only Operations and Super Admin can read shop listings.");
+  }
+}
+
+function optionalQueryText(url, field, max) {
+  if (!url.searchParams.has(field)) return null;
+  let value = String(url.searchParams.get(field) ?? "");
+  if (value.includes("\0")) fail(400, "invalid_catalog_query", `${field} cannot contain a NUL character.`, { field });
+  value = value.trim();
+  if (!value) return null;
+  if (value.length > max) fail(400, "invalid_catalog_query", `${field} must be ${max} characters or fewer.`, { field });
+  return value;
+}
+
+function optionalMinorQuery(url, field) {
+  if (!url.searchParams.has(field)) return null;
+  const raw = String(url.searchParams.get(field) ?? "").trim();
+  if (!raw) return null;
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+    fail(400, "invalid_catalog_query", `${field} must be a non-negative integer number of centavos.`, { field });
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    fail(400, "invalid_catalog_query", `${field} must be a non-negative integer number of centavos.`, { field });
+  }
+  return value;
+}
+
+function parseStaffCatalogCursor(value) {
+  if (value == null || value === "") return null;
+  try {
+    const decoded = Buffer.from(String(value), "base64url").toString("utf8");
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.id == null || !Object.hasOwn(parsed, "at")) {
+      fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
+    }
+    return { at: parsed.at == null ? "" : String(parsed.at), id: String(parsed.id) };
+  } catch (error) {
+    if (error instanceof CatalogError) throw error;
+    fail(400, "invalid_cursor", "The catalog cursor is invalid. Start again without it.");
+  }
+}
+
+function parseStaffCatalogQuery(url) {
+  let q = url.searchParams.has("q") ? String(url.searchParams.get("q") ?? "") : "";
+  if (q.includes("\0")) fail(400, "invalid_catalog_query", "q cannot contain a NUL character.", { field: "q" });
+  q = q.trim();
+  if (q.length > 80) fail(400, "invalid_catalog_query", "q must be 80 characters or fewer.", { field: "q" });
+  if (!q) q = null;
+
+  let limit = 50;
+  if (url.searchParams.has("limit")) {
+    const raw = String(url.searchParams.get("limit") ?? "");
+    if (!/^[1-9][0-9]*$/.test(raw)) {
+      fail(400, "invalid_catalog_query", "limit must be an integer from 1 through 50.", { field: "limit" });
+    }
+    limit = Number(raw);
+    if (limit > 50) fail(400, "invalid_catalog_query", "limit must be an integer from 1 through 50.", { field: "limit" });
+  }
+
+  const minPriceMinor = optionalMinorQuery(url, "minPriceMinor");
+  const maxPriceMinor = optionalMinorQuery(url, "maxPriceMinor");
+  if (minPriceMinor != null && maxPriceMinor != null && minPriceMinor > maxPriceMinor) {
+    fail(400, "invalid_catalog_query", "minPriceMinor must be less than or equal to maxPriceMinor.", { field: "minPriceMinor" });
+  }
+
+  return {
+    q,
+    limit,
+    cursor: parseStaffCatalogCursor(url.searchParams.get("cursor")),
+    subcategoryCode: optionalQueryText(url, "subcategoryCode", 120),
+    supplierId: optionalQueryText(url, "supplierId", 80),
+    minPriceMinor,
+    maxPriceMinor,
+  };
+}
+
+async function staffCatalogList(store, params) {
+  if (typeof store.listStaffCatalogItems === "function") {
+    return store.listStaffCatalogItems(params);
+  }
+  return listStaffCatalogItemsFromGraph(store, params);
 }
 
 function ownService(store, user, serviceId) {
@@ -528,8 +649,46 @@ function parseFormatFinderQuery(url) {
   return query;
 }
 
-export async function routeSupplierCatalog({ req, url, store, user, readBody, id, now, audit }) {
-  const { pathname } = url;
+export async function routeSupplierCatalog(args) {
+  const review = await routeCatalogReview(args);
+  if (review) return review;
+  const { req, url, store } = args;
+  const parts = url.pathname.split("/");
+  const listingWrite = req.method !== "GET" && parts[1] === "me" && ["catalog-items", "catalog-option-groups"].includes(parts[2]);
+  const itemId = parts[2] === "catalog-option-groups"
+    ? (store.catalogOptionGroups || []).find(group => group.id === parts[3])?.catalogItemId : parts[3];
+  const before = listingWrite && (store.catalogItems || []).find(item => item.id === itemId);
+  const snapshot = before ? listingSnapshot(store, before) : null;
+  const priorStatus = before?.reviewStatus || "approved";
+  const response = await routeSupplierCatalogExisting(args);
+  const item = snapshot && (store.catalogItems || []).find(row => row.id === itemId);
+  if (response?.mutated && item && sensitiveSnapshot(snapshot) !== sensitiveSnapshot(listingSnapshot(store, item))) {
+    startListingReview(store, item, snapshot);
+    if (priorStatus !== "pending") catalogReviewNotice(store, item, args, "catalog_review_pending");
+    if (response.body?.item) response.body.item = privateCatalogItem(store, item);
+    response.body.reviewStatus = item.reviewStatus;
+    response.body.reviewReason = item.reviewReason;
+  }
+  if (response?.mutated && item) retainApprovedPhotos(store, item);
+  return response;
+}
+
+async function routeSupplierCatalogExisting({ req, url, store, user, readBody, id, now, audit }) {
+  let { pathname } = url;
+  const staffRead = req.method === "GET" && /^\/ops\/catalog\/(shops(?:\/[^/]+)?|items\/[^/]+)$/.test(pathname);
+  const ownPreview = req.method === "GET" && pathname === "/me/catalog-preview";
+  if (staffRead || ownPreview) {
+    if (!user) fail(401, "unauthorized", "Sign in to read this catalogue.");
+    if (staffRead) {
+      if (!identityHasMembership(user, "ops_admin") && !identityHasMembership(user, "super_admin")) {
+        fail(403, "forbidden", "An Operations membership is required.");
+      }
+      pathname = pathname.slice(4);
+    } else {
+      requireSupplier(user);
+      pathname = `/catalog/shops/${encodeURIComponent(user.id)}`;
+    }
+  }
 
   if (req.method === "GET" && pathname === "/accepted-file-formats") {
     const formats = publicAcceptedFormats(store);
@@ -772,6 +931,32 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     return { status: 200, body: { service: privateService(store, service) }, mutated: true };
   }
 
+  if (pathname === "/ops/catalog-items" || /^\/ops\/catalog-items\/[^/]+$/.test(pathname)) {
+    requireStaff(user);
+    if (req.method !== "GET") {
+      return {
+        status: 405,
+        body: { error: "method_not_allowed", message: "This route only reads shop listings." },
+      };
+    }
+    if (pathname === "/ops/catalog-items") {
+      const query = parseStaffCatalogQuery(url);
+      const listed = await staffCatalogList(store, query);
+      const body = {
+        items: listed.items.map((item) => staffCatalogListing(store, item)),
+        shops: listed.shops,
+        total: listed.total,
+      };
+      if (listed.nextCursor) body.nextCursor = listed.nextCursor;
+      return { status: 200, body };
+    }
+    const item = (store.catalogItems || []).find(
+      (candidate) => candidate.id === pathIdentifier(pathname.split("/")[3]),
+    );
+    if (!item) return { status: 404, body: { error: "catalog_item_not_found" } };
+    return { status: 200, body: staffCatalogListing(store, item) };
+  }
+
   if (req.method === "GET" && pathname === "/me/catalog-items") {
     requireSupplier(user);
     const listed = await ownCatalogList(store, { supplierId: user.id, ...parseCatalogListQuery(url) });
@@ -809,6 +994,8 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     const existing = (store.catalogItems || []).filter((item) => item.supplierId === user.id);
     const item = {
       id: id("sci"),
+      reviewStatus: "pending",
+      reviewReason: null,
       supplierId: user.id,
       supplierServiceId: service.id,
       subcategoryCode,
@@ -829,6 +1016,7 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     if (!Array.isArray(store.catalogOptions)) store.catalogOptions = [];
     if (!Array.isArray(store.catalogItemFileFormats)) store.catalogItemFileFormats = [];
     store.catalogItems.push(item);
+    catalogReviewNotice(store, item, { id, now }, "catalog_review_pending");
     if (starter) copyStarterIntoItem(store, starter, item, id, at);
     auditChange(audit, store, user, "catalog_item.create", "supplier_catalog_item", item.id, { serviceId: service.id });
     return { status: 201, body: { item: privateCatalogItem(store, item) }, mutated: true };
@@ -876,7 +1064,15 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     // than through six more routes each with its own version check.
     if (Object.hasOwn(body, "priceTiers")) replacePriceTiers(store, item, body.priceTiers, now);
     if (Object.hasOwn(body, "speedTiers")) replaceSpeedTiers(store, item, body.speedTiers, now);
-    if (body.active != null) item.active = booleanValue(body.active, "active");
+    if (body.active != null) {
+      const nextActive = booleanValue(body.active, "active");
+      if (nextActive && item.suspendReason) {
+        fail(409, "listing_suspended", "GRIDGO took this listing down. It stays off the board until a Super Admin restores it.", {
+          reason: item.suspendReason,
+        });
+      }
+      item.active = nextActive;
+    }
     if (body.sortOrder != null) item.sortOrder = integer(body.sortOrder, "sortOrder", { min: 0 });
     bumpVersion(item, now());
     auditChange(audit, store, user, "catalog_item.update", "supplier_catalog_item", item.id);
@@ -1169,6 +1365,56 @@ export async function routeSupplierCatalog({ req, url, store, user, readBody, id
     bumpVersion(item, at);
     auditChange(audit, store, user, `catalog_option.${req.method === "DELETE" ? "delete" : "update"}`, "supplier_catalog_option", option.id);
     return { status: 200, body: { itemVersion: item.version, groupVersion: group.version, ...(req.method === "PATCH" ? { option } : {}) }, mutated: true };
+  }
+
+  // One listing, not the whole service line. Only a Super Admin may take it
+  // down or clear the take-down. `suspendReason` is the staff take-down; the shop's
+  // own `active` switch is turned off with it so clients lose the listing,
+  // and the shop cannot turn that switch back on while the reason is set.
+  if (req.method === "POST" && /^\/catalog-items\/[^/]+\/(suspend|restore)$/.test(pathname)) {
+    if (!user) {
+      return {
+        status: 401,
+        body: {
+          error: "unauthorized",
+          message: "Sign in to GRIDGO, then retry this request with the new access token.",
+        },
+      };
+    }
+    if (!identityHasMembership(user, "super_admin")) {
+      fail(403, "forbidden", "Only a Super Admin can take a listing down or restore it.");
+    }
+    const action = pathname.split("/").pop();
+    const item = (store.catalogItems || []).find((candidate) => candidate.id === pathIdentifier(pathname.split("/")[2]));
+    if (!item) fail(404, "catalog_item_not_found", "That catalog item no longer exists.");
+    if (action === "suspend") {
+      if (item.suspendReason) fail(409, "listing_suspended", "That listing is already taken down.");
+      const body = catalogRecord(await readBody(req));
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (!reason) {
+        fail(400, "reason_required", "Enter a reason. The shop sees it, and GRIDGO stores it on the listing.");
+      }
+      if (reason.length > 2000) fail(400, "reason_too_long", "The reason must be at most 2,000 characters.");
+      item.active = false;
+      item.suspendReason = reason;
+      item.suspendedAt = now();
+      item.suspendedBy = user.id;
+      bumpVersion(item, now());
+      notifyListingStanding(store, item, reason, id, now());
+      auditChange(audit, store, user, "catalog_item.suspend", "supplier_catalog_item", item.id, { reason });
+      return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
+    }
+    if (!item.suspendReason) {
+      fail(409, "listing_not_suspended", "That listing is not suspended.");
+    }
+    item.active = false;
+    delete item.suspendReason;
+    delete item.suspendedAt;
+    delete item.suspendedBy;
+    bumpVersion(item, now());
+    notifyListingStanding(store, item, null, id, now());
+    auditChange(audit, store, user, "catalog_item.restore", "supplier_catalog_item", item.id);
+    return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }
 
   return null;
