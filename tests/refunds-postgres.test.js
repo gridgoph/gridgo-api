@@ -325,10 +325,11 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
-async function apiForTest(t) {
+async function apiForTest(t, { bytes } = {}) {
   const storage = http.createServer((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
     else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
+    else if (req.method === 'GET' && bytes) { res.writeHead(200, { 'Content-Length': bytes.length }); res.end(bytes); }
     else { res.writeHead(404); res.end(); }
   });
   await new Promise((resolve) => storage.listen(0, '127.0.0.1', resolve));
@@ -358,9 +359,37 @@ async function apiForTest(t) {
       headers: { ...(key ? { Authorization: `Bearer ${token(key, opts.claims)}` } : {}),
         'Content-Type': 'application/json', 'Idempotency-Key': opts.key || id('httpkey'), ...opts.headers },
       ...(body ? { body: JSON.stringify(body) } : {}) });
-    return { status: res.status, body: await res.json(), headers: res.headers };
+    return { status: res.status, body: opts.raw ? Buffer.from(await res.arrayBuffer()) : await res.json(), headers: res.headers };
   };
 }
+
+test('refund receipt content preserves bound-client privacy and signed-read access', { skip: !DATABASE_URL }, async (t) => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db);
+  const bytes = Buffer.alloc(100, 0x5a);
+  const api = await apiForTest(t, { bytes });
+  for (const key of ['client', 'other', 'supplier', 'rider']) {
+    assert.equal((await api(key, 'GET', '/files/receipt/content')).status, 403);
+  }
+  let refund = await request(db);
+  refund = await review(db, refund);
+  refund = await settle(db, refund);
+  refund = await reserve(db, refund);
+  await pay(db, refund);
+  for (const key of [null, 'client', 'other', 'supplier', 'rider', 'ops', 'super']) {
+    const signed = await api(key, 'GET', '/files/receipt/download-url');
+    const content = await api(key, 'GET', '/files/receipt/content', null, { raw: true });
+    assert.equal(content.status, signed.status);
+    if (['client', 'ops', 'super'].includes(key)) {
+      assert.equal(content.status, 200);
+      assert.deepEqual(content.body, bytes);
+      assert.equal(content.headers.get('content-type'), 'image/png');
+      assert.equal(content.headers.get('cache-control'), 'private, no-store, max-age=0');
+    } else {
+      assert.equal(content.status, key ? 403 : 401);
+    }
+  }
+});
 
 test('live HTTP refund authorization, signed QR privacy, production race and durable inbox', { skip: !DATABASE_URL }, async (t) => {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());

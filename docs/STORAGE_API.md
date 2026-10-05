@@ -11,7 +11,7 @@ GRIDGO uses the API as the **control plane** and MinIO as the **download data pl
 3. `POST /files/:fileId/attach` separately binds a ready file to a domain record. It rechecks lifecycle state, uploader, purpose, detected media type, target ownership/state, metadata integrity, and MinIO object existence and byte size.
 4. `GET /files/:fileId/download-url` authorizes the caller from current domain relationships, checks the object, and returns a short-lived presigned GET. MinIO serves the bytes.
 
-This deliberately replaces the earlier API-proxied-download proposal. Presigned GETs avoid routing 50–200 MiB artwork back through the single Node process. Uploads remain proxied because only the API can enforce byte limits and signature inspection before declaring a file ready.
+Presigned GETs avoid routing 50–200 MiB artwork back through the single Node process. Payment proofs and payout/refund receipts additionally support an authenticated API byte read for browser receipt reading when a LAN storage origin is blocked. Uploads remain proxied because only the API can enforce byte limits and signature inspection before declaring a file ready.
 
 The prior NestJS API's broader shape—upload, presigned URL, inspect, get, delete, and my-uploads—was evaluated. This contract adopts upload, metadata get, presigned GET, and safe delete. Binary inspection and `my-uploads` are deferred: inspection needs a defined analysis product, while current apps reach files from role-scoped orders/services. Those routes may be added later without changing this contract.
 
@@ -305,6 +305,14 @@ curl -f "$DOWNLOAD_URL" --output ./artwork-readback.pdf
 cmp ./artwork.pdf ./artwork-readback.pdf
 ```
 
+## GET /files/:fileId/content — private payment image bytes
+
+Auth: exactly the same `authorizeFileRead` gate as `download-url`, including current role selection and approval. Supported purposes are `payment_proof`, `payout_receipt`, and `refund_receipt` only (each at most 15 MiB). Operations and Super Admin may read these; other readers retain the existing purpose-specific rules: payment proof owner, approved assigned supplier for a payout receipt, and the refund's owning client for a bound refund receipt. No new reader is granted access.
+
+Success: `200` with streamed MinIO bytes, `Content-Type` from the detected upload type, `Content-Length` from validated metadata, `Cache-Control: private, no-store, max-age=0`, and `X-Content-Type-Options: nosniff`. The object must exist and match the recorded size, as for `download-url`. Authorization failures and storage failures use the existing JSON error contract. A readable file of another purpose returns `400 file_content_not_supported`; non-ready or unknown files return `404 file_not_found`.
+
+Dashboard integration: fetch this API path with `Authorization: Bearer <Clerk session JWT>` and the same `X-GRIDGO-Role` header used for other file reads, read the response as a blob, and pass a local object URL/data URL to the receipt reader. Revoke object URLs when finished. Do not use this authenticated path directly as an `<img src>` without fetching the bytes first. This avoids a browser request to the LAN storage origin; the API uses its internal MinIO connection. Large artwork and all other file purposes continue using `download-url`.
+
 ## DELETE /files/:fileId — file deletion
 
 Auth: **Super Admin only**, or the owning client deleting their own `artwork` / `mockup` after every related order is `completed` or `payout_released`. Client artwork still used by a draft cart cannot be deleted. Clients cannot delete unattached uploads through this endpoint; unused uploads follow scheduled cleanup. Operations, suppliers and riders cannot delete files early, including their own verification evidence.
@@ -389,6 +397,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | HTTP | `error` | When / client fix |
 |---:|---|---|
 | 400 | `invalid_file_purpose` | Purpose is absent/unknown; send one documented enum. |
+| 400 | `file_content_not_supported` | Byte route requested for another readable purpose; use `download-url`. |
 | 400 | `invalid_multipart` | Multipart framing is malformed/incomplete; recreate `FormData` and retry. |
 | 400 | `unexpected_form_field` | Upload includes a text field other than `purpose`; remove it. |
 | 400 | `file_required` | Missing or multiple/wrong-named file part; send exactly one `file`. |
