@@ -1,4 +1,5 @@
 import { supplierArtworkReleased } from "./artwork-gates.js";
+import { availableDispatch } from "./dispatch-policy.js";
 import { activePayoutHold } from "./operational-model.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
@@ -175,7 +176,8 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         occurrence,
         "client",
       );
-    if (!old || stateOccurrence(old) !== stateOccurrence(order)) {
+    if (!old || stateOccurrence(old) !== stateOccurrence(order)
+        || (availableDispatch(order) && !availableDispatch(old))) {
       notifyOrderParties(store, order, { createId, at });
       notifyOpsOrderProgress(store, order, { createId, at });
     }
