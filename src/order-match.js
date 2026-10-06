@@ -1,3 +1,4 @@
+import { cartGroups } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { recentLapseQualityPenalty } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
@@ -242,7 +243,18 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
     // Rank real listing projections, never combine one listing's low price
     // with another's fast promise. Each offered listing must meet the deadline.
-    const groupLines = (widthRequest?.cartLines || []).filter((line) => line.supplierId === supplierId);
+    const draftGroups = cartGroups(null, (widthRequest?.cartLines || []).filter(line => line.supplierId === supplierId));
+    const requestedDate = deadline == null ? null : new Date(deadline).toISOString();
+    const groupLines = draftGroups.find(group => group.deadline === requestedDate)?.lines || [];
+    const earlierJobs = draftGroups.filter(group => group.deadline != null
+      && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))).map(group => ({
+      supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => {
+        const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
+        const service = (store.supplierServices || []).find(row => row.id === item?.supplierServiceId);
+        return item ? itemTurnaroundHours(item, service) : 24;
+      })),
+    }));
+    const projectionStore = earlierJobs.length ? { ...store, orderJobs: [...(store.orderJobs || []), ...earlierJobs] } : store;
     const groupUnits = groupLines.reduce((total, line) => total + BigInt(line.quantity), 0n);
     const groupHours = groupLines.map((line) => {
       const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
@@ -254,7 +266,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
       // Use the same combined quantity and slowest turnaround as checkout.
       const combinedUnits = groupUnits + BigInt(units ?? listing.minimumOrderQuantity ?? 1);
       if (combinedUnits > MAX_SAFE_MINOR) fail(400, "invalid_quantity", "The group's quantity exceeds the supported range.");
-      const { projection, queue } = projectShopFinish(store, {
+      const { projection, queue } = projectShopFinish(projectionStore, {
         supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours), now,
         units: groupLines.length ? Number(combinedUnits) : units,
       });

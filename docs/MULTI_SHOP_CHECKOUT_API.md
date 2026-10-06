@@ -8,16 +8,14 @@ All amounts are safe integer PHP minor units. Use the existing [cart and matchin
 
 Existing endpoints remain. `POST /me/carts`, `PATCH /me/carts/:id`, and
 `PUT /me/carts/:id/fulfillment` additionally accept `deadline`, an ISO date-time.
-The cart has one deadline and one `fulfillmentMode: delivery | pickup` for every
-shop group. A match selection can initialize an unset cart deadline. A multi-shop
-checkout requires a deadline (`400 basket_deadline_required`). Changing it on the
-cart causes checkout to revalidate every group's full quantity against the new date.
-
-Call `POST /me/matches` with `cartId` for each product. The server uses the cart's
-deadline; a conflicting explicit deadline returns `409 basket_deadline_mismatch`.
-Only feasible listings are returned. At checkout every group's queue/calendar is
-rechecked independently, including combined quantities from the same shop. If any
-one group misses the date, `409 deadline_not_met` rolls back the entire checkout.
+Each product keeps its own deadline; see [per-line deadline fields](PER_LINE_DEADLINES_API.md).
+The cart keeps one `fulfillmentMode: delivery | pickup`. Cart-level `deadline`
+is a legacy default, while explicit line deadlines win. Checkout groups by shop
+and normalized deadline. Multiple groups require a date on every line
+(`400 basket_deadline_required`). Matching accepts each product's explicit date;
+`groupId` scopes its shop and supplies that group's date only when no date is sent.
+Checkout rechecks every group, reserving earlier dates first. Any infeasible
+group returns `409 deadline_not_met` and rolls back the entire checkout.
 
 Cart responses add `deadline` and `groups`:
 
@@ -48,7 +46,7 @@ pass `{cartId, groupId, subcategoryCode, ...}` to `/me/matches`, then add a retu
 This restricts matching to that group without accepting a supplier identity from
 the client. New products use matching without `groupId`.
 
-Several items in the same shop still incur one delivery fee, calculated to that
+Several items in the same shop with the same deadline incur one delivery fee, calculated to that
 group's farthest effective drop-off using the existing distance bands. Legacy pickup
 remains free. Explicit pre-match hub pickup includes the allocated fee described below. An unavailable price or missing delivery point makes the
 corresponding preview total `null`; checkout refuses invalid lines. Previews are
@@ -69,10 +67,10 @@ signed listing photos; line mutations remain compact as before.
 {"payment":{"method":"qr_manual","proofFileId":"file_...","reference":"TRANSFER-123"}}
 ```
 
-Single-shop checkout remains `{order, invoice}`, uses the existing setting of
+Single-group checkout remains `{order, invoice}`, uses the existing setting of
 75% or 100%, and keeps all existing payment endpoints and states.
 
-Multi-shop checkout returns **201 `{order, basket, invoice}`**. The compatibility
+Multi-group checkout returns **201 `{order, basket, invoice}`**. The compatibility
 `order` is the first shop group's ordinary order, not the basket total. New apps
 must use `basket.totalMinor` and `basket.payment` for the combined charge. The
 cart's existing `checkedOutOrderId` points to that first order; checked-out cart
@@ -120,12 +118,12 @@ reads additionally return `basketId`.
 The example abbreviates nested orders and timestamps. Nested orders use the
 role-aware projection; use the existing order detail endpoint for signed progress
 galleries. Each group order additionally has `basketId`, `groupLabel`, and the
-immutable `basketDeadline`. Clients get anonymous labels and GRIDGO-inclusive amounts with no supplier ID or
+immutable `basketDeadline` (that group's original requested date), plus `deadline`. Groups and combined receipt sections expose `deadline`; the parent date is null for mixed dates. Clients get anonymous labels and GRIDGO-inclusive amounts with no supplier ID or
 supplier-price breakdown on the new basket/group responses;
 Operations gets the supplier identity and that group's existing money/payout/refund
 projections. Supplier and rider access remains scoped to their assigned order.
 
-Multi-shop payment is always **100% upfront**, even when the setting is 75. Each
+Multi-group payment is always **100% upfront**, even when the setting is 75, including multiple dates at one shop. The API exposes `upfrontReason: "multiple_fulfillment_groups"`; one group uses `"platform_setting"` on the cart quote. Each
 group has an `initial` allocation equal to its own total and a zero `final_online`
 with `not_required`. The single basket transfer funds those group allocations;
 they are not additional transfers. Never add basket totals to group order totals
@@ -222,10 +220,10 @@ receipt remains immutable; refund records describe the subsequent adjustment.
 There is exactly one `order_invoices` row and invoice number per basket. Both
 `/baskets/:id/invoice` and `/orders/:anyGroupOrderId/invoice` return the same snapshot.
 The flat `lines`, `deliveryLines`, customer totals and `paymentPlan` remain, with
-additive `basketId` and `groups: [{orderId,label,lines,clientItemSubtotalMinor,
+additive `basketId` and `groups: [{orderId,label,deadline,lines,clientItemSubtotalMinor,
 deliveryFeeMinor,totalMinor}]`. Operations also receives each group's
 `itemSubtotalMinor` and `serviceFeeMinor`. Single-shop legacy invoice fields stay unchanged. Delivery labels are Shop A, Shop B,
-etc. Client receipts expose `clientItemSubtotalMinor` and line
+etc.; different dates at the same shop share a label and carry distinct deadlines and order IDs. Client receipts expose `clientItemSubtotalMinor` and line
 `clientUnitPriceMinor` / `clientAmountMinor`; they omit supplier amounts and
 service-fee decomposition. Operations retains the original amount fields.
 The receipt contains no shop identity or payout amounts. One receipt-ready

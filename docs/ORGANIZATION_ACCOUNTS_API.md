@@ -111,6 +111,41 @@ Missing, expired, unready, foreign-owned or wrong-purpose evidence returns
 `409 organization_email_verification_required`. Stale case versions return
 `409 approval_state_conflict`.
 
+## Reading back a sent-back application
+
+`GET /me/client-application` returns the applicant's own case so a correction starts from
+what they sent rather than an empty form (gridgo-client#187):
+
+```json
+{
+  "approvalCase": { "id": "...", "status": "rejected", "version": 2, "applicationRevision": 1 },
+  "application": {
+    "accountType": "organization", "businessName": "...", "businessNature": "...",
+    "school": "...", "organizationEmail": "...", "facultyAdviserContact": "...", "handover": false,
+    "officer": { "fullName": "...", "dateOfBirth": "...", "address": "...", "phone": "...",
+      "governmentIdType": "passport", "governmentIdExpiresOn": "...", "studentIdExpiresOn": "..." },
+    "documents": { "government_id": { "fileId": "file_...", "name": "id.jpg" } }
+  },
+  "sentBack": {
+    "reason": "Please upload these again:\n- School recognition certificate: Does not look right",
+    "documents": [{ "key": "school_recognition_certificate",
+      "label": "School recognition certificate", "note": "Does not look right" }]
+  }
+}
+```
+
+`application` is the latest applicant revision while the case is `pending` or `rejected`
+(business bodies carry `businessType` and `signatory` instead), else `null`; it never carries
+the email-verification stamp or request hash. `documents` lists only files that are still
+`ready` and owned by the applicant: those IDs can be sent again in the corrected body, and
+the bytes stay unreadable to the applicant. `sentBack` is present only on a rejected case.
+Its `documents` are read from the reason the dashboard writes, one `- <label>` or
+`- <label>: <note>` line per document Operations marked, matched against the track's
+checklist; free text that names no document leaves `documents` empty and the reason stands
+alone. The applicant's `approval_rejected` inbox notice names the same documents
+("Upload your school recognition certificate again.") or quotes the reason; the push stays
+the generic lock-screen copy and carries `type` for routing.
+
 ## Operations review
 
 Existing `GET /approval-cases` and `GET /approval-cases/:id` remain the review queue/detail.

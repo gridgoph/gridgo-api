@@ -128,6 +128,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "1791504000000_organization_discount",
       "1791590400000_organization_accounts",
         "1791676800000_staff_hub_handovers",
+      "1791763200000_per_line_deadlines",
       ],
     );
 
@@ -306,6 +307,13 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Product-date columns are additive and a mixed-date parent is nullable.
+    for (const table of ['client_cart_lines', 'order_jobs', 'order_baskets']) {
+      const column = (await client.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='deadline'", [schema, table])).rows[0];
+      assert.equal(column.is_nullable, 'YES');
+    }
+    await runner(migrationOptions(schema, 'down', 1, client));
 
     // Rollback is allowed only before staff configuration or handovers exist.
     await client.query("INSERT INTO staff_roles VALUES ('counter_assistant', 'Counter assistant', false)");
@@ -1081,7 +1089,8 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     assert.deepEqual(migrated.settings.deliveryFeeBands[3], {
       zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,
     });
-    for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows, before[table]);
+    for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows,
+      table === "order_jobs" ? before[table].map(row => ({ ...row, deadline: null })) : before[table]);
   });
 });
 

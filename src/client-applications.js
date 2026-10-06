@@ -1,5 +1,7 @@
 // Application snapshots contain private personal details and opaque file IDs.
-// Expose the full snapshot only through the staff approval-case projection.
+// Staff read the full snapshot through the approval-case projection. The
+// applicant reads back only their own open revision (`clientApplicationView`),
+// so a correction starts from what they sent; never the file bytes.
 export const CLIENT_APPLICATION_FIELDS = ['businessName', 'businessNature', 'accountType', 'businessType',
   'school', 'organizationEmail', 'officer', 'signatory', 'documents', 'facultyAdviserContact'];
 const BASE_BUSINESS = ['government_id', 'payout_bank_proof', 'bir_2303'];
@@ -9,15 +11,112 @@ export const APPLICATION_DOCUMENTS = Object.freeze({
   partnership: [...BASE_BUSINESS, 'sec_certificate', 'articles_and_bylaws', 'general_information_sheet', 'signatory_authorization'],
   corporation: [...BASE_BUSINESS, 'sec_certificate', 'articles_and_bylaws', 'general_information_sheet', 'signatory_authorization'],
 });
+const text = (value) => typeof value === 'string' ? value.trim() : '';
+/**
+ * Each document in the words Operations' send-back reason uses. The dashboard
+ * writes one line per document it marks, `- <label>` or `- <label>: <note>`,
+ * so these labels must stay the dashboard's (gridgo-web
+ * `src/lib/client-applications.ts`). `noun` is how the client is told.
+ */
+export const APPLICATION_DOCUMENT_WORDS = Object.freeze({
+  government_id: { label: 'Primary government ID', noun: 'primary government ID' },
+  student_id: { label: 'Student ID', noun: 'student ID' },
+  enrollment_document: { label: 'Enrolment document', noun: 'proof of enrolment' },
+  school_recognition_certificate: { label: 'School recognition certificate', noun: 'school recognition certificate' },
+  payout_bank_proof: { label: 'Payout bank account proof', noun: 'proof of bank account' },
+  bir_2303: { label: 'BIR Certificate of Registration (Form 2303)', noun: 'BIR Certificate of Registration' },
+  dti_certificate: { label: 'DTI business name certificate', noun: 'DTI business name certificate' },
+  sec_certificate: { label: 'SEC certificate', noun: 'SEC certificate' },
+  articles_and_bylaws: { label: 'Articles and by-laws', noun: 'articles and by-laws' },
+  general_information_sheet: { label: 'General Information Sheet', noun: 'General Information Sheet' },
+  signatory_authorization: { label: "Board resolution or secretary's certificate", noun: "board resolution or secretary's certificate" },
+  business_permit: { label: "Mayor's or Barangay business permit", noun: 'business permit' },
+});
+const wordsKey = (value) => text(value).normalize('NFKC').replace(/[\u2018\u2019]/gu, "'").replace(/\s+/gu, ' ').toLowerCase();
+const DOCUMENT_BY_LABEL = new Map(Object.entries(APPLICATION_DOCUMENT_WORDS)
+  .flatMap(([key, words]) => [[wordsKey(words.label), key], [wordsKey(key), key]]));
+function documentKeysFor(application) {
+  const track = application.accountType === 'organization' ? 'organization' : application.businessType;
+  const required = APPLICATION_DOCUMENTS[track];
+  if (!required) return null;
+  return new Set([...required, track === 'organization' ? 'school_recognition_certificate' : 'business_permit']);
+}
+/**
+ * The documents a send-back reason asks for again, in the order written.
+ * Free text that names no document yields none, and the reason stands alone.
+ */
+export function sentBackDocuments(reason, application = {}) {
+  const allowed = documentKeysFor(application);
+  const found = new Map();
+  for (const line of String(reason || '').split(/\r?\n/u)) {
+    const item = /^\s*[-*\u2022]\s*(.+)$/u.exec(line)?.[1];
+    if (!item) continue;
+    const colon = item.indexOf(':');
+    const key = DOCUMENT_BY_LABEL.get(wordsKey(colon < 0 ? item : item.slice(0, colon)));
+    if (!key || found.has(key) || (allowed && !allowed.has(key))) continue;
+    found.set(key, { key, label: APPLICATION_DOCUMENT_WORDS[key].label, note: colon < 0 ? null : text(item.slice(colon + 1)) || null });
+  }
+  return [...found.values()];
+}
+function listed(words) {
+  return words.length < 2 ? words.join('') : `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`;
+}
+/** What the applicant's inbox says when Operations sends an application back. */
+export function sentBackNotificationBody(reason, application = {}) {
+  const documents = sentBackDocuments(reason, application);
+  if (documents.length) {
+    const nouns = documents.map((row) => APPLICATION_DOCUMENT_WORDS[row.key].noun);
+    return `Upload your ${listed(nouns)} again. Everything else you sent is kept.`;
+  }
+  const said = text(reason).replace(/\s+/gu, ' ');
+  if (!said) return 'Open your application to see what Operations asked for.';
+  return `Operations said: ${said.length > 240 ? `${said.slice(0, 239).trimEnd()}\u2026` : said}`;
+}
 export function applicationError(status, code, details = {}) {
   throw Object.assign(new Error(code), { status, code, details });
 }
-const text = (value) => typeof value === 'string' ? value.trim() : '';
 export const organizationKey = (value) => text(value).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase();
 export function currentApplication(store, approvalCase) {
   return (store.approvalCaseEvents || []).filter((event) => event.approvalCaseId === approvalCase?.id
     && event.actorKind === 'applicant' && event.snapshot?.accountType)
     .sort((a, b) => a.applicationRevision - b.applicationRevision || a.createdAt.localeCompare(b.createdAt)).at(-1)?.snapshot || {};
+}
+const PERSON_FIELDS = ['fullName', 'dateOfBirth', 'address', 'phone', 'governmentIdType', 'governmentIdExpiresOn',
+  'governmentIdHasNoExpiry', 'studentIdExpiresOn'];
+/**
+ * `GET /me/client-application`: the applicant's own last revision while it is
+ * pending or sent back, so a correction starts from everything they sent, and
+ * what Operations asked for again. Files are named, never readable: only
+ * documents still ready to be sent again are listed.
+ */
+export function clientApplicationView(store, userId) {
+  const approvalCase = (store.approvalCases || []).find((row) => row.userId === userId && row.kind === 'business_client');
+  if (!approvalCase) return { approvalCase: null, application: null, sentBack: null };
+  const snapshot = currentApplication(store, approvalCase);
+  const open = ['pending', 'rejected'].includes(approvalCase.status) && snapshot.schemaVersion === 1;
+  let application = null;
+  if (open) {
+    const personField = snapshot.accountType === 'organization' ? 'officer' : 'signatory';
+    const person = Object.fromEntries(PERSON_FIELDS.filter((key) => snapshot[personField]?.[key] != null)
+      .map((key) => [key, snapshot[personField][key]]));
+    const documents = {};
+    for (const [key, fileId] of Object.entries(snapshot.documents || {})) {
+      const file = (store.files || []).find((row) => row.fileId === fileId);
+      if (!file || file.ownerId !== userId || file.purpose !== 'client_verification_document' || file.state !== 'ready') continue;
+      documents[key] = { fileId, name: text(file.originalFilename) || null };
+    }
+    application = { accountType: snapshot.accountType, businessName: snapshot.businessName, businessNature: snapshot.businessNature,
+      handover: Boolean(snapshot.handover), [personField]: person, documents,
+      ...Object.fromEntries(['businessType', 'school', 'organizationEmail', 'facultyAdviserContact']
+        .filter((key) => snapshot[key] != null).map((key) => [key, snapshot[key]])) };
+  }
+  const reason = approvalCase.status === 'rejected' ? text(approvalCase.rejectionReason) || null : null;
+  return {
+    approvalCase: { id: approvalCase.id, status: approvalCase.status, version: approvalCase.version,
+      applicationRevision: approvalCase.applicationRevision },
+    application,
+    sentBack: approvalCase.status === 'rejected' ? { reason, documents: sentBackDocuments(reason, snapshot) } : null,
+  };
 }
 function validDate(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
