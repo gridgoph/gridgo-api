@@ -79,7 +79,7 @@ User action acknowledgements remain durable inbox records but use silent inbox i
 | 47 | Fees/zones/settings | Authorized settings refresh; generic public catalog/quote refresh; no retrospective accepted commercial change or private settings payload. |
 | 48 | Read/unread/delete | Owner-only mutation retained, same-owner other-device inbox hint; role-scoped snapshot read-all leaves concurrent/new and other-role records unread. |
 | 49 | Login/logout/switch/access | Existing claim/release ownership retained; selected-role membership checked; stale current notifications suppressed; consumer account cache/stream teardown supplied by app workers. |
-| 50 | Announcement | Membership audience selection and role/app-aware routing; only everyone may reach unclaimed installs with existing exact anonymous data. |
+| 50 | Announcement | Membership audience selection and role/app-aware routing; everyone reaches unclaimed installs; [release broadcasts](RELEASE_ANNOUNCEMENTS_API.md) reach only matching retained app roles, with the same exact anonymous data. |
 | 51 | Reconnect/foreground | SSE replay uses current authorization/projection; unsupported cursor remains 409; consumer refetch contract plus all-resource server LISTEN-recovery refresh. |
 | 52 | Role anomaly/delivery failure | Privileged membership mutation alerts other Super Admins; durable outbox failure/attempt/code state and provider health expose delivery trouble. No unconfigured alert channel, anomaly heuristic or recipient preference invented. |
 
