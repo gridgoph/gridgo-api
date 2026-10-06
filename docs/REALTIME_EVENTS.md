@@ -92,3 +92,20 @@ An own-account `role_changed` push may reach the account's still-owned device wh
 Listing review and product-type requests emit `catalog_review_pending` / `catalog_review_decided` durable inbox rows to the owning supplier and every current Operations/Super Admin membership, plus scoped `catalog` invalidation. Review changes use the transaction/save/outbox boundary. See [listing review](SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker).
 
 Paper-invoice promises write `physical_invoice_promised` to the owning client's inbox when Operations/Super Admin first sets or changes `promisedDeliveryAt`. The body states the paper invoice delivery date and time in Asia/Manila. Repeating the same promise does not notify again. This uses the ordinary notification/outbox boundary at `save()`; no separate push sender is required.
+
+### Idle rider job alerts
+
+`dispatch_available` uses the dispatch list's shared pool rules in
+`src/dispatch-policy.js`: approved active rider membership, an unassigned
+`ready_for_dispatch` order, no shop recovery hold, and a journey to deliver
+(including transport to the hub). There is no distance, zone, or vehicle filter.
+Riders assigned an order in `rider_assigned`, `picked_up`, or `out_for_delivery`
+receive no new job alert. Finished and cancelled trips do not block alerts.
+
+The inbox occurrence is unique per rider and order, including re-offers and
+soft-deleted inbox rows. Existing device registration and role routing determine
+which phones enter `notification_push_outbox`; an absent or pruned token receives
+nothing. Android notification permission remains the phone's preference; there
+is no separate server-side rider notification preference. The worker rechecks
+idle status and job availability before sending or retrying. Push uses fixed
+customer-free copy and the existing `orderId` deep-link field on `gridgo_default`.

@@ -30,6 +30,7 @@ import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
+import { availableDispatch } from "./dispatch-policy.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -5816,9 +5817,8 @@ async function handleRequest(req, res) {
       // destination and not a different job. Only the unfinished
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => !isContainedPickup(o) && !recoveryHeld(o)
-          && (o.state === "ready_for_dispatch"
-            || (o.state === "rider_assigned" && o.riderId === user.id)),
+        (o) => availableDispatch(o) || (!isContainedPickup(o) && !recoveryHeld(o)
+          && o.state === "rider_assigned" && o.riderId === user.id),
       );
       return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });
     }
