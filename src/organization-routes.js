@@ -1,5 +1,5 @@
 import { applyForBusiness, requireIdempotencyKey } from './enrollment.js';
-import { APPLICATION_DOCUMENTS, applicationError as fail, currentApplication, nextQuarter } from './client-applications.js';
+import { APPLICATION_DOCUMENTS, applicationError as fail, clientApplicationView, currentApplication, nextQuarter } from './client-applications.js';
 import { requestOrganizationCode, verifyOrganizationCode } from './organization-email.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
 
@@ -58,7 +58,7 @@ export function sweepOfficerConfirmations(store, { at, createId }) {
 export async function routeOrganization({ req, url, store, user, readBody, now, createId, mailer, emailSecret }) {
   const path = url.pathname;
   if (path === '/me/organization/statements') return null;
-  const mine = path === '/me/client-application/checklist' || path === '/me/organization' || path.startsWith('/me/organization/');
+  const mine = path === '/me/client-application' || path === '/me/client-application/checklist' || path === '/me/organization' || path.startsWith('/me/organization/');
   const ops = /^\/ops\/organizations(?:\/[^/]+(?:\/notice)?)?$/.test(path);
   const permit = /^\/approval-cases\/([^/]+)\/request-business-permit$/.exec(path);
   if (!mine && !ops && !permit) return null;
@@ -71,6 +71,7 @@ export async function routeOrganization({ req, url, store, user, readBody, now, 
     if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request');
     return body;
   };
+  if (path === '/me/client-application' && req.method === 'GET') return { status: 200, body: clientApplicationView(store, user.id) };
   if (path === '/me/client-application/checklist' && req.method === 'GET') return { status: 200, body: {
     requiredDocuments: APPLICATION_DOCUMENTS, optionalDocuments: { organization: ['school_recognition_certificate'], business: ['business_permit'] },
     optionalFields: ['facultyAdviserContact'], filePurpose: 'client_verification_document',
