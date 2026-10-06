@@ -1,4 +1,4 @@
-import { currentApplication, decideClientApplication } from "./client-applications.js";
+import { currentApplication, decideClientApplication, sentBackNotificationBody } from "./client-applications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { assertRiderApprovalReady } from "./enrollment.js";
 
@@ -497,7 +497,10 @@ export function decideApprovalCase({
     title,
     body: shopBack
       ? `Your account and ${lines} can take new orders again.`
-      : "Open GRIDGO to review your current approval status.",
+      // A client's sent-back application names what to fix (gridgo-client#187).
+      : action === "reject" && approvalCase.kind === "business_client"
+        ? sentBackNotificationBody(input.reason, currentApplication(store, approvalCase))
+        : "Open GRIDGO to review your current approval status.",
     approvalCaseId: approvalCase.id,
     domainEventKey: `approval_case:${approvalCase.id}:${input.requestId}`,
     read: false,

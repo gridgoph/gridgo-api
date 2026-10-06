@@ -274,3 +274,84 @@ test('a business cannot select the organization checklist to omit bank and regis
     signatory: ctx.body.officer, documents: ctx.body.documents };
   assert.throws(() => applyForBusiness(ctx), { code: 'invalid_application' });
 });
+
+import { businessApplicationProjection } from '../src/approval-cases.js';
+import { clientApplicationView, sentBackDocuments, sentBackNotificationBody } from '../src/client-applications.js';
+const DASHBOARD_REASON = 'Please upload these again:\n- School recognition certificate: Does not look right. Resend please';
+test('a sent-back application reads back to its applicant, names the flagged document, and resends with the rest kept', async () => {
+  const ctx = fixture(); verify(ctx);
+  ctx.store.files.push({ fileId: 'file_recognition', ownerId: ctx.user.id, purpose: 'client_verification_document', state: 'ready',
+    originalFilename: 'recognition.jpg', references: [] });
+  for (const file of ctx.store.files) file.originalFilename ||= `${file.fileId}.pdf`;
+  ctx.body.documents.school_recognition_certificate = 'file_recognition';
+  ctx.body.facultyAdviserContact = 'Adviser, 0917 000 0000';
+  const { approvalCase } = applyForBusiness(ctx);
+  decideApprovalCase({ store: ctx.store, caseId: approvalCase.id, action: 'reject', input: { expectedVersion: 1,
+    requestId: 'send-back', reason: DASHBOARD_REASON }, actor: { id: 'ops' }, actorRole: 'ops_admin', at, createId: ctx.createId });
+
+  const notice = ctx.store.notifications.find((row) => row.type === 'approval_rejected');
+  assert.equal(notice.title, 'Application needs changes');
+  assert.equal(notice.body, 'Upload your school recognition certificate again. Everything else you sent is kept.');
+
+  const view = (await call(ctx, '/me/client-application', undefined, ctx.user, 'GET')).body;
+  assert.deepEqual(view.approvalCase, { id: approvalCase.id, status: 'rejected', version: 2, applicationRevision: 1 });
+  assert.equal(view.application.businessName, 'Test organization');
+  assert.equal(view.application.school, 'Test school');
+  assert.equal(view.application.facultyAdviserContact, 'Adviser, 0917 000 0000');
+  assert.equal(view.application.officer.fullName, 'Officer One');
+  assert.equal(view.application.officer.studentIdExpiresOn, '2030-01-01');
+  assert.equal(view.application.officer.emailVerifiedAt, undefined);
+  assert.equal(view.application.emailVerifiedAt, undefined);
+  assert.equal(view.application.requestPayloadHash, undefined);
+  assert.deepEqual(view.application.documents.school_recognition_certificate, { fileId: 'file_recognition', name: 'recognition.jpg' });
+  assert.deepEqual(Object.keys(view.application.documents).sort(),
+    ['enrollment_document', 'government_id', 'school_recognition_certificate', 'student_id']);
+  assert.deepEqual(view.sentBack, { reason: DASHBOARD_REASON, documents: [{ key: 'school_recognition_certificate',
+    label: 'School recognition certificate', note: 'Does not look right. Resend please' }] });
+
+  // The client keeps every other answer and file and replaces only the flagged one.
+  ctx.store.files.push({ fileId: 'file_recognition_2', ownerId: ctx.user.id, purpose: 'client_verification_document', state: 'ready', references: [] });
+  const resend = { ...structuredClone(ctx.body), documents: { ...Object.fromEntries(Object.entries(view.application.documents)
+    .map(([key, row]) => [key, row.fileId])), school_recognition_certificate: 'file_recognition_2' }, expectedVersion: 2 };
+  verify(ctx);
+  const resent = applyForBusiness({ ...ctx, body: resend, idempotencyKey: 'resend' });
+  assert.equal(resent.approvalCase.status, 'pending');
+  assert.equal(resent.approvalCase.applicationRevision, 2);
+  assert.equal(ctx.store.files.find((file) => file.fileId === 'file_government_id').clientApplicationRejectedAt, undefined);
+  // Operations reads the resent revision with the earlier details intact.
+  const staff = businessApplicationProjection(ctx.store, resent.approvalCase);
+  assert.equal(staff.businessName, 'Test organization');
+  assert.equal(staff.officer.fullName, 'Officer One');
+  assert.equal(staff.documents.government_id, 'file_government_id');
+  assert.equal(staff.documents.school_recognition_certificate, 'file_recognition_2');
+  const pending = (await call(ctx, '/me/client-application', undefined, ctx.user, 'GET')).body;
+  assert.equal(pending.sentBack, null);
+  assert.equal(pending.application.documents.school_recognition_certificate.fileId, 'file_recognition_2');
+});
+test('the read-back lists only files still ready, and nothing once approved or for another client', async () => {
+  const ctx = fixture(); verify(ctx);
+  const { approvalCase } = applyForBusiness(ctx);
+  ctx.store.files.find((file) => file.fileId === 'file_student_id').state = 'deleted';
+  let view = (await call(ctx, '/me/client-application', undefined, ctx.user, 'GET')).body;
+  assert.equal(view.application.documents.student_id, undefined);
+  assert.equal(view.sentBack, null);
+  ctx.store.users.push({ id: 'other', role: 'client' });
+  ctx.store.userRoleMemberships.push({ userId: 'other', role: 'client' });
+  assert.deepEqual((await call(ctx, '/me/client-application', undefined, { id: 'other', role: 'client' }, 'GET')).body,
+    { approvalCase: null, application: null, sentBack: null });
+  ctx.store.files.find((file) => file.fileId === 'file_student_id').state = 'ready';
+  approve(ctx, approvalCase);
+  view = clientApplicationView(ctx.store, ctx.user.id);
+  assert.equal(view.approvalCase.status, 'approved');
+  assert.equal(view.application, null);
+});
+test('send-back reasons name documents only from the track checklist; free text stands alone', () => {
+  const business = { accountType: 'business', businessType: 'sole_proprietor' };
+  const reason = "Please upload these again:\n- Payout bank account proof: Name differs\n- student id\n- Mayor’s or Barangay business permit";
+  assert.deepEqual(sentBackDocuments(reason, business).map((row) => row.key), ['payout_bank_proof', 'business_permit']);
+  assert.equal(sentBackNotificationBody(reason, business),
+    'Upload your proof of bank account and business permit again. Everything else you sent is kept.');
+  assert.deepEqual(sentBackDocuments('The name does not match the DTI certificate.', business), []);
+  assert.equal(sentBackNotificationBody('The name does not\nmatch.', business), 'Operations said: The name does not match.');
+  assert.ok(sentBackNotificationBody('x'.repeat(400), business).endsWith('…'));
+});
