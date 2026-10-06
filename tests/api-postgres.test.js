@@ -1648,6 +1648,8 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(clientRead.body.settings.serviceFeeRateBps, current.body.settings.serviceFeeRateBps);
     assert.equal(current.body.settings.serviceFeeRateBps, 1000);
     assert.equal(current.body.settings.serviceFeeVisibleToClient, true);
+    assert.equal(current.body.settings.physicalInvoiceRequestsEnabled, false);
+    assert.equal(clientRead.body.settings.physicalInvoiceRequestsEnabled, false);
     assert.deepEqual(current.body.settings.paymentQr, {
       method: "qr_manual",
       caption: "QR Ph",
@@ -1766,8 +1768,35 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(hidden.status, 200, JSON.stringify(hidden.body));
     assert.equal(hidden.body.settings.serviceFeeVisibleToClient, false);
     assert.equal(hidden.body.settings.serviceFeeRateBps, 1250);
+    assert.equal(hidden.body.settings.physicalInvoiceRequestsEnabled, false);
 
-    let version = hidden.body.version;
+    const badPaper = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_super",
+      body: {
+        expectedVersion: hidden.body.version,
+        physicalInvoiceRequestsEnabled: "yes",
+        reason: "Bad printed-invoice switch",
+      },
+    });
+    assert.equal(badPaper.status, 400);
+    assert.equal(badPaper.body.error, "invalid_physical_invoice_requests");
+
+    const paper = await request(instance.api, "/settings", {
+      method: "PATCH",
+      subject: "clerk_super",
+      body: {
+        expectedVersion: hidden.body.version,
+        physicalInvoiceRequestsEnabled: true,
+        reason: "Accept printed-invoice requests",
+      },
+    });
+    assert.equal(paper.status, 200, JSON.stringify(paper.body));
+    assert.equal(paper.body.settings.physicalInvoiceRequestsEnabled, true);
+    const clientSeesPaper = await request(instance.api, "/settings", { subject: "clerk_client" });
+    assert.equal(clientSeesPaper.body.settings.physicalInvoiceRequestsEnabled, true);
+
+    let version = paper.body.version;
     for (const [subject, riderCommissionBps] of [["clerk_super", 7000], ["clerk_super", 8500]]) {
       const changed = await request(instance.api, "/settings", {
         method: "PATCH", subject,

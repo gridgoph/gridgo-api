@@ -128,6 +128,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "1791504000000_organization_discount",
       "1791590400000_organization_accounts",
         "1791676800000_staff_hub_handovers",
+        "1791680400000_support_chat_staff_people",
+        "1791684000000_support_chat_images",
       ],
     );
 
@@ -306,6 +308,16 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverse chat photos on support messages.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='support_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 0);
+
+    // Reverse staff people-search / desk-to-desk threads.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='support_chat_threads' AND column_name='staff_peer_user_id'`, [schema])).rowCount, 0);
 
     // Rollback is allowed only before staff configuration or handovers exist.
     await client.query("INSERT INTO staff_roles VALUES ('counter_assistant', 'Counter assistant', false)");

@@ -4,9 +4,12 @@ import { tooManyRequests } from "./support-rate-limit.js";
 const CHAT_LOCK = "gridgo-support-chat";
 const PARTY_ROLES = new Set(["client", "supplier", "rider"]);
 const STAFF_ROLES = new Set(["ops_admin", "super_admin"]);
+const CHAT_ROLES = new Set([...PARTY_ROLES, ...STAFF_ROLES]);
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MESSAGE_MAX = 4000;
 const PREVIEW_MAX = 140;
+const CHAT_IMAGE_PURPOSE = "support_chat_image";
+const MAX_CHAT_IMAGES = 4;
 const DEFAULT_MESSAGE_LIMIT = 100;
 const MAX_MESSAGE_LIMIT = 200;
 const POST_LIMIT = 30;
@@ -49,22 +52,47 @@ function asIso(value) {
   return String(value);
 }
 
-export function parseMessageBody(value) {
-  if (value == null || typeof value !== "string") {
+export function parseMessageBody(value, { allowEmpty = false } = {}) {
+  if (value == null || value === "") {
+    if (allowEmpty) return { ok: true, body: "" };
+    if (value == null) return { ok: false, message: "body must be a string." };
+    return { ok: false, message: "Write a message." };
+  }
+  if (typeof value !== "string") {
     return { ok: false, message: "body must be a string." };
   }
   const body = value.replace(/\r\n/g, "\n").trim();
-  if (!body) return { ok: false, message: "Write a message." };
+  if (!body) {
+    if (allowEmpty) return { ok: true, body: "" };
+    return { ok: false, message: "Write a message." };
+  }
   if (body.length > MESSAGE_MAX) {
     return { ok: false, message: `Messages can be up to ${MESSAGE_MAX} characters.` };
   }
   return { ok: true, body };
 }
 
-export function messagePreview(body) {
+export function parseAttachmentFileIds(value) {
+  if (value == null) return { ok: true, fileIds: [] };
+  if (!Array.isArray(value)) {
+    return { ok: false, message: "attachmentFileIds must be a list of uploaded file ids." };
+  }
+  const fileIds = [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))];
+  if (fileIds.length > MAX_CHAT_IMAGES) {
+    return { ok: false, message: `A message can include up to ${MAX_CHAT_IMAGES} photos.` };
+  }
+  return { ok: true, fileIds };
+}
+
+export function messagePreview(body, attachmentCount = 0) {
   const compact = String(body || "").replace(/\s+/g, " ").trim();
-  if (compact.length <= PREVIEW_MAX) return compact;
-  return `${compact.slice(0, PREVIEW_MAX - 1)}…`;
+  if (compact) {
+    if (compact.length <= PREVIEW_MAX) return compact;
+    return `${compact.slice(0, PREVIEW_MAX - 1)}…`;
+  }
+  if (attachmentCount === 1) return "Sent a photo";
+  if (attachmentCount > 1) return `Sent ${attachmentCount} photos`;
+  return "";
 }
 
 export function actorRole(user) {
@@ -84,10 +112,16 @@ export function isStaffActor(user) {
 
 export function canViewThread(user, thread) {
   if (!user || !thread) return false;
-  if (isStaffActor(user)) return true;
-  return isPartyActor(user)
-    && thread.partyUserId === user.id
-    && thread.partyRole === actorRole(user);
+  if (isPartyActor(user)) {
+    return !thread.staffPeerUserId
+      && thread.partyUserId === user.id
+      && thread.partyRole === actorRole(user);
+  }
+  if (isStaffActor(user)) {
+    if (!thread.staffPeerUserId) return true;
+    return thread.partyUserId === user.id || thread.staffPeerUserId === user.id;
+  }
+  return false;
 }
 
 function integerLimit(value, fallback = DEFAULT_MESSAGE_LIMIT) {
@@ -115,20 +149,128 @@ function mapThread(row, viewerId) {
     createdAt: asIso(row.created_at),
     updatedAt: asIso(row.updated_at),
     viewerUserId: viewerId,
+    staffPeerUserId: row.staff_peer_user_id ?? null,
+    staffPeerName: row.staff_peer_name || row.staff_peer_email || null,
+    staffPeerEmail: row.staff_peer_email ?? null,
+    staffPeerRole: row.staff_peer_role ?? null,
   };
 }
 
-function mapMessage(row, viewerId) {
+function mapPerson(row) {
+  return {
+    userId: row.id,
+    name: row.name || row.email || "Account",
+    email: row.email ?? null,
+    role: row.role,
+    imageUrl: row.image_url ?? null,
+  };
+}
+
+function mapAttachment(row) {
+  return {
+    fileId: row.file_id,
+    contentType: row.detected_content_type ?? null,
+    originalFilename: row.original_filename ?? null,
+  };
+}
+
+function mapMessage(row, viewerId, filesById = {}) {
+  const ids = Array.isArray(row.attachment_file_ids) ? row.attachment_file_ids : [];
   return {
     id: row.id,
     threadId: row.thread_id,
     senderUserId: row.sender_user_id,
     senderRole: row.sender_role,
     senderName: row.sender_name ?? null,
+    senderImageUrl: row.sender_image_url ?? null,
     body: row.body,
+    attachments: ids.map((fileId) => filesById[fileId]).filter(Boolean),
     createdAt: asIso(row.created_at),
     mine: row.sender_user_id === viewerId,
   };
+}
+
+async function loadAttachmentMeta(database, fileIds) {
+  const ids = [...new Set((fileIds || []).filter(Boolean))];
+  if (!ids.length) return {};
+  const result = await database.query(
+    `SELECT file_id, detected_content_type, original_filename
+       FROM files
+      WHERE file_id = ANY($1::text[])
+        AND state = 'ready'`,
+    [ids],
+  );
+  return Object.fromEntries(result.rows.map((row) => [row.file_id, mapAttachment(row)]));
+}
+
+async function hydrateMessages(database, rows, viewerId) {
+  const fileIds = rows.flatMap((row) => row.attachment_file_ids || []);
+  const filesById = await loadAttachmentMeta(database, fileIds);
+  return rows.map((row) => mapMessage(row, viewerId, filesById));
+}
+
+function parseAttachmentIdsFromPayload(payload) {
+  return parseAttachmentFileIds(payload?.attachmentFileIds ?? payload?.attachment_file_ids);
+}
+
+async function assertChatImages(database, userId, fileIds) {
+  if (!fileIds.length) return [];
+  const found = await database.query(
+    `SELECT file_id, owner_id, purpose, state, detected_content_type, original_filename
+       FROM files
+      WHERE file_id = ANY($1::text[])`,
+    [fileIds],
+  );
+  if (found.rowCount !== fileIds.length) {
+    const error = new Error("One of those photos is not a ready chat upload.");
+    error.status = 400;
+    error.code = "invalid_chat_image";
+    throw error;
+  }
+  const bound = await database.query(
+    `SELECT DISTINCT file_id FROM file_references WHERE file_id = ANY($1::text[])`,
+    [fileIds],
+  );
+  if (bound.rowCount) {
+    const error = new Error("That photo is already attached to a GRIDGO record. Upload it again for this chat.");
+    error.status = 409;
+    error.code = "file_already_attached";
+    throw error;
+  }
+  for (const row of found.rows) {
+    if (
+      row.owner_id !== userId
+      || row.purpose !== CHAT_IMAGE_PURPOSE
+      || row.state !== "ready"
+      || !["image/jpeg", "image/png", "image/webp"].includes(row.detected_content_type)
+    ) {
+      const error = new Error("Upload a JPEG, PNG, or WebP through POST /files with purpose support_chat_image.");
+      error.status = 400;
+      error.code = "invalid_chat_image";
+      throw error;
+    }
+  }
+  return found.rows;
+}
+
+async function bindChatImages(database, { fileIds, messageId, thread }) {
+  for (const [index, fileId] of fileIds.entries()) {
+    await database.query(
+      `INSERT INTO file_references (file_id, reference_type, reference_id, field, position, data)
+       VALUES ($1, 'support_chat_message', $2, 'attachmentFileIds', $3, $4::jsonb)`,
+      [
+        fileId,
+        messageId,
+        index,
+        JSON.stringify({
+          threadId: thread.id,
+          partyUserId: thread.partyUserId,
+          partyRole: thread.partyRole,
+          staffPeerUserId: thread.staffPeerUserId ?? null,
+        }),
+      ],
+    );
+  }
 }
 
 export function formatChatEvent(event) {
@@ -139,8 +281,9 @@ function threadSelect(viewerId) {
   return `
     SELECT
       t.id, t.party_user_id, t.party_role, t.last_message_at, t.last_message_preview,
-      t.last_message_sender_role, t.created_at, t.updated_at,
+      t.last_message_sender_role, t.created_at, t.updated_at, t.staff_peer_user_id,
       u.name AS party_name, u.email AS party_email,
+      p.name AS staff_peer_name, p.email AS staff_peer_email, p.role AS staff_peer_role,
       (
         SELECT count(*)::int
         FROM support_chat_messages m
@@ -152,6 +295,7 @@ function threadSelect(viewerId) {
       ) AS unread_count
     FROM support_chat_threads t
     JOIN users u ON u.id = t.party_user_id
+    LEFT JOIN users p ON p.id = t.staff_peer_user_id
   `;
 }
 
@@ -168,7 +312,7 @@ export async function findThread(database, id, viewerId) {
 export async function findPartyThread(database, userId, role, viewerId) {
   const result = await database.query(
     `${threadSelect(viewerId)}
-     WHERE t.party_user_id = $2 AND t.party_role = $3
+     WHERE t.party_user_id = $2 AND t.party_role = $3 AND t.staff_peer_user_id IS NULL
      ORDER BY t.last_message_at DESC NULLS LAST, t.updated_at DESC
      LIMIT 1`,
     [viewerId, userId, role],
@@ -180,7 +324,8 @@ export async function findPartyThread(database, userId, role, viewerId) {
 export async function findDraftPartyThread(database, userId, role, viewerId) {
   const result = await database.query(
     `${threadSelect(viewerId)}
-     WHERE t.party_user_id = $2 AND t.party_role = $3 AND t.last_message_at IS NULL
+     WHERE t.party_user_id = $2 AND t.party_role = $3
+       AND t.staff_peer_user_id IS NULL AND t.last_message_at IS NULL
      ORDER BY t.created_at DESC
      LIMIT 1`,
     [viewerId, userId, role],
@@ -194,6 +339,7 @@ export async function listPartyThreads(database, userId, role, viewerId, { inclu
   const result = await database.query(
     `${threadSelect(viewerId)}
      WHERE t.party_user_id = $2 AND t.party_role = $3
+       AND t.staff_peer_user_id IS NULL
        ${draftClause}
      ORDER BY t.last_message_at DESC NULLS LAST, t.updated_at DESC`,
     [viewerId, userId, role],
@@ -203,29 +349,150 @@ export async function listPartyThreads(database, userId, role, viewerId, { inclu
 
 export async function listThreads(database, viewerId, { role, q, limit } = {}) {
   const values = [viewerId];
-  const clauses = ["t.last_message_at IS NOT NULL"];
-  if (role && PARTY_ROLES.has(role)) {
+  const clauses = [
+    `(
+      t.last_message_at IS NOT NULL
+      OR t.staff_peer_user_id IS NOT NULL
+    )`,
+    `(
+      t.staff_peer_user_id IS NULL
+      OR t.party_user_id = $1
+      OR t.staff_peer_user_id = $1
+    )`,
+  ];
+  if (role === "staff") {
+    clauses.push("t.staff_peer_user_id IS NOT NULL");
+  } else if (role && PARTY_ROLES.has(role)) {
     values.push(role);
-    clauses.push(`t.party_role = $${values.length}`);
+    clauses.push(`t.party_role = $${values.length} AND t.staff_peer_user_id IS NULL`);
   }
   if (q && String(q).trim()) {
     values.push(likePattern(String(q).trim()));
     clauses.push(
-      `(u.name ILIKE $${values.length} ESCAPE '\\' OR u.email ILIKE $${values.length} ESCAPE '\\' OR coalesce(t.last_message_preview, '') ILIKE $${values.length} ESCAPE '\\')`,
+      `(u.name ILIKE $${values.length} ESCAPE '\\'
+        OR u.email ILIKE $${values.length} ESCAPE '\\'
+        OR coalesce(p.name, '') ILIKE $${values.length} ESCAPE '\\'
+        OR coalesce(p.email, '') ILIKE $${values.length} ESCAPE '\\'
+        OR coalesce(t.last_message_preview, '') ILIKE $${values.length} ESCAPE '\\')`,
     );
   }
   values.push(integerLimit(limit, 100));
   const result = await database.query(
     `${threadSelect(viewerId)}
      WHERE ${clauses.join(" AND ")}
-     ORDER BY t.last_message_at DESC, t.updated_at DESC
+     ORDER BY t.last_message_at DESC NULLS LAST, t.updated_at DESC
      LIMIT $${values.length}`,
     values,
   );
   return result.rows.map((row) => mapThread(row, viewerId));
 }
 
-export async function listMessages(database, threadId, viewerId, { after, limit } = {}) {
+function peopleRoles(role) {
+  if (role === "staff") return [...STAFF_ROLES];
+  if (role && CHAT_ROLES.has(role)) return [role];
+  return [...CHAT_ROLES];
+}
+
+export async function listPeople(database, viewerId, { q, role, limit } = {}) {
+  const values = [viewerId, peopleRoles(role)];
+  const clauses = [
+    "u.id <> $1",
+    "u.role = ANY($2::text[])",
+    "coalesce(u.account_status, 'active') <> 'removed'",
+  ];
+  if (q && String(q).trim()) {
+    values.push(likePattern(String(q).trim()));
+    clauses.push(
+      `(u.name ILIKE $${values.length} ESCAPE '\\' OR u.email ILIKE $${values.length} ESCAPE '\\')`,
+    );
+  }
+  values.push(integerLimit(limit, 20));
+  const result = await database.query(
+    `SELECT u.id, u.name, u.email, u.role,
+            NULLIF(btrim(u.data->>'imageUrl'), '') AS image_url
+       FROM users u
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY u.name ASC NULLS LAST, u.email ASC NULLS LAST
+      LIMIT $${values.length}`,
+    values,
+  );
+  return result.rows.map(mapPerson);
+}
+
+export async function findStaffThread(database, userId, peerId, viewerId) {
+  const result = await database.query(
+    `${threadSelect(viewerId)}
+     WHERE t.staff_peer_user_id IS NOT NULL
+       AND (
+         (t.party_user_id = $2 AND t.staff_peer_user_id = $3)
+         OR (t.party_user_id = $3 AND t.staff_peer_user_id = $2)
+       )
+     ORDER BY t.last_message_at DESC NULLS LAST, t.updated_at DESC
+     LIMIT 1`,
+    [viewerId, userId, peerId],
+  );
+  const row = result.rows[0];
+  return row ? mapThread(row, viewerId) : null;
+}
+
+async function insertStaffThread(database, { partyUserId, partyRole, staffPeerUserId }) {
+  const result = await database.query(
+    `INSERT INTO support_chat_threads (party_user_id, party_role, staff_peer_user_id)
+     VALUES ($1, $2, $3)
+     RETURNING id`,
+    [partyUserId, partyRole, staffPeerUserId],
+  );
+  return result.rows[0].id;
+}
+
+export async function openStaffThread(database, viewer, target) {
+  const existing = await findStaffThread(database, viewer.id, target.id, viewer.id);
+  if (existing) return existing;
+  try {
+    const id = await insertStaffThread(database, {
+      partyUserId: target.id,
+      partyRole: target.role,
+      staffPeerUserId: viewer.id,
+    });
+    return findThread(database, id, viewer.id);
+  } catch (error) {
+    if (error?.code === "23505") {
+      return findStaffThread(database, viewer.id, target.id, viewer.id);
+    }
+    throw error;
+  }
+}
+
+export async function openThreadForStaff(database, viewer, { userId, role }) {
+  if (!userId) {
+    return { error: "role", message: "Choose who to write to." };
+  }
+  if (userId === viewer.id) {
+    return { error: "self", message: "You already have this desk." };
+  }
+  if (!CHAT_ROLES.has(role)) {
+    return { error: "role", message: "Choose a client, shop, rider, or desk account." };
+  }
+  const found = await database.query(
+    `SELECT id, name, email, role, coalesce(account_status, 'active') AS account_status
+       FROM users
+      WHERE id = $1`,
+    [userId],
+  );
+  const target = found.rows[0];
+  if (!target || target.role !== role || target.account_status === "removed") {
+    return { error: "not_found", message: "That account is not on this desk." };
+  }
+  if (STAFF_ROLES.has(role)) {
+    return { thread: await openStaffThread(database, viewer, target) };
+  }
+  const existing = await findPartyThread(database, userId, role, viewer.id);
+  if (existing) return { thread: existing };
+  const id = await insertPartyThread(database, userId, role);
+  return { thread: await findThread(database, id, viewer.id) };
+}
+
+export async function listMessages(database, threadId, viewerId, { after, limit, q, media } = {}) {
   const values = [threadId];
   let afterClause = "";
   if (after && THREAD_ID.test(String(after))) {
@@ -234,19 +501,29 @@ export async function listMessages(database, threadId, viewerId, { after, limit 
       SELECT created_at, id FROM support_chat_messages WHERE id = $${values.length}
     )`;
   }
+  let searchClause = "";
+  if (q && String(q).trim()) {
+    values.push(likePattern(String(q).trim()));
+    searchClause = `AND m.body ILIKE $${values.length} ESCAPE '\\'`;
+  }
+  const mediaClause = media ? "AND cardinality(m.attachment_file_ids) > 0" : "";
   values.push(integerLimit(limit));
   const result = await database.query(
     `SELECT m.id, m.thread_id, m.sender_user_id, m.sender_role, m.body, m.created_at,
-            u.name AS sender_name
+            m.attachment_file_ids,
+            u.name AS sender_name,
+            NULLIF(btrim(u.data->>'imageUrl'), '') AS sender_image_url
      FROM support_chat_messages m
      JOIN users u ON u.id = m.sender_user_id
      WHERE m.thread_id = $1
        ${afterClause}
+       ${searchClause}
+       ${mediaClause}
      ORDER BY m.created_at ASC, m.id ASC
      LIMIT $${values.length}`,
     values,
   );
-  return result.rows.map((row) => mapMessage(row, viewerId));
+  return hydrateMessages(database, result.rows, viewerId);
 }
 
 export async function markThreadRead(database, threadId, userId) {
@@ -307,6 +584,7 @@ export async function postMessage(database, {
   senderUserId,
   senderRole,
   body,
+  attachmentFileIds = [],
   createParty,
   newThread,
 }) {
@@ -317,11 +595,15 @@ export async function postMessage(database, {
     viewerId: senderUserId,
   });
   if (!id) return null;
+  if (attachmentFileIds.length) {
+    await assertChatImages(database, senderUserId, attachmentFileIds);
+  }
   const inserted = await database.query(
-    `INSERT INTO support_chat_messages (thread_id, sender_user_id, sender_role, body)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, thread_id, sender_user_id, sender_role, body, created_at`,
-    [id, senderUserId, senderRole, body],
+    `INSERT INTO support_chat_messages
+        (thread_id, sender_user_id, sender_role, body, attachment_file_ids)
+     VALUES ($1, $2, $3, $4, $5::text[])
+     RETURNING id, thread_id, sender_user_id, sender_role, body, attachment_file_ids, created_at`,
+    [id, senderUserId, senderRole, body, attachmentFileIds],
   );
   const messageRow = inserted.rows[0];
   await database.query(
@@ -331,13 +613,55 @@ export async function postMessage(database, {
          last_message_sender_role = $4,
          updated_at = $2
      WHERE id = $1`,
-    [id, messageRow.created_at, messagePreview(body), senderRole],
+    [id, messageRow.created_at, messagePreview(body, attachmentFileIds.length), senderRole],
   );
   await markThreadRead(database, id, senderUserId);
-  const sender = await database.query("SELECT name FROM users WHERE id = $1", [senderUserId]);
+  const sender = await database.query(
+    `SELECT name, NULLIF(btrim(data->>'imageUrl'), '') AS image_url FROM users WHERE id = $1`,
+    [senderUserId],
+  );
   const thread = await findThread(database, id, senderUserId);
-  const message = mapMessage({ ...messageRow, sender_name: sender.rows[0]?.name ?? null }, senderUserId);
+  if (attachmentFileIds.length && thread) {
+    await bindChatImages(database, { fileIds: attachmentFileIds, messageId: messageRow.id, thread });
+  }
+  const filesById = await loadAttachmentMeta(database, attachmentFileIds);
+  const message = mapMessage({
+    ...messageRow,
+    sender_name: sender.rows[0]?.name ?? null,
+    sender_image_url: sender.rows[0]?.image_url ?? null,
+  }, senderUserId, filesById);
   return { thread, message };
+}
+
+export async function deleteThread(database, threadId) {
+  const files = await database.query(
+    `SELECT DISTINCT unnest(attachment_file_ids) AS file_id
+       FROM support_chat_messages
+      WHERE thread_id = $1
+        AND cardinality(attachment_file_ids) > 0`,
+    [threadId],
+  );
+  const fileIds = files.rows.map((row) => row.file_id).filter(Boolean);
+  if (fileIds.length) {
+    await database.query(
+      `DELETE FROM file_references
+        WHERE reference_type = 'support_chat_message'
+          AND file_id = ANY($1::text[])`,
+      [fileIds],
+    );
+    await database.query(
+      `UPDATE files
+          SET state = 'delete_pending'
+        WHERE file_id = ANY($1::text[])
+          AND purpose = $2
+          AND state = 'ready'
+          AND NOT EXISTS (
+            SELECT 1 FROM file_references r WHERE r.file_id = files.file_id
+          )`,
+      [fileIds, CHAT_IMAGE_PURPOSE],
+    );
+  }
+  await database.query(`DELETE FROM support_chat_threads WHERE id = $1`, [threadId]);
 }
 
 function forbidden(send, res, message = "This conversation is not available on this account.") {
@@ -367,6 +691,14 @@ function rateLimited(send, res) {
     error: "too_many_requests",
     message: "You are sending messages too fast. Wait a moment and try again.",
   });
+}
+
+function chatWriteError(send, res, error) {
+  if (error?.status && error?.code) {
+    send(res, error.status, { error: error.code, message: error.message });
+    return true;
+  }
+  return false;
 }
 
 async function partySnapshot(database, user, { markRead = false } = {}) {
@@ -452,11 +784,15 @@ async function replayMissed(database, user, lastEventId, writeEvent) {
     `SELECT
         t.id AS thread_id, t.party_user_id, t.party_role, t.last_message_at,
         t.last_message_preview, t.last_message_sender_role, t.created_at AS thread_created_at,
-        t.updated_at, u.name AS party_name, u.email AS party_email,
-        m.id, m.sender_user_id, m.sender_role, m.body, m.created_at, s.name AS sender_name
+        t.updated_at, t.staff_peer_user_id, u.name AS party_name, u.email AS party_email,
+        p.name AS staff_peer_name, p.email AS staff_peer_email, p.role AS staff_peer_role,
+        m.id, m.sender_user_id, m.sender_role, m.body, m.attachment_file_ids, m.created_at,
+        s.name AS sender_name,
+        NULLIF(btrim(s.data->>'imageUrl'), '') AS sender_image_url
      FROM support_chat_messages m
      JOIN support_chat_threads t ON t.id = m.thread_id
      JOIN users u ON u.id = t.party_user_id
+     LEFT JOIN users p ON p.id = t.staff_peer_user_id
      JOIN users s ON s.id = m.sender_user_id
      WHERE (m.created_at, m.id) > ($1, $2)
        ${scope}
@@ -464,7 +800,8 @@ async function replayMissed(database, user, lastEventId, writeEvent) {
      LIMIT 200`,
     values,
   );
-  for (const row of result.rows) {
+  const messages = await hydrateMessages(database, result.rows, user.id);
+  result.rows.forEach((row, index) => {
     writeEvent({
       type: "message",
       thread: mapThread({
@@ -478,11 +815,15 @@ async function replayMissed(database, user, lastEventId, writeEvent) {
         updated_at: row.updated_at,
         party_name: row.party_name,
         party_email: row.party_email,
+        staff_peer_user_id: row.staff_peer_user_id,
+        staff_peer_name: row.staff_peer_name,
+        staff_peer_email: row.staff_peer_email,
+        staff_peer_role: row.staff_peer_role,
         unread_count: 0,
       }, user.id),
-      message: mapMessage(row, user.id),
+      message: messages[index],
     });
-  }
+  });
 }
 
 export async function routeSupportChat({
@@ -539,6 +880,8 @@ export async function routeSupportChat({
       messages: await listMessages(database, snapshot.thread.id, user.id, {
         after: url.searchParams.get("after"),
         limit: url.searchParams.get("limit"),
+        q: url.searchParams.get("q"),
+        media: url.searchParams.get("media") === "1" || url.searchParams.get("media") === "true",
       }),
     });
     return true;
@@ -567,7 +910,12 @@ export async function routeSupportChat({
       return true;
     }
     const payload = await readBody(req);
-    const parsed = parseMessageBody(payload.body);
+    const attachments = parseAttachmentIdsFromPayload(payload);
+    if (!attachments.ok) {
+      invalid(send, res, attachments.message);
+      return true;
+    }
+    const parsed = parseMessageBody(payload.body, { allowEmpty: attachments.fileIds.length > 0 });
     if (!parsed.ok) {
       invalid(send, res, parsed.message);
       return true;
@@ -580,30 +928,37 @@ export async function routeSupportChat({
         return true;
       }
     }
-    const posted = await database.transaction(
-      async () => {
-        const posted = await postMessage(database, {
-          threadId: requestedId || undefined,
-          senderUserId: user.id,
-          senderRole: actorRole(user),
-          body: parsed.body,
-          createParty: { userId: user.id, role: actorRole(user) },
-          newThread: payload.newThread === true && !requestedId,
-        });
-        if (typeof notifyStaff === "function" && PARTY_ROLES.has(posted.message.senderRole)) {
-          await notifyStaff({
-            type: "ops_support_message",
-            title: "A support message arrived",
-            occurrenceKey: posted.message.id,
-            resource: "chat",
-            id: posted.message.id,
+    let posted;
+    try {
+      posted = await database.transaction(
+        async () => {
+          const posted = await postMessage(database, {
+            threadId: requestedId || undefined,
+            senderUserId: user.id,
+            senderRole: actorRole(user),
+            body: parsed.body,
+            attachmentFileIds: attachments.fileIds,
+            createParty: { userId: user.id, role: actorRole(user) },
+            newThread: payload.newThread === true && !requestedId,
           });
-        }
-        emitChatEvent(database, { type: "message", thread: posted.thread, message: posted.message });
-        return posted;
-      },
-      { lockKey: CHAT_LOCK },
-    );
+          if (typeof notifyStaff === "function" && PARTY_ROLES.has(posted.message.senderRole)) {
+            await notifyStaff({
+              type: "ops_support_message",
+              title: "A support message arrived",
+              occurrenceKey: posted.message.id,
+              resource: "chat",
+              id: posted.message.id,
+            });
+          }
+          emitChatEvent(database, { type: "message", thread: posted.thread, message: posted.message });
+          return posted;
+        },
+        { lockKey: CHAT_LOCK },
+      );
+    } catch (error) {
+      if (chatWriteError(send, res, error)) return true;
+      throw error;
+    }
     send(res, 201, posted);
     return true;
   }
@@ -643,6 +998,45 @@ export async function routeSupportChat({
     return true;
   }
 
+  if (method === "GET" && path === "/support-chat/people") {
+    if (!isStaffActor(user)) {
+      forbidden(send, res, "Only Operations can look up people on the chat desk.");
+      return true;
+    }
+    send(res, 200, {
+      people: await listPeople(database, user.id, {
+        q: url.searchParams.get("q"),
+        role: url.searchParams.get("role"),
+        limit: url.searchParams.get("limit"),
+      }),
+    });
+    return true;
+  }
+
+  if (method === "POST" && path === "/support-chat/threads") {
+    if (!isStaffActor(user)) {
+      forbidden(send, res, "Only Operations can start a conversation on the desk.");
+      return true;
+    }
+    const payload = await readBody(req);
+    const userId = typeof payload.userId === "string" ? payload.userId.trim() : "";
+    const role = typeof payload.role === "string" ? payload.role.trim() : "";
+    const opened = await database.transaction(
+      () => openThreadForStaff(database, user, { userId, role }),
+      { lockKey: CHAT_LOCK },
+    );
+    if (opened.error === "self" || opened.error === "role") {
+      invalid(send, res, opened.message);
+      return true;
+    }
+    if (opened.error === "not_found") {
+      send(res, 404, { error: "support_chat_person_not_found", message: opened.message });
+      return true;
+    }
+    send(res, 200, { thread: opened.thread });
+    return true;
+  }
+
   if (method === "GET" && threadMatch) {
     const thread = await findThread(database, threadMatch[1], user.id);
     if (!thread || !canViewThread(user, thread)) {
@@ -658,8 +1052,24 @@ export async function routeSupportChat({
       messages: await listMessages(database, thread.id, user.id, {
         after: url.searchParams.get("after"),
         limit: url.searchParams.get("limit"),
+        q: url.searchParams.get("q"),
+        media: url.searchParams.get("media") === "1" || url.searchParams.get("media") === "true",
       }),
     });
+    return true;
+  }
+
+  if (method === "DELETE" && threadMatch) {
+    const thread = await findThread(database, threadMatch[1], user.id);
+    if (!thread || !canViewThread(user, thread)) {
+      notFound(send, res);
+      return true;
+    }
+    await database.transaction(
+      () => deleteThread(database, thread.id),
+      { lockKey: CHAT_LOCK },
+    );
+    send(res, 200, { deleted: true, threadId: thread.id });
     return true;
   }
 
@@ -673,6 +1083,8 @@ export async function routeSupportChat({
       messages: await listMessages(database, thread.id, user.id, {
         after: url.searchParams.get("after"),
         limit: url.searchParams.get("limit"),
+        q: url.searchParams.get("q"),
+        media: url.searchParams.get("media") === "1" || url.searchParams.get("media") === "true",
       }),
     });
     return true;
@@ -688,24 +1100,37 @@ export async function routeSupportChat({
       return true;
     }
     const thread = await findThread(database, threadMessagesMatch[1], user.id);
-    if (!thread) {
+    if (!thread || !canViewThread(user, thread)) {
       notFound(send, res);
       return true;
     }
-    const parsed = parseMessageBody((await readBody(req)).body);
+    const payload = await readBody(req);
+    const attachments = parseAttachmentIdsFromPayload(payload);
+    if (!attachments.ok) {
+      invalid(send, res, attachments.message);
+      return true;
+    }
+    const parsed = parseMessageBody(payload.body, { allowEmpty: attachments.fileIds.length > 0 });
     if (!parsed.ok) {
       invalid(send, res, parsed.message);
       return true;
     }
-    const posted = await database.transaction(
-      () => postMessage(database, {
-        threadId: thread.id,
-        senderUserId: user.id,
-        senderRole: STAFF_ROLES.has(actorRole(user)) ? actorRole(user) : "ops_admin",
-        body: parsed.body,
-      }),
-      { lockKey: CHAT_LOCK },
-    );
+    let posted;
+    try {
+      posted = await database.transaction(
+        () => postMessage(database, {
+          threadId: thread.id,
+          senderUserId: user.id,
+          senderRole: STAFF_ROLES.has(actorRole(user)) ? actorRole(user) : "ops_admin",
+          body: parsed.body,
+          attachmentFileIds: attachments.fileIds,
+        }),
+        { lockKey: CHAT_LOCK },
+      );
+    } catch (error) {
+      if (chatWriteError(send, res, error)) return true;
+      throw error;
+    }
     if (!posted) {
       notFound(send, res);
       return true;

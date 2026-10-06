@@ -155,6 +155,16 @@ export async function routePhysicalInvoice({ req, url, store, user, readBody, no
     return { status: 200, body: { request }, mutated: false };
   }
 
+  // Super Admin setting, default off. A request already stored stays readable
+  // above, and Operations can still promise a time on PATCH.
+  if (store?.settings?.physicalInvoiceRequestsEnabled !== true) {
+    fail(
+      403,
+      "physical_invoice_requests_disabled",
+      "GRIDGO is not taking printed-invoice requests right now.",
+    );
+  }
+
   if (order.physicalInvoiceRequest) {
     fail(409, "physical_invoice_already_requested", "A physical invoice has already been requested for this order.");
   }

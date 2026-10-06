@@ -128,16 +128,26 @@ export function clerkUserFromWebhookData(data) {
     lastName: data.last_name,
     username: data.username,
     primaryEmailAddress: primary?.email_address ? { emailAddress: primary.email_address } : undefined,
+    imageUrl: data.image_url,
+    hasImage: data.has_image === true,
   };
+}
+
+/** Clerk's hosted portrait, only when the person set one. Generated initials are not a photo. */
+export function clerkImageUrl(clerkUser) {
+  const hasImage = clerkUser?.hasImage === true || clerkUser?.has_image === true;
+  const url = String(clerkUser?.imageUrl || clerkUser?.image_url || "").trim();
+  return hasImage && url ? url : null;
 }
 
 /**
  * Refresh the GRIDGO account's person copy from Clerk.
  *
- * Clerk owns first name, last name, and primary email. GRIDGO keeps a copy so
- * greetings, Operations lists, and mail still work when Clerk is not in the
- * request. Shop name, pin, floor phone, and floor contact are not touched.
- * A Clerk email that already belongs to another GRIDGO account is left alone.
+ * Clerk owns first name, last name, primary email, and the portrait. GRIDGO
+ * keeps a copy so greetings, Operations lists, mail, and chat still work when
+ * Clerk is not in the request. Shop name, pin, floor phone, and floor contact
+ * are not touched. A Clerk email that already belongs to another GRIDGO
+ * account is left alone.
  */
 export function applyClerkIdentityCopy(store, user, clerkUser) {
   if (!user || !clerkUser) return { mutated: false };
@@ -158,6 +168,13 @@ export function applyClerkIdentityCopy(store, user, clerkUser) {
       user.email = profile.email;
       mutated = true;
     }
+  }
+
+  const imageUrl = clerkImageUrl(clerkUser);
+  const currentImage = typeof user.imageUrl === "string" && user.imageUrl.trim() ? user.imageUrl.trim() : null;
+  if (currentImage !== imageUrl) {
+    user.imageUrl = imageUrl;
+    mutated = true;
   }
 
   return { mutated };

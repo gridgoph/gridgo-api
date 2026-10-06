@@ -123,6 +123,13 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 10 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
   },
+  // A picture on an Operations conversation. JPEG/PNG/WebP only; the
+  // contents must match the filename. Bound when the chat message is posted.
+  support_chat_image: {
+    roles: ["client", "supplier", "rider", "ops_admin", "super_admin"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
 });
 export const RIDER_DOCUMENT_TYPES = Object.freeze(["drivers_license", "or_cr", "selfie"]);
 const RIDER_DOCUMENT_TYPE_SET = new Set(RIDER_DOCUMENT_TYPES);
@@ -715,6 +722,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A tracker attachment is bound when the decision is saved: send its fileId in attachmentIds to POST /admin/tracker/:repo/:number/decisions.",
     );
   }
+  if (purpose === "support_chat_image") {
+    fail(
+      400,
+      "support_chat_image_not_attachable",
+      "A chat photo is bound when the message is sent: send its fileId in attachmentFileIds.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1195,6 +1209,21 @@ export function authorizeFileRead(user, store, file) {
   // Tracker evidence is the Super Admin's alone; Operations never reads it.
   if (file.purpose === "tracker_decision") {
     if (hasRole(user, "super_admin")) return;
+    forbidden();
+  }
+  if (file.purpose === "support_chat_image") {
+    if (["ops_admin", "super_admin"].includes(user.role) || hasRole(user, "ops_admin") || hasRole(user, "super_admin")) {
+      return;
+    }
+    if (file.ownerId === user.id) return;
+    const onThread = (file.references || []).some((reference) => (
+      reference.type === "support_chat_message"
+      && (
+        (reference.partyUserId === user.id && (!reference.partyRole || reference.partyRole === user.role))
+        || reference.staffPeerUserId === user.id
+      )
+    ));
+    if (onThread) return;
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
