@@ -63,6 +63,9 @@ MINIO_SECRET_KEY=<bucket secret>
 GITHUB_TRACKER_TOKEN=
 GITHUB_TRACKER_REPOS=
 FIRSTMATE_TRACKER_TOKEN=
+# Optional automated app releases (docs/RELEASE_ANNOUNCEMENTS_API.md).
+# Same value as the RELEASE_ANNOUNCE_TOKEN repository secret in all three apps.
+RELEASE_ANNOUNCE_TOKEN=
 ```
 
 `minio.env` is read by MinIO and its initializer:

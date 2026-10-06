@@ -1,3 +1,5 @@
+import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
+import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
 import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
 import { redeemStaffInvite } from './staff-access.js';
 import { routeOrganization, organizationProjection, sweepOfficerConfirmations } from "./organization-routes.js";
@@ -158,7 +160,6 @@ import {
   releaseDeviceToken,
   removeDeviceTokenIds,
   unclaimedDeviceLimit,
-  unclaimedDeviceTokens,
   unregisterDeviceToken,
 } from "./push.js";
 import {
@@ -342,8 +343,8 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
  * not one a call site can forget: an unclaimed device has no user, so there is
  * no notification record for it to be derived from, and no `save()` to hook.
  * The rule the hook exists to enforce — one push per readable notification —
- * still holds, because this path carries no notification at all. It has exactly
- * one call site (`POST /announcements`), and `pushDelivery.send` refuses
+ * still holds, because this path carries no notification at all. It is shared by
+ * staff announcements and release announcements, and `pushDelivery.send` refuses
  * anything but a stranger-safe message for these devices regardless.
  */
 function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
@@ -1175,22 +1176,7 @@ function isSuper(user) {
   return identityHasMembership(user, "super_admin");
 }
 
-/**
- * Who a platform announcement reaches.
- *
- * `everyone` is the only audience that extends to unclaimed devices, and it is
- * the reason they exist: an app-update notice has to reach an install whose
- * owner never signed in. A role-targeted audience cannot include them — an
- * unclaimed handset has no role, and guessing one would put a print-shop
- * message on a rider's lock screen.
- */
-const ANNOUNCEMENT_AUDIENCES = new Map([
-  ["everyone", null],
-  ["clients", ["client"]],
-  ["suppliers", ["supplier"]],
-  ["riders", ["rider"]],
-  ["ops", ["ops_admin", "super_admin"]],
-]);
+// Staff audience rules and release app scoping live in announcements.js.
 const ANNOUNCEMENT_TITLE_MAX = 120;
 const ANNOUNCEMENT_BODY_MAX = 500;
 
@@ -1897,6 +1883,17 @@ async function handleRequest(req, res) {
     })) {
       return;
     }
+    if (await routeReleaseAnnouncement({
+      req, res, pathname, send, readBody, database, enqueueMutation,
+      broadcast: async (input) => {
+        const store = await load();
+        const { announcement, unclaimed } = appendAnnouncement(store, input, { id, at: now(), audit });
+        await save(store);
+        database.afterCommit(() => deliverAnnouncementPush(unclaimed, announcement));
+        return announcement;
+      },
+    })) return;
+
     // firstmate's service token, not a Clerk session.
     if (await tracker.routeFirstmate({ req, res, pathname, url, send })) return;
     if (await routeFirstmateIssueReports({ req, res, pathname, url, send, database, storage: objectStorage })) return;
@@ -3144,57 +3141,12 @@ async function handleRequest(req, res) {
       }
       const imageUrl = image.imageUrl;
 
-      const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
-      const recipients = store.users.filter((candidate) => roles === null || roles.some(role=>hasRole(store,candidate.id,role)));
-      const announcementId = id("anc");
-      const at = now();
-      for (const recipient of recipients) {
-        store.notifications.push({
-          id: id("ntf"),
-          userId: recipient.id,
-          type: "announcement",
-          ...(roles ? {audienceRoles:roles} : {}),
-          orderId: null,
-          announcementId,
-          title,
-          body: text,
-          ...(imageUrl ? { imageUrl } : {}),
-          read: false,
-          at,
-        });
-      }
-      // Read before `save()`, which queues the per-account outbox rows; the
-      // records themselves carry no identity, so the anonymous fan-out below
-      // can use them after the write.
-      const unclaimed = audience === "everyone" ? unclaimedDeviceTokens(store) : [];
-      audit(store, {
-        actor: user,
-        action: "announcement.broadcast",
-        entityType: "announcement",
-        entityId: announcementId,
-        detail: {
-          audience,
-          title,
-          notifiedUsers: recipients.length,
-          unclaimedDevices: unclaimed.length,
-          hasImage: Boolean(imageUrl),
-        },
-        reason: body.reason || null,
-      });
+      const { announcement, unclaimed } = appendAnnouncement(store, {
+        audience, title, body: text, imageUrl, actor: user, reason: body.reason || null,
+      }, { id, at: now(), audit });
       await save(store);
-      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text, imageUrl }));
-      return send(res, 201, {
-        announcement: {
-          id: announcementId,
-          audience,
-          title,
-          body: text,
-          imageUrl,
-          at,
-          notifiedUsers: recipients.length,
-          unclaimedDevices: unclaimed.length,
-        },
-      });
+      database.afterCommit(() => deliverAnnouncementPush(unclaimed, announcement));
+      return send(res, 201, { announcement });
     }
 
     if (req.method === "GET" && (pathname === "/me/production-lapses" || /^\/users\/[^/]+\/production-lapses$/.test(pathname))) {
@@ -6342,6 +6294,11 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (isSelfQueuedFileMutation) {
+    void handleRequest(req, res);
+    return;
+  }
+  // Auth is checked before the release handler enters its domain transaction.
+  if (isReleaseAnnouncementRoute(pathname)) {
     void handleRequest(req, res);
     return;
   }

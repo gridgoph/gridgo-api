@@ -4858,3 +4858,92 @@ test('organization verification, handover, notices and code attempts persist thr
     await database.close();
   }
 });
+
+test("release announcements authenticate machine tokens and hide unconfigured routes", { skip: !DATABASE_URL }, async () => {
+  const instance = await startApi({ RELEASE_ANNOUNCE_TOKEN: "", FIRSTMATE_TRACKER_TOKEN: "" });
+  try {
+    for (const route of ["/release-announcements", "/firstmate/release-announcements"]) {
+      const result = await request(instance.api, route, { method: "POST", body: { app: "client", version: "1.0.123" } });
+      assert.equal(result.status, 404);
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise(resolve => instance.child.once("exit", resolve));
+  }
+});
+
+test("release announcements are atomic, audience-scoped and idempotent across both machine routes", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const fcm = await startMockFcm();
+  const instance = await startApi({ ...fcm.env, RELEASE_ANNOUNCE_TOKEN: "release-test-secret", FIRSTMATE_TRACKER_TOKEN: "firstmate-test-secret", GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: "0" });
+  const post = (body, token = "release-test-secret", route = "/release-announcements") => request(instance.api, route, {
+    method: "POST", body, headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  try {
+    for (const token of [null, "wrong", "firstmate-test-secret"]) {
+      assert.equal((await post({ app: "client", version: "1.0.123" }, token)).status, 401);
+    }
+    assert.equal((await post({ app: "client", version: "1.0.123" }, "release-test-secret", "/firstmate/release-announcements")).status, 401);
+    for (const body of [null, {}, { app: "ops", version: "1.0.123" }, { app: "client", version: "v1.0.123" }, { app: "client", version: "1.0.123\n" }, { app: "client", version: "1.0.123\r" }, { app: "client", version: 123 }]) {
+      assert.equal((await post(body)).status, 400);
+    }
+    await database.query("DELETE FROM release_announcements");
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      // One identity with two memberships and two apps must get only this app's push.
+      store.userRoleMemberships.push({ userId: "user_client", role: "rider", createdAt: AT });
+      for (const [deviceId, userId, appRole] of [
+        ["dev_client_release", "user_client", "client"], ["dev_dual_release", "user_client", "rider"],
+        ["dev_supplier_release", "user_supplier", "supplier"], ["dev_rider_release", "user_rider", "rider"],
+        ["dev_anon_client_release", null, "client"], ["dev_anon_supplier_release", null, "supplier"],
+        ["dev_anon_rider_release", null, "rider"], ["dev_anon_unknown_release", null, null],
+      ]) store.deviceTokens.push({ id: deviceId, userId, appRole, token: deviceId + ":" + "x".repeat(120), platform: "android", createdAt: AT, updatedAt: AT });
+      await saveStore(database, store);
+    });
+    for (const app of ["client", "supplier", "rider"]) {
+      const body = { app, version: "1.0.123" };
+      const results = await Promise.all([post(body), post(body, "firstmate-test-secret", "/firstmate/release-announcements")]);
+      assert.deepEqual(results.map(r => r.status).sort(), [200, 201]);
+      assert.deepEqual(results[0].body.announcement, results[1].body.announcement);
+      const announcement = results[0].body.announcement;
+      assert.equal(announcement.audience, `${app}s`);
+      assert.equal(announcement.unclaimedDevices, 1);
+      const store = await loadStore(database);
+      const notifications = store.notifications.filter(n => n.announcementId === announcement.id);
+      const expectedUsers = app === "client" ? ["user_client", "user_promote"] : app === "rider" ? ["user_client", "user_rider"] : ["user_supplier"];
+      assert.deepEqual(notifications.map(n => n.userId).sort(), expectedUsers);
+      assert.ok(notifications.every(n => n.type === "announcement" && n.appRole === app));
+      assert.equal(store.auditLog.filter(a => a.entityId === announcement.id).length, 1);
+      const again = await post(body);
+      assert.equal(again.status, 200);
+      assert.deepEqual(again.body.announcement, announcement);
+    }
+    const releaseSends = () => fcm.sends.filter(s => s.body.message.notification.title.endsWith("1.0.123 is ready"));
+    for (let attempt = 0; attempt < 200 && releaseSends().length < 7; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(releaseSends().length, 7, instance.output());
+    assert.ok(releaseSends().every(s => !s.body.message.token.includes("unknown")));
+    for (const send of releaseSends()) {
+      assert.equal(send.body.message.data.type, "announcement");
+      assert.match(send.body.message.notification.title, /^GRIDGO (Client|Supplier|Rider) 1\.0\.123 is ready$/);
+      assert.equal(send.body.message.notification.body, "Update now for the latest fixes and features.");
+      if (send.body.message.token.includes("anon")) assert.deepEqual(send.body.message.data, { type: "announcement" });
+    }
+    assert.equal((await database.query("SELECT count(*) AS count FROM release_announcements")).rows[0].count, 3);
+    // Inbox retention cannot erase the durable idempotency history.
+    await database.query("DELETE FROM notifications WHERE type = 'announcement'");
+    const replay = await post({ app: "client", version: "1.0.123" });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.announcement.notifiedUsers, 2);
+    assert.equal((await database.query("SELECT count(*) AS count FROM notifications WHERE type = 'announcement'")).rows[0].count, 0);
+    const nextVersion = await post({ app: "client", version: "1.0.124" });
+    assert.equal(nextVersion.status, 201);
+    assert.notEqual(nextVersion.body.announcement.id, replay.body.announcement.id);
+
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise(resolve => instance.child.once("exit", resolve));
+    await fcm.close();
+    await database.close();
+  }
+});
