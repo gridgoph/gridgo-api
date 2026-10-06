@@ -367,8 +367,9 @@ Set drop-offs in one call with:
 ## Checkout and invoice
 
 Multi-shop baskets use the additive [multi-shop checkout contract](MULTI_SHOP_CHECKOUT_API.md):
-one basket deadline and fulfillment choice, 100% upfront, one combined receipt,
-and independent order ledgers per shop. The single-shop flow below is unchanged.
+per-line deadlines and one basket fulfillment choice, 100% upfront for multiple groups,
+one combined receipt, and independent order ledgers per shop and deadline.
+The single-group flow below is unchanged. Field names and compatibility: [per-line deadlines](PER_LINE_DEADLINES_API.md).
 
 Upload the QR Ph screenshot with `POST /files`, `purpose=payment_proof`, then:
 
