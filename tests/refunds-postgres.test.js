@@ -325,8 +325,12 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
-async function apiForTest(t, { bytes } = {}) {
-  const storage = http.createServer((req, res) => {
+async function apiForTest(t, { bytes, storageControl = {} } = {}) {
+  const storage = http.createServer(async (req, res) => {
+    if (req.url.startsWith('/refund-test/private/')) {
+      storageControl.requests?.push({ method: req.method, url: req.url });
+      if (storageControl.unavailable) { req.socket.destroy(); return; }
+    } else if (storageControl.initialization) await storageControl.initialization;
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
     else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
     else if (req.method === 'GET' && bytes) { res.writeHead(200, { 'Content-Length': bytes.length }); res.end(bytes); }
@@ -354,28 +358,56 @@ async function apiForTest(t, { bytes } = {}) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.ok(healthy, output);
-  return async (key, method, path, body, opts = {}) => {
+  const api = async (key, method, path, body, opts = {}) => {
     const res = await fetch(`${origin}${path}`, { method,
       headers: { ...(key ? { Authorization: `Bearer ${token(key, opts.claims)}` } : {}),
         'Content-Type': 'application/json', 'Idempotency-Key': opts.key || id('httpkey'), ...opts.headers },
       ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: res.status, body: opts.raw ? Buffer.from(await res.arrayBuffer()) : await res.json(), headers: res.headers };
   };
+  api.waitForStorage = async () => {
+    for (let n = 0; n < 200; n++) {
+      if (output.includes('MinIO ready:')) return;
+      if (child.exitCode !== null) throw new Error(output);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.fail(`Storage initialization did not finish: ${output}`);
+  };
+  if (!storageControl.initialization) await api.waitForStorage();
+  return api;
 }
 
 test('refund receipt content preserves bound-client privacy and signed-read access', { skip: !DATABASE_URL }, async (t) => {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
   await fixture(db);
   const bytes = Buffer.alloc(100, 0x5a);
-  const api = await apiForTest(t, { bytes });
-  for (const key of ['client', 'other', 'supplier', 'rider']) {
-    assert.equal((await api(key, 'GET', '/files/receipt/content')).status, 403);
-  }
+  // Hold the startup bucket check until denied reads have exercised the readiness gate.
+  let finishInitialization;
+  const initialization = new Promise((resolve) => { finishInitialization = resolve; });
+  t.after(() => finishInitialization());
+  const storageControl = { initialization, requests: [] };
+  const api = await apiForTest(t, { bytes, storageControl });
+  const assertDenied = async (keys) => {
+    const before = storageControl.requests.length;
+    for (const key of keys) for (const suffix of ['content', 'download-url']) {
+      const result = await api(key, 'GET', `/files/receipt/${suffix}`);
+      assert.equal(result.status, key ? 403 : 401, `${key}: ${suffix}`);
+      assert.equal(result.body.error, key ? 'forbidden' : 'unauthorized');
+    }
+    assert.equal(storageControl.requests.length, before, 'denied reads must not touch object storage');
+  };
+  const initializing = await api('ops', 'GET', '/files/receipt/content');
+  assert.equal(initializing.status, 503);
+  assert.equal(initializing.body.error, 'storage_initializing');
+  await assertDenied([null, 'client', 'other', 'supplier', 'rider']);
   let refund = await request(db);
   refund = await review(db, refund);
   refund = await settle(db, refund);
   refund = await reserve(db, refund);
   await pay(db, refund);
+  await assertDenied([null, 'other', 'supplier', 'rider']);
+  finishInitialization();
+  await api.waitForStorage();
   for (const key of [null, 'client', 'other', 'supplier', 'rider', 'ops', 'super']) {
     const signed = await api(key, 'GET', '/files/receipt/download-url');
     const content = await api(key, 'GET', '/files/receipt/content', null, { raw: true });
@@ -389,6 +421,14 @@ test('refund receipt content preserves bound-client privacy and signed-read acce
       assert.equal(content.status, key ? 403 : 401);
     }
   }
+  await assertDenied([null, 'other', 'supplier', 'rider']);
+  storageControl.unavailable = true;
+  for (const suffix of ['content', 'download-url']) {
+    const unavailable = await api('client', 'GET', `/files/receipt/${suffix}`);
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.error, 'minio_unavailable');
+  }
+  await assertDenied([null, 'other', 'supplier', 'rider']);
 });
 
 test('live HTTP refund authorization, signed QR privacy, production race and durable inbox', { skip: !DATABASE_URL }, async (t) => {

@@ -498,6 +498,14 @@ export function pushMessageFor(notification, env = process.env) {
   const image = resolveFcmImageUrl(notification.imageUrl, env);
   const presentation = pushPresentation(notification);
   const publicMessage = ["announcement", "season_window"].includes(notification.type);
+  // Fixed offer copy carries no customer, address, or money fields.
+  if (notification.type === "dispatch_available") return {
+    title: "New delivery job",
+    body: "A job is ready for pickup. Open GRIDGO to view it.",
+    data,
+    androidChannelId: presentation.androidChannelId,
+    sound: presentation.sound,
+  };
   return {
     title: publicMessage ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
     body: publicMessage ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",

@@ -30,6 +30,7 @@ import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
+import { availableDispatch } from "./dispatch-policy.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -2617,7 +2618,6 @@ async function handleRequest(req, res) {
 
     const needsInitializedStorage =
       (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
-      (req.method === "GET" && /^\/files\/[^/]+\/(download-url|content)$/.test(pathname)) ||
       (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
     if (storageInitializing && needsInitializedStorage) {
       throw new AttachmentError(
@@ -2744,6 +2744,10 @@ async function handleRequest(req, res) {
       authorizeFileRead(user, store, file);
       if (serveContent && !["payment_proof", "payout_receipt", "refund_receipt"].includes(file.purpose)) {
         throw new AttachmentError(400, "file_content_not_supported", "Only payment proofs and payout or refund receipts can be read through this route.");
+      }
+      // Refused readers must get the same response regardless of storage readiness.
+      if (storageInitializing) {
+        throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
       }
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
@@ -5813,9 +5817,8 @@ async function handleRequest(req, res) {
       // destination and not a different job. Only the unfinished
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => !isContainedPickup(o) && !recoveryHeld(o)
-          && (o.state === "ready_for_dispatch"
-            || (o.state === "rider_assigned" && o.riderId === user.id)),
+        (o) => availableDispatch(o) || (!isContainedPickup(o) && !recoveryHeld(o)
+          && o.state === "rider_assigned" && o.riderId === user.id),
       );
       return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });
     }
