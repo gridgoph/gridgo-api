@@ -46,7 +46,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rows.map((row) => row.table_name));
     for (const table of [
-      "staff_roles", "staff_profiles", "staff_invites", "hub_handouts",
+      "release_announcements", "staff_roles", "staff_profiles", "staff_invites", "hub_handouts",
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "organization_accounts", "organization_email_challenges",
@@ -129,6 +129,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "1791590400000_organization_accounts",
         "1791676800000_staff_hub_handovers",
       "1791763200000_per_line_deadlines",
+      "1791849600000_release_announcements",
       ],
     );
 
@@ -313,6 +314,12 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       const column = (await client.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='deadline'", [schema, table])).rows[0];
       assert.equal(column.is_nullable, 'YES');
     }
+    await client.query("INSERT INTO release_announcements(app,version,announcement) VALUES ('client','1.0.123','{}')");
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, 'down', 1, client)), /deduplication history must be retained/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM release_announcements");
+    await runner(migrationOptions(schema, 'down', 1, client));
     await runner(migrationOptions(schema, 'down', 1, client));
 
     // Rollback is allowed only before staff configuration or handovers exist.
