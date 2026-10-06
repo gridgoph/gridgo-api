@@ -1,3 +1,4 @@
+import { groupSummary } from "./cart-groups.js";
 import { publicOrganizationDiscount } from "./organization-money.js";
 import { clientInvoice } from "./invoice-projection.js";
 import { publicOrderFor } from './operational-model.js';
@@ -29,12 +30,13 @@ export function publicBasket(store, basket, user) {
   const orders = basket.orderIds.map((id) => store.orders.find((order) => order.id === id));
   return {
     id: basket.id, receiptOrderId: basket.receiptOrderId, totalMinor: basket.totalMinor,
+    ...groupSummary(orders), upfrontReason: "multiple_fulfillment_groups",
     deadline: basket.deadline, fulfillmentMode: basket.fulfillmentMode, createdAt: basket.createdAt,
     payment: { ...basket.payment, amountMinor: basket.totalMinor },
     ...(basket.pickupFeeMinor != null ? { pickupFeeMinor: basket.pickupFeeMinor,
       hubPickup: { ...structuredClone(orders[0].hubPickup), feeMinor: basket.pickupFeeMinor } } : {}),
     groups: orders.map((order, index) => ({
-      orderId: order.id, label: shopLabel(index), state: order.state,
+      orderId: order.id, label: order.groupLabel || shopLabel(index), deadline: order.deadline ?? order.basketDeadline ?? basket.deadline, state: order.state,
       ...publicOrganizationDiscount(order),
       clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor),
       ...(privileged ? { itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor } : {}),

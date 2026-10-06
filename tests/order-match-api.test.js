@@ -1921,14 +1921,14 @@ test("match tokens persist across requests, select another shop and keep deadlin
   const persistedLine = (await database.query("SELECT supplier_id, match_deadline FROM client_cart_lines WHERE cart_id=$1", [cartId])).rows[0];
   assert.equal(persistedLine.supplier_id, "supplier_b");
   assert.equal(persistedLine.match_deadline, deadline);
-  // The basket deadline is revalidated at checkout after a change.
-  await database.query("UPDATE client_carts SET deadline = $1 WHERE id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
+  // The product deadline is revalidated at checkout after a change.
+  await database.query("UPDATE client_cart_lines SET deadline = $1 WHERE cart_id = $2", [new Date(Date.now() + 1000).toISOString(), cartId]);
   const payment = { method: "qr_manual", proofFileId: "file_qr", reference: "OTHER-SHOP" };
   const late = await post(`/me/carts/${cartId}/checkout`, { payment });
   assert.equal(late.status, 409, JSON.stringify(late.body));
   assert.equal(late.body.error, "deadline_not_met");
   assert.equal(Number((await database.query("SELECT count(*) FROM orders")).rows[0].count), 0, "failed checkout rolls back");
-  await database.query("UPDATE client_carts SET deadline = $1 WHERE id = $2", [deadline, cartId]);
+  await database.query("UPDATE client_cart_lines SET deadline = $1 WHERE cart_id = $2", [deadline, cartId]);
   const placed = await post(`/me/carts/${cartId}/checkout`, { payment });
   assert.equal(placed.status, 201, JSON.stringify(placed.body));
   const order = (await loadStore(database)).orders.find((row) => row.id === placed.body.order.id);
@@ -2025,8 +2025,9 @@ test("multi-shop artwork lists and signed downloads enforce job ownership throug
   assert.equal((await call("/files/file_art_legacy/download-url", { subject: "clerk_rider" })).status, 403);
 });
 
-for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [2, 'pickup'], [3, 'pickup']]) {
-  test(`multi-shop ${groupCount} ${fulfillmentMode} groups persist one payment and receipt, with independent payouts and refunds`, { skip: !DATABASE_URL }, async (t) => {
+for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'delivery'], [2, 'pickup'], [3, 'pickup'],
+  [2, 'delivery', 'same-shop'], [2, 'pickup', 'same-shop'], [2, 'delivery', 'across-shops']]) {
+  test(`multi-shop ${groupCount} ${fulfillmentMode} ${dateMode || 'single-date'} groups persist one payment and receipt, with independent payouts and refunds`, { skip: !DATABASE_URL }, async (t) => {
     const database = createDatabase({ DATABASE_URL });
     t.after(() => database.close());
     await fixture(database);
@@ -2065,23 +2066,26 @@ for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [
       defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } }, 'clerk_client');
     assert.equal(created.status, 201, JSON.stringify(created.body));
     const cartId = created.body.cart.id;
-    for (const suffix of ['a', 'b', 'c'].slice(0, groupCount)) {
+    for (const [index, suffix] of (dateMode === 'same-shop' ? ['a', 'a'] : ['a', 'b', 'c'].slice(0, groupCount)).entries()) {
+      const lineDate = new Date(Date.parse(deadline) + index * 86400000).toISOString();
       let selection = {};
       if (fulfillmentMode === 'pickup') {
-        const match = await post('/me/matches', { subcategoryCode: 'flyers', cartId, fulfillmentMode }, 'clerk_client');
+        const match = await post('/me/matches', { subcategoryCode: 'flyers', cartId, fulfillmentMode, ...(dateMode ? { deadline: lineDate } : {}) }, 'clerk_client');
         assert.equal(match.status, 200, JSON.stringify(match.body));
         const listing = [...match.body.listings, ...match.body.otherListings].find(row => row.id === `item_supplier_${suffix}`);
         assert.ok(listing, JSON.stringify(match.body));
         selection = { selectToken: listing.selectToken, matchRequestId: match.body.matchRequestId };
       }
-      const added = await post(`/me/carts/${cartId}/lines`, { catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...selection }, 'clerk_client');
+      const added = await post(`/me/carts/${cartId}/lines`, { catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...selection, ...(dateMode ? { deadline: lineDate } : {}) }, 'clerk_client');
       assert.equal(added.status, 201, JSON.stringify(added.body));
     }
     // A failure in a later group must roll back earlier groups and file bindings.
     await database.transaction(async () => {
       const store = await loadStore(database);
-      store.carts.find((cart) => cart.id === cartId).deadline = new Date(Date.now() + 2 * 86400000).toISOString();
-      const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+      const tooSoon = new Date(Date.now() + 2 * 86400000).toISOString();
+      store.carts.find((cart) => cart.id === cartId).deadline = tooSoon;
+      for (const line of store.cartLines.filter(line => line.cartId === cartId && line.deadline)) line.deadline = tooSoon;
+      const service = store.supplierServices.find((row) => row.supplierId === (dateMode === 'same-shop' ? 'supplier_a' : 'supplier_b'));
       service.turnaroundHours = 500;
       service.standardTurnaroundHours = 500;
       await saveStore(database, store);
@@ -2095,7 +2099,10 @@ for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [
       const cart = store.carts.find((row) => row.id === cartId);
       assert.equal(cart.state, 'draft');
       cart.deadline = deadline;
-      const service = store.supplierServices.find((row) => row.supplierId === 'supplier_b');
+      for (const [index, line] of store.cartLines.filter(line => line.cartId === cartId).entries()) {
+        if (line.deadline) line.deadline = new Date(Date.parse(deadline) + (dateMode ? index : 0) * 86400000).toISOString();
+      }
+      const service = store.supplierServices.find((row) => row.supplierId === (dateMode === 'same-shop' ? 'supplier_a' : 'supplier_b'));
       service.turnaroundHours = 24;
       service.standardTurnaroundHours = 24;
       await saveStore(database, store);
@@ -2112,6 +2119,19 @@ for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [
     const { basket, invoice } = placed.body;
     const [first, second] = basket.groups.map((group) => group.orderId);
     assert.equal(basket.groups.length, groupCount);
+    if (dateMode) {
+      const dates = [deadline, new Date(Date.parse(deadline) + 86400000).toISOString()];
+      assert.equal(basket.deadline, null);
+      assert.deepEqual(basket.groups.map(group => group.deadline), dates);
+      assert.deepEqual(invoice.groups.map(group => group.deadline), dates);
+      const persistedDates = await loadStore(database);
+      assert.deepEqual(persistedDates.cartLines.filter(line => line.cartId === cartId).map(line => line.deadline), dates);
+      for (const [index, group] of basket.groups.entries()) {
+        assert.equal(persistedDates.orders.find(order => order.id === group.orderId).deadline, dates[index]);
+        assert.equal(persistedDates.orderJobs.find(job => job.orderId === group.orderId).deadline, dates[index]);
+      }
+      await assert.rejects(database.query("UPDATE orders SET data=jsonb_set(data,'{deadline}',to_jsonb('2030-01-01'::text)) WHERE id=$1", [first]), /group deadline is immutable/);
+    }
     assert.equal(basket.totalMinor, before.clientQuote.totalMinor);
     assert.equal((await call(`/orders/${first}`, { subject: 'clerk_supplier_a' })).status, 403);
     const expectedPickup = groupCount === 2 ? [1251, 1250] : [834, 834, 833];
@@ -2182,7 +2202,7 @@ for (const [groupCount, fulfillmentMode] of [[2, 'delivery'], [3, 'delivery'], [
       const assigned = await post(`/orders/${second}/transition`, { state: 'supplier_assigned' });
       assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
       assert.equal(assigned.body.order.shopAcceptance.workingMinutes, 60);
-      const declined = await post(`/orders/${second}/decline`, { reason: 'Unable to fulfil this group' }, 'clerk_supplier_b');
+      const declined = await post(`/orders/${second}/decline`, { reason: 'Unable to fulfil this group' }, dateMode === 'same-shop' ? 'clerk_supplier_a' : 'clerk_supplier_b');
       assert.equal(declined.status, 200, JSON.stringify(declined.body));
       assert.equal((await loadStore(database)).orders.find((order) => order.id === first).state, 'production');
     }

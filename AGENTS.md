@@ -40,7 +40,7 @@ Client catalogue privacy is staged: `docs/CLIENT_CATALOG_PRIVACY.md` defines cli
 
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
 
-Multi-shop basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md`. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
+Basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md` and `docs/PER_LINE_DEADLINES_API.md`. Group by shop and line deadline; multiple groups (even at one shop) pay 100% upfront. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
 
 - New requests opt into pre-match delivery/hub pickup via `fulfillmentMode`; token selection locks the cart choice. Hub hours/fees are Super Admin settings; pickup fee defaults to zero and occupies the existing fulfillment charge slot. Contract and released-build compatibility: `docs/ORDER_MATCH_API.md#fulfillment-before-matching`.
 - Match priority, reason badges, anonymous alternatives, and expiring selection-token/cart-deadline semantics are defined in `docs/ORDER_MATCH_API.md`. Rank only deadline-capable listings; never restore weighted or same-shop boosts.
