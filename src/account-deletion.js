@@ -13,7 +13,7 @@ const project = (row) => ({
 // This records a request only. Operations must verify web ownership and complete
 // the deletion separately before recording completion here.
 export async function routeAccountDeletion({ req, url, user, database, readBody, onEvent }) {
-  const path = url.pathname;
+  const path = url.pathname === '/api/account-deletion-requests' ? '/account-deletion-requests' : url.pathname;
   const app = path === '/me/account-deletion-request';
   const web = path === '/account-deletion-requests';
   const staff = path === '/ops/account-deletion-requests' || path.startsWith('/ops/account-deletion-requests/');

@@ -192,5 +192,6 @@ test('HTTP requests bypass account holds, audit atomically and notify only staff
   assert.equal((await request(instance.api, '/ops/account-deletion-requests', { token: clerkToken(`${PREFIX}_super_admin`) })).status, 200);
   const web = await request(instance.api, '/account-deletion-requests', { method: 'POST', body: { email: `${PREFIX}@example.test`, confirmed: true } });
   assert.equal(web.status, 202);
+  assert.equal((await request(instance.api, '/api/account-deletion-requests', { method: 'POST', body: { email: `${PREFIX}@example.test`, confirmed: true } })).status, 202);
   assert.equal((await request(instance.api, '/me/account-deletion-request', { method: 'POST', body: { confirmed: true } })).status, 401);
 });

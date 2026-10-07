@@ -13,7 +13,8 @@ It does not erase accounts, revoke sign-in, anonymise records, or handle Clerk
   `{ "email": "account@example.test", "confirmed": true }`. A web email is
   unverified: never links an account by email. Operations must verify ownership
   before taking any deletion action. Limited to 10 attempts per connection per
-  10 minutes. Use the landing site's `/delete-account` page.
+  10 minutes. `/api/account-deletion-requests` is an equivalent path for the
+  landing development proxy. Use the landing site's `/delete-account` page.
 - Both return `202 { "ok": true, "message": "We will delete your account within 30 days" }`.
   Repeated pending requests reuse the existing request and original deadline.
   Public responses never disclose whether an account or request exists.

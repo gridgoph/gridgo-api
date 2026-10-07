@@ -1870,7 +1870,7 @@ async function handleRequest(req, res) {
         at: now(),
       });
     }
-    if (pathname === '/account-deletion-requests') {
+    if (pathname === '/account-deletion-requests' || pathname === '/api/account-deletion-requests') {
       const result = await routeAccountDeletion({ req, url, database, readBody, onEvent: deletionRequestEvent });
       return send(res, result.status, result.body);
     }
