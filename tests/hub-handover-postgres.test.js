@@ -12,6 +12,7 @@ async function setup(t, ready = true) {
   await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture();
   store.settings.handoverOtpEnabled = true;
+  store.settings.hubPickupEnabled = false;
   const order = store.orders[0];
   Object.assign(order, { fulfillmentMode: 'pickup', riderId: 'rider', state: ready ? 'awaiting_collection' : 'out_for_delivery', awaitingCollectionAt: AT });
   store.staffRoles = [{ code: 'hub_staff', name: 'Hub staff', canHandout: true }];
@@ -228,4 +229,28 @@ test('HTTP settings and staff hub agree on unset, configured and cleared schedul
     assert.deepEqual(store.settings.hubPickup.schedule, schedule);
     assert.deepEqual(store.orders[0].handover.schedule, null);
   }
+});
+
+test('pickup availability defaults off and requires Super Admin, reason and current version', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await setup(t);
+  await db.query("UPDATE platform_settings SET settings = settings - 'hubPickupEnabled'");
+  let current = (await api('client', 'GET', '/settings')).body;
+  assert.equal(current.settings.hubPickupEnabled, false);
+  const body = { expectedVersion: current.version, reason: 'Enable new pickup orders', hubPickupEnabled: true };
+  assert.equal((await api('ops', 'PATCH', '/settings', body)).status, 403);
+  assert.equal((await api('client', 'PATCH', '/settings', body)).status, 403);
+  assert.equal((await api('admin', 'PATCH', '/settings', { ...body, reason: '' })).body.error, 'settings_reason_required');
+  assert.equal((await api('admin', 'PATCH', '/settings', { ...body, hubPickupEnabled: 'true' })).body.error, 'invalid_hub_pickup_enabled');
+  const enabled = await api('admin', 'PATCH', '/settings', body);
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.body.settings.hubPickupEnabled, true);
+  assert.equal((await api('admin', 'PATCH', '/settings', body)).body.error, 'settings_version_conflict');
+  current = (await api('client', 'GET', '/settings')).body;
+  assert.equal(current.settings.hubPickupEnabled, true);
+  assert.equal((await api('admin', 'PATCH', '/settings', { ...body, expectedVersion: current.version, hubPickupEnabled: false })).status, 200);
+  const saved = await loadStore(db);
+  assert.equal(saved.settings.hubPickupEnabled, false);
+  const updates = saved.auditLog.filter(row => row.action === 'settings.operational_update');
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0].detail.current.hubPickupEnabled, true);
 });

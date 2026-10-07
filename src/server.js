@@ -592,6 +592,7 @@ function publicOperationalSettings(settings, store = null) {
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
+    hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
@@ -3211,6 +3212,7 @@ async function handleRequest(req, res) {
       const next = {
         ...store.settings,
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
+        hubPickupEnabled: Object.hasOwn(body, "hubPickupEnabled") ? body.hubPickupEnabled : store.settings.hubPickupEnabled === true,
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
         productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")

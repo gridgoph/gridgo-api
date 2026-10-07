@@ -970,6 +970,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
 }
 
 function checkoutBasket(store, user, cart, body, createId, at, req) {
+  if (cart.fulfillmentMode === "pickup" && store.settings.hubPickupEnabled !== true) {
+    fail(409, "hub_pickup_disabled", "Hub pickup is currently unavailable. Choose delivery for a new order.");
+  }
   const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
