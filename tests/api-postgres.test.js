@@ -2159,6 +2159,112 @@ async function startMockObjectStorage({ size, bytes } = {}) {
   return { server, requests, url: `http://127.0.0.1:${server.address().port}` };
 }
 
+for (const scope of ["line", "legacy", "no_jobs", "other_job"]) {
+  test(`Operations reassignment transfers artwork access (${scope})`, { skip: !DATABASE_URL }, async (t) => {
+    const database = createDatabase({ DATABASE_URL });
+    t.after(() => database.close());
+    await clearAndFixture(database);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      for (const suffix of ["replacement", "other"]) {
+        const supplierId = `user_${suffix}`;
+        store.users.push({ ...store.users.find((row) => row.id === "user_supplier"),
+          id: supplierId, clerkUserId: `clerk_${suffix}`, email: `${suffix}@example.invalid` });
+        store.userRoleMemberships.push({ userId: supplierId, role: "supplier", createdAt: AT });
+        store.supplierProfiles.push({ ...structuredClone(store.supplierProfiles[0]), userId: supplierId });
+        store.approvalCases.push({ ...store.approvalCases.find((row) => row.id === "case_supplier"), id: `case_${suffix}`, userId: supplierId });
+        store.supplierServices.push({ ...structuredClone(store.supplierServices[0]), id: `svc_${suffix}`, supplierId });
+      }
+      const order = store.orders.find((row) => row.id === "ord_payout");
+      Object.assign(order, { state: "approved_for_matching", quantity: 1, payoutMilestones: [],
+        artworkFileIds: ["file_artwork"], mockupFileIds: ["file_mockup"] });
+      const job = { id: "job_original", orderId: order.id, supplierId: "user_supplier", riderId: null,
+        state: "needs_qa", fulfillmentMode: "delivery", pickup: structuredClone(order.pickup),
+        dropoff: structuredClone(order.dropoff), supplierSubtotalMinor: 100000, deliveryFeeMinor: 2500,
+        estimatedHours: 24, createdAt: AT, updatedAt: AT };
+      if (scope !== "no_jobs") store.orderJobs.push(job);
+      for (const purpose of ["artwork", "mockup"]) {
+        store.files.push({ ...structuredClone(store.files[0]), fileId: `file_${purpose}`,
+          ownerId: "user_client", purpose, originalFilename: `${purpose}.pdf`, objectKey: `${purpose}/source.pdf`,
+          references: [{ type: "order", id: order.id,
+            field: ["line", "other_job"].includes(scope) ? `line:line_original:${purpose}` : `${purpose}FileIds` }] });
+      }
+      if (["line", "other_job"].includes(scope)) {
+        store.orderLineItems.push({ id: "line_original", orderId: order.id, jobId: job.id,
+          itemNameSnapshot: "Print item", pricingBasisSnapshot: "per_unit", quantity: 1,
+          baseUnitPriceMinor: 100000, effectiveUnitPriceMinor: 100000, lineSubtotalMinor: 100000,
+          acceptedFormatCodesSnapshot: ["pdf"], sortOrder: 0,
+          artworkFileId: "file_artwork", mockupFileId: "file_mockup",
+          artworkLinks: [{ label: "Design", formatCode: "google_drive", url: "https://drive.google.com/file/d/example/view" }],
+          createdAt: AT });
+      }
+      if (scope === "other_job") {
+        store.orderJobs.push({ ...structuredClone(job), id: "job_other", supplierId: "user_other" });
+        store.orderLineItems.push({ ...structuredClone(store.orderLineItems[0]), id: "line_other",
+          jobId: "job_other", artworkFileId: "file_other", mockupFileId: null, sortOrder: 1 });
+        store.files.push({ ...structuredClone(store.files.find((file) => file.fileId === "file_artwork")),
+          fileId: "file_other", objectKey: "artwork/other.pdf", references: [{ type: "order", id: order.id, field: "line:line_other:artwork" }] });
+        order.artworkFileIds.push("file_other");
+      }
+      await saveStore(database, store);
+    });
+    const before = await loadStore(database);
+    const bytes = Buffer.alloc(100, 65);
+    const storage = await startMockObjectStorage({ size: bytes.length, bytes });
+    t.after(() => new Promise((resolve) => storage.server.close(resolve)));
+    const instance = await startApi({ MINIO_ENDPOINT: storage.url, MINIO_PUBLIC_URL: storage.url });
+    t.after(async () => {
+      instance.child.kill("SIGTERM");
+      await new Promise((resolve) => instance.child.once("exit", resolve));
+    });
+    for (const fileId of ["file_artwork", "file_mockup"]) {
+      assert.equal((await request(instance.api, `/files/${fileId}/download-url`, { subject: "clerk_supplier" })).status, 200);
+      assert.equal((await request(instance.api, `/files/${fileId}/download-url`, { subject: "clerk_replacement" })).status, 403);
+    }
+    const assigned = await request(instance.api, "/orders/ord_payout/transition", {
+      method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned", supplierId: "user_replacement" },
+    });
+    assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+    const view = await request(instance.api, "/orders/ord_payout", { subject: "clerk_replacement" });
+    assert.equal(view.status, 200);
+    assert.deepEqual(view.body.order.artworkFileIds, ["file_artwork"]);
+    assert.deepEqual(view.body.order.mockupFileIds, ["file_mockup"]);
+    const jobs = await request(instance.api, "/jobs", { subject: "clerk_replacement" });
+    assert.deepEqual(jobs.body.jobs.find((order) => order.id === "ord_payout").artworkFileIds, ["file_artwork"]);
+    const previousJobs = await request(instance.api, "/jobs", { subject: "clerk_supplier" });
+    assert.equal(previousJobs.body.jobs.some((order) => order.id === "ord_payout"), false);
+    if (["line", "other_job"].includes(scope)) {
+      assert.deepEqual(view.body.order.productionItems.map((line) => line.id), ["line_original"]);
+      assert.deepEqual(view.body.order.productionItems[0].artworkLinks, before.orderLineItems[0].artworkLinks);
+    }
+    assert.equal((await request(instance.api, "/orders/ord_payout", { subject: "clerk_supplier" })).status, 403);
+    for (const fileId of ["file_artwork", "file_mockup"]) {
+      for (const suffix of ["", "/download-url"]) {
+        assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: "clerk_supplier" })).status, 403);
+        for (const subject of ["clerk_replacement", "clerk_client", "clerk_ops", "clerk_super"]) {
+          const response = await request(instance.api, `/files/${fileId}${suffix}`, { subject });
+          assert.equal(response.status, 200, JSON.stringify(response.body));
+          if (suffix) {
+            assert.match(response.body.url, /X-Amz-Signature=/);
+            assert.deepEqual(Buffer.from(await (await fetch(response.body.url)).arrayBuffer()), bytes);
+          }
+        }
+      }
+    }
+    const after = await loadStore(database);
+    assert.deepEqual(after.orderLineItems, before.orderLineItems);
+    assert.deepEqual(after.files, before.files);
+    assert.deepEqual(after.orders.find((row) => row.id === "ord_payout").payments,
+      before.orders.find((row) => row.id === "ord_payout").payments);
+    if (scope !== "no_jobs") assert.equal(after.orderJobs.find((row) => row.id === "job_original").supplierId, "user_replacement");
+    if (scope === "other_job") {
+      assert.deepEqual(after.orderJobs.find((row) => row.id === "job_other"), before.orderJobs.find((row) => row.id === "job_other"));
+      assert.equal((await request(instance.api, "/files/file_other/download-url", { subject: "clerk_replacement" })).status, 403);
+      assert.equal((await request(instance.api, "/files/file_other/download-url", { subject: "clerk_other" })).status, 200);
+    }
+  });
+}
+
 test("private payment content streams exact bytes with signed-read authorization and no caching", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());

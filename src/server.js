@@ -5766,6 +5766,7 @@ async function handleRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
+        const previousSupplierId = order.supplierId;
         order.supplierId = body.supplierId;
         // optional: record which service lines justified eligibility
         if (Array.isArray(body.matchingServiceIds)) {
@@ -5776,6 +5777,14 @@ async function handleRequest(req, res) {
           order.matchingServiceIds = cand?.matchingServiceIds || [];
         }
         setOrderPickup(order, store);
+        // Artwork and production lines follow their job, so transfer ownership
+        // with the parent assignment without rewriting immutable line/file refs.
+        for (const job of store.orderJobs || []) {
+          if (job.orderId !== order.id || job.supplierId !== previousSupplierId) continue;
+          job.supplierId = order.supplierId;
+          job.pickup = structuredClone(order.pickup);
+          job.updatedAt = now();
+        }
         audit(store, {
           actor: user,
           action: "order.supplier_assigned",
