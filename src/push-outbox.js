@@ -13,7 +13,7 @@ export function outboxVerdict(row, results, at) {
 }
 export function deviceAcceptsNotification(store, device, notification, at) {
   if (notification.type === "dispatch_available"
-      && (!availableDispatch((store.orders || []).find(order => order.id === notification.orderId))
+      && (!availableDispatch((store.orders || []).find(order => order.id === notification.orderId), store)
         || riderHasActiveDelivery(store, notification.userId))) return false;
   if (notification.type === "season_window" && !seasonPushAllowed(store, device, notification, at)) return false;
   // A removed membership must not strand the only installed app without the

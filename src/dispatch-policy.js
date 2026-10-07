@@ -1,10 +1,17 @@
 import { isContainedPickup } from "./operational-model.js";
+import { refundHold, refundSettlementFor } from "./refund-policy.js";
+import { rescheduleHold } from "./order-reschedule-policy.js";
 import { recoveryHeld } from "./shop-recovery.js";
 
+export function dispatchWorkHeld(store, order) {
+  return Boolean(refundHold(store, order) || refundSettlementFor(store, order)
+    || recoveryHeld(order) || rescheduleHold(order));
+}
+
 /** The shared pool has no distance, zone, or vehicle restriction. */
-export function availableDispatch(order) {
+export function availableDispatch(order, store) {
   return Boolean(order && order.state === "ready_for_dispatch" && !order.riderId
-    && !isContainedPickup(order) && !recoveryHeld(order));
+    && !isContainedPickup(order) && !dispatchWorkHeld(store, order));
 }
 
 /** Keep aligned with the rider app's ACTIVE_TRIP_STATES. */
