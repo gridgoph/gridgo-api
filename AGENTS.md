@@ -40,7 +40,7 @@ Client catalogue privacy is staged: `docs/CLIENT_CATALOG_PRIVACY.md` defines cli
 
 Client preference ranking, shop matching, carts, multi-supplier jobs, QR checkout, QA, and invoices are defined in `docs/ORDER_MATCH_API.md`.
 
-Multi-shop basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md`. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
+Basket payment/receipt and independent group order contracts: `docs/MULTI_SHOP_CHECKOUT_API.md` and `docs/PER_LINE_DEADLINES_API.md`. Group by shop and line deadline; multiple groups (even at one shop) pay 100% upfront. `src/baskets.js` owns the shared payment boundary; never confirm one group through the order payment routes.
 
 - New requests opt into pre-match delivery/hub pickup via `fulfillmentMode`; token selection locks the cart choice. Hub hours/fees are Super Admin settings; pickup fee defaults to zero and occupies the existing fulfillment charge slot. Contract and released-build compatibility: `docs/ORDER_MATCH_API.md#fulfillment-before-matching`.
 - Match priority, reason badges, anonymous alternatives, and expiring selection-token/cart-deadline semantics are defined in `docs/ORDER_MATCH_API.md`. Rank only deadline-capable listings; never restore weighted or same-shop boosts.
@@ -85,6 +85,8 @@ Listing approval, grandfathered live rows, private revisions, required specs, an
 
 Super Admin listing take-downs and shop-controlled republication follow `docs/SUPPLIER_CATALOG_API.md#staff-listing-index-and-take-down`.
 
+Production durations use whole shop working days with additive day fields and legacy hour adapters; conversion, release-gap fields, and calendar refusal rules: `docs/SUPPLIER_CATALOG_API.md#production-time-in-working-days`, `src/production-days.js`. Existing order promises stay immutable.
+
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 
 Season awareness windows and Super Admin-only rollout controls are defined in `docs/SEASON_WINDOWS_API.md`. Scheduled season pushes default off; `noticeQueuedAt` is immutable and never reset by edits.
@@ -98,7 +100,7 @@ Season awareness windows and Super Admin-only rollout controls are defined in `d
 - Push failure must never fail its trigger. FCM v1 stays on `node:crypto` + `fetch`; do not add `firebase-admin`.
 - `save()` kicks the single-flight outbox drain after commit (`kickPushDrain`); the lifecycle tick is only the retry backstop. Reach/delivery aggregates, `/health.push` since-boot fields, and the hourly `validate_only` stale-token sweep (`src/push-token-validation.js`, `device_token_checks`): `docs/OPERATIONAL_MODEL_V2_API.md#get-opspushstats`.
 - One token belongs to one `user.id`. Anonymous registration is hostile input and exposes only a fixed `{ok:true}` body.
-- Unclaimed handsets may receive only `everyone` announcements with `data` exactly `{type:"announcement"}`.
+- Unclaimed handsets receive `everyone` announcements or app-scoped releases when their retained `appRole` matches; `data` stays exactly `{type:"announcement"}`. Release routes, deduplication and rollout: `docs/RELEASE_ANNOUNCEMENTS_API.md`.
 - Prune `INVALID_ARGUMENT` only when the violation identifies `message.token`.
 - Push payload data is allowlisted to `notificationId`, `type`, `orderId`, and `at`.
 - Every implemented domain event writes a durable inbox row to each current `ops_admin` and `super_admin` membership (`privilegedAdminMemberships` in `src/notifications.js`). Super Admin is never invalidate-only. Contract: `docs/REALTIME_EVENTS.md`.

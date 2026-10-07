@@ -1,3 +1,6 @@
+import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
+import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
+import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
 import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
 import { redeemStaffInvite } from './staff-access.js';
 import { routeOrganization, organizationProjection, sweepOfficerConfirmations } from "./organization-routes.js";
@@ -30,6 +33,7 @@ import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
+import { availableDispatch } from "./dispatch-policy.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -157,7 +161,6 @@ import {
   releaseDeviceToken,
   removeDeviceTokenIds,
   unclaimedDeviceLimit,
-  unclaimedDeviceTokens,
   unregisterDeviceToken,
 } from "./push.js";
 import {
@@ -341,8 +344,8 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
  * not one a call site can forget: an unclaimed device has no user, so there is
  * no notification record for it to be derived from, and no `save()` to hook.
  * The rule the hook exists to enforce — one push per readable notification —
- * still holds, because this path carries no notification at all. It has exactly
- * one call site (`POST /announcements`), and `pushDelivery.send` refuses
+ * still holds, because this path carries no notification at all. It is shared by
+ * staff announcements and release announcements, and `pushDelivery.send` refuses
  * anything but a stranger-safe message for these devices regardless.
  */
 function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
@@ -1175,22 +1178,7 @@ function isSuper(user) {
   return identityHasMembership(user, "super_admin");
 }
 
-/**
- * Who a platform announcement reaches.
- *
- * `everyone` is the only audience that extends to unclaimed devices, and it is
- * the reason they exist: an app-update notice has to reach an install whose
- * owner never signed in. A role-targeted audience cannot include them — an
- * unclaimed handset has no role, and guessing one would put a print-shop
- * message on a rider's lock screen.
- */
-const ANNOUNCEMENT_AUDIENCES = new Map([
-  ["everyone", null],
-  ["clients", ["client"]],
-  ["suppliers", ["supplier"]],
-  ["riders", ["rider"]],
-  ["ops", ["ops_admin", "super_admin"]],
-]);
+// Staff audience rules and release app scoping live in announcements.js.
 const ANNOUNCEMENT_TITLE_MAX = 120;
 const ANNOUNCEMENT_BODY_MAX = 500;
 
@@ -1752,6 +1740,9 @@ function summarizeService(s) {
     qtyMax: s.qtyMax,
     pricingBasis: s.pricingBasis,
     referenceRateMinor: s.referenceRateMinor,
+    turnaroundDays: s.turnaroundDays,
+    standardTurnaroundDays: s.standardTurnaroundDays ?? s.turnaroundDays,
+    productionDayMinutes: s.turnaroundDays ? s.turnaroundHours * 60 / s.turnaroundDays : 600,
     turnaroundHours: s.turnaroundHours,
     capacityDaily: s.capacityDaily,
     capacityWeekly: s.capacityWeekly,
@@ -1897,6 +1888,17 @@ async function handleRequest(req, res) {
     })) {
       return;
     }
+    if (await routeReleaseAnnouncement({
+      req, res, pathname, send, readBody, database, enqueueMutation,
+      broadcast: async (input) => {
+        const store = await load();
+        const { announcement, unclaimed } = appendAnnouncement(store, input, { id, at: now(), audit });
+        await save(store);
+        database.afterCommit(() => deliverAnnouncementPush(unclaimed, announcement));
+        return announcement;
+      },
+    })) return;
+
     // firstmate's service token, not a Clerk session.
     if (await tracker.routeFirstmate({ req, res, pathname, url, send })) return;
     if (await routeFirstmateIssueReports({ req, res, pathname, url, send, database, storage: objectStorage })) return;
@@ -2618,7 +2620,6 @@ async function handleRequest(req, res) {
 
     const needsInitializedStorage =
       (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
-      (req.method === "GET" && /^\/files\/[^/]+\/(download-url|content)$/.test(pathname)) ||
       (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
     if (storageInitializing && needsInitializedStorage) {
       throw new AttachmentError(
@@ -2745,6 +2746,10 @@ async function handleRequest(req, res) {
       authorizeFileRead(user, store, file);
       if (serveContent && !["payment_proof", "payout_receipt", "refund_receipt"].includes(file.purpose)) {
         throw new AttachmentError(400, "file_content_not_supported", "Only payment proofs and payout or refund receipts can be read through this route.");
+      }
+      // Refused readers must get the same response regardless of storage readiness.
+      if (storageInitializing) {
+        throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
       }
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
@@ -3141,57 +3146,12 @@ async function handleRequest(req, res) {
       }
       const imageUrl = image.imageUrl;
 
-      const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
-      const recipients = store.users.filter((candidate) => roles === null || roles.some(role=>hasRole(store,candidate.id,role)));
-      const announcementId = id("anc");
-      const at = now();
-      for (const recipient of recipients) {
-        store.notifications.push({
-          id: id("ntf"),
-          userId: recipient.id,
-          type: "announcement",
-          ...(roles ? {audienceRoles:roles} : {}),
-          orderId: null,
-          announcementId,
-          title,
-          body: text,
-          ...(imageUrl ? { imageUrl } : {}),
-          read: false,
-          at,
-        });
-      }
-      // Read before `save()`, which queues the per-account outbox rows; the
-      // records themselves carry no identity, so the anonymous fan-out below
-      // can use them after the write.
-      const unclaimed = audience === "everyone" ? unclaimedDeviceTokens(store) : [];
-      audit(store, {
-        actor: user,
-        action: "announcement.broadcast",
-        entityType: "announcement",
-        entityId: announcementId,
-        detail: {
-          audience,
-          title,
-          notifiedUsers: recipients.length,
-          unclaimedDevices: unclaimed.length,
-          hasImage: Boolean(imageUrl),
-        },
-        reason: body.reason || null,
-      });
+      const { announcement, unclaimed } = appendAnnouncement(store, {
+        audience, title, body: text, imageUrl, actor: user, reason: body.reason || null,
+      }, { id, at: now(), audit });
       await save(store);
-      database.afterCommit(() => deliverAnnouncementPush(unclaimed, { title, body: text, imageUrl }));
-      return send(res, 201, {
-        announcement: {
-          id: announcementId,
-          audience,
-          title,
-          body: text,
-          imageUrl,
-          at,
-          notifiedUsers: recipients.length,
-          unclaimedDevices: unclaimed.length,
-        },
-      });
+      database.afterCommit(() => deliverAnnouncementPush(unclaimed, announcement));
+      return send(res, 201, { announcement });
     }
 
     if (req.method === "GET" && (pathname === "/me/production-lapses" || /^\/users\/[^/]+\/production-lapses$/.test(pathname))) {
@@ -4015,8 +3975,9 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, body);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0;
-      const turnaroundHours = body.turnaroundHours != null ? Number(body.turnaroundHours) : 48;
-      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
+      const duration = productionDuration(body, { turnaroundHours: 48 }, "turnaround", shopProductionDayMinutes(store, user.id), "invalid_service");
+      const turnaroundHours = duration.turnaroundHours;
+      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isFinite(turnaroundHours) || turnaroundHours <= 0) {
         return send(res, 400, {
           error: "invalid_service",
           message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
@@ -4036,7 +3997,9 @@ async function handleRequest(req, res) {
         qtyMax: body.qtyMax != null ? Number(body.qtyMax) : null,
         pricingBasis: body.pricingBasis || "per_unit",
         referenceRateMinor,
-        turnaroundHours,
+        ...duration,
+        standardTurnaroundDays: duration.turnaroundDays,
+        standardTurnaroundHours: duration.turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
         zones: Array.isArray(body.zones) ? body.zones : [],
@@ -4107,10 +4070,12 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, toValidate);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
-      const turnaroundHours = body.turnaroundHours == null ? null : Number(body.turnaroundHours);
+      const duration = body.turnaroundDays != null || body.turnaroundHours != null
+        ? productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, service.supplierId), "invalid_service") : null;
+      const turnaroundHours = duration?.turnaroundHours;
       if (
         (referenceRateMinor != null && (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0)) ||
-        (turnaroundHours != null && (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0))
+        (turnaroundHours != null && (!Number.isFinite(turnaroundHours) || turnaroundHours <= 0))
       ) {
         return send(res, 400, {
           error: "invalid_service",
@@ -4125,7 +4090,6 @@ async function handleRequest(req, res) {
         "qtyMax",
         "pricingBasis",
         "referenceRateMinor",
-        "turnaroundHours",
         "capacityDaily",
         "capacityWeekly",
         "equipmentNotes",
@@ -4147,6 +4111,11 @@ async function handleRequest(req, res) {
               service[k] = body[k];
             }
           }
+        }
+        if (duration) {
+          Object.assign(service, duration);
+          service.standardTurnaroundDays = duration.turnaroundDays;
+          service.standardTurnaroundHours = duration.turnaroundHours;
         }
         // Capability expansion on a live service requires re-verification
         const categoryChanged = body.categoryCode != null && body.categoryCode !== prevCategory;
@@ -5816,9 +5785,8 @@ async function handleRequest(req, res) {
       // destination and not a different job. Only the unfinished
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => !isContainedPickup(o) && !recoveryHeld(o)
-          && (o.state === "ready_for_dispatch"
-            || (o.state === "rider_assigned" && o.riderId === user.id)),
+        (o) => availableDispatch(o) || (!isContainedPickup(o) && !recoveryHeld(o)
+          && o.state === "rider_assigned" && o.riderId === user.id),
       );
       return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });
     }
@@ -6342,6 +6310,11 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (isSelfQueuedFileMutation) {
+    void handleRequest(req, res);
+    return;
+  }
+  // Auth is checked before the release handler enters its domain transaction.
+  if (isReleaseAnnouncementRoute(pathname)) {
     void handleRequest(req, res);
     return;
   }

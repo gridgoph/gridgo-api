@@ -116,7 +116,7 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Organization discount and statements: [Organization money API](docs/ORGANIZATION_MONEY_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
 - Files: `/files` metadata/control plane with private MinIO bytes
-- Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`
+- Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`; machine release broadcasts and rollout: [Release announcements](docs/RELEASE_ANNOUNCEMENTS_API.md)
 - Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
 
 - Season awareness: public `/season-windows`, Super Admin editor and disabled-by-default scheduled notices under `/admin/season-windows`; see [Season windows API](docs/SEASON_WINDOWS_API.md).

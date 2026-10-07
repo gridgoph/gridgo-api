@@ -951,6 +951,7 @@ function productionItemsFor(store, order, user) {
       } : null;
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
+        turnaroundDays: line.turnaroundDaysSnapshot ?? null,
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>

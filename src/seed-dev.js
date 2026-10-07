@@ -1,3 +1,4 @@
+import { synchronizeProductionHours } from "./production-days.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -204,7 +205,7 @@ export const LOVIS_LISTINGS = [
       { label: "5 days", turnaroundHours: 120, priceMinor: 25_000 },
       { label: "3 days", turnaroundHours: 72, priceMinor: 35_000 },
       { label: "Next day", turnaroundHours: 24, priceMinor: 50_000 },
-      { label: "Same day, 2 to 3 hours", turnaroundHours: 3, priceMinor: 70_000 },
+      { label: "1 working day", turnaroundDays: 1, turnaroundHours: 10, priceMinor: 70_000 },
     ],
     description:
       "Thesis and report hardbound with gold or silver lettering, digital or embossed. A4, short and long.",
@@ -510,8 +511,8 @@ export async function seedDevelopmentShop(database, {
         minimumLengthMilli: listing.minimumLengthMilli ?? null,
         minimumOrderQuantity: listing.minimumOrderQuantity ?? null,
         printerMaxWidthFeet: seededPrinterCap(listing, starter, "lovis"),
-        turnaroundMode: starter.defaultTurnaroundHours ? "override" : "inherit",
-        turnaroundHours: starter.defaultTurnaroundHours ?? null,
+        turnaroundMode: starter.defaultTurnaroundDays ? "override" : "inherit",
+        turnaroundHours: starter.defaultTurnaroundDays == null ? null : starter.defaultTurnaroundDays * 10,
         fileFormatMode: starter.defaultFormatCodes?.length ? "override" : "inherit",
         active: true,
         sortOrder: listingPhotos.indexOf(listing),
@@ -549,6 +550,7 @@ export async function seedDevelopmentShop(database, {
       }
     }
 
+    synchronizeProductionHours(store, { convertLegacy: true });
     await saveStore(database, store);
   });
 
@@ -1127,6 +1129,7 @@ async function seedAdditionalDevelopmentShop(database, fixture, { clerkBackend, 
       }
     }
     retireUnseededListings(store, fixture.slug, seededItemIds);
+    synchronizeProductionHours(store, { convertLegacy: true });
     await saveStore(database, store);
   });
   return { email, shopName: fixture.shopName, clerkUserId, photos: uploaded.every((row) => row.stored) };
@@ -1178,6 +1181,7 @@ async function seedDevelopmentClient(database, clerkBackend, now) {
     } else {
       store.clientProfiles.push({ userId: user.id, clientKind: "personal", updatedAt: at });
     }
+    synchronizeProductionHours(store, { convertLegacy: true });
     await saveStore(database, store);
   });
   return { email: person.email, clerkUserId: clerkUser.id, userId: clientUserId };
@@ -1733,6 +1737,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
         at,
       });
     }
+    synchronizeProductionHours(store, { convertLegacy: true });
     await saveStore(database, store);
   });
 }

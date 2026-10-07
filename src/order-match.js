@@ -1,3 +1,5 @@
+import { shopProductionDayMinutes } from "./production-days.js";
+import { cartGroups } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { recentLapseQualityPenalty } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
@@ -152,7 +154,7 @@ function queueMinutesFor(store, supplierId, fallbackHours) {
       && !jobs.some((job) => job.orderId === order.id),
   );
   const hours = [...jobs, ...orders].reduce((total, row) => {
-    const estimate = Number.isSafeInteger(row.estimatedHours) && row.estimatedHours > 0
+    const estimate = Number.isFinite(row.estimatedHours) && row.estimatedHours > 0
       ? row.estimatedHours
       : fallbackHours;
     return total + estimate;
@@ -198,8 +200,10 @@ function allowanceMinutesFrom(settings) {
 }
 
 /** One queue/calendar projection for matching, cart previews, and checkout. */
-export function projectShopFinish(store, { supplierId, turnaroundHours, units, now }) {
-  const hours = Number.isSafeInteger(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
+export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, units, now }) {
+  const hours = Number.isSafeInteger(turnaroundDays) && turnaroundDays > 0
+    ? turnaroundDays * shopProductionDayMinutes(store, supplierId) / 60
+    : Number.isFinite(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
   const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
   const queue = queueMinutesFor(store, supplierId, hours);
   const capacityDaily = (store.supplierServices || [])
@@ -242,7 +246,18 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
     // Rank real listing projections, never combine one listing's low price
     // with another's fast promise. Each offered listing must meet the deadline.
-    const groupLines = (widthRequest?.cartLines || []).filter((line) => line.supplierId === supplierId);
+    const draftGroups = cartGroups(null, (widthRequest?.cartLines || []).filter(line => line.supplierId === supplierId));
+    const requestedDate = deadline == null ? null : new Date(deadline).toISOString();
+    const groupLines = draftGroups.find(group => group.deadline === requestedDate)?.lines || [];
+    const earlierJobs = draftGroups.filter(group => group.deadline != null
+      && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))).map(group => ({
+      supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => {
+        const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
+        const service = (store.supplierServices || []).find(row => row.id === item?.supplierServiceId);
+        return item ? itemTurnaroundHours(item, service) : 24;
+      })),
+    }));
+    const projectionStore = earlierJobs.length ? { ...store, orderJobs: [...(store.orderJobs || []), ...earlierJobs] } : store;
     const groupUnits = groupLines.reduce((total, line) => total + BigInt(line.quantity), 0n);
     const groupHours = groupLines.map((line) => {
       const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
@@ -254,7 +269,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
       // Use the same combined quantity and slowest turnaround as checkout.
       const combinedUnits = groupUnits + BigInt(units ?? listing.minimumOrderQuantity ?? 1);
       if (combinedUnits > MAX_SAFE_MINOR) fail(400, "invalid_quantity", "The group's quantity exceeds the supported range.");
-      const { projection, queue } = projectShopFinish(store, {
+      const { projection, queue } = projectShopFinish(projectionStore, {
         supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours), now,
         units: groupLines.length ? Number(combinedUnits) : units,
       });
@@ -331,7 +346,7 @@ function otherListing(row) {
       "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
-      "turnaroundHours", "minimumTurnaroundHours", "rush", "acceptedFormats", "optionGroups", "version",
+      "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version",
     ].map((key) => [key, item[key]])),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
     fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,

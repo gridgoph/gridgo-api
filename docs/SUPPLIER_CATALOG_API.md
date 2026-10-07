@@ -279,3 +279,46 @@ Only Super Admin may call either action; Operations, suppliers, riders and clien
 Private listing detail, the staff index, and `GET /me/catalog-items` (including PostgreSQL search and pagination) carry `suspendReason` and `suspendedAt`, both null when there is no take-down. While a reason is set, the shop cannot PATCH `active=true`: the API returns `409 listing_suspended` with the reason. Taken-down listings cannot appear on the client board or in matching.
 
 Each successful action commits the item, audit (`catalog_item.suspend` or `catalog_item.restore`, entity type `supplier_catalog_item`) and shop inbox notice together. `listing_suspended` tells the owning shop the reason. `listing_restored` tells it the take-down is lifted and the listing remains hidden until the shop turns it on. Both notices carry `catalogItemId`, use the supplier role, and invalidate the shop's notifications and catalogue after commit. Push data retains its existing privacy allowlist.
+
+## Production time in working days
+
+Refs gridgoph/gridgo-supplier#122 (7 October 2026 decision). A production day is
+one shop working day's open time, using its configured schedule. The fallback
+remains Monday–Saturday, 08:00–18:00 (600 minutes). Closed weekdays and dated
+closures still do not consume production time. An evening request starts at the
+next opening. For split shifts, sum open minutes; schedules without a positive,
+consistent daily length refuse conversion (`production_day_length_unavailable`).
+
+Listing create/update accepts `turnaroundDays` (maximum) and nullable
+`minimumTurnaroundDays`. Both are whole integers >= 1; the minimum cannot exceed
+the maximum. `turnaroundMode: "inherit"` clears the two listing overrides.
+Private listing responses return the overrides; public catalogue, match and cart
+listing responses return the effective maximum. `productionDayMinutes` identifies
+the calendar divisor (null when a saved calendar is unavailable).
+
+Services accept `turnaroundDays` and `rushTurnaroundDays`; reads also expose
+`standardTurnaroundDays`. Speed tiers use `turnaroundDays`; starters expose
+`defaultTurnaroundDays`. Existing endpoints and ready/promise timestamps remain
+unchanged. Use the server's timestamps for dates; never divide a duration by 24.
+
+During the installed-app release gap, legacy `*TurnaroundHours`/`turnaroundHours`
+fields remain. Hour-only writes convert to `max(1, ceil(hours * 60 /
+productionDayMinutes))`; explicit days win when both forms are present. Hour
+responses express the whole-day duration in working hours. For example, a default
+shop receives 2 days/20 hours from a 2-day write and 5 days/50 hours from an old
+48-hour write. There is no new sub-day option.
+
+Migration `1791936000000` rounds existing listings, service defaults/rush, speed
+tiers, starters and approved listing snapshots up. It refuses ambiguous saved
+calendars and keeps existing order snapshots/promises untouched. Tier IDs and
+prices survive even when multiple speeds round to the same day. The canonical
+columns are additive; old hour columns remain as compatibility projections.
+`src/production-days.js` owns request conversion and the compatibility view;
+`src/availability.js` remains the calendar engine. New order-line snapshots keep
+`turnaroundDaysSnapshot` and `productionDayMinutesSnapshot`; they are immutable
+and old orders remain null. Order `productionItems` expose `turnaroundDays`, and
+checkout `jobs` expose `estimatedDays` (null for historical hour-only records).
+Exact integer production minutes keep half-hour shop shifts precise through
+checkout and queue reloads; legacy integer-hour database columns round up only
+as compatibility storage. Production data was not queried
+by the implementation worker: run migrations through the normal deployment gate.

@@ -176,6 +176,22 @@ test("relational store round-trips typed money, relationships, and composite rou
   assert.equal(reloaded.orders[0].payoutMilestones[0].amountMinor, 50000);
   assert.equal(reloaded.credits.user_client.balanceMinor, 500000);
 
+  store.supplierProfiles.push({ userId: 'user_supplier', shopName: 'Shop', contactName: 'Supplier', shop: store.users[1].shop, version: 1, updatedAt: AT,
+    schedule: { utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 480, closesMinute: 990 }] } });
+  Object.assign(store.supplierServices[0], { turnaroundDays: 1, turnaroundHours: 8.5 });
+  store.orderLineItems.push({ id: 'day_line', orderId: 'ord_one', sourceCatalogItemId: null, sourceSupplierServiceId: 'svc_banner',
+    itemNameSnapshot: 'Print', pricingBasisSnapshot: 'per_unit', pricingUnitSnapshot: 'per_unit',
+    turnaroundDaysSnapshot: 1, productionDayMinutesSnapshot: 510, turnaroundHoursSnapshot: 8.5,
+    baseUnitPriceMinor: 100000, effectiveUnitPriceMinor: 100000, quantity: 1, lineSubtotalMinor: 100000,
+    acceptedFormatCodesSnapshot: ["pdf"], structuredSpecSnapshot: {}, sortOrder: 0, snapshotFinalized: true, createdAt: AT });
+  await database.transaction(async () => saveStore(database, store));
+  const daysReloaded = await loadStore(database);
+  assert.equal(daysReloaded.supplierServices[0].turnaroundDays, 1);
+  assert.equal(daysReloaded.supplierServices[0].turnaroundHours, 8.5);
+  assert.equal(daysReloaded.orderLineItems[0].turnaroundDaysSnapshot, 1);
+  assert.equal(daysReloaded.orderLineItems[0].turnaroundHoursSnapshot, 8.5);
+  await assert.rejects(database.query("UPDATE order_line_items SET turnaround_days_snapshot=2 WHERE id='day_line'"), /immutable/);
+
   await clear(database);
   await database.close();
 });

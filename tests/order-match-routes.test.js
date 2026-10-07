@@ -1198,7 +1198,7 @@ test('a later shop missing the basket deadline rejects checkout, and matching us
   }
   const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers' })).body;
   assert.ok([...match.listings, ...match.otherListings].every((item) => item.id !== 'item_b'));
-  await assert.rejects(call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-09-20T00:00:00Z' }), { code: 'basket_deadline_mismatch' });
+  assert.equal((await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-09-20T00:00:00Z' })).status, 200);
   await assert.rejects(call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'LATE' } }), { code: 'deadline_not_met' });
 });
 
@@ -1613,4 +1613,115 @@ test('pending organization gets no discount and a client cannot supply its own d
     payment: { method: 'qr_manual', reference: 'PENDING', proofFileId: 'file_qr' } })).body;
   assert.equal(placed.invoice.organizationDiscountMinor, 0);
   assert.equal(placed.invoice.totalMinor, 11000);
+});
+
+for (const acrossShops of [false, true]) {
+  test(`per-line deadlines group by shop and date (${acrossShops ? 'across shops' : 'same shop'})`, async () => {
+    const { store, client } = fixture();
+    store.settings.downpaymentPercent = 75;
+    const call = caller(store, client);
+    const dates = ['2026-09-10T00:00:00.000Z', '2026-09-12T00:00:00.000Z'];
+    const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery',
+      defaultDropoff: { lat: 7.08, lng: 125.62, label: 'Destination' } })).body.cart;
+    for (const [item, deadline] of [['item_a', dates[0]], [acrossShops ? 'item_b' : 'item_a2', dates[1]], ['item_a', dates[0]]]) {
+      await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, deadline, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+    }
+    const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+    assert.deepEqual(preview.lines.map(line => line.deadline), [dates[0], dates[1], dates[0]]);
+    assert.equal(preview.deadline, null);
+    assert.equal(preview.groupCount, 2);
+    assert.equal(preview.shopCount, acrossShops ? 2 : 1);
+    assert.equal(preview.isMultiGroup, true);
+    assert.deepEqual(preview.groups.map(group => group.deadline), dates);
+    assert.deepEqual(preview.groups.map(group => group.label), ['Shop A', acrossShops ? 'Shop B' : 'Shop A']);
+    assert.deepEqual(preview.groups.map(group => group.lineIds.length), [2, 1]);
+    assert.ok(preview.groups.every(group => group.deliveryFeeMinor > 0));
+    assert.equal(preview.clientQuote.deliveryFeeMinor, preview.groups.reduce((sum, group) => sum + group.deliveryFeeMinor, 0));
+    assert.equal(preview.clientQuote.downpaymentPercent, 100);
+    assert.equal(preview.clientQuote.upfrontReason, 'multiple_fulfillment_groups');
+    const { basket, invoice } = (await call('POST', `/me/carts/${cart.id}/checkout`, {
+      payment: { method: 'qr_manual', reference: 'DATES', proofFileId: 'file_qr' },
+    })).body;
+    assert.deepEqual(basket.groups.map(group => group.deadline), dates);
+    assert.deepEqual(invoice.groups.map(group => group.deadline), dates);
+    assert.deepEqual(invoice.deliveryLines.map(line => line.deadline), dates);
+    assert.equal(basket.deadline, null);
+    assert.equal(basket.totalMinor, preview.clientQuote.totalMinor);
+    assert.equal(store.orderJobs.length, 2);
+    assert.equal(store.orderInvoices.length, 1);
+    assert.equal(basket.upfrontReason, 'multiple_fulfillment_groups');
+    for (const [index, group] of basket.groups.entries()) {
+      const order = store.orders.find(row => row.id === group.orderId);
+      assert.equal(order.deadline, dates[index]);
+      assert.equal(store.orderJobs.find(job => job.orderId === order.id).deadline, dates[index]);
+      for (const role of ['client', 'supplier', 'rider', 'ops_admin']) {
+        assert.equal(publicOrderFor(order, { id: client.id, role }, store).deadline, dates[index]);
+      }
+      assert.equal(order.downpaymentPercent, 100);
+      assert.equal(order.payments.final_online.status, 'not_required');
+      assert.equal(order.payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), order.supplierSubtotalMinor);
+      order.payments.initial.status = 'confirmed';
+      const siblings = structuredClone(store.orders.filter(row => row.id !== order.id));
+      const refund = calculateRefundSettlement(order, { beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0 });
+      assert.equal(refund.totalMinor, order.totalMinor);
+      assert.equal(refund.deliveryMinor, group.deliveryFeeMinor);
+      assert.deepEqual(store.orders.filter(row => row.id !== order.id), siblings);
+    }
+  });
+}
+
+test('selection tokens retain their own date and line edits recheck only that product', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const original = '2026-09-10T00:00:00.000Z';
+  const later = '2026-09-12T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: original })).body.cart;
+  for (const deadline of [original, later]) {
+    const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline })).body;
+    const listing = [...match.listings, ...match.otherListings].find(row => row.id === 'item_a');
+    const input = { selectToken: listing.selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [], artworkFileId: 'file_art' };
+    await assert.rejects(call('POST', `/me/carts/${cart.id}/lines`, { ...input, deadline: '2026-10-01T00:00:00Z' }), { code: 'select_token_deadline_mismatch' });
+    await call('POST', `/me/carts/${cart.id}/lines`, input);
+  }
+  const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  assert.deepEqual(preview.groups.map(group => group.deadline), [original, later]);
+  const match = (await call('POST', '/me/matches', { cartId: cart.id, groupId: preview.groups[1].id, subcategoryCode: 'brochures' })).body;
+  const selected = store.matchSelections.find(row => row.requestId === match.matchRequestId);
+  assert.equal(selected.selection.deadline, later);
+  const edited = (await call('PATCH', `/me/carts/${cart.id}/lines/${preview.lines[1].id}`, { deadline: original })).body.cart;
+  assert.equal(edited.groups.length, 1);
+  assert.equal(edited.deadline, original);
+  await assert.rejects(call('PATCH', `/me/carts/${cart.id}/lines/${preview.lines[1].id}`, { deadline: AT }), { code: 'deadline_not_met' });
+});
+
+test('legacy single-date cart keeps one sub-order and its configured installment plan', async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  const call = caller(store, client);
+  const deadline = '2026-09-10T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline })).body.cart;
+  for (const item of ['item_a', 'item_a2']) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  assert.equal(preview.isMultiGroup, false);
+  assert.equal(preview.clientQuote.downpaymentPercent, 75);
+  assert.equal(preview.clientQuote.upfrontReason, 'platform_setting');
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', reference: 'LEGACY-DATE', proofFileId: 'file_qr' } })).body;
+  assert.equal(placed.basket, undefined);
+  assert.equal(placed.order.deadline, deadline);
+  assert.equal(placed.order.downpaymentPercent, 75);
+  assert.equal(store.orders.length, 1);
+});
+
+test('a later-date slow product does not force the earlier product to miss its own match', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const item = store.catalogItems.find(row => row.id === 'item_a2');
+  item.turnaroundMode = 'override'; item.turnaroundHours = 240;
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart;
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item.id, deadline: '2026-10-10T00:00:00Z', quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-08-28T00:00:00Z' })).body;
+  assert.ok([...match.listings, ...match.otherListings].some(row => row.id === 'item_a'));
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline: '2026-08-28T00:00:00Z', quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', reference: 'EARLIEST-FIRST', proofFileId: 'file_qr' } })).body;
+  assert.deepEqual(placed.basket.groups.map(group => group.deadline), ['2026-10-10T00:00:00.000Z', '2026-08-28T00:00:00.000Z']);
 });

@@ -1,5 +1,6 @@
 import { supplierArtworkReleased } from "./artwork-gates.js";
-import { isContainedPickup, paymentSettled } from "./operational-model.js";
+import { paymentSettled } from "./operational-model.js";
+import { availableDispatch, riderHasActiveDelivery } from "./dispatch-policy.js";
 import { privilegedAdminMemberships, eligibleRiderIds, finalPaymentAction } from "./notifications.js";
 
 /**
@@ -293,7 +294,7 @@ function sameLiveNotification(store, draft) {
       notification.userId === draft.userId
       && notification.type === draft.type
       && (notification.appRole ?? null) === (draft.appRole ?? null)
-      && (notification.occurrenceKey ?? null) === (draft.occurrenceKey ?? null)
+      && (draft.type === "dispatch_available" || (notification.occurrenceKey ?? null) === (draft.occurrenceKey ?? null))
       && (notification.orderId ?? null) === (draft.orderId ?? null)
       && (notification.approvalCaseId ?? null) === (draft.approvalCaseId ?? null),
   );
@@ -329,10 +330,6 @@ export function shopNotificationDraft(order) {
   };
 }
 
-function approvedRiders(store) {
-  return eligibleRiderIds(store).map(id => ({id}));
-}
-
 export function riderNotificationDrafts(store, order) {
   if (!order?.id || !order.state) return [];
   const drafts = [];
@@ -349,15 +346,16 @@ export function riderNotificationDrafts(store, order) {
       read: false,
     });
   }
-  if (order.state === "ready_for_dispatch" && !order.riderId && !isContainedPickup(order)) {
-    for (const rider of approvedRiders(store)) {
+  if (availableDispatch(order)) {
+    for (const riderId of eligibleRiderIds(store)) {
+      if (riderHasActiveDelivery(store, riderId)) continue;
       drafts.push({
-        userId: rider.id,
+        userId: riderId,
         appRole: "rider",
         type: "dispatch_available",
-        occurrenceKey: stateOccurrence(order),
+        occurrenceKey: `dispatch:${order.id}`,
         orderId: order.id,
-        title: "A packed job needs a rider",
+        title: "New delivery job",
         body: "Accept in Offers, then check the job with the supplier at pickup before taking the package.",
         read: false,
       });

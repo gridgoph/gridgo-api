@@ -83,7 +83,7 @@ function profileCompletion(store, supplierId, legacy) {
     if (!["pending_verification", "live"].includes(service.state)) missing.push("service_not_submitted");
     if (!String(service.pricingBasis || "").trim()) missing.push("pricing_basis");
     const hours = service.turnaroundHours || service.standardTurnaroundHours;
-    if (!Number.isSafeInteger(hours) || hours <= 0) missing.push("turnaround");
+    if (!Number.isFinite(hours) || hours <= 0) missing.push("turnaround");
     if (!(store.supplierServiceFileFormats || []).some(row => row.supplierServiceId === service.id)) {
       missing.push("service_default_formats");
     }

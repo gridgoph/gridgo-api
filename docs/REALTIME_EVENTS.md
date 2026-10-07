@@ -79,7 +79,7 @@ User action acknowledgements remain durable inbox records but use silent inbox i
 | 47 | Fees/zones/settings | Authorized settings refresh; generic public catalog/quote refresh; no retrospective accepted commercial change or private settings payload. |
 | 48 | Read/unread/delete | Owner-only mutation retained, same-owner other-device inbox hint; role-scoped snapshot read-all leaves concurrent/new and other-role records unread. |
 | 49 | Login/logout/switch/access | Existing claim/release ownership retained; selected-role membership checked; stale current notifications suppressed; consumer account cache/stream teardown supplied by app workers. |
-| 50 | Announcement | Membership audience selection and role/app-aware routing; only everyone may reach unclaimed installs with existing exact anonymous data. |
+| 50 | Announcement | Membership audience selection and role/app-aware routing; everyone reaches unclaimed installs; [release broadcasts](RELEASE_ANNOUNCEMENTS_API.md) reach only matching retained app roles, with the same exact anonymous data. |
 | 51 | Reconnect/foreground | SSE replay uses current authorization/projection; unsupported cursor remains 409; consumer refetch contract plus all-resource server LISTEN-recovery refresh. |
 | 52 | Role anomaly/delivery failure | Privileged membership mutation alerts other Super Admins; durable outbox failure/attempt/code state and provider health expose delivery trouble. No unconfigured alert channel, anomaly heuristic or recipient preference invented. |
 
@@ -92,3 +92,20 @@ An own-account `role_changed` push may reach the account's still-owned device wh
 Listing review and product-type requests emit `catalog_review_pending` / `catalog_review_decided` durable inbox rows to the owning supplier and every current Operations/Super Admin membership, plus scoped `catalog` invalidation. Review changes use the transaction/save/outbox boundary. See [listing review](SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker).
 
 Paper-invoice promises write `physical_invoice_promised` to the owning client's inbox when Operations/Super Admin first sets or changes `promisedDeliveryAt`. The body states the paper invoice delivery date and time in Asia/Manila. Repeating the same promise does not notify again. This uses the ordinary notification/outbox boundary at `save()`; no separate push sender is required.
+
+### Idle rider job alerts
+
+`dispatch_available` uses the dispatch list's shared pool rules in
+`src/dispatch-policy.js`: approved active rider membership, an unassigned
+`ready_for_dispatch` order, no shop recovery hold, and a journey to deliver
+(including transport to the hub). There is no distance, zone, or vehicle filter.
+Riders assigned an order in `rider_assigned`, `picked_up`, or `out_for_delivery`
+receive no new job alert. Finished and cancelled trips do not block alerts.
+
+The inbox occurrence is unique per rider and order, including re-offers and
+soft-deleted inbox rows. Existing device registration and role routing determine
+which phones enter `notification_push_outbox`; an absent or pruned token receives
+nothing. Android notification permission remains the phone's preference; there
+is no separate server-side rider notification preference. The worker rechecks
+idle status and job availability before sending or retrying. Push uses fixed
+customer-free copy and the existing `orderId` deep-link field on `gridgo_default`.
