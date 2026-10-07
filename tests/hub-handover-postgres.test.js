@@ -78,6 +78,34 @@ test('HTTP QR claims commit exactly once under concurrency, preserve money, deny
   await assert.rejects(db.query("UPDATE orders SET data=data-'handover' WHERE id='order'"), /handover must be preserved/);
 });
 
+test('Operations and Super Admin use the staff routes through their own membership, without an invite', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await setup(t);
+  const as = role => ({ headers: { 'X-GRIDGO-Role': role } });
+  for (const [key, role] of [['ops', 'ops_admin'], ['admin', 'super_admin']]) {
+    const me = await api(key, 'GET', '/staff/me', null, as(role));
+    assert.equal(me.status, 200, JSON.stringify(me.body));
+    assert.deepEqual({ ...me.body.staff, name: undefined }, { id: key, name: undefined, role, canHandout: true });
+    assert.equal((await api(key, 'GET', '/staff/hub', null, as(role))).status, 200);
+    assert.equal((await api(key, 'GET', '/staff/me')).status, 200);
+    // A role the account does not hold is still refused.
+    assert.equal((await api(key, 'GET', '/staff/me', null, as('staff'))).status, 403);
+  }
+  for (const key of ['client', 'supplier', 'rider']) assert.equal((await api(key, 'GET', '/staff/me')).status, 403);
+  const credentials = await api('client', 'GET', '/orders/order/handover');
+  const mismatch = await api('ops', 'POST', '/staff/hub/claims', { ...credentials.body.handover, otp: 'bad' }, as('ops_admin'));
+  assert.equal(mismatch.body.error, 'handover_otp_mismatch');
+  const claimed = await api('ops', 'POST', '/staff/hub/claims', credentials.body.handover, as('ops_admin'));
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.handout.staffId, 'ops');
+  assert.equal((await api('ops', 'GET', '/staff/hub/handouts', null, as('ops_admin'))).body.staffTotals[0].count, 1);
+  assert.equal((await api('admin', 'GET', '/staff/hub/handouts', null, as('super_admin'))).body.handouts.length, 0);
+  assert.equal((await api('admin', 'GET', '/ops/hub/handouts', null, as('super_admin'))).body.handouts.length, 1);
+  const after = await loadStore(db);
+  assert.equal(after.orders[0].state, 'issue_window_open');
+  assert.deepEqual(after.staffProfiles, []);
+  assert.equal(after.userRoleMemberships.some(m => m.role === 'staff'), false);
+});
+
 test('rider arrival mints hub credentials and does not start issue window; delivery mismatch blocks then correct OTP opens the shared event', { skip: !DATABASE_URL }, async t => {
   const { db, api } = await setup(t, false);
   await db.transaction(async () => {
