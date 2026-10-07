@@ -287,6 +287,27 @@ Operations uses the existing `POST /orders/:id/payments/initial/confirm`, then `
 
 `GET /orders` and `GET /orders/:id` expose `fileCheck: { status, requestedAt, reviewedAt, reviewedBy, reason, waitingSeconds }` to Operations/Super Admin; the owning client receives the same projection without `reviewedBy`. Suppliers/riders omit it. `waitingSeconds` is computed at read time, in elapsed wall-clock seconds while pending, and is zero after a decision/cancellation. The dashboard follow-up should filter pending checks, sort by `requestedAt` and render the elapsed wait on each row, including `initial_payment_review` orders, so out-of-hours backlogs stay visible. Existing production orders without this additive snapshot retain access; existing intake remains hidden until the quality-control handoff.
 
+#### Recorded Operations checklist
+
+The dashboard may send `qaChecklist: { artwork: boolean, spec: boolean, quantity: boolean, address: boolean }`
+on a `needs_qa` transition to `supplier_assigned` (including legacy approval edges) or `client_correction`.
+These are the existing four portal ticks: artwork opens and has sufficient resolution (including design-link access/matching),
+specification matches the order, quantity looks deliberate, and delivery address is reachable (or the client collects at the hub).
+A `true` means the reviewer checked that item; `false` means **Not checked**, not a recorded failure verdict.
+All four booleans, and no other keys, are required when the field is supplied. Approval requires all four `true`;
+invalid payloads return `400 invalid_qa_checklist` without changing the order. Send-back still needs its client-visible reason.
+
+Operations/Super Admin reads `fileCheck.checklist: { version: 1, checks: { artwork, spec, quantity, address } }`,
+with the authenticated `reviewedBy` and server `reviewedAt` applying to all four items. The snapshot is committed
+in `orders.data` and the `order.file_check` audit event in the same transaction as the decision. Migration
+`1791961200000_order_qa_checklist` adds a database constraint; it never fabricates results for old reviews.
+Client resubmission clears the current checklist; earlier decisions remain in audit.
+
+During the API-first rollout, old dashboards may omit `qaChecklist`; their decisions remain valid but store `checklist: null`.
+Historical/absent checklists also project as `null`: display **Not recorded** for each item, even if the overall review passed.
+The owning client's projection omits `checklist` as well as `reviewedBy`; suppliers/riders still omit `fileCheck` entirely.
+
+
 Client follow-up: show upload/link-check failure guidance on the Artwork tab and route checkout errors to the indicated line; do not treat an `unknown` check as a warning. Dashboard follow-up: render the pending queue/wait and use the transitions above to pass or request correction. Backend delivery alone does not finish the issue's production + client-release acceptance gate.
 
 ### POST `/artwork/link-check`
