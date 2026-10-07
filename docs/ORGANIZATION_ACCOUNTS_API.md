@@ -2,7 +2,7 @@
 
 Implements the backend for client #163, #164 and #165 on the existing `business_client`
 approval case. All routes require a Clerk session. Client routes require the client
-membership; staff routes require Operations or Super Admin. The shared organization
+membership; organization-directory and notice routes require Operations or Super Admin; application review requires Super Admin. The shared organization
 email belongs to the signed-in Clerk identity: this API never links identities by email
 or creates another login. Application approval changes the account type; submission does not.
 
@@ -12,7 +12,7 @@ Upload each document using the existing multipart `POST /files` with
 `purpose=client_verification_document` (JPEG, PNG, WebP or PDF; 20 MiB maximum).
 Keep the returned opaque `file.fileId`. Submit IDs in `documents`; submission attaches
 ready files atomically. Do not call `/files/:id/attach` for this purpose. Each checklist
-item needs its own file, owned by the applicant. Operations checks authenticity,
+item needs its own file, owned by the applicant. Super Admin checks authenticity,
 matching personal details and business bank-account ownership during review.
 
 Only Operations and Super Admin may subsequently read these files, including signed
@@ -140,13 +140,13 @@ the email-verification stamp or request hash. `documents` lists only files that 
 `ready` and owned by the applicant: those IDs can be sent again in the corrected body, and
 the bytes stay unreadable to the applicant. `sentBack` is present only on a rejected case.
 Its `documents` are read from the reason the dashboard writes, one `- <label>` or
-`- <label>: <note>` line per document Operations marked, matched against the track's
+`- <label>: <note>` line per document Super Admin marked, matched against the track's
 checklist; free text that names no document leaves `documents` empty and the reason stands
 alone. The applicant's `approval_rejected` inbox notice names the same documents
 ("Upload your school recognition certificate again.") or quotes the reason; the push stays
 the generic lock-screen copy and carries `type` for routing.
 
-## Operations review
+## Super Admin review
 
 Existing `GET /approval-cases` and `GET /approval-cases/:id` remain the review queue/detail.
 Detail adds the submitted checklist and private personal details to `application`, and
@@ -208,7 +208,7 @@ A reminder is an ordinary durable inbox/push event of type `organization_officer
   return `409 officer_changed`; a pending handover returns `409 officer_handover_pending`.
   Confirmation clears the outstanding reminder and resets the quarterly clock; retry is a no-op.
 - Change: open the verification form and submit the handover endpoint above. It does not
-  replace the verified officer until Operations approves it.
+  replace the verified officer until Super Admin approves it.
 
 Staff endpoints:
 

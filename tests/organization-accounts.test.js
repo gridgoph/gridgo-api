@@ -203,10 +203,10 @@ test('staff notices reach the current shared login and staff inboxes, never hist
   assert.equal(replay.body.notificationId, result.body.notificationId);
   await assert.rejects(call(ctx, `/ops/organizations/${ctx.user.id}/notice`, { ...body, title: 'Different' }, ops), { code: 'idempotency_conflict' });
 });
-test('staff can require a business permit before approval and applicants must resubmit it', async () => {
+test('Super Admin can require a business permit before approval and applicants must resubmit it', async () => {
   const ctx = fixture('sole_proprietor');
   const { approvalCase } = applyForBusiness(ctx);
-  await call(ctx, `/approval-cases/${approvalCase.id}/request-business-permit`, { expectedVersion: 1, reason: 'Permit needed for review' }, { id: 'ops', role: 'ops_admin' });
+  await call(ctx, `/approval-cases/${approvalCase.id}/request-business-permit`, { expectedVersion: 1, reason: 'Permit needed for review' }, { id: 'super', role: 'super_admin' });
   assert.throws(() => approve(ctx, approvalCase), (error) => Boolean(error.details?.fields?.['documents.business_permit']));
 });
 

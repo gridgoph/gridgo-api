@@ -1165,7 +1165,7 @@ function fixedAuthProjection(store, auth, role) {
     return {
       ...base,
       capabilities: {
-        manageApprovalCases: true,
+        manageApprovalCases: false,
         manageOperations: true,
       },
     };
@@ -2566,16 +2566,16 @@ async function handleRequest(req, res) {
       return send(res, orderMatchResponse.status, orderMatchResponse.body);
     }
 
-    // ---- shared Operations / Super Admin approval queue ----
+    // ---- Super Admin approval queue ----
     if (req.method === "GET" && pathname === "/approval-cases") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const result = approvalQueue(store, url);
       const { status: responseStatus, ...body } = result;
       return send(res, responseStatus, body);
     }
 
     if (req.method === "GET" && /^\/approval-cases\/[^/]+$/.test(pathname)) {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const caseId = pathname.split("/")[2];
       const approvalCase = (store.approvalCases || []).find((candidate) => candidate.id === caseId);
       if (!approvalCase) return send(res, 404, { error: "approval_case_not_found" });
@@ -2583,7 +2583,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && /^\/approval-cases\/[^/]+\/(approve|reject|suspend|restore)$/.test(pathname)) {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const [, , caseId, action] = pathname.split("/");
       if (!APPROVAL_DECISIONS.has(action)) return send(res, 404, { error: "not_found", path: pathname });
       const input = approvalDecisionInput(action, await readBody(req));
@@ -3717,9 +3717,9 @@ async function handleRequest(req, res) {
       return send(res, 200, { user: userWithAccountState(target) });
     }
 
-    // Supplier / rider verification (ops + super)
+    // Supplier / rider verification (Super Admin only)
     if (req.method === "POST" && /^\/users\/[^/]+\/verification$/.test(pathname)) {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const uid = pathname.split("/")[2];
       const target = store.users.find((u) => u.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
