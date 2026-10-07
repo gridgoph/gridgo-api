@@ -623,6 +623,8 @@ function publicMatchedOrder(store, order) {
       deliveryDistanceMeters: job.deliveryDistanceMeters,
       deliveryFeeMinor: job.deliveryFeeMinor,
       estimatedHours: job.estimatedHours,
+      estimatedDays: (store.orderLineItems || []).some(line => line.jobId === job.id && line.turnaroundDaysSnapshot != null)
+        ? Math.max(...store.orderLineItems.filter(line => line.jobId === job.id).map(line => line.turnaroundDaysSnapshot || 0)) : null,
       scheduledFor: job.scheduledFor ?? null,
       deadline: job.deadline ?? order.deadline ?? null,
     }));
@@ -806,6 +808,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       ...(jobDropoff ? { dropoff: jobDropoff } : {}),
       supplierSubtotalMinor, deliveryDistanceMeters: distance, deliveryFeeMinor,
       ...deliverySplit(deliveryFeeMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
+      estimatedProductionMinutes: Math.round(estimatedHours * 60),
       estimatedHours, ...(cart.scheduledFor ? { scheduledFor: cart.scheduledFor } : {}),
       createdAt: at, updatedAt: at,
     };

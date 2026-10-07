@@ -1,3 +1,4 @@
+import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
 import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
@@ -593,6 +594,7 @@ function publicOperationalSettings(settings, store = null) {
     hubPickup: publicHubPickup(rest),
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
+    physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
     paymentQr,
@@ -1738,6 +1740,9 @@ function summarizeService(s) {
     qtyMax: s.qtyMax,
     pricingBasis: s.pricingBasis,
     referenceRateMinor: s.referenceRateMinor,
+    turnaroundDays: s.turnaroundDays,
+    standardTurnaroundDays: s.standardTurnaroundDays ?? s.turnaroundDays,
+    productionDayMinutes: s.turnaroundDays ? s.turnaroundHours * 60 / s.turnaroundDays : 600,
     turnaroundHours: s.turnaroundHours,
     capacityDaily: s.capacityDaily,
     capacityWeekly: s.capacityWeekly,
@@ -3210,6 +3215,8 @@ async function handleRequest(req, res) {
         organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
+        physicalInvoiceRequestsEnabled:
+          body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
@@ -3968,8 +3975,9 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, body);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0;
-      const turnaroundHours = body.turnaroundHours != null ? Number(body.turnaroundHours) : 48;
-      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
+      const duration = productionDuration(body, { turnaroundHours: 48 }, "turnaround", shopProductionDayMinutes(store, user.id), "invalid_service");
+      const turnaroundHours = duration.turnaroundHours;
+      if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isFinite(turnaroundHours) || turnaroundHours <= 0) {
         return send(res, 400, {
           error: "invalid_service",
           message: "referenceRateMinor must be a non-negative integer and turnaroundHours must be a positive integer.",
@@ -3989,7 +3997,9 @@ async function handleRequest(req, res) {
         qtyMax: body.qtyMax != null ? Number(body.qtyMax) : null,
         pricingBasis: body.pricingBasis || "per_unit",
         referenceRateMinor,
-        turnaroundHours,
+        ...duration,
+        standardTurnaroundDays: duration.turnaroundDays,
+        standardTurnaroundHours: duration.turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
         zones: Array.isArray(body.zones) ? body.zones : [],
@@ -4060,10 +4070,12 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, toValidate);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
-      const turnaroundHours = body.turnaroundHours == null ? null : Number(body.turnaroundHours);
+      const duration = body.turnaroundDays != null || body.turnaroundHours != null
+        ? productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, service.supplierId), "invalid_service") : null;
+      const turnaroundHours = duration?.turnaroundHours;
       if (
         (referenceRateMinor != null && (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0)) ||
-        (turnaroundHours != null && (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0))
+        (turnaroundHours != null && (!Number.isFinite(turnaroundHours) || turnaroundHours <= 0))
       ) {
         return send(res, 400, {
           error: "invalid_service",
@@ -4078,7 +4090,6 @@ async function handleRequest(req, res) {
         "qtyMax",
         "pricingBasis",
         "referenceRateMinor",
-        "turnaroundHours",
         "capacityDaily",
         "capacityWeekly",
         "equipmentNotes",
@@ -4100,6 +4111,11 @@ async function handleRequest(req, res) {
               service[k] = body[k];
             }
           }
+        }
+        if (duration) {
+          Object.assign(service, duration);
+          service.standardTurnaroundDays = duration.turnaroundDays;
+          service.standardTurnaroundHours = duration.turnaroundHours;
         }
         // Capability expansion on a live service requires re-verification
         const categoryChanged = body.categoryCode != null && body.categoryCode !== prevCategory;

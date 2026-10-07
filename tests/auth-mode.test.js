@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import {
   activateClerkClientProfile,
   applyClerkIdentityCopy,
+  clerkImageUrl,
   applyClerkWebhookEvent,
   authConfiguration,
   authenticateBearerToken,
@@ -270,6 +271,34 @@ test("Clerk identity copy will not steal another account's email", () => {
   assert.equal(store.users[0].name, "Quinn");
   assert.equal(store.users[0].email, "old@gridgo.test");
   assert.equal(store.users[1].email, "taken@gridgo.test");
+});
+
+test("Clerk identity copy keeps the hosted portrait and ignores generated initials", () => {
+  const store = {
+    users: [{ id: "user_shop", clerkUserId: "clerk_shop", email: "old@gridgo.test", name: "Mark David" }],
+  };
+  assert.equal(clerkImageUrl({ imageUrl: "https://img.clerk.com/generated.png", hasImage: false }), null);
+  const copied = applyClerkIdentityCopy(store, store.users[0], {
+    imageUrl: "https://img.clerk.com/mark.jpg",
+    hasImage: true,
+  });
+  assert.equal(copied.mutated, true);
+  assert.equal(store.users[0].imageUrl, "https://img.clerk.com/mark.jpg");
+
+  const webhook = applyClerkWebhookEvent(store, {
+    type: "user.updated",
+    data: {
+      id: "clerk_shop",
+      first_name: "Mark",
+      last_name: "David",
+      image_url: "https://img.clerk.com/new.jpg",
+      has_image: true,
+      email_addresses: [{ id: "idn_1", email_address: "old@gridgo.test" }],
+      primary_email_address_id: "idn_1",
+    },
+  });
+  assert.equal(webhook.mutated, true);
+  assert.equal(store.users[0].imageUrl, "https://img.clerk.com/new.jpg");
 });
 
 test("refreshMappedIdentityFromClerk ignores a Clerk Backend miss", async () => {

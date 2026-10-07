@@ -3,7 +3,7 @@ export const CATALOG_REVIEW_TABLES = [
   "catalogItems", "catalogOptionGroups", "catalogOptions", "catalogItemPhotos",
   "catalogPriceTiers", "catalogSpeedTiers", "catalogItemFileFormats",
 ];
-const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt", "suspendReason", "suspendedBy", "turnaroundMode", "turnaroundHours", "minimumTurnaroundHours"];
+const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt", "suspendReason", "suspendedBy", "turnaroundMode", "turnaroundDays", "minimumTurnaroundDays", "turnaroundHours", "minimumTurnaroundHours"];
 
 export function listingSnapshot(store, item) {
   const { approvedSnapshot, reviewStatus, reviewReason, reviewedAt, reviewedBy, ...record } = item;

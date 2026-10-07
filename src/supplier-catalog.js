@@ -1,3 +1,4 @@
+import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
@@ -19,6 +20,7 @@ function speedTiersFor(store, itemId) {
       id: row.id,
       label: row.label,
       turnaroundHours: row.turnaroundHours,
+      ...productionProjection(row, displayProductionDayMinutes(store, (store.catalogItems || []).find(item => item.id === itemId)?.supplierId), ["turnaround"]),
       priceMinor: row.priceMinor ?? null,
       surchargeMinor: row.surchargeMinor ?? null,
     }));
@@ -536,9 +538,11 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     })),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
+    ...productionProjection({ ...item, turnaroundDays: item.turnaroundMode === "override" ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays, turnaroundHours: itemTurnaroundHours(item, service) }, displayProductionDayMinutes(store, item.supplierId)),
     turnaroundHours: itemTurnaroundHours(item, service),
     minimumTurnaroundHours: item.minimumTurnaroundHours ?? null,
     rush: service.rushEnabled ? {
+      ...productionProjection({ turnaroundDays: service.rushTurnaroundDays, turnaroundHours: service.rushTurnaroundHours }, displayProductionDayMinutes(store, service.supplierId), ["turnaround"]),
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
       clientPriceMinor: clientMoneyMinor(store, service.rushPriceMinor),
@@ -576,6 +580,7 @@ export function publicSupplierShop(store, supplierId) {
         version: service.version || 1,
         categoryCode: activeCategory(store, service.categoryCode)?.code || service.categoryCode,
         pricingBasis: service.pricingBasis,
+        ...productionProjection(service, displayProductionDayMinutes(store, service.supplierId), ["turnaround", "standardTurnaround"]),
         turnaroundHours: Object.hasOwn(service, "standardTurnaroundHours")
           ? service.standardTurnaroundHours
           : service.turnaroundHours,
@@ -636,6 +641,7 @@ export function listingStartersFor(store, subcategoryCode) {
       name: starter.name,
       defaultPricingUnit: starter.defaultPricingUnit,
       defaultPackageQty: starter.defaultPackageQty ?? null,
+      defaultTurnaroundDays: starter.defaultTurnaroundDays ?? null,
       defaultTurnaroundHours: starter.defaultTurnaroundHours ?? null,
       defaultFormatCodes: [...(starter.defaultFormatCodes || [])],
       groups: (store.listingStarterGroups || [])
@@ -719,7 +725,7 @@ export function supplierCatalogReadiness(store, supplierId) {
   const reviewReady = services.filter((service) =>
     ["pending_verification", "live"].includes(service.state)
     && String(service.pricingBasis || "").trim()
-    && Number.isSafeInteger(service.turnaroundHours || service.standardTurnaroundHours)
+    && Number.isFinite(service.turnaroundHours || service.standardTurnaroundHours)
     && (service.turnaroundHours || service.standardTurnaroundHours) > 0
     && (store.supplierServiceFileFormats || []).some((record) => record.supplierServiceId === service.id));
   if (reviewReady.length === 0) missing.push("review_ready_service_line");
@@ -889,6 +895,10 @@ export function createOrderLineSnapshot(store, selection, createId) {
       pricingBasisSnapshot: service.pricingBasis || item.pricingUnit || "per_unit",
       pricingUnitSnapshot: item.pricingUnit || "per_unit",
       packageQtySnapshot: item.packageQty ?? null,
+      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays) == null ? {} : {
+        turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays,
+        productionDayMinutesSnapshot: displayProductionDayMinutes(store, item.supplierId),
+      }),
       turnaroundHoursSnapshot: itemTurnaroundHours(item, service),
       baseUnitPriceMinor: item.basePriceMinor,
       effectiveUnitPriceMinor,
@@ -1240,6 +1250,7 @@ export function privateCatalogItem(store, item) {
     turnaroundMode: item.turnaroundMode || "inherit",
     turnaroundHours: item.turnaroundHours ?? null,
     minimumTurnaroundHours: item.minimumTurnaroundHours ?? null,
+    ...productionProjection(item, displayProductionDayMinutes(store, item.supplierId)),
     fileFormatMode: item.fileFormatMode || "inherit",
     acceptedFormats: effectiveAcceptedFormats(store, item),
     active: item.active !== false,

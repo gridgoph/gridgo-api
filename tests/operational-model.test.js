@@ -52,6 +52,23 @@ test("requires service-fee settings to use an actual integer", () => {
   }
 });
 
+test("printed-invoice requests stay off until Super Admin turns them on", () => {
+  assert.equal(defaultOperationalSettings().physicalInvoiceRequestsEnabled, false);
+  const { physicalInvoiceRequestsEnabled: _omitted, ...withoutFlag } = defaultOperationalSettings();
+  assert.equal(validateOperationalSettings(withoutFlag), true);
+  for (const physicalInvoiceRequestsEnabled of ["true", 1, null]) {
+    expectDomainError(
+      () => validateOperationalSettings({ ...defaultOperationalSettings(), physicalInvoiceRequestsEnabled }),
+      400,
+      "invalid_physical_invoice_requests",
+    );
+  }
+  assert.equal(
+    validateOperationalSettings({ ...defaultOperationalSettings(), physicalInvoiceRequestsEnabled: true }),
+    true,
+  );
+});
+
 test("requires the client service-fee row visibility to be a JSON boolean when set", () => {
   assert.equal(defaultOperationalSettings().serviceFeeVisibleToClient, true);
   const { serviceFeeVisibleToClient: _omitted, ...withoutVisibility } = defaultOperationalSettings();

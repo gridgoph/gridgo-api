@@ -7,11 +7,19 @@ import { spawn } from "node:child_process";
 
 import { createDatabase } from "../src/database.js";
 import {
+  authorizeFileUpload,
+  resolveFileTarget,
+  validateUpload,
+} from "../src/attachments.js";
+import {
   formatChatEvent,
   isSupportChatRoute,
   messagePreview,
+  parseAttachmentFileIds,
   parseMessageBody,
 } from "../src/support-chat.js";
+
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
@@ -145,7 +153,16 @@ async function wipe(database, occurrenceKeys = []) {
   }
   await database.query(`DELETE FROM notifications WHERE user_id LIKE $1`, [`${PREFIX}%`]);
   await database.query(
-    `DELETE FROM support_chat_threads WHERE party_user_id LIKE $1`,
+    `DELETE FROM file_references WHERE file_id LIKE $1 OR reference_id LIKE $1`,
+    [`${PREFIX}%`],
+  );
+  await database.query(
+    `DELETE FROM files WHERE file_id LIKE $1 OR owner_id LIKE $1`,
+    [`${PREFIX}%`],
+  );
+  await database.query(
+    `DELETE FROM support_chat_threads
+     WHERE party_user_id LIKE $1 OR staff_peer_user_id LIKE $1`,
     [`${PREFIX}%`],
   );
   await database.query(`DELETE FROM user_role_memberships WHERE user_id LIKE $1`, [`${PREFIX}%`]);
@@ -170,10 +187,40 @@ test("support-chat helpers keep messages honest", () => {
 
   assert.deepEqual(parseMessageBody("  hello  "), { ok: true, body: "hello" });
   assert.equal(parseMessageBody("").ok, false);
+  assert.equal(parseMessageBody("", { allowEmpty: true }).ok, true);
   assert.equal(parseMessageBody("   ").ok, false);
   assert.equal(parseMessageBody("x".repeat(4001)).ok, false);
   assert.equal(messagePreview("one   two   three"), "one two three");
   assert.equal(messagePreview("n".repeat(200)).endsWith("…"), true);
+  assert.equal(messagePreview("", 1), "Sent a photo");
+  assert.equal(messagePreview("", 2), "Sent 2 photos");
+  assert.deepEqual(parseAttachmentFileIds(["a", "a", "b"]).fileIds, ["a", "b"]);
+  assert.equal(parseAttachmentFileIds(["1", "2", "3", "4", "5"]).ok, false);
+
+  authorizeFileUpload({ id: "c", role: "client" }, "support_chat_image");
+  authorizeFileUpload({ id: "o", role: "ops_admin" }, "support_chat_image");
+  assert.throws(
+    () => resolveFileTarget({}, "support_chat_image", {}, { id: "c", role: "client" }),
+    { code: "support_chat_image_not_attachable" },
+  );
+  assert.equal(
+    validateUpload(
+      { originalFilename: "shot.png", size: 120, sniffBytes: PNG, declaredContentType: "image/png" },
+      "support_chat_image",
+    ),
+    "image/png",
+  );
+  assert.throws(
+    () => validateUpload(
+      { originalFilename: "notes.pdf", size: 120, sniffBytes: Buffer.from("%PDF-1.7"), declaredContentType: "application/pdf" },
+      "support_chat_image",
+    ),
+    (error) => {
+      assert.equal(error.code, "invalid_file_type");
+      assert.equal(error.details.reason, "purpose_media_type_not_allowed");
+      return true;
+    },
+  );
 
   const frame = formatChatEvent({
     type: "message",
@@ -212,6 +259,12 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
   assert.deepEqual(empty.body.messages, []);
   assert.deepEqual(empty.body.threads ?? [], []);
 
+  await database.query(
+    `UPDATE users SET data = jsonb_set(COALESCE(data, '{}'::jsonb), '{imageUrl}', to_jsonb($2::text))
+     WHERE id = $1`,
+    [byRole.client.id, "https://img.clerk.com/ana.jpg"],
+  );
+
   const sent = await request(instance.api, "/support-chat/me/messages", {
     method: "POST",
     token: client,
@@ -224,6 +277,7 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
   assert.equal(sent.body.thread.partyUserId, byRole.client.id);
   assert.equal(sent.body.message.body, "The tarpaulin colours look off.");
   assert.equal(sent.body.message.mine, true);
+  assert.equal(sent.body.message.senderImageUrl, "https://img.clerk.com/ana.jpg");
 
   const mine = await request(instance.api, "/support-chat/me", { token: client, role: "client" });
   assert.equal(mine.status, 200);
@@ -313,6 +367,148 @@ test("authenticated roles chat with Operations on isolated threads", { skip: !DA
 
   const staffAsParty = await request(instance.api, "/support-chat/me", { token: ops, role: "ops_admin" });
   assert.equal(staffAsParty.status, 403);
+
+  const partyPeople = await request(instance.api, "/support-chat/people?q=Ana", {
+    token: client,
+    role: "client",
+  });
+  assert.equal(partyPeople.status, 403);
+
+  const foundPeople = await request(instance.api, "/support-chat/people?q=Ana", {
+    token: ops,
+    role: "ops_admin",
+  });
+  assert.equal(foundPeople.status, 200);
+  assert.equal(foundPeople.body.people.some((row) => row.userId === byRole.client.id && row.role === "client"), true);
+  assert.equal(foundPeople.body.people.some((row) => row.userId === byRole.ops.id), false);
+
+  const staffPeople = await request(instance.api, "/support-chat/people?role=staff", {
+    token: ops,
+    role: "ops_admin",
+  });
+  assert.equal(staffPeople.status, 200);
+  assert.equal(
+    staffPeople.body.people.some((row) => row.userId === byRole.super.id && row.role === "super_admin"),
+    true,
+  );
+  assert.equal(staffPeople.body.people.some((row) => row.userId === byRole.ops.id), false);
+
+  const openedClient = await request(instance.api, "/support-chat/threads", {
+    method: "POST",
+    token: ops,
+    role: "ops_admin",
+    body: { userId: byRole.client.id, role: "client" },
+  });
+  assert.equal(openedClient.status, 200);
+  assert.equal(openedClient.body.thread.id, sent.body.thread.id);
+
+  const selfChat = await request(instance.api, "/support-chat/threads", {
+    method: "POST",
+    token: ops,
+    role: "ops_admin",
+    body: { userId: byRole.ops.id, role: "ops_admin" },
+  });
+  assert.equal(selfChat.status, 400);
+
+  const staffOpen = await request(instance.api, "/support-chat/threads", {
+    method: "POST",
+    token: ops,
+    role: "ops_admin",
+    body: { userId: byRole.super.id, role: "super_admin" },
+  });
+  assert.equal(staffOpen.status, 200);
+  assert.equal(staffOpen.body.thread.partyUserId, byRole.super.id);
+  assert.equal(staffOpen.body.thread.staffPeerUserId, byRole.ops.id);
+
+  const staffReuse = await request(instance.api, "/support-chat/threads", {
+    method: "POST",
+    token: admin,
+    role: "super_admin",
+    body: { userId: byRole.ops.id, role: "ops_admin" },
+  });
+  assert.equal(staffReuse.body.thread.id, staffOpen.body.thread.id);
+  assert.equal(staffReuse.body.thread.staffPeerName, "Ops Desk");
+
+  const hidden = await request(instance.api, `/support-chat/threads/${staffOpen.body.thread.id}`, {
+    token: client,
+    role: "client",
+  });
+  assert.equal(hidden.status, 404);
+
+  const staffNote = await request(instance.api, `/support-chat/threads/${staffOpen.body.thread.id}/messages`, {
+    method: "POST",
+    token: ops,
+    role: "ops_admin",
+    body: { body: "Can you take the late drop-off?" },
+  });
+  assert.equal(staffNote.status, 201);
+  occurrenceKeys.push(staffNote.body.message.id);
+  assert.equal((await staffNotices(database, staffNote.body.message.id)).length, 0);
+
+  const adminRead = await request(instance.api, `/support-chat/threads/${staffOpen.body.thread.id}`, {
+    token: admin,
+    role: "super_admin",
+  });
+  assert.equal(adminRead.status, 200);
+  assert.equal(adminRead.body.messages.some((row) => row.body === "Can you take the late drop-off?"), true);
+
+  const staffInbox = await request(instance.api, "/support-chat/threads?role=staff", {
+    token: ops,
+    role: "ops_admin",
+  });
+  assert.equal(staffInbox.body.threads.some((row) => row.id === staffOpen.body.thread.id), true);
+
+  const foundByWord = await request(
+    instance.api,
+    `/support-chat/threads/${sent.body.thread.id}/messages?q=tarpaulin`,
+    { token: ops, role: "ops_admin" },
+  );
+  assert.equal(foundByWord.status, 200);
+  assert.equal(foundByWord.body.messages.some((row) => row.body.includes("tarpaulin")), true);
+  const missedWord = await request(
+    instance.api,
+    `/support-chat/threads/${sent.body.thread.id}/messages?q=unicorn-keyword`,
+    { token: ops, role: "ops_admin" },
+  );
+  assert.equal(missedWord.body.messages.length, 0);
+
+  await database.query(
+    `INSERT INTO files
+       (file_id, owner_id, purpose, original_filename, declared_content_type, detected_content_type,
+        size_bytes, state, object_key, created_at, position, data)
+     VALUES ($1, $2, 'support_chat_image', 'print.png', 'image/png', 'image/png',
+             240, 'ready', $3, now(), 0, '{}')`,
+    [`${PREFIX}_chat_img`, byRole.client.id, `${PREFIX}/support_chat_image/print.png`],
+  );
+  const pictured = await request(instance.api, "/support-chat/me/messages", {
+    method: "POST",
+    token: client,
+    role: "client",
+    body: { body: "", threadId: sent.body.thread.id, attachmentFileIds: [`${PREFIX}_chat_img`] },
+  });
+  assert.equal(pictured.status, 201, JSON.stringify(pictured.body));
+  occurrenceKeys.push(pictured.body.message.id);
+  assert.equal(pictured.body.message.attachments?.[0]?.fileId, `${PREFIX}_chat_img`);
+  assert.equal(pictured.body.thread.lastMessagePreview, "Sent a photo");
+
+  const photos = await request(
+    instance.api,
+    `/support-chat/threads/${sent.body.thread.id}/messages?media=1`,
+    { token: ops, role: "ops_admin" },
+  );
+  assert.equal(photos.body.messages.some((row) => row.attachments?.some((item) => item.fileId === `${PREFIX}_chat_img`)), true);
+
+  const gone = await request(instance.api, `/support-chat/threads/${bike.body.thread.id}`, {
+    method: "DELETE",
+    token: rider,
+    role: "rider",
+  });
+  assert.equal(gone.status, 200);
+  const missing = await request(instance.api, `/support-chat/threads/${bike.body.thread.id}`, {
+    token: ops,
+    role: "ops_admin",
+  });
+  assert.equal(missing.status, 404);
 
   const unauth = await request(instance.api, "/support-chat/me");
   assert.equal(unauth.status, 401);

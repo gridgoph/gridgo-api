@@ -225,6 +225,11 @@ export function defaultOperationalSettings() {
     handoverOtpEnabled: false,
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
+    /**
+     * Whether a client may file a new printed-invoice request.
+     * Off until Super Admin turns it on. A request already on file stays.
+     */
+    physicalInvoiceRequestsEnabled: false,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     productionPenalty: defaultProductionPenalty(),
@@ -263,6 +268,17 @@ export function validateOperationalSettings(settings) {
       "invalid_service_fee_visibility",
       "serviceFeeVisibleToClient must be a JSON boolean.",
       { field: "serviceFeeVisibleToClient" },
+    );
+  }
+  if (
+    settings?.physicalInvoiceRequestsEnabled !== undefined &&
+    typeof settings.physicalInvoiceRequestsEnabled !== "boolean"
+  ) {
+    fail(
+      400,
+      "invalid_physical_invoice_requests",
+      "physicalInvoiceRequestsEnabled must be a JSON boolean.",
+      { field: "physicalInvoiceRequestsEnabled" },
     );
   }
   const riderCommissionBps = settings?.riderCommissionBps;
@@ -935,6 +951,7 @@ function productionItemsFor(store, order, user) {
       } : null;
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
+        turnaroundDays: line.turnaroundDaysSnapshot ?? null,
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
