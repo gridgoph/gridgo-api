@@ -136,6 +136,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791943200000_support_chat_images",
         "1791946800000_account_deletion_requests",
         "1791950400000_delivery_chat",
+        "1791954000000_delivery_chat_images",
       ],
     );
 
@@ -314,6 +315,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverse photos on delivery messages.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 0);
 
     // Reverse client-rider delivery messages.
     await runner(migrationOptions(schema, "down", 1, client));

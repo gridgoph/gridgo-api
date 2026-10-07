@@ -113,6 +113,7 @@ Parents contain IDs only:
 | `payout_receipt` | `order.payoutReceiptFileIds: string[]` and `payoutMilestone.receiptFileId` (Operations and the assigned shop; bound at `POST /orders/:id/milestones/:code/release`, never through attach) |
 | `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 | `tracker_decision` | `tracker_decisions.attachment_ids` (Super Admin only; bound by `POST /admin/tracker/:repo/:number/decisions`, never through attach) |
+| `delivery_chat_image` | `delivery_chat_messages.attachment_file_ids` (the delivery's client and rider only; bound by `POST /orders/:id/delivery-chat/messages`, never through attach) |
 
 Legacy orders may still return `proofFileIds` containing retired supplier-proof files. They remain readable evidence but the `proof` upload purpose and supplier-proof workflow no longer accept writes.
 
@@ -141,6 +142,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `refund_qr` | client | JPEG, PNG, WebP | 5 MiB (`5242880`) |
 | `refund_evidence` | client/ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `refund_receipt` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
+| `delivery_chat_image` | client or rider | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
 
@@ -273,6 +275,8 @@ Auth for ordinary purposes: `ops_admin`, `super_admin`, file owner, or a user re
 `packing_photo` metadata and signed reads are limited to its supplier owner, the owning client after attachment, and Operations/Super Admin. Riders cannot read it, including an assigned rider. It uses the existing one-year order-photo retention policy and open-case holds.
 
 `support_chat_image` reads use the conversation boundary (`canViewThread` in `src/support-chat.js`). Photos in a private staff-pair thread are available only to its participants, including against unrelated Operations/Super Admin callers. Photos in a party support thread remain available to that party and the shared staff inbox. Unsent uploads are owner-only. This applies to metadata and signed download URLs.
+
+`delivery_chat_image` reads follow the delivery conversation (`canReadDeliveryChatPhoto` in `src/delivery-chat.js`): the order's client and the rider the photo was sent with, while that rider still has the job and the conversation is open or read-only. Operations, Super Admin, a reassigned rider and, after the conversation closes, the sender too are refused. When the lifecycle sweep deletes the conversation it removes the references, sets the photos `delete_pending` (`deletionSource: "early"`, `deletionReason: "delivery_chat_closed"`) and deletes their objects; the file retention pass retries any that storage refused. Unsent uploads are owner-only and expire as unused files.
 
 Artwork and mockup reads for suppliers/riders follow the reader's assigned job lines, including `line:<lineId>:artwork|mockup` references. A line reference must resolve to that order's line, the requested file, and a job assigned to the reader; a primary order assignment, uploader ownership, or additional order-wide reference cannot bypass that check. Files shared by multiple lines are readable through any assigned line. The same scope filters `artworkFileIds`, `mockupFileIds`, and the artwork filename in order responses. The owning client and Operations/Super Admin retain full access.
 

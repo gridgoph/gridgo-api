@@ -4,10 +4,12 @@ import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
 import { fixture, AT } from "./fixtures/reschedule.js";
 import { apiForTest } from "./fixtures/reschedule-http.js";
+import { createFileRetention } from "../src/file-retention.js";
 import {
   deliveryChatParty,
   deliveryChatWindow,
   parseDeliveryMessage,
+  parseDeliveryPhotoIds,
   purgeClosedDeliveryChats,
 } from "../src/delivery-chat.js";
 
@@ -53,7 +55,13 @@ test("message body is trimmed and bounded", () => {
   assert.equal(parseDeliveryMessage("x".repeat(1001)).ok, false);
 });
 
-async function setup(t, orderPatch = {}) {
+function chatPhoto(fileId, ownerId, patch = {}) {
+  return { fileId, ownerId, purpose: "delivery_chat_image", originalFilename: "gate.jpg", declaredContentType: "image/jpeg",
+    detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: `delivery_chat_image/${fileId}`, createdAt: AT,
+    readyAt: AT, references: [], ...patch };
+}
+
+async function setup(t, orderPatch = {}, { files = [] } = {}) {
   const db = createDatabase({ DATABASE_URL });
   t.after(() => db.close());
   await db.query("TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE");
@@ -67,6 +75,7 @@ async function setup(t, orderPatch = {}) {
     store.approvalCases.push({ id: `case_${riderId}`, userId: riderId, kind: "rider", status: "approved", version: 1,
       applicationRevision: 1, createdAt: AT, updatedAt: AT });
   }
+  store.files.push(...files);
   await db.transaction(() => saveStore(db, store));
   return { db, api: await apiForTest(t) };
 }
@@ -111,7 +120,8 @@ test("HTTP: client and rider message each other during the delivery; nobody else
   assert.equal(riderView.status, 200);
   assert.deepEqual(riderView.body.messages.map((m) => [m.senderRole, m.body, m.mine]), [["client", "Gate is the blue one", false]]);
   for (const message of riderView.body.messages) {
-    assert.deepEqual(Object.keys(message).sort(), ["body", "createdAt", "id", "mine", "senderRole"]);
+    assert.deepEqual(Object.keys(message).sort(), ["attachments", "body", "createdAt", "id", "mine", "senderRole"]);
+    assert.deepEqual(message.attachments, []);
   }
 
   const reply = await api("rider", "POST", `${PATH}/messages`, { body: "Five minutes away" });
@@ -194,4 +204,131 @@ test("HTTP: no conversation on a job collected at GRIDGO Office", { skip: !DATAB
   const collected = await api("rider", "POST", `${PATH}/messages`, { body: "hello" });
   assert.equal(collected.status, 409);
   assert.equal(collected.body.error, "delivery_chat_not_available");
+});
+
+test("parse: up to four photo ids, and a photo can be the whole message", () => {
+  assert.deepEqual(parseDeliveryPhotoIds(undefined), { ok: true, fileIds: [] });
+  assert.deepEqual(parseDeliveryPhotoIds([" a ", "a", "b"]), { ok: true, fileIds: ["a", "b"] });
+  assert.equal(parseDeliveryPhotoIds("a").ok, false);
+  assert.equal(parseDeliveryPhotoIds(["a", "b", "c", "d", "e"]).ok, false);
+  assert.deepEqual(parseDeliveryMessage(undefined, { allowEmpty: true }), { ok: true, body: "" });
+  assert.deepEqual(parseDeliveryMessage("  ", { allowEmpty: true }), { ok: true, body: "" });
+  assert.equal(parseDeliveryMessage(undefined).ok, false);
+});
+
+const PHOTOS = [
+  chatPhoto("photo_gate", "client"),
+  chatPhoto("photo_spare", "client"),
+  chatPhoto("photo_door", "rider", { detectedContentType: "image/png", originalFilename: "door.png" }),
+  chatPhoto("photo_support", "client", { purpose: "support_chat_image" }),
+];
+
+test("HTTP: a photo goes with the message, and only the client and the rider can open it", { skip: !DATABASE_URL }, async (t) => {
+  const { db, api } = await setup(t, {}, { files: PHOTOS });
+
+  const sent = await api("client", "POST", `${PATH}/messages`, { attachmentFileIds: ["photo_gate"] });
+  assert.equal(sent.status, 201, JSON.stringify(sent.body));
+  assert.equal(sent.body.message.body, "");
+  assert.deepEqual(sent.body.message.attachments, [{ fileId: "photo_gate", contentType: "image/jpeg", originalFilename: "gate.jpg" }]);
+
+  const reply = await api("rider", "POST", `${PATH}/messages`, { body: "This door?", attachmentFileIds: ["photo_door"] });
+  assert.equal(reply.status, 201, JSON.stringify(reply.body));
+
+  const riderView = await api("rider", "GET", PATH);
+  assert.deepEqual(riderView.body.messages.map((m) => [m.body, m.attachments.map((a) => a.fileId)]),
+    [["", ["photo_gate"]], ["This door?", ["photo_door"]]]);
+
+  for (const fileId of ["photo_gate", "photo_door"]) {
+    for (const actor of ["client", "rider"]) {
+      const link = await api(actor, "GET", `/files/${fileId}/download-url`);
+      assert.equal(link.status, 200, `${actor} ${fileId}: ${JSON.stringify(link.body)}`);
+      assert.ok(link.body.url);
+    }
+    for (const actor of ["other", "supplier", "ops", "admin", "rider2"]) {
+      const link = await api(actor, "GET", `/files/${fileId}/download-url`);
+      assert.equal(link.status, 403, `${actor} must not open ${fileId}: ${JSON.stringify(link.body)}`);
+      assert.equal((await api(actor, "GET", `/files/${fileId}`)).status, 403);
+    }
+  }
+
+  const refusals = [
+    ["client", { attachmentFileIds: ["photo_gate"] }, 409, "file_already_attached"],
+    ["rider", { attachmentFileIds: ["photo_spare"] }, 400, "invalid_chat_image"],
+    ["client", { attachmentFileIds: ["photo_support"] }, 400, "invalid_chat_image"],
+    ["client", { attachmentFileIds: ["photo_missing"] }, 400, "invalid_chat_image"],
+    ["client", { attachmentFileIds: ["a", "b", "c", "d", "e"] }, 400, "invalid_request"],
+    ["client", { attachmentFileIds: [] }, 400, "invalid_request"],
+  ];
+  for (const [actor, body, status, error] of refusals) {
+    const refused = await api(actor, "POST", `${PATH}/messages`, body);
+    assert.equal(refused.status, status, `${JSON.stringify(body)}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error, error);
+  }
+  const attach = await api("client", "POST", "/files/photo_spare/attach", { orderId: "order" });
+  assert.equal(attach.status, 400);
+  assert.equal(attach.body.error, "delivery_chat_image_not_attachable");
+  // An unsent upload is still its owner's alone.
+  assert.equal((await api("client", "GET", "/files/photo_spare/download-url")).status, 200);
+  assert.equal((await api("rider", "GET", "/files/photo_spare/download-url")).status, 403);
+
+  const references = (await db.query(
+    `SELECT file_id, reference_id, data FROM file_references WHERE reference_type = 'delivery_chat_message' ORDER BY file_id`,
+  )).rows;
+  assert.deepEqual(references.map((row) => [row.file_id, row.data]),
+    [["photo_door", { orderId: "order", riderId: "rider" }], ["photo_gate", { orderId: "order", riderId: "rider" }]]);
+});
+
+test("HTTP: photos go with the conversation one day after delivery, bytes included", { skip: !DATABASE_URL }, async (t) => {
+  const { db, api } = await setup(t, {}, { files: PHOTOS });
+  assert.equal((await api("client", "POST", `${PATH}/messages`, { body: "Gate", attachmentFileIds: ["photo_gate"] })).status, 201);
+
+  await patchOrder(db, { state: "issue_window_open", deliveryEvidence: { recordedAt: ago(2 * HOUR), evidenceType: "photo" } });
+  for (const actor of ["client", "rider"]) {
+    assert.equal((await api(actor, "GET", "/files/photo_gate/download-url")).status, 200, `${actor} reads it while delivered`);
+  }
+  assert.deepEqual(await purgeClosedDeliveryChats(db), { removed: 0, fileIds: [] });
+
+  await patchOrder(db, { deliveryEvidence: { recordedAt: ago(25 * HOUR), evidenceType: "photo" } });
+  // Refused at once (403), or already queued for deletion by the API's own sweep (404).
+  for (const actor of ["client", "rider"]) {
+    const status = (await api(actor, "GET", "/files/photo_gate/download-url")).status;
+    assert.ok([403, 404].includes(status), `${actor}: ${status}`);
+  }
+
+  const purged = await purgeClosedDeliveryChats(db);
+  assert.equal(await messageCount(db), 0);
+  if (purged.removed) assert.deepEqual(purged.fileIds, ["photo_gate"]);
+  const file = (await db.query(`SELECT state, data FROM files WHERE file_id = 'photo_gate'`)).rows[0];
+  assert.equal(file.state === "delete_pending" || file.state === "deleted", true, file.state);
+  assert.equal((await db.query(
+    `SELECT 1 FROM file_references WHERE file_id = 'photo_gate'`,
+  )).rowCount, 0);
+
+  // The file retention pass removes the bytes the sweep queued.
+  const deleted = [];
+  const retention = createFileRetention({ database: db, load: () => loadStore(db), save: (next) => saveStore(db, next),
+    storage: { deleteObject: async (key) => { deleted.push(key); } }, id: (prefix) => `${prefix}_test` });
+  await retention.finishPending("photo_gate");
+  const after = (await db.query(`SELECT state, object_key FROM files WHERE file_id = 'photo_gate'`)).rows[0];
+  assert.equal(after.state, "deleted");
+  assert.equal(after.object_key, null);
+  for (const actor of ["client", "rider"]) {
+    assert.equal((await api(actor, "GET", "/files/photo_gate/download-url")).status, 404);
+  }
+  // The spare upload was never sent, so the conversation did not take it.
+  assert.equal((await db.query(`SELECT state FROM files WHERE file_id = 'photo_spare'`)).rows[0].state, "ready");
+});
+
+test("HTTP: a reassigned rider never sees the previous rider's photos", { skip: !DATABASE_URL }, async (t) => {
+  const { db, api } = await setup(t, {}, { files: PHOTOS });
+  assert.equal((await api("client", "POST", `${PATH}/messages`, { attachmentFileIds: ["photo_gate"] })).status, 201);
+  await patchOrder(db, { riderId: "rider2", state: "rider_assigned" });
+  // 403 while the sweep has not run, 404 once it has queued the photo's deletion.
+  for (const actor of ["rider2", "rider", "client"]) {
+    const status = (await api(actor, "GET", "/files/photo_gate/download-url")).status;
+    assert.ok([403, 404].includes(status), `${actor}: ${status}`);
+  }
+  await purgeClosedDeliveryChats(db);
+  const file = (await db.query(`SELECT state FROM files WHERE file_id = 'photo_gate'`)).rows[0];
+  assert.ok(["delete_pending", "deleted"].includes(file.state), file.state);
 });
