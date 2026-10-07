@@ -1,3 +1,4 @@
+import { documentPagesFor } from "./document-pages.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
 import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
@@ -115,6 +116,7 @@ function positiveInteger(value, field) {
  */
 function measurementFor(item, body, { required = true } = {}) {
   const kind = measurementKindFor(item.pricingUnit || "per_unit");
+  if (kind === "pages") return null;
   const sent = body.measurement == null ? null : record(body.measurement, "measurement");
 
   if (kind === "none") {
@@ -131,7 +133,6 @@ function measurementFor(item, body, { required = true } = {}) {
     fail(400, "measurement_required", MEASUREMENT_PROMPTS[kind], { field: "measurement", measurementKind: kind });
   }
 
-  if (kind === "pages") return { pages: positiveInteger(sent.pages, "measurement.pages") };
   if (kind === "length") return { length: positiveInteger(sent.length, "measurement.length") };
   return {
     width: positiveInteger(sent.width, "measurement.width"),
@@ -141,7 +142,7 @@ function measurementFor(item, body, { required = true } = {}) {
 
 /** What to ask for, in the client's terms, when a measurement is missing. */
 const MEASUREMENT_PROMPTS = Object.freeze({
-  pages: "Tell us how many pages this document has.",
+  pages: "Upload the document to read its page count.",
   area: "Tell us how wide and how tall this needs to be.",
   length: "Tell us how long this needs to be.",
 });
@@ -291,6 +292,16 @@ function fileFor(store, user, fileId, purpose, field) {
   return file;
 }
 
+function syncDocumentPages(store, item, line, body, { required = false, previousFileId = line.artworkFileId } = {}) {
+  const range = Object.hasOwn(body, "pageRange") ? body.pageRange
+    : previousFileId !== line.artworkFileId ? null : line.documentPages?.range ?? null;
+  const pages = documentPagesFor(store, item, line, range, { required });
+  if (item.pricingUnit === "per_page") {
+    line.documentPages = pages;
+    line.measurement = pages ? { pages: pages.printed } : null;
+  }
+}
+
 /**
  * What a basket line costs right now, priced the way checkout will price it.
  *
@@ -302,10 +313,11 @@ function cartLineSubtotal(store, line) {
   if (!item) return null;
   try {
     const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
+    const documentPages = documentPagesFor(store, item, line);
     return priceCatalogSelection(store, item, {
       selectedOptions,
       quantity: line.quantity,
-      measurement: line.measurement || null,
+      measurement: item.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement || null,
     }).lineSubtotalMinor;
   } catch {
     // A line the pricer refuses -- a measurement the listing stopped taking,
@@ -330,7 +342,7 @@ function assertCartLinePriceable(store, item, line) {
   priceCatalogSelection(store, item, {
     selectedOptions,
     quantity: line.quantity,
-    measurement: line.measurement || null,
+    measurement: item.pricingUnit === "per_page" && !line.measurement ? { pages: 1 } : line.measurement || null,
   });
 }
 
@@ -476,6 +488,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     // unit price times a quantity. `lineSubtotalMinor` stays the shop figure;
     // the client reads `clientLineSubtotalMinor`.
     const lineSubtotalMinor = cartLineSubtotal(store, line);
+    const documentPages = item ? documentPagesFor(store, item, line) : null;
     return {
       id: line.id,
       deadline: lineDeadline(cart, line),
@@ -483,7 +496,8 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       catalogItemId: line.catalogItemId,
       quantity: line.quantity,
       optionIds: [...(line.optionIds || [])],
-      measurement: line.measurement ? { ...line.measurement } : null,
+      measurement: item?.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement ? { ...line.measurement } : null,
+      documentPages,
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
       artworkLinks: structuredClone(line.artworkLinks || []),
@@ -751,6 +765,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       fail(409, "catalog_item_stale", "A cart listing changed or is no longer public. Refresh the cart before checkout.", { lineId: line.id });
     }
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
+    syncDocumentPages(store, item, line, {}, { required: true });
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (!line.artworkFileId && !(line.artworkLinks || []).length) {
       fail(409, "artwork_required", "Upload artwork or add a publicly viewable design link before checkout.", { lineId: line.id, field: "artwork" });
@@ -794,6 +809,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
         sortOrder: line.sortOrder,
       }, createId);
       snapshot.lineItem.jobId = jobId;
+      snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
@@ -934,6 +950,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       amountMinor: lineItem.lineSubtotalMinor,
       artworkFileId: cartLine.artworkFileId ?? null,
       artworkLinks: structuredClone(lineItem.artworkLinks || []),
+      documentPages: structuredClone(lineItem.documentPages ?? null),
       mockupFileId: cartLine.mockupFileId ?? null,
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
     })),
@@ -1142,7 +1159,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const optionIds = body.optionIds ?? [];
     if (!Array.isArray(optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.");
     const quantity = positiveInteger(body.quantity, "quantity");
-    const measurement = measurementFor(item, body);
+    const measurement = item.pricingUnit === "per_page" && body.measurement?.pages != null
+      ? { pages: positiveInteger(body.measurement.pages, "measurement.pages") } : measurementFor(item, body);
     const structuredSpec = body.structuredSpec == null ? {} : record(body.structuredSpec, "structuredSpec");
     assertPrinterCap(store, item, { optionIds, measurement, structuredSpec });
     const { selectedOptions } = selectedCatalogPrice(store, item, optionIds);
@@ -1394,10 +1412,11 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
     };
-    assertCartLinePriceable(store, item, line);
     assertMatchDeadline(store, item, line, at);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
     if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
+    syncDocumentPages(store, item, line, body);
+    assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
     store.cartLines.push(line);
@@ -1409,11 +1428,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   if (lineMatch && ["PATCH", "DELETE"].includes(req.method)) {
     const cart = ownCart(store, user, decodeURIComponent(lineMatch[1]), { draft: true });
     const lineId = decodeURIComponent(lineMatch[2]);
-    const line = (store.cartLines || []).find((row) => row.id === lineId && row.cartId === cart.id);
+    const storedLine = (store.cartLines || []).find((row) => row.id === lineId && row.cartId === cart.id);
+    const line = storedLine ? structuredClone(storedLine) : null;
     if (!line) fail(404, "cart_line_not_found", "That cart line no longer exists.");
     const at = now();
     if (req.method === "DELETE") {
-      store.cartLines = store.cartLines.filter((row) => row !== line);
+      store.cartLines = store.cartLines.filter((row) => row !== storedLine);
       updateCart(cart, at);
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
@@ -1447,11 +1467,13 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
+    if (patchedItem) syncDocumentPages(store, patchedItem, line, body, { previousFileId: storedLine.artworkFileId });
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach
     // is still allowed; the quantity is fixed through the sheet, not here.
-    const repriced = ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field));
+    const repriced = ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field))
+      || (patchedItem?.pricingUnit === "per_page" && ["artworkFileId", "pageRange"].some(field => Object.hasOwn(body, field)));
     if (repriced && patchedItem) {
       try {
         assertCartLinePriceable(store, patchedItem, line);
@@ -1461,6 +1483,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       }
     }
     line.updatedAt = at;
+    Object.assign(storedLine, line);
     updateCart(cart, at);
     return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }

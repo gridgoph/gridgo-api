@@ -472,3 +472,38 @@ The quality factor subtracts two points per order with a missed ready-by deadlin
 in the last 30 days, capped at ten of 100. Client factor priority and deadline
 feasibility filtering remain unchanged. The public rating is unchanged. See
 [late-production penalties](PRODUCTION_PENALTIES_API.md#matching-weight).
+
+### Document page selection
+
+Per-page cart lines derive `measurement.pages` from the uploaded artwork's
+server-inspected `detected.pageCount`. Typed counts are ignored, including from
+older clients. A line may be added before uploading; its subtotal stays `null`
+until its file supplies a count. PDF detection includes compressed page trees;
+recognized raster uploads with a detected count have one page. No extra document
+formats are introduced. Unreadable documents and design links without a count
+must be exported to a readable PDF and uploaded for per-page ordering.
+
+Add/PATCH accepts `pageRange: null | string`. Null or an empty string selects all
+pages. Strings accept one-based inclusive ranges and individual pages separated
+by commas (`"1-4, 7"`). Overlaps and duplicates print once per copy; intervals are
+sorted and merged. Zero, negative, fractional, reversed, malformed, out-of-file
+ranges and strings over 1,000 characters return `400 invalid_page_range`. A range
+on another pricing unit returns `400 page_range_not_accepted`. A range without a
+readable uploaded count returns `409 document_page_count_required`. Omitting the
+field preserves the selection; replacing/removing artwork resets it to all pages
+unless the same request explicitly selects a range for the new file.
+
+Responses expose `documentPages: { total, range, printed } | null`. This is
+server-owned; supplying a `documentPages` object never changes it. `total` is the
+file count, `range` is the normalized selection or null for all, and `printed` is
+the unique selected count per copy. That count replaces total pages in the
+existing price engine: copies, option/duplex multipliers, minimum quantities and
+quantity tiers are unchanged. Shop subtotal, payout and client fee use that same
+price. Checkout revalidates the count and rejects missing counts with
+`409 document_page_count_required` (`field: "artwork"`, `lineId`).
+
+Checkout snapshots `documentPages` into immutable order lines, invoice lines and
+role-scoped `productionItems`; the supplier prints those page numbers from the
+attached original file. Existing placed orders are unchanged. Clients must show
+the read-only file count and selection on Artwork, and never a typed page count
+on Listing. Deploy this API before releasing the client and supplier changes.

@@ -84,6 +84,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
     quantity: 100, lineSubtotalMinor: 10000, acceptedFormatCodesSnapshot: ["pdf"],
     structuredSpecSnapshot: { size: "A5" }, artworkFileId: "file_art", mockupFileId: "file_mock",
     dropoff: { lat: 7.0731, lng: 125.6128, label: "Home" }, sortOrder: 0,
+    documentPages: { total: 30, range: "1-4, 7", printed: 5 },
     snapshotFinalized: true, createdAt: AT,
   }];
   store.orderInvoices = [{ orderId: "ord_match", invoiceNumber: "GG-20260824-0001", issuedAt: AT, snapshot: { totalMinor: 13500 } }];
@@ -104,6 +105,7 @@ test("relational store round-trips client matching, cart, job, line, and invoice
   await database.transaction(() => saveStore(database, reloaded));
   assert.deepEqual((await loadStore(database)).orderLineItems, store.orderLineItems);
 
+  await assert.rejects(database.query("UPDATE order_line_items SET document_pages = NULL WHERE id = 'line_one'"), /immutable/);
   await clear(database);
 });
 

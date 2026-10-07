@@ -976,6 +976,7 @@ function productionItemsFor(store, order, user) {
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
+        documentPages: structuredClone(line.documentPages ?? null),
         structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
           ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
         options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
