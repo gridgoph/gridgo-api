@@ -42,12 +42,12 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
 | GET | `/auth/me/ops` | `ops_admin` membership | fixed Operations projection |
 | GET | `/auth/me/admin` | `super_admin` membership | fixed Super Admin projection |
-| GET | `/approval-cases?status=&kind=&cursor=` | ops/super | submitted cases ordered oldest first; defaults to pending; `status=suspended` lists suspended accounts |
-| GET | `/approval-cases/:caseId` | ops/super | applicant profile, kind-specific review data, readiness, suspended service lines, and immutable history |
-| POST | `/approval-cases/:caseId/approve` | ops/super | pending → approved with expected version and idempotency key |
-| POST | `/approval-cases/:caseId/reject` | ops/super | pending → rejected; reason required |
-| POST | `/approval-cases/:caseId/suspend` | ops/super | approved → suspended; reason required |
-| POST | `/approval-cases/:caseId/restore` | ops/super | suspended → approved; restore note required; optional `restoreServiceIds` brings named lines back in the same transaction |
+| GET | `/approval-cases?status=&kind=&cursor=` | super | submitted cases ordered oldest first; defaults to pending; `status=suspended` lists suspended accounts |
+| GET | `/approval-cases/:caseId` | super | applicant profile, kind-specific review data, readiness, suspended service lines, and immutable history |
+| POST | `/approval-cases/:caseId/approve` | super | pending → approved with expected version and idempotency key |
+| POST | `/approval-cases/:caseId/reject` | super | pending → rejected; reason required |
+| POST | `/approval-cases/:caseId/suspend` | super | approved → suspended; reason required |
+| POST | `/approval-cases/:caseId/restore` | super | suspended → approved; restore note required; optional `restoreServiceIds` brings named lines back in the same transaction |
 | POST | `/auth/logout` | authenticated | optionally releases this phone back to unclaimed; the client signs out of Clerk |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
@@ -79,7 +79,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET, PATCH, DELETE | `/me/payout-account` | supplier | where this shop wants payouts sent: wallet, account name, number, and the receiving-QR file |
 | GET | `/users/:id/payout-account` | owning supplier; ops/super any supplier | that shop's payout account with `shopName`, for the release desk |
 | PATCH | `/users/:id/role` | super | role change; audited |
-| POST | `/users/:id/verification` | ops/super | one-release legacy supplier/rider verification compatibility path |
+| POST | `/users/:id/verification` | super | one-release legacy supplier/rider verification compatibility path |
 | GET | `/zones` | authenticated | address-zone records; order creation requires an active zone code, but zone fees are not used for v2 pricing |
 | POST | `/zones` | super | create zone |
 | PATCH | `/zones/:idOrCode` | super | update zone |
@@ -181,7 +181,7 @@ Enrollment-specific errors are `400 idempotency_key_required` for a missing key,
 
 ## Approval queue and decisions
 
-`GET /approval-cases` is shared by Operations and Super Admin. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
+`GET /approval-cases`, case detail, all case decisions, business-permit requests, and legacy `POST /users/:id/verification` are Super Admin only (`403 forbidden` for every other role). An explicit `X-GRIDGO-Role: ops_admin` cannot borrow a secondary Super Admin membership. Operations retains service-line review and account-standing permissions. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
 
 List items and `detail.approvalCase` carry `status`, `decidedAt` (for a suspended case, when it was suspended), `decidedBy`, `decidedByName` (the deciding approver's display name, or `null`), `suspensionReason`, and `rejectionReason`.
 
@@ -220,7 +220,7 @@ Every decision response adds `restoredServiceIds` (always `[]` except for a rest
 
 Rider approval and restore through the canonical `/approval-cases/:id/approve|restore` routes require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
 
-The one-release Operations queue still decides through `POST /users/:id/verification`. That compatibility path accepts the typed licence number from rider enroll when no licence file has ever been attached, and records `submittedAt` on the decision so the case matches the verification status. A licence file that was later removed still blocks approval.
+The one-release Super Admin queue can still decide through `POST /users/:id/verification`. That compatibility path accepts the typed licence number from rider enroll when no licence file has ever been attached, and records `submittedAt` on the decision so the case matches the verification status. A licence file that was later removed still blocks approval.
 
 ## Supplier shop and verification profile
 
@@ -724,6 +724,7 @@ Default `GET /settings` response:
     "serviceFeeRateBps": 1000,
     "serviceFeeVisibleToClient": true,
     "riderCommissionBps": 8500,
+    "clientRiderLocationRevealDistanceMeters": 1000,
     "downpaymentPercent": 100,
     "issueWindowHours": 24,
     "productionNudge": {
@@ -1136,7 +1137,7 @@ Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 cl
 
 `POST /orders/:id/transition` refuses a supplier moving `production -> supplier_self_qc`, `production -> ready_for_dispatch`, or `supplier_self_qc -> ready_for_dispatch` with `409 production_photo_required` until the job has at least one **ready, attached JPEG/PNG/WebP owned by its assigned supplier**. Body flags, unattached uploads, pending/deleted files, PDFs, another shop's files, artwork, and rider delivery evidence do not count.
 
-One photo is sufficient: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
+One production photo is sufficient for the production-photo gate: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
 
 Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
 
@@ -1158,6 +1159,16 @@ Order list/detail and order mutation responses expose this additive projection t
 ```
 
 With no qualifying image, the response is `{ "status": "waiting_for_photo", "photos": [] }`. The client should display **Waiting for a progress photo** during production and subsequent steps until evidence exists, even after a staff correction. A gallery row exposes no uploader, private key, filename, payout stage or proof code. Signed links use the same authorization and TTL as artwork; unrelated clients and unassigned riders browsing dispatch offers receive none. If signing fails, the photo identity remains and the app can retry `GET /files/:fileId/download-url`. Attaching evidence queues order/job invalidations before commit.
+
+### Packing photos
+
+After production, the shop uploads a separate `packing_photo` showing the finished prints packed and ready. Use `POST /files` then `POST /files/:fileId/attach` with `{ "orderId": "..." }` while `production` or `supplier_self_qc`. The existing upload validation and transactional attach checks apply. Only a ready attached JPEG/PNG/WebP owned by the assigned supplier counts; production photos, payout proofs, PDFs, pending uploads and client-supplied flags never do.
+
+A supplier transition from either production state to `ready_for_dispatch` returns `409 packing_photo_required` until packing evidence exists, in addition to the existing production-photo gate. Jobs already dispatched stay unchanged. Existing audited staff correction remains available and records `packingPhotoMissing` alongside `photoMissing`; claim and refund holds still apply.
+
+Order list/detail and mutation responses expose `packingProgress` with the same `{ status, photos }` shape and short-lived signed links as `productionProgress`, only to the owning client, assigned supplier and Operations/Super Admin. Raw `packingPhotoFileIds` are omitted from every projection. Riders receive neither the gallery nor metadata/download access.
+
+Attaching a packing photo changes no order state or payout milestone. It atomically writes a client `order_packed` notification ("Your order is packed and waiting for the rider"), separate staff `order_packing_photo_received` notifications, and order/job refresh hints. The usual inbox/SSE/push outbox delivers them after commit. Retrying an already-attached file returns `file_already_attached` and creates no duplicate notification. The supplier separately confirms Ready for dispatch to notify riders.
 
 ### Plain order history
 
@@ -1335,7 +1346,33 @@ Operations acts on the inbox row. Without it the request would sit in jsonb unre
 
 `GET /dispatch/:id/location` returns `{ping}` for the current rider only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. Consumers calculate staleness from `at` and `accuracy`.
 
+Client reads return `{ping:null}` until the latest fix is within `settings.clientRiderLocationRevealDistanceMeters` of the delivery destination (including a confirmed destination change). The default is 1,000 meters, also for existing settings without this field. Distance uses the shared straight-line calculation rounded to whole meters; the boundary is inclusive. Missing or invalid destination coordinates fail closed. No older inside-radius fix is substituted for a newer outside-radius fix. Related supplier/rider reads and both Operations/Super Admin tracking endpoints are unchanged.
+
+Only Super Admin may change `clientRiderLocationRevealDistanceMeters` through `PATCH /settings` with `expectedVersion` and a nonblank `reason`. It must be a positive JSON safe integer in meters; null, strings, zero, negatives and fractions return `400 invalid_rider_location_reveal_distance`. Omission preserves the current value. The audited setting applies on the next client location read, including existing trips, without a release. Clients show progress and “Your rider is on the way” while `ping` is null and must clear any previously shown rider marker.
+
 `GET /ops/riders/locations` returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,pickup,dropoff}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. `vehicleType` is the rider profile's `motorcycle | car | van | truck | bicycle` and `plateNumber` its plate, both `null` when no profile exists, so the map can draw the vehicle the rider actually drives. `pickup` and `dropoff` are the order's snapshot points as `{lat,lng,label}` or `null`; a collected order reports the GRIDGO Office point as `dropoff`, the same substitution `publicOrderFor` applies, so the map can draw the remaining leg of the trip. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
+
+## Delivery messages
+
+The owning client and the assigned rider can message each other about a door delivery (`src/delivery-chat.js`, gridgo-client#198). There is no call route: neither side ever receives the other's phone number or email, and a call option waits on a masked-call provider.
+
+- **Open** while the assigned rider has the job (`rider_assigned`, `picked_up`, `out_for_delivery`): both can read and write.
+- **Read only** for 24 hours after the delivery is recorded (`deliveryEvidence.recordedAt`, else `issueWindowOpenedAt`), whatever state follows.
+- **Closed** otherwise: before a rider, on a job collected at GRIDGO Office (`fulfillmentMode: "pickup"` — its rider drives to our counter), after a cancellation, and once the day has passed. The routes refuse a closed conversation at once, and the lifecycle sweep deletes its rows. A conversation is keyed by order **and** rider, so a reassigned job starts clean and the previous rider's messages are deleted.
+
+The client's and the assigned rider's order projection carries `deliveryChat: { status: "open" | "read_only", closesAt, retentionHours: 24 }` while it is not closed; nobody else ever sees it.
+
+```http
+GET /orders/:id/delivery-chat
+```
+
+`200 { chat, messages: [{ id, senderRole: "client" | "rider", body, createdAt, mine }] }`, oldest first, and marks the conversation read for the caller. `401` signed out, `403 forbidden` for anyone but the two parties (Operations included), `404 order_not_found`, `409 delivery_chat_not_available` (no rider yet, or a collected job), `410 delivery_chat_closed` (past its day).
+
+```http
+POST /orders/:id/delivery-chat/messages
+```
+
+`{ "body": "Gate is the blue one" }` — trimmed, 1–1000 characters (`400 invalid_request`). `201 { chat, message }`; `409 delivery_chat_read_only` once delivered; `429 too_many_requests` past 30 messages in 10 minutes; the same `401`/`403`/`404`/`409`/`410` as the read. The other party gets an inbox row and push of type `delivery_message` (`appRole` `client` or `rider`, `orderId` set). Its copy never contains the message, because inbox rows outlive the conversation, and a burst within five minutes rides on the recipient's still-unread notice instead of ringing again.
 
 ## Delivery and issue window
 

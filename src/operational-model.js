@@ -1,4 +1,5 @@
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
+import { deliveryChatProjection } from "./delivery-chat.js";
 import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
@@ -6,6 +7,7 @@ import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
+import { packingProgressFor } from "./packing-progress.js";
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
@@ -221,6 +223,7 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
+    clientRiderLocationRevealDistanceMeters: 1_000,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
     hubPickupEnabled: false,
@@ -246,6 +249,10 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.clientRiderLocationRevealDistanceMeters !== undefined &&
+      (!Number.isSafeInteger(settings.clientRiderLocationRevealDistanceMeters) || settings.clientRiderLocationRevealDistanceMeters <= 0)) {
+    fail(400, "invalid_rider_location_reveal_distance", "Set the client rider location reveal distance to a positive whole number of meters.", { field: "clientRiderLocationRevealDistanceMeters" });
+  }
   if (settings?.hubPickupEnabled !== undefined && typeof settings.hubPickupEnabled !== "boolean") {
     fail(400, "invalid_hub_pickup_enabled", "hubPickupEnabled must be a boolean.");
   }
@@ -407,6 +414,16 @@ function validateNudgeSpan(value, unit, field) {
 
 function radians(degrees) {
   return (degrees * Math.PI) / 180;
+}
+
+export function clientRiderLocationPing(order, ping, settings) {
+  const destination = deliveryDestination(order);
+  for (const point of [destination, ping]) {
+    if (!point || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90 ||
+        !Number.isFinite(point.lng) || Math.abs(point.lng) > 180) return null;
+  }
+  const radius = settings?.clientRiderLocationRevealDistanceMeters ?? 1_000;
+  return distanceMetersBetween(ping, destination) <= radius ? ping : null;
 }
 
 export function distanceMetersBetween(pickup, dropoff) {
@@ -1104,6 +1121,15 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.correction;
   if (owningClient) publicRecord.correction = clientCorrectionFor(order);
   // Same related parties as artwork; signing rechecks file authorization.
+  delete publicRecord.packingProgress;
+  delete publicRecord.packingPhotoFileIds;
+  if (ops || owningClient || assignedSupplier) {
+    publicRecord.packingProgress = packingProgressFor(store, order);
+  }
+  // Only the two people in the conversation learn it exists (gridgo-client#198).
+  delete publicRecord.deliveryChat;
+  const deliveryChat = deliveryChatProjection(order, user);
+  if (deliveryChat) publicRecord.deliveryChat = deliveryChat;
   delete publicRecord.productionProgress;
   if (ops || owningClient || assignedSupplier || (rider && order.riderId === user.id)) {
     publicRecord.productionProgress = productionProgressFor(store, order);

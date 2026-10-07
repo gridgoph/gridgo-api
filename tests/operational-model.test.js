@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   OperationalError,
   calculateOrderMoney,
+  clientRiderLocationPing,
   checklistDigest,
   confirmIssueWindow,
   createPaymentSchedule,
@@ -1008,4 +1009,29 @@ test("hidden client fee breakdowns cover legacy quotes without changing staff co
     }
   }
   assert.deepEqual(order, original);
+});
+
+
+test("client rider reveal radius defaults to 1 km and requires positive whole meters", () => {
+  assert.equal(defaultOperationalSettings().clientRiderLocationRevealDistanceMeters, 1000);
+  for (const value of [null, "1000", 0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    expectDomainError(() => validateOperationalSettings({ ...defaultOperationalSettings(), clientRiderLocationRevealDistanceMeters: value }), 400, "invalid_rider_location_reveal_distance");
+  }
+  const { clientRiderLocationRevealDistanceMeters, ...legacy } = defaultOperationalSettings();
+  assert.equal(validateOperationalSettings(legacy), true);
+});
+
+test("client rider location fails closed and reveals only within the current radius", () => {
+  const order = { fulfillmentMode: "delivery", dropoff: { lat: 0, lng: 0 } };
+  const ping = { lat: 0, lng: 0.005, at: AT };
+  assert.equal(clientRiderLocationPing(order, ping, {}), ping);
+  assert.equal(clientRiderLocationPing(order, { ...ping, lng: 0.02 }, {}), null);
+  assert.equal(clientRiderLocationPing(order, ping, { clientRiderLocationRevealDistanceMeters: 555 }), null);
+  assert.equal(clientRiderLocationPing(order, ping, { clientRiderLocationRevealDistanceMeters: 556 }), ping);
+  assert.equal(clientRiderLocationPing(order, null, {}), null);
+  for (const dropoff of [null, {}, { lat: null, lng: 0 }, { lat: 91, lng: 0 }, { lat: 0, lng: "0" }]) {
+    assert.equal(clientRiderLocationPing({ ...order, dropoff }, ping, {}), null);
+  }
+  const moved = { ...order, dropoffConfirmation: { status: "confirmed", point: { lat: 1, lng: 1 } } };
+  assert.equal(clientRiderLocationPing(moved, ping, {}), null);
 });

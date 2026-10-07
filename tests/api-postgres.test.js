@@ -254,6 +254,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
       timeline: [], createdAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z",
     });
     store.files.push({ fileId: "file_pof", ownerId: "user_supplier", purpose: "fulfilment_proof", originalFilename: "proof.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: "proof/file_pof.jpg", references: [{ type: "order", id: "ord_payout", field: "fulfilmentProofFileIds", milestoneCode: "printing" }], createdAt: AT, readyAt: AT });
+    store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_packing", purpose: "packing_photo", objectKey: "packing/photo.jpg", references: [{ type: "order", id: "ord_payout", field: "packingPhotoFileIds" }] });
     const riderLicense = {
       fileId: "file_rider_license_fixture",
       ownerId: "user_rider",
@@ -605,7 +606,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(before.body.capabilities.receiveJobOffers, false);
 
     const approved = await request(instance.api, "/users/user_supplier_applicant/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "approved" },
+      method: "POST", subject: "clerk_super", body: { status: "approved" },
     });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.user.verificationStatus, "approved");
@@ -617,7 +618,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(approvedProjection.body.capabilities.acceptJobs, true);
 
     const suspended = await request(instance.api, "/users/user_supplier/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Quality hold" },
+      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Quality hold" },
     });
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
     const suspendedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
@@ -627,7 +628,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(suspendedProjection.body.capabilities.editCatalogue, false);
 
     const riderSuspended = await request(instance.api, "/users/user_rider/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Documents expired" },
+      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Documents expired" },
     });
     assert.equal(riderSuspended.status, 200, JSON.stringify(riderSuspended.body));
     const riderProjection = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
@@ -635,7 +636,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(riderProjection.body.capabilities.receiveDispatchOffers, false);
 
     const riderRestored = await request(instance.api, "/users/user_rider/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "approved" },
+      method: "POST", subject: "clerk_super", body: { status: "approved" },
     });
     assert.equal(riderRestored.status, 200, JSON.stringify(riderRestored.body));
     const restoredProjection = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
@@ -644,7 +645,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(restoredProjection.body.capabilities.receiveDispatchOffers, true);
 
     const reset = await request(instance.api, "/users/user_supplier_applicant/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "unverified" },
+      method: "POST", subject: "clerk_super", body: { status: "unverified" },
     });
     assert.equal(reset.status, 200, JSON.stringify(reset.body));
     const resetProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier_applicant" });
@@ -656,7 +657,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
       method: "PATCH", subject: "clerk_super", body: { role: "supplier" },
     })).status, 200);
     const promotedDecision = await request(instance.api, "/users/user_promote/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "approved" },
+      method: "POST", subject: "clerk_super", body: { status: "approved" },
     });
     assert.equal(promotedDecision.status, 200, JSON.stringify(promotedDecision.body));
     const promotedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_promote" });
@@ -667,18 +668,18 @@ test("legacy verification decisions keep approval cases and fixed projections co
     const persisted = await loadStore(database);
     const supplierCase = persisted.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
     assert.equal(supplierCase.status, "suspended");
-    assert.equal(supplierCase.decidedBy, "user_ops");
+    assert.equal(supplierCase.decidedBy, "user_super");
     const supplierEvents = persisted.approvalCaseEvents.filter((event) => event.approvalCaseId === "case_supplier");
     assert.equal(supplierEvents.length, 1);
     assert.equal(supplierEvents[0].fromStatus, "approved");
     assert.equal(supplierEvents[0].toStatus, "suspended");
     assert.equal(supplierEvents[0].actorKind, "approver");
-    assert.equal(supplierEvents[0].actorUserId, "user_ops");
+    assert.equal(supplierEvents[0].actorUserId, "user_super");
     const promotedCase = persisted.approvalCases.find(
       (approvalCase) => approvalCase.userId === "user_promote" && approvalCase.kind === "supplier",
     );
     assert.equal(promotedCase.status, "approved");
-    assert.equal(promotedCase.decidedBy, "user_ops");
+    assert.equal(promotedCase.decidedBy, "user_super");
     assert.equal(
       persisted.auditLog.some(
         (entry) => entry.action === "user.verification" && entry.entityId === "user_supplier",
@@ -698,19 +699,19 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
   const instance = await startApi();
   try {
     const riderSuspended = await request(instance.api, "/users/user_rider/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Documents expired" },
+      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Documents expired" },
     });
     assert.equal(riderSuspended.status, 200, JSON.stringify(riderSuspended.body));
 
     const staleRestore = await request(instance.api, "/approval-cases/case_rider/restore", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "restore-stale", note: "Stale restore" },
     });
     assert.equal(staleRestore.status, 409, JSON.stringify(staleRestore.body));
     assert.equal(staleRestore.body.error, "approval_case_stale");
 
     const freshRestore = await request(instance.api, "/approval-cases/case_rider/restore", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 2, requestId: "restore-fresh", note: "Documents renewed" },
     });
     assert.equal(freshRestore.status, 200, JSON.stringify(freshRestore.body));
@@ -723,7 +724,7 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
     assert.equal(demoted.status, 200, JSON.stringify(demoted.body));
 
     const suspendDemoted = await request(instance.api, "/approval-cases/case_supplier/suspend", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "suspend-demoted", reason: "Post-departure review" },
     });
     assert.equal(suspendDemoted.status, 409, JSON.stringify(suspendDemoted.body));
@@ -733,13 +734,13 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
       method: "PATCH", subject: "clerk_super", body: { role: "supplier" },
     });
     assert.equal(repromoted.status, 200, JSON.stringify(repromoted.body));
-    const repromotedDetail = await request(instance.api, "/approval-cases/case_supplier", { subject: "clerk_ops" });
+    const repromotedDetail = await request(instance.api, "/approval-cases/case_supplier", { subject: "clerk_super" });
     assert.equal(repromotedDetail.status, 200, JSON.stringify(repromotedDetail.body));
     assert.equal(repromotedDetail.body.approvalCase.status, "pending");
     assert.equal(repromotedDetail.body.approvalCase.version, 2, JSON.stringify(repromotedDetail.body.approvalCase));
 
     const staleApprove = await request(instance.api, "/approval-cases/case_supplier/approve", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "approve-stale" },
     });
     assert.equal(staleApprove.status, 409, JSON.stringify(staleApprove.body));
@@ -766,6 +767,52 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
   }
 });
 
+test("sign-up endpoints require Super Admin for every applicant kind", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await addApprovalDecisionFixtures(database);
+  const instance = await startApi();
+  try {
+    const before = await loadStore(database);
+    for (const subject of ["clerk_ops", "clerk_client", "clerk_supplier", "clerk_rider"]) {
+      const routes = [
+        ["GET", "/approval-cases"],
+        ...["case_supplier_pending", "case_rider_intake", "case_business_pending"].flatMap((id) => [
+          ["GET", `/approval-cases/${id}`],
+          ...["approve", "reject", "suspend", "restore"].map((action) => ["POST", `/approval-cases/${id}/${action}`]),
+        ]),
+        ["POST", "/approval-cases/case_business_pending/request-business-permit"],
+        ["POST", "/users/user_supplier/verification"],
+        ["POST", "/users/user_rider/verification"],
+      ];
+      for (const [method, route] of routes) {
+        const denied = await request(instance.api, route, {
+          method, subject, ...(method === "POST" ? { body: { status: "approved", expectedVersion: 1,
+            requestId: "approval-denied", reason: "Review evidence", note: "Review evidence" } } : {}),
+        });
+        assert.equal(denied.status, 403, `${subject} ${method} ${route}: ${JSON.stringify(denied.body)}`);
+        assert.equal(denied.body.error, "forbidden");
+      }
+    }
+    const after = await loadStore(database);
+    assert.deepEqual(after.approvalCases, before.approvalCases);
+    assert.deepEqual(after.approvalCaseEvents, before.approvalCaseEvents);
+    assert.deepEqual(after.auditLog, before.auditLog);
+    const ops = await request(instance.api, "/auth/me/ops", { subject: "clerk_ops" });
+    const admin = await request(instance.api, "/auth/me/admin", { subject: "clerk_super" });
+    assert.equal(ops.body.capabilities.manageApprovalCases, false);
+    assert.equal(ops.body.capabilities.manageOperations, true);
+    assert.equal(admin.body.capabilities.manageApprovalCases, true);
+    for (const route of ["/orders", "/supplier-services", "/ops/organizations"]) {
+      assert.equal((await request(instance.api, route, { subject: "clerk_ops" })).status, 200);
+    }
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test("approval audit authority follows the selected role and implicit Super Admin precedence", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
@@ -776,9 +823,14 @@ test("approval audit authority follows the selected role and implicit Super Admi
   });
   const instance = await startApi();
   try {
+    const denied = await request(instance.api, "/approval-cases/case_rider/suspend", {
+      method: "POST", subject: "clerk_ops", headers: { "X-GRIDGO-Role": "ops_admin" },
+      body: { expectedVersion: 1, requestId: "selected-ops-denied", reason: "Review evidence" },
+    });
+    assert.equal(denied.status, 403);
     const decisions = [
-      { action: "suspend", role: "ops_admin", authority: "ops_admin" },
-      { action: "restore", role: "super_admin", authority: "super_admin" },
+      { action: "suspend", role: "super_admin", authority: "super_admin" },
+      { action: "restore", role: undefined, authority: "super_admin" },
       { action: "suspend", role: undefined, authority: "super_admin" },
     ];
     for (const [index, decision] of decisions.entries()) {
@@ -808,13 +860,13 @@ test("canonical rider decisions enforce readiness after replay handling", { skip
   const instance = await startApi();
   try {
     const suspended = await request(instance.api, "/approval-cases/case_rider/suspend", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "rider-readiness-suspend", reason: "Evidence review" },
     });
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
 
     const restored = await request(instance.api, "/approval-cases/case_rider/restore", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 2, requestId: "rider-readiness-restore", note: "Evidence ready" },
     });
     assert.equal(restored.status, 200, JSON.stringify(restored.body));
@@ -832,32 +884,32 @@ test("canonical rider decisions enforce readiness after replay handling", { skip
     });
 
     const replayed = await request(instance.api, "/approval-cases/case_rider/restore", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 2, requestId: "rider-readiness-restore", note: "Evidence ready" },
     });
     assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
     assert.equal(replayed.body.replayed, true);
 
     const resuspended = await request(instance.api, "/approval-cases/case_rider/suspend", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 3, requestId: "rider-readiness-resuspend", reason: "Evidence removed" },
     });
     assert.equal(resuspended.status, 200, JSON.stringify(resuspended.body));
 
     const blockedRestore = await request(instance.api, "/approval-cases/case_rider/restore", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 4, requestId: "rider-readiness-blocked-restore", note: "Try restore" },
     });
     assert.equal(blockedRestore.status, 409, JSON.stringify(blockedRestore.body));
     assert.equal(blockedRestore.body.error, "rider_documents_incomplete");
 
     const reset = await request(instance.api, "/users/user_rider/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "unverified" },
+      method: "POST", subject: "clerk_super", body: { status: "unverified" },
     });
     assert.equal(reset.status, 200, JSON.stringify(reset.body));
 
     const blockedApproval = await request(instance.api, "/approval-cases/case_rider/approve", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 5, requestId: "rider-readiness-blocked-approve" },
     });
     assert.equal(blockedApproval.status, 409, JSON.stringify(blockedApproval.body));
@@ -889,7 +941,7 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     const denied = await request(instance.api, "/approval-cases?status=pending", { subject: "clerk_client" });
     assert.equal(denied.status, 403);
 
-    const queue = await request(instance.api, "/approval-cases?status=pending&kind=supplier", { subject: "clerk_ops" });
+    const queue = await request(instance.api, "/approval-cases?status=pending&kind=supplier", { subject: "clerk_super" });
     assert.equal(queue.status, 200, JSON.stringify(queue.body));
     assert.deepEqual(queue.body.approvalCases.map((approvalCase) => approvalCase.id), [
       "case_supplier_pending",
@@ -901,15 +953,15 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(allPending.status, 200, JSON.stringify(allPending.body));
     assert.equal(allPending.body.approvalCases.some((approvalCase) => approvalCase.id === "case_rider_intake"), false);
 
-    const businessDetail = await request(instance.api, "/approval-cases/case_business_pending", { subject: "clerk_ops" });
+    const businessDetail = await request(instance.api, "/approval-cases/case_business_pending", { subject: "clerk_super" });
     assert.equal(businessDetail.status, 200, JSON.stringify(businessDetail.body));
     assert.equal(businessDetail.body.clientProfile.businessName, "GRIDGO Buyer");
-    const riderDetail = await request(instance.api, "/approval-cases/case_rider_intake", { subject: "clerk_ops" });
+    const riderDetail = await request(instance.api, "/approval-cases/case_rider_intake", { subject: "clerk_super" });
     assert.equal(riderDetail.status, 200, JSON.stringify(riderDetail.body));
     assert.equal(riderDetail.body.riderProfile.plateNumber, "INTAKE-1");
     assert.deepEqual(riderDetail.body.riderDocuments, []);
 
-    const detail = await request(instance.api, "/approval-cases/case_supplier_pending", { subject: "clerk_ops" });
+    const detail = await request(instance.api, "/approval-cases/case_supplier_pending", { subject: "clerk_super" });
     assert.equal(detail.status, 200, JSON.stringify(detail.body));
     assert.equal(detail.body.applicant.id, "user_supplier_pending");
     assert.equal(detail.body.supplierProfile.shopName, "Ready Prints");
@@ -918,14 +970,14 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.equal(JSON.stringify(detail.body).toLowerCase().includes("commission"), false);
 
     const commissionInput = await request(instance.api, "/approval-cases/case_supplier_pending/approve", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "approval-with-commission", commissionPercent: 10 },
     });
     assert.equal(commissionInput.status, 400);
     assert.equal(commissionInput.body.error, "unexpected_field");
 
     const incomplete = await request(instance.api, "/approval-cases/case_supplier_incomplete/approve", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "approval-incomplete" },
     });
     assert.equal(incomplete.status, 409, JSON.stringify(incomplete.body));
@@ -933,20 +985,20 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.deepEqual(incomplete.body.missing, ["review_ready_service_line"]);
 
     const blankRejection = await request(instance.api, "/approval-cases/case_supplier_incomplete/reject", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "reject-blank", reason: " " },
     });
     assert.equal(blankRejection.status, 400);
     assert.equal(blankRejection.body.error, "reason_required");
     const rejected = await request(instance.api, "/approval-cases/case_supplier_incomplete/reject", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "reject-incomplete", reason: "Add a complete service line" },
     });
     assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
     assert.equal(rejected.body.approvalCase.status, "rejected");
 
     const approved = await request(instance.api, "/approval-cases/case_supplier_pending/approve", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "approval-winner", note: "Ready for launch" },
     });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
@@ -964,14 +1016,14 @@ test("approval queue, detail, and supplier decisions follow the settled transact
     assert.deepEqual(replayed.body.publishedServiceIds, ["svc_pending_complete"]);
 
     const blankSuspension = await request(instance.api, "/approval-cases/case_supplier_pending/suspend", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 2, requestId: "suspend-blank", reason: "   " },
     });
     assert.equal(blankSuspension.status, 400);
     assert.equal(blankSuspension.body.error, "reason_required");
 
     const suspended = await request(instance.api, "/approval-cases/case_supplier_pending/suspend", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 2, requestId: "suspend-account", reason: "Safety review" },
     });
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
@@ -1053,7 +1105,7 @@ test("a suspended shop is reinstated with the lines that went down with it in on
   try {
     // How Dara Blueprint was suspended on 18 Sep.
     const legacy = await request(instance.api, "/users/user_supplier/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Unpaid penalty" },
+      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Unpaid penalty" },
     });
     assert.equal(legacy.status, 200, JSON.stringify(legacy.body));
 
@@ -1062,11 +1114,11 @@ test("a suspended shop is reinstated with the lines that went down with it in on
     const listed = queue.body.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
     assert.equal(listed.status, "suspended");
     assert.equal(listed.suspensionReason, "Unpaid penalty");
-    assert.equal(listed.decidedBy, "user_ops");
-    assert.equal(listed.decidedByName, "Ops");
+    assert.equal(listed.decidedBy, "user_super");
+    assert.equal(listed.decidedByName, "Super");
     assert.ok(Date.parse(listed.decidedAt) > Date.parse(AT));
 
-    const detail = await request(instance.api, "/approval-cases/case_supplier", { subject: "clerk_ops" });
+    const detail = await request(instance.api, "/approval-cases/case_supplier", { subject: "clerk_super" });
     assert.equal(detail.status, 200, JSON.stringify(detail.body));
     const lines = Object.fromEntries(detail.body.suspendedServiceLines.map((line) => [line.id, line]));
     assert.deepEqual(Object.keys(lines).sort(), ["svc_banner", "svc_historic", "svc_individual", "svc_signage"]);
@@ -1162,7 +1214,7 @@ test("racing approval decisions have one PostgreSQL winner and one set of side e
   try {
     const [approve, reject] = await Promise.all([
       request(firstApi.api, "/approval-cases/case_rider/approve", {
-        method: "POST", subject: "clerk_ops",
+        method: "POST", subject: "clerk_super",
         body: { expectedVersion: 1, requestId: "race-approve" },
       }),
       request(secondApi.api, "/approval-cases/case_rider/reject", {
@@ -1235,7 +1287,7 @@ test("role demotion and re-promotion reset the approval case so a returnee re-ea
     assert.equal(riderProjection.body.capabilities.receiveDispatchOffers, false);
 
     const blankSuspend = await request(instance.api, "/users/user_supplier/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "   " },
+      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "   " },
     });
     assert.equal(blankSuspend.status, 200, JSON.stringify(blankSuspend.body));
     const suspendedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
@@ -1243,7 +1295,7 @@ test("role demotion and re-promotion reset the approval case so a returnee re-ea
     assert.equal(suspendedProjection.body.approvalCase.suspensionReason, "Verification suspended");
 
     const blankReject = await request(instance.api, "/users/user_rider/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "rejected", reason: "   " },
+      method: "POST", subject: "clerk_super", body: { status: "rejected", reason: "   " },
     });
     assert.equal(blankReject.status, 200, JSON.stringify(blankReject.body));
     const rejectedProjection = await request(instance.api, "/auth/me/rider", { subject: "clerk_rider" });
@@ -1544,6 +1596,7 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
             originalFilename: "start.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
             size: 100, state: "ready", objectKey: "proof/start.jpg", createdAt: AT, readyAt: AT,
             references: [{ type: "order", id: orderId, field: "fulfilmentProofFileIds", milestoneCode: "production_started" }] });
+          store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_start_packing", purpose: "packing_photo", objectKey: "packing/start.jpg", references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
           await saveStore(database, store);
         });
         // The escrow split of the shop's own price, snapshotted when the quote
@@ -2106,6 +2159,112 @@ async function startMockObjectStorage({ size, bytes } = {}) {
   return { server, requests, url: `http://127.0.0.1:${server.address().port}` };
 }
 
+for (const scope of ["line", "legacy", "no_jobs", "other_job"]) {
+  test(`Operations reassignment transfers artwork access (${scope})`, { skip: !DATABASE_URL }, async (t) => {
+    const database = createDatabase({ DATABASE_URL });
+    t.after(() => database.close());
+    await clearAndFixture(database);
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      for (const suffix of ["replacement", "other"]) {
+        const supplierId = `user_${suffix}`;
+        store.users.push({ ...store.users.find((row) => row.id === "user_supplier"),
+          id: supplierId, clerkUserId: `clerk_${suffix}`, email: `${suffix}@example.invalid` });
+        store.userRoleMemberships.push({ userId: supplierId, role: "supplier", createdAt: AT });
+        store.supplierProfiles.push({ ...structuredClone(store.supplierProfiles[0]), userId: supplierId });
+        store.approvalCases.push({ ...store.approvalCases.find((row) => row.id === "case_supplier"), id: `case_${suffix}`, userId: supplierId });
+        store.supplierServices.push({ ...structuredClone(store.supplierServices[0]), id: `svc_${suffix}`, supplierId });
+      }
+      const order = store.orders.find((row) => row.id === "ord_payout");
+      Object.assign(order, { state: "approved_for_matching", quantity: 1, payoutMilestones: [],
+        artworkFileIds: ["file_artwork"], mockupFileIds: ["file_mockup"] });
+      const job = { id: "job_original", orderId: order.id, supplierId: "user_supplier", riderId: null,
+        state: "needs_qa", fulfillmentMode: "delivery", pickup: structuredClone(order.pickup),
+        dropoff: structuredClone(order.dropoff), supplierSubtotalMinor: 100000, deliveryFeeMinor: 2500,
+        estimatedHours: 24, createdAt: AT, updatedAt: AT };
+      if (scope !== "no_jobs") store.orderJobs.push(job);
+      for (const purpose of ["artwork", "mockup"]) {
+        store.files.push({ ...structuredClone(store.files[0]), fileId: `file_${purpose}`,
+          ownerId: "user_client", purpose, originalFilename: `${purpose}.pdf`, objectKey: `${purpose}/source.pdf`,
+          references: [{ type: "order", id: order.id,
+            field: ["line", "other_job"].includes(scope) ? `line:line_original:${purpose}` : `${purpose}FileIds` }] });
+      }
+      if (["line", "other_job"].includes(scope)) {
+        store.orderLineItems.push({ id: "line_original", orderId: order.id, jobId: job.id,
+          itemNameSnapshot: "Print item", pricingBasisSnapshot: "per_unit", quantity: 1,
+          baseUnitPriceMinor: 100000, effectiveUnitPriceMinor: 100000, lineSubtotalMinor: 100000,
+          acceptedFormatCodesSnapshot: ["pdf"], sortOrder: 0,
+          artworkFileId: "file_artwork", mockupFileId: "file_mockup",
+          artworkLinks: [{ label: "Design", formatCode: "google_drive", url: "https://drive.google.com/file/d/example/view" }],
+          createdAt: AT });
+      }
+      if (scope === "other_job") {
+        store.orderJobs.push({ ...structuredClone(job), id: "job_other", supplierId: "user_other" });
+        store.orderLineItems.push({ ...structuredClone(store.orderLineItems[0]), id: "line_other",
+          jobId: "job_other", artworkFileId: "file_other", mockupFileId: null, sortOrder: 1 });
+        store.files.push({ ...structuredClone(store.files.find((file) => file.fileId === "file_artwork")),
+          fileId: "file_other", objectKey: "artwork/other.pdf", references: [{ type: "order", id: order.id, field: "line:line_other:artwork" }] });
+        order.artworkFileIds.push("file_other");
+      }
+      await saveStore(database, store);
+    });
+    const before = await loadStore(database);
+    const bytes = Buffer.alloc(100, 65);
+    const storage = await startMockObjectStorage({ size: bytes.length, bytes });
+    t.after(() => new Promise((resolve) => storage.server.close(resolve)));
+    const instance = await startApi({ MINIO_ENDPOINT: storage.url, MINIO_PUBLIC_URL: storage.url });
+    t.after(async () => {
+      instance.child.kill("SIGTERM");
+      await new Promise((resolve) => instance.child.once("exit", resolve));
+    });
+    for (const fileId of ["file_artwork", "file_mockup"]) {
+      assert.equal((await request(instance.api, `/files/${fileId}/download-url`, { subject: "clerk_supplier" })).status, 200);
+      assert.equal((await request(instance.api, `/files/${fileId}/download-url`, { subject: "clerk_replacement" })).status, 403);
+    }
+    const assigned = await request(instance.api, "/orders/ord_payout/transition", {
+      method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned", supplierId: "user_replacement" },
+    });
+    assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
+    const view = await request(instance.api, "/orders/ord_payout", { subject: "clerk_replacement" });
+    assert.equal(view.status, 200);
+    assert.deepEqual(view.body.order.artworkFileIds, ["file_artwork"]);
+    assert.deepEqual(view.body.order.mockupFileIds, ["file_mockup"]);
+    const jobs = await request(instance.api, "/jobs", { subject: "clerk_replacement" });
+    assert.deepEqual(jobs.body.jobs.find((order) => order.id === "ord_payout").artworkFileIds, ["file_artwork"]);
+    const previousJobs = await request(instance.api, "/jobs", { subject: "clerk_supplier" });
+    assert.equal(previousJobs.body.jobs.some((order) => order.id === "ord_payout"), false);
+    if (["line", "other_job"].includes(scope)) {
+      assert.deepEqual(view.body.order.productionItems.map((line) => line.id), ["line_original"]);
+      assert.deepEqual(view.body.order.productionItems[0].artworkLinks, before.orderLineItems[0].artworkLinks);
+    }
+    assert.equal((await request(instance.api, "/orders/ord_payout", { subject: "clerk_supplier" })).status, 403);
+    for (const fileId of ["file_artwork", "file_mockup"]) {
+      for (const suffix of ["", "/download-url"]) {
+        assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: "clerk_supplier" })).status, 403);
+        for (const subject of ["clerk_replacement", "clerk_client", "clerk_ops", "clerk_super"]) {
+          const response = await request(instance.api, `/files/${fileId}${suffix}`, { subject });
+          assert.equal(response.status, 200, JSON.stringify(response.body));
+          if (suffix) {
+            assert.match(response.body.url, /X-Amz-Signature=/);
+            assert.deepEqual(Buffer.from(await (await fetch(response.body.url)).arrayBuffer()), bytes);
+          }
+        }
+      }
+    }
+    const after = await loadStore(database);
+    assert.deepEqual(after.orderLineItems, before.orderLineItems);
+    assert.deepEqual(after.files, before.files);
+    assert.deepEqual(after.orders.find((row) => row.id === "ord_payout").payments,
+      before.orders.find((row) => row.id === "ord_payout").payments);
+    if (scope !== "no_jobs") assert.equal(after.orderJobs.find((row) => row.id === "job_original").supplierId, "user_replacement");
+    if (scope === "other_job") {
+      assert.deepEqual(after.orderJobs.find((row) => row.id === "job_other"), before.orderJobs.find((row) => row.id === "job_other"));
+      assert.equal((await request(instance.api, "/files/file_other/download-url", { subject: "clerk_replacement" })).status, 403);
+      assert.equal((await request(instance.api, "/files/file_other/download-url", { subject: "clerk_other" })).status, 200);
+    }
+  });
+}
+
 test("private payment content streams exact bytes with signed-read authorization and no caching", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
@@ -2499,7 +2658,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       `/approval-cases/${business.body.approvalCase.id}/approve`,
       {
         method: "POST",
-        subject: "clerk_ops",
+        subject: "clerk_super",
         body: {
           expectedVersion: business.body.approvalCase.version,
           requestId: "approve-promote-business",
@@ -2620,7 +2779,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     const incompleteProfileApproval = await request(
       instance.api,
       `/users/${rider.body.user.id}/verification`,
-      { method: "POST", subject: "clerk_ops", body: { status: "approved" } },
+      { method: "POST", subject: "clerk_super", body: { status: "approved" } },
     );
     assert.equal(incompleteProfileApproval.status, 400, JSON.stringify(incompleteProfileApproval.body));
     assert.equal(incompleteProfileApproval.body.error, "invalid_application");
@@ -2633,7 +2792,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     const unsubmittedApproval = await request(
       instance.api,
       `/users/${rider.body.user.id}/verification`,
-      { method: "POST", subject: "clerk_ops", body: { status: "approved" } },
+      { method: "POST", subject: "clerk_super", body: { status: "approved" } },
     );
     assert.equal(unsubmittedApproval.status, 409, JSON.stringify(unsubmittedApproval.body));
     assert.equal(unsubmittedApproval.body.error, "approval_state_conflict");
@@ -2691,7 +2850,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     const approvalWithoutLicense = await request(
       instance.api,
       `/users/${invalidatedDocument.riderId}/verification`,
-      { method: "POST", subject: "clerk_ops", body: { status: "approved" } },
+      { method: "POST", subject: "clerk_super", body: { status: "approved" } },
     );
     assert.equal(approvalWithoutLicense.status, 409, JSON.stringify(approvalWithoutLicense.body));
     assert.equal(approvalWithoutLicense.body.error, "rider_documents_incomplete");
@@ -2706,7 +2865,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     );
 
     const riderRejected = await request(instance.api, `/users/${invalidatedDocument.riderId}/verification`, {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { status: "rejected", reason: "Licence evidence missing" },
     });
     assert.equal(riderRejected.status, 200, JSON.stringify(riderRejected.body));
@@ -2787,11 +2946,11 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     );
 
     const supplierApproved = await request(instance.api, `/users/${supplier.body.user.id}/verification`, {
-      method: "POST", subject: "clerk_ops", body: { status: "approved" },
+      method: "POST", subject: "clerk_super", body: { status: "approved" },
     });
     assert.equal(supplierApproved.status, 200, JSON.stringify(supplierApproved.body));
     const supplierRejected = await request(instance.api, `/users/${supplier.body.user.id}/verification`, {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { status: "rejected", reason: "Complete the category setup" },
     });
     assert.equal(supplierRejected.status, 200, JSON.stringify(supplierRejected.body));
@@ -2804,7 +2963,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     const rejectedSupplierState = await loadStore(database);
     const rejectedLegacySupplier = rejectedSupplierState.users.find(({ id }) => id === supplier.body.user.id);
     assert.equal(rejectedLegacySupplier.verificationNote, "Complete the category setup");
-    assert.equal(rejectedLegacySupplier.verifiedBy, "user_ops");
+    assert.equal(rejectedLegacySupplier.verifiedBy, "user_super");
     const retainedServiceIds = rejectedSupplierState.supplierServices
       .filter((service) => service.supplierId === supplier.body.user.id)
       .map((service) => service.id);
@@ -3168,7 +3327,7 @@ test("legacy verification can approve a rider who enrolled with a typed licence 
   try {
     const approved = await request(instance.api, "/users/user_jaylord/verification", {
       method: "POST",
-      subject: "clerk_ops",
+      subject: "clerk_super",
       body: { status: "approved", note: "Pilot accreditation complete" },
     });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
@@ -4116,7 +4275,7 @@ test("account suspend, remove, and restore are audited and separate from accredi
     assert.equal(missingUser.body.error, "user_not_found");
 
     const riderHold = await request(instance.api, "/users/user_rider/verification", {
-      method: "POST", subject: "clerk_ops", body: { status: "suspended", reason: "Licence review" },
+      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Licence review" },
     });
     assert.equal(riderHold.status, 200, JSON.stringify(riderHold.body));
     assert.equal(riderHold.body.user.verificationStatus, "suspended");
@@ -4129,7 +4288,7 @@ test("account suspend, remove, and restore are audited and separate from accredi
     assert.equal(offers.body.error, "forbidden");
 
     const caseSuspend = await request(instance.api, "/approval-cases/case_supplier/suspend", {
-      method: "POST", subject: "clerk_ops",
+      method: "POST", subject: "clerk_super",
       body: { expectedVersion: 1, requestId: "accredit-suspend", reason: "Shop documents" },
     });
     assert.equal(caseSuspend.status, 200, JSON.stringify(caseSuspend.body));
@@ -4813,7 +4972,7 @@ test('organization verification, handover, notices and code attempts persist thr
     assert.equal(duplicate.status, 409, JSON.stringify(duplicate.body));
     assert.equal(duplicate.body.error, 'organization_already_exists');
     const caseId = applied.body.approvalCase.id;
-    const detail = await request(instance.api, `/approval-cases/${caseId}`, { subject: 'clerk_ops' });
+    const detail = await request(instance.api, `/approval-cases/${caseId}`, { subject: 'clerk_super' });
     assert.equal(detail.status, 200, JSON.stringify(detail.body));
     assert.deepEqual(detail.body.application.documents, applications.user_client.documents);
     assert.equal(JSON.stringify(detail.body).includes('codeHash'), false);
@@ -4824,7 +4983,7 @@ test('organization verification, handover, notices and code attempts persist thr
       assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: 'clerk_ops' })).status, 200);
       assert.equal((await request(instance.api, `/files/${fileId}${suffix}`, { subject: 'clerk_super' })).status, 200);
     }
-    const approved = await request(instance.api, `/approval-cases/${caseId}/approve`, { method: 'POST', subject: 'clerk_ops',
+    const approved = await request(instance.api, `/approval-cases/${caseId}/approve`, { method: 'POST', subject: 'clerk_super',
       body: { expectedVersion: 1, requestId: 'organization-approve-one' } });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     const oldOfficer = approved.body.organization.currentOfficer;
@@ -4973,6 +5132,110 @@ test("release announcements are atomic, audience-scoped and idempotent across bo
     instance.child.kill("SIGTERM");
     await new Promise(resolve => instance.child.once("exit", resolve));
     await fcm.close();
+    await database.close();
+  }
+});
+
+test('packing photo gates dispatch, notifies the client once, and stays private from the rider', { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({DATABASE_URL});
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find(row => row.id === 'ord_payout').state = 'production';
+    store.files.find(row => row.fileId === 'file_packing').references = [];
+    await saveStore(database,store);
+  });
+  const storage = await startMockObjectStorage({size:100});
+  const instance = await startApi({MINIO_ENDPOINT:storage.url,MINIO_PUBLIC_URL:storage.url});
+  try {
+    for (const from of ['production','supplier_self_qc']) {
+      if (from === 'supplier_self_qc') assert.equal((await request(instance.api,'/orders/ord_payout/transition',{method:'POST',subject:'clerk_supplier',body:{state:from}})).status,200);
+      const denied = await request(instance.api,'/orders/ord_payout/transition',{method:'POST',subject:'clerk_supplier',body:{state:'ready_for_dispatch',packingProgress:{photos:['fake']}}});
+      assert.equal(denied.status,409);
+      assert.equal(denied.body.error,'packing_photo_required');
+    }
+    const before = (await loadStore(database)).orders.find(row=>row.id==='ord_payout');
+    const attached = await request(instance.api,'/files/file_packing/attach',{method:'POST',subject:'clerk_supplier',body:{orderId:'ord_payout'}});
+    assert.equal(attached.status,200,JSON.stringify(attached.body) + instance.output());
+    assert.equal(attached.body.order.state,'supplier_self_qc');
+    assert.deepEqual((await loadStore(database)).orders.find(row=>row.id==='ord_payout').payoutMilestones,before.payoutMilestones);
+    assert.equal((await request(instance.api,'/files/file_packing/attach',{method:'POST',subject:'clerk_supplier',body:{orderId:'ord_payout'}})).status,409);
+    const saved = await loadStore(database);
+    assert.equal(saved.notifications.filter(n=>n.type==='order_packed' && n.userId==='user_client').length,1);
+    assert.ok(saved.notifications.some(n=>n.type==='order_packing_photo_received' && n.appRole==='ops_admin'));
+    for (const subject of ['clerk_client','clerk_ops']) {
+      const result = await request(instance.api,'/orders/ord_payout',{subject});
+      assert.match(result.body.order.packingProgress.photos[0].downloadUrl,/X-Amz-Signature=/);
+      assert.equal((await request(instance.api,'/files/file_packing/download-url',{subject})).status,200);
+    }
+    assert.equal((await request(instance.api,'/files/file_packing/download-url',{subject:'clerk_rider'})).status,403);
+    const ready = await request(instance.api,'/orders/ord_payout/transition',{method:'POST',subject:'clerk_supplier',body:{state:'ready_for_dispatch'}});
+    assert.equal(ready.status,200,JSON.stringify(ready.body));
+  } finally {
+    instance.child.kill('SIGTERM');
+    await new Promise(resolve=>instance.child.once('exit',resolve));
+    await new Promise(resolve=>storage.server.close(resolve));
+    await database.close();
+  }
+});
+
+
+test("client rider location radius is live, private and leaves staff tracking unchanged", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find(row => row.id === "ord_payout");
+    order.state = "out_for_delivery";
+    order.riderId = "user_rider";
+    delete store.settings.clientRiderLocationRevealDistanceMeters;
+    store.locationPings.push({ id: "ping_radius", orderId: order.id, riderId: order.riderId, lat: 7.06, lng: 125.62, accuracy: 5, at: new Date().toISOString() });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  const location = subject => request(instance.api, "/dispatch/ord_payout/location", { subject });
+  try {
+    let current = await request(instance.api, "/settings", { subject: "clerk_super" });
+    assert.equal(current.body.settings.clientRiderLocationRevealDistanceMeters, 1000);
+    assert.deepEqual((await location("clerk_client")).body, { ping: null });
+    assert.equal((await location("clerk_promote")).status, 403);
+    for (const subject of ["clerk_ops", "clerk_super", "clerk_rider", "clerk_supplier"]) {
+      assert.equal((await location(subject)).body.ping.id, "ping_radius");
+    }
+    for (const subject of ["clerk_ops", "clerk_super"]) {
+      const map = await request(instance.api, "/ops/riders/locations", { subject });
+      assert.equal(map.status, 200);
+      assert.equal(map.body.riders[0].lat, 7.06);
+    }
+    const patch = (subject, value, version = current.body.version) => request(instance.api, "/settings", {
+      method: "PATCH", subject, body: { expectedVersion: version, reason: "Update client tracking distance", clientRiderLocationRevealDistanceMeters: value },
+    });
+    for (const subject of ["clerk_ops", "clerk_client", "clerk_rider", "clerk_supplier"]) assert.equal((await patch(subject, 3000)).status, 403);
+    for (const value of [null, "1000", 0, -1, 1.5]) {
+      const invalid = await patch("clerk_super", value);
+      assert.equal(invalid.status, 400);
+      assert.equal(invalid.body.error, "invalid_rider_location_reveal_distance");
+    }
+    const staleVersion = current.body.version;
+    current = await patch("clerk_super", 3000);
+    assert.equal(current.status, 200);
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_radius");
+    assert.equal((await patch("clerk_super", 1000, staleVersion)).status, 409);
+    current = await patch("clerk_super", 1000);
+    assert.equal(current.status, 200);
+    assert.deepEqual((await location("clerk_client")).body, { ping: null });
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.locationPings.push({ id: "ping_near", orderId: "ord_payout", riderId: "user_rider", lat: 7.079, lng: 125.62, accuracy: 5, at: new Date(Date.now() + 1000).toISOString() });
+      await saveStore(database, store);
+    });
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_near");
+    const persisted = await loadStore(database);
+    assert.equal(persisted.settings.clientRiderLocationRevealDistanceMeters, 1000);
+    assert.ok(persisted.auditLog.some(row => row.action === "settings.operational_update"));
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise(resolve => instance.child.once("exit", resolve));
     await database.close();
   }
 });

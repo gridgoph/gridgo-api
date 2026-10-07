@@ -19,6 +19,7 @@ const KINDS = new Set([
   "artwork",
   "fulfilment_proof",
   "production_photo",
+  "packing_photo",
   "delivery_photo",
   "handoff_signature",
   "supplier_invoice",
@@ -49,6 +50,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   supplier_invoice: { roles: ["supplier"], maxBytes: 15 * 1024 * 1024, contentTypes: [...CONTENT_TYPES] },
+  packing_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   production_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
@@ -950,6 +952,13 @@ export function authorizeFileAttach(user, file, target) {
     if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
     return;
   }
+  if (file.purpose === "packing_photo") {
+    if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
+    if (!["production", "supplier_self_qc"].includes(record.state)) {
+      fail(409, "packing_photo_upload_not_allowed", "Add the packing photo before marking the package ready for dispatch.");
+    }
+    return;
+  }
   if (file.purpose === "production_photo") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
@@ -1091,6 +1100,7 @@ export function attachFileReference(file, target) {
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
     production_photo: "productionPhotoFileIds",
+    packing_photo: "packingPhotoFileIds",
     delivery_photo: "deliveryPhotoFileIds",
     handoff_signature: "handoffSignatureFileIds",
     service_image: "imageFileIds",
@@ -1226,6 +1236,7 @@ export function authorizeFileRead(user, store, file) {
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === "client_verification_document") forbidden();
+  if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)) forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"

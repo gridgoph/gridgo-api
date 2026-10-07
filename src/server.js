@@ -22,6 +22,7 @@ import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
+import { packingPhotoFiles } from "./packing-progress.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
@@ -178,6 +179,7 @@ import { applyProductionNudges, continueAfterStepFailure } from "./production-in
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
   calculateOrderMoney,
+  clientRiderLocationPing,
   carriedToOffice,
   confirmIssueWindow,
   createPaymentSchedule,
@@ -210,6 +212,7 @@ import {
   routeSupportDesk,
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
+import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
 import {
   isFirstmateIssueReportsRoute,
   isStaffIssueReportsRoute,
@@ -600,6 +603,7 @@ function publicOperationalSettings(settings, store = null) {
   return {
     ...rest,
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
+    clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
@@ -1165,7 +1169,7 @@ function fixedAuthProjection(store, auth, role) {
     return {
       ...base,
       capabilities: {
-        manageApprovalCases: true,
+        manageApprovalCases: false,
         manageOperations: true,
       },
     };
@@ -1502,6 +1506,14 @@ async function sweepOrganizationOfficers() {
   });
 }
 
+// A delivery's messages go one day after it is delivered (gridgo-client#198).
+// Its own tables, so no domain lock: nothing else writes a closed conversation.
+async function sweepDeliveryChats() {
+  const candidate = await database.query(`SELECT 1 FROM delivery_chat_messages LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await database.transaction(() => purgeClosedDeliveryChats(database, now()), { lockKey: "gridgo-delivery-chat" });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -1570,6 +1582,11 @@ async function publicOrder(order, user, orderStore) {
     authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
     presignGet: (key) => objectStorage.presignGet(key),
   });
+  await signProductionPhotos(record, {
+    findFile: (fileId) => findFile(orderStore, fileId),
+    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
+    presignGet: (key) => objectStorage.presignGet(key),
+  }, "packingProgress");
   return record;
 }
 
@@ -2435,6 +2452,10 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (await routeDeliveryChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
+      return;
+    }
+
     /**
      * What clients said about this shop's work, read back by the shop.
      *
@@ -2566,16 +2587,16 @@ async function handleRequest(req, res) {
       return send(res, orderMatchResponse.status, orderMatchResponse.body);
     }
 
-    // ---- shared Operations / Super Admin approval queue ----
+    // ---- Super Admin approval queue ----
     if (req.method === "GET" && pathname === "/approval-cases") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const result = approvalQueue(store, url);
       const { status: responseStatus, ...body } = result;
       return send(res, responseStatus, body);
     }
 
     if (req.method === "GET" && /^\/approval-cases\/[^/]+$/.test(pathname)) {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const caseId = pathname.split("/")[2];
       const approvalCase = (store.approvalCases || []).find((candidate) => candidate.id === caseId);
       if (!approvalCase) return send(res, 404, { error: "approval_case_not_found" });
@@ -2583,7 +2604,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && /^\/approval-cases\/[^/]+\/(approve|reject|suspend|restore)$/.test(pathname)) {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const [, , caseId, action] = pathname.split("/");
       if (!APPROVAL_DECISIONS.has(action)) return send(res, 404, { error: "not_found", path: pathname });
       const input = approvalDecisionInput(action, await readBody(req));
@@ -2900,6 +2921,18 @@ async function handleRequest(req, res) {
               fileId: latestFile.fileId,
               milestoneCode: latestTarget.milestoneCode,
             });
+          }
+          if (latestFile.purpose === "packing_photo") {
+            const order = latestTarget.record;
+            latestStore.notifications.push({
+              id: id("ntf"), userId: order.clientId, appRole: "client",
+              type: "order_packed", orderId: order.id, occurrenceKey: `packing:${latestFile.fileId}`,
+              title: "Your order is packed",
+              body: "Your order is packed and waiting for the rider. Open the order to see the packing photo.",
+              read: false, at: attachedAt,
+            });
+            notifyAdmins(latestStore, "order_packing_photo_received", "Packing photo received", order,
+              `packing:${latestFile.fileId}`, { createId: id, at: attachedAt });
           }
           queueOrderInvalidate(latestStore, latestTarget.record, ["orders", "jobs"]);
           await save(latestStore);
@@ -3240,6 +3273,8 @@ async function handleRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
+          ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
         hubPickupEnabled: Object.hasOwn(body, "hubPickupEnabled") ? body.hubPickupEnabled : store.settings.hubPickupEnabled === true,
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
@@ -3717,9 +3752,9 @@ async function handleRequest(req, res) {
       return send(res, 200, { user: userWithAccountState(target) });
     }
 
-    // Supplier / rider verification (ops + super)
+    // Supplier / rider verification (Super Admin only)
     if (req.method === "POST" && /^\/users\/[^/]+\/verification$/.test(pathname)) {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const uid = pathname.split("/")[2];
       const target = store.users.find((u) => u.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
@@ -5485,6 +5520,7 @@ async function handleRequest(req, res) {
           });
         }
         const photoMissing = productionPhotoFiles(store, order).length === 0;
+        const packingPhotoMissing = next === "ready_for_dispatch" && packingPhotoFiles(store, order).length === 0;
         if (["ops_admin", "super_admin"].includes(user.role)) {
           const reason = typeof body.reason === "string" ? body.reason.trim() : "";
           if (!reason) return send(res, 400, {
@@ -5493,7 +5529,7 @@ async function handleRequest(req, res) {
           });
           audit(store, {
             actor: user, action: "order.production_override", entityType: "order", entityId: order.id,
-            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing },
+            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing, packingPhotoMissing },
           });
         } else if (photoMissing) {
           return send(res, 409, {
@@ -5501,6 +5537,10 @@ async function handleRequest(req, res) {
             message: "Attach at least one production progress photo before marking this job packed or ready for dispatch. A start-of-production photo counts.",
           });
         }
+      }
+      if (next === "ready_for_dispatch" && user.role === "supplier" && !packingPhotoFiles(store, order).length) {
+        return send(res, 409, { error: "packing_photo_required",
+          message: "Add a photo of the finished prints packed and ready before marking Ready for dispatch." });
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
@@ -5743,6 +5783,7 @@ async function handleRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       if (next === "supplier_assigned" && body.supplierId) {
+        const previousSupplierId = order.supplierId;
         order.supplierId = body.supplierId;
         // optional: record which service lines justified eligibility
         if (Array.isArray(body.matchingServiceIds)) {
@@ -5753,6 +5794,14 @@ async function handleRequest(req, res) {
           order.matchingServiceIds = cand?.matchingServiceIds || [];
         }
         setOrderPickup(order, store);
+        // Artwork and production lines follow their job, so transfer ownership
+        // with the parent assignment without rewriting immutable line/file refs.
+        for (const job of store.orderJobs || []) {
+          if (job.orderId !== order.id || job.supplierId !== previousSupplierId) continue;
+          job.supplierId = order.supplierId;
+          job.pickup = structuredClone(order.pickup);
+          job.updatedAt = now();
+        }
         audit(store, {
           actor: user,
           action: "order.supplier_assigned",
@@ -6129,7 +6178,7 @@ async function handleRequest(req, res) {
       const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId);
       if (!pings.length) return send(res, 200, { ping: null });
       const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
-      return send(res, 200, { ping });
+      return send(res, 200, { ping: user.role === "client" ? clientRiderLocationPing(order, ping, store.settings) : ping });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {
@@ -6535,6 +6584,7 @@ async function runLifecycleWork() {
         });
       },
       sweepOrganizationOfficers,
+      sweepDeliveryChats,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }

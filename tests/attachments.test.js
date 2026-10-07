@@ -804,3 +804,22 @@ test("chat photos keep staff-pair privacy and shared support-inbox access", () =
   assert.doesNotThrow(() => authorizeFileRead(ops, {}, draftPhoto));
   expectError(() => authorizeFileRead(superAdmin, {}, draftPhoto), 403, "forbidden");
 });
+
+test('packing photos are supplier images, attach only before dispatch, and exclude rider reads', () => {
+  authorizeFileUpload(supplier, 'packing_photo');
+  for (const actor of [client, rider, ops]) expectError(() => authorizeFileUpload(actor, 'packing_photo'), 403, 'forbidden');
+  expectError(() => validateUpload({ originalFilename: 'proof.pdf', declaredContentType: 'application/pdf', sniffBytes: Buffer.from('%PDF-1.7\n'), size: 20 }, 'packing_photo'), 415, 'invalid_file_type');
+  const record = order({state:'production'});
+  const store = {orders:[record], supplierServices:[]};
+  const file = readyFile('packing_photo');
+  const target = resolveFileTarget(store, file.purpose, {orderId:record.id}, supplier);
+  authorizeFileAttach(supplier,file,target);
+  expectError(() => authorizeFileAttach(otherSupplier,file,target),403,'forbidden');
+  for (const state of ['ready_for_dispatch','rider_assigned','delivered']) {
+    expectError(() => authorizeFileAttach(supplier,file,{...target,record:{...record,state}}),409,'packing_photo_upload_not_allowed');
+  }
+  attachFileReference(file,target);
+  assert.deepEqual(record.packingPhotoFileIds,[file.fileId]);
+  for (const actor of [client,supplier,ops,superAdmin]) authorizeFileRead(actor,store,file);
+  for (const actor of [rider,otherClient,otherSupplier]) expectError(() => authorizeFileRead(actor,store,file),403,'forbidden');
+});
