@@ -1,5 +1,6 @@
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
+import { canViewThread } from "./support-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -1212,16 +1213,13 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (file.purpose === "support_chat_image") {
-    if (["ops_admin", "super_admin"].includes(user.role) || hasRole(user, "ops_admin") || hasRole(user, "super_admin")) {
-      return;
-    }
     if (file.ownerId === user.id) return;
+    // The reference snapshots the thread parties when the message is sent.
+    // Staff-pair photos follow the same privacy boundary as their conversation.
     const onThread = (file.references || []).some((reference) => (
       reference.type === "support_chat_message"
-      && (
-        (reference.partyUserId === user.id && (!reference.partyRole || reference.partyRole === user.role))
-        || reference.staffPeerUserId === user.id
-      )
+      && reference.partyUserId && reference.partyRole
+      && canViewThread(user, reference)
     ));
     if (onThread) return;
     forbidden();
