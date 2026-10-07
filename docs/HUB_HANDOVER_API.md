@@ -15,8 +15,8 @@ All routes use the existing Clerk instance. The Admin App may select its staff c
 | POST | `/admin/staff/invites/:id/revoke` | revokes an unused code; does not revoke an already-created membership |
 | GET | `/admin/staff` | named staff profiles with `active`, `roleCode`, `updatedAt` |
 | PATCH | `/admin/staff/:userId` | `{roleCode,active}`; reassigns or suspends the profile |
-| POST | `/auth/staff/redeem` | Clerk bearer + `{code}`; `{staff:{id,name,role,canHandout}}` |
-| GET | `/staff/me` | same caller-only staff projection (Operations/Super Admin: `role` is their membership); inactive/missing staff is 403 |
+| POST | `/auth/staff/redeem` | Clerk bearer + `{code}`; `{staff:{id,name,role,roleName,canHandout}}` |
+| GET | `/staff/me` | same caller-only staff projection (Operations/Super Admin: `role` is their membership and `roleName` is `Operations` or `Super Admin`); inactive/missing staff is 403 |
 
 The invite code is a 192-bit bearer secret returned **once** and stored as SHA-256. Deliver it privately to the intended staff member. The first verified Clerk subject to redeem it owns it; a same-subject retry is idempotent, another subject gets `409 staff_invite_used`. Expired/revoked/unknown codes return `409 staff_invite_invalid`. Redemption never links identities by email; an email already mapped to another subject returns `409 email_already_registered`. New identities receive only `staff`, with name copied from Clerk. Redeeming another invite cannot silently reassign an existing staff profile.
 

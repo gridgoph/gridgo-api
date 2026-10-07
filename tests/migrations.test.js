@@ -136,6 +136,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791943200000_support_chat_images",
         "1791946800000_account_deletion_requests",
         "1791950400000_delivery_chat",
+        "1791954000000_document_page_ranges",
+        "1791957600000_delivery_chat_images",
+        "1791961200000_order_qa_checklist",
       ],
     );
 
@@ -314,6 +317,28 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+
+    const checklistConstraint = async () => (await client.query(`SELECT 1 FROM pg_constraint c
+      JOIN pg_namespace n ON n.oid = c.connamespace
+      WHERE n.nspname = $1 AND c.conname = 'orders_qa_checklist_check'`, [schema])).rowCount;
+    assert.equal(await checklistConstraint(), 1);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal(await checklistConstraint(), 0);
+
+    // Reverse photos on delivery messages without removing document selections.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 0);
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name IN ('client_cart_lines', 'order_line_items') AND column_name='document_pages'`, [schema])).rowCount, 2);
+
+    // Reverse the additive document selection snapshot before earlier migrations.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='client_cart_lines' AND column_name='document_pages'`, [schema])).rowCount, 0);
 
     // Reverse client-rider delivery messages.
     await runner(migrationOptions(schema, "down", 1, client));

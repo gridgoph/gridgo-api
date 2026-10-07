@@ -16,15 +16,16 @@ export const staffHash = value => createHash('sha256').update(String(value)).dig
 // Operations and Super Admin hold every hub staff capability through their own
 // membership: no invite or staff profile, selected with their own role header.
 const ADMIN_STAFF_ROLES = ['super_admin', 'ops_admin'];
+const ADMIN_STAFF_ROLE_NAMES = { super_admin: 'Super Admin', ops_admin: 'Operations' };
 export function staffAccess(store, user) {
   if (!activeAccount(user)) return null;
   if (hasMembership(store, user, 'staff')) {
     const profile = (store.staffProfiles || []).find(p => p.userId === user.id && p.active);
     const role = (store.staffRoles || []).find(r => r.code === profile?.roleCode);
-    if (role) return { id: user.id, name: user.name, role: role.code, canHandout: role.canHandout };
+    if (role) return { id: user.id, name: user.name, role: role.code, roleName: role.name, canHandout: role.canHandout };
   }
   const adminRole = ADMIN_STAFF_ROLES.find(role => hasMembership(store, user, role));
-  return adminRole ? { id: user.id, name: user.name, role: adminRole, canHandout: true } : null;
+  return adminRole ? { id: user.id, name: user.name, role: adminRole, roleName: ADMIN_STAFF_ROLE_NAMES[adminRole], canHandout: true } : null;
 }
 export function redeemStaffInvite({ store, claims, clerkUser, code, id, at, audit }) {
   if (!claims?.sub) staffError(401, 'unauthorized');

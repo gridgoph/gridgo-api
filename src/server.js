@@ -1506,12 +1506,16 @@ async function sweepOrganizationOfficers() {
   });
 }
 
-// A delivery's messages go one day after it is delivered (gridgo-client#198).
-// Its own tables, so no domain lock: nothing else writes a closed conversation.
+// A delivery's messages go one day after it is delivered (gridgo-client#198),
+// and their photos with them (gridgo-client#218). The photos are file rows, so
+// this takes the domain lock; their bytes are removed once it has committed.
 async function sweepDeliveryChats() {
   const candidate = await database.query(`SELECT 1 FROM delivery_chat_messages LIMIT 1`);
   if (!candidate.rowCount) return;
-  await database.transaction(() => purgeClosedDeliveryChats(database, now()), { lockKey: "gridgo-delivery-chat" });
+  const { fileIds } = await enqueueMutation(() => purgeClosedDeliveryChats(database, now()));
+  for (const fileId of fileIds) {
+    try { await fileRetention.finishPending(fileId); } catch { /* The file retention pass retries it. */ }
+  }
 }
 
 async function sweepProductionInactivity() {
@@ -5833,7 +5837,7 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
-      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "");
+      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist);
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {
         audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,

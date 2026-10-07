@@ -1,6 +1,7 @@
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { canViewThread } from "./support-chat.js";
+import { canReadDeliveryChatPhoto } from "./delivery-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -130,6 +131,13 @@ export const PURPOSE_POLICIES = Object.freeze({
   // contents must match the filename. Bound when the chat message is posted.
   support_chat_image: {
     roles: ["client", "supplier", "rider", "ops_admin", "super_admin"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  // A picture in a client-rider delivery conversation. Bound when the message
+  // is posted; deleted with the conversation one day after delivery.
+  delivery_chat_image: {
+    roles: ["client", "rider"],
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
@@ -732,6 +740,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A chat photo is bound when the message is sent: send its fileId in attachmentFileIds.",
     );
   }
+  if (purpose === "delivery_chat_image") {
+    fail(
+      400,
+      "delivery_chat_image_not_attachable",
+      "A delivery chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/delivery-chat/messages.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1232,6 +1247,14 @@ export function authorizeFileRead(user, store, file) {
       && canViewThread(user, reference)
     ));
     if (onThread) return;
+    forbidden();
+  }
+  // Sent photos follow the delivery conversation: its two parties, while it
+  // can be read. That holds for the sender too. Unsent uploads are the owner's.
+  if (file.purpose === "delivery_chat_image") {
+    const sent = (file.references || []).filter((reference) => reference.type === "delivery_chat_message");
+    if (!sent.length && file.ownerId === user.id) return;
+    if (sent.some((reference) => canReadDeliveryChatPhoto(user, store, reference))) return;
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;

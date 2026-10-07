@@ -351,7 +351,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null, extraEnv = {} } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, pageRange = null, downpaymentPercent = null, extraEnv = {} } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -367,6 +367,14 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
     const item = store.catalogItems.find((row) => row.id === catalogItemId);
     item.pricingUnit = "per_area";
     item.measureUnit = "ft";
+    await saveStore(database, store);
+  });
+  if (pageRange) await database.transaction(async () => {
+    const store = await loadStore(database);
+    const item = store.catalogItems.find(row => row.id === catalogItemId);
+    item.pricingUnit = "per_page";
+    item.basePriceMinor = 300;
+    store.files.find(row => row.fileId === "file_art").detected = { kind: "pdf", pageCount: 30 };
     await saveStore(database, store);
   });
   const instance = await startApi({ extraEnv });
@@ -393,7 +401,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
   });
   const added = await call(`/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art", ...(measurement ? { measurement } : {}) },
+    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art", ...(measurement ? { measurement } : {}), ...(pageRange ? { pageRange } : {}) },
   });
   assert.equal(added.status, 201, JSON.stringify(added.body));
   const withMockup = await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}/mockup`, {
@@ -455,17 +463,25 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
 
     // Step two: the artwork. A failed check goes back to the client and the
     // money stays where it is.
-    const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi" });
+    const qaChecklist = { artwork: false, spec: true, quantity: true, address: true };
+    const invalid = await transition("supplier_assigned", "clerk_ops", { qaChecklist });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.error, "invalid_qa_checklist");
+    assert.equal(await stateOf(), "needs_qa");
+    assert.equal((await loadStore(database)).orders.find(row => row.id === orderId).fileCheck.status, "pending");
+    const failed = await transition("client_correction", "clerk_ops", { note: "Artwork is 72dpi", qaChecklist });
     assert.equal(failed.status, 200, JSON.stringify(failed.body));
     assert.equal(await stateOf(), "client_correction");
     await assertHeld();
     assert.equal(failed.body.order.fileCheck.status, "failed");
     assert.equal(failed.body.order.fileCheck.reason, "Artwork is 72dpi");
+    assert.deepEqual(failed.body.order.fileCheck.checklist, { version: 1, checks: qaChecklist });
     const corrected = await call(`/orders/${orderId}`, { subject: "clerk_client" });
     assert.deepEqual(corrected.body.order.correction, {
       reason: "Artwork is 72dpi", requestedAt: failed.body.order.updatedAt,
     });
     assert.equal(corrected.body.order.timeline.at(-1).note, "Artwork needs a change");
+    assert.equal(corrected.body.order.fileCheck.checklist, undefined);
     const clientOrders = await call("/orders", { subject: "clerk_client" });
     assert.deepEqual(clientOrders.body.orders.find((row) => row.id === orderId).correction, corrected.body.order.correction);
     const held = await call(`/orders/${orderId}`, { subject: "clerk_ops" });
@@ -476,18 +492,29 @@ test("a paid order clears money, then quality, and only then reaches the shop", 
     const resubmitted = await transition("needs_qa", "clerk_client");
     assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.body));
     assert.equal(resubmitted.body.order.fileCheck.status, "pending");
+    assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.fileCheck.checklist, null);
     await assertHeld();
     assert.deepEqual(resubmitted.body.order.correction, corrected.body.order.correction);
 
     // Passing quality control hands it to the shop that was matched before the
     // client paid. No supplier id is sent: there is nothing left to assign.
-    const approved = await transition("supplier_assigned", "clerk_ops", { note: "Artwork approved" });
+    qaChecklist.artwork = true;
+    const approved = await transition("supplier_assigned", "clerk_ops", { note: "Artwork approved", qaChecklist });
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.order.supplierId, "supplier_a");
     assert.equal(approved.body.order.fileCheck.status, "passed");
     assert.equal(approved.body.order.fileCheck.reviewedBy, "user_ops");
     assert.equal(approved.body.order.shopAcceptance.assignedAt, approved.body.order.updatedAt);
     const released = await loadStore(database);
+    const savedChecklist = released.orders.find(row => row.id === orderId).fileCheck.checklist;
+    assert.deepEqual(savedChecklist, { version: 1, checks: qaChecklist });
+    assert.deepEqual((await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order.fileCheck.checklist, savedChecklist);
+    assert.ok(released.auditLog.some(row => row.orderId === orderId && row.action === "order.file_check"
+      && row.detail.fileCheck.checklist?.checks.artwork === false));
+    assert.ok(released.auditLog.some(row => row.orderId === orderId && row.action === "order.file_check"
+      && row.detail.fileCheck.checklist?.checks.artwork === true));
+    await assert.rejects(database.query("UPDATE orders SET data = jsonb_set(data, '{fileCheck,checklist}', $2::jsonb) WHERE id = $1",
+      [orderId, JSON.stringify({ version: 1, checks: { artwork: true } })]), /orders_qa_checklist_check/);
     assert.equal(released.notifications.filter(n => n.orderId === orderId && n.type === "shop_job_assigned").length, 1);
     assert.ok(released.auditLog.some(row => row.orderId === orderId && row.action === "order.file_check" && row.detail.fileCheck.status === "passed"));
 
@@ -2724,3 +2751,19 @@ for (const groupCount of [1, 2]) {
     assert.equal((await call(statementPath)).status, 403);
   });
 }
+
+ test("document page ranges persist through cart, checkout and supplier reads", { skip: !DATABASE_URL }, async t => {
+  const { call, database, orderId } = await placedOrder(t, { pageRange: "1-4, 4, 8" });
+  const expected = { total: 30, range: "1-4, 8", printed: 5 };
+  const store = await loadStore(database);
+  assert.deepEqual(store.cartLines[0].documentPages, expected);
+  assert.deepEqual(store.cartLines[0].measurement, { pages: 5 });
+  assert.deepEqual(store.orderLineItems[0].documentPages, expected);
+  assert.equal(store.orderLineItems[0].lineSubtotalMinor, 1500);
+  assert.equal(store.orders[0].supplierPlatformPayoutMinor, 1500);
+  assert.equal((await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops" })).status, 200);
+  assert.equal((await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } })).status, 200);
+  const job = await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" });
+  assert.equal(job.status, 200);
+  assert.deepEqual(job.body.order.productionItems[0].documentPages, expected);
+});

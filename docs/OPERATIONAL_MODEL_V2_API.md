@@ -1366,13 +1366,13 @@ The client's and the assigned rider's order projection carries `deliveryChat: { 
 GET /orders/:id/delivery-chat
 ```
 
-`200 { chat, messages: [{ id, senderRole: "client" | "rider", body, createdAt, mine }] }`, oldest first, and marks the conversation read for the caller. `401` signed out, `403 forbidden` for anyone but the two parties (Operations included), `404 order_not_found`, `409 delivery_chat_not_available` (no rider yet, or a collected job), `410 delivery_chat_closed` (past its day).
+`200 { chat, messages: [{ id, senderRole: "client" | "rider", body, attachments: [{ fileId, contentType, originalFilename }], createdAt, mine }] }`, oldest first, and marks the conversation read for the caller. `401` signed out, `403 forbidden` for anyone but the two parties (Operations included), `404 order_not_found`, `409 delivery_chat_not_available` (no rider yet, or a collected job), `410 delivery_chat_closed` (past its day).
 
 ```http
 POST /orders/:id/delivery-chat/messages
 ```
 
-`{ "body": "Gate is the blue one" }` — trimmed, 1–1000 characters (`400 invalid_request`). `201 { chat, message }`; `409 delivery_chat_read_only` once delivered; `429 too_many_requests` past 30 messages in 10 minutes; the same `401`/`403`/`404`/`409`/`410` as the read. The other party gets an inbox row and push of type `delivery_message` (`appRole` `client` or `rider`, `orderId` set). Its copy never contains the message, because inbox rows outlive the conversation, and a burst within five minutes rides on the recipient's still-unread notice instead of ringing again.
+`{ "body": "Gate is the blue one", "attachmentFileIds": ["file_…"] }` — `body` trimmed, up to 1000 characters, and may be empty only when the message carries a photo (`400 invalid_request`). `attachmentFileIds` is optional, up to four of the sender's own ready, unsent `delivery_chat_image` uploads (JPEG, PNG or WebP through `POST /files`); anything else is `400 invalid_chat_image`, and a photo already sent is `409 file_already_attached`. Photos are readable through `GET /files/:id/download-url` by the two parties only while the conversation is, and are deleted with it (see `docs/STORAGE_API.md`). `201 { chat, message }`; `409 delivery_chat_read_only` once delivered; `429 too_many_requests` past 30 messages in 10 minutes; the same `401`/`403`/`404`/`409`/`410` as the read. The other party gets an inbox row and push of type `delivery_message` (`appRole` `client` or `rider`, `orderId` set). Its copy never contains the message, because inbox rows outlive the conversation, and a burst within five minutes rides on the recipient's still-unread notice instead of ringing again.
 
 ## Delivery and issue window
 

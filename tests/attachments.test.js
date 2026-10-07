@@ -805,6 +805,51 @@ test("chat photos keep staff-pair privacy and shared support-inbox access", () =
   expectError(() => authorizeFileRead(superAdmin, {}, draftPhoto), 403, "forbidden");
 });
 
+test("delivery chat photos: the client and the rider it was sent with, while the conversation can be read", () => {
+  authorizeFileUpload(client, "delivery_chat_image");
+  authorizeFileUpload(rider, "delivery_chat_image");
+  for (const actor of [supplier, ops]) expectError(() => authorizeFileUpload(actor, "delivery_chat_image"), 403, "forbidden");
+  expectError(
+    () => resolveFileTarget({}, "delivery_chat_image", {}, client),
+    400,
+    "delivery_chat_image_not_attachable",
+  );
+  const record = order({ state: "out_for_delivery", riderId: rider.id, fulfillmentMode: "delivery" });
+  const store = { orders: [record] };
+  const sent = readyFile("delivery_chat_image", {
+    ownerId: client.id,
+    references: [{
+      type: "delivery_chat_message", id: "message-a", field: "attachmentFileIds",
+      orderId: record.id, riderId: rider.id,
+    }],
+  });
+  for (const actor of [client, rider]) assert.doesNotThrow(() => authorizeFileRead(actor, store, sent));
+  for (const actor of [otherClient, supplier, ops, superAdmin, { id: "rider-b", role: "rider", verificationStatus: "approved" },
+    { ...client, role: "rider" }]) {
+    expectError(() => authorizeFileRead(actor, store, sent), 403, "forbidden");
+  }
+
+  // A reassigned job: the photo stays with the rider it was sent to, and goes
+  // even from its sender.
+  const reassigned = { orders: [{ ...record, riderId: "rider-b" }] };
+  for (const actor of [client, rider, { id: "rider-b", role: "rider", verificationStatus: "approved" }]) {
+    expectError(() => authorizeFileRead(actor, reassigned, sent), 403, "forbidden");
+  }
+
+  // Readable for the day after delivery, then refused before the sweep runs.
+  const delivered = (hoursAgo) => ({ orders: [{ ...record, state: "issue_window_open",
+    deliveryEvidence: { recordedAt: new Date(Date.now() - hoursAgo * 3_600_000).toISOString() } }] });
+  for (const actor of [client, rider]) {
+    assert.doesNotThrow(() => authorizeFileRead(actor, delivered(2), sent));
+    expectError(() => authorizeFileRead(actor, delivered(25), sent), 403, "forbidden");
+  }
+
+  // An unsent upload is its owner's alone.
+  const draft = readyFile("delivery_chat_image", { ownerId: rider.id });
+  assert.doesNotThrow(() => authorizeFileRead(rider, store, draft));
+  for (const actor of [client, ops]) expectError(() => authorizeFileRead(actor, store, draft), 403, "forbidden");
+});
+
 test('packing photos are supplier images, attach only before dispatch, and exclude rider reads', () => {
   authorizeFileUpload(supplier, 'packing_photo');
   for (const actor of [client, rider, ops]) expectError(() => authorizeFileUpload(actor, 'packing_photo'), 403, 'forbidden');

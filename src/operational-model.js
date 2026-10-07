@@ -976,6 +976,7 @@ function productionItemsFor(store, order, user) {
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
+        documentPages: structuredClone(line.documentPages ?? null),
         structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
           ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
         options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
@@ -1024,7 +1025,10 @@ export function publicOrderFor(order, user, store = null) {
   publicRecord.productionItems = user?.role === "supplier" && !supplierArtworkReleased(order) ? [] : productionItemsFor(store, order, user);
   if (["ops_admin", "super_admin", "client"].includes(user?.role) && order.fileCheck) {
     publicRecord.fileCheck = fileCheckProjection(order);
-    if (user.role === "client") delete publicRecord.fileCheck.reviewedBy;
+    if (user.role === "client") {
+      delete publicRecord.fileCheck.reviewedBy;
+      delete publicRecord.fileCheck.checklist;
+    }
   } else delete publicRecord.fileCheck;
   delete publicRecord.rescheduleRequest;
   const reschedule = publicReschedule(order, user);
