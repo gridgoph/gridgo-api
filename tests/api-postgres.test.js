@@ -254,6 +254,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
       timeline: [], createdAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z",
     });
     store.files.push({ fileId: "file_pof", ownerId: "user_supplier", purpose: "fulfilment_proof", originalFilename: "proof.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg", size: 100, state: "ready", objectKey: "proof/file_pof.jpg", references: [{ type: "order", id: "ord_payout", field: "fulfilmentProofFileIds", milestoneCode: "printing" }], createdAt: AT, readyAt: AT });
+    store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_packing", purpose: "packing_photo", objectKey: "packing/photo.jpg", references: [{ type: "order", id: "ord_payout", field: "packingPhotoFileIds" }] });
     const riderLicense = {
       fileId: "file_rider_license_fixture",
       ownerId: "user_rider",
@@ -1544,6 +1545,7 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
             originalFilename: "start.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
             size: 100, state: "ready", objectKey: "proof/start.jpg", createdAt: AT, readyAt: AT,
             references: [{ type: "order", id: orderId, field: "fulfilmentProofFileIds", milestoneCode: "production_started" }] });
+          store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_start_packing", purpose: "packing_photo", objectKey: "packing/start.jpg", references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
           await saveStore(database, store);
         });
         // The escrow split of the shop's own price, snapshotted when the quote
@@ -4973,6 +4975,49 @@ test("release announcements are atomic, audience-scoped and idempotent across bo
     instance.child.kill("SIGTERM");
     await new Promise(resolve => instance.child.once("exit", resolve));
     await fcm.close();
+    await database.close();
+  }
+});
+
+test('packing photo gates dispatch, notifies the client once, and stays private from the rider', { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({DATABASE_URL});
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.orders.find(row => row.id === 'ord_payout').state = 'production';
+    store.files.find(row => row.fileId === 'file_packing').references = [];
+    await saveStore(database,store);
+  });
+  const storage = await startMockObjectStorage({size:100});
+  const instance = await startApi({MINIO_ENDPOINT:storage.url,MINIO_PUBLIC_URL:storage.url});
+  try {
+    for (const from of ['production','supplier_self_qc']) {
+      if (from === 'supplier_self_qc') assert.equal((await request(instance.api,'/orders/ord_payout/transition',{method:'POST',subject:'clerk_supplier',body:{state:from}})).status,200);
+      const denied = await request(instance.api,'/orders/ord_payout/transition',{method:'POST',subject:'clerk_supplier',body:{state:'ready_for_dispatch',packingProgress:{photos:['fake']}}});
+      assert.equal(denied.status,409);
+      assert.equal(denied.body.error,'packing_photo_required');
+    }
+    const before = (await loadStore(database)).orders.find(row=>row.id==='ord_payout');
+    const attached = await request(instance.api,'/files/file_packing/attach',{method:'POST',subject:'clerk_supplier',body:{orderId:'ord_payout'}});
+    assert.equal(attached.status,200,JSON.stringify(attached.body) + instance.output());
+    assert.equal(attached.body.order.state,'supplier_self_qc');
+    assert.deepEqual((await loadStore(database)).orders.find(row=>row.id==='ord_payout').payoutMilestones,before.payoutMilestones);
+    assert.equal((await request(instance.api,'/files/file_packing/attach',{method:'POST',subject:'clerk_supplier',body:{orderId:'ord_payout'}})).status,409);
+    const saved = await loadStore(database);
+    assert.equal(saved.notifications.filter(n=>n.type==='order_packed' && n.userId==='user_client').length,1);
+    assert.ok(saved.notifications.some(n=>n.type==='order_packing_photo_received' && n.appRole==='ops_admin'));
+    for (const subject of ['clerk_client','clerk_ops']) {
+      const result = await request(instance.api,'/orders/ord_payout',{subject});
+      assert.match(result.body.order.packingProgress.photos[0].downloadUrl,/X-Amz-Signature=/);
+      assert.equal((await request(instance.api,'/files/file_packing/download-url',{subject})).status,200);
+    }
+    assert.equal((await request(instance.api,'/files/file_packing/download-url',{subject:'clerk_rider'})).status,403);
+    const ready = await request(instance.api,'/orders/ord_payout/transition',{method:'POST',subject:'clerk_supplier',body:{state:'ready_for_dispatch'}});
+    assert.equal(ready.status,200,JSON.stringify(ready.body));
+  } finally {
+    instance.child.kill('SIGTERM');
+    await new Promise(resolve=>instance.child.once('exit',resolve));
+    await new Promise(resolve=>storage.server.close(resolve));
     await database.close();
   }
 });

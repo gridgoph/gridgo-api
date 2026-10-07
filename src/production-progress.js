@@ -20,10 +20,10 @@ export function productionProgressFor(store, order) {
 }
 
 /** The caller must authorize each file exactly as a direct artwork download. */
-export async function signProductionPhotos(record, { findFile, authorizeRead, presignGet }) {
-  if (!record?.productionProgress) return;
+export async function signProductionPhotos(record, { findFile, authorizeRead, presignGet }, field = "productionProgress") {
+  if (!record?.[field]) return;
   const visible = [];
-  for (const photo of record.productionProgress.photos) {
+  for (const photo of record[field].photos) {
     const file = findFile(photo.fileId);
     try { authorizeRead(file); } catch { continue; }
     try {
@@ -36,7 +36,7 @@ export async function signProductionPhotos(record, { findFile, authorizeRead, pr
     }
     visible.push(photo);
   }
-  record.productionProgress = { status: visible.length ? "photos_available" : "waiting_for_photo", photos: visible };
+  record[field] = { status: visible.length ? "photos_available" : "waiting_for_photo", photos: visible };
 }
 
 const PROGRESS_LABELS = Object.freeze({

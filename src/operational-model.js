@@ -6,6 +6,7 @@ import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
+import { packingProgressFor } from "./packing-progress.js";
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
@@ -1104,6 +1105,11 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.correction;
   if (owningClient) publicRecord.correction = clientCorrectionFor(order);
   // Same related parties as artwork; signing rechecks file authorization.
+  delete publicRecord.packingProgress;
+  delete publicRecord.packingPhotoFileIds;
+  if (ops || owningClient || assignedSupplier) {
+    publicRecord.packingProgress = packingProgressFor(store, order);
+  }
   delete publicRecord.productionProgress;
   if (ops || owningClient || assignedSupplier || (rider && order.riderId === user.id)) {
     publicRecord.productionProgress = productionProgressFor(store, order);

@@ -22,6 +22,7 @@ import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
+import { packingPhotoFiles } from "./packing-progress.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from "./refund-policy.js";
@@ -1570,6 +1571,11 @@ async function publicOrder(order, user, orderStore) {
     authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
     presignGet: (key) => objectStorage.presignGet(key),
   });
+  await signProductionPhotos(record, {
+    findFile: (fileId) => findFile(orderStore, fileId),
+    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
+    presignGet: (key) => objectStorage.presignGet(key),
+  }, "packingProgress");
   return record;
 }
 
@@ -2900,6 +2906,18 @@ async function handleRequest(req, res) {
               fileId: latestFile.fileId,
               milestoneCode: latestTarget.milestoneCode,
             });
+          }
+          if (latestFile.purpose === "packing_photo") {
+            const order = latestTarget.record;
+            latestStore.notifications.push({
+              id: id("ntf"), userId: order.clientId, appRole: "client",
+              type: "order_packed", orderId: order.id, occurrenceKey: `packing:${latestFile.fileId}`,
+              title: "Your order is packed",
+              body: "Your order is packed and waiting for the rider. Open the order to see the packing photo.",
+              read: false, at: attachedAt,
+            });
+            notifyAdmins(latestStore, "order_packing_photo_received", "Packing photo received", order,
+              `packing:${latestFile.fileId}`, { createId: id, at: attachedAt });
           }
           queueOrderInvalidate(latestStore, latestTarget.record, ["orders", "jobs"]);
           await save(latestStore);
@@ -5485,6 +5503,7 @@ async function handleRequest(req, res) {
           });
         }
         const photoMissing = productionPhotoFiles(store, order).length === 0;
+        const packingPhotoMissing = next === "ready_for_dispatch" && packingPhotoFiles(store, order).length === 0;
         if (["ops_admin", "super_admin"].includes(user.role)) {
           const reason = typeof body.reason === "string" ? body.reason.trim() : "";
           if (!reason) return send(res, 400, {
@@ -5493,7 +5512,7 @@ async function handleRequest(req, res) {
           });
           audit(store, {
             actor: user, action: "order.production_override", entityType: "order", entityId: order.id,
-            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing },
+            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing, packingPhotoMissing },
           });
         } else if (photoMissing) {
           return send(res, 409, {
@@ -5501,6 +5520,10 @@ async function handleRequest(req, res) {
             message: "Attach at least one production progress photo before marking this job packed or ready for dispatch. A start-of-production photo counts.",
           });
         }
+      }
+      if (next === "ready_for_dispatch" && user.role === "supplier" && !packingPhotoFiles(store, order).length) {
+        return send(res, 409, { error: "packing_photo_required",
+          message: "Add a photo of the finished prints packed and ready before marking Ready for dispatch." });
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
