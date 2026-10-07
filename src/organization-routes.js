@@ -1,3 +1,4 @@
+import { identityHasMembership } from "./authorization-context.js";
 import { applyForBusiness, requireIdempotencyKey } from './enrollment.js';
 import { APPLICATION_DOCUMENTS, applicationError as fail, clientApplicationView, currentApplication, nextQuarter } from './client-applications.js';
 import { requestOrganizationCode, verifyOrganizationCode } from './organization-email.js';
@@ -64,7 +65,8 @@ export async function routeOrganization({ req, url, store, user, readBody, now, 
   if (!mine && !ops && !permit) return null;
   if (!user) fail(401, 'unauthorized');
   if (mine && !(store.userRoleMemberships || []).some((row) => row.userId === user.id && row.role === 'client')) fail(403, 'membership_required');
-  if ((ops || permit) && !staff(user)) fail(403, 'forbidden');
+  if (ops && !staff(user)) fail(403, 'forbidden');
+  if (permit && !identityHasMembership(user, 'super_admin')) fail(403, 'forbidden');
   const at = now();
   const input = async () => {
     const body = await readBody(req);

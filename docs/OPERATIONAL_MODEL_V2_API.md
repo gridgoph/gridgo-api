@@ -42,12 +42,12 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/auth/me/rider` | rider membership | rider profile, case, document summaries, and capabilities |
 | GET | `/auth/me/ops` | `ops_admin` membership | fixed Operations projection |
 | GET | `/auth/me/admin` | `super_admin` membership | fixed Super Admin projection |
-| GET | `/approval-cases?status=&kind=&cursor=` | ops/super | submitted cases ordered oldest first; defaults to pending; `status=suspended` lists suspended accounts |
-| GET | `/approval-cases/:caseId` | ops/super | applicant profile, kind-specific review data, readiness, suspended service lines, and immutable history |
-| POST | `/approval-cases/:caseId/approve` | ops/super | pending → approved with expected version and idempotency key |
-| POST | `/approval-cases/:caseId/reject` | ops/super | pending → rejected; reason required |
-| POST | `/approval-cases/:caseId/suspend` | ops/super | approved → suspended; reason required |
-| POST | `/approval-cases/:caseId/restore` | ops/super | suspended → approved; restore note required; optional `restoreServiceIds` brings named lines back in the same transaction |
+| GET | `/approval-cases?status=&kind=&cursor=` | super | submitted cases ordered oldest first; defaults to pending; `status=suspended` lists suspended accounts |
+| GET | `/approval-cases/:caseId` | super | applicant profile, kind-specific review data, readiness, suspended service lines, and immutable history |
+| POST | `/approval-cases/:caseId/approve` | super | pending → approved with expected version and idempotency key |
+| POST | `/approval-cases/:caseId/reject` | super | pending → rejected; reason required |
+| POST | `/approval-cases/:caseId/suspend` | super | approved → suspended; reason required |
+| POST | `/approval-cases/:caseId/restore` | super | suspended → approved; restore note required; optional `restoreServiceIds` brings named lines back in the same transaction |
 | POST | `/auth/logout` | authenticated | optionally releases this phone back to unclaimed; the client signs out of Clerk |
 | POST | `/files` | purpose role | streamed upload; see storage contract |
 | GET | `/files/:fileId` | file owner/related order or service/ops/super | public metadata |
@@ -79,7 +79,7 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET, PATCH, DELETE | `/me/payout-account` | supplier | where this shop wants payouts sent: wallet, account name, number, and the receiving-QR file |
 | GET | `/users/:id/payout-account` | owning supplier; ops/super any supplier | that shop's payout account with `shopName`, for the release desk |
 | PATCH | `/users/:id/role` | super | role change; audited |
-| POST | `/users/:id/verification` | ops/super | one-release legacy supplier/rider verification compatibility path |
+| POST | `/users/:id/verification` | super | one-release legacy supplier/rider verification compatibility path |
 | GET | `/zones` | authenticated | address-zone records; order creation requires an active zone code, but zone fees are not used for v2 pricing |
 | POST | `/zones` | super | create zone |
 | PATCH | `/zones/:idOrCode` | super | update zone |
@@ -181,7 +181,7 @@ Enrollment-specific errors are `400 idempotency_key_required` for a missing key,
 
 ## Approval queue and decisions
 
-`GET /approval-cases` is shared by Operations and Super Admin. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
+`GET /approval-cases`, case detail, all case decisions, business-permit requests, and legacy `POST /users/:id/verification` are Super Admin only (`403 forbidden` for every other role). An explicit `X-GRIDGO-Role: ops_admin` cannot borrow a secondary Super Admin membership. Operations retains service-line review and account-standing permissions. `status` defaults to `pending`; `kind` is optional and accepts `business_client`, `supplier`, or `rider`. Results contain only cases with `submittedAt`, sort by `submittedAt` then ID ascending, and return at most 50 rows plus an opaque `nextCursor`. An interrupted rider case with no submission timestamp never appears. `GET /approval-cases/:caseId` returns the applicant identity, case, immutable history, and kind-specific profile data. Supplier detail contains governed service lines and readiness but no commission or deduction field.
 
 List items and `detail.approvalCase` carry `status`, `decidedAt` (for a suspended case, when it was suspended), `decidedBy`, `decidedByName` (the deciding approver's display name, or `null`), `suspensionReason`, and `rejectionReason`.
 
@@ -220,7 +220,7 @@ Every decision response adds `restoredServiceIds` (always `[]` except for a rest
 
 Rider approval and restore through the canonical `/approval-cases/:id/approve|restore` routes require a completed allowed vehicle type and plate, a ready current driver's licence with a future expiry, and non-null `submittedAt` produced by the explicit rider submit endpoint. Attaching licence evidence alone never submits or queues the case. Profile failures return `400 invalid_application`; missing, expired, or unsubmitted evidence returns `409 rider_documents_incomplete`, `409 document_expired`, or `409 approval_state_conflict` respectively.
 
-The one-release Operations queue still decides through `POST /users/:id/verification`. That compatibility path accepts the typed licence number from rider enroll when no licence file has ever been attached, and records `submittedAt` on the decision so the case matches the verification status. A licence file that was later removed still blocks approval.
+The one-release Super Admin queue can still decide through `POST /users/:id/verification`. That compatibility path accepts the typed licence number from rider enroll when no licence file has ever been attached, and records `submittedAt` on the decision so the case matches the verification status. A licence file that was later removed still blocks approval.
 
 ## Supplier shop and verification profile
 
