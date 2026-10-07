@@ -351,7 +351,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
 
 
 /** Boots the API on a seeded database and returns a placed, paid-pending order. */
-async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, downpaymentPercent = null, extraEnv = {} } = {}) {
+async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMode = null, measurement = null, pageRange = null, downpaymentPercent = null, extraEnv = {} } = {}) {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
   await fixture(database);
@@ -367,6 +367,14 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
     const item = store.catalogItems.find((row) => row.id === catalogItemId);
     item.pricingUnit = "per_area";
     item.measureUnit = "ft";
+    await saveStore(database, store);
+  });
+  if (pageRange) await database.transaction(async () => {
+    const store = await loadStore(database);
+    const item = store.catalogItems.find(row => row.id === catalogItemId);
+    item.pricingUnit = "per_page";
+    item.basePriceMinor = 300;
+    store.files.find(row => row.fileId === "file_art").detected = { kind: "pdf", pageCount: 30 };
     await saveStore(database, store);
   });
   const instance = await startApi({ extraEnv });
@@ -393,7 +401,7 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
   });
   const added = await call(`/me/carts/${cartId}/lines`, {
     method: "POST", subject: "clerk_client",
-    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art", ...(measurement ? { measurement } : {}) },
+    body: { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art", ...(measurement ? { measurement } : {}), ...(pageRange ? { pageRange } : {}) },
   });
   assert.equal(added.status, 201, JSON.stringify(added.body));
   const withMockup = await call(`/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}/mockup`, {
@@ -2724,3 +2732,19 @@ for (const groupCount of [1, 2]) {
     assert.equal((await call(statementPath)).status, 403);
   });
 }
+
+ test("document page ranges persist through cart, checkout and supplier reads", { skip: !DATABASE_URL }, async t => {
+  const { call, database, orderId } = await placedOrder(t, { pageRange: "1-4, 4, 8" });
+  const expected = { total: 30, range: "1-4, 8", printed: 5 };
+  const store = await loadStore(database);
+  assert.deepEqual(store.cartLines[0].documentPages, expected);
+  assert.deepEqual(store.cartLines[0].measurement, { pages: 5 });
+  assert.deepEqual(store.orderLineItems[0].documentPages, expected);
+  assert.equal(store.orderLineItems[0].lineSubtotalMinor, 1500);
+  assert.equal(store.orders[0].supplierPlatformPayoutMinor, 1500);
+  assert.equal((await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops" })).status, 200);
+  assert.equal((await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } })).status, 200);
+  const job = await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" });
+  assert.equal(job.status, 200);
+  assert.deepEqual(job.body.order.productionItems[0].documentPages, expected);
+});

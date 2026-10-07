@@ -581,77 +581,69 @@ test("a tarpaulin cart line is refused when requested width exceeds the printer 
   );
 });
 
-test("a document priced by the page bills pages times copies", async () => {
+test("document pages come from the file, selected pages price copies and snapshot the shop payout", async () => {
   const { store, client } = fixture();
-  const booklet = store.catalogItems.find((row) => row.id === "item_a");
-  booklet.name = "supplier_a Booklet";
-  booklet.pricingUnit = "per_page";
-  booklet.basePriceMinor = 300;
-
+  const item = store.catalogItems.find(row => row.id === "item_a");
+  Object.assign(item, { pricingUnit: "per_page", basePriceMinor: 300 });
+  const file = store.files.find(row => row.fileId === "file_art");
+  file.detected = { kind: "pdf", pageCount: 30 };
   const call = caller(store, client);
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
-
-  // Pages and copies are two different numbers, and conflating them is how a
-  // client orders a tenth of their own document. Ten pages, three copies.
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 3,
-    measurement: { pages: 10 },
+    catalogItemId: item.id, optionIds: [], quantity: 2, measurement: { pages: 1 },
   });
-  assert.equal(added.status, 201);
-  assert.equal(added.body.cart.lines[0].quantity, 3);
-  assert.deepEqual(added.body.cart.lines[0].measurement, { pages: 10 });
-  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 9_000);
+  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, null);
+  const url = `/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`;
+  const attached = await call("PATCH", url, { artworkFileId: file.fileId, measurement: { pages: 999 } });
+  assert.deepEqual(attached.body.cart.lines[0].measurement, { pages: 30 });
+  assert.equal(attached.body.cart.lines[0].lineSubtotalMinor, 18000);
+  const selected = await call("PATCH", url, { pageRange: "1-4, 3-6, 9, 9", measurement: { pages: 1 } });
+  const selection = { total: 30, range: "1-6, 9", printed: 7 };
+  assert.deepEqual(selected.body.cart.lines[0].documentPages, selection);
+  assert.equal(selected.body.cart.lines[0].lineSubtotalMinor, 4200);
+  const copies = await call("PATCH", url, { quantity: 3, measurement: { pages: 30 } });
+  assert.equal(copies.body.cart.lines[0].lineSubtotalMinor, 6300);
+  assert.deepEqual(copies.body.cart.lines[0].measurement, { pages: 7 });
+  await assert.rejects(call("PATCH", url, { pageRange: "31", quantity: 9 }), { code: "invalid_page_range" });
+  assert.equal(store.cartLines[0].quantity, 3);
+  const placed = await call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "DOCUMENT-RANGE" },
+  });
+  assert.equal(placed.status, 201);
+  const order = store.orders[0];
+  assert.equal(order.supplierSubtotalMinor, 6300);
+  assert.equal(store.orderJobs[0].supplierSubtotalMinor, 6300);
+  assert.equal(order.payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), 6300);
+  assert.deepEqual(store.orderLineItems[0].documentPages, selection);
+  assert.deepEqual(store.orderInvoices[0].snapshot.lines[0].documentPages, selection);
+  order.fileCheck.status = "passed";
+  assert.deepEqual(publicOrderFor(order, { id: "supplier_a", role: "supplier" }, store).productionItems[0].documentPages, selection);
+  file.detected.pageCount = 1;
+  assert.deepEqual(publicOrderFor(order, client, store).productionItems[0].documentPages, selection);
 });
 
-test("attaching a detected page count then changing copies prices pages times copies", async () => {
+test("a new file resets the range and unreadable documents cannot be priced or checked out", async () => {
   const { store, client } = fixture();
-  const booklet = store.catalogItems.find((row) => row.id === "item_a");
-  booklet.name = "supplier_a Booklet";
-  booklet.pricingUnit = "per_page";
-  booklet.basePriceMinor = 300;
-
+  store.catalogItems[0].pricingUnit = "per_page";
+  const file = store.files.find(row => row.fileId === "file_art");
+  file.detected = { kind: "pdf", pageCount: 12 };
+  store.files.push({ ...file, fileId: "replacement", detected: { kind: "raster", pageCount: 1 } });
   const call = caller(store, client);
   const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
-
-  // The listing screen's default: one page, two copies, ₱3 each — ₱6, which
-  // is the invoice a 30-page PDF used to produce until the file's own count
-  // was written onto the line.
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
-    catalogItemId: "item_a", optionIds: [], quantity: 2,
-    measurement: { pages: 1 },
+    catalogItemId: "item_a", optionIds: [], quantity: 1, artworkFileId: file.fileId, pageRange: "3-5",
   });
-  assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 600);
-  const lineId = added.body.cart.lines[0].id;
-
-  const attached = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
-    artworkFileId: "file_art",
-    measurement: { pages: 30 },
-  });
-  assert.equal(attached.status, 200);
-  assert.equal(attached.body.cart.lines[0].artworkFileId, "file_art");
-  assert.equal(attached.body.cart.lines[0].quantity, 2);
-  assert.deepEqual(attached.body.cart.lines[0].measurement, { pages: 30 });
-  assert.equal(attached.body.cart.lines[0].lineSubtotalMinor, 18_000);
-
-  const edited = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
-    measurement: { pages: 10 },
-  });
-  assert.deepEqual(edited.body.cart.lines[0].measurement, { pages: 10 });
-  assert.equal(edited.body.cart.lines[0].quantity, 2);
-  assert.equal(edited.body.cart.lines[0].lineSubtotalMinor, 6_000);
-
-  await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
-    measurement: { pages: 30 },
-  });
-
-  // Checkout's stepper is copies. A quantity-only PATCH must not replace or
-  // drop the page count the file already put on the line.
-  const copies = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, {
-    quantity: 3,
-  });
-  assert.equal(copies.body.cart.lines[0].quantity, 3);
-  assert.deepEqual(copies.body.cart.lines[0].measurement, { pages: 30 });
-  assert.equal(copies.body.cart.lines[0].lineSubtotalMinor, 27_000);
+  const url = `/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`;
+  const replaced = await call("PATCH", url, { artworkFileId: "replacement" });
+  assert.deepEqual(replaced.body.cart.lines[0].documentPages, { total: 1, range: null, printed: 1 });
+  const cleared = await call("PATCH", url, { artworkFileId: null });
+  assert.equal(cleared.body.cart.lines[0].lineSubtotalMinor, null);
+  file.detected = null;
+  const unread = await call("PATCH", url, { artworkFileId: file.fileId, measurement: { pages: 1 } });
+  assert.equal(unread.body.cart.lines[0].measurement, null);
+  await assert.rejects(call("POST", `/me/carts/${cartId}/checkout`, {
+    payment: { method: "qr_manual", proofFileId: "file_qr", reference: "UNREADABLE" },
+  }), { code: "document_page_count_required" });
 });
 
 test("checkout writes ops needs-QA, payment-submitted, and the client receipt-ready row", async () => {
