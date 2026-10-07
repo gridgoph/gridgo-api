@@ -222,6 +222,7 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
+    clientRiderLocationRevealDistanceMeters: 1_000,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
     hubPickupEnabled: false,
@@ -247,6 +248,10 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.clientRiderLocationRevealDistanceMeters !== undefined &&
+      (!Number.isSafeInteger(settings.clientRiderLocationRevealDistanceMeters) || settings.clientRiderLocationRevealDistanceMeters <= 0)) {
+    fail(400, "invalid_rider_location_reveal_distance", "Set the client rider location reveal distance to a positive whole number of meters.", { field: "clientRiderLocationRevealDistanceMeters" });
+  }
   if (settings?.hubPickupEnabled !== undefined && typeof settings.hubPickupEnabled !== "boolean") {
     fail(400, "invalid_hub_pickup_enabled", "hubPickupEnabled must be a boolean.");
   }
@@ -408,6 +413,16 @@ function validateNudgeSpan(value, unit, field) {
 
 function radians(degrees) {
   return (degrees * Math.PI) / 180;
+}
+
+export function clientRiderLocationPing(order, ping, settings) {
+  const destination = deliveryDestination(order);
+  for (const point of [destination, ping]) {
+    if (!point || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90 ||
+        !Number.isFinite(point.lng) || Math.abs(point.lng) > 180) return null;
+  }
+  const radius = settings?.clientRiderLocationRevealDistanceMeters ?? 1_000;
+  return distanceMetersBetween(ping, destination) <= radius ? ping : null;
 }
 
 export function distanceMetersBetween(pickup, dropoff) {

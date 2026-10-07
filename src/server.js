@@ -179,6 +179,7 @@ import { applyProductionNudges, continueAfterStepFailure } from "./production-in
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
   calculateOrderMoney,
+  clientRiderLocationPing,
   carriedToOffice,
   confirmIssueWindow,
   createPaymentSchedule,
@@ -601,6 +602,7 @@ function publicOperationalSettings(settings, store = null) {
   return {
     ...rest,
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
+    clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
@@ -3258,6 +3260,8 @@ async function handleRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
+          ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
         hubPickupEnabled: Object.hasOwn(body, "hubPickupEnabled") ? body.hubPickupEnabled : store.settings.hubPickupEnabled === true,
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
@@ -6161,7 +6165,7 @@ async function handleRequest(req, res) {
       const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId);
       if (!pings.length) return send(res, 200, { ping: null });
       const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
-      return send(res, 200, { ping });
+      return send(res, 200, { ping: user.role === "client" ? clientRiderLocationPing(order, ping, store.settings) : ping });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {

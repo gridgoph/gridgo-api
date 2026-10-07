@@ -5178,3 +5178,64 @@ test('packing photo gates dispatch, notifies the client once, and stays private 
     await database.close();
   }
 });
+
+
+test("client rider location radius is live, private and leaves staff tracking unchanged", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find(row => row.id === "ord_payout");
+    order.state = "out_for_delivery";
+    order.riderId = "user_rider";
+    delete store.settings.clientRiderLocationRevealDistanceMeters;
+    store.locationPings.push({ id: "ping_radius", orderId: order.id, riderId: order.riderId, lat: 7.06, lng: 125.62, accuracy: 5, at: new Date().toISOString() });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  const location = subject => request(instance.api, "/dispatch/ord_payout/location", { subject });
+  try {
+    let current = await request(instance.api, "/settings", { subject: "clerk_super" });
+    assert.equal(current.body.settings.clientRiderLocationRevealDistanceMeters, 1000);
+    assert.deepEqual((await location("clerk_client")).body, { ping: null });
+    assert.equal((await location("clerk_promote")).status, 403);
+    for (const subject of ["clerk_ops", "clerk_super", "clerk_rider", "clerk_supplier"]) {
+      assert.equal((await location(subject)).body.ping.id, "ping_radius");
+    }
+    for (const subject of ["clerk_ops", "clerk_super"]) {
+      const map = await request(instance.api, "/ops/riders/locations", { subject });
+      assert.equal(map.status, 200);
+      assert.equal(map.body.riders[0].lat, 7.06);
+    }
+    const patch = (subject, value, version = current.body.version) => request(instance.api, "/settings", {
+      method: "PATCH", subject, body: { expectedVersion: version, reason: "Update client tracking distance", clientRiderLocationRevealDistanceMeters: value },
+    });
+    for (const subject of ["clerk_ops", "clerk_client", "clerk_rider", "clerk_supplier"]) assert.equal((await patch(subject, 3000)).status, 403);
+    for (const value of [null, "1000", 0, -1, 1.5]) {
+      const invalid = await patch("clerk_super", value);
+      assert.equal(invalid.status, 400);
+      assert.equal(invalid.body.error, "invalid_rider_location_reveal_distance");
+    }
+    const staleVersion = current.body.version;
+    current = await patch("clerk_super", 3000);
+    assert.equal(current.status, 200);
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_radius");
+    assert.equal((await patch("clerk_super", 1000, staleVersion)).status, 409);
+    current = await patch("clerk_super", 1000);
+    assert.equal(current.status, 200);
+    assert.deepEqual((await location("clerk_client")).body, { ping: null });
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.locationPings.push({ id: "ping_near", orderId: "ord_payout", riderId: "user_rider", lat: 7.079, lng: 125.62, accuracy: 5, at: new Date(Date.now() + 1000).toISOString() });
+      await saveStore(database, store);
+    });
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_near");
+    const persisted = await loadStore(database);
+    assert.equal(persisted.settings.clientRiderLocationRevealDistanceMeters, 1000);
+    assert.ok(persisted.auditLog.some(row => row.action === "settings.operational_update"));
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise(resolve => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
