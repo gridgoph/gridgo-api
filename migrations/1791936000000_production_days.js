@@ -63,6 +63,20 @@ export async function up(pgm) {
     ALTER TABLE supplier_catalog_speed_tiers ADD COLUMN turnaround_days integer CHECK (turnaround_days >= 1);
     ALTER TABLE listing_starters ADD COLUMN default_turnaround_days integer CHECK (default_turnaround_days >= 1);
 
+    ALTER TABLE order_line_items
+      ADD COLUMN turnaround_days_snapshot integer CHECK (turnaround_days_snapshot >= 1),
+      ADD COLUMN production_day_minutes_snapshot integer CHECK (production_day_minutes_snapshot > 0);
+    ALTER TABLE order_jobs ADD COLUMN estimated_production_minutes integer CHECK (estimated_production_minutes > 0);
+    CREATE FUNCTION guard_production_day_snapshot() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF OLD.snapshot_finalized AND ROW(OLD.turnaround_days_snapshot, OLD.production_day_minutes_snapshot)
+          IS DISTINCT FROM ROW(NEW.turnaround_days_snapshot, NEW.production_day_minutes_snapshot) THEN
+        RAISE EXCEPTION 'order production day snapshots are immutable' USING ERRCODE='23514';
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER production_day_snapshot_immutable BEFORE UPDATE ON order_line_items
+      FOR EACH ROW EXECUTE FUNCTION guard_production_day_snapshot();
+
     -- Two differently priced tiers may round to the same day. Retain both IDs/prices.
     DO $$ DECLARE constraint_name text; BEGIN
       SELECT conname INTO STRICT constraint_name FROM pg_constraint
@@ -102,6 +116,25 @@ export async function up(pgm) {
   `);
 }
 
-export async function down() {
-  throw new Error('Production-day conversion is forward-only; original hour durations cannot be recovered.');
+export async function down(pgm) {
+  pgm.sql(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM supplier_services) OR EXISTS (SELECT 1 FROM supplier_catalog_items)
+         OR EXISTS (SELECT 1 FROM supplier_catalog_speed_tiers) OR EXISTS (SELECT 1 FROM listing_starters)
+         OR EXISTS (SELECT 1 FROM order_line_items WHERE turnaround_days_snapshot IS NOT NULL)
+         OR EXISTS (SELECT 1 FROM order_jobs WHERE estimated_production_minutes IS NOT NULL) THEN
+        RAISE EXCEPTION 'Production-day conversion requires a forward migration once used';
+      END IF;
+    END $$;
+    ALTER TABLE supplier_services DROP COLUMN turnaround_days, DROP COLUMN standard_turnaround_days, DROP COLUMN rush_turnaround_days;
+    ALTER TABLE supplier_catalog_items DROP CONSTRAINT catalog_production_days_range, DROP COLUMN turnaround_days, DROP COLUMN minimum_turnaround_days;
+    ALTER TABLE supplier_catalog_speed_tiers DROP COLUMN turnaround_days, ADD UNIQUE (catalog_item_id, turnaround_hours);
+    ALTER TABLE listing_starters DROP COLUMN default_turnaround_days;
+    DROP TRIGGER production_day_snapshot_immutable ON order_line_items;
+    DROP FUNCTION guard_production_day_snapshot();
+    ALTER TABLE order_line_items DROP COLUMN turnaround_days_snapshot, DROP COLUMN production_day_minutes_snapshot;
+    ALTER TABLE order_jobs DROP COLUMN estimated_production_minutes;
+    DROP FUNCTION production_days_json(jsonb, integer);
+    DROP FUNCTION production_day_minutes(jsonb);
+  `);
 }

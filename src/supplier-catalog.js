@@ -725,7 +725,7 @@ export function supplierCatalogReadiness(store, supplierId) {
   const reviewReady = services.filter((service) =>
     ["pending_verification", "live"].includes(service.state)
     && String(service.pricingBasis || "").trim()
-    && Number.isSafeInteger(service.turnaroundHours || service.standardTurnaroundHours)
+    && Number.isFinite(service.turnaroundHours || service.standardTurnaroundHours)
     && (service.turnaroundHours || service.standardTurnaroundHours) > 0
     && (store.supplierServiceFileFormats || []).some((record) => record.supplierServiceId === service.id));
   if (reviewReady.length === 0) missing.push("review_ready_service_line");
@@ -895,6 +895,10 @@ export function createOrderLineSnapshot(store, selection, createId) {
       pricingBasisSnapshot: service.pricingBasis || item.pricingUnit || "per_unit",
       pricingUnitSnapshot: item.pricingUnit || "per_unit",
       packageQtySnapshot: item.packageQty ?? null,
+      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays) == null ? {} : {
+        turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays,
+        productionDayMinutesSnapshot: displayProductionDayMinutes(store, item.supplierId),
+      }),
       turnaroundHoursSnapshot: itemTurnaroundHours(item, service),
       baseUnitPriceMinor: item.basePriceMinor,
       effectiveUnitPriceMinor,

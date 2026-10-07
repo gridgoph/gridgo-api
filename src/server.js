@@ -3972,7 +3972,7 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, body);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor != null ? Number(body.referenceRateMinor) : 0;
-      const duration = productionDuration(body, { turnaroundHours: 48 }, "turnaround", shopProductionDayMinutes(store, user.id));
+      const duration = productionDuration(body, { turnaroundHours: 48 }, "turnaround", shopProductionDayMinutes(store, user.id), "invalid_service");
       const turnaroundHours = duration.turnaroundHours;
       if (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0 || !Number.isFinite(turnaroundHours) || turnaroundHours <= 0) {
         return send(res, 400, {
@@ -4068,7 +4068,7 @@ async function handleRequest(req, res) {
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
       const duration = body.turnaroundDays != null || body.turnaroundHours != null
-        ? productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, service.supplierId)) : null;
+        ? productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, service.supplierId), "invalid_service") : null;
       const turnaroundHours = duration?.turnaroundHours;
       if (
         (referenceRateMinor != null && (!Number.isSafeInteger(referenceRateMinor) || referenceRateMinor < 0)) ||

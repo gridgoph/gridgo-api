@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { up } from '../migrations/1791432000000_production_days.js';
+import { up } from '../migrations/1791936000000_production_days.js';
 
 // Exercise the actual forward SQL on the old table shape in an isolated schema.
 test('forward migration rounds every production source up and preserves colliding tier prices and approved snapshots', { skip: !process.env.DATABASE_URL }, async () => {
@@ -16,6 +16,9 @@ test('forward migration rounds every production source up and preserves collidin
       CREATE TABLE supplier_services (id text, supplier_id text, turnaround_hours integer, standard_turnaround_hours integer, rush_turnaround_hours integer);
       CREATE TABLE supplier_catalog_items (id text, supplier_id text, turnaround_hours integer, minimum_turnaround_hours integer, approved_snapshot jsonb);
       CREATE TABLE supplier_catalog_speed_tiers (id text, catalog_item_id text, turnaround_hours integer, price_minor integer, UNIQUE (catalog_item_id, turnaround_hours));
+      CREATE TABLE order_jobs (id text);
+      CREATE TABLE order_line_items (id text, snapshot_finalized boolean, turnaround_hours_snapshot integer);
+      INSERT INTO order_line_items VALUES ('historic', true, 3);
       CREATE TABLE listing_starters (id text, default_turnaround_hours integer);
       INSERT INTO supplier_profiles VALUES ('default', null), ('custom', '{"utcOffsetMinutes":480,"week":[{"weekday":1,"opensMinute":480,"closesMinute":990}]}');
       INSERT INTO supplier_services VALUES ('service', 'default', 48, 24, 3), ('custom_service', 'custom', 24, 24, null);
@@ -43,6 +46,10 @@ test('forward migration rounds every production source up and preserves collidin
     assert.equal((await db.query("SELECT turnaround_days FROM supplier_catalog_items WHERE id='inherited'")).rows[0].turnaround_days, null);
     assert.equal((await db.query("SELECT default_turnaround_days FROM listing_starters WHERE id='starter'")).rows[0].default_turnaround_days, 1);
     assert.equal((await db.query("SELECT default_turnaround_days FROM listing_starters WHERE id='unset'")).rows[0].default_turnaround_days, null);
+    assert.equal((await db.query("SELECT turnaround_hours_snapshot FROM order_line_items WHERE id='historic'")).rows[0].turnaround_hours_snapshot, 3);
+    await db.query('SAVEPOINT immutable_snapshot');
+    await assert.rejects(db.query("UPDATE order_line_items SET turnaround_days_snapshot=1 WHERE id='historic'"), /immutable/);
+    await db.query('ROLLBACK TO SAVEPOINT immutable_snapshot');
     await assert.rejects(db.query(`SELECT production_day_minutes('{"week":[]}'::jsonb)`), /production_day_length_unavailable/);
   } finally {
     await db.query('ROLLBACK');

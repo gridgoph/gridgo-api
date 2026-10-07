@@ -19,20 +19,20 @@ export function hoursToDays(hours, minutes = 600) {
 }
 
 /** Days own new writes; hour-only builds keep working through this adapter. */
-export function productionDuration(body, current, prefix, minutes) {
+export function productionDuration(body, current, prefix, minutes, errorCode = "invalid_catalog_item") {
   const daysKey = `${prefix}Days`, hoursKey = `${prefix}Hours`;
   let days = current[daysKey] ?? hoursToDays(current[hoursKey], minutes);
   const field = Object.hasOwn(body, daysKey) ? daysKey : Object.hasOwn(body, hoursKey) ? hoursKey : null;
   if (field) {
     const value = body[field];
-    if (value != null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1)) {
-      throw new AvailabilityError(400, 'invalid_catalog_item', `${field} must be a whole number, at least 1.`, { field });
+    if (value != null && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || (field === daysKey && !Number.isSafeInteger(value)))) {
+      throw new AvailabilityError(400, errorCode, `${field} must be a whole number, at least 1.`, { field });
     }
     days = field === daysKey ? value : hoursToDays(value, minutes);
   }
   const hours = days == null ? null : days * minutes / 60;
-  if (days != null && (!Number.isSafeInteger(days * minutes) || days * minutes > 2_147_483_647 * 60)) {
-    throw new AvailabilityError(400, 'invalid_catalog_item', 'Production time is too large.', { field: daysKey });
+  if (days != null && (!Number.isSafeInteger(days * minutes) || days * minutes > 2_147_483_647)) {
+    throw new AvailabilityError(400, errorCode, 'Production time is too large.', { field: daysKey });
   }
   return { [daysKey]: days ?? null, [hoursKey]: hours };
 }
@@ -68,6 +68,14 @@ export function synchronizeProductionHours(store, { convertLegacy = false } = {}
     apply(tier, dayMinutes(store, item?.supplierId), ['turnaround']);
   }
   for (const starter of store.listingStarters || []) apply(starter, 600, ['defaultTurnaround']);
+  for (const line of store.orderLineItems || []) {
+    if (line.turnaroundDaysSnapshot != null && line.productionDayMinutesSnapshot != null) {
+      line.turnaroundHoursSnapshot = line.turnaroundDaysSnapshot * line.productionDayMinutesSnapshot / 60;
+    }
+  }
+  for (const job of store.orderJobs || []) {
+    if (job.estimatedProductionMinutes != null) job.estimatedHours = job.estimatedProductionMinutes / 60;
+  }
   return store;
 }
 

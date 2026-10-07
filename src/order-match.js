@@ -154,7 +154,7 @@ function queueMinutesFor(store, supplierId, fallbackHours) {
       && !jobs.some((job) => job.orderId === order.id),
   );
   const hours = [...jobs, ...orders].reduce((total, row) => {
-    const estimate = Number.isSafeInteger(row.estimatedHours) && row.estimatedHours > 0
+    const estimate = Number.isFinite(row.estimatedHours) && row.estimatedHours > 0
       ? row.estimatedHours
       : fallbackHours;
     return total + estimate;

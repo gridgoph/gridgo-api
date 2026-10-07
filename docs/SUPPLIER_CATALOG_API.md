@@ -308,11 +308,17 @@ responses express the whole-day duration in working hours. For example, a defaul
 shop receives 2 days/20 hours from a 2-day write and 5 days/50 hours from an old
 48-hour write. There is no new sub-day option.
 
-Migration `1791432000000` rounds existing listings, service defaults/rush, speed
+Migration `1791936000000` rounds existing listings, service defaults/rush, speed
 tiers, starters and approved listing snapshots up. It refuses ambiguous saved
 calendars and keeps existing order snapshots/promises untouched. Tier IDs and
 prices survive even when multiple speeds round to the same day. The canonical
 columns are additive; old hour columns remain as compatibility projections.
 `src/production-days.js` owns request conversion and the compatibility view;
-`src/availability.js` remains the calendar engine. Production data was not queried
+`src/availability.js` remains the calendar engine. New order-line snapshots keep
+`turnaroundDaysSnapshot` and `productionDayMinutesSnapshot`; they are immutable
+and old orders remain null. Order `productionItems` expose `turnaroundDays`, and
+checkout `jobs` expose `estimatedDays` (null for historical hour-only records).
+Exact integer production minutes keep half-hour shop shifts precise through
+checkout and queue reloads; legacy integer-hour database columns round up only
+as compatibility storage. Production data was not queried
 by the implementation worker: run migrations through the normal deployment gate.
