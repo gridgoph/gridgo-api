@@ -12,6 +12,7 @@ async function setup(t, ready = true) {
   await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture();
   store.settings.handoverOtpEnabled = true;
+  store.settings.hubPickupEnabled = false;
   const order = store.orders[0];
   Object.assign(order, { fulfillmentMode: 'pickup', riderId: 'rider', state: ready ? 'awaiting_collection' : 'out_for_delivery', awaitingCollectionAt: AT });
   store.staffRoles = [{ code: 'hub_staff', name: 'Hub staff', canHandout: true }];
@@ -76,6 +77,34 @@ test('HTTP QR claims commit exactly once under concurrency, preserve money, deny
   assert.equal((await api('ops', 'GET', '/ops/hub/handouts')).body.handouts.length, 1);
   await assert.rejects(db.query("DELETE FROM hub_handouts WHERE order_id='order'"), /append-only/);
   await assert.rejects(db.query("UPDATE orders SET data=data-'handover' WHERE id='order'"), /handover must be preserved/);
+});
+
+test('Operations and Super Admin use the staff routes through their own membership, without an invite', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await setup(t);
+  const as = role => ({ headers: { 'X-GRIDGO-Role': role } });
+  for (const [key, role] of [['ops', 'ops_admin'], ['admin', 'super_admin']]) {
+    const me = await api(key, 'GET', '/staff/me', null, as(role));
+    assert.equal(me.status, 200, JSON.stringify(me.body));
+    assert.deepEqual({ ...me.body.staff, name: undefined }, { id: key, name: undefined, role, canHandout: true });
+    assert.equal((await api(key, 'GET', '/staff/hub', null, as(role))).status, 200);
+    assert.equal((await api(key, 'GET', '/staff/me')).status, 200);
+    // A role the account does not hold is still refused.
+    assert.equal((await api(key, 'GET', '/staff/me', null, as('staff'))).status, 403);
+  }
+  for (const key of ['client', 'supplier', 'rider']) assert.equal((await api(key, 'GET', '/staff/me')).status, 403);
+  const credentials = await api('client', 'GET', '/orders/order/handover');
+  const mismatch = await api('ops', 'POST', '/staff/hub/claims', { ...credentials.body.handover, otp: 'bad' }, as('ops_admin'));
+  assert.equal(mismatch.body.error, 'handover_otp_mismatch');
+  const claimed = await api('ops', 'POST', '/staff/hub/claims', credentials.body.handover, as('ops_admin'));
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.handout.staffId, 'ops');
+  assert.equal((await api('ops', 'GET', '/staff/hub/handouts', null, as('ops_admin'))).body.staffTotals[0].count, 1);
+  assert.equal((await api('admin', 'GET', '/staff/hub/handouts', null, as('super_admin'))).body.handouts.length, 0);
+  assert.equal((await api('admin', 'GET', '/ops/hub/handouts', null, as('super_admin'))).body.handouts.length, 1);
+  const after = await loadStore(db);
+  assert.equal(after.orders[0].state, 'issue_window_open');
+  assert.deepEqual(after.staffProfiles, []);
+  assert.equal(after.userRoleMemberships.some(m => m.role === 'staff'), false);
 });
 
 test('rider arrival mints hub credentials and does not start issue window; delivery mismatch blocks then correct OTP opens the shared event', { skip: !DATABASE_URL }, async t => {
@@ -200,4 +229,28 @@ test('HTTP settings and staff hub agree on unset, configured and cleared schedul
     assert.deepEqual(store.settings.hubPickup.schedule, schedule);
     assert.deepEqual(store.orders[0].handover.schedule, null);
   }
+});
+
+test('pickup availability defaults off and requires Super Admin, reason and current version', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await setup(t);
+  await db.query("UPDATE platform_settings SET settings = settings - 'hubPickupEnabled'");
+  let current = (await api('client', 'GET', '/settings')).body;
+  assert.equal(current.settings.hubPickupEnabled, false);
+  const body = { expectedVersion: current.version, reason: 'Enable new pickup orders', hubPickupEnabled: true };
+  assert.equal((await api('ops', 'PATCH', '/settings', body)).status, 403);
+  assert.equal((await api('client', 'PATCH', '/settings', body)).status, 403);
+  assert.equal((await api('admin', 'PATCH', '/settings', { ...body, reason: '' })).body.error, 'settings_reason_required');
+  assert.equal((await api('admin', 'PATCH', '/settings', { ...body, hubPickupEnabled: 'true' })).body.error, 'invalid_hub_pickup_enabled');
+  const enabled = await api('admin', 'PATCH', '/settings', body);
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.body.settings.hubPickupEnabled, true);
+  assert.equal((await api('admin', 'PATCH', '/settings', body)).body.error, 'settings_version_conflict');
+  current = (await api('client', 'GET', '/settings')).body;
+  assert.equal(current.settings.hubPickupEnabled, true);
+  assert.equal((await api('admin', 'PATCH', '/settings', { ...body, expectedVersion: current.version, hubPickupEnabled: false })).status, 200);
+  const saved = await loadStore(db);
+  assert.equal(saved.settings.hubPickupEnabled, false);
+  const updates = saved.auditLog.filter(row => row.action === 'settings.operational_update');
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0].detail.current.hubPickupEnabled, true);
 });

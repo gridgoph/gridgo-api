@@ -61,7 +61,7 @@ const COPY = {
   out_for_delivery: {
     type: "order_out_for_delivery",
     title: "Out for delivery",
-    body: "Your order is on the way.",
+    body: "Your order is on the way. Confirm your drop-off pin or choose a new spot in the app.",
   },
   awaiting_collection: {
     type: "order_ready_for_pickup",

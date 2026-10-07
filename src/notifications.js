@@ -5,7 +5,7 @@ export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
 /** Refetch pings that only Operations and Super Admin may receive. */
-export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "chat"]);
+export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "chat", "account-deletion-requests"]);
 
 export const INVALIDATE_RESOURCES = Object.freeze([
   "orders",

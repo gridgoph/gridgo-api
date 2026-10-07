@@ -1,3 +1,4 @@
+import { routeAccountDeletion } from './account-deletion.js';
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
@@ -170,6 +171,7 @@ import {
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
+import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { applyProductionNudges, continueAfterStepFailure } from "./production-inactivity.js";
@@ -351,6 +353,14 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
 function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   if (!pushDelivery.configured || devices.length === 0) return;
   fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
+}
+
+async function deletionRequestEvent({ action, id: requestId, actor }) {
+  const latest = await load();
+  audit(latest, { actor, action, entityType: 'account_deletion_request', entityId: requestId });
+  notifyAdmins(latest, action, action === 'account_deletion_requested' ? 'Account deletion requested' : 'Account deletion completed', null, `${action}:${requestId}`, { createId: id, at: now() });
+  queueInvalidate(latest, { resource: 'account-deletion-requests' });
+  await save(latest);
 }
 
 /**
@@ -592,6 +602,7 @@ function publicOperationalSettings(settings, store = null) {
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
+    hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
@@ -1861,6 +1872,10 @@ async function handleRequest(req, res) {
         at: now(),
       });
     }
+    if (pathname === '/account-deletion-requests' || pathname === '/api/account-deletion-requests') {
+      const result = await routeAccountDeletion({ req, url, database, readBody, onEvent: deletionRequestEvent });
+      return send(res, result.status, result.body);
+    }
     if (await routeSupportDesk({
       req,
       res,
@@ -2223,6 +2238,10 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    if (pathname === '/me/account-deletion-request') {
+      const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
+      return send(res, result.status, result.body);
+    }
     // Other routes already use ?role as a directory filter. Only the inbox
     // contract interprets that query as actor context.
     const notificationRoleQuery = ["/notifications", "/notifications/stream", "/notifications/read-all"].includes(pathname)
@@ -2372,6 +2391,11 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (pathname === '/ops/account-deletion-requests' || pathname.startsWith('/ops/account-deletion-requests/')) {
+      const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
+      return send(res, result.status, result.body);
+    }
+
     if (isStaffIssueReportsRoute(pathname)) {
       await routeStaffIssueReports({
         req,
@@ -2493,6 +2517,12 @@ async function handleRequest(req, res) {
           && guardedOrder && refundHold(store, guardedOrder) && !refundSettlementFor(store, guardedOrder);
         if (guardedOrder && !reconcileBalance) assertRefundWorkAllowed(store, guardedOrder);
       }
+    }
+
+    const dropoffResponse = await routeDropoffConfirmation({ req, url, store, user, readBody, now, id, audit });
+    if (dropoffResponse) {
+      if (dropoffResponse.mutated) await save(store);
+      return send(res, dropoffResponse.status, dropoffResponse.body);
     }
 
     const statementResponse = routeOrganizationStatements({ req, url, store, user, now });
@@ -3211,6 +3241,7 @@ async function handleRequest(req, res) {
       const next = {
         ...store.settings,
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
+        hubPickupEnabled: Object.hasOwn(body, "hubPickupEnabled") ? body.hubPickupEnabled : store.settings.hubPickupEnabled === true,
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
         productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
@@ -5172,7 +5203,7 @@ async function handleRequest(req, res) {
         // Same destination rule as publicOrderFor: a collected order travels to
         // the GRIDGO Office counter, never to the address the client shopped with.
         const dropoff =
-          order.fulfillmentMode === "pickup" ? gridgoOfficePoint() : mapPointOrNull(order.dropoff);
+          order.fulfillmentMode === "pickup" ? gridgoOfficePoint() : mapPointOrNull(deliveryDestination(order));
         return {
           riderId: order.riderId,
           name: rider?.name || "Rider",
@@ -5752,6 +5783,7 @@ async function handleRequest(req, res) {
       const previousFileCheck = JSON.stringify(order.fileCheck);
       order.state = next;
       order.updatedAt = now();
+      if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
       recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "");
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {

@@ -124,3 +124,5 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 See the authoritative contract documents for exact methods, roles, bodies, states, and error codes.
 
 - Business and organization application documents, shared-login email codes, officer handover/history, and quarterly notices: [Organization accounts API](docs/ORGANIZATION_ACCOUNTS_API.md).
+
+Account deletion requests and the manual Operations queue: [Account deletion API](docs/ACCOUNT_DELETION_API.md).

@@ -1396,3 +1396,18 @@ See [Production deadline requests](ORDER_RESCHEDULE_API.md) for the one-request 
 
 See [Shop acceptance and recovery](SHOP_RECOVERY_API.md) for the opening-hour deadline,
 shop cancellation, client-approved replacement or full-refund choice, and dashboard failure history.
+
+## Out-for-delivery drop-off confirmation
+
+A door delivery entering `out_for_delivery` records `dropoffConfirmation: {status:"pending", requestedAt}` and its client notification/push asks the client to confirm or change the pin. Hub pickup and already-running older trips without this record retain their previous behavior. The original order/job destination, distance, paid fee, installments and rider split remain immutable snapshots.
+
+`POST /orders/:id/dropoff-confirmation` is owning-client only, while the order is `out_for_delivery`. Send `{action:"confirm"}` to keep the original point or `{action:"change", point:{lat,lng,label}}` to request a new point. Coordinates must be finite JSON numbers in latitude/longitude bounds and the trimmed label must be 1–240 characters.
+
+The reply is `200 {confirmation}`:
+
+- `status:"confirmed"`, `requestedAt`, `answeredAt`, `point`: the original point was confirmed, or the new point has the same distance zone and exactly the same fee. The API compares both points using a table captured when the prompt was created, and requires that fee to match the paid order snapshot. If an older paid price cannot be reproduced from that table, a changed point goes to review; confirming the original coordinates always works. Settings edits after the prompt do not change the comparison.
+- `status:"needs_review"`, `requestedAt`, `answeredAt`, `requestedPoint`: the change was **not applied**. Keep the original destination and paid fee. Client copy: “This spot changes the delivery fee. Your original drop-off and payment are unchanged. GRIDGO will contact you.” Operations and Super Admin each receive an `ops_dropoff_review_requested` notification with the requested coordinates/address and the instruction to contact the client. No repricing, collection, or refund occurs.
+
+An identical retry returns the saved answer without another audit/notification. A different second answer returns `409 dropoff_confirmation_answered`; a closed trip, hub pickup or missing prompt returns `409 dropoff_confirmation_unavailable`. Invalid input returns `400 invalid_dropoff_confirmation` or `invalid_dropoff_point`; foreign clients and other roles receive `403`.
+
+Authorized client, rider and Operations order projections include `dropoffConfirmation`. Rider projections omit rejected `requestedPoint`; supplier projections omit the confirmation record. Internal comparison settings and the original confirmation snapshot are never projected. For compatible navigation, projected `dropoff` becomes the confirmed `point`; storage keeps the original `dropoff`. `/ops/riders/locations` uses the same effective destination. Confirmations notify the rider and staff and invalidate `orders`, `dispatch`, and `notifications`, so an open trip updates without restarting it. Pending or rejected changes continue using the original destination and do not impose a new delivery gate. The record lives in `orders.data` JSONB; no migration is needed.

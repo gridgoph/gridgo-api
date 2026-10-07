@@ -137,7 +137,7 @@ test("issue-report and chat pings reach only Operations and Super Admin", () => 
       { id: "d_rider", userId: "user_r", appRole: "rider" },
     ],
   };
-  for (const resource of ["issue-reports", "chat"]) {
+  for (const resource of ["issue-reports", "chat", "account-deletion-requests"]) {
     assert.deepEqual(
       invalidateAudienceIds(store, {
         resource,

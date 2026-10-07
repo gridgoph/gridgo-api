@@ -38,7 +38,7 @@ function addPublicListing(store, { supplierId, itemId, priceMinor, shop, turnaro
 function fixture() {
   const client = { id: "user_client", role: "client", email: "client@gridgo.test" };
   const store = {
-    settings: defaultOperationalSettings(),
+    settings: { ...defaultOperationalSettings(), hubPickupEnabled: true },
     taxonomy: defaultTaxonomy(),
     users: [client],
     userRoleMemberships: [{ userId: client.id, role: "client" }],
@@ -1725,3 +1725,31 @@ test('a later-date slow product does not force the earlier product to miss its o
   const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', reference: 'EARLIEST-FIRST', proofFileId: 'file_qr' } })).body;
   assert.deepEqual(placed.basket.groups.map(group => group.deadline), ['2026-10-10T00:00:00.000Z', '2026-08-28T00:00:00.000Z']);
 });
+
+for (const enabled of [undefined, false, true]) {
+  for (const multiShop of [false, true]) {
+    test(`pickup checkout availability=${enabled}, multi-shop=${multiShop}`, async () => {
+      const { store, client } = fixture();
+      const call = caller(store, client);
+      const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup", deadline: "2026-09-10T08:00:00.000Z" })).body.cart.id;
+      for (const catalogItemId of multiShop ? ["item_a", "item_b"] : ["item_a"]) {
+        await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId, optionIds: [], quantity: 1, artworkFileId: "file_art" });
+      }
+      // Switch after cart selection: a stale client must not bypass the gate.
+      if (enabled === undefined) delete store.settings.hubPickupEnabled;
+      else store.settings.hubPickupEnabled = enabled;
+      const submit = () => call("POST", `/me/carts/${cartId}/checkout`, {
+        payment: { method: "qr_manual", proofFileId: "file_qr", reference: "TEST-123" },
+      });
+      if (enabled) {
+        assert.equal((await submit()).status, 201);
+        assert.equal(store.orders.length, multiShop ? 2 : 1);
+      } else {
+        await assert.rejects(submit, { status: 409, code: "hub_pickup_disabled" });
+        assert.equal(store.orders.length, 0);
+        assert.equal(store.orderJobs.length, 0);
+        assert.equal(store.carts[0].state, "draft");
+      }
+    });
+  }
+}
