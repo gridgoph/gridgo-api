@@ -40,6 +40,7 @@ export function productionDuration(body, current, prefix, minutes, errorCode = "
 export function productionProjection(record, minutes, prefixes = ['turnaround', 'minimumTurnaround']) {
   return Object.assign({ productionDayMinutes: minutes }, ...prefixes.map(prefix => ({
     [`${prefix}Days`]: record[`${prefix}Days`] ?? (minutes == null ? null : hoursToDays(record[`${prefix}Hours`], minutes)),
+    ...(record[`${prefix}Days`] != null && minutes != null ? { [`${prefix}Hours`]: record[`${prefix}Days`] * minutes / 60 } : {}),
   })));
 }
 

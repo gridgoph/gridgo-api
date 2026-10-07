@@ -1805,3 +1805,12 @@ test('listing production days are canonical and old hour writes round up', async
   assert.equal(old.body.item.turnaroundHours, 50);
   assert.equal(publicCatalogItem(store, store.catalogItems[0]).turnaroundDays, 5);
 });
+
+
+test('private listing search rows derive compatibility hours from canonical days for a half-hour shift', () => {
+  const store = fixture();
+  store.supplierProfiles[0].schedule = { utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 480, closesMinute: 990 }] };
+  const row = { ...store.catalogItems[0], turnaroundMode: 'override', turnaroundDays: 1, turnaroundHours: 9 };
+  assert.equal(privateCatalogItem(store, row).turnaroundHours, 8.5);
+  assert.equal(privateCatalogItem(store, row).turnaroundDays, 1);
+});
