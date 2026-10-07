@@ -121,6 +121,17 @@ test('only Super Admin creates configurable staff roles/invites and log scope is
   assert.equal(JSON.stringify(list).includes(invite.body.code), false);
 });
 
+test('the staff projection carries the role name Super Admin set, and the membership name for Operations and Super Admin', async () => {
+  const store = setup();
+  const me = async actor => (await call(store, actor, '/staff/me', {}, 'GET')).body.staff;
+  assert.deepEqual(await me('other'), { id: 'other', name: 'other', role: 'hub_staff', roleName: 'Hub staff', canHandout: true });
+  await call(store, 'admin', '/admin/staff/roles', { code: 'front_desk', name: 'Front desk (no handout)', canHandout: false });
+  store.staffProfiles[0].roleCode = 'front_desk';
+  assert.equal((await me('other')).roleName, 'Front desk (no handout)');
+  assert.equal((await me('ops')).roleName, 'Operations');
+  assert.equal((await me('admin')).roleName, 'Super Admin');
+});
+
 test('OTP retry budget persists a cooldown and a valid code cannot bypass it; Unicode input is a normal mismatch', async () => {
   const store = setup(), h = store.orders[0].handover;
   for (let i = 0; i < 5; i++) {

@@ -40,6 +40,7 @@ test('HTTP invitation uses Clerk subject, role membership, single-use codes and 
   assert.equal((await api('client', 'POST', '/auth/staff/redeem', { code })).body.error, 'staff_invite_used');
   const me = await api('other', 'GET', '/staff/me');
   assert.equal(me.body.staff.role, 'hub_staff');
+  assert.equal(me.body.staff.roleName, 'Hub staff');
   assert.equal(JSON.stringify(me.body).includes('clerk_'), false);
   const store = await loadStore(db);
   assert.ok(store.userRoleMemberships.some(m => m.userId === 'other' && m.role === 'staff'));
@@ -82,10 +83,10 @@ test('HTTP QR claims commit exactly once under concurrency, preserve money, deny
 test('Operations and Super Admin use the staff routes through their own membership, without an invite', { skip: !DATABASE_URL }, async t => {
   const { db, api } = await setup(t);
   const as = role => ({ headers: { 'X-GRIDGO-Role': role } });
-  for (const [key, role] of [['ops', 'ops_admin'], ['admin', 'super_admin']]) {
+  for (const [key, role, roleName] of [['ops', 'ops_admin', 'Operations'], ['admin', 'super_admin', 'Super Admin']]) {
     const me = await api(key, 'GET', '/staff/me', null, as(role));
     assert.equal(me.status, 200, JSON.stringify(me.body));
-    assert.deepEqual({ ...me.body.staff, name: undefined }, { id: key, name: undefined, role, canHandout: true });
+    assert.deepEqual({ ...me.body.staff, name: undefined }, { id: key, name: undefined, role, roleName, canHandout: true });
     assert.equal((await api(key, 'GET', '/staff/hub', null, as(role))).status, 200);
     assert.equal((await api(key, 'GET', '/staff/me')).status, 200);
     // A role the account does not hold is still refused.
