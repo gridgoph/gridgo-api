@@ -115,6 +115,7 @@ async function fixture(database) {
   await database.transaction(async () => {
     const store = await loadStore(database);
     store.settings.handoverOtpEnabled = true;
+    store.settings.hubPickupEnabled = true;
     store.users.push(
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
       { id: "supplier_a", clerkUserId: "clerk_supplier_a", email: "a@gridgo.test", name: "A", role: "supplier", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Shop A" }, createdAt: AT },

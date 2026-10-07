@@ -222,6 +222,7 @@ export function defaultOperationalSettings() {
     riderCommissionBps: 8_500,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
+    hubPickupEnabled: false,
     handoverOtpEnabled: false,
     /** Names the fee on client checkout. The pesos stay inside Printing either way. */
     serviceFeeVisibleToClient: true,
@@ -244,6 +245,9 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.hubPickupEnabled !== undefined && typeof settings.hubPickupEnabled !== "boolean") {
+    fail(400, "invalid_hub_pickup_enabled", "hubPickupEnabled must be a boolean.");
+  }
   if (settings?.handoverOtpEnabled !== undefined && typeof settings.handoverOtpEnabled !== 'boolean') {
     fail(400, 'invalid_handover_otp_setting', 'handoverOtpEnabled must be a boolean.');
   }
