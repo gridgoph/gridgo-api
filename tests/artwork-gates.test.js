@@ -106,3 +106,47 @@ test('resubmitting through the legacy submitted state restarts the review, and c
   assert.equal(fileCheckProjection(order, '2026-10-06T00:00:00Z').waitingSeconds, 0);
   assert.equal(supplierArtworkReleased(order), false);
 });
+
+const QA_TICKS = { artwork: true, spec: true, quantity: true, address: true };
+test('QA preserves explicit item results with the authenticated reviewer and clears them on resubmission', () => {
+  const { order, store } = fixture();
+  const checks = { ...QA_TICKS, artwork: false };
+  recordFileCheckTransition(order, 'needs_qa', 'client_correction', { id: 'ops' }, AT, 'Replace artwork', checks);
+  assert.deepEqual(order.fileCheck.checklist, { version: 1, checks });
+  assert.equal(order.fileCheck.reviewedBy, 'ops');
+  assert.equal(order.fileCheck.reviewedAt, AT);
+  checks.spec = false;
+  assert.equal(order.fileCheck.checklist.checks.spec, true, 'snapshot must not retain input references');
+  assert.equal(publicOrderFor(order, { id: 'client', role: 'client' }, store).fileCheck.checklist, undefined);
+  assert.equal(publicOrderFor(order, { id: 'shop', role: 'supplier' }, store).fileCheck, undefined);
+  recordFileCheckTransition(order, 'client_correction', 'needs_qa', { id: 'client' }, AT, '');
+  assert.equal(order.fileCheck.checklist, null);
+  recordFileCheckTransition(order, 'needs_qa', 'supplier_assigned', { id: 'ops' }, AT, '', QA_TICKS);
+  assert.deepEqual(fileCheckProjection(order, AT).checklist, { version: 1, checks: QA_TICKS });
+});
+
+test('legacy decisions never fabricate per-item results', () => {
+  const { order } = fixture();
+  recordFileCheckTransition(order, 'needs_qa', 'supplier_assigned', { id: 'ops' }, AT, '');
+  assert.equal(fileCheckProjection(order, AT).checklist, null);
+  delete order.fileCheck.checklist;
+  assert.equal(fileCheckProjection(order, AT).checklist, null);
+});
+
+test('QA rejects partial, unknown, nonboolean and incomplete approval checklists', () => {
+  for (const checks of [null, [], {}, { ...QA_TICKS, extra: true }, { ...QA_TICKS, artwork: 'true' }, { ...QA_TICKS, artwork: false }]) {
+    const { order } = fixture();
+    const before = structuredClone(order);
+    assert.throws(() => recordFileCheckTransition(order, 'needs_qa', 'supplier_assigned', { id: 'ops' }, AT, '', checks),
+      error => error.status === 400 && error.code === 'invalid_qa_checklist');
+    assert.deepEqual(order, before);
+  }
+});
+
+test('legacy intake can record an explicit checklist without inventing an earlier review', () => {
+  const { order } = fixture();
+  delete order.fileCheck;
+  recordFileCheckTransition(order, 'needs_qa', 'supplier_assigned', { id: 'ops' }, AT, '', QA_TICKS);
+  assert.deepEqual(order.fileCheck.checklist, { version: 1, checks: QA_TICKS });
+  assert.equal(order.fileCheck.reviewedAt, AT);
+});

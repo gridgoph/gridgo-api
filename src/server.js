@@ -5837,7 +5837,7 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
-      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "");
+      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist);
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {
         audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,
