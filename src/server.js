@@ -212,6 +212,7 @@ import {
   routeSupportDesk,
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
+import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
 import {
   isFirstmateIssueReportsRoute,
   isStaffIssueReportsRoute,
@@ -1505,6 +1506,14 @@ async function sweepOrganizationOfficers() {
   });
 }
 
+// A delivery's messages go one day after it is delivered (gridgo-client#198).
+// Its own tables, so no domain lock: nothing else writes a closed conversation.
+async function sweepDeliveryChats() {
+  const candidate = await database.query(`SELECT 1 FROM delivery_chat_messages LIMIT 1`);
+  if (!candidate.rowCount) return;
+  await database.transaction(() => purgeClosedDeliveryChats(database, now()), { lockKey: "gridgo-delivery-chat" });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -2441,6 +2450,10 @@ async function handleRequest(req, res) {
         database,
         notifyStaff: notifyStaffDesk,
       });
+    }
+
+    if (await routeDeliveryChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
+      return;
     }
 
     /**
@@ -6571,6 +6584,7 @@ async function runLifecycleWork() {
         });
       },
       sweepOrganizationOfficers,
+      sweepDeliveryChats,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }

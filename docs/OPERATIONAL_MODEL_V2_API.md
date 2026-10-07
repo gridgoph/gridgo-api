@@ -1352,6 +1352,28 @@ Only Super Admin may change `clientRiderLocationRevealDistanceMeters` through `P
 
 `GET /ops/riders/locations` returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,pickup,dropoff}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. `vehicleType` is the rider profile's `motorcycle | car | van | truck | bicycle` and `plateNumber` its plate, both `null` when no profile exists, so the map can draw the vehicle the rider actually drives. `pickup` and `dropoff` are the order's snapshot points as `{lat,lng,label}` or `null`; a collected order reports the GRIDGO Office point as `dropoff`, the same substitution `publicOrderFor` applies, so the map can draw the remaining leg of the trip. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
 
+## Delivery messages
+
+The owning client and the assigned rider can message each other about a door delivery (`src/delivery-chat.js`, gridgo-client#198). There is no call route: neither side ever receives the other's phone number or email, and a call option waits on a masked-call provider.
+
+- **Open** while the assigned rider has the job (`rider_assigned`, `picked_up`, `out_for_delivery`): both can read and write.
+- **Read only** for 24 hours after the delivery is recorded (`deliveryEvidence.recordedAt`, else `issueWindowOpenedAt`), whatever state follows.
+- **Closed** otherwise: before a rider, on a job collected at GRIDGO Office (`fulfillmentMode: "pickup"` — its rider drives to our counter), after a cancellation, and once the day has passed. The routes refuse a closed conversation at once, and the lifecycle sweep deletes its rows. A conversation is keyed by order **and** rider, so a reassigned job starts clean and the previous rider's messages are deleted.
+
+The client's and the assigned rider's order projection carries `deliveryChat: { status: "open" | "read_only", closesAt, retentionHours: 24 }` while it is not closed; nobody else ever sees it.
+
+```http
+GET /orders/:id/delivery-chat
+```
+
+`200 { chat, messages: [{ id, senderRole: "client" | "rider", body, createdAt, mine }] }`, oldest first, and marks the conversation read for the caller. `401` signed out, `403 forbidden` for anyone but the two parties (Operations included), `404 order_not_found`, `409 delivery_chat_not_available` (no rider yet, or a collected job), `410 delivery_chat_closed` (past its day).
+
+```http
+POST /orders/:id/delivery-chat/messages
+```
+
+`{ "body": "Gate is the blue one" }` — trimmed, 1–1000 characters (`400 invalid_request`). `201 { chat, message }`; `409 delivery_chat_read_only` once delivered; `429 too_many_requests` past 30 messages in 10 minutes; the same `401`/`403`/`404`/`409`/`410` as the read. The other party gets an inbox row and push of type `delivery_message` (`appRole` `client` or `rider`, `orderId` set). Its copy never contains the message, because inbox rows outlive the conversation, and a burst within five minutes rides on the recipient's still-unread notice instead of ringing again.
+
 ## Delivery and issue window
 
 Upload and attach rider `delivery_photo` evidence, then:

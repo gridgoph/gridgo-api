@@ -1,4 +1,5 @@
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
+import { deliveryChatProjection } from "./delivery-chat.js";
 import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
@@ -1125,6 +1126,10 @@ export function publicOrderFor(order, user, store = null) {
   if (ops || owningClient || assignedSupplier) {
     publicRecord.packingProgress = packingProgressFor(store, order);
   }
+  // Only the two people in the conversation learn it exists (gridgo-client#198).
+  delete publicRecord.deliveryChat;
+  const deliveryChat = deliveryChatProjection(order, user);
+  if (deliveryChat) publicRecord.deliveryChat = deliveryChat;
   delete publicRecord.productionProgress;
   if (ops || owningClient || assignedSupplier || (rider && order.riderId === user.id)) {
     publicRecord.productionProgress = productionProgressFor(store, order);
