@@ -17,3 +17,7 @@ export async function up(pgm) {
     CREATE INDEX account_deletion_queue ON account_deletion_requests(status,requested_at,id);
   `);
 }
+
+export async function down(pgm) {
+  pgm.sql('DROP TABLE account_deletion_requests');
+}

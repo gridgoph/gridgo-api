@@ -46,7 +46,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rows.map((row) => row.table_name));
     for (const table of [
-      "release_announcements", "staff_roles", "staff_profiles", "staff_invites", "hub_handouts",
+      "account_deletion_requests", "release_announcements", "staff_roles", "staff_profiles", "staff_invites", "hub_handouts",
       "user_role_memberships", "client_profiles", "supplier_profiles", "rider_profiles",
       "approval_cases", "approval_case_events", "rider_documents", "supplier_payment_terms",
       "organization_accounts", "organization_email_challenges",
@@ -133,6 +133,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "1791936000000_production_days",
         "1791939600000_support_chat_staff_people",
         "1791943200000_support_chat_images",
+        "1791946800000_account_deletion_requests",
       ],
     );
 
@@ -313,6 +314,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     )).rowCount, 1);
 
     // Reverse chat photos on support messages.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('account_deletion_requests') AS table_name")).rows[0].table_name, null);
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='support_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 0);
