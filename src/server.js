@@ -33,7 +33,7 @@ import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
-import { availableDispatch } from "./dispatch-policy.js";
+import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -2478,6 +2478,13 @@ async function handleRequest(req, res) {
       const refundGuard = pathname.match(/^\/(?:orders|dispatch)\/([^/]+)\/(.+)$/);
       if (refundGuard && !["issues", "physical-invoice"].includes(refundGuard[2])) {
         const guardedOrder = store.orders.find((order) => order.id === refundGuard[1]);
+        if (pathname.startsWith("/dispatch/") && refundGuard[2] === "accept"
+          && user.role === "rider" && approvedRole(store, user.id, "rider")
+          && guardedOrder?.state === "ready_for_dispatch" && !guardedOrder.riderId
+          && !isContainedPickup(guardedOrder) && dispatchWorkHeld(store, guardedOrder)) {
+          return send(res, 409, { error: "dispatch_paused",
+            message: "This job is paused and cannot be accepted. Refresh Offers to choose another job." });
+        }
         if (guardedOrder && (refundHold(store, guardedOrder) || refundSettlementFor(store, guardedOrder) || recoveryHeld(guardedOrder) || rescheduleHold(guardedOrder))
           && !canAccessOrder(store, user.id, guardedOrder, { role: user.role, offer: true })) {
           return send(res, 403, { error: "forbidden" });
@@ -5785,7 +5792,7 @@ async function handleRequest(req, res) {
       // destination and not a different job. Only the unfinished
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => availableDispatch(o) || (!isContainedPickup(o) && !recoveryHeld(o)
+        (o) => availableDispatch(o, store) || (!isContainedPickup(o) && !dispatchWorkHeld(store, o)
           && o.state === "rider_assigned" && o.riderId === user.id),
       );
       return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });
@@ -5801,7 +5808,7 @@ async function handleRequest(req, res) {
       }
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
-      if (!order || order.state !== "ready_for_dispatch") return send(res, 409, { error: "not_offerable" });
+      if (!order || order.state !== "ready_for_dispatch" || order.riderId) return send(res, 409, { error: "not_offerable", message: "This job is no longer available. Refresh Offers to choose another job." });
       // A collected order needs a rider too — it is carried to GRIDGO Office
       // rather than to the client's door. Only the unfinished counter-pickup
       // shape has no journey to offer.

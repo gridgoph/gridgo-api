@@ -703,3 +703,24 @@ test('shop recovery full-refund choice persists, rejects partial settlement and 
   assert.equal(store.orders[0].state, 'cancelled');
   assert.equal(store.refundPayments[0].amountMinor, 115000);
 });
+
+test('live dispatch removes refund-paused offers and rejects stale acceptance without assigning a rider', { skip: !DATABASE_URL }, async (t) => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'ready_for_dispatch' });
+  await db.transaction(async () => {
+    const s = await loadStore(db); s.orders[0].riderId = null; await saveStore(db, s);
+  });
+  const api = await apiForTest(t);
+  assert.equal((await api('rider', 'GET', '/dispatch/offers')).body.offers.length, 1);
+  const refund = await request(db);
+  assert.deepEqual((await api('rider', 'GET', '/dispatch/offers')).body.offers, []);
+  const refused = await api('rider', 'POST', '/dispatch/order/accept', {});
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, 'dispatch_paused');
+  assert.match(refused.body.message, /paused.*cannot be accepted/i);
+  assert.equal((await loadStore(db)).orders[0].riderId, null);
+  assert.equal((await api('other', 'POST', '/dispatch/order/accept', {})).status, 403);
+  await call(db, 'client', 'POST', `/refund-requests/${refund.id}/withdraw`, { expectedVersion: refund.version, reason: 'Continue the order.' });
+  assert.equal((await api('rider', 'GET', '/dispatch/offers')).body.offers.length, 1);
+  assert.equal((await api('rider', 'POST', '/dispatch/order/accept', {})).status, 200);
+});

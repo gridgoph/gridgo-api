@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { notifyOrderParties } from '../src/client-order-notifications.js';
 import { deriveDomainEvents } from '../src/domain-events.js';
 import { enqueueNotificationPushes, deviceAcceptsNotification } from '../src/push-outbox.js';
+import { notificationVisible, takeQueuedInvalidates } from '../src/notifications.js';
 import { pushMessageFor } from '../src/push.js';
 
 function fixture() {
@@ -87,4 +88,48 @@ test('dispatch lock-screen copy is fixed and the deep link uses the existing ord
   assert.equal(message.body,'A job is ready for pickup. Open GRIDGO to view it.');
   assert.deepEqual(message.data,{notificationId:'n',type:'dispatch_available',orderId:'job'});
   assert.equal(message.androidChannelId,'gridgo_default');
+});
+
+test('refund and deadline pauses suppress new and queued alerts and remove inbox offers', () => {
+  for (const pause of [
+    ...['requested', 'reviewed', 'approved', 'destination_review', 'payment_in_progress', 'payment_unknown'].map(status =>
+      s => { s.refundRequests = [{orderId:'job',status}]; }),
+    s => { s.refundSettlements = [{orderId:'job',sequence:1}]; },
+    s => { s.orders[0].rescheduleRequest = {status:'declined'}; },
+    s => { s.orders[0].state = 'cancelled'; },
+  ]) {
+    const s = fixture();
+    notifyOrderParties(s,s.orders[0],options);
+    const n = offers(s)[0];
+    pause(s);
+    assert.equal(deviceAcceptsNotification(s,s.deviceTokens[0],n),false);
+    assert.equal(notificationVisible(s,n,'idle','rider'),false);
+    s.notifications = [];
+    notifyOrderParties(s,s.orders[0],options);
+    assert.equal(offers(s).length,0);
+  }
+});
+
+test('refund-only changes invalidate the prior rider pool and withdrawal restores eligibility', () => {
+  const before = fixture();
+  const held = structuredClone(before);
+  held.refundRequests = [{orderId:'job',status:'requested'}];
+  deriveDomainEvents(held,before,options);
+  const hints = takeQueuedInvalidates(held);
+  assert.ok(hints.some(h => h.resource === 'dispatch' && h.id === 'job' && h.userIds?.includes('idle')));
+  assert.equal(offers(held).length,0);
+  const resumed = structuredClone(held);
+  resumed.refundRequests[0].status = 'withdrawn';
+  deriveDomainEvents(resumed,held,options);
+  assert.equal(offers(resumed).filter(n => n.userId === 'idle').length,1);
+});
+
+test('rejected and withdrawn refunds and payout-only holds leave dispatch available', () => {
+  for (const status of ['rejected','withdrawn']) {
+    const s = fixture();
+    s.refundRequests = [{orderId:'job',status}];
+    s.orders[0].payoutHold = true;
+    notifyOrderParties(s,s.orders[0],options);
+    assert.equal(offers(s).filter(n => n.userId === 'idle').length,1);
+  }
 });

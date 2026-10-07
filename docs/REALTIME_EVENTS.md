@@ -97,7 +97,7 @@ Paper-invoice promises write `physical_invoice_promised` to the owning client's 
 
 `dispatch_available` uses the dispatch list's shared pool rules in
 `src/dispatch-policy.js`: approved active rider membership, an unassigned
-`ready_for_dispatch` order, no shop recovery hold, and a journey to deliver
+`ready_for_dispatch` order, no refund request/settlement, deadline, or shop recovery work hold, and a journey to deliver
 (including transport to the hub). There is no distance, zone, or vehicle filter.
 Riders assigned an order in `rider_assigned`, `picked_up`, or `out_for_delivery`
 receive no new job alert. Finished and cancelled trips do not block alerts.
@@ -109,3 +109,5 @@ nothing. Android notification permission remains the phone's preference; there
 is no separate server-side rider notification preference. The worker rechecks
 idle status and job availability before sending or retrying. Push uses fixed
 customer-free copy and the existing `orderId` deep-link field on `gridgo_default`.
+
+Work holds remove dispatch offers and suppress their existing inbox/replay and queued push alerts. Refund-only changes also invalidate the prior rider pool; a stale accept returns `409 dispatch_paused` with a plain message and makes no assignment. Withdrawing or rejecting a refund restores eligibility only when no other work hold remains.
