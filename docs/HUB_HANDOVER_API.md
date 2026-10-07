@@ -2,7 +2,7 @@
 
 Refs gridgoph/gridgo-api#124 and gridgoph/gridgo-api#125.
 
-All routes use the existing Clerk instance. The Admin App may select its staff context with `X-GRIDGO-Role: staff`; Operations/Super Admin feed screens must use their corresponding membership context. GRIDGO database memberships are authoritative. An invite grants the `staff` membership and a configurable staff profile role; the built-in `hub_staff` role permits handouts. Custom role codes never grant Operations, Super Admin, rider or supplier permissions. Account suspension, staff-profile suspension and membership removal take effect on the next request. A staff account may retain other existing memberships.
+All routes use the existing Clerk instance. The Admin App may select its staff context with `X-GRIDGO-Role: staff`; Operations/Super Admin feed screens must use their corresponding membership context. GRIDGO database memberships are authoritative. An invite grants the `staff` membership and a configurable staff profile role; the built-in `hub_staff` role permits handouts. Custom role codes never grant Operations, Super Admin, rider or supplier permissions. Operations and Super Admin are staff without an invite or staff profile: their own membership grants every staff route with `canHandout:true`, and they select it with `X-GRIDGO-Role: ops_admin` or `super_admin` (the projection's `role` is that membership). `X-GRIDGO-Role: staff` stays a 403 for an account without the `staff` membership. Account suspension, staff-profile suspension and membership removal take effect on the next request. A staff account may retain other existing memberships.
 
 ## Staff provisioning (Super Admin dashboard)
 
@@ -16,7 +16,7 @@ All routes use the existing Clerk instance. The Admin App may select its staff c
 | GET | `/admin/staff` | named staff profiles with `active`, `roleCode`, `updatedAt` |
 | PATCH | `/admin/staff/:userId` | `{roleCode,active}`; reassigns or suspends the profile |
 | POST | `/auth/staff/redeem` | Clerk bearer + `{code}`; `{staff:{id,name,role,canHandout}}` |
-| GET | `/staff/me` | same caller-only staff projection; inactive/missing staff is 403 |
+| GET | `/staff/me` | same caller-only staff projection (Operations/Super Admin: `role` is their membership); inactive/missing staff is 403 |
 
 The invite code is a 192-bit bearer secret returned **once** and stored as SHA-256. Deliver it privately to the intended staff member. The first verified Clerk subject to redeem it owns it; a same-subject retry is idempotent, another subject gets `409 staff_invite_used`. Expired/revoked/unknown codes return `409 staff_invite_invalid`. Redemption never links identities by email; an email already mapped to another subject returns `409 email_already_registered`. New identities receive only `staff`, with name copied from Clerk. Redeeming another invite cannot silently reassign an existing staff profile.
 
