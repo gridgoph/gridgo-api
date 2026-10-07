@@ -170,6 +170,7 @@ import {
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
+import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { applyProductionNudges, continueAfterStepFailure } from "./production-inactivity.js";
@@ -2493,6 +2494,12 @@ async function handleRequest(req, res) {
           && guardedOrder && refundHold(store, guardedOrder) && !refundSettlementFor(store, guardedOrder);
         if (guardedOrder && !reconcileBalance) assertRefundWorkAllowed(store, guardedOrder);
       }
+    }
+
+    const dropoffResponse = await routeDropoffConfirmation({ req, url, store, user, readBody, now, id, audit });
+    if (dropoffResponse) {
+      if (dropoffResponse.mutated) await save(store);
+      return send(res, dropoffResponse.status, dropoffResponse.body);
     }
 
     const statementResponse = routeOrganizationStatements({ req, url, store, user, now });
@@ -5172,7 +5179,7 @@ async function handleRequest(req, res) {
         // Same destination rule as publicOrderFor: a collected order travels to
         // the GRIDGO Office counter, never to the address the client shopped with.
         const dropoff =
-          order.fulfillmentMode === "pickup" ? gridgoOfficePoint() : mapPointOrNull(order.dropoff);
+          order.fulfillmentMode === "pickup" ? gridgoOfficePoint() : mapPointOrNull(deliveryDestination(order));
         return {
           riderId: order.riderId,
           name: rider?.name || "Rider",
@@ -5752,6 +5759,7 @@ async function handleRequest(req, res) {
       const previousFileCheck = JSON.stringify(order.fileCheck);
       order.state = next;
       order.updatedAt = now();
+      if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
       recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "");
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {

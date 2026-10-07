@@ -1,3 +1,4 @@
+import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
@@ -1067,6 +1068,11 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.attachments;
   // Credentials are available only from the caller-scoped handover endpoint.
   delete publicRecord.handover;
+  delete publicRecord.dropoffConfirmationPricing;
+  delete publicRecord.dropoffConfirmation;
+  const dropoffConfirmation = publicDropoffConfirmation(order, user?.role);
+  if (dropoffConfirmation) publicRecord.dropoffConfirmation = dropoffConfirmation;
+  if (order.fulfillmentMode === "delivery") publicRecord.dropoff = structuredClone(deliveryDestination(order));
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
   delete publicRecord.shopRecoveryHistory;
   delete publicRecord.shopFailureEvents;
