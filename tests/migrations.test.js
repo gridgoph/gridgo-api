@@ -130,6 +130,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791676800000_staff_hub_handovers",
       "1791763200000_per_line_deadlines",
       "1791849600000_release_announcements",
+      "1791936000000_production_days",
       ],
     );
 
@@ -314,6 +315,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       const column = (await client.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='deadline'", [schema, table])).rows[0];
       assert.equal(column.is_nullable, 'YES');
     }
+    // Only an unused production-day schema can be reversed.
+    await runner(migrationOptions(schema, "down", 1, client));
     await client.query("INSERT INTO release_announcements(app,version,announcement) VALUES ('client','1.0.123','{}')");
     await client.query("BEGIN");
     await assert.rejects(runner(migrationOptions(schema, 'down', 1, client)), /deduplication history must be retained/);
@@ -1097,7 +1100,7 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
       zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,
     });
     for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows,
-      table === "order_jobs" ? before[table].map(row => ({ ...row, deadline: null })) : before[table]);
+      table === "order_jobs" ? before[table].map(row => ({ ...row, deadline: null, estimated_production_minutes: null })) : before[table]);
   });
 });
 

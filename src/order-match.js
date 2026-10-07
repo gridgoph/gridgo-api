@@ -1,3 +1,4 @@
+import { shopProductionDayMinutes } from "./production-days.js";
 import { cartGroups } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { recentLapseQualityPenalty } from './production-penalties.js';
@@ -153,7 +154,7 @@ function queueMinutesFor(store, supplierId, fallbackHours) {
       && !jobs.some((job) => job.orderId === order.id),
   );
   const hours = [...jobs, ...orders].reduce((total, row) => {
-    const estimate = Number.isSafeInteger(row.estimatedHours) && row.estimatedHours > 0
+    const estimate = Number.isFinite(row.estimatedHours) && row.estimatedHours > 0
       ? row.estimatedHours
       : fallbackHours;
     return total + estimate;
@@ -199,8 +200,10 @@ function allowanceMinutesFrom(settings) {
 }
 
 /** One queue/calendar projection for matching, cart previews, and checkout. */
-export function projectShopFinish(store, { supplierId, turnaroundHours, units, now }) {
-  const hours = Number.isSafeInteger(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
+export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, units, now }) {
+  const hours = Number.isSafeInteger(turnaroundDays) && turnaroundDays > 0
+    ? turnaroundDays * shopProductionDayMinutes(store, supplierId) / 60
+    : Number.isFinite(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
   const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
   const queue = queueMinutesFor(store, supplierId, hours);
   const capacityDaily = (store.supplierServices || [])
@@ -343,7 +346,7 @@ function otherListing(row) {
       "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
-      "turnaroundHours", "minimumTurnaroundHours", "rush", "acceptedFormats", "optionGroups", "version",
+      "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version",
     ].map((key) => [key, item[key]])),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
     fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,

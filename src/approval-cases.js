@@ -75,7 +75,7 @@ export function supplierApprovalReadiness(store, supplierId) {
       Boolean(nonblank(service.pricingBasis)) &&
       Number.isSafeInteger(service.referenceRateMinor) &&
       service.referenceRateMinor >= 0 &&
-      Number.isSafeInteger(service.turnaroundHours) &&
+      Number.isFinite(service.turnaroundHours) &&
       service.turnaroundHours > 0,
   );
   if (publishableServices.length === 0) missing.push("review_ready_service_line");

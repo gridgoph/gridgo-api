@@ -195,7 +195,7 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
       }
       for (const job of store.orderJobs || []) if (job.orderId === order.id) {
         Object.assign(job, { supplierId: replacement.supplierId, pickup: replacement.pickup, riderId: null,
-          state: order.state, updatedAt: at, estimatedHours: Math.max(...replacement.selections.map((row) => row.turnaroundHours)) });
+          state: order.state, updatedAt: at, estimatedProductionMinutes: Math.round(Math.max(...replacement.selections.map((row) => row.turnaroundHours)) * 60), estimatedHours: Math.max(...replacement.selections.map((row) => row.turnaroundHours)) });
       }
       order.timeline ||= [];
       order.timeline.push({ at, state: order.state, by: user.id, note: 'Client accepted a replacement for the original product and specifications.' });
