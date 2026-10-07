@@ -54,6 +54,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
+      "delivery_chat_messages", "delivery_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
@@ -134,6 +135,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791939600000_support_chat_staff_people",
         "1791943200000_support_chat_images",
         "1791946800000_account_deletion_requests",
+        "1791950400000_delivery_chat",
       ],
     );
 
@@ -312,6 +314,11 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         WHERE n.nspname = $1 AND t.relname = 'client_profiles' AND c.conname = 'client_profiles_check'`,
       [schema],
     )).rowCount, 1);
+
+    // Reverse client-rider delivery messages.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('delivery_chat_messages') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('delivery_chat_reads') AS t")).rows[0].t, null);
 
     // Reverse chat photos on support messages.
     await runner(migrationOptions(schema, "down", 1, client));
