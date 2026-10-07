@@ -724,6 +724,7 @@ Default `GET /settings` response:
     "serviceFeeRateBps": 1000,
     "serviceFeeVisibleToClient": true,
     "riderCommissionBps": 8500,
+    "clientRiderLocationRevealDistanceMeters": 1000,
     "downpaymentPercent": 100,
     "issueWindowHours": 24,
     "productionNudge": {
@@ -1344,6 +1345,10 @@ Operations acts on the inbox row. Without it the request would sit in jsonb unre
 `POST /dispatch/:id/location` accepts `{lat,lng,accuracy?,recordedAt?}` from the assigned approved rider during `picked_up` or `out_for_delivery`; other states return `409 tracking_not_active`. Coordinates must be finite numbers within latitude/longitude bounds; accuracy, if present, is nonnegative meters (`400 invalid_location` otherwise). Optional `recordedAt` is the source GPS fix timestamp; omission uses server time. Invalid timestamps, fixes more than 30 seconds ahead, or more than five minutes old return `400 invalid_location_timestamp`. A valid fix no newer than the current assigned rider's latest fix returns `200 {ping,ignored:true}`. Accepted fixes return `{ping}` with source time in `ping.at`.
 
 `GET /dispatch/:id/location` returns `{ping}` for the current rider only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. Consumers calculate staleness from `at` and `accuracy`.
+
+Client reads return `{ping:null}` until the latest fix is within `settings.clientRiderLocationRevealDistanceMeters` of the delivery destination (including a confirmed destination change). The default is 1,000 meters, also for existing settings without this field. Distance uses the shared straight-line calculation rounded to whole meters; the boundary is inclusive. Missing or invalid destination coordinates fail closed. No older inside-radius fix is substituted for a newer outside-radius fix. Related supplier/rider reads and both Operations/Super Admin tracking endpoints are unchanged.
+
+Only Super Admin may change `clientRiderLocationRevealDistanceMeters` through `PATCH /settings` with `expectedVersion` and a nonblank `reason`. It must be a positive JSON safe integer in meters; null, strings, zero, negatives and fractions return `400 invalid_rider_location_reveal_distance`. Omission preserves the current value. The audited setting applies on the next client location read, including existing trips, without a release. Clients show progress and “Your rider is on the way” while `ping` is null and must clear any previously shown rider marker.
 
 `GET /ops/riders/locations` returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,pickup,dropoff}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. `vehicleType` is the rider profile's `motorcycle | car | van | truck | bicycle` and `plateNumber` its plate, both `null` when no profile exists, so the map can draw the vehicle the rider actually drives. `pickup` and `dropoff` are the order's snapshot points as `{lat,lng,label}` or `null`; a collected order reports the GRIDGO Office point as `dropoff`, the same substitution `publicOrderFor` applies, so the map can draw the remaining leg of the trip. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
 
