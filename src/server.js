@@ -1,3 +1,4 @@
+import { routeAccountDeletion } from './account-deletion.js';
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
@@ -351,6 +352,14 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
 function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   if (!pushDelivery.configured || devices.length === 0) return;
   fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
+}
+
+async function deletionRequestEvent({ action, id: requestId, actor }) {
+  const latest = await load();
+  audit(latest, { actor, action, entityType: 'account_deletion_request', entityId: requestId });
+  notifyAdmins(latest, action, action === 'account_deletion_requested' ? 'Account deletion requested' : 'Account deletion completed', null, `${action}:${requestId}`, { createId: id, at: now() });
+  queueInvalidate(latest, { resource: 'account-deletion-requests' });
+  await save(latest);
 }
 
 /**
@@ -1861,6 +1870,10 @@ async function handleRequest(req, res) {
         at: now(),
       });
     }
+    if (pathname === '/account-deletion-requests') {
+      const result = await routeAccountDeletion({ req, url, database, readBody, onEvent: deletionRequestEvent });
+      return send(res, result.status, result.body);
+    }
     if (await routeSupportDesk({
       req,
       res,
@@ -2223,6 +2236,10 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    if (pathname === '/me/account-deletion-request') {
+      const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
+      return send(res, result.status, result.body);
+    }
     // Other routes already use ?role as a directory filter. Only the inbox
     // contract interprets that query as actor context.
     const notificationRoleQuery = ["/notifications", "/notifications/stream", "/notifications/read-all"].includes(pathname)
@@ -2370,6 +2387,11 @@ async function handleRequest(req, res) {
         error: "unauthorized",
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
       });
+    }
+
+    if (pathname === '/ops/account-deletion-requests' || pathname.startsWith('/ops/account-deletion-requests/')) {
+      const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
+      return send(res, result.status, result.body);
     }
 
     if (isStaffIssueReportsRoute(pathname)) {
