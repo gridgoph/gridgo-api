@@ -346,7 +346,7 @@ export function riderNotificationDrafts(store, order) {
       read: false,
     });
   }
-  if (availableDispatch(order)) {
+  if (availableDispatch(order, store)) {
     for (const riderId of eligibleRiderIds(store)) {
       if (riderHasActiveDelivery(store, riderId)) continue;
       drafts.push({

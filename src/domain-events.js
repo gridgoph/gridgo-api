@@ -148,7 +148,9 @@ export function deriveDomainEvents(store, before, { createId, at }) {
       );
       notifyAdmins("ops_payout_hold_released", "Payout hold released", order, `${occurrence}:hold_released`);
     }
-    if (!changed(old, order)) continue;
+    const offerChanged = availableDispatch(order, store) !== availableDispatch(old, before);
+    if (offerChanged) hint("dispatch", order.id, eligibleRiderIds(before));
+    if (!changed(old, order) && !offerChanged) continue;
     queueOrderInvalidate(store, order, [
       "orders",
       "jobs",
@@ -177,7 +179,7 @@ export function deriveDomainEvents(store, before, { createId, at }) {
         "client",
       );
     if (!old || stateOccurrence(old) !== stateOccurrence(order)
-        || (availableDispatch(order) && !availableDispatch(old))) {
+        || (availableDispatch(order, store) && !availableDispatch(old, before))) {
       notifyOrderParties(store, order, { createId, at });
       notifyOpsOrderProgress(store, order, { createId, at });
     }
