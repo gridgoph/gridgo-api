@@ -767,3 +767,40 @@ test("production photos are supplier-owned images attached to assigned productio
   expectError(() => authorizeFileRead(otherClient, store, file), 403, "forbidden");
   expectError(() => markFileDeletePending(file, supplier, "now"), 403, "forbidden");
 });
+
+test("chat photos keep staff-pair privacy and shared support-inbox access", () => {
+  const peerPhoto = readyFile("support_chat_image", {
+    ownerId: ops.id,
+    references: [{
+      type: "support_chat_message", id: "message-private", field: "attachmentFileIds",
+      partyUserId: superAdmin.id, partyRole: "super_admin", staffPeerUserId: ops.id,
+    }],
+  });
+  for (const actor of [ops, superAdmin]) {
+    assert.doesNotThrow(() => authorizeFileRead(actor, {}, peerPhoto));
+  }
+  for (const actor of [
+    { id: "ops-unrelated", role: "ops_admin" },
+    { id: "super-unrelated", role: "super_admin" },
+    client, supplier, rider,
+  ]) {
+    expectError(() => authorizeFileRead(actor, {}, peerPhoto), 403, "forbidden");
+  }
+
+  const partyPhoto = readyFile("support_chat_image", {
+    ownerId: ops.id,
+    references: [{
+      type: "support_chat_message", id: "message-shared", field: "attachmentFileIds",
+      partyUserId: client.id, partyRole: "client", staffPeerUserId: null,
+    }],
+  });
+  for (const actor of [client, ops, superAdmin]) {
+    assert.doesNotThrow(() => authorizeFileRead(actor, {}, partyPhoto));
+  }
+  expectError(() => authorizeFileRead(otherClient, {}, partyPhoto), 403, "forbidden");
+  expectError(() => authorizeFileRead({ ...client, role: "supplier" }, {}, partyPhoto), 403, "forbidden");
+
+  const draftPhoto = readyFile("support_chat_image", { ownerId: ops.id });
+  assert.doesNotThrow(() => authorizeFileRead(ops, {}, draftPhoto));
+  expectError(() => authorizeFileRead(superAdmin, {}, draftPhoto), 403, "forbidden");
+});

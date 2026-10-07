@@ -5,7 +5,7 @@ import { routePhysicalInvoice } from "../src/physical-invoice-routes.js";
 
 const AT = "2026-09-21T06:00:00.000Z";
 
-function fixture() {
+function fixture({ requestsEnabled = false } = {}) {
   const user = { id: "user_client", role: "client", email: "client@gridgo.test" };
   const order = {
     id: "ord_1",
@@ -19,10 +19,17 @@ function fixture() {
       users: [user],
       userRoleMemberships: [{ userId: user.id, role: "client" }],
       orders: [order],
+      settings: { physicalInvoiceRequestsEnabled: requestsEnabled },
     },
     order,
   };
 }
+
+const REQUEST_BODY = {
+  contactPerson: "Ana Reyes",
+  officeAddress: "7th floor, 12 J.P. Laurel Ave, Davao City",
+  operatingHours: "Mon–Fri 9am–5pm",
+};
 
 function recordAudit(store, entry) {
   if (!Array.isArray(store.auditLog)) store.auditLog = [];
@@ -44,8 +51,46 @@ async function call({ store, user }, method, pathname, body) {
   });
 }
 
+test("a new physical-invoice request is refused while the switch is off", async () => {
+  const missing = fixture();
+  delete missing.store.settings;
+  await assert.rejects(
+    call(missing, "POST", "/orders/ord_1/physical-invoice", REQUEST_BODY),
+    (error) => error.status === 403 && error.code === "physical_invoice_requests_disabled",
+  );
+  assert.equal(missing.order.physicalInvoiceRequest, undefined);
+  assert.equal(
+    (missing.store.auditLog || []).filter((entry) => entry.action === "order.physical_invoice_requested").length,
+    0,
+  );
+
+  const explicit = fixture({ requestsEnabled: false });
+  await assert.rejects(
+    call(explicit, "POST", "/orders/ord_1/physical-invoice", REQUEST_BODY),
+    (error) => error.status === 403 && error.code === "physical_invoice_requests_disabled",
+  );
+  assert.equal(explicit.order.physicalInvoiceRequest, undefined);
+});
+
+test("an existing request stays readable and promiseable while the switch is off", async () => {
+  const context = asRole(withRequest(fixture({ requestsEnabled: false })), "ops_admin");
+  const read = await call(
+    { store: context.store, user: context.store.users.find((user) => user.role === "client") },
+    "GET",
+    "/orders/ord_1/physical-invoice",
+  );
+  assert.equal(read.status, 200);
+  assert.equal(read.body.request.contactPerson, "Ana Reyes");
+
+  const promised = await call(context, "PATCH", "/orders/ord_1/physical-invoice", {
+    promisedDeliveryAt: "2026-09-21T02:00:00.000Z",
+  });
+  assert.equal(promised.status, 200);
+  assert.equal(promised.body.request.promisedDeliveryAt, "2026-09-21T02:00:00.000Z");
+});
+
 test("a client can request a physical invoice for their own order", async () => {
-  const context = fixture();
+  const context = fixture({ requestsEnabled: true });
   const created = await call(context, "POST", "/orders/ord_1/physical-invoice", {
     contactPerson: "Ana Reyes",
     officeAddress: "7th floor, 12 J.P. Laurel Ave, Davao City",
@@ -64,7 +109,7 @@ test("a client can request a physical invoice for their own order", async () => 
 });
 
 test("a second request on the same order is refused", async () => {
-  const context = fixture();
+  const context = fixture({ requestsEnabled: true });
   await call(context, "POST", "/orders/ord_1/physical-invoice", {
     contactPerson: "Ana Reyes",
     officeAddress: "12 Laurel",
@@ -94,7 +139,7 @@ test("another client's order is forbidden", async () => {
 });
 
 test("requesting a physical invoice writes an audit row naming the office", async () => {
-  const context = fixture();
+  const context = fixture({ requestsEnabled: true });
   await call(context, "POST", "/orders/ord_1/physical-invoice", {
     contactPerson: "Ana Reyes",
     officeAddress: "7th floor, 12 J.P. Laurel Ave, Davao City",
@@ -245,7 +290,7 @@ test("a second promise replaces the instant and writes another audit row", async
 });
 
 test("a refused second request writes no further audit row", async () => {
-  const context = fixture();
+  const context = fixture({ requestsEnabled: true });
   const request = {
     contactPerson: "Ana Reyes",
     officeAddress: "12 Laurel",

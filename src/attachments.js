@@ -1,5 +1,6 @@
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
+import { canViewThread } from "./support-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -122,6 +123,13 @@ export const PURPOSE_POLICIES = Object.freeze({
     roles: ["super_admin"],
     maxBytes: 10 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
+  },
+  // A picture on an Operations conversation. JPEG/PNG/WebP only; the
+  // contents must match the filename. Bound when the chat message is posted.
+  support_chat_image: {
+    roles: ["client", "supplier", "rider", "ops_admin", "super_admin"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
 });
 export const RIDER_DOCUMENT_TYPES = Object.freeze(["drivers_license", "or_cr", "selfie"]);
@@ -715,6 +723,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A tracker attachment is bound when the decision is saved: send its fileId in attachmentIds to POST /admin/tracker/:repo/:number/decisions.",
     );
   }
+  if (purpose === "support_chat_image") {
+    fail(
+      400,
+      "support_chat_image_not_attachable",
+      "A chat photo is bound when the message is sent: send its fileId in attachmentFileIds.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1195,6 +1210,18 @@ export function authorizeFileRead(user, store, file) {
   // Tracker evidence is the Super Admin's alone; Operations never reads it.
   if (file.purpose === "tracker_decision") {
     if (hasRole(user, "super_admin")) return;
+    forbidden();
+  }
+  if (file.purpose === "support_chat_image") {
+    if (file.ownerId === user.id) return;
+    // The reference snapshots the thread parties when the message is sent.
+    // Staff-pair photos follow the same privacy boundary as their conversation.
+    const onThread = (file.references || []).some((reference) => (
+      reference.type === "support_chat_message"
+      && reference.partyUserId && reference.partyRole
+      && canViewThread(user, reference)
+    ));
+    if (onThread) return;
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;

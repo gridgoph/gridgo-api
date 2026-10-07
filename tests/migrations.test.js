@@ -131,6 +131,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "1791763200000_per_line_deadlines",
       "1791849600000_release_announcements",
       "1791936000000_production_days",
+        "1791939600000_support_chat_staff_people",
+        "1791943200000_support_chat_images",
       ],
     );
 
@@ -310,6 +312,15 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       [schema],
     )).rowCount, 1);
 
+    // Reverse chat photos on support messages.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='support_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 0);
+
+    // Reverse staff people-search / desk-to-desk threads.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='support_chat_threads' AND column_name='staff_peer_user_id'`, [schema])).rowCount, 0);
     // Product-date columns are additive and a mixed-date parent is nullable.
     for (const table of ['client_cart_lines', 'order_jobs', 'order_baskets']) {
       const column = (await client.query("SELECT is_nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='deadline'", [schema, table])).rows[0];

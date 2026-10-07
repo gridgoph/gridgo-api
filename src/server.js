@@ -594,6 +594,7 @@ function publicOperationalSettings(settings, store = null) {
     hubPickup: publicHubPickup(rest),
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
+    physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
     paymentQr,
@@ -3214,6 +3215,8 @@ async function handleRequest(req, res) {
         organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
+        physicalInvoiceRequestsEnabled:
+          body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
