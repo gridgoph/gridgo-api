@@ -50,7 +50,8 @@ export function flattenListingStarters(starters = defaultListingStarters()) {
       name: starter.name,
       defaultPricingUnit: starter.defaultPricingUnit,
       defaultPackageQty: starter.defaultPackageQty ?? null,
-      defaultTurnaroundHours: starter.defaultTurnaroundHours ?? null,
+      defaultTurnaroundDays: starter.defaultTurnaroundDays ?? null,
+      defaultTurnaroundHours: starter.defaultTurnaroundDays == null ? null : starter.defaultTurnaroundDays * 10,
       defaultFormatCodes: starter.defaultFormatCodes || [],
     });
     for (const group of starter.groups || []) {

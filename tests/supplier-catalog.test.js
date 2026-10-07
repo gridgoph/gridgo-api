@@ -1196,7 +1196,7 @@ test("bulk breaks and speeds are replaced as a set, and refuse a rule that canno
     { label: "5 days", turnaroundHours: 120, priceMinor: 25_000 },
     { label: "2-3 hours", turnaroundHours: 3, priceMinor: 70_000 },
   ], at);
-  assert.deepEqual(store.catalogSpeedTiers.map((tier) => tier.turnaroundHours).sort((a, b) => a - b), [3, 120]);
+  assert.deepEqual(store.catalogSpeedTiers.map((tier) => tier.turnaroundHours).sort((a, b) => a - b), [10, 120]);
 
   // A speed either names its own price or adds a fee. Both, or neither, means
   // nothing, so it is refused rather than guessed at.
@@ -1429,8 +1429,8 @@ test("overriding ready-in time can state the soonest and latest hours", async ()
     },
   });
   assert.equal(saved.status, 200, JSON.stringify(saved.body));
-  assert.equal(saved.body.item.turnaroundHours, 72);
-  assert.equal(saved.body.item.minimumTurnaroundHours, 24);
+  assert.equal(saved.body.item.turnaroundHours, 80);
+  assert.equal(saved.body.item.minimumTurnaroundHours, 30);
 
   await assert.rejects(
     () => catalogCall(store, {
@@ -1785,4 +1785,23 @@ test("listing review: take-down and restore stay independent of a pending revisi
   await reviewCall(store, "/ops/catalog-reviews/item/decision", { expectedVersion: 8, status: "approved", photosUnbranded: true });
   assert.equal(publicCatalogItem(store, store.catalogItems[0]), null);
   assert.equal(store.catalogItems[0].suspendReason, "Sample still needs replacement");
+});
+
+test('listing production days are canonical and old hour writes round up', async () => {
+  const store = fixture();
+  const response = await catalogCall(store, {
+    method: 'PATCH', path: '/me/catalog-items/item',
+    body: { expectedVersion: 3, turnaroundMode: 'override', turnaroundDays: 2, minimumTurnaroundDays: 1 },
+  });
+  assert.equal(response.body.item.turnaroundDays, 2);
+  assert.equal(response.body.item.minimumTurnaroundDays, 1);
+  assert.equal(response.body.item.turnaroundHours, 20);
+  assert.equal(response.body.item.productionDayMinutes, 600);
+  const old = await catalogCall(store, {
+    method: 'PATCH', path: '/me/catalog-items/item',
+    body: { expectedVersion: response.body.item.version, turnaroundHours: 48 },
+  });
+  assert.equal(old.body.item.turnaroundDays, 5);
+  assert.equal(old.body.item.turnaroundHours, 50);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).turnaroundDays, 5);
 });

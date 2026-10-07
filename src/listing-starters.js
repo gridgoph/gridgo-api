@@ -27,7 +27,7 @@ export function defaultListingStarters() {
       name: "Tarpaulin",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 24,
+      defaultTurnaroundDays: 3,
       defaultFormatCodes: DESIGN_FILES,
       // No size group. A tarpaulin is billed by the square foot, so the client
       // states the size as a measurement and picking it twice -- once as an
@@ -68,7 +68,7 @@ export function defaultListingStarters() {
       name: "Flyers",
       defaultPricingUnit: "per_package",
       defaultPackageQty: 100,
-      defaultTurnaroundHours: 48,
+      defaultTurnaroundDays: 5,
       defaultFormatCodes: PRINT_FILES,
       groups: orderedGroups([
         spec("lstg_flyer_size", "Size", "Sheet size", [
@@ -95,7 +95,7 @@ export function defaultListingStarters() {
       name: "Brochures",
       defaultPricingUnit: "per_package",
       defaultPackageQty: 100,
-      defaultTurnaroundHours: 48,
+      defaultTurnaroundDays: 5,
       defaultFormatCodes: PRINT_FILES,
       groups: orderedGroups([
         spec("lstg_brochure_size", "Size", "Sheet size before fold", [
@@ -122,7 +122,7 @@ export function defaultListingStarters() {
       name: "Business cards",
       defaultPricingUnit: "per_package",
       defaultPackageQty: 100,
-      defaultTurnaroundHours: 48,
+      defaultTurnaroundDays: 5,
       defaultFormatCodes: PRINT_FILES,
       groups: orderedGroups([
         spec("lstg_card_size", "Size", "Card size", [
@@ -148,7 +148,7 @@ export function defaultListingStarters() {
       name: "Posters & standees",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 48,
+      defaultTurnaroundDays: 5,
       defaultFormatCodes: DESIGN_FILES,
       groups: orderedGroups([
         spec("lstg_poster_size", "Size", "Display size", [
@@ -167,7 +167,7 @@ export function defaultListingStarters() {
       name: "Stickers & labels",
       defaultPricingUnit: "per_package",
       defaultPackageQty: 100,
-      defaultTurnaroundHours: 48,
+      defaultTurnaroundDays: 5,
       defaultFormatCodes: PRINT_FILES,
       groups: orderedGroups([
         spec("lstg_sticker_printer", "Printer", "What it is printed on", [
@@ -214,7 +214,7 @@ export function defaultListingStarters() {
       name: "Custom apparel",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 72,
+      defaultTurnaroundDays: 8,
       defaultFormatCodes: APPAREL_FILES,
       groups: orderedGroups([
         spec("lstg_apparel_size", "Size", "Garment size", [
@@ -260,7 +260,7 @@ export function defaultListingStarters() {
       name: "Lanyards",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 72,
+      defaultTurnaroundDays: 8,
       defaultFormatCodes: APPAREL_FILES,
       groups: orderedGroups([
         spec("lstg_lanyard_width", "Width", null, [
@@ -279,7 +279,7 @@ export function defaultListingStarters() {
       name: "Drinkware",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 72,
+      defaultTurnaroundDays: 8,
       defaultFormatCodes: APPAREL_FILES,
       groups: orderedGroups([
         spec("lstg_drink_item", "Item", null, [
@@ -298,7 +298,7 @@ export function defaultListingStarters() {
       name: "Giveaways",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 72,
+      defaultTurnaroundDays: 8,
       defaultFormatCodes: APPAREL_FILES,
       groups: orderedGroups([
         spec("lstg_giveaway_item", "Item", null, [
@@ -317,7 +317,7 @@ export function defaultListingStarters() {
       name: "Certificates",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 48,
+      defaultTurnaroundDays: 5,
       defaultFormatCodes: PRINT_FILES,
       groups: orderedGroups([
         spec("lstg_cert_paper", "Paper", "Certificate stock", [
@@ -336,7 +336,7 @@ export function defaultListingStarters() {
       name: "Plaques & trophies",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 96,
+      defaultTurnaroundDays: 10,
       defaultFormatCodes: DESIGN_FILES,
       groups: orderedGroups([
         spec("lstg_plaque_material", "Material", null, [
@@ -355,7 +355,7 @@ export function defaultListingStarters() {
       name: "Medals",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 96,
+      defaultTurnaroundDays: 10,
       defaultFormatCodes: APPAREL_FILES,
       groups: orderedGroups([
         spec("lstg_medal_finish", "Finish", null, [
@@ -374,7 +374,7 @@ export function defaultListingStarters() {
       name: "3D print",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 72,
+      defaultTurnaroundDays: 8,
       defaultFormatCodes: MODEL_FILES,
       groups: orderedGroups([
         spec("lstg_3d_material", "Material", "Print filament", [
@@ -393,7 +393,7 @@ export function defaultListingStarters() {
       name: "Blueprint plotting",
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 24,
+      defaultTurnaroundDays: 3,
       defaultFormatCodes: ["pdf"],
       groups: orderedGroups([
         // The four sheet sizes the master list quotes, at their real CAD
@@ -425,7 +425,7 @@ export function defaultListingStarters() {
       // wall, so the shop quotes one price for the whole job.
       defaultPricingUnit: "whole_job",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 168,
+      defaultTurnaroundDays: 17,
       defaultFormatCodes: ["pdf", "psd", "canva_link"],
       groups: orderedGroups([
         spec("lstg_sign_material", "Material", "What the sign is made of", [
@@ -449,7 +449,7 @@ export function defaultListingStarters() {
       // copies. Those are two different numbers and the platform bills both.
       defaultPricingUnit: "per_page",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 4,
+      defaultTurnaroundDays: 1,
       defaultFormatCodes: ["pdf"],
       groups: orderedGroups([
         spec("lstg_doc_colour", "Colour", "Black and white, or full colour", [
@@ -483,7 +483,7 @@ export function defaultListingStarters() {
       name: "Booklets",
       defaultPricingUnit: "per_page",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 24,
+      defaultTurnaroundDays: 3,
       defaultFormatCodes: ["pdf"],
       groups: orderedGroups([
         spec("lstg_booklet_fold", "Fold", "How the sheet is folded", [
@@ -508,7 +508,7 @@ export function defaultListingStarters() {
       // and a client asking for "one" means one ream.
       defaultPricingUnit: "per_package",
       defaultPackageQty: 500,
-      defaultTurnaroundHours: 24,
+      defaultTurnaroundDays: 3,
       defaultFormatCodes: ["pdf"],
       groups: orderedGroups([
         spec("lstg_riso_size", "Paper size", "The sheet it prints on", [
@@ -526,7 +526,7 @@ export function defaultListingStarters() {
       defaultPackageQty: null,
       // The slowest speed the shop sells, which is the one its base price
       // belongs to. A faster date picks a speed tier and its own price.
-      defaultTurnaroundHours: 120,
+      defaultTurnaroundDays: 12,
       defaultFormatCodes: ["pdf"],
       groups: orderedGroups([
         spec("lstg_bind_size", "Size", "Trim size of the finished book", [
@@ -552,7 +552,7 @@ export function defaultListingStarters() {
       // thing, and a client asking for one means one set.
       defaultPricingUnit: "per_unit",
       defaultPackageQty: null,
-      defaultTurnaroundHours: 2,
+      defaultTurnaroundDays: 1,
       defaultFormatCodes: ["png", "jpeg"],
       groups: orderedGroups([
         spec("lstg_id_set", "What you need", "Single sizes and the usual sets", [

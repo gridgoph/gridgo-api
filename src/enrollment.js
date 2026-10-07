@@ -1,3 +1,4 @@
+import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { CLIENT_APPLICATION_FIELDS, validateClientApplication, bindClientApplication } from "./client-applications.js";
 import crypto from "node:crypto";
 
@@ -386,7 +387,7 @@ export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotenc
     qtyMax: null,
     pricingBasis: "per_unit",
     referenceRateMinor: 0,
-    turnaroundHours: 48,
+    ...productionDuration({ turnaroundHours: 48 }, {}, "turnaround", shopProductionDayMinutes(store, user.id)),
     capacityDaily: null,
     capacityWeekly: null,
     zones: [],

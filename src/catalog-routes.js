@@ -1,3 +1,4 @@
+import { productionDuration, productionProjection, shopProductionDayMinutes } from "./production-days.js";
 import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { routeCatalogReview, catalogReviewNotice } from "./catalog-review-routes.js";
 import {
@@ -343,7 +344,7 @@ function subcategoryForService(store, service, subcategoryCode) {
   return code;
 }
 
-function pricingFields(body, current = {}) {
+function pricingFields(body, current = {}, minutes = 600) {
   const pricingUnit = body.pricingUnit == null ? (current.pricingUnit || "per_unit") : requiredText(body.pricingUnit, "pricingUnit", 20);
   if (!isPricingUnit(pricingUnit)) {
     fail(400, "invalid_catalog_item", `pricingUnit must be one of ${PRICING_UNITS.join(", ")}.`, { field: "pricingUnit" });
@@ -399,30 +400,20 @@ function pricingFields(body, current = {}) {
   if (!["inherit", "override"].includes(turnaroundMode)) {
     fail(400, "invalid_catalog_item", "turnaroundMode must be inherit or override.", { field: "turnaroundMode" });
   }
-  let turnaroundHours = current.turnaroundHours ?? null;
-  if (Object.hasOwn(body, "turnaroundHours")) {
-    turnaroundHours = body.turnaroundHours == null ? null : integer(body.turnaroundHours, "turnaroundHours", { min: 1 });
-  }
-  if (turnaroundMode === "inherit") turnaroundHours = null;
-  else if (!Number.isSafeInteger(turnaroundHours) || turnaroundHours <= 0) {
-    fail(400, "invalid_catalog_item", "turnaroundHours is required when overriding ready-in time.", { field: "turnaroundHours" });
-  }
-  let minimumTurnaroundHours = current.minimumTurnaroundHours ?? null;
-  if (Object.hasOwn(body, "minimumTurnaroundHours")) {
-    minimumTurnaroundHours = body.minimumTurnaroundHours == null
-      ? null
-      : integer(body.minimumTurnaroundHours, "minimumTurnaroundHours", { min: 1 });
-  }
-  if (turnaroundMode === "inherit") minimumTurnaroundHours = null;
-  else if (minimumTurnaroundHours != null && turnaroundHours != null && minimumTurnaroundHours > turnaroundHours) {
-    fail(400, "invalid_catalog_item", "The soonest ready-in cannot be later than the promised time.", {
-      field: "minimumTurnaroundHours",
-    });
+  const maximum = productionDuration(body, current, "turnaround", minutes);
+  const minimum = productionDuration(body, current, "minimumTurnaround", minutes);
+  if (turnaroundMode === "inherit") {
+    maximum.turnaroundDays = maximum.turnaroundHours = null;
+    minimum.minimumTurnaroundDays = minimum.minimumTurnaroundHours = null;
+  } else if (maximum.turnaroundDays == null) {
+    fail(400, "invalid_catalog_item", "turnaroundDays is required when overriding production time.", { field: "turnaroundDays" });
+  } else if (minimum.minimumTurnaroundDays != null && minimum.minimumTurnaroundDays > maximum.turnaroundDays) {
+    fail(400, "invalid_catalog_item", "Minimum production days cannot exceed the maximum.", { field: "minimumTurnaroundDays" });
   }
   return {
     pricingUnit, packageQty, measureUnit,
     minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
-    turnaroundMode, turnaroundHours, minimumTurnaroundHours,
+    turnaroundMode, ...maximum, ...minimum,
   };
 }
 
@@ -543,16 +534,10 @@ export function replaceSpeedTiers(store, item, value, now) {
   if (!Array.isArray(value)) fail(400, "invalid_catalog_item", "speedTiers must be a list.", { field: "speedTiers" });
   if (value.length > 6) fail(400, "invalid_catalog_item", "A listing can offer at most six speeds.", { field: "speedTiers" });
   const at = now();
-  const seen = new Set();
   const next = value.map((row, index) => {
     const tier = catalogRecord(row, { code: "invalid_catalog_item", field: `speedTiers[${index}]` });
-    const turnaroundHours = integer(tier.turnaroundHours, `speedTiers[${index}].turnaroundHours`, { min: 1, max: 8_760 });
-    if (seen.has(turnaroundHours)) {
-      fail(400, "invalid_catalog_item", "Two speeds cannot take the same time.", {
-        field: `speedTiers[${index}].turnaroundHours`,
-      });
-    }
-    seen.add(turnaroundHours);
+    const duration = productionDuration(tier, {}, "turnaround", shopProductionDayMinutes(store, item.supplierId));
+    if (duration.turnaroundDays == null) fail(400, "invalid_catalog_item", "A speed needs production days.");
     const priceMinor = tier.priceMinor == null ? null : moneyMinor(tier.priceMinor, `speedTiers[${index}].priceMinor`);
     const surchargeMinor = tier.surchargeMinor == null ? null : moneyMinor(tier.surchargeMinor, `speedTiers[${index}].surchargeMinor`);
     if ((priceMinor == null) === (surchargeMinor == null)) {
@@ -561,10 +546,11 @@ export function replaceSpeedTiers(store, item, value, now) {
       });
     }
     return {
-      id: `${item.id}_speed_${turnaroundHours}`,
+      id: (store.catalogSpeedTiers || []).some(existing => existing.id === tier.id && existing.catalogItemId === item.id)
+        ? tier.id : `${item.id}_speed_${duration.turnaroundDays}_${index}`,
       catalogItemId: item.id,
       label: requiredText(tier.label, `speedTiers[${index}].label`, 80),
-      turnaroundHours,
+      ...duration,
       priceMinor,
       surchargeMinor,
       sortOrder: index,
@@ -609,6 +595,7 @@ function privateService(store, service) {
     state: service.state,
     pricingBasis: service.pricingBasis ?? null,
     referenceRateMinor: service.referenceRateMinor,
+    ...productionProjection(service, shopProductionDayMinutes(store, service.supplierId), ["turnaround", "standardTurnaround", "rushTurnaround"]),
     turnaroundHours: service.turnaroundHours,
     standardTurnaroundHours: service.standardTurnaroundHours ?? service.turnaroundHours,
     rushEnabled: Boolean(service.rushEnabled),
@@ -841,14 +828,16 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       state: "draft",
       pricingBasis: body.pricingBasis ? requiredText(body.pricingBasis, "pricingBasis", 40) : "per_unit",
       referenceRateMinor: body.referenceRateMinor == null ? 0 : moneyMinor(body.referenceRateMinor, "referenceRateMinor"),
-      turnaroundHours: body.turnaroundHours == null ? 24 : integer(body.turnaroundHours, "turnaroundHours", { min: 1 }),
-      standardTurnaroundHours: body.turnaroundHours == null ? 24 : integer(body.turnaroundHours, "turnaroundHours", { min: 1 }),
+      ...productionDuration(body, { turnaroundHours: 24 }, "turnaround", shopProductionDayMinutes(store, user.id)),
       rushEnabled: false,
       version: 1,
       createdAt: at,
       updatedAt: at,
     };
     if (!Array.isArray(store.supplierServices)) store.supplierServices = [];
+    if (service.turnaroundDays == null) fail(400, "invalid_catalog_item", "A service needs production days.");
+    service.standardTurnaroundDays = service.turnaroundDays;
+    service.standardTurnaroundHours = service.turnaroundHours;
     store.supplierServices.push(service);
     auditChange(audit, store, user, "supplier_service.create", "supplier_service", service.id);
     return { status: 201, body: { service: privateService(store, service) }, mutated: true };
@@ -872,19 +861,21 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     if (req.method !== "PATCH") return null;
     if (body.pricingBasis != null) service.pricingBasis = requiredText(body.pricingBasis, "pricingBasis", 40);
     if (body.referenceRateMinor != null) service.referenceRateMinor = moneyMinor(body.referenceRateMinor, "referenceRateMinor");
-    if (body.turnaroundHours != null) {
-      service.turnaroundHours = integer(body.turnaroundHours, "turnaroundHours", { min: 1 });
+    if (body.turnaroundDays != null || body.turnaroundHours != null) {
+      Object.assign(service, productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, user.id)));
+      service.standardTurnaroundDays = service.turnaroundDays;
       service.standardTurnaroundHours = service.turnaroundHours;
     }
     if (body.rushEnabled != null) {
       service.rushEnabled = booleanValue(body.rushEnabled, "rushEnabled");
       if (!service.rushEnabled) {
         service.rushTurnaroundHours = null;
+        service.rushTurnaroundDays = null;
         service.rushPriceMinor = null;
       }
     }
     if (service.rushEnabled) {
-      if (body.rushTurnaroundHours != null) service.rushTurnaroundHours = integer(body.rushTurnaroundHours, "rushTurnaroundHours", { min: 1 });
+      if (body.rushTurnaroundDays != null || body.rushTurnaroundHours != null) Object.assign(service, productionDuration(body, service, "rushTurnaround", shopProductionDayMinutes(store, user.id)));
       if (body.rushPriceMinor != null) service.rushPriceMinor = moneyMinor(body.rushPriceMinor, "rushPriceMinor");
       if (!service.rushTurnaroundHours || service.rushPriceMinor == null) {
         fail(400, "invalid_catalog_item", "Rush turnaround and price are required when rush is enabled.");
@@ -985,11 +976,13 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       fail(400, "invalid_subcategory_code", "That starter belongs to a different subcategory.");
     }
     const pricing = pricingFields({
+      ...body,
       pricingUnit: body.pricingUnit ?? starter?.defaultPricingUnit,
       packageQty: Object.hasOwn(body, "packageQty") ? body.packageQty : starter?.defaultPackageQty,
-      turnaroundMode: body.turnaroundMode ?? (starter?.defaultTurnaroundHours ? "override" : "inherit"),
+      turnaroundMode: body.turnaroundMode ?? (starter?.defaultTurnaroundDays || starter?.defaultTurnaroundHours ? "override" : "inherit"),
       turnaroundHours: Object.hasOwn(body, "turnaroundHours") ? body.turnaroundHours : starter?.defaultTurnaroundHours,
-    });
+      ...(!Object.hasOwn(body, "turnaroundDays") && !Object.hasOwn(body, "turnaroundHours") && starter?.defaultTurnaroundDays != null ? { turnaroundDays: starter.defaultTurnaroundDays } : {}),
+    }, {}, shopProductionDayMinutes(store, user.id));
     const at = now();
     const existing = (store.catalogItems || []).filter((item) => item.supplierId === user.id);
     const item = {
@@ -1057,7 +1050,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     if (body.description != null) item.description = optionalText(body.description, "description", 4000);
     if (body.basePriceMinor != null) item.basePriceMinor = moneyMinor(body.basePriceMinor, "basePriceMinor");
     if (body.subcategoryCode != null) item.subcategoryCode = subcategoryForService(store, service, body.subcategoryCode);
-    Object.assign(item, pricingFields(body, item));
+    Object.assign(item, pricingFields(body, item, shopProductionDayMinutes(store, item.supplierId)));
     Object.assign(item, printerCapFields(body, item, item.subcategoryCode));
     // Tiers are small ordered sets a shop edits as a whole -- add a break,
     // change a price, drop a speed -- so they are replaced wholesale rather
