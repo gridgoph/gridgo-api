@@ -1136,7 +1136,7 @@ Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 cl
 
 `POST /orders/:id/transition` refuses a supplier moving `production -> supplier_self_qc`, `production -> ready_for_dispatch`, or `supplier_self_qc -> ready_for_dispatch` with `409 production_photo_required` until the job has at least one **ready, attached JPEG/PNG/WebP owned by its assigned supplier**. Body flags, unattached uploads, pending/deleted files, PDFs, another shop's files, artwork, and rider delivery evidence do not count.
 
-One photo is sufficient: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
+One production photo is sufficient for the production-photo gate: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
 
 Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
 
@@ -1158,6 +1158,16 @@ Order list/detail and order mutation responses expose this additive projection t
 ```
 
 With no qualifying image, the response is `{ "status": "waiting_for_photo", "photos": [] }`. The client should display **Waiting for a progress photo** during production and subsequent steps until evidence exists, even after a staff correction. A gallery row exposes no uploader, private key, filename, payout stage or proof code. Signed links use the same authorization and TTL as artwork; unrelated clients and unassigned riders browsing dispatch offers receive none. If signing fails, the photo identity remains and the app can retry `GET /files/:fileId/download-url`. Attaching evidence queues order/job invalidations before commit.
+
+### Packing photos
+
+After production, the shop uploads a separate `packing_photo` showing the finished prints packed and ready. Use `POST /files` then `POST /files/:fileId/attach` with `{ "orderId": "..." }` while `production` or `supplier_self_qc`. The existing upload validation and transactional attach checks apply. Only a ready attached JPEG/PNG/WebP owned by the assigned supplier counts; production photos, payout proofs, PDFs, pending uploads and client-supplied flags never do.
+
+A supplier transition from either production state to `ready_for_dispatch` returns `409 packing_photo_required` until packing evidence exists, in addition to the existing production-photo gate. Jobs already dispatched stay unchanged. Existing audited staff correction remains available and records `packingPhotoMissing` alongside `photoMissing`; claim and refund holds still apply.
+
+Order list/detail and mutation responses expose `packingProgress` with the same `{ status, photos }` shape and short-lived signed links as `productionProgress`, only to the owning client, assigned supplier and Operations/Super Admin. Raw `packingPhotoFileIds` are omitted from every projection. Riders receive neither the gallery nor metadata/download access.
+
+Attaching a packing photo changes no order state or payout milestone. It atomically writes a client `order_packed` notification ("Your order is packed and waiting for the rider"), separate staff `order_packing_photo_received` notifications, and order/job refresh hints. The usual inbox/SSE/push outbox delivers them after commit. Retrying an already-attached file returns `file_already_attached` and creates no duplicate notification. The supplier separately confirms Ready for dispatch to notify riders.
 
 ### Plain order history
 

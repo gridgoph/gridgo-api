@@ -14,7 +14,7 @@ for (const [purpose, deadline] of [
   ['artwork', '2026-11-03'], ['mockup', '2026-11-03'],
   ['payment_proof', '2031-10-04'], ['payout_receipt', '2031-10-04'], ['refund_receipt', '2031-10-04'],
   ['refund_qr', '2031-10-04'], ['refund_evidence', '2031-10-04'],
-  ['production_photo', '2027-10-04'], ['fulfilment_proof', '2027-10-04'],
+  ['packing_photo', '2027-10-04'], ['production_photo', '2027-10-04'], ['fulfilment_proof', '2027-10-04'],
   ['delivery_photo', '2027-10-04'], ['handoff_signature', '2027-10-04'],
 ]) test(`${purpose} expires at its deadline, never before`, () => {
   const { store, file } = fixture(purpose);

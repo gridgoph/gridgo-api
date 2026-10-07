@@ -232,6 +232,7 @@ async function attachProgressPhoto(database, orderId) {
       purpose: "production_photo", originalFilename: "progress.jpg", detectedContentType: "image/jpeg",
       declaredContentType: "image/jpeg", size: 100, state: "ready", objectKey: `progress/${orderId}.jpg`, createdAt: AT, readyAt: AT,
       references: [{ type: "order", id: orderId, field: "productionPhotoFileIds" }] });
+    store.files.push({ ...structuredClone(store.files.at(-1)), fileId: `packing_${orderId}`, purpose: "packing_photo", objectKey: `packing/${orderId}.jpg`, references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
     await saveStore(database, store);
   });
 }
@@ -795,6 +796,7 @@ test("a new order pays the shop 40/35/25 of its own cost, each stage only after 
   assert.equal((await transition("production")).status, 200);
   await refusedWith("production_started", "pof_required");
   await attachProofDirectly(database, orderId, "production_started");
+  await attachProgressPhoto(database, orderId);
   for (const subject of ["clerk_supplier_a", "clerk_client"]) {
     const denied = await release("production_started", subject);
     assert.equal(denied.status, 403, `${subject}: ${JSON.stringify(denied.body)}`);
@@ -866,6 +868,7 @@ test("a claim holds every remaining share, and the last one waits out the clock"
     assert.equal((await transition(state, subject)).status, 200, state);
   }
   await attachProofDirectly(database, orderId, "production_started");
+  await attachProgressPhoto(database, orderId);
   assert.equal((await release("production_started")).status, 200);
   for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
     assert.equal((await transition(state)).status, 200, state);
@@ -1584,6 +1587,7 @@ test("a paid-up-front order runs from one confirmation to a fully released payou
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
   }
   await attachProofDirectly(database, orderId, "production_started");
+  await attachProgressPhoto(database, orderId);
   assert.equal((await release("production_started")).status, 200);
   for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
     const moved = await transition(state);

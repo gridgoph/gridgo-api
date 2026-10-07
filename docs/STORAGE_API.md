@@ -98,6 +98,7 @@ Parents contain IDs only:
 |---|---|
 | `artwork` | `order.artworkFileIds: string[]` |
 | `production_photo` | `order.productionPhotoFileIds: string[]`; plain progress only |
+| `packing_photo` | `order.packingPhotoFileIds: string[]`; packed-work evidence only |
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
 | `handoff_signature` | `order.handoffSignatureFileIds: string[]`; the one the checklist was signed against is `order.pickupChecklist.handoffSignature.fileId` |
@@ -127,6 +128,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `mockup` | client | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `production_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
+| `packing_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `handoff_signature` | rider | PNG | 2 MiB (`2097152`) |
@@ -148,7 +150,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, supplier `production_photo`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, supplier `production_photo`, supplier `packing_photo`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -220,6 +222,7 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 |---|---|---|
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
 | `production_photo` | `{ "orderId": "..." }` | assigned approved supplier, while order is `production` or `supplier_self_qc`; otherwise `409 production_photo_upload_not_allowed` |
+| `packing_photo` | `{ "orderId": "..." }` | assigned approved supplier, while order is `production` or `supplier_self_qc`; otherwise `409 packing_photo_upload_not_allowed` |
 | `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "production_started" }` | a stage of the order's own payout plan that takes a file: assigned supplier for `production_started` (plan 2) or `printing`/`packaging_qc` (legacy plan 1); assigned rider for `delivered`. `issue_window` and `retention` take no direct upload |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
 | `handoff_signature` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned` only, else `409 handoff_signature_upload_not_allowed`. Named by `signature.fileId` on `POST /dispatch/:id/pickup-checklist` |
@@ -266,6 +269,8 @@ curl -fsS -X POST "$API/files/$RIDER_LICENSE_FILE_ID/attach" -H "Authorization: 
 ## GET /files/:fileId — metadata
 
 Auth for ordinary purposes: `ops_admin`, `super_admin`, file owner, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super. A `handoff_signature` is additionally never readable by the order's client — it is a person's handwriting, and the client has no part in the counter handoff. When acting as supplier/rider, an order-referenced file additionally requires current approval, even for its uploader. Explicit [actor role selection](OPERATIONAL_MODEL_V2_API.md#selecting-an-actor-role) applies to file authorization and returned parent projections throughout upload/attach transactions.
+
+`packing_photo` metadata and signed reads are limited to its supplier owner, the owning client after attachment, and Operations/Super Admin. Riders cannot read it, including an assigned rider. It uses the existing one-year order-photo retention policy and open-case holds.
 
 `support_chat_image` reads use the conversation boundary (`canViewThread` in `src/support-chat.js`). Photos in a private staff-pair thread are available only to its participants, including against unrelated Operations/Super Admin callers. Photos in a party support thread remain available to that party and the shared staff inbox. Unsent uploads are owner-only. This applies to metadata and signed download URLs.
 
