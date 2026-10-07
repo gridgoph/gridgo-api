@@ -215,7 +215,11 @@ test("support-chat helpers keep messages honest", () => {
       { originalFilename: "notes.pdf", size: 120, sniffBytes: Buffer.from("%PDF-1.7"), declaredContentType: "application/pdf" },
       "support_chat_image",
     ),
-    { code: "purpose_media_type_not_allowed" },
+    (error) => {
+      assert.equal(error.code, "invalid_file_type");
+      assert.equal(error.details.reason, "purpose_media_type_not_allowed");
+      return true;
+    },
   );
 
   const frame = formatChatEvent({
