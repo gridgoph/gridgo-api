@@ -1,4 +1,5 @@
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
+import { pickupChatProjection } from "./pickup-chat.js";
 import { deliveryChatProjection } from "./delivery-chat.js";
 import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
@@ -417,6 +418,9 @@ function radians(degrees) {
 }
 
 export function clientRiderLocationPing(order, ping, settings) {
+  // New pre-pick-up pings must never become visible after the state changes.
+  // Unmarked pings predate pick-up tracking and retain the old radius policy.
+  if (order.state === "rider_assigned" || ping?.leg === "pickup") return null;
   const destination = deliveryDestination(order);
   for (const point of [destination, ping]) {
     if (!point || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90 ||
@@ -1131,6 +1135,9 @@ export function publicOrderFor(order, user, store = null) {
     publicRecord.packingProgress = packingProgressFor(store, order);
   }
   // Only the two people in the conversation learn it exists (gridgo-client#198).
+  delete publicRecord.pickupChat;
+  const pickupChat = pickupChatProjection(order, user, store);
+  if (pickupChat) publicRecord.pickupChat = pickupChat;
   delete publicRecord.deliveryChat;
   const deliveryChat = deliveryChatProjection(order, user);
   if (deliveryChat) publicRecord.deliveryChat = deliveryChat;

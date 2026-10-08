@@ -33,6 +33,9 @@ export function fileRelationships(store, file) {
   let unresolved = false;
   for (const ref of file.references || []) {
     if (ref.type === 'order') orderIds.add(ref.id);
+    if (ref.type === 'pickup_chat_message') {
+      if (ref.orderId) orderIds.add(ref.orderId); else unresolved = true;
+    }
     const caseCollection = { refund_request: 'refundRequests', issue: 'issues', claim: 'claims', dispute: 'disputes', escalation: 'escalations' }[ref.type];
     if (caseCollection) {
       const request = (store[caseCollection] || []).find((row) => row.id === ref.id);

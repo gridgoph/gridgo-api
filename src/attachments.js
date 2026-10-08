@@ -2,6 +2,7 @@ import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { canViewThread } from "./support-chat.js";
+import { canReadPickupChatPhoto } from "./pickup-chat.js";
 import { canReadDeliveryChatPhoto } from "./delivery-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
@@ -139,6 +140,12 @@ export const PURPOSE_POLICIES = Object.freeze({
   // is posted; deleted with the conversation one day after delivery.
   delivery_chat_image: {
     roles: ["client", "rider"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  // Private shop-rider photos are bound by the pick-up chat message route.
+  pickup_chat_image: {
+    roles: ["supplier", "rider"],
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
@@ -769,6 +776,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A delivery chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/delivery-chat/messages.",
     );
   }
+  if (purpose === "pickup_chat_image") {
+    fail(
+      400,
+      "pickup_chat_image_not_attachable",
+      "A pick-up chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/pickup-chat/messages.",
+    );
+  }
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1277,6 +1291,12 @@ export function authorizeFileRead(user, store, file) {
     const sent = (file.references || []).filter((reference) => reference.type === "delivery_chat_message");
     if (!sent.length && file.ownerId === user.id) return;
     if (sent.some((reference) => canReadDeliveryChatPhoto(user, store, reference))) return;
+    forbidden();
+  }
+  if (file.purpose === "pickup_chat_image") {
+    const sent = (file.references || []).filter((reference) => reference.type === "pickup_chat_message");
+    if (!sent.length && file.ownerId === user.id) return;
+    if (sent.some((reference) => canReadPickupChatPhoto(user, store, reference))) return;
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
