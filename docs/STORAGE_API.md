@@ -522,3 +522,7 @@ Progress images use the same private read gate as artwork. The client gallery an
 ### Client application documents
 
 `client_verification_document` uploads are client-owned JPEG/PNG/WebP/PDF files up to 20 MiB. Complete application submission attaches them through the existing file-reference mechanism. Only Operations and Super Admin can read metadata or signed bytes, including after submission; the owner receives the opaque file ID at upload. Track checklists, rejected-revision retention and handover rules are in [Organization accounts](ORGANIZATION_ACCOUNTS_API.md). Automatic deletion remains disabled by default.
+
+### Pick-up chat photos
+
+`pickup_chat_image` accepts supplier/rider JPEG, PNG and WebP images up to 15 MiB, using the usual upload verification. Up to four own ready unsent photos bind through `POST /orders/:id/pickup-chat/messages`. Generic attach is refused with `pickup_chat_image_not_attachable`. Sent metadata/downloads are private to the approved assigned supplier and rider while the conversation is readable, including Office transfers; reassignment revokes access. The chat sweep queues byte deletion when the conversation closes; retained opaque order references preserve open-case holds on every retry. See [pick-up messages](OPERATIONAL_MODEL_V2_API.md#pick-up-messages).

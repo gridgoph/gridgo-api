@@ -5199,7 +5199,8 @@ test("client rider location radius is live, private and leaves staff tracking un
     assert.equal(current.body.settings.clientRiderLocationRevealDistanceMeters, 1000);
     assert.deepEqual((await location("clerk_client")).body, { ping: null });
     assert.equal((await location("clerk_promote")).status, 403);
-    for (const subject of ["clerk_ops", "clerk_super", "clerk_rider", "clerk_supplier"]) {
+    assert.deepEqual((await location("clerk_supplier")).body, { ping: null, hidden: "picked_up" });
+    for (const subject of ["clerk_ops", "clerk_super", "clerk_rider"]) {
       assert.equal((await location(subject)).body.ping.id, "ping_radius");
     }
     for (const subject of ["clerk_ops", "clerk_super"]) {

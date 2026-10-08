@@ -54,7 +54,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
-      "delivery_chat_messages", "delivery_chat_reads",
+      "delivery_chat_messages", "delivery_chat_reads", "pickup_chat_messages", "pickup_chat_reads",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
@@ -140,6 +140,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791957600000_delivery_chat_images",
         "1791961200000_order_qa_checklist",
         "1791964800000_docx_artwork",
+        "1791968400000_pickup_chat",
       ],
     );
 
@@ -321,6 +322,12 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
 
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='pickup_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('pickup_chat_messages') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('pickup_chat_reads') AS t")).rows[0].t, null);
 
     assert.deepEqual((await client.query("SELECT extensions, mime_types FROM accepted_file_formats WHERE code='docx'")).rows[0], {
       extensions: ['docx'], mime_types: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],

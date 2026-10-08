@@ -212,6 +212,7 @@ import {
   routeSupportDesk,
 } from "./support-desk.js";
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
+import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
 import {
   isFirstmateIssueReportsRoute,
@@ -1518,6 +1519,15 @@ async function sweepDeliveryChats() {
   }
 }
 
+async function sweepPickupChats() {
+  const candidate = await database.query(`SELECT 1 FROM pickup_chat_messages LIMIT 1`);
+  if (!candidate.rowCount) return;
+  const { fileIds } = await enqueueMutation(() => purgeClosedPickupChats(database, now()));
+  for (const fileId of fileIds) {
+    try { await fileRetention.finishPending(fileId); } catch { /* The file retention pass retries it. */ }
+  }
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -1581,6 +1591,7 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
 
 async function publicOrder(order, user, orderStore) {
   const record = publicOrderFor(order, user, orderStore);
+  if (record.pickupChat) record.pickupChat.unread = await pickupChatUnread(database, order, user.id);
   await signProductionPhotos(record, {
     findFile: (fileId) => findFile(orderStore, fileId),
     authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
@@ -2454,6 +2465,10 @@ async function handleRequest(req, res) {
         database,
         notifyStaff: notifyStaffDesk,
       });
+    }
+
+    if (await routePickupChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
+      return;
     }
 
     if (await routeDeliveryChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
@@ -6147,7 +6162,7 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId && o.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
-      if (!["picked_up", "out_for_delivery"].includes(order.state)) {
+      if (!["rider_assigned", "picked_up", "out_for_delivery"].includes(order.state)) {
         return send(res, 409, { error: "tracking_not_active", state: order.state });
       }
       const body = await readBody(req);
@@ -6159,6 +6174,11 @@ async function handleRequest(req, res) {
       if (!Number.isFinite(body.lat) || Math.abs(body.lat)>90 || !Number.isFinite(body.lng) || Math.abs(body.lng)>180 || (body.accuracy != null && (!Number.isFinite(body.accuracy) || body.accuracy < 0))) return send(res,400,{error:'invalid_location'});
       const latest = store.locationPings.filter(p=>p.orderId===orderId&&p.riderId===order.riderId).sort((a,b)=>b.at.localeCompare(a.at))[0];
       if (latest && Date.parse(latest.at)>=fixMs) return send(res,200,{ping:latest,ignored:true});
+      // A delayed handset fix from before the handoff is still a pick-up ping,
+      // even if it arrives after the checklist has moved the order forward.
+      const pickupAt = order.pickupChecklist?.completedAt
+        || (order.timeline || []).findLast((entry) => entry.state === "picked_up")?.at;
+      const pickupLeg = order.state === "rider_assigned" || (pickupAt && fixMs < Date.parse(pickupAt));
       const ping = {
         id: id("ping"),
         orderId,
@@ -6167,6 +6187,7 @@ async function handleRequest(req, res) {
         lng: Number(body.lng),
         accuracy: body.accuracy ?? null,
         at: recordedAt,
+        leg: pickupLeg ? "pickup" : "delivery",
       };
       store.locationPings.push(ping);
       await save(store);
@@ -6179,10 +6200,18 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       if (!canViewOrderLocation(user, order, store)) return send(res, 403, { error: "forbidden" });
-      const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId);
-      if (!pings.length) return send(res, 200, { ping: null });
+      if (user.role === "supplier" && order.state !== "rider_assigned") {
+        const pickedUp = Boolean(order.pickupChecklist?.completedAt)
+          || ["picked_up", "out_for_delivery", "awaiting_collection", "delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
+        return send(res, 200, { ping: null, ...(pickedUp ? { hidden: "picked_up" } : {}) });
+      }
+      const point = mapPointOrNull(order.pickup);
+      const shop = user.role === "supplier" ? { shop: point ? { lat: point.lat, lng: point.lng } : null } : {};
+      const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId
+        && (user.role !== "supplier" || p.leg === "pickup"));
+      if (!pings.length) return send(res, 200, { ping: null, ...shop });
       const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
-      return send(res, 200, { ping: user.role === "client" ? clientRiderLocationPing(order, ping, store.settings) : ping });
+      return send(res, 200, { ping: user.role === "client" ? clientRiderLocationPing(order, ping, store.settings) : ping, ...shop });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {
@@ -6394,7 +6423,7 @@ const server = http.createServer((req, res) => {
     // handleRequest fails the same parse and answers 500 itself.
   }
   logHttpRequest(req, res, pathname, Date.now());
-  const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = (req.method === "GET" && isPickupChatRoute(pathname)) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // Upload/attach routes queue their own transactions. Deletion commits intent
   // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
@@ -6594,6 +6623,7 @@ async function runLifecycleWork() {
       },
       sweepOrganizationOfficers,
       sweepDeliveryChats,
+      sweepPickupChats,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }
