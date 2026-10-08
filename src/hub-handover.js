@@ -176,6 +176,8 @@ export async function routeHubHandover(context) {
     if (match[2] === 'handover' && req.method === 'GET') {
       if (!client && !(rider && order.fulfillmentMode === 'delivery')) fail(403, 'forbidden');
       const available = h && !h.consumedAt && (carriedToOffice(order) ? order.state === 'awaiting_collection' : READY_STATES.includes(order.state));
+      // Riders enter the code read aloud by the client; never give them the answer.
+      if (!client) return { status: 200, body: { handover: available ? { otpRequired: true } : null } };
       return { status: 200, body: { handover: available ? { otp: h.otp, ...(client && h.qrToken ? { qrToken: h.qrToken, hub: { id: h.hubId, point: h.point, schedule: h.schedule }, ...summary(order) } : {}) } : null } };
     }
     if (match[2] === 'handover/escalate' && req.method === 'POST') {

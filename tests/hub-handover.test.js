@@ -82,15 +82,21 @@ test('ready and missed-day reminders count completed open dates once, skip closu
   assert.equal(store.notifications.length, count);
 });
 
-test('delivery OTP is shared only with owning client and assigned rider and mismatch is a blocking error with escalation', async () => {
+test('delivery OTP is client-only; assigned rider gets a requirement and can escalate mismatches', async () => {
   const store = fixture(), order = store.orders[0];
   Object.assign(order, { state: 'out_for_delivery', riderId: 'rider' });
   store.settings.handoverOtpEnabled = true;
   prepareHandover(store, order, { at: AT });
   const client = (await call(store, 'client', '/orders/order/handover', {}, 'GET')).body.handover;
   const rider = (await call(store, 'rider', '/orders/order/handover', {}, 'GET')).body.handover;
-  assert.equal(client.otp, rider.otp);
-  assert.equal(rider.qrToken, undefined);
+  assert.match(client.otp, /^\d{6}$/);
+  assert.deepEqual(rider, { otpRequired: true });
+  for (const actor of ['client', 'rider', 'supplier', 'admin']) {
+    assert.equal(publicOrderFor(order, store.users.find(u => u.id === actor), store).handover, undefined);
+  }
+  for (const actor of ['other', 'supplier', 'admin']) {
+    await rejects(call(store, actor, '/orders/order/handover', {}, 'GET'), 'forbidden');
+  }
   assert.throws(() => verifyHandoverOtp(order, '000bad'), e => e.code === 'handover_otp_mismatch' && e.details.canEscalate);
   verifyHandoverOtp(order, client.otp);
   await call(store, 'rider', '/orders/order/handover/escalate', { reason: 'Codes do not match' });

@@ -7,14 +7,14 @@ import { apiForTest } from './fixtures/reschedule-http.js';
 import { prepareHandover } from '../src/hub-handover.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
-async function setup(t, ready = true) {
+async function setup(t, ready = true, fulfillmentMode = 'pickup') {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
   await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture();
   store.settings.handoverOtpEnabled = true;
   store.settings.hubPickupEnabled = false;
   const order = store.orders[0];
-  Object.assign(order, { fulfillmentMode: 'pickup', riderId: 'rider', state: ready ? 'awaiting_collection' : 'out_for_delivery', awaitingCollectionAt: AT });
+  Object.assign(order, { fulfillmentMode, riderId: 'rider', state: ready ? 'awaiting_collection' : 'out_for_delivery', awaitingCollectionAt: AT });
   store.staffRoles = [{ code: 'hub_staff', name: 'Hub staff', canHandout: true }];
   if (ready) prepareHandover(store, order, { at: AT });
   store.files.push({ fileId: 'drop_photo', ownerId: 'rider', purpose: 'delivery_photo', state: 'ready', objectKey: 'private/drop_photo', originalFilename: 'photo.png', declaredContentType: 'image/png', detectedContentType: 'image/png', size: 100, createdAt: AT, references: [{ type: 'order', id: 'order', field: 'deliveryPhotoFileIds' }] });
@@ -136,10 +136,18 @@ test('rider arrival mints hub credentials and does not start issue window; deliv
   assert.equal(bad.body.error, 'handover_otp_mismatch');
   const client = await api('client', 'GET', '/orders/delivery/handover');
   const rider = await api('rider', 'GET', '/orders/delivery/handover');
-  assert.equal(client.body.handover.otp, rider.body.handover.otp);
-  const delivered = await api('rider', 'POST', '/dispatch/delivery/delivery', { ...proof, otp: rider.body.handover.otp });
+  assert.deepEqual(rider.body, { handover: { otpRequired: true } });
+  assert.equal((await api('rider', 'GET', '/orders/delivery')).body.order.handover, undefined);
+  const delivered = await api('rider', 'POST', '/dispatch/delivery/delivery', { ...proof, otp: client.body.handover.otp });
   assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
   assert.equal(delivered.body.order.state, 'issue_window_open');
+  assert.equal(delivered.body.order.handover, undefined);
+  const saved = await loadStore(db);
+  assert.ok(saved.orders.find(o => o.id === 'delivery').handover.consumedAt);
+  const attempts = saved.auditLog.filter(a => a.action.startsWith('delivery.handover_otp_'));
+  assert.deepEqual(attempts.map(a => a.action), ['delivery.handover_otp_rejected', 'delivery.handover_otp_verified']);
+  assert.ok(attempts.every(a => a.actorId === 'rider' && a.orderId === 'delivery'));
+  assert.equal(JSON.stringify(attempts).includes(client.body.handover.otp), false);
 });
 
 test('legacy counter collection and delivery evidence remain available for already-ready orders without OTP credentials', { skip: !DATABASE_URL }, async t => {
@@ -254,4 +262,71 @@ test('pickup availability defaults off and requires Super Admin, reason and curr
   const updates = saved.auditLog.filter(row => row.action === 'settings.operational_update');
   assert.equal(updates.length, 2);
   assert.equal(updates[0].detail.current.hubPickupEnabled, true);
+});
+
+async function deliverySetup(t, enabled = true) {
+  const context = await setup(t, false, 'delivery');
+  await context.db.transaction(async () => {
+    const store = await loadStore(context.db);
+    store.settings.handoverOtpEnabled = enabled;
+    store.users.find(u => u.id === 'rider').verificationStatus = 'approved';
+    store.approvalCases.push({ id: 'rider_case', userId: 'rider', kind: 'rider', status: 'approved', version: 1, applicationRevision: 1, createdAt: AT, updatedAt: AT });
+    Object.assign(store.orders[0], { fulfillmentMode: 'delivery', state: 'out_for_delivery' });
+    prepareHandover(store, store.orders[0], { at: AT });
+    await saveStore(context.db, store);
+  });
+  return context;
+}
+const deliveryProof = { evidenceType: 'photo', evidenceFileId: 'drop_photo' };
+
+test('delivery failures commit their attempt budget and audit; correct code cannot bypass lockout', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await deliverySetup(t);
+  const otp = (await api('client', 'GET', '/orders/order/handover')).body.handover.otp;
+  const wrong = otp === '000000' ? '000001' : '000000';
+  for (const value of [undefined, 123456, 'éééééé', wrong, wrong]) {
+    const result = await api('rider', 'POST', '/dispatch/order/delivery', { ...deliveryProof, otp: value });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error, 'handover_otp_mismatch');
+    assert.equal(result.body.canEscalate, true);
+    assert.equal(result.body.escalatePath, '/orders/order/handover/escalate');
+  }
+  const locked = await api('rider', 'POST', '/dispatch/order/delivery', { ...deliveryProof, otp });
+  assert.equal(locked.status, 429);
+  assert.equal(locked.body.error, 'handover_attempts_exceeded');
+  const saved = await loadStore(db), order = saved.orders[0];
+  assert.equal(order.handover.failedAttempts, 5);
+  assert.equal(locked.body.retryAfter, order.handover.retryAfter);
+  assert.ok(Date.parse(locked.body.retryAfter) > Date.now());
+  assert.equal(order.state, 'out_for_delivery');
+  assert.equal(order.handover.consumedAt, undefined);
+  assert.equal(order.deliveryEvidence, undefined);
+  assert.equal(order.issueWindowOpenedAt, undefined);
+  const rejected = saved.auditLog.filter(a => a.action === 'delivery.handover_otp_rejected');
+  assert.equal(rejected.length, 6);
+  assert.equal(rejected.at(-1).detail.error, 'handover_attempts_exceeded');
+  assert.equal(JSON.stringify(rejected).includes(otp), false);
+  // Expire only the mutable cooldown, preserving the issued code.
+  await db.query("UPDATE orders SET data = jsonb_set(data, '{handover,retryAfter}', to_jsonb('2026-01-01T00:00:00Z'::text)) WHERE id = 'order'");
+  const delivered = await api('rider', 'POST', '/dispatch/order/delivery', { ...deliveryProof, otp });
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.order.state, 'issue_window_open');
+});
+
+test('switch-off delivery keeps evidence-only completion and no credentials', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await deliverySetup(t, false);
+  assert.deepEqual((await api('rider', 'GET', '/orders/order/handover')).body, { handover: null });
+  const delivered = await api('rider', 'POST', '/dispatch/order/delivery', deliveryProof);
+  assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
+  assert.equal(delivered.body.order.state, 'issue_window_open');
+  assert.equal((await loadStore(db)).orders[0].handover, undefined);
+});
+
+test('disabling rollout cannot bypass a previously issued delivery code', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await deliverySetup(t);
+  await db.query("UPDATE platform_settings SET settings = jsonb_set(settings, '{handoverOtpEnabled}', 'false')");
+  const rejected = await api('rider', 'POST', '/dispatch/order/delivery', deliveryProof);
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.error, 'handover_otp_mismatch');
+  const otp = (await api('client', 'GET', '/orders/order/handover')).body.handover.otp;
+  assert.equal((await api('rider', 'POST', '/dispatch/order/delivery', { ...deliveryProof, otp })).status, 200);
 });
