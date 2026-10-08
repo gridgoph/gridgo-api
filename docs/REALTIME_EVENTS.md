@@ -111,3 +111,20 @@ idle status and job availability before sending or retrying. Push uses fixed
 customer-free copy and the existing `orderId` deep-link field on `gridgo_default`.
 
 Work holds remove dispatch offers and suppress their existing inbox/replay and queued push alerts. Refund-only changes also invalidate the prior rider pool; a stale accept returns `409 dispatch_paused` with a plain message and makes no assignment. Withdrawing or rejecting a refund restores eligibility only when no other work hold remains.
+
+## Private order calls
+
+`calls` invalidates carry only the order ID and are explicitly addressed to the
+two call parties. They never expand to staff or other order participants.
+Clients refetch authorized call state and signalling; the SSE frame contains no
+SDP, ICE, name or credential. App reconnect/focus and an active-call two-second
+HTTP polling fallback recover dropped pointers. Call GET/POST permissions use
+current order assignment and database memberships, including after reassignment.
+
+`order_call_incoming` (callee) and `order_call_missed` (callee after timeout,
+decline or cancellation) use the normal durable inbox/outbox. Incoming pushes
+are high priority, have zero provider storage TTL and are suppressed after their
+ring deadline or termination. Push data remains the four-field allowlist.
+`order_call_activity` gives each Operations/Super Admin membership a generic
+lifecycle notice without access to call records or signals. Full API/app behavior:
+[Calls API](CALLS_API.md).

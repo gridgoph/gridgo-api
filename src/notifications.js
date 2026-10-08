@@ -9,6 +9,7 @@ export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "chat"
 
 export const INVALIDATE_RESOURCES = Object.freeze([
   "orders",
+  "calls",
   "jobs",
   "approvals",
   "escalations",
@@ -227,7 +228,7 @@ export function invalidateAudienceIds(store, event) {
   if (STAFF_INVALIDATE_RESOURCES.includes(event?.resource)) return opsAdminRecipientIds(store);
   const ids = new Set(event.userIds || []);
   const order = (store.orders || []).find(row => row.id === event.id);
-  if (["notifications", "identity", "credits"].includes(event.resource)) return [...ids];
+  if (["notifications", "identity", "credits", "calls"].includes(event.resource)) return [...ids];
   if (event.resource === "location") {
     const order = (store.orders || []).find(o => o.id === event.id);
     return (store.users || []).filter(u => canAccessOrder(store,u.id,order,{location:true})).map(u => u.id);

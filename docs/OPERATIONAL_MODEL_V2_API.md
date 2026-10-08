@@ -1354,7 +1354,7 @@ Only Super Admin may change `clientRiderLocationRevealDistanceMeters` through `P
 
 ## Delivery messages
 
-The owning client and the assigned rider can message each other about a door delivery (`src/delivery-chat.js`, gridgo-client#198). There is no call route: neither side ever receives the other's phone number or email, and a call option waits on a masked-call provider.
+The owning client and the assigned rider can message each other about a door delivery (`src/delivery-chat.js`, gridgo-client#198). Neither side receives the other's phone number or email. Private audio calls use the separate [Calls API](CALLS_API.md); client/rider calling has the same active window, without the read-only day.
 
 - **Open** while the assigned rider has the job (`rider_assigned`, `picked_up`, `out_for_delivery`): both can read and write.
 - **Read only** for 24 hours after the delivery is recorded (`deliveryEvidence.recordedAt`, else `issueWindowOpenedAt`), whatever state follows.

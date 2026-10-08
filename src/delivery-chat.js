@@ -9,9 +9,8 @@ import { tooManyRequests } from "./support-rate-limit.js";
  keyed by order *and* rider, so a reassigned job never shows the new rider
  what the client said to the old one.
 
- Neither side ever sees the other's phone number or email. Calls are out of
- scope until GRIDGO has a masked-call provider; the issue's stop rule forbids
- handing out personal numbers.
+ Neither side ever sees the other's phone number or email. Audio calls use
+ the separate private WebRTC contract in docs/CALLS_API.md.
 
  A job collected at GRIDGO Office has no conversation: its rider drives to our
  counter, not to the client.

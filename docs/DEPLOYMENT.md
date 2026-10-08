@@ -248,3 +248,83 @@ Money is `BIGINT` minor units and application writes are checked against JavaScr
 ## Organization email verification
 
 Organization applications require `EMAIL_USER` and `EMAIL_PASSWORD` for one-time email codes. Without them, the request-code endpoint returns `503 organization_email_not_configured`; other API routes remain available. Apply migration `1791504000000` before deploying this API. Roll out the client/dashboard checklist consumers together: old name-only applications can no longer be submitted or newly approved. See [Organization accounts](ORGANIZATION_ACCOUNTS_API.md) for the request bodies and legacy-account upgrade path.
+
+## Optional voice relay (coturn)
+
+[Voice calls](CALLS_API.md) work without a paid calling provider. For reliable
+carrier/NAT traversal, an operator can install a self-hosted TURN relay. This
+repository only supplies the **disabled-by-default** `calls` compose profile;
+normal deploys never start coturn. No production ports or services are changed
+by the API release. Audio is encrypted WebRTC traffic; the API stores no audio.
+
+The optional service uses the upstream
+[coturn 4.18.0-r0 image](https://github.com/coturn/coturn/releases/tag/docker%2F4.18.0-r0).
+It joins only its own `turn-edge` network, never `gridgo-api-storage` or the proxy
+network. The operator must review host capacity/bandwidth and firewall policy,
+choose DNS/public IP, install a TLS certificate and pin the reviewed image digest
+before enabling it. Do not enable the profile as a side effect of migration.
+
+Install a mode-0600 `turnserver.conf` beside production compose, readable by the
+container's service user, and `turn-certs/fullchain.pem` / `turn-certs/privkey.pem`.
+Example configuration (replace every placeholder):
+
+```ini
+listening-port=3478
+tls-listening-port=5349
+min-port=49160
+max-port=49200
+realm=turn.example.test
+server-name=turn.example.test
+external-ip=<public IPv4 address>
+use-auth-secret
+static-auth-secret=<high entropy shared secret>
+fingerprint
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+no-tcp-relay
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+user-quota=4
+total-quota=100
+max-bps=64000
+bps-capacity=6400000
+log-file=stdout
+simple-log
+```
+
+Address exclusions use `denied-peer-ip`; loopback is denied by default. Do not enable `no-auth`,
+loopback peers, `server-relay`, web admin or the CLI. Keep TURN logs restricted;
+they can contain network addresses. The example quotas need capacity review.
+
+API `gridgo-api.env` must contain matching configuration:
+
+```dotenv
+STUN_URLS=stun:turn.example.test:3478
+TURN_URLS=turn:turn.example.test:3478?transport=udp,turn:turn.example.test:3478?transport=tcp,turns:turn.example.test:5349?transport=tcp
+TURN_SHARED_SECRET=<same high entropy shared secret>
+TURN_CREDENTIAL_TTL_SECONDS=600
+```
+
+The profile declares 3478 UDP/TCP, 5349 TCP, and UDP relay range 49160–49200.
+An operator must authorize these exposures explicitly, align firewall/NAT rules
+and the external address, and then use `docker compose --profile calls up -d coturn`.
+Port mappings preserve the relay range. Certificate renewal requires coturn to
+reload/restart as an operator action. Keep API/TURN clocks synchronized for
+expiry checks. Secret rotation must update both sides together; it invalidates
+new uses of previously issued credentials.
+
+Before releasing app call buttons, use two physical phones across Wi-Fi and
+mobile data, force relay transport for one test, and verify audio, expiry,
+authentication refusal, cancellation, timeout/missed push, app background/resume,
+reassignment and hangup at pickup/delivery. Test IPv6/carrier combinations used
+by riders. STUN-only operation is an explicit degraded mode and cannot prove
+carrier connectivity. This backend task does not perform that production rollout.
