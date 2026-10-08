@@ -133,6 +133,7 @@ export function parseCallSignal(body) {
 export async function routeOrderCalls({ req, res, pathname, user, store, database, readBody, send, save, createId, now }) {
   const match = ROUTE.exec(pathname);
   if (!match) return false;
+  if (!["GET", "POST"].includes(req.method)) return fail(send, res, 405, "method_not_allowed");
   if (!user) return fail(send, res, 401, "unauthorized");
   const [, orderId, callId, action] = match;
   const order = store.orders.find(o => o.id === orderId);

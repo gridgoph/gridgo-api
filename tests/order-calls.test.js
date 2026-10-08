@@ -5,7 +5,7 @@ import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore } from '../src/postgres-store.js';
 import { fixture, AT, id } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
-import { callParty, callWindow, publicCall, iceConfiguration, parseCallSignal, purgeClosedCalls, reconcileCalls } from '../src/order-calls.js';
+import { callParty, callWindow, publicCall, iceConfiguration, parseCallSignal, purgeClosedCalls, reconcileCalls, routeOrderCalls } from '../src/order-calls.js';
 import { pushMessageFor, fcmRequestBody } from '../src/push.js';
 import { deviceAcceptsNotification } from '../src/push-outbox.js';
 import { createRealtimeTransport } from '../src/realtime-transport.js';
@@ -299,4 +299,18 @@ httpTest('signal budget and caller rate limit are durable database limits', asyn
     await api('client', 'POST', `${BASE}/${start.body.call.id}/cancel`, {});
   }
   assert.equal((await api('client', 'POST', BASE, { pair: 'delivery' })).body.error, 'too_many_requests');
+});
+
+
+test('unsupported methods never reconcile or write outside the HTTP mutation boundary', async () => {
+  for (const method of ['HEAD', 'OPTIONS', 'PUT', 'PATCH', 'DELETE']) {
+    let result;
+    const routed = await routeOrderCalls({ req: { method }, res: {}, pathname: BASE,
+      user: { id: 'client', role: 'client' },
+      send: (_res, status, body) => { result = { status, body }; },
+      database: { query() { throw new Error('unsupported method touched database'); } },
+    });
+    assert.equal(routed, true);
+    assert.deepEqual(result, { status: 405, body: { error: 'method_not_allowed' } });
+  }
 });
