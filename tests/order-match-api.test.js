@@ -251,7 +251,7 @@ async function dispatchAndDeliver({ call, database, orderId }) {
     store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
     await saveStore(database, store);
   });
-  const handover = (await call(`/orders/${orderId}/handover`, { subject: "clerk_rider" })).body.handover;
+  const handover = (await call(`/orders/${orderId}/handover`, { subject: "clerk_client" })).body.handover;
   const delivered = await post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop", otp: handover.otp });
   assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
   assert.equal(delivered.body.order.state, "issue_window_open");
@@ -1687,7 +1687,7 @@ test("a legacy 75/25 order still needs its balance before delivery", { skip: !DA
     store.files.find((file) => file.fileId === "file_drop").references = [{ type: "order", id: orderId, field: "deliveryPhotoFileIds" }];
     await saveStore(database, store);
   });
-  const handover = (await call(`/orders/${orderId}/handover`, { subject: "clerk_rider" })).body.handover;
+  const handover = (await call(`/orders/${orderId}/handover`, { subject: "clerk_client" })).body.handover;
   const deliver = () => post(`/dispatch/${orderId}/delivery`, "clerk_rider", { evidenceType: "photo", evidenceFileId: "file_drop", otp: handover.otp });
 
   const blocked = await deliver();

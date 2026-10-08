@@ -45,11 +45,17 @@ A successful claim returns `{handout,order:{orderId,state,...}}`. Each append-on
 | Method | Endpoint | Access / behavior |
 |---|---|---|
 | GET | `/orders/:id/handover` | owning client; assigned rider for delivery only; `{handover:null}` until ready or after consumption |
-| POST | `/dispatch/:id/delivery` | existing rider evidence body plus `otp` for a governed delivery |
+| POST | `/dispatch/:id/delivery` | existing rider evidence body plus the client-read `otp` for a governed delivery |
 | POST | `/orders/:id/handover/escalate` | owner/assigned rider; `{reason}`; staff must also supply the scanned `qrToken` |
 | POST | `/orders/:id/hub-redelivery` | owning client after 3 missed days; `{costAccepted:true}` |
 
-At the delivery production-ready boundary, one six-digit OTP is minted. It is unique among active handovers. Client and assigned rider see the same `{otp}`. The rider compares it before submitting the existing photo/signature evidence and OTP. The code does not replace the six supplier pickup checks, supplier handoff signature, delivery evidence, or final-payment gate.
+At the delivery production-ready boundary, one six-digit OTP is minted. It is unique among active handovers. Only the owning client reads `{handover:{otp}}`. At drop-off the client reads the code aloud and the assigned rider types it into the rider app. The assigned rider's `GET /orders/:id/handover` returns `{handover:{otpRequired:true}}` while verification is available, and `{handover:null}` before readiness or after consumption; it never returns the OTP. Ordinary order/basket/job payloads continue to omit the internal `handover` object for every role.
+
+The approved, assigned rider submits `POST /dispatch/:id/delivery` with `{evidenceType:"photo",evidenceFileId:"<attached file ID>",otp:"012345"}` (`evidenceType:"signature"` remains supported). `otp` must be a six-digit string, preserving leading zeroes. The server compares it using the same constant-time check and per-order attempt budget as the hub. Success is `200 {order:...}` with `order.state:"issue_window_open"`; the code is consumed atomically with delivery evidence, the issue window, notifications and audit. The returned order contains no code.
+
+Missing, malformed or wrong codes return `409 handover_otp_mismatch` with `canEscalate:true` and `escalatePath:"/orders/:id/handover/escalate"`. The fifth failure still returns that mismatch and starts a 15-minute lockout. Subsequent attempts, even with the correct code, return `429 handover_attempts_exceeded` with `retryAfter` (an ISO timestamp), `canEscalate:true` and the same escalation path. After expiry the attempt budget resets on the next check. Refusals persist their budget and a `delivery.handover_otp_rejected` audit without recording either the submitted or issued code; success records `delivery.handover_otp_verified`. A mismatch or lockout never completes delivery. Existing authorization, state, evidence and payment gates run before the code check, so those refusals do not spend the code budget.
+
+The code does not replace the six supplier pickup checks, supplier handoff signature, delivery evidence, or final-payment gate. The hub claim flow is unchanged.
 
 For hub pickup, production-ready is **not** client-ready: the rider still carries the order to the hub. Recording arrival sets `awaiting_collection`, mints an opaque 256-bit QR token paired with its OTP, and does not open the issue window. The owning client's handover read returns `{otp,qrToken,hub,orderId,state,readyAt,missedDays,operationsRequired,redeliveryRequest}`. Render **only `qrToken`** inside the QR and show the OTP separately. Supplier, staff, unrelated client and hub transport rider cannot retrieve that credential pair. Ordinary order/basket/job responses omit the entire internal handover object.
 
@@ -75,7 +81,7 @@ An approved assigned supplier may upload a `supplier_invoice` via the existing `
 
 ## Compatibility and deployment
 
-`settings.handoverOtpEnabled` defaults to **false** to preserve released apps during the backend-first deployment. Super Admin enables it with the existing `PATCH /settings` body `{expectedVersion,reason,handoverOtpEnabled:true}` once client/rider OTP screens and the staff scanner are released. The update is audited and version checked. With the switch off, readiness keeps the existing handover contract. Enabling affects subsequent readiness transitions; it never silently rewrites already-ready orders. Disabling later does **not** bypass OTPs for orders that already have credentials.
+`settings.handoverOtpEnabled` defaults to **false** to preserve released apps during the backend-first deployment. Super Admin enables it with the existing `PATCH /settings` body `{expectedVersion,reason,handoverOtpEnabled:true}` only after riders have the next rider app release with typed-code submission, the client OTP screen and staff scanner are released, and hub hours are set. Keep the production switch off until those rollout prerequisites are met. The update is audited and version checked. With the switch off, readiness keeps the existing handover contract. Enabling affects subsequent readiness transitions; it never silently rewrites already-ready orders. Disabling later does **not** bypass OTPs for orders that already have credentials.
 
 Run the forward migration before deploying the API. It adds staff roles/profiles/invites and an immutable handout ledger, extends the existing membership role vocabulary with `staff`, and protects issued handover facts and consumption in `orders.data`. It creates no users and changes no existing money or payout snapshots.
 

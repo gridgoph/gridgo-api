@@ -6239,6 +6239,11 @@ async function handleRequest(req, res) {
       }
       if (!carriedToOffice(order) && order.handover) {
         const denied = checkHandoverAttempt(order, body.otp, now());
+        audit(store, { actor: user,
+          action: denied ? 'delivery.handover_otp_rejected' : 'delivery.handover_otp_verified',
+          entityType: 'order', entityId: order.id, orderId: order.id,
+          detail: denied ? { error: denied.body.error, failedAttempts: order.handover.failedAttempts || 0,
+            ...(order.handover.retryAfter ? { retryAfter: order.handover.retryAfter } : {}) } : null });
         if (denied) { await save(store); return send(res, denied.status, denied.body); }
       }
       const deliveredAt = now();
