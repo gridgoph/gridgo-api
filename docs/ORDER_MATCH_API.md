@@ -498,11 +498,18 @@ feasibility filtering remain unchanged. The public rating is unchanged. See
 
 Per-page cart lines derive `measurement.pages` from the uploaded artwork's
 server-inspected `detected.pageCount`. Typed counts are ignored, including from
-older clients. A line may be added before uploading; its subtotal stays `null`
+older clients, except for DOCX files without a usable cached page count. A line
+may be added before uploading; its subtotal stays `null`
 until its file supplies a count. PDF detection includes compressed page trees;
-recognized raster uploads with a detected count have one page. No extra document
-formats are introduced. Unreadable documents and design links without a count
-must be exported to a readable PDF and uploaded for per-page ordering.
+recognized raster uploads with a detected count have one page. DOCX reads the
+cached `<Pages>` value in `docProps/app.xml`; it is not rendered. For a ready DOCX
+with an unknown count, Add/PATCH accepts a positive safe-integer
+`measurement.pages` as the total document count. A detected count always wins.
+The manual total is preserved across quantity/range edits and checkout, and
+reset when artwork is replaced or removed; enter it again for the new file.
+Unknown-count DOCX without an entered total, other unreadable documents, and
+design links without a count cannot complete per-page checkout. Other formats'
+existing count rules are unchanged.
 
 Add/PATCH accepts `pageRange: null | string`. Null or an empty string selects all
 pages. Strings accept one-based inclusive ranges and individual pages separated
@@ -510,13 +517,15 @@ by commas (`"1-4, 7"`). Overlaps and duplicates print once per copy; intervals a
 sorted and merged. Zero, negative, fractional, reversed, malformed, out-of-file
 ranges and strings over 1,000 characters return `400 invalid_page_range`. A range
 on another pricing unit returns `400 page_range_not_accepted`. A range without a
-readable uploaded count returns `409 document_page_count_required`. Omitting the
+readable uploaded count (or entered total for unknown-count DOCX) returns
+`409 document_page_count_required`. Omitting the
 field preserves the selection; replacing/removing artwork resets it to all pages
 unless the same request explicitly selects a range for the new file.
 
 Responses expose `documentPages: { total, range, printed } | null`. This is
 server-owned; supplying a `documentPages` object never changes it. `total` is the
-file count, `range` is the normalized selection or null for all, and `printed` is
+detected file count (or entered DOCX total), `range` is the normalized selection
+or null for all, and `printed` is
 the unique selected count per copy. That count replaces total pages in the
 existing price engine: copies, option/duplex multipliers, minimum quantities and
 quantity tiers are unchanged. Shop subtotal, payout and client fee use that same
@@ -526,5 +535,14 @@ price. Checkout revalidates the count and rejects missing counts with
 Checkout snapshots `documentPages` into immutable order lines, invoice lines and
 role-scoped `productionItems`; the supplier prints those page numbers from the
 attached original file. Existing placed orders are unchanged. Clients must show
-the read-only file count and selection on Artwork, and never a typed page count
-on Listing. Deploy this API before releasing the client and supplier changes.
+the detected file count and selection on Artwork, with a manual total input
+only for unknown-count DOCX, and never a typed page count on Listing. Deploy this API before releasing the client and supplier changes.
+
+### Uploaded artwork format acceptance
+
+Cart line add, replacement and checkout compare the file's detected MIME with
+the listing's approved effective accepted formats. A mismatch is
+`409 artwork_file_format_not_accepted` (`field: "artwork"`, `lineId`, `fileId`).
+A listing override of exactly `pdf,docx` accepts those uploads and refuses JPEG,
+even though JPEG remains uploadable globally. A pending format revision keeps
+the previous approved acceptance set until Operations approves it.

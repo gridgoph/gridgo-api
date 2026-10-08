@@ -1,3 +1,4 @@
+import { DOCX_CONTENT_TYPE } from "./docx.js";
 import fs from 'node:fs/promises';
 import { inspectArtwork } from './artwork-inspection.js';
 
@@ -52,7 +53,9 @@ const FIX = 'Export the original design again as a supported file, then upload a
 export function checkArtworkBytes(head, tail, size, type, at, { pngStructure = null } = {}) {
   let valid = false;
   const detected = inspectArtwork(head, type);
-  if (type === 'application/pdf') {
+  if (type === DOCX_CONTENT_TYPE) {
+    valid = head.length === size && detected?.kind === 'document';
+  } else if (type === 'application/pdf') {
     valid = head.subarray(0, 5).toString() === '%PDF-' && /%%EOF\s*$/.test(tail.toString('latin1'))
       && detected?.pageCount > 0 && !/\/Encrypt\b/.test(head.toString('latin1'))
       && /startxref\s+(\d+)\s+%%EOF\s*$/.test(tail.toString('latin1'))

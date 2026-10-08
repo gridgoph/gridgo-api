@@ -1,3 +1,4 @@
+import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { canViewThread } from "./support-chat.js";
@@ -151,6 +152,7 @@ const EXTENSION_CONTENT_TYPES = new Map([
   [".png", "image/png"],
   [".webp", "image/webp"],
   [".pdf", "application/pdf"],
+  [".docx", DOCX_CONTENT_TYPE],
   [".psd", "image/vnd.adobe.photoshop"],
 ]);
 const HEIC_EXTENSIONS = new Set([".heic", ".heif"]);
@@ -402,6 +404,22 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
   }
 }
 
+/** DOCX needs its bounded complete ZIP directory, beyond the multipart header. */
+export async function validateUploadFromDisk(file, purpose = "artwork") {
+  if (purpose !== "artwork" || path.extname(file?.originalFilename || "").toLowerCase() !== ".docx"
+      || !file?.tempPath || file.size > DOCX_MAX_BYTES) return validateUpload(file, purpose);
+  const handle = await fs.open(file.tempPath, "r");
+  try {
+    const size = (await handle.stat()).size;
+    if (size !== file.size || size > DOCX_MAX_BYTES) {
+      fail(415, "invalid_file_type", "The uploaded DOCX is incomplete.", { reason: "file_type_mismatch", purpose });
+    }
+    const bytes = Buffer.alloc(size);
+    const { bytesRead } = await handle.read(bytes, 0, size, 0);
+    return validateUpload({ ...file, sniffBytes: bytes.subarray(0, bytesRead) }, purpose);
+  } finally { await handle.close(); }
+}
+
 export function validateUpload(file, purpose = "artwork") {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
@@ -430,6 +448,9 @@ export function validateUpload(file, purpose = "artwork") {
 
   const extension = path.extname(originalFilename).toLowerCase();
   const sniffBytes = Buffer.from(file.sniffBytes || []);
+  if (extension === ".docx" && file.size > DOCX_MAX_BYTES) {
+    fail(413, "file_too_large", "DOCX artwork must be 16 MiB or smaller.", { purpose, maxBytes: DOCX_MAX_BYTES, maxMiB: 16 });
+  }
   const sniffedContentType = sniffContentType(sniffBytes);
   if (HEIC_EXTENSIONS.has(extension) || sniffedContentType === "image/heic") {
     fail(
@@ -448,7 +469,7 @@ export function validateUpload(file, purpose = "artwork") {
       415,
       "invalid_file_type",
       purpose === "artwork"
-        ? "This file type is not supported. Choose a JPEG, PNG, WebP, PDF, or Photoshop file and try again."
+        ? "This file type is not supported. Choose a JPEG, PNG, WebP, PDF, DOCX, or Photoshop file and try again."
         : "This file type is not supported. Choose a JPEG, PNG, WebP, or PDF file and try again.",
       { reason: "content_type_not_allowed", purpose, allowedContentTypes: policy.contentTypes },
     );
@@ -462,7 +483,7 @@ export function validateUpload(file, purpose = "artwork") {
       415,
       "invalid_file_type",
       purpose === "artwork"
-        ? "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, PDF, or Photoshop and try again."
+        ? "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, PDF, DOCX, or Photoshop and try again."
         : "The filename, file contents, and reported type do not agree. Export the file as JPEG, PNG, WebP, or PDF and try again.",
       {
         reason: "file_type_mismatch",
@@ -486,6 +507,7 @@ export function validateUpload(file, purpose = "artwork") {
 }
 
 function sniffContentType(bytes) {
+  if (bytes.length >= 4 && bytes.readUInt32LE(0) === 0x04034b50) return inspectDocx(bytes) ? DOCX_CONTENT_TYPE : null;
   if (bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-") return "application/pdf";
   if (bytes.length >= 4 && bytes.subarray(0, 4).toString("ascii") === "8BPS") return "image/vnd.adobe.photoshop";
   if (
