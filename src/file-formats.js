@@ -1,3 +1,5 @@
+import { DOCX_CONTENT_TYPE } from "./docx.js";
+
 /**
  * Platform file types a listing may name, and which of those GRIDGO can store.
  *
@@ -14,6 +16,7 @@ export const UNOPENED_FILE_MESSAGE =
 /** Magic-byte types `purpose=artwork` will store. Keys are sniffed MIME. */
 export const ARTWORK_UPLOAD_MIME_TO_CODE = Object.freeze({
   "application/pdf": "pdf",
+  [DOCX_CONTENT_TYPE]: "docx",
   "image/png": "png",
   "image/jpeg": "jpeg",
   "image/webp": "webp",

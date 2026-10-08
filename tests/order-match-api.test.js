@@ -1,3 +1,4 @@
+import { docx, zip } from './helpers/docx.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -2766,4 +2767,113 @@ for (const groupCount of [1, 2]) {
   const job = await call(`/orders/${orderId}`, { subject: "clerk_supplier_a" });
   assert.equal(job.status, 200);
   assert.deepEqual(job.body.order.productionItems[0].documentPages, expected);
+});
+
+test('DOCX upload, PDF/DOCX listing override and per-page checkout retain inspected or entered counts', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    Object.assign(store.catalogItems.find(row => row.id === 'item_supplier_a'), { pricingUnit: 'per_page', basePriceMinor: 300 });
+    store.catalogOptionGroups.push({ id: 'docx_size', catalogItemId: 'item_supplier_a', name: 'Size', kind: 'spec', required: true, sortOrder: 0, version: 1, createdAt: AT, updatedAt: AT });
+    store.catalogOptions.push({ id: 'docx_a4', optionGroupId: 'docx_size', label: 'A4', priceModifierMinor: 0, active: true, sortOrder: 0, createdAt: AT, updatedAt: AT });
+    await saveStore(database, store);
+  });
+  // Only object storage is simulated. HTTP auth, upload parsing, DB, listing
+  // acceptance, pricing and checkout use the production paths.
+  const objects = new Map();
+  const storage = http.createServer((req, res) => {
+    if (req.url.includes('location')) { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<LocationConstraint></LocationConstraint>'); return; }
+    if (req.method === 'PUT') {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => { objects.set(req.url, Buffer.concat(chunks)); res.writeHead(200, { ETag: '"fixture"' }); res.end(); });
+      return;
+    }
+    res.writeHead(200, { 'Content-Length': objects.get(req.url)?.length || 0 }); res.end();
+  });
+  await new Promise(resolve => storage.listen(0, '127.0.0.1', resolve));
+  t.after(() => { storage.closeAllConnections(); return new Promise(resolve => storage.close(resolve)); });
+  const storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  const instance = await startApi({ extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const configured = await call('/me/catalog-items/item_supplier_a/file-formats', {
+    method: 'PUT', subject: 'clerk_supplier_a', body: { expectedVersion: 1, mode: 'override', formatCodes: ['pdf', 'docx'] },
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+  const approved = await call('/ops/catalog-reviews/item_supplier_a/decision', { method: 'POST', subject: 'clerk_ops',
+    body: { expectedVersion: configured.body.item.version, status: 'approved', photosUnbranded: true } });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  const listing = (await call('/catalog/items/item_supplier_a')).body.item;
+  assert.deepEqual(listing.acceptedFormats.map(row => row.code).sort(), ['docx', 'pdf']);
+  const registry = await call('/accepted-file-formats');
+  assert.equal(registry.body.formats.find(row => row.code === 'docx').uploadable, true);
+  const mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const upload = async (bytes, type = mime, name = 'document.docx', status = 201) => {
+    const form = new FormData(); form.set('purpose', 'artwork');
+    form.set('file', new Blob([bytes], { type }), name);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
+      const body = await response.json();
+      if (body.error === 'storage_initializing') { await new Promise(resolve => setTimeout(resolve, 25)); continue; }
+      assert.equal(response.status, status, JSON.stringify(body));
+      return body;
+    }
+    assert.fail('Storage did not initialize');
+  };
+  const renamed = await upload(zip([['hello.txt', 'not Word']]), mime, 'renamed.docx', 415);
+  assert.equal(renamed.error, 'invalid_file_type');
+  const valid = (await upload(docx('7'))).file;
+  const unknown = (await upload(docx(null), 'application/octet-stream')).file;
+  const jpeg = (await upload(readFileSync(new URL('./fixtures/artwork-check/pixel.jpg', import.meta.url)), 'image/jpeg', 'photo.jpg')).file;
+  assert.equal(jpeg.artworkCheck.status, 'passed', 'JPEG refusal must come from listing acceptance, not unreadable bytes');
+  assert.equal(valid.artworkCheck.status, 'passed');
+  assert.equal(valid.detected.pageCount, 7);
+  assert.equal(unknown.artworkCheck.status, 'passed');
+  assert.equal(unknown.detected.pageCount, null);
+  for (const [file, pages, range, expected] of [
+    [valid, 99, '2-4', { total: 7, range: '2-4', printed: 3 }],
+    [unknown, 9, '2-4', { total: 9, range: '2-4', printed: 3 }],
+  ]) {
+    const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+    const lineBody = { catalogItemId: 'item_supplier_a', optionIds: ['docx_a4'], quantity: 2 };
+    const add = body => call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { ...lineBody, ...body } });
+    assert.equal((await add({ artworkFileId: jpeg.fileId })).body.error, 'artwork_file_format_not_accepted');
+    const added = await add({ artworkFileId: file.fileId, measurement: { pages }, pageRange: range });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    const lineId = added.body.cart.lines[0].id;
+    assert.deepEqual(added.body.cart.lines[0].documentPages, expected);
+    const patch = body => call(`/me/carts/${cartId}/lines/${lineId}`, { method: 'PATCH', body });
+    assert.equal((await patch({ artworkFileId: jpeg.fileId })).body.error, 'artwork_file_format_not_accepted');
+    assert.deepEqual((await patch({ quantity: 3 })).body.cart.lines[0].documentPages, expected);
+    if (file === unknown) {
+      await patch({ artworkFileId: valid.fileId });
+      const replaced = await patch({ artworkFileId: unknown.fileId });
+      assert.equal(replaced.body.cart.lines[0].documentPages, null, 'replacement cannot inherit another file count');
+      for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.equal((await patch({ measurement: { pages: invalid } })).status, 400);
+      }
+      assert.deepEqual((await patch({ measurement: { pages }, pageRange: range })).body.cart.lines[0].documentPages, expected);
+    }
+    const place = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: {
+      payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: `DOCX-${file.fileId}` },
+    } });
+    // A previously saved cart also has to pass the current listing gate.
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.cartLines.find(row => row.id === lineId).artworkFileId = jpeg.fileId;
+      await saveStore(database, store);
+    });
+    assert.equal((await place()).body.error, 'artwork_file_format_not_accepted');
+    await patch({ artworkFileId: file.fileId, measurement: { pages }, pageRange: range });
+    const checkout = await place();
+    assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+    const persisted = (await loadStore(database)).orderLineItems.find(row => row.artworkFileId === file.fileId);
+    assert.deepEqual(persisted.documentPages, expected);
+    assert.deepEqual(persisted.measurement, { pages: 3 });
+    assert.equal(persisted.lineSubtotalMinor, 2700, 'three copies of three selected pages at PHP 3');
+    assert.deepEqual(persisted.acceptedFormatCodesSnapshot.sort(), ['docx', 'pdf']);
+  }
 });

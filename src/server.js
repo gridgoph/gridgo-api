@@ -92,7 +92,7 @@ import {
   publicFile,
   readArtworkMeasurements,
   resolveFileTarget,
-  validateUpload,
+  validateUploadFromDisk,
 } from "./attachments.js";
 import {
   isPublicSupplierCatalogRoute,
@@ -2709,7 +2709,7 @@ async function handleRequest(req, res) {
         }
         const purpose = String(fields.purpose || "");
         authorizeFileUpload(user, purpose);
-        const detectedContentType = validateUpload(file, purpose);
+        const detectedContentType = await validateUploadFromDisk(file, purpose);
         if (storageInitializing) {
           throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
         }

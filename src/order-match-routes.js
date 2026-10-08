@@ -1,3 +1,5 @@
+import { listingAcceptsArtwork } from "./file-formats.js";
+import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
@@ -292,9 +294,29 @@ function fileFor(store, user, fileId, purpose, field) {
   return file;
 }
 
+function assertListingArtwork(store, item, line) {
+  if (!line.artworkFileId) return;
+  const file = (store.files || []).find(row => row.fileId === line.artworkFileId);
+  if (!listingAcceptsArtwork(publicCatalogItem(store, item)?.acceptedFormats, file?.detectedContentType)) {
+    fail(409, "artwork_file_format_not_accepted", "Choose an artwork file type accepted by this listing.",
+      { lineId: line.id, fileId: line.artworkFileId, field: "artwork" });
+  }
+}
+
 function syncDocumentPages(store, item, line, body, { required = false, previousFileId = line.artworkFileId } = {}) {
   const range = Object.hasOwn(body, "pageRange") ? body.pageRange
     : previousFileId !== line.artworkFileId ? null : line.documentPages?.range ?? null;
+  const file = (store.files || []).find(row => row.fileId === line.artworkFileId && row.state === "ready" && row.purpose === "artwork");
+  if (item.pricingUnit === "per_page" && file?.detectedContentType === DOCX_CONTENT_TYPE
+      && !(Number.isSafeInteger(file.detected?.pageCount) && file.detected.pageCount > 0)) {
+    if (previousFileId !== line.artworkFileId || Object.hasOwn(body, "measurement")) {
+      line.documentPages = null;
+      line.measurement = null;
+    }
+    if (body.measurement?.pages != null) {
+      line.measurement = { pages: positiveInteger(body.measurement.pages, "measurement.pages") };
+    }
+  }
   const pages = documentPagesFor(store, item, line, range, { required });
   if (item.pricingUnit === "per_page") {
     line.documentPages = pages;
@@ -765,6 +787,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       fail(409, "catalog_item_stale", "A cart listing changed or is no longer public. Refresh the cart before checkout.", { lineId: line.id });
     }
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
+    assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, {}, { required: true });
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (!line.artworkFileId && !(line.artworkLinks || []).length) {
@@ -1415,6 +1438,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     assertMatchDeadline(store, item, line, at);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
     if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
+    assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, body);
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
@@ -1467,6 +1491,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
+    if (patchedItem && Object.hasOwn(body, "artworkFileId")) assertListingArtwork(store, patchedItem, line);
     if (patchedItem) syncDocumentPages(store, patchedItem, line, body, { previousFileId: storedLine.artworkFileId });
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
