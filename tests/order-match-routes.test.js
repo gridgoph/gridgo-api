@@ -65,7 +65,7 @@ function fixture() {
     shop: { lat: 7.09, lng: 125.63, label: "Shop B" }, turnaroundHours: 24,
   });
   store.files.push(
-    { fileId: "file_art", ownerId: client.id, purpose: "artwork", artworkCheck: { status: "passed", checkedAt: AT }, state: "ready", objectKey: "client/art.pdf", references: [] },
+    { fileId: "file_art", ownerId: client.id, purpose: "artwork", detectedContentType: "application/pdf", artworkCheck: { status: "passed", checkedAt: AT }, state: "ready", objectKey: "client/art.pdf", references: [] },
     { fileId: "file_mock", ownerId: client.id, purpose: "mockup", state: "ready", objectKey: "client/mock.jpg", references: [] },
     { fileId: "file_qr", ownerId: client.id, purpose: "payment_proof", state: "ready", objectKey: "client/qr.jpg", references: [] },
   );

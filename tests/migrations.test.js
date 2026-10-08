@@ -139,6 +139,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791954000000_document_page_ranges",
         "1791957600000_delivery_chat_images",
         "1791961200000_order_qa_checklist",
+        "1791964800000_docx_artwork",
       ],
     );
 
@@ -320,6 +321,23 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
 
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+
+    assert.deepEqual((await client.query("SELECT extensions, mime_types FROM accepted_file_formats WHERE code='docx'")).rows[0], {
+      extensions: ['docx'], mime_types: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    });
+    await client.query(`INSERT INTO files
+      (file_id, owner_id, purpose, original_filename, declared_content_type, detected_content_type,
+        size_bytes, state, object_key, created_at, position)
+      VALUES ('docx_guard', 'multi_role_shop', 'artwork', 'print.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        100, 'ready', 'docx-guard', now(), 0)`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /DOCX uploads exist/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM files WHERE file_id='docx_guard'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT 1 FROM accepted_file_formats WHERE code='docx'")).rowCount, 0);
 
     const checklistConstraint = async () => (await client.query(`SELECT 1 FROM pg_constraint c
       JOIN pg_namespace n ON n.oid = c.connamespace

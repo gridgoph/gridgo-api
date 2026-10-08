@@ -125,7 +125,7 @@ Validation uses the filename extension, the declared part MIME when it is specif
 
 | Purpose | Upload role | Allowed detected types | Maximum |
 |---|---|---|---|
-| `artwork` | client | JPEG, PNG, WebP, PDF, Photoshop (`image/vnd.adobe.photoshop`, magic `8BPS`) | 200 MiB (`209715200`) |
+| `artwork` | client | JPEG, PNG, WebP, PDF, DOCX, Photoshop (`image/vnd.adobe.photoshop`, magic `8BPS`) | 200 MiB (`209715200`); DOCX 16 MiB (`16777216`) |
 | `mockup` | client | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `production_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
@@ -146,7 +146,32 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
 
-Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`). HEIC/HEIF is deliberately rejected with `415 invalid_file_type` with `reason: "heic_not_supported"`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
+Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`) and DOCX (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `.docx`). HEIC/HEIF is deliberately rejected with `415 invalid_file_type` with `reason: "heic_not_supported"`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
+
+DOCX is artwork-only. The complete ZIP is checked before storage: at most 16 MiB
+compressed, 2,048 entries, 16 MiB expanded per entry and 64 MiB expanded overall,
+with at most a 200:1 compression ratio per entry. Stored and deflated entries,
+including data descriptors, are supported. CRCs, declared lengths, local and
+central headers must agree; duplicate/unsafe paths, overlaps, encrypted, ZIP64,
+macro-bearing and unsupported compression containers are refused. A renamed
+arbitrary ZIP is not a DOCX: `[Content_Types].xml` must identify the Word main
+part and `word/document.xml` must contain Word document/body markup. Malformed
+or over-budget packages return `415 invalid_file_type`; DOCX uploads above
+16 MiB return `413 file_too_large`. No archive entry is extracted to disk, no
+external XML entity or relationship is fetched, and no document is rendered.
+This is a bounded package check, not a full Word validator or print preview.
+
+The automatic artwork verdict accepts a structurally valid DOCX even without
+page metadata. `detected` uses `kind: "document"`, `pageCount` from a positive
+safe-integer `docProps/app.xml` `<Pages>` value, or `null` when absent/unusable.
+Dimensions stay unknown. Word's cached page count is advisory and can depend on
+fonts/layout; Operations still checks print readiness. See [document page
+selection](ORDER_MATCH_API.md#document-page-selection) for manual DOCX counts.
+
+Client file pickers must offer `.docx` and its MIME above (or use the governed
+registry's uploadable types); clients must permit entering `measurement.pages`
+when a DOCX's detected count is null. This API change does not update any app.
+
 
 The upload request timeout defaults to 15 minutes. Clients may show transfer progress, but progress reaching 100% is **not success**. Only a `201` response containing `file.fileId` means MinIO storage and `ready` metadata both completed. Retry after any lost connection or non-201 response; never invent or reuse a guessed ID.
 

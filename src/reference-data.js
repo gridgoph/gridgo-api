@@ -25,6 +25,7 @@ export function defaultZones() {
 export function defaultAcceptedFileFormats() {
   return [
     { code: "pdf", displayName: "PDF", inputKind: "file", extensions: ["pdf"], mimeTypes: ["application/pdf"], active: true },
+    { code: "docx", displayName: "Word document", inputKind: "file", extensions: ["docx"], mimeTypes: ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"], active: true },
     { code: "png", displayName: "PNG", inputKind: "file", extensions: ["png"], mimeTypes: ["image/png"], active: true },
     { code: "jpeg", displayName: "JPEG", inputKind: "file", extensions: ["jpg", "jpeg"], mimeTypes: ["image/jpeg"], active: true },
     { code: "webp", displayName: "WebP", inputKind: "file", extensions: ["webp"], mimeTypes: ["image/webp"], active: true },

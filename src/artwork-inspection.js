@@ -1,3 +1,4 @@
+import { DOCX_CONTENT_TYPE, inspectDocx } from "./docx.js";
 import zlib from "node:zlib";
 
 /**
@@ -465,7 +466,10 @@ export function inspectArtwork(bytes, contentType) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 16) return null;
 
   let read = null;
-  if (contentType === "application/pdf") {
+  if (contentType === DOCX_CONTENT_TYPE) {
+    const docx = inspectDocx(bytes);
+    if (docx) read = { kind: "document", pageCount: docx.pageCount };
+  } else if (contentType === "application/pdf") {
     read = inspectPdf(bytes);
   } else if (contentType === "image/png") {
     const raster = inspectPng(bytes);

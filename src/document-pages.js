@@ -1,3 +1,4 @@
+import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { PricingError } from './pricing.js';
 
 const invalidRange = () => new PricingError(400, 'invalid_page_range',
@@ -29,14 +30,17 @@ export function selectDocumentPages(total, range = null) {
   };
 }
 
-/** Only server-inspected upload metadata determines billable document pages. */
+/** Detected counts win; DOCX without Pages metadata permits a client count. */
 export function documentPagesFor(store, item, line, range = line.documentPages?.range ?? null, { required = false } = {}) {
   if (item.pricingUnit !== 'per_page') {
     if (range != null) throw new PricingError(400, 'page_range_not_accepted', 'This listing is not priced by the page.', { field: 'pageRange' });
     return null;
   }
   const file = (store.files || []).find(row => row.fileId === line.artworkFileId && row.state === 'ready' && row.purpose === 'artwork');
-  const total = file?.detected?.pageCount;
+  let total = file?.detected?.pageCount;
+  if ((!Number.isSafeInteger(total) || total < 1) && file?.detectedContentType === DOCX_CONTENT_TYPE) {
+    total = line.documentPages?.total ?? line.measurement?.pages;
+  }
   if (!Number.isSafeInteger(total) || total < 1) {
     if (required || range != null) throw new PricingError(409, 'document_page_count_required',
       'Upload a document with a readable page count. If needed, export it as a PDF and upload it again.', { field: 'artwork', lineId: line.id });
