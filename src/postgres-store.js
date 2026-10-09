@@ -114,6 +114,7 @@ export function emptyStore() {
     ...emptyStaffStore(),
     ...emptyVoucherStore(),
     version: 3,
+    legalPenaltyGate: null,
     users: [],
     userRoleMemberships: [],
     clientProfiles: [],

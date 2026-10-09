@@ -37,9 +37,28 @@ async function withMigrationSchema(t, fn) {
   await fn({ schema, client });
 }
 
-test("fresh PostgreSQL migrates through onboarding, enrollment, and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
+// Legal history is deliberately forward-only. Exercise the historical rollback
+// chain only up to the last migration preceding that boundary.
+const HISTORICAL_ROLLBACK_TIMESTAMP = 1791972000000;
+
+test("fresh PostgreSQL installs legal evidence tables and refuses rollback", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
+    const tables = new Set((await client.query(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = $1", [schema],
+    )).rows.map((row) => row.table_name));
+    for (const table of ["legal_documents", "legal_versions", "legal_acceptances", "privacy_requests"]) {
+      assert.ok(tables.has(table), `${table} should exist after up`);
+    }
+    assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name,
+      "1791975600000_legal_privacy");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /legal evidence must be retained/);
+  });
+});
+
+test("historical PostgreSQL migrations through onboarding, enrollment, and money additions reverse in order", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner({ ...migrationOptions(schema, "up", HISTORICAL_ROLLBACK_TIMESTAMP, client), timestamp: true });
 
     const tables = new Set((await client.query(
       "SELECT table_name FROM information_schema.tables WHERE table_schema = $1",
@@ -1103,7 +1122,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
-    await runner(migrationOptions(schema, "up", undefined, client));
+    await runner({ ...migrationOptions(schema, "up", HISTORICAL_ROLLBACK_TIMESTAMP, client), timestamp: true });
     const { count } = (await client.query(`SELECT count(*)::integer AS count FROM pgmigrations
       WHERE name >= '1786978800000_rider_delivery_commission'`)).rows[0];
     await runner(migrationOptions(schema, "down", count, client));
