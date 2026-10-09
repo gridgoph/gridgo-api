@@ -1,3 +1,4 @@
+import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
@@ -90,6 +91,7 @@ const TABLES = [
   // Money is relational; policy and bounded warning history are snapshots.
   { name: "production_lapses", keys: ["id"], columns: ["id", "order_id", "supplier_id", "tier", "deadline_at", "detected_at", "rate_bps", "deduction_minor", "remaining_balance_minor", "applied_at", "data"] },
   ...refundTableDefinitions,
+  ...voucherTables,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
@@ -109,6 +111,7 @@ const TABLES = [
 export function emptyStore() {
   return {
     ...emptyStaffStore(),
+    ...emptyVoucherStore(),
     version: 3,
     users: [],
     userRoleMemberships: [],
@@ -179,6 +182,7 @@ export function emptyStore() {
 function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   staffRows(store, rows);
+  voucherRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
@@ -771,6 +775,7 @@ export async function loadStore(database) {
   }
   const store = emptyStore();
   loadStaffRows(store, loaded);
+  loadVoucherRows(store, loaded);
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
   const settings = loaded.platform_settings[0];

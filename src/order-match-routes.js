@@ -1,3 +1,5 @@
+import { voucherMoney, applyVoucherMoney } from './voucher-money.js';
+import { selectVoucher, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
@@ -440,7 +442,22 @@ function cartDelivery(store, cart, supplierId, lines) {
   return { ...farthest, feeMinor: deliveryFeeForDistance(farthest.distance, store.settings) };
 }
 
-function clientCartQuote(store, cart, lines) {
+function cartVoucherPlan(store, cart, lines, at) {
+  const grouped = cartGroups(cart, lines);
+  const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, grouped.length);
+  const money = grouped.map((group, index) => {
+    const amounts = group.lines.map(line => cartLineSubtotal(store, line));
+    const supplierSubtotalMinor = amounts.some(amount => amount == null) ? null : addMinor(amounts, "voucher.items");
+    const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? pickupShares[index] : cartDelivery(store, cart, group.supplierId, group.lines).feeMinor;
+    if (supplierSubtotalMinor == null || deliveryFeeMinor == null) return null;
+    return { supplierSubtotalMinor, deliveryFeeMinor, ...organizationFeeMoney(supplierSubtotalMinor, store.settings, approvedOrganization(store, cart.clientId)) };
+  });
+  if (money.some(group => !group)) return null;
+  const voucher = selectVoucher(store, cart, money, at);
+  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0) };
+}
+
+function clientCartQuote(store, cart, lines, at) {
   const reasons = [];
   if (!lines.length) reasons.push({ code: "cart_empty" });
   const subtotals = lines.map((line) => {
@@ -470,14 +487,31 @@ function clientCartQuote(store, cart, lines) {
   const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
   const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
     : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
-  const organizationDiscountMinor = subtotals.some((amount) => amount == null) ? null : addMinor(grouped.map(({ lines: entries }) => organizationFeeMoney(
+  let organizationDiscountMinor = subtotals.some((amount) => amount == null) ? null : addMinor(grouped.map(({ lines: entries }) => organizationFeeMoney(
     addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"), store.settings, approvedOrganization(store, cart.clientId)).organizationDiscountMinor), "quote.discount");
-  const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
+  let totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
     : addMinor([clientItemSubtotalMinor - organizationDiscountMinor, deliveryFeeMinor], "quote.total");
+  const voucherPlan = totalMinor == null ? null : cartVoucherPlan(store, cart, lines, at);
+  if (voucherPlan) {
+    organizationDiscountMinor = voucherPlan.organizationDiscountMinor;
+    totalMinor = addMinor(voucherPlan.groups.map(group => group.totalMinor), 'voucher.total');
+  }
   const downpaymentPercent = grouped.length > 1 ? 100 : downpaymentPercentSetting(store.settings);
-  const downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
+  let downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
+  if (voucherPlan?.voucher) {
+    downpaymentMinor = addMinor(voucherPlan.money.map((group, index) => {
+      const allocation = voucherPlan.groups[index], rate = downpaymentPercent * 100;
+      return roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate)
+        - Math.min(allocation.voucherServiceFeeMinor, roundBps(group.grossServiceFeeMinor, rate))
+        - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate));
+    }), 'voucher.downpayment');
+  }
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
+    voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
+    voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
+    discountKind: voucherPlan?.discountKind || null,
+    voucherGroups: voucherPlan?.groups.map((group, index) => ({ groupId: grouped[index].lines[0].id, ...group })) || [],
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
@@ -550,6 +584,13 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
   });
+  if (cart.state === 'draft') {
+    const plan = cartVoucherPlan(store, cart, lines, at);
+    if (plan) groups.forEach((group, index) => Object.assign(group, {
+      totalMinor: plan.groups[index].totalMinor, organizationDiscountMinor: plan.groups[index].organizationDiscountMinor,
+      voucherDiscountMinor: plan.groups[index].voucherDiscountMinor,
+    }));
+  }
   if (groups.length > 1) {
     for (const line of publicLines) {
       line.groupId = groups.find((group) => group.lineIds.includes(line.id)).id;
@@ -577,7 +618,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     shops: groups.length > 1 ? groups.map(({ id, label }) => ({ id, label })) : cartShops(store, lines),
     groups,
     ...(cart.checkedOutOrderId && basketForOrder(store, cart.checkedOutOrderId) ? { basketId: basketForOrder(store, cart.checkedOutOrderId).id } : {}),
-    clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines) : null,
+    clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines, at) : null,
     checkedOutOrderId: cart.checkedOutOrderId ?? null,
     createdAt: cart.createdAt,
     updatedAt: cart.updatedAt,
@@ -695,6 +736,7 @@ function publicMatchedOrder(store, order) {
       balanceStatus: order.payments.final_online.status,
     },
     jobs,
+    ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer || null),
     fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
@@ -707,7 +749,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null } = {}) {
   assertRequestFulfillment(cart, body);
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
@@ -881,7 +923,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Pickup is a per-order platform charge. The internal trip to the hub keeps
   // the existing zero-charge job contract and never earns a share of this fee.
   const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
-  const fee = organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, user.id));
+  const fee = organizationFeeMoney(itemSubtotalMinor, store.settings, !voucher && approvedOrganization(store, user.id));
   const { serviceFeeMinor } = fee;
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
@@ -942,6 +984,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // The shop's escrow stages, from its own price and never the client's total.
   snapshotPayoutPlan(order, { supplierPlatformPayoutMinor: itemSubtotalMinor });
 
+  if (voucher && voucherAllocation) applyVoucherMoney(order, voucherAllocation, voucher);
   order.invoiceNumber = invoiceNumber(orderId, at);
 
   store.orderJobs ||= [];
@@ -984,8 +1027,11 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     deliveryFeeMinor: deliveryTotalMinor,
     ...(order.hubPickup ? { hubPickup: structuredClone(order.hubPickup), pickupFeeMinor: order.pickupFeeMinor } : {}),
     ...(order.requestFulfillment ? { requestFulfillment: structuredClone(order.requestFulfillment) } : {}),
-    totalMinor,
-    paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor, balanceMinor },
+    totalMinor: order.totalMinor,
+    ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor,
+      voucherServiceFeeMinor: order.voucherServiceFeeMinor, voucherDeliveryMinor: order.voucherDeliveryMinor,
+      clientServiceFeeMinor: order.clientServiceFeeMinor, clientDeliveryFeeMinor: order.clientDeliveryFeeMinor } : {}),
+    paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor: order.payments.initial.amountMinor, balanceMinor: order.payments.final_online.amountMinor },
   };
   if (!basketId) store.orderInvoices.push({ orderId, invoiceNumber: order.invoiceNumber, issuedAt: at, snapshot: invoice });
   if (!basketId) {
@@ -1017,7 +1063,14 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
   const groups = cartGroups(cart, lines);
-  if (groups.length < 2) return checkout(store, user, cart, body, createId, at, req);
+  const plan = cartVoucherPlan(store, cart, lines, at);
+  const voucher = plan?.voucher;
+  if (groups.length < 2) {
+    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0] });
+    if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
+    else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
+    return result;
+  }
   if (groups.some(group => !group.deadline)) fail(400, "basket_deadline_required", "Set a deadline for every product before checkout.");
   const basketId = createId("bsk");
   const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
@@ -1029,10 +1082,12 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     .sort((a, b) => Date.parse(a.group.deadline) - Date.parse(b.group.deadline) || a.index - b.index)) {
     results[index] = checkout(store, user, cart, body, createId, at, req, {
       groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)),
-      pickupFeeMinor: hubPickup ? pickupShares[index] : null,
+      pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index],
     });
   }
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
+  if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: orders.map(o => o.id), amountMinor: plan.voucherDiscountMinor });
+  else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
   const first = orders[0];
   const basket = { id: basketId, clientId: user.id, receiptOrderId: first.id,
     orderIds: orders.map((order) => order.id), totalMinor: addMinor(orders.map((order) => order.totalMinor), "basket.totalMinor"),
@@ -1048,6 +1103,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     lines: results.flatMap((result) => result.invoice.lines),
     groups: results.map((result, index) => ({ orderId: result.order.id, label: result.order.groupLabel, deadline: groups[index].deadline,
       lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
+      ...(result.invoice.voucher ? { voucher: result.invoice.voucher, voucherDiscountMinor: result.invoice.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: result.invoice.grossServiceFeeMinor, organizationDiscountMinor: result.invoice.organizationDiscountMinor,
       serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
       ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
@@ -1060,6 +1116,9 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     deliveryLines: results.flatMap((result, index) => result.invoice.deliveryLines.map((line) => ({ jobId: line.jobId, shopName: result.order.groupLabel, deadline: groups[index].deadline, amountMinor: line.amountMinor }))),
     deliveryFeeMinor: addMinor(orders.map((order) => order.deliveryFeeMinor), "basket.deliveryFeeMinor"),
     totalMinor: basket.totalMinor,
+    ...(voucher ? { voucher: { id: voucher.id, campaignId: voucher.campaignId, fundedBy: 'GRIDGO', label: 'GRIDGO-funded voucher', amountMinor: plan.voucherDiscountMinor },
+      voucherDiscountMinor: plan.voucherDiscountMinor, voucherServiceFeeMinor: addMinor(orders.map(o => o.voucherServiceFeeMinor || 0), 'voucher.fee'),
+      voucherDeliveryMinor: addMinor(orders.map(o => o.voucherDeliveryMinor || 0), 'voucher.delivery') } : {}),
     paymentPlan: { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
   };
   for (const order of orders) order.invoiceNumber = first.invoiceNumber;
@@ -1212,7 +1271,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
         line.dropoff = point(input.dropoff, "dropoff", { required: false });
       }
     }
-    return { status: 200, body: { quote: clientCartQuote(store, preview, lines) }, mutated: false };
+    return { status: 200, body: { quote: clientCartQuote(store, preview, lines, now()) }, mutated: false };
   }
   if (req.method === "GET" && pathname === "/me/preferences") {
     return { status: 200, body: { preferences: publicPreference(store, user.id) }, mutated: false };
@@ -1364,6 +1423,37 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
+  }
+
+  const voucherRoute = /^\/me\/carts\/([^/]+)\/voucher$/.exec(pathname);
+  if (voucherRoute && ['GET', 'POST', 'DELETE'].includes(req.method)) {
+    const cart = ownCart(store, user, voucherRoute[1], { draft: true });
+    const at = now();
+    availableVouchers(store, user.id, at, cart.id);
+    if (req.method !== 'GET') {
+      let voucher = null;
+      if (req.method === 'POST') {
+        const body = record(await readBody(req));
+        if (body.code != null) {
+          const added = addVoucherCode(store, user.id, body.code, { id, at });
+          if (added.status >= 400) return added;
+          body.voucherId = added.body.voucher.id;
+        }
+        voucher = availableVouchers(store, user.id, at, cart.id).find(v => v.id === body.voucherId);
+        if (!voucher) fail(409, 'voucher_unavailable', 'Choose an available voucher.');
+      }
+      let choice = store.voucherCartChoices.find(c => c.id === cart.id);
+      if (!choice) { choice = { id: cart.id }; store.voucherCartChoices.push(choice); }
+      Object.assign(choice, { voucherId: voucher?.id || null, removed: req.method === 'DELETE' });
+      releaseVoucherReservations(store, { id, at }, r => r.cartId === cart.id);
+      if (voucher) {
+        const lines = store.cartLines.filter(line => line.cartId === cart.id).sort((a,b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+        const plan = cartVoucherPlan(store, cart, lines, at);
+        if (!plan?.voucher) fail(409, 'voucher_not_better_than_organization', 'The organization discount is equal or greater.');
+        reserveVoucher(store, voucher, cart, { id, at });
+      }
+    }
+    return { status: 200, body: { cart: publicCart(store, cart, at), serverTime: at }, mutated: req.method !== 'GET' };
   }
 
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);

@@ -1,3 +1,6 @@
+import { routeVouchers } from './voucher-routes.js';
+import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
+import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeAccountDeletion } from './account-deletion.js';
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
@@ -275,6 +278,7 @@ const fileRetention = createFileRetention({ database, storage: objectStorage,
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const organizationMailer = createOrganizationMailer(process.env);
+const drainVoucherEmail = createVoucherEmailWorker({ database, env: process.env });
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
 // under their own advisory lock and can never hold up the domain lock that
@@ -302,6 +306,7 @@ function kickPushDrain() {
 
 async function save(store) {
   await reconcileCalls(database, store, { createId: id, at: now() });
+  cancelVoucherReservations(store, { id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
     // Existing completed/ready orders keep their legacy contract until a new
@@ -2331,6 +2336,17 @@ async function handleRequest(req, res) {
     if (pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
+    const voucherResponse = await routeVouchers({ req, url, store, user, readBody, readRawBody, now, id });
+    if (voucherResponse) {
+      if (voucherResponse.mutated) await save(store);
+      if (voucherResponse.bytes) {
+        res.writeHead(voucherResponse.status, { 'Content-Type': voucherResponse.contentType,
+          'Content-Disposition': `attachment; filename="${voucherResponse.filename}"`, 'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(voucherResponse.bytes);
+      }
+      return send(res, voucherResponse.status, voucherResponse.body);
     }
     const organizationResponse = await routeOrganization({ req, url, store, user, readBody, now, createId: id,
       mailer: organizationMailer, emailSecret: process.env.CLERK_SECRET_KEY });
@@ -5205,6 +5221,7 @@ async function handleRequest(req, res) {
       }
       const body = await readBody(req);
       const confirmedAt = now();
+      if (installmentCode === 'initial') confirmVoucher(store, [order], { id, at: confirmedAt, actorId: user.id });
       const previousState = order.state;
       installment.status = "confirmed";
       installment.confirmedAt = confirmedAt;
@@ -6651,6 +6668,11 @@ async function runLifecycleWork() {
           if (sweepHubReminders(store, { at: now(), id })) await save(store);
         });
       },
+      async () => enqueueMutation(async () => {
+        const store = await load();
+        if (sweepVouchers(store, { id, at: now() })) await save(store);
+      }),
+      drainVoucherEmail,
       sweepOrganizationOfficers,
       sweepDeliveryChats,
       sweepPickupChats,
