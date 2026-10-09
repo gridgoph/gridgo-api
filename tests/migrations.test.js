@@ -140,7 +140,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791957600000_delivery_chat_images",
         "1791961200000_order_qa_checklist",
         "1791964800000_docx_artwork",
-        "1791968400000_operating_hours",
+        "1791975800000_operating_hours",
       ],
     );
 

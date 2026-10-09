@@ -36,7 +36,7 @@ Closure ranges include both dates and must be real `YYYY-MM-DD` dates. Each rang
 
 **Priority Delivery is not offered yet.** The cutoff is persisted and audited but unused. Do not introduce a `priority` or `express` service level or infer an offer from this setting. Cart service levels remain `standard | scheduled`.
 
-Each successful edit increments the existing settings version and writes `settings.operational_update`, including `previous`, `current`, `reviewDelayedOrderIds`, actor and reason. Settings, delay tags, audit and realtime invalidations commit in the existing domain transaction. Migration `1791968400000` installs defaults only when absent and increments the settings version; it does not rewrite orders or penalties. Fresh reference seeding also supplies the defaults.
+Each successful edit increments the existing settings version and writes `settings.operational_update`, including `previous`, `current`, `reviewDelayedOrderIds`, actor and reason. Settings, delay tags, audit and realtime invalidations commit in the existing domain transaction. Migration `1791975800000` installs defaults only when absent and increments the settings version; it does not rewrite orders or penalties. Fresh reference seeding also supplies the defaults.
 
 ## Calendar and ready-by
 
