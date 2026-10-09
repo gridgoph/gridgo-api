@@ -1,3 +1,4 @@
+import { slaDueAt } from './operating-hours.js';
 /**
  * Production inactivity reminders.
  *
@@ -112,7 +113,7 @@ export function lastShopProductionAt(order, store) {
  * reminder — updating the job resets the clock. Null when reminders are off,
  * the silence has no anchor, or `maxCount` is already used up.
  */
-export function nextNudgeDueAt(lastShopAt, lastNudgeAt, alreadySentCount, policy) {
+export function nextNudgeDueAt(lastShopAt, lastNudgeAt, alreadySentCount, policy, clock = null) {
   if (!policy?.enabled) return null;
   if (!Number.isInteger(alreadySentCount) || alreadySentCount < 0) return null;
   if (!Number.isInteger(policy.maxCount) || alreadySentCount >= policy.maxCount) return null;
@@ -120,10 +121,10 @@ export function nextNudgeDueAt(lastShopAt, lastNudgeAt, alreadySentCount, policy
   const afterMs = Number.isFinite(policy.afterMs) ? policy.afterMs : policy.afterHours * 60 * 60 * 1000;
   const everyMs = Number.isFinite(policy.everyMs) ? policy.everyMs : policy.everyHours * 60 * 60 * 1000;
   if (!Number.isFinite(afterMs) || !Number.isFinite(everyMs)) return null;
-  if (alreadySentCount === 0) return new Date(Date.parse(lastShopAt) + afterMs).toISOString();
+  if (alreadySentCount === 0) return slaDueAt(clock, lastShopAt, afterMs);
   if (!lastNudgeAt || Number.isNaN(Date.parse(lastNudgeAt))) return null;
-  const repeatAt = Date.parse(lastNudgeAt) + everyMs;
-  const resetAt = Date.parse(lastShopAt) + afterMs;
+  const repeatAt = Date.parse(slaDueAt(clock, lastNudgeAt, everyMs));
+  const resetAt = Date.parse(slaDueAt(clock, lastShopAt, afterMs));
   return new Date(Math.max(repeatAt, resetAt)).toISOString();
 }
 
@@ -194,7 +195,7 @@ export function applyProductionNudges(store, { at, createId, limit = 100 } = {})
     if (activePayoutHold(store, order)) continue;
     const sent = sentForState(store, order);
     const lastNudgeAt = sent.reduce((latest, notification) => laterIso(latest, notification.at), null);
-    const due = nextNudgeDueAt(lastShopProductionAt(order, store), lastNudgeAt, sent.length, policy);
+    const due = nextNudgeDueAt(lastShopProductionAt(order, store), lastNudgeAt, sent.length, policy, order.operatingClock);
     if (!due || Date.parse(due) > Date.parse(at)) continue;
     const n = sent.length + 1;
     if (n > policy.maxCount) continue;
