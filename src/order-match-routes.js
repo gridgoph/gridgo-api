@@ -1,3 +1,4 @@
+import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './operating-hours.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
@@ -545,7 +546,16 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
     const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, cart.clientId));
     const serviceFeeMinor = fee?.grossServiceFeeMinor ?? null;
-    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, lineIds: groupLines.map((line) => line.id),
+    let readyBy = null;
+    try {
+      const items = groupLines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
+      if (items.every(Boolean) && groupLines.every(line => publicLines.find(row => row.id === line.id)?.promiseBy)) {
+        readyBy = projectShopFinish(store, { supplierId, now: at,
+          turnaroundHours: Math.max(...items.map(item => itemTurnaroundHours(item, store.supplierServices.find(service => service.id === item.supplierServiceId)))),
+          units: groupLines.reduce((sum, line) => sum + line.quantity, 0) }).projection.promiseBy;
+      }
+    } catch (error) { if (!(error instanceof AvailabilityError)) throw error; }
+    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, lineIds: groupLines.map((line) => line.id),
       ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
@@ -561,8 +571,13 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       }
     }
   }
+  const operatingStatus = reviewTiming(store.settings, at);
+  const readyBy = groups.length && groups.every(group => group.readyBy)
+    ? groups.map(group => group.readyBy).sort().at(-1) : null;
   return {
     id: cart.id,
+    operatingStatus,
+    checkoutNotice: operatingStatus.isOpenNow ? null : { code: 'outside_operating_hours', ...operatingStatus, readyBy },
     state: cart.state,
     version: cart.version,
     serviceLevel: cart.serviceLevel,
@@ -685,6 +700,7 @@ function publicMatchedOrder(store, order) {
     // The promised date, never the shop's own. A client who can see both can
     // see the allowance.
     readyBy: order.promiseBy ?? null,
+    review: orderReviewTiming(order, store.settings),
     downpaymentPercent: orderDownpaymentPercent(order),
     paymentPlan: {
       method: "qr_manual",
@@ -725,6 +741,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const downpaymentPercent = basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
+    operatingClock: operatingClockSnapshot(store.settings, store.version),
+    reviewSchedule: reviewTiming(store.settings, at),
     clientId: user.id,
     organizationOfficer: officerSnapshot(store, user.id),
     deadline: lineDeadline(cart, cartLines[0]),

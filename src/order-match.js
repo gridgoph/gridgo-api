@@ -1,3 +1,5 @@
+import { operatingHours, reviewTiming } from './operating-hours.js';
+import { addOpeningMilliseconds } from './availability.js';
 import { shopProductionDayMinutes } from "./production-days.js";
 import { cartGroups } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
@@ -209,15 +211,22 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, turnarou
   const capacityDaily = (store.supplierServices || [])
     .filter((row) => row.supplierId === supplierId && row.state === "live")
     .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
+  const review = store.settings?.operatingHours ? reviewTiming(store.settings, now) : null;
   const projection = projectFinish({
     schedule: scheduleFor(profile),
-    now,
+    now: review?.reviewCompletesAt || now,
+    preserveSeconds: Boolean(review),
     queueMinutes: queue.minutes,
     turnaroundMinutes: hours * 60,
     units: Number.isSafeInteger(units) && units > 0 ? units : null,
     capacityDaily: capacityDaily > 0 ? capacityDaily : null,
-    allowanceMinutes: allowanceMinutesFrom(store.settings),
+    allowanceMinutes: review ? 0 : allowanceMinutesFrom(store.settings),
   });
+  if (review) {
+    projection.review = review;
+    projection.promiseBy = addOpeningMilliseconds(operatingHours(store.settings).schedule,
+      projection.readyBy, allowanceMinutesFrom(store.settings) * 60000);
+  }
   return { projection, queue };
 }
 
@@ -354,6 +363,7 @@ function otherListing(row) {
     distanceZone: row.distanceZone,
     ...(row.distanceZone?.key === "out_of_zone" ? { distanceKm: Number((row.distance / 1000).toFixed(1)) } : {}),
     ...(item.rating ? { rating: item.rating } : {}),
+    review: row.projection.review ?? null,
     readyBy: row.projection.promiseBy, placeInLine: row.queue.jobsAhead + 1,
   };
 }
@@ -416,17 +426,15 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     .filter((value) => Number.isFinite(value))
     .sort((left, right) => left - right);
 
-  const start = new Date(at);
-  start.setHours(0, 0, 0, 0);
+  const manilaDay = new Date(Date.parse(at) + 480 * 60000).toISOString().slice(0, 10);
+  const start = Date.parse(`${manilaDay}T00:00:00+08:00`);
 
   const out = [];
   /** Where the run of possible days starts, so its first two can be called tight. */
   let firstPossible = null;
   for (let index = 0; index < days; index += 1) {
-    const day = new Date(start);
-    day.setDate(day.getDate() + index);
-    const endOfDay = new Date(day);
-    endOfDay.setHours(23, 59, 59, 999);
+    const day = new Date(start + index * 86400000);
+    const endOfDay = new Date(day.getTime() + 86400000 - 1);
 
     const reachable = promises.filter((value) => value <= endOfDay.getTime()).length;
 
@@ -449,24 +457,18 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     const narrowByDate = firstPossible !== null && index - firstPossible < 2;
 
     out.push({
-      day: localDayKey(day),
+      day: new Date(day.getTime() + 480 * 60000).toISOString().slice(0, 10),
+      reason: reachable ? null : promises.length ? "review_production_delivery_exceeds_deadline" : "no_eligible_listing",
       state: reachable === 0 ? "cannot" : narrowByChoice || narrowByDate ? "tight" : "open",
     });
   }
 
   return {
     days: out,
+    operatingStatus: reviewTiming(store.settings, at),
     /** The first moment anybody could finish, or null when nobody prints this. */
     earliest: promises.length ? new Date(promises[0]).toISOString() : null,
   };
-}
-
-/** A local calendar day, which is what a client picks. */
-function localDayKey(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
 }
 
 export function matchShop(store, input = {}) {
@@ -537,6 +539,7 @@ export function matchShop(store, input = {}) {
     listings: winner.choices.map((choice) => ({
       ...choice.listing,
       readyBy: choice.projection.promiseBy,
+      review: choice.projection.review ?? null,
       placeInLine: choice.queue.jobsAhead + 1,
       distanceZone,
       ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((winner.distance / 1000).toFixed(1)) } : {}),
@@ -548,6 +551,7 @@ export function matchShop(store, input = {}) {
      * spent before the job starts.
      */
     promiseBy: winner.projection.promiseBy,
+    operatingStatus: winner.projection.review ?? null,
     /** Not for the client. Persisted when the order is placed, and what the shop is held to. */
     shopReadyBy: winner.projection.readyBy,
     score: {

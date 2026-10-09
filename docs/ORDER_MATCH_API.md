@@ -546,3 +546,11 @@ the listing's approved effective accepted formats. A mismatch is
 A listing override of exactly `pdf,docx` accepts those uploads and refuses JPEG,
 even though JPEG remains uploadable globally. A pending format revision keeps
 the previous approved acceptance set until Operations approves it.
+
+## Platform operating hours
+
+[Operating hours](OPERATING_HOURS_API.md) defines the review wait included in new
+match/cart promises, the additive `operatingStatus`, listing `review`, cart
+`checkoutNotice` and group `readyBy`, and Manila deadline-calendar reasons.
+Payment and automatic artwork checks remain available outside office hours;
+manual review and dispatch for new orders follow the live platform schedule.

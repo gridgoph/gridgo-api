@@ -140,6 +140,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791957600000_delivery_chat_images",
         "1791961200000_order_qa_checklist",
         "1791964800000_docx_artwork",
+        "1791968400000_operating_hours",
       ],
     );
 
@@ -321,6 +322,13 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
 
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+
+    await client.query(`UPDATE orders SET data = data || '{"operatingClock":{"version":1}}'::jsonb WHERE id = 'order_match_plan'`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /Operating-clock orders exist/);
+    await client.query("ROLLBACK");
+    await client.query("UPDATE orders SET data = data - 'operatingClock' WHERE id = 'order_match_plan'");
+    await runner(migrationOptions(schema, "down", 1, client));
 
     assert.deepEqual((await client.query("SELECT extensions, mime_types FROM accepted_file_formats WHERE code='docx'")).rows[0], {
       extensions: ['docx'], mime_types: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
@@ -1158,7 +1166,10 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     ]);
     await runner(migrationOptions(schema, "up", undefined, client));
     const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
-    assert.equal(migrated.version, 14);
+    assert.equal(migrated.version, 15);
+    assert.equal(migrated.settings.operatingHours.artworkReviewMinutes, 60);
+    assert.equal(migrated.settings.operatingHours.priorityDispatchCutoffMinute, 960);
+    assert.deepEqual(migrated.settings.operatingHours.schedule.week.map(row => row.weekday), [1, 2, 3, 4, 5, 6]);
     assert.deepEqual(migrated.settings.deliveryFeeBands.slice(0, 3), settings.deliveryFeeBands.slice(0, 3));
     assert.deepEqual(migrated.settings.deliveryFeeBands[3], {
       zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,

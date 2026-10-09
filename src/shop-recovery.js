@@ -18,7 +18,7 @@ const fail = (code) => { throw Object.assign(new Error(code), { status: 409, cod
 const normalized = (value) => String(value || '').trim().toLowerCase();
 
 export function startShopAcceptance(store, order, at) {
-  const schedule = structuredClone(store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
+  const schedule = structuredClone(order.operatingClock?.schedule || store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
   order.shopAcceptance = { supplierId: order.supplierId, assignedAt: at, deadlineAt: addOpeningMilliseconds(schedule, at, 3600000),
     workingMinutes: 60, schedule, status: 'pending' };
 }

@@ -257,6 +257,24 @@ export function workingMinutesBetween(schedule, from, to) {
   return total;
 }
 
+/** Exact duration for SLA thresholds; closing/opening boundaries retain milliseconds. */
+export function openingMillisecondsBetween(schedule, from, to) {
+  validateShopSchedule(schedule);
+  const start = instantOf(from, "from"), end = instantOf(to, "to");
+  if (end <= start) return 0;
+  let { dayKey, weekday } = localOf(start, schedule.utcOffsetMinutes);
+  let total = 0;
+  while (instantAt(dayKey, 0, schedule.utcOffsetMinutes) < end) {
+    for (const window of windowsOn(schedule, dayKey, weekday)) {
+      total += Math.max(0, Math.min(end, instantAt(dayKey, window.closesMinute, schedule.utcOffsetMinutes))
+        - Math.max(start, instantAt(dayKey, window.opensMinute, schedule.utcOffsetMinutes)));
+    }
+    dayKey = nextDayKey(dayKey);
+    weekday = (weekday + 1) % 7;
+  }
+  return total;
+}
+
 /** The end of the nth open day at or after `from`. Day 0 is the day work starts. */
 export function addWorkingDays(schedule, from, days) {
   const fromMs = instantOf(from, "from");
@@ -296,6 +314,7 @@ export function projectFinish({
   units = null,
   capacityDaily = null,
   allowanceMinutes = 0,
+  preserveSeconds = false,
 }) {
   if (!Number.isFinite(turnaroundMinutes) || turnaroundMinutes <= 0) {
     fail(400, "invalid_duration", "A listing needs a positive turnaround before it can be scheduled.", {
@@ -306,8 +325,9 @@ export function projectFinish({
     fail(400, "invalid_duration", "Queue time must be zero or more.", { field: "queueMinutes" });
   }
 
-  const startsAt = addWorkingMinutes(schedule, now, queueMinutes);
-  const byTurnaround = addWorkingMinutes(schedule, startsAt, turnaroundMinutes);
+  const add = preserveSeconds ? (schedule, at, minutes) => addOpeningMilliseconds(schedule, at, Math.ceil(minutes * 60000)) : addWorkingMinutes;
+  const startsAt = add(schedule, now, queueMinutes);
+  const byTurnaround = add(schedule, startsAt, turnaroundMinutes);
 
   let capacityDays = 0;
   if (Number.isSafeInteger(units) && units > 0 && Number.isSafeInteger(capacityDaily) && capacityDaily > 0) {
