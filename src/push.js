@@ -506,6 +506,12 @@ export function pushMessageFor(notification, env = process.env) {
     androidChannelId: presentation.androidChannelId,
     sound: presentation.sound,
   };
+  if (["order_call_incoming", "order_call_missed"].includes(notification.type)) return {
+    title: notification.type === "order_call_incoming" ? "Incoming voice call" : "Missed voice call",
+    body: notification.type === "order_call_incoming" ? "Open GRIDGO to answer the call." : "Open the order to call back.",
+    data, androidChannelId: presentation.androidChannelId, sound: presentation.sound,
+    ...(notification.type === "order_call_incoming" ? { transient: true } : {}),
+  };
   return {
     title: publicMessage ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
     body: publicMessage ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",
@@ -570,7 +576,7 @@ export function fcmRequestBody(message, token, { validateOnly = false } = {}) {
   };
   const aps = { sound: message.sound || "default" };
   const apns = {
-    headers: { "apns-priority": "10" },
+    headers: { "apns-priority": "10", ...(message.transient ? { "apns-expiration": "0" } : {}) },
     payload: { aps },
   };
   if (message.image) {
@@ -587,6 +593,7 @@ export function fcmRequestBody(message, token, { validateOnly = false } = {}) {
       data: message.data,
       android: {
         priority: "high",
+        ...(message.transient ? { ttl: "0s" } : {}),
         notification: androidNotification,
       },
       apns,

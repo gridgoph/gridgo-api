@@ -12,6 +12,8 @@ export function outboxVerdict(row, results, at) {
   return row.attempts >= 8 ? "failed" : "pending";
 }
 export function deviceAcceptsNotification(store, device, notification, at) {
+  if (notification.type === "order_call_incoming" &&
+      Date.parse(notification.callExpiresAt) <= Date.parse(at || new Date().toISOString())) return false;
   if (notification.type === "dispatch_available"
       && (!availableDispatch((store.orders || []).find(order => order.id === notification.orderId), store)
         || riderHasActiveDelivery(store, notification.userId))) return false;

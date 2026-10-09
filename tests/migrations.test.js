@@ -55,6 +55,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
       "delivery_chat_messages", "delivery_chat_reads", "pickup_chat_messages", "pickup_chat_reads",
+      "order_calls", "order_call_signals",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
@@ -141,6 +142,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791961200000_order_qa_checklist",
         "1791964800000_docx_artwork",
         "1791968400000_pickup_chat",
+        "1791972000000_order_calls",
       ],
     );
 
@@ -322,6 +324,10 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
 
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('order_calls') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('order_call_signals') AS t")).rows[0].t, null);
 
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='pickup_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);

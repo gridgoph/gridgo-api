@@ -127,6 +127,7 @@ export function createApnsDelivery(env = process.env, options = {}) {
               "apns-topic": topic,
               "apns-push-type": "alert",
               "apns-priority": "10",
+              ...(message.transient ? { "apns-expiration": "0" } : {}),
             });
           } catch {
             done({ ok: false, prune: false, code: "apns_transport_error" });

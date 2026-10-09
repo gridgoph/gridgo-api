@@ -214,6 +214,7 @@ import {
 import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
 import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
+import { isOrderCallRoute, routeOrderCalls, reconcileCalls, purgeClosedCalls, callParty } from "./order-calls.js";
 import {
   isFirstmateIssueReportsRoute,
   isStaffIssueReportsRoute,
@@ -300,6 +301,7 @@ function kickPushDrain() {
 }
 
 async function save(store) {
+  await reconcileCalls(database, store, { createId: id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
     // Existing completed/ready orders keep their legacy contract until a new
@@ -1528,6 +1530,15 @@ async function sweepPickupChats() {
   }
 }
 
+async function sweepOrderCallHistory() {
+  const candidate = await database.query('SELECT 1 FROM order_calls LIMIT 1');
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    await purgeClosedCalls(database, store, now());
+  });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -2467,6 +2478,8 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (await routeOrderCalls({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) return;
+
     if (await routePickupChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
       return;
     }
@@ -3097,6 +3110,8 @@ async function handleRequest(req, res) {
       const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
         if (!invalidateFrameVisible(payload.resource, eventRole)) return;
         if (eventRole && !hasRole(committedStore,user.id,eventRole) && payload.resource !== 'identity') return;
+        if (payload.resource === 'calls' && !['delivery', 'pickup'].some(pair => callParty(
+          { id: user.id, role: eventRole || user.role }, (committedStore.orders || []).find(o => o.id === payload.id), committedStore, pair))) return;
         if (payload.resource === 'location' && payload.id && !canAccessOrder(committedStore,user.id,(committedStore.orders || []).find(o=>o.id===payload.id),{role:eventRole,location:true})) return;
         res.write(formatInvalidateEvent(payload));
       });
@@ -6423,7 +6438,7 @@ const server = http.createServer((req, res) => {
     // handleRequest fails the same parse and answers 500 itself.
   }
   logHttpRequest(req, res, pathname, Date.now());
-  const mutatesStore = (req.method === "GET" && isPickupChatRoute(pathname)) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = (req.method === "GET" && (isPickupChatRoute(pathname) || isOrderCallRoute(pathname))) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // Upload/attach routes queue their own transactions. Deletion commits intent
   // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
@@ -6594,6 +6609,21 @@ function runPushTokenValidation() {
     console.warn(`push token validation failed reason=${error?.message || "unknown"}`);
   });
 }
+// A separate short tick keeps the 30s ringing deadline independent of the
+// slower file/production lifecycle. All replicas serialize through the domain lock.
+let callsBusy = false;
+async function sweepCalls() {
+  if (callsBusy) return;
+  callsBusy = true;
+  try {
+    const active = await database.query("SELECT 1 FROM order_calls WHERE state IN ('ringing','accepted') LIMIT 1");
+    if (active.rowCount) await enqueueMutation(async () => {
+      const store = await load();
+      if (await reconcileCalls(database, store, { createId: id, at: now() })) await save(store);
+    });
+  } catch { console.warn("call lifecycle sweep failed"); }
+  finally { callsBusy = false; }
+}
 let lifecycleBusy = false;
 async function runLifecycleWork() {
   if (lifecycleBusy) return;
@@ -6624,6 +6654,7 @@ async function runLifecycleWork() {
       sweepOrganizationOfficers,
       sweepDeliveryChats,
       sweepPickupChats,
+      sweepOrderCallHistory,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }
@@ -6636,6 +6667,8 @@ await realtimeTransport.start();
 server.listen(PORT, HOST, () => {
   const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));
   lifecycleTimer.unref();
+  const callsTimer = setInterval(sweepCalls, 1000);
+  callsTimer.unref();
   void runLifecycleWork();
   // Off the lifecycle tick: a pass paces itself for seconds and must never
   // hold up issue windows, nudges, or the outbox backstop. `0` disables it.

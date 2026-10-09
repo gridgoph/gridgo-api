@@ -115,6 +115,7 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
 - Organization discount and statements: [Organization money API](docs/ORGANIZATION_MONEY_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
+- Private audio calls: `/orders/:id/calls`, party-scoped WebRTC signalling and ICE; [Calls API](docs/CALLS_API.md)
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`; machine release broadcasts and rollout: [Release announcements](docs/RELEASE_ANNOUNCEMENTS_API.md)
 - Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
