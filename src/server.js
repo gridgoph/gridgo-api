@@ -6668,10 +6668,26 @@ async function runLifecycleWork() {
           if (sweepHubReminders(store, { at: now(), id })) await save(store);
         });
       },
-      async () => enqueueMutation(async () => {
-        const store = await load();
-        if (sweepVouchers(store, { id, at: now() })) await save(store);
-      }),
+      async () => {
+        // Idle wallets must not contend with checkout/provider work. Recheck
+        // the graph under the domain lock only when a release or notice is due.
+        const candidate = await database.query(`SELECT 1 FROM voucher_reservations
+          WHERE status = 'reserved' AND expires_at <= $1
+          UNION ALL
+          SELECT 1 FROM vouchers
+          WHERE status = 'available' AND expires_at > $1
+            AND ((expires_at <= $1::timestamptz + interval '48 hours'
+              AND expires_at > $1::timestamptz + interval '24 hours'
+              AND issued_at < expires_at - interval '48 hours' AND data->>'reminded48At' IS NULL)
+            OR (expires_at <= $1::timestamptz + interval '24 hours'
+              AND issued_at < expires_at - interval '24 hours' AND data->>'reminded24At' IS NULL))
+          LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (sweepVouchers(store, { id, at: now() })) await save(store);
+        });
+      },
       drainVoucherEmail,
       sweepOrganizationOfficers,
       sweepDeliveryChats,

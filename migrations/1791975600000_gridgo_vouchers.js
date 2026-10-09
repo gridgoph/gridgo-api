@@ -142,4 +142,51 @@ export async function up(pgm) {
     END $$;
   `);
 }
-export async function down() { throw new Error("Vouchers require a forward migration"); }
+export async function down(pgm) {
+  pgm.sql(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM voucher_campaigns)
+        OR EXISTS (SELECT 1 FROM voucher_code_attempts)
+        OR EXISTS (SELECT 1 FROM voucher_cart_choices)
+        OR EXISTS (SELECT 1 FROM orders WHERE data ? 'voucher') THEN
+        RAISE EXCEPTION 'Vouchers require a forward migration once used';
+      END IF;
+    END $$;
+    DROP TRIGGER voucher_order_guard ON orders;
+    DROP TRIGGER voucher_order_allocations ON orders;
+    DROP TRIGGER voucher_payment_allocations ON order_payment_allocations;
+    DROP TRIGGER voucher_payments ON order_payments;
+    DROP FUNCTION guard_voucher_order();
+    DROP FUNCTION validate_voucher_allocations();
+    DROP TABLE voucher_email_outbox, voucher_cart_choices, voucher_code_attempts,
+      voucher_ledger, voucher_redemptions, voucher_reservations, vouchers, voucher_campaigns;
+    DROP FUNCTION voucher_append_only();
+    CREATE OR REPLACE FUNCTION guard_organization_discount() RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE rate numeric; discount numeric; gross numeric;
+    BEGIN
+      IF TG_OP = 'UPDATE' AND OLD.commercial_committed_at IS NOT NULL AND NEW.commercial_committed_at IS NOT NULL
+        AND (NEW.data->'organizationDiscountRateBps' IS DISTINCT FROM OLD.data->'organizationDiscountRateBps'
+          OR NEW.data->'organizationDiscountMinor' IS DISTINCT FROM OLD.data->'organizationDiscountMinor'
+          OR NEW.data->'grossServiceFeeMinor' IS DISTINCT FROM OLD.data->'grossServiceFeeMinor') THEN
+        RAISE EXCEPTION 'committed organization discount is immutable' USING ERRCODE = '23514';
+      END IF;
+      IF NEW.commercial_committed_at IS NULL OR NOT (NEW.data ?| ARRAY['organizationDiscountMinor','organizationDiscountRateBps','grossServiceFeeMinor']) THEN RETURN NEW; END IF;
+      rate := (NEW.data->>'organizationDiscountRateBps')::numeric;
+      discount := (NEW.data->>'organizationDiscountMinor')::numeric;
+      gross := (NEW.data->>'grossServiceFeeMinor')::numeric;
+      IF rate IS NULL OR discount IS NULL OR gross IS NULL
+        OR jsonb_typeof(NEW.data->'organizationDiscountRateBps') <> 'number'
+        OR jsonb_typeof(NEW.data->'organizationDiscountMinor') <> 'number'
+        OR jsonb_typeof(NEW.data->'grossServiceFeeMinor') <> 'number'
+        OR rate <> trunc(rate) OR rate < 0 OR rate > NEW.service_fee_rate_bps
+        OR gross <> floor((NEW.supplier_subtotal_minor::numeric * NEW.service_fee_rate_bps + 5000) / 10000)
+        OR discount <> floor((NEW.supplier_subtotal_minor::numeric * rate + 5000) / 10000)
+        OR NEW.service_fee_minor IS DISTINCT FROM gross - discount
+        OR NEW.total_minor IS DISTINCT FROM NEW.supplier_subtotal_minor + NEW.service_fee_minor + NEW.delivery_fee_minor
+        OR NEW.supplier_platform_payout_minor IS DISTINCT FROM NEW.supplier_subtotal_minor - NEW.direct_store_due_minor THEN
+        RAISE EXCEPTION 'organization discount must be funded only from service fee' USING ERRCODE = '23514';
+      END IF;
+      RETURN NEW;
+    END $$;
+  `);
+}
