@@ -1,4 +1,5 @@
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
+import { loadLegalPenaltyGate } from './legal.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
@@ -774,6 +775,7 @@ export async function loadStore(database) {
     loaded[table.name] = (await database.query(`SELECT ${table.columns.join(", ")} FROM ${table.name}`)).rows;
   }
   const store = emptyStore();
+  store.legalPenaltyGate = await loadLegalPenaltyGate(database);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));

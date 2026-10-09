@@ -242,7 +242,7 @@ function addInitialCase(store, { user, kind, submittedAt, key, body, createId, a
 
 function validateSupplierInput(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["profile", "serviceCategories"]);
+  rejectUnexpected(body, ["profile", "serviceCategories", "legalConsentVersion", "legalConsent"]);
   if (plainObject(body.profile)) {
     rejectUnexpected(body.profile, ["shopName", "contactName", "phone", "location"], "profile.");
     if (plainObject(body.profile.location)) {
@@ -307,7 +307,7 @@ function resolveSupplierCategories(store, validated) {
 
 function validateRider(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["profile"]);
+  rejectUnexpected(body, ["profile", "legalConsentVersion", "legalConsent"]);
   if (plainObject(body.profile)) {
     rejectUnexpected(body.profile, ["phone", "vehicleType", "plateNumber", "licenseNumber"], "profile.");
   }

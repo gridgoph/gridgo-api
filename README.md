@@ -105,7 +105,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, `/season-windows`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.
+All routes except `/health`, `/catalog`, `/season-windows`, public `/legal/documents` and effective `/legal/versions/*` reads, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
@@ -127,3 +127,5 @@ See the authoritative contract documents for exact methods, roles, bodies, state
 - Business and organization application documents, shared-login email codes, officer handover/history, and quarterly notices: [Organization accounts API](docs/ORGANIZATION_ACCOUNTS_API.md).
 
 Account deletion requests and the manual Operations queue: [Account deletion API](docs/ACCOUNT_DELETION_API.md).
+
+Legal documents, versioned enrollment/order consent, acceptance CSV and the manual Privacy Requests queue: [Legal & Privacy API](docs/LEGAL_API.md).

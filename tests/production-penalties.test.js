@@ -164,3 +164,26 @@ test('clients and riders never see stage deductions or private reassignment evid
     assert.ok((result.payoutMilestones || []).every((stage) => stage.amountMinor === undefined && stage.productionDeductionMinor === undefined));
   }
 });
+
+test('real supplier terms require consent before money deduction; warning and immutable gross payout stay intact', () => {
+  const store = fixture(true), order = store.orders[0];
+  order.readyAt = atHours(2); order.state = 'completed';
+  store.legalPenaltyGate = { versionId: 'supplier-agreement-real', acceptedSupplierIds: [] };
+  assert.equal(assess(store, 2), true);
+  assert.equal(assess(store, 3), false);
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
+  store.legalPenaltyGate.acceptedSupplierIds.push('shop');
+  assert.equal(assess(store, 4), true);
+  assert.ok(store.productionLapses[0].deductionMinor > 0);
+  assert.equal(store.productionLapses[0].supplierAgreementVersionId, 'supplier-agreement-real');
+});
+
+test('unaccepted real penalty terms never create an unresolvable penalty payout hold', () => {
+  const store = fixture(true), order = store.orders[0];
+  order.readyAt = atHours(2); order.state = 'completed';
+  store.legalPenaltyGate = { versionId: 'real-no-consent', acceptedSupplierIds: [] };
+  assess(store,2);
+  const stage = order.payoutMilestones.find(stage => stage.status !== 'released');
+  assert.doesNotThrow(() => releaseMilestone(order, stage.code, {id:'ops',role:'ops_admin'}, atHours(3), store));
+  assert.equal(stage.status,'released');
+});

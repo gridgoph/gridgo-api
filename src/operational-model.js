@@ -7,7 +7,7 @@ import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
-import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
+import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { packingProgressFor } from "./packing-progress.js";
 import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
@@ -830,7 +830,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
 
   if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
-  if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+  if (supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
@@ -1010,6 +1010,21 @@ function clientCorrectionFor(order) {
     previousState = entry.state;
   }
   return correction;
+}
+
+function minimizePartyContact(value, rider = false) {
+  if (!value || typeof value !== 'object') return;
+  const privateKeys = new Set(['client', 'clientProfile', 'clientName', 'clientPhone', 'clientEmail',
+    'customer', 'customerName', 'customerPhone', 'customerEmail', 'billingAddress', 'organizationOfficer', 'collection',
+    'legalAcceptances', 'artworkRightsAcceptance', 'artworkRights', 'privacyRequests']);
+  for (const key of Object.keys(value)) {
+    if (key === 'supplierContact') continue;
+    if (privateKeys.has(key)) { delete value[key]; continue; }
+    // Recipient contact is delivery-only. Shop production needs neither it nor an address book.
+    if (['recipient','contact','recipientName','recipientPhone','contactName','contactPhone','phone','email'].includes(key)
+        && !rider) { delete value[key]; continue; }
+    minimizePartyContact(value[key], rider);
+  }
 }
 
 export function publicOrderFor(order, user, store = null) {
@@ -1354,6 +1369,25 @@ export function publicOrderFor(order, user, store = null) {
       delete installment.confirmedBy;
       delete installment.rejectedBy;
       delete installment.rejectionReason;
+    }
+  }
+  if (['supplier', 'rider'].includes(user?.role)) {
+    if (user.role === 'supplier') publicRecord.timeline = publicRecord.timeline.map(entry => {
+      if (entry.state === 'delivered' || entry.by === order.clientId) {
+        const plain = publicProgressTimeline([entry])[0];
+        return { at: entry.at, state: entry.state, note: plain?.note || 'Client updated order' };
+      }
+      return entry;
+    });
+    const assignedRider = rider && (order.riderId === user.id || (store?.orderJobs || []).some(job => job.orderId === order.id && job.riderId === user.id));
+    minimizePartyContact(publicRecord, assignedRider);
+    if (rider) {
+      if (publicRecord.payments) publicRecord.payments = Object.fromEntries(Object.entries(publicRecord.payments).map(([code, payment]) => [code, { status: payment?.status }]));
+      // Delivery workers need package/count/QA and route evidence, not the client's billing history.
+      for (const key of ['acceptedQuote','pendingQuote','quoteHistory','invoice','billing',
+        'credit','credits','organizationDiscountMinor','organizationDiscountRateBps','serviceFeeMinor',
+        'serviceFeeRateBps','grossServiceFeeMinor','supplierSubtotalMinor','subtotalMinor','totalMinor',
+        'supplierPlatformPayoutMinor','onlineDueMinor','directStoreDueMinor','paymentPlan']) delete publicRecord[key];
     }
   }
   return publicRecord;

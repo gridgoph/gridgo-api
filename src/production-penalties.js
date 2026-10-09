@@ -36,6 +36,10 @@ export function cappedPenaltyMinor(remainingMinor, rateBps) {
   return Number(amount > BigInt(remainingMinor) ? BigInt(remainingMinor) : amount);
 }
 
+export function supplierPenaltyAllowed(store, supplierId) {
+  return !store?.legalPenaltyGate || store.legalPenaltyGate.acceptedSupplierIds.includes(supplierId);
+}
+
 export function orderPenaltyMinor(order) {
   return (order.payoutMilestones || []).reduce((sum, stage) => sum + (stage.productionDeductionMinor || 0), 0);
 }
@@ -115,6 +119,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
     if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
       && ['open', 'payout_held'].includes(claim.status))) continue;
+    if (!supplierPenaltyAllowed(store, order.supplierId)) continue;
     const unpaid = (order.payoutMilestones || []).filter((stage) => !['released', 'superseded'].includes(stage.status));
     const remaining = unpaid.reduce((sum, stage) => sum + BigInt(stage.amountMinor), 0n);
     if (remaining > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('Remaining payout exceeds safe integer minor units');
@@ -128,6 +133,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       stage.amountMinor -= deduction;
       left -= deduction;
     }
+    if (store.legalPenaltyGate) lapse.supplierAgreementVersionId = store.legalPenaltyGate.versionId;
     lapse.appliedAt = at;
     order.updatedAt = at;
     recordEvent(store, order, lapse, 'deduction', at, createId);
