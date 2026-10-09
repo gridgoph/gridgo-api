@@ -1,3 +1,4 @@
+import { defaultOperatingHours, validateOperatingHours, orderReviewTiming } from './operating-hours.js';
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { pickupChatProjection } from "./pickup-chat.js";
 import { deliveryChatProjection } from "./delivery-chat.js";
@@ -221,6 +222,7 @@ export function defaultProductionNudge() {
 
 export function defaultOperationalSettings() {
   return {
+    operatingHours: defaultOperatingHours(),
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
@@ -250,6 +252,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.operatingHours !== undefined) validateOperatingHours(settings.operatingHours);
   if (settings?.clientRiderLocationRevealDistanceMeters !== undefined &&
       (!Number.isSafeInteger(settings.clientRiderLocationRevealDistanceMeters) || settings.clientRiderLocationRevealDistanceMeters <= 0)) {
     fail(400, "invalid_rider_location_reveal_distance", "Set the client rider location reveal distance to a positive whole number of meters.", { field: "clientRiderLocationRevealDistanceMeters" });
@@ -832,7 +835,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
   if (supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
-      && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication))) {
+      && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock)) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
   }
 
@@ -1030,6 +1033,13 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.operatingClock;
+  delete publicRecord.reviewSchedule;
+  delete publicRecord.reviewDelayed;
+  if (['ops_admin', 'super_admin'].includes(user?.role) || (user?.role === 'client' && user.id === order.clientId)) {
+    const review = orderReviewTiming(order, store?.settings);
+    if (review) publicRecord.review = review;
+  }
   if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
   if (user?.role === "client" && order.organizationDiscountRateBps > 0) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {

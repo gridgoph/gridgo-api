@@ -1,3 +1,4 @@
+import { alwaysOpenOperatingHours } from "./helpers/operating-hours.mjs";
 import { docx, zip } from './helpers/docx.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -115,6 +116,7 @@ async function fixture(database) {
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
+    store.settings.operatingHours = alwaysOpenOperatingHours();
     store.settings.handoverOtpEnabled = true;
     store.settings.hubPickupEnabled = true;
     store.users.push(
@@ -2876,4 +2878,49 @@ test('DOCX upload, PDF/DOCX listing override and per-page checkout retain inspec
     assert.equal(persisted.lineSubtotalMinor, 2700, 'three copies of three selected pages at PHP 3');
     assert.deepEqual(persisted.acceptedFormatCodesSnapshot.sort(), ['docx', 'pdf']);
   }
+});
+
+test('outside-hours checkout exposes its review estimate and payment confirmation remains available', { skip: !DATABASE_URL }, async t => {
+  const { database, call, orderId } = await placedOrder(t);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships.push({ userId: 'user_ops', role: 'super_admin', createdAt: AT });
+    await saveStore(database, store);
+  });
+  const before = await loadStore(database);
+  const original = before.orders.find(row => row.id === orderId);
+  assert.equal(original.operatingClock.version, 1);
+  assert.ok(original.reviewSchedule.reviewCompletesAt);
+  const today = new Date(Date.now() + 480 * 60000).toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+  const settings = (await call('/settings', { subject: 'clerk_ops' })).body;
+  const closed = await call('/settings', { method: 'PATCH', subject: 'clerk_ops', body: {
+    expectedVersion: settings.version, reason: 'Close for staff training',
+    operatingHours: { ...settings.settings.operatingHours, schedule: { ...settings.settings.operatingHours.schedule,
+      closures: [{ startDay: today, endDay: tomorrow }] } },
+  } });
+  assert.equal(closed.status, 200, JSON.stringify(closed.body));
+  const cart = await call('/me/carts', { method: 'POST', subject: 'clerk_client', body: { fulfillmentMode: 'pickup' } });
+  const added = await call(`/me/carts/${cart.body.cart.id}/lines`, { method: 'POST', subject: 'clerk_client', body: {
+    catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkFileId: 'file_art',
+  } });
+  assert.equal(added.status, 201, JSON.stringify(added.body));
+  assert.equal(added.body.cart.checkoutNotice.code, 'outside_operating_hours');
+  assert.equal(added.body.cart.checkoutNotice.readyBy, added.body.cart.groups[0].readyBy);
+  const checkout = await call(`/me/carts/${cart.body.cart.id}/checkout`, { method: 'POST', subject: 'clerk_client', body: {
+    payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'CLOSED-OFFICE' },
+  } });
+  assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+  assert.equal(checkout.body.order.review.label, 'Waiting for review');
+  assert.equal(checkout.body.order.review.isOpenNow, false);
+  assert.equal(checkout.body.order.review.reviewDelayed, true);
+  assert.equal(checkout.body.order.readyBy, added.body.cart.groups[0].readyBy);
+  assert.equal(checkout.body.order.operatingClock, undefined);
+  const confirm = await call(`/orders/${checkout.body.order.id}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  assert.equal(confirm.status, 200, JSON.stringify(confirm.body));
+  const manual = await call(`/orders/${checkout.body.order.id}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  assert.equal(manual.body.error, 'outside_operating_hours');
+  const after = (await loadStore(database)).orders.find(row => row.id === orderId);
+  assert.equal(after.promiseBy, original.promiseBy);
+  assert.deepEqual(after.operatingClock, original.operatingClock);
 });

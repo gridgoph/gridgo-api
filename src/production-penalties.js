@@ -1,3 +1,4 @@
+import { slaElapsed } from './operating-hours.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { formatMinorPhp } from './payout-copy.js';
 import { refundHold, refundSettlementFor } from './refund-policy.js';
@@ -22,8 +23,8 @@ export function validateProductionPenalty(policy) {
 /** Only client acceptance changes readyBy; pending/expired requests retain the original deadline. */
 export function productionDeadline(order) { return order.readyBy || null; }
 
-export function latenessTier(deadlineAt, finishedAt, noCommunication = false) {
-  const late = Date.parse(finishedAt) - Date.parse(deadlineAt);
+export function latenessTier(deadlineAt, finishedAt, noCommunication = false, clock = null) {
+  const late = !deadlineAt || !finishedAt ? NaN : slaElapsed(clock, deadlineAt, finishedAt);
   if (!Number.isFinite(late) || late <= 0) return null;
   return noCommunication || late > 24 * 3600000 ? 'severe' : late > 6 * 3600000 ? 'moderate' : 'minor';
 }
@@ -94,7 +95,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       continue;
     }
     if (!order.readyAt && !WATCHED.has(order.state)) continue;
-    const tier = latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication));
+    const tier = latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock);
     if (!tier) continue;
     if (!lapse) {
       const policy = productionPenaltySettings(store.settings);

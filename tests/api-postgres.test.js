@@ -1,3 +1,4 @@
+import { alwaysOpenOperatingHours } from "./helpers/operating-hours.mjs";
 import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -159,6 +160,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
+    store.settings.operatingHours = alwaysOpenOperatingHours();
     store.users.push(
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
       { id: "user_supplier", clerkUserId: "clerk_supplier", email: "supplier@gridgo.test", name: "Supplier", role: "supplier", supplierName: "Print Shop", verificationStatus: "approved", shop: { lat: 7.064, lng: 125.6085, label: "Davao Shop" }, createdAt: AT },
@@ -1937,13 +1939,13 @@ test('delivery zone limit updates persist with the settings handshake and preser
       assert.equal(invalid.status, 400, JSON.stringify(invalid.body));
       assert.equal(invalid.body.error, error);
       if (error !== 'invalid_delivery_fee_bands') assert.equal(invalid.body.field, `deliveryFeeBands[${index}].maxDistanceMeters`);
-      assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_ops' })).body, current);
+      assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_ops' })).body.settings, current.settings);
     }
     const updated = await patch(input);
     assert.equal(updated.status, 200, JSON.stringify(updated.body));
     assert.equal(updated.body.version, current.version + 1);
     assert.deepEqual(updated.body.settings.deliveryFeeBands, deliveryFeeBands);
-    assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_client' })).body, updated.body);
+    assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_client' })).body.settings, updated.body.settings);
     assert.equal((await patch(input)).body.error, 'settings_version_conflict');
     const store = await loadStoreEventually(database, store => store.settings.deliveryFeeBands[0].maxDistanceMeters === 1200);
     const audit = store.auditLog.find(entry => entry.action === 'settings.operational_update');
@@ -5237,6 +5239,69 @@ test("client rider location radius is live, private and leaves staff tracking un
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise(resolve => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test('operating hours settings require Super Admin/version/reason, persist with audit, and tag review delays atomically', { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  // Keep this test independent of the machine's weekday and clock.
+  const open = { timeZone: 'Asia/Manila', artworkReviewMinutes: 60, priorityDispatchCutoffMinute: 960,
+    schedule: { utcOffsetMinutes: 480, week: Array.from({ length: 7 }, (_, weekday) => ({ weekday, opensMinute: 0, closesMinute: 1440 })), closures: [] } };
+  const at = new Date().toISOString();
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.settings.operatingHours = open;
+    const order = store.orders.find(row => row.id === 'ord_payout');
+    order.state = 'needs_qa';
+    order.operatingClock = { version: 1, settingsVersion: store.version, schedule: structuredClone(open.schedule) };
+    order.fileCheck = { status: 'pending', requestedAt: at };
+    order.promiseBy = '2099-01-01T00:00:00.000Z';
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const current = (await request(instance.api, '/settings', { subject: 'clerk_super' })).body;
+    assert.equal(current.operatingStatus.isOpenNow, true);
+    const today = new Date(Date.now() + 480 * 60000).toISOString().slice(0, 10);
+    const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+    const closed = { ...open, priorityDispatchCutoffMinute: 900,
+      schedule: { ...open.schedule, closures: [{ startDay: today, endDay: tomorrow }] } };
+    const patch = (body, subject = 'clerk_super') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
+    const input = { expectedVersion: current.version, reason: 'Temporary office closure', operatingHours: closed };
+    assert.equal((await patch(input, 'clerk_ops')).status, 403);
+    assert.equal((await patch(input, 'clerk_client')).status, 403);
+    assert.equal((await patch({ ...input, reason: '' })).body.error, 'settings_reason_required');
+    assert.equal((await patch({ ...input, operatingHours: null })).body.error, 'invalid_operating_hours');
+    const updated = await patch(input);
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.version, current.version + 1);
+    assert.equal(updated.body.operatingStatus.isOpenNow, false);
+    assert.equal((await patch(input)).body.error, 'settings_version_conflict');
+    const store = await loadStoreEventually(database, store => store.version === current.version + 1);
+    const order = store.orders.find(row => row.id === 'ord_payout');
+    assert.equal(order.reviewDelayed.settingsVersion, store.version);
+    assert.equal(order.promiseBy, '2099-01-01T00:00:00.000Z');
+    assert.deepEqual(order.operatingClock.schedule, open.schedule);
+    const audit = store.auditLog.find(row => row.action === 'settings.operational_update');
+    assert.deepEqual(audit.detail.reviewDelayedOrderIds, ['ord_payout']);
+    assert.deepEqual(audit.detail.current.operatingHours, closed);
+    assert.deepEqual(audit.detail.previous.operatingHours, open);
+    const view = await request(instance.api, '/orders/ord_payout', { subject: 'clerk_client' });
+    assert.equal(view.body.order.review.reviewDelayed, true);
+    assert.equal(view.body.order.review.label, 'Waiting for review');
+    assert.equal(view.body.order.operatingClock, undefined);
+    const blocked = await request(instance.api, '/orders/ord_payout/transition', {
+      method: 'POST', subject: 'clerk_ops', body: { state: 'client_correction', note: 'Fix artwork' },
+    });
+    assert.equal(blocked.body.error, 'outside_operating_hours');
+    await database.query("UPDATE orders SET state = 'ready_for_dispatch' WHERE id = 'ord_payout'");
+    const dispatch = await request(instance.api, '/dispatch/ord_payout/accept', { method: 'POST', subject: 'clerk_rider', body: {} });
+    assert.equal(dispatch.body.error, 'outside_operating_hours');
+  } finally {
+    instance.child.kill('SIGTERM');
+    await new Promise(resolve => instance.child.once('exit', resolve));
     await database.close();
   }
 });

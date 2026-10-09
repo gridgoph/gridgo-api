@@ -2,6 +2,7 @@ import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
+import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
 import { routeAccountDeletion } from './account-deletion.js';
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
@@ -637,6 +638,7 @@ function publicOperationalSettings(settings, store = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
     downpaymentPercent: downpaymentPercentSetting(rest),
@@ -3338,7 +3340,7 @@ async function handleRequest(req, res) {
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "reason_required" });
       if (!order.supplierId || order.readyAt || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
-          || !latenessTier(productionDeadline(order), now())) return send(res, 409, { error: "production_deadline_not_missed" });
+          || !latenessTier(productionDeadline(order), now(), false, order.operatingClock)) return send(res, 409, { error: "production_deadline_not_missed" });
       if (!order.productionNoCommunication) {
         order.productionNoCommunication = { at: now(), by: user.id, reason };
         audit(store, { actor: user, action: "production_lapse.no_communication", entityType: "order", entityId: order.id, orderId: order.id, reason });
@@ -3353,6 +3355,7 @@ async function handleRequest(req, res) {
       return send(res, 200, {
         version: store.version,
         settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store),
+        operatingStatus: reviewTiming(store.settings, now()),
       });
     }
 
@@ -3370,6 +3373,7 @@ async function handleRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
@@ -3404,16 +3408,21 @@ async function handleRequest(req, res) {
       const previous = structuredClone(store.settings);
       store.settings = structuredClone(next);
       store.version += 1;
+      const reviewDelayedOrderIds = tagDelayedReviews(store, previous, now());
+      for (const orderId of reviewDelayedOrderIds) {
+        const affected = store.orders.find(order => order.id === orderId);
+        queueOrderInvalidate(store, affected, ['orders', 'jobs']);
+      }
       audit(store, {
         actor: user,
         action: "settings.operational_update",
         entityType: "settings",
         entityId: "operational",
-        detail: { previous, current: store.settings },
+        detail: { previous, current: store.settings, reviewDelayedOrderIds },
         reason,
       });
       await save(store);
-      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store) });
+      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store), operatingStatus: reviewTiming(store.settings, now()) });
     }
 
     if (req.method === "POST" && pathname === "/settings/payment-qr") {
@@ -5410,6 +5419,9 @@ async function handleRequest(req, res) {
       const requestedDropoff = dropoffFor(address, zoneCode);
       const order = {
         id: id("ord"),
+        operatingClock: operatingClockSnapshot(store.settings, store.version),
+        ...(body.submit ? { fileCheck: { status: 'pending', requestedAt: ts, reviewedAt: null, reviewedBy: null, reason: null },
+          reviewSchedule: reviewTiming(store.settings, ts) } : {}),
         clientId: user.id,
         organizationOfficer: officerSnapshot(store, user.id),
         supplierId: null,
@@ -5609,6 +5621,10 @@ async function handleRequest(req, res) {
           error: "forbidden",
           message: "This order is assigned to another account. Open one of your own orders before taking this action.",
         });
+      }
+      if (order.operatingClock && (next === 'rider_assigned' || next === 'picked_up'
+        || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
+        requireOperatingHours(store.settings, now(), next === 'rider_assigned' || next === 'picked_up' ? 'Dispatch' : 'Artwork review');
       }
       if (["supplier_self_qc", "ready_for_dispatch"].includes(next)) {
         if (order.payoutHold || activePayoutHold(store, order.id)) {
@@ -5931,7 +5947,7 @@ async function handleRequest(req, res) {
       order.state = next;
       order.updatedAt = now();
       if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
-      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist);
+      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist, store.settings);
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {
         audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,
@@ -5994,6 +6010,7 @@ async function handleRequest(req, res) {
       if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
+      if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       order.riderId = user.id;
       order.state = "rider_assigned";
       order.updatedAt = now();
@@ -6016,6 +6033,7 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       if (order.state !== "rider_assigned") {
         return send(res, 409, {
           error: "pickup_checklist_not_available",

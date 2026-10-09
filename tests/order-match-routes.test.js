@@ -125,7 +125,7 @@ for (const queued of [false, true]) {
     const match = await call("POST", "/me/matches", {
       subcategoryCode: "flyers", excludedSupplierIds: ["supplier_b"],
     });
-    const expected = queued ? "2026-09-28T06:00:00.000Z" : "2026-09-28T02:00:00.000Z";
+    const expected = queued ? "2026-09-28T07:00:00.000Z" : "2026-09-28T03:00:00.000Z";
     assert.equal(match.body.promiseBy, expected);
     assert.equal(match.body.queue.jobsAhead, queued ? 2 : 0);
     const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
@@ -162,7 +162,7 @@ test("cart promise uses quantity capacity, closures, and the current request tim
   const added = await call("POST", `/me/carts/${cartId}/lines`, {
     catalogItemId: "item_a", optionIds: [], quantity: 200, artworkFileId: "file_art",
   });
-  const expected = "2026-09-29T10:00:00.000Z"; // End of the second open day.
+  const expected = "2026-09-30T00:00:00.000Z"; // Production ends Tuesday at 18:00; dispatch opens Wednesday at 08:00.
   assert.equal(added.body.cart.lines[0].promiseBy, expected);
   const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
     payment: { method: "qr_manual", proofFileId: "file_qr", reference: "CAPACITY-READY" },

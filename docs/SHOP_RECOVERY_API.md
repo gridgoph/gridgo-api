@@ -12,8 +12,10 @@ order, event history, audit and notification outbox commit together.
 {"supplierId":"supplier_id","assignedAt":"2026-10-10T09:30:30.000Z","deadlineAt":"2026-10-12T00:30:30.000Z","workingMinutes":60,"status":"pending"}
 ```
 
-The window counts exactly **60 opening minutes**, using the assignment-time
-snapshot of the shop schedule (including closures, split shifts and UTC offset).
+The window counts exactly **60 opening minutes**. Orders created after the
+[operating-hours rollout](OPERATING_HOURS_API.md) use their creation-time platform
+calendar snapshot. Older orders retain the assignment-time snapshot of the shop
+schedule (including closures, split shifts and UTC offset).
 Schedule edits do not extend an existing assignment. Existing assignments receive
 a fresh window on the first lifecycle sweep after deployment. Accept with the
 existing `POST /orders/:id/transition` and `{"state":"payment_authorized"}`
