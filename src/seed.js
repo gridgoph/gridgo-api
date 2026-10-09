@@ -1,3 +1,4 @@
+import { seedLegalDocuments } from './legal.js';
 import { fileURLToPath } from "node:url";
 
 import { createDatabase } from "./database.js";
@@ -37,6 +38,7 @@ function replaceAll(target, definitions) {
 
 export async function seedReferenceData(database) {
   await database.transaction(async () => {
+    await seedLegalDocuments(database);
     const store = await loadStore(database);
     const reference = referenceData();
     appendMissing(store.catalog, reference.catalog, "id");

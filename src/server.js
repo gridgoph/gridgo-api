@@ -1,6 +1,7 @@
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
+import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
 import { routeAccountDeletion } from './account-deletion.js';
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
@@ -364,6 +365,32 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
 function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   if (!pushDelivery.configured || devices.length === 0) return;
   fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
+}
+
+async function legalEvent({ action, id: entityId, actor, detail }) {
+  const latest = await load();
+  audit(latest, { actor, action, entityType: action.startsWith('privacy.') ? 'privacy_request' : 'legal_document', entityId, detail });
+  notifyAdmins(latest, action, action.startsWith('privacy.') ? 'Privacy request updated' : 'Legal record updated', null, `${action}:${entityId}:${id('event')}`, { createId: id, at: now() });
+  queueInvalidate(latest, { resource: action.startsWith('privacy.') ? 'privacy-requests' : 'legal' });
+  await save(latest);
+}
+async function legalResponse(req, res, url, user = null) {
+  const result = await routeLegal({ req, url, user, database, readBody, onEvent: legalEvent,
+    signPdf: async fileId => {
+      const file = (await database.query("SELECT object_key FROM files WHERE file_id=$1 AND state='ready' AND purpose='legal_document'", [fileId])).rows[0];
+      if (!file) throw Object.assign(new Error('file_not_found'), {status:404,code:'file_not_found'});
+      return objectStorage.presignGet(file.object_key);
+    } });
+  if (!result) return false;
+  res.setHeader('Cache-Control', 'no-store');
+  if (result.csv != null) {
+    res.writeHead(200, { ...res.gridgoCorsHeaders, 'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="legal-acceptances.csv"',
+      'Access-Control-Expose-Headers': 'X-Next-Offset',
+      ...(result.nextOffset != null ? {'X-Next-Offset':String(result.nextOffset)} : {}) });
+    res.end(result.csv);
+  } else send(res,result.status,result.body);
+  return true;
 }
 
 async function deletionRequestEvent({ action, id: requestId, actor }) {
@@ -1920,6 +1947,7 @@ async function handleRequest(req, res) {
         at: now(),
       });
     }
+    if (pathname.startsWith('/legal/') && await legalResponse(req, res, url)) return;
     if (pathname === '/account-deletion-requests' || pathname === '/api/account-deletion-requests') {
       const result = await routeAccountDeletion({ req, url, database, readBody, onEvent: deletionRequestEvent });
       return send(res, result.status, result.body);
@@ -2177,6 +2205,8 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/activate") {
+      const enrollmentBody = await readBody(req);
+      const consent = await validateEnrollmentConsent(database, enrollmentBody, "client");
       const header = req.headers.authorization || "";
       const match = /^Bearer\s+(.+)$/i.exec(header);
       const result = await activateClerkClientProfile({
@@ -2196,6 +2226,7 @@ async function handleRequest(req, res) {
           message: result.message,
         });
       }
+      await recordEnrollmentConsent(database, result.user, consent);
       return send(res, 200, { user: publicUser(result.user) });
     }
 
@@ -2222,8 +2253,10 @@ async function handleRequest(req, res) {
         now,
       };
       const role = pathname.endsWith("/supplier") ? "supplier" : "rider";
+      const consent = await validateEnrollmentConsent(database, body, role);
       const result = role === "supplier" ? enrollSupplier(common) : enrollRider(common);
       if (result.status === 201) await save(store);
+      await recordEnrollmentConsent(database, result.user, consent);
       const refreshed = await authenticateRequest(req, store);
       const response = fixedAuthProjection(store, refreshed, role);
       if (role === "supplier") {
@@ -2286,6 +2319,7 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    if (!pathname.startsWith("/admin/") && await legalResponse(req, res, url, user)) return;
     if (pathname === '/me/account-deletion-request') {
       const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
       return send(res, result.status, result.body);
@@ -2318,6 +2352,8 @@ async function handleRequest(req, res) {
         message: "Sign in to GRIDGO, then retry this request with the new access token.",
       });
     }
+
+    if (pathname.startsWith("/admin/") && await legalResponse(req, res, url, user)) return;
 
     const privateCatalogRoute = pathname === "/listing-starters"
       || pathname === "/me/supplier-readiness"
@@ -2629,6 +2665,14 @@ async function handleRequest(req, res) {
     });
     if (orderMatchResponse) {
       if (orderMatchResponse.mutated) await save(store);
+      if (isArtworkCheckout(req.method, pathname) && orderMatchResponse.status < 400) {
+        const body = await readBody(req);
+        const result = orderMatchResponse.body;
+        const orders = result.basket
+          ? store.orders.filter(order => order.basketId === result.basket.id)
+          : store.orders.filter(order => order.id === result.order?.id);
+        for (const order of orders) await recordArtworkConsent(database, user, order, body);
+      }
       if (orderMatchResponse.status < 400) {
         await decorateCatalogPhotoUrls(store, orderMatchResponse.body);
       }
@@ -2918,6 +2962,9 @@ async function handleRequest(req, res) {
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
         authorizeFileAttach(latestUser, latestFile, latestTarget);
         if (latestTarget.type === "order") assertRefundWorkAllowed(latestStore, latestTarget.record);
+        if (latestFile.purpose === 'artwork' && latestTarget.type === 'order') {
+          await recordArtworkConsent(database, latestUser, latestTarget.record, body);
+        }
         if (latestTarget.type === "supplier_catalog_item") {
           const priorReviewStatus = latestTarget.record.reviewStatus;
           const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });

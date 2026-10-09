@@ -369,10 +369,8 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal("quoteHistory" in riderOrder, false);
   assert.equal("componentLines" in riderOrder.payments.initial, false);
   assert.equal("supplierPrincipalRateBps" in riderOrder.payments.initial, false);
-  assert.equal("componentLines" in riderOrder.acceptedQuote.payments.initial, false);
-  assert.equal("supplierPrincipalRateBps" in riderOrder.acceptedQuote.payments.initial, false);
-  assert.equal("paymentTerms" in riderOrder.acceptedQuote, false);
-  assert.equal("supplierDownpaymentRateBps" in riderOrder.acceptedQuote, false);
+  assert.equal(riderOrder.acceptedQuote, undefined);
+  assert.deepEqual(riderOrder.payments.initial, { status: order.payments.initial.status });
 
   const pickupMoney = plan({ fulfillmentMode: "pickup", paymentPlan: "pickup_downpayment_store" });
   const pickupSchedule = createPaymentSchedule(pickupMoney);
@@ -940,8 +938,11 @@ test("only the owning client gets the latest Operations correction, separate fro
   ]) {
     const result = publicOrderFor(order, reader);
     assert.equal(Object.hasOwn(result, "correction"), false);
-    if (reader?.role === "supplier" || reader?.role === "ops_admin") {
-      assert.deepEqual(result.timeline, order.timeline, "existing raw history access is unchanged");
+    if (reader?.role === "supplier") {
+      assert.deepEqual(result.timeline[2], { at: '3', state: 'needs_qa', note: 'Artwork being checked' });
+      assert.equal(result.timeline[3].note, reason, 'shop retains Operations production instructions');
+    } else if (reader?.role === "ops_admin") {
+      assert.deepEqual(result.timeline, order.timeline, "Operations retain raw audit history");
     } else {
       assert.equal(JSON.stringify(result).includes(reason), false);
     }
