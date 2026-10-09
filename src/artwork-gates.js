@@ -1,3 +1,4 @@
+import { reviewTiming } from './operating-hours.js';
 // Checkout and supplier visibility share this gate. File bytes stay in MinIO;
 // only the upload's structural verdict and the Operations decision are stored.
 export function supplierArtworkReleased(order) {
@@ -33,7 +34,7 @@ export function qaChecklistSnapshot(checks, passing) {
   return { version: 1, checks: Object.fromEntries(QA_CHECK_IDS.map(id => [id, checks[id]])) };
 }
 
-export function recordFileCheckTransition(order, from, next, actor, at, note, checks) {
+export function recordFileCheckTransition(order, from, next, actor, at, note, checks, settings = null) {
   const passing = from === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval'].includes(next);
   const rejecting = from === 'needs_qa' && next === 'client_correction';
   if (passing || rejecting) {
@@ -44,8 +45,11 @@ export function recordFileCheckTransition(order, from, next, actor, at, note, ch
       status: passing ? 'passed' : 'failed', reviewedAt: at, reviewedBy: actor.id,
       reason: passing ? null : note.trim(), checklist,
     };
-  } else if (order.fileCheck && ['submitted', 'needs_qa'].includes(next) && from === 'client_correction') {
+  } else if (['submitted', 'needs_qa'].includes(next) && ((order.fileCheck && from === 'client_correction')
+    || (order.operatingClock && !order.fileCheck))) {
     order.fileCheck = { status: 'pending', requestedAt: at, reviewedAt: null, reviewedBy: null, reason: null, checklist: null };
+    if (order.operatingClock) order.reviewSchedule = reviewTiming(settings, at);
+    delete order.reviewDelayed;
   } else if (order.fileCheck && next === 'cancelled' && order.fileCheck.status !== 'passed') {
     order.fileCheck = { ...order.fileCheck, status: 'cancelled' };
   }

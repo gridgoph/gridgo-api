@@ -41,7 +41,7 @@ async function withMigrationSchema(t, fn) {
 // chain only up to the last migration preceding that boundary.
 const HISTORICAL_ROLLBACK_TIMESTAMP = 1791975600000;
 
-test("fresh PostgreSQL installs legal evidence tables and refuses rollback", { skip: !DATABASE_URL }, async (t) => {
+test("fresh PostgreSQL orders operating hours after legal evidence and preserves both rollback guards", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner(migrationOptions(schema, "up", undefined, client));
     const tables = new Set((await client.query(
@@ -50,6 +50,24 @@ test("fresh PostgreSQL installs legal evidence tables and refuses rollback", { s
     for (const table of ["legal_documents", "legal_versions", "legal_acceptances", "privacy_requests"]) {
       assert.ok(tables.has(table), `${table} should exist after up`);
     }
+    assert.deepEqual((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 5")).rows.map(row => row.name), [
+      "1791975800000_operating_hours",
+      "1791975700000_legal_privacy",
+      "1791975600000_gridgo_vouchers",
+      "1791972000000_order_calls",
+      "1791968400000_pickup_chat",
+    ]);
+    await client.query(`
+      INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
+        VALUES ('clock_client', 'clerk_clock_client', 'clock@test.invalid', 'Client', 'client', 'individual', now(), 0);
+      INSERT INTO orders (id, client_id, state, created_at, updated_at, position, data)
+        VALUES ('clock_order', 'clock_client', 'draft', now(), now(), 0, '{"operatingClock":{"version":1}}');
+    `);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /Operating-clock orders exist/);
+    await client.query("ROLLBACK");
+    await client.query("UPDATE orders SET data = data - 'operatingClock' WHERE id = 'clock_order'");
+    await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name,
       "1791975700000_legal_privacy");
     await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /legal evidence must be retained/);
@@ -1203,7 +1221,10 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     ]);
     await runner(migrationOptions(schema, "up", undefined, client));
     const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
-    assert.equal(migrated.version, 14);
+    assert.equal(migrated.version, 15);
+    assert.equal(migrated.settings.operatingHours.artworkReviewMinutes, 60);
+    assert.equal(migrated.settings.operatingHours.priorityDispatchCutoffMinute, 960);
+    assert.deepEqual(migrated.settings.operatingHours.schedule.week.map(row => row.weekday), [1, 2, 3, 4, 5, 6]);
     assert.deepEqual(migrated.settings.deliveryFeeBands.slice(0, 3), settings.deliveryFeeBands.slice(0, 3));
     assert.deepEqual(migrated.settings.deliveryFeeBands[3], {
       zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,
