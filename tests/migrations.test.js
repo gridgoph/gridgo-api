@@ -39,7 +39,7 @@ async function withMigrationSchema(t, fn) {
 
 // Legal history is deliberately forward-only. Exercise the historical rollback
 // chain only up to the last migration preceding that boundary.
-const HISTORICAL_ROLLBACK_TIMESTAMP = 1791972000000;
+const HISTORICAL_ROLLBACK_TIMESTAMP = 1791975600000;
 
 test("fresh PostgreSQL installs legal evidence tables and refuses rollback", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
