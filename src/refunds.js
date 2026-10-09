@@ -1,3 +1,4 @@
+import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
   supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents } from './refund-policy.js';
@@ -221,6 +222,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (request.status !== 'reviewed' || settlementFor(store, request)) fail(409, 'refund_state_conflict', 'Review the refund before settling it.');
     if (request.late && user.role !== 'super_admin') fail(403, 'refund_super_admin_required', 'Super Admin must settle a late case.');
     if (body.workStopped !== true) fail(400, 'refund_work_stop_required', 'Confirm production and fulfilment have stopped.');
+    if (order.voucher && typeof body.clientCaused !== 'boolean') fail(400, 'voucher_refund_fault_required', 'Record whether the cancellation/refund was caused by the client.');
     const shopAgreement = text(body.shopAgreement, 'shopAgreement');
     const deliveryEvidence = text(body.deliveryEvidence, 'deliveryEvidence');
     const { amounts, maximum } = settlementCalculation(store, order, request, body);
@@ -241,6 +243,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       shopEntitlementMinor: amounts.shopEntitlementMinor, riderEntitlementMinor: amounts.riderEntitlementMinor,
       principalMinor: amounts.principalMinor, feeMinor: amounts.feeMinor, deliveryMinor: amounts.deliveryMinor,
       platformDeliveryMinor, totalMinor: amounts.totalMinor, snapshot: { ...amounts,
+        ...(order.voucher ? { clientCaused: body.clientCaused } : {}),
         ...(order.directStoreDueMinor > 0 ? { directStoreDueMinor: order.directStoreDueMinor, directStoreCollectedMinor: 0 } : {}) } };
     store.refundSettlements.push(settlement);
     const supersededStages = [];
@@ -341,6 +344,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     bind(receipt, request, 'transfer_evidence');
     store.refundPayments.push(payment); attempt.status = 'paid'; attempt.updatedAt = at; request.status = 'paid';
     const settlement = settlementFor(store, request);
+    restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
     order.revenueAdjustments ||= [];
     const returnedPlatform = sumMinor([settlement.feeMinor, settlement.platformDeliveryMinor]);
     if (returnedPlatform) order.revenueAdjustments.push({ id: id('rev'), kind: 'refund', amountMinor: -returnedPlatform,

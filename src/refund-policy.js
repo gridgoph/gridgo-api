@@ -96,7 +96,7 @@ function proportionalFee(order, principal, collected, earlier) {
   if (!basis) return 0;
   const cumulativePrincipal = BigInt(sumMinor([earlier.principalMinor, principal]));
   const denominator = BigInt(basis);
-  const cumulativeFee = Number((BigInt(refundMinor(order.serviceFeeMinor, 'serviceFeeMinor')) * cumulativePrincipal + denominator / 2n) / denominator);
+  const cumulativeFee = Number((BigInt(refundMinor(order.serviceFeeMinor - (order.voucherServiceFeeMinor || 0), 'serviceFeeMinor')) * cumulativePrincipal + denominator / 2n) / denominator);
   return Math.max(0, Math.min(collected.feeMinor - earlier.feeMinor, cumulativeFee - earlier.feeMinor));
 }
 
@@ -110,7 +110,7 @@ export function calculateRefundSettlement(order, {
     .map((stage) => stage.amountMinor)]);
   refundMinor(shopEntitlementMinor, 'shopEntitlementMinor');
   refundMinor(riderEntitlementMinor, 'riderEntitlementMinor');
-  if (riderEntitlementMinor > collected.deliveryMinor - previous.deliveryMinor) {
+  if (riderEntitlementMinor > collected.deliveryMinor + (order.voucherDeliveryMinor || 0) - previous.deliveryMinor) {
     refundFail(409, 'refund_requires_super_admin', 'Verified delivery funds do not cover the rider obligation. Reconcile collection with Super Admin before approving.', { escalateTo: 'super_admin' });
   }
   if (shopEntitlementMinor < releasedMinor) {
@@ -134,7 +134,7 @@ export function calculateRefundSettlement(order, {
   }
   const feeMinor = beforeProduction ? collected.feeMinor - previous.feeMinor : proportionalFee(order, principal, collected, previous);
   const deliveryMinor = deliveryCompleted(order) ? 0
-    : Math.max(0, collected.deliveryMinor - previous.deliveryMinor - riderEntitlementMinor);
+    : Math.max(0, collected.deliveryMinor - previous.deliveryMinor - Math.max(0, riderEntitlementMinor - (order.voucherDeliveryMinor || 0)));
   const amounts = { principalMinor: principal, feeMinor, deliveryMinor };
   return { ...amounts, totalMinor: sumMinor(Object.values(amounts)), collected, previous, releasedMinor,
     remainingShopMinor, shopEntitlementMinor, riderEntitlementMinor, availablePrincipalMinor };

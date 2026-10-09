@@ -1745,3 +1745,50 @@ for (const enabled of [undefined, false, true]) {
     });
   }
 }
+
+// Voucher regression exercises the same checkout builder used by released apps.
+import { issueVoucher, confirmVoucher } from '../src/vouchers.js';
+import crypto from 'node:crypto';
+for (const multi of [false, true]) for (const percent of [75, 100]) test(`voucher checkout keeps payouts and rider pay unchanged (multi=${multi}, percent=${percent})`, async () => {
+  async function build(withVoucher) {
+    const { store, client } = fixture();
+    store.settings.downpaymentPercent = percent;
+    const call = caller(store, client);
+    const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', deadline: '2026-09-10T08:00:00.000Z',
+      defaultDropoff: { lat: 7.0731, lng: 125.6128, label: 'Home' } })).body.cart.id;
+    for (const catalogItemId of multi ? ['item_a', 'item_b'] : ['item_a']) await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId, optionIds: [], quantity: 1, artworkFileId: 'file_art' });
+    if (withVoucher) {
+      store.voucherCampaigns = [{ id: 'campaign', name: 'Thanks', mode: 'assigned', status: 'active', valueMinor: 1500, totalLimit: 10, validityDays: 7 }];
+      issueVoucher(store, store.voucherCampaigns[0], client.id, { id: prefix => `${prefix}_${crypto.randomUUID()}`, at: AT });
+      const quote = (await call('GET', `/me/carts/${cartId}/voucher`)).body.cart.clientQuote;
+      assert.equal(quote.voucherDiscountMinor, 1500);
+      await call('DELETE', `/me/carts/${cartId}/voucher`);
+      assert.equal((await call('GET', `/me/carts/${cartId}`)).body.cart.clientQuote.voucherDiscountMinor, 0);
+      await call('POST', `/me/carts/${cartId}/voucher`, { voucherId: store.vouchers[0].id });
+    }
+    const quoteBeforeCheckout = (await call('GET', `/me/carts/${cartId}/quote`)).body.quote;
+    const response = await call('POST', `/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', reference: 'PAYMENT', proofFileId: 'file_qr' } });
+    assert.equal(quoteBeforeCheckout.downpaymentMinor, response.body.invoice.paymentPlan.downpaymentMinor);
+    assert.equal(quoteBeforeCheckout.totalMinor, response.body.invoice.totalMinor);
+    return { store, response };
+  }
+  const regular = await build(false), discounted = await build(true);
+  const sum = (store, field) => store.orders.reduce((n, order) => n + order[field], 0);
+  assert.equal(sum(regular.store, 'totalMinor') - sum(discounted.store, 'totalMinor'), 1500);
+  for (let i = 0; i < regular.store.orders.length; i++) {
+    const before = regular.store.orders[i], after = discounted.store.orders[i];
+    assert.equal(JSON.stringify(after.payoutMilestones), JSON.stringify(before.payoutMilestones));
+    for (const key of ['riderPayoutMinor', 'riderCommissionBps', 'deliveryFeeMinor', 'supplierPlatformPayoutMinor', 'supplierSubtotalMinor']) assert.equal(after[key], before[key]);
+    assert.deepEqual(after.paymentAllocations.filter(a => a.component === 'supplier_principal'), before.paymentAllocations.filter(a => a.component === 'supplier_principal'));
+    assert.equal(after.totalMinor, Object.values(after.payments).reduce((total, payment) => total + payment.amountMinor, 0));
+  }
+  assert.equal(discounted.response.body.invoice.voucherDiscountMinor, 1500);
+  assert.equal(discounted.store.voucherReservations.filter(r => r.status === 'reserved').length, 1);
+  if (multi) {
+    const basket = discounted.store.baskets[0];
+    await routeBaskets({ req: { method: 'POST' }, url: new URL(`/baskets/${basket.id}/payment/confirm`, 'http://test'),
+      store: discounted.store, user: { id: 'ops', role: 'ops_admin' }, readBody: async () => ({}), id: prefix => `${prefix}_${crypto.randomUUID()}`, now: () => AT });
+    assert.equal(basket.payment.status, 'confirmed');
+  } else confirmVoucher(discounted.store, discounted.store.orders, { id: prefix => `${prefix}_${crypto.randomUUID()}`, at: AT, actorId: 'ops' });
+  assert.equal(discounted.store.vouchers[0].status, 'used');
+});

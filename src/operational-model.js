@@ -773,11 +773,14 @@ export function moneyReportingForOrder(order, store = null) {
       riderCollectedMinor: collectedSplit.riderPayoutMinor,
       platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
     },
+    ...(order.voucher ? { voucherFunding: { ...order.voucher, amountMinor: order.voucherDiscountMinor,
+      serviceFeeMinor: order.voucherServiceFeeMinor, deliveryMinor: order.voucherDeliveryMinor } } : {}),
     platformRevenue: {
+      ...(order.voucher ? { voucherDiscountMinor: order.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
       organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
-      netServiceFeeMinor: order.serviceFeeMinor ?? 0,
-      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor : 0,
+      netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0),
+      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor - (order.voucherDiscountMinor || 0) : 0,
       collectedMinor: platformCollectedMinor,
       recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
       adjustedMinor,
@@ -1114,6 +1117,9 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  if (!ops && !owningClient) {
+    for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor']) delete publicRecord[field];
+  }
   // Legacy payment breakdowns carry fee labels. Hide that breakdown for the
   // client when checkout hides fees, including immutable quote snapshots.
   if (owningClient && store?.settings?.serviceFeeVisibleToClient === false) {
@@ -1226,6 +1232,7 @@ export function publicOrderFor(order, user, store = null) {
   if (assignedSupplier && reporting) publicRecord.supplierSettlement = reporting.supplierSettlement;
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;
+    if (reporting.voucherFunding) publicRecord.voucherFunding = reporting.voucherFunding;
     publicRecord.platformRevenue = reporting.platformRevenue;
     publicRecord.deliverySettlement = reporting.deliverySettlement;
   }

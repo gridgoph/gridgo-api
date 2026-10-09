@@ -77,6 +77,7 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.voucherId) item.voucherId = notification.voucherId;
   if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
   if (notification.type === "organization_officer_confirmation") {
     item.officerId = notification.officerId;

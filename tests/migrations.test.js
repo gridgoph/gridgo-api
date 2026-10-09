@@ -143,6 +143,7 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791964800000_docx_artwork",
         "1791968400000_pickup_chat",
         "1791972000000_order_calls",
+        "1791975600000_gridgo_vouchers",
       ],
     );
 
@@ -325,9 +326,21 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
 
+    // Empty installations can reverse; campaign history must never be discarded.
+    await client.query(`INSERT INTO voucher_campaigns
+      (id, name, code, mode, status, value_minor, total_limit, per_account_limit, validity_days, created_at, updated_at)
+      VALUES ('rollback_guard', 'Rollback guard', 'ROLLBACK', 'assigned', 'draft', 1500, 1, 1, 7, now(), now())`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /Vouchers require a forward migration/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM voucher_campaigns WHERE id='rollback_guard'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('voucher_campaigns') AS t")).rows[0].t, null);
+
     await runner(migrationOptions(schema, "down", 1, client));
     assert.equal((await client.query("SELECT to_regclass('order_calls') AS t")).rows[0].t, null);
     assert.equal((await client.query("SELECT to_regclass('order_call_signals') AS t")).rows[0].t, null);
+
 
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='pickup_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);

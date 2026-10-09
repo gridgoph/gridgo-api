@@ -1,3 +1,5 @@
+import { issueVoucher, reserveVoucher, confirmVoucher } from '../src/vouchers.js';
+import { voucherMoney, applyVoucherMoney } from '../src/voucher-money.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -59,7 +61,7 @@ function orderFixture({ state = 'payment_authorized', paidPercent = 100, release
   return order;
 }
 async function fixture(db, options = {}) {
-  await db.query('TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
+  await db.query('TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
   const store = emptyStore(); store.settings = defaultOperationalSettings();
   store.users = Object.entries(roles).map(([key, role]) => ({ id: key, role, clerkUserId: `clerk_${key}`,
     email: `${key}@refund.test`, name: key, createdAt: AT, ...(role === 'client' ? { accountType: 'individual' } : {}),
@@ -77,6 +79,19 @@ async function fixture(db, options = {}) {
     readyFile('shop_qr', 'supplier_payout_qr', 'supplier')];
   store.supplierPayoutAccounts = [{ supplierId: 'supplier', provider: 'gcash', accountName: 'Shop', qrFileId: 'shop_qr', version: 1, updatedAt: AT }];
   store.files.at(-1).references.push({ type: 'supplier_payout_account', id: 'supplier', field: 'qr' });
+  if (options.voucher) {
+    const campaign = { id: 'voucher_campaign', name: 'Refund test', code: 'REFUND-TEST', mode: 'assigned', status: 'active',
+      valueMinor: 1500, totalLimit: 10, perAccountLimit: 1, endsAt: null, validityDays: 7, createdAt: AT, updatedAt: AT };
+    store.voucherCampaigns.push(campaign);
+    const voucher = issueVoucher(store, campaign, 'client', { id, at: AT }).voucher;
+    const cart = { id: 'voucher_cart', clientId: 'client', state: 'draft', version: 1, serviceLevel: 'standard', fulfillmentMode: 'delivery', createdAt: AT, updatedAt: AT };
+    store.carts.push(cart);
+    const order = store.orders[0];
+    Object.assign(order, { grossServiceFeeMinor: order.serviceFeeMinor, organizationDiscountMinor: 0, organizationDiscountRateBps: 0 });
+    applyVoucherMoney(order, voucherMoney([order], voucher.valueMinor).groups[0], voucher);
+    reserveVoucher(store, voucher, cart, { id, at: AT, orderIds: [order.id], amountMinor: 1500 });
+    confirmVoucher(store, [order], { id, at: AT, actorId: 'ops' });
+  }
   await db.transaction(() => saveStore(db, store));
 }
 function audit(store, entry) {
@@ -108,7 +123,7 @@ async function settle(db, refund, { shop = 0, rider = 0, total = 115000, princip
   return (await call(db, key, 'POST', `/refund-requests/${refund.id}/settle`, { expectedVersion: refund.version,
     shopEntitlementMinor: shop, riderEntitlementMinor: rider, ...(principal == null ? {} : { principalMinor: principal }), totalMinor: total,
     workStopped: true, shopAgreement: 'Shop agreed the recorded final entitlement.', deliveryEvidence: 'Trip and earnings reconciled.',
-    reason: 'Agreed available-funds refund.' }, options)).body.refund;
+    reason: 'Agreed available-funds refund.', ...(options.clientCaused == null ? {} : { clientCaused: options.clientCaused }) }, options)).body.refund;
 }
 async function reserve(db, refund, options = {}) {
   return (await call(db, options.actor || 'ops', 'POST', `/refund-requests/${refund.id}/payment-attempts`, {
@@ -723,4 +738,23 @@ test('live dispatch removes refund-paused offers and rejects stale acceptance wi
   await call(db, 'client', 'POST', `/refund-requests/${refund.id}/withdraw`, { expectedVersion: refund.version, reason: 'Continue the order.' });
   assert.equal((await api('rider', 'GET', '/dispatch/offers')).body.offers.length, 1);
   assert.equal((await api('rider', 'POST', '/dispatch/order/accept', {})).status, 200);
+});
+
+
+test('voucher refund transfers return only paid cash and restore only an unexpired no-fault reward', { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  for (const clientCaused of [false, true]) {
+    await fixture(db, { voucher: true });
+    let refund = await review(db, await request(db));
+    await assert.rejects(settle(db, refund, { total: 113500 }), errorCode('voucher_refund_fault_required'));
+    refund = await settle(db, refund, { total: 113500, clientCaused });
+    assert.equal(refund.settlement.feeMinor, 8500);
+    assert.equal((await loadStore(db)).vouchers[0].status, 'used');
+    refund = await reserve(db, refund);
+    refund = await pay(db, refund);
+    const store = await loadStore(db);
+    assert.equal(store.refundPayments[0].amountMinor, 113500);
+    assert.equal(store.vouchers[0].status, clientCaused ? 'used' : 'available');
+    assert.equal(store.voucherLedger.filter(row => row.kind === 'restored').length, clientCaused ? 0 : 1);
+  }
 });

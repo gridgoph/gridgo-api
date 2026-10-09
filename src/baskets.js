@@ -1,3 +1,4 @@
+import { confirmVoucher } from './vouchers.js';
 import { groupSummary } from "./cart-groups.js";
 import { publicOrganizationDiscount } from "./organization-money.js";
 import { clientInvoice } from "./invoice-projection.js";
@@ -90,6 +91,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   } else {
     if (payment.status !== 'pending_confirmation') fail(409, 'payment_not_pending', 'This basket has no payment waiting for review.');
     if (action === 'reject' && (typeof body.reason !== 'string' || !body.reason.trim())) fail(400, 'payment_rejection_reason_required', 'Explain what the client must correct.');
+    if (action === 'confirm') confirmVoucher(store, basket.orderIds.map(orderId => store.orders.find(o => o.id === orderId)), { id, at: now(), actorId: user.id });
     if (action === 'confirm') Object.assign(payment, { status: 'confirmed', confirmedAt: now(), confirmedBy: user.id, confirmationSource: 'manual_ops' });
     else Object.assign(payment, { status: 'not_submitted', reference: null, proofFileId: null, submittedAt: null,
       rejectedAt: now(), rejectedBy: user.id, rejectionReason: body.reason.trim() });
