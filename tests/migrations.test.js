@@ -51,7 +51,7 @@ test("fresh PostgreSQL installs legal evidence tables and refuses rollback", { s
       assert.ok(tables.has(table), `${table} should exist after up`);
     }
     assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name,
-      "1791975600000_legal_privacy");
+      "1791975700000_legal_privacy");
     await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /legal evidence must be retained/);
   });
 });
