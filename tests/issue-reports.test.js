@@ -316,11 +316,21 @@ test("Operations and Super Admin read and mark reports with their session; other
 
   const listed = await staffCall("ops", "/api/ops/issue-reports?status=new");
   assert.equal(listed.status, 200);
-  assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0 });
+  assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0, priorities: 0 });
   assert.equal(listed.body.reports[0].issue, "Rider map is blank");
   assert.equal(listed.body.reports[0].trackerIssueUrl, null);
 
   const patch = (who, body) => staffCall(who, `/ops/issue-reports/${filed.id}`, { method: "PATCH", body: JSON.stringify(body) });
+  const pinned = await patch("ops", { priority: true });
+  assert.equal(pinned.status, 200, JSON.stringify(pinned.body));
+  assert.equal(pinned.body.priority, true);
+  assert.equal(pinned.body.status, "new");
+  assert.equal((await staffCall("super", "/ops/issue-reports?priority=true")).body.reports[0].id, filed.id);
+  assert.equal((await staffCall("ops", "/ops/issue-reports")).body.counts.priorities, 1);
+  assert.equal((await patch("ops", { priority: "true" })).status, 400);
+  assert.equal((await patch("client", { priority: false })).status, 403);
+  assert.equal((await patch("super", { priority: false })).body.priority, false);
+  assert.equal((await staffCall("ops", "/ops/issue-reports?priority=true")).body.reports.length, 0);
   for (const trackerIssueUrl of [
     "https://github.com/someone-else/gridgo-api/issues/1",
     "http://github.com/gridgoph/gridgo-api/issues/1",
@@ -343,8 +353,12 @@ test("Operations and Super Admin read and mark reports with their session; other
   assert.equal(tracked.status, 200);
   assert.equal(tracked.body.status, "tracked");
   assert.equal(tracked.body.trackerIssueUrl, link);
-  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 1, published: 0, dismissed: 0 });
+  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 1, published: 0, dismissed: 0, priorities: 0 });
   assert.equal((await staffCall("ops", "/ops/issue-reports?status=tracked")).body.reports[0].trackerIssueUrl, link);
+  const linkedPin = await patch("super", { priority: true });
+  assert.equal(linkedPin.body.trackerIssueUrl, link);
+  assert.equal(linkedPin.body.status, "tracked");
+  await patch("ops", { priority: false });
   const republished = await patch("super", { status: "published", publishedIn: "09-25-2026" });
   assert.equal(republished.body.trackerIssueUrl, link, "omitting the link keeps it");
   assert.equal((await patch("ops", { status: "tracked", trackerIssueUrl: null })).body.trackerIssueUrl, null, "null clears it");
@@ -360,7 +374,7 @@ test("Operations and Super Admin read and mark reports with their session; other
   assert.equal(dismissed.status, 200);
   assert.equal(dismissed.body.status, "dismissed");
   assert.equal(dismissed.body.trackerIssueUrl, null, "dismissed clears the link");
-  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 0, published: 0, dismissed: 1 });
+  assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 0, published: 0, dismissed: 1, priorities: 0 });
   assert.equal((await staffCall("client", `/ops/issue-reports/${filed.id}`, { method: "PATCH", body: JSON.stringify({ status: "new" }) })).status, 403);
 });
 
@@ -417,7 +431,7 @@ test("firstmate reads new reports with signed screenshots and links them with it
 
   const listed = await call(base, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
   assert.equal(listed.status, 200);
-  assert.deepEqual(listed.body.counts, { new: 2, tracked: 0, published: 0, dismissed: 0 });
+  assert.deepEqual(listed.body.counts, { new: 2, tracked: 0, published: 0, dismissed: 0, priorities: 0 });
   assert.deepEqual(listed.body.reports.map((report) => report.issue), ["Checkout spins forever", "Old report"]);
   const [report] = listed.body.reports;
   assert.equal(report.trackerIssueUrl, null);
@@ -461,7 +475,7 @@ test("firstmate reads new reports with signed screenshots and links them with it
   assert.equal(dismissed.body.trackerIssueUrl, null);
   assert.deepEqual(
     (await call(base, "/firstmate/issue-reports", { token: FIRSTMATE_TOKEN })).body.counts,
-    { new: 0, tracked: 0, published: 1, dismissed: 1 },
+    { new: 0, tracked: 0, published: 1, dismissed: 1, priorities: 0 },
   );
 });
 
@@ -511,7 +525,7 @@ test("the list pages with before=<last id shown>, never repeating or skipping a 
       { token: FIRSTMATE_TOKEN },
     );
     assert.equal(page.status, 200);
-    assert.deepEqual(page.body.counts, { new: 7, tracked: 0, published: 0, dismissed: 1 });
+    assert.deepEqual(page.body.counts, { new: 7, tracked: 0, published: 0, dismissed: 1, priorities: 0 });
     if (!page.body.reports.length) break;
     assert.ok(page.body.reports.length <= 2);
     paged.push(...page.body.reports.map((report) => report.id));
@@ -519,6 +533,16 @@ test("the list pages with before=<last id shown>, never repeating or skipping a 
   }
   assert.deepEqual(paged, everything.body.reports.map((report) => report.id));
   assert.equal(new Set(paged).size, 7);
+
+  // Priority paging spans statuses and can find pins older than the first normal page.
+  await database.query("UPDATE issue_reports SET priority = true WHERE id = ANY($1::uuid[])", [[ids[0], ids[1], handled.id]]);
+  const firstPins = await call(base, "/firstmate/issue-reports?priority=true&limit=2", {token:FIRSTMATE_TOKEN});
+  assert.equal(firstPins.body.counts.priorities, 3);
+  assert.equal(firstPins.body.reports[0].id, handled.id);
+  const nextPins = await call(base, `/firstmate/issue-reports?priority=true&limit=2&before=${firstPins.body.reports.at(-1).id}`, {token:FIRSTMATE_TOKEN});
+  assert.equal(nextPins.body.reports.length, 1);
+  assert.equal(new Set([...firstPins.body.reports, ...nextPins.body.reports].map(item => item.id)).size, 3);
+  assert.equal((await call(base, "/firstmate/issue-reports?priority=invalid", {token:FIRSTMATE_TOKEN})).status, 400);
 
   // The cursor may be a report that has since left the tab.
   const afterHandled = await call(base, `/firstmate/issue-reports?status=new&before=${handled.id}`, { token: FIRSTMATE_TOKEN });
@@ -622,7 +646,7 @@ test("the running API serves the firstmate issue-report routes only with FIRSTMA
 
     const listed = await call(api, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
     assert.equal(listed.status, 200, JSON.stringify(listed.body));
-    assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0 });
+    assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0, priorities: 0 });
     const [shot] = listed.body.reports[0].screenshots;
     assert.match(shot.url, /^http:\/\/minio\.test:9000\/[^/]+\/issue_reports\//);
     assert.match(shot.url, /X-Amz-Signature=/);

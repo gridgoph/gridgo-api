@@ -43,7 +43,7 @@ const HISTORICAL_ROLLBACK_TIMESTAMP = 1791975600000;
 
 test("fresh PostgreSQL orders operating hours after legal evidence and preserves both rollback guards", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
-    await runner(migrationOptions(schema, "up", undefined, client));
+    await runner({ ...migrationOptions(schema, "up", 1791975800000, client), timestamp: true });
     const tables = new Set((await client.query(
       "SELECT table_name FROM information_schema.tables WHERE table_schema = $1", [schema],
     )).rows.map((row) => row.table_name));
@@ -1314,5 +1314,20 @@ test("listing review migration grandfathers live listings and defaults new recor
     await client.query("BEGIN");
     await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /listing reviews exist/);
     await client.query("ROLLBACK");
+  });
+});
+
+
+test("issue-report priority migration defaults existing reports to unpinned and preserves workflow", { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({schema,client}) => {
+    await runner({...migrationOptions(schema,"up",1791975800000,client), timestamp:true});
+    await client.query(`INSERT INTO issue_reports(id,issue,status,published_in,tracker_issue_url)
+      VALUES ('11111111-1111-4111-8111-111111111111','Keep existing metadata','published','10-13-2026','https://github.com/gridgoph/gridgo-web/issues/1')`);
+    await runner(migrationOptions(schema,"up",undefined,client));
+    const row = (await client.query("SELECT priority,status,published_in,tracker_issue_url FROM issue_reports")).rows[0];
+    assert.deepEqual(row,{priority:false,status:'published',published_in:'10-13-2026',tracker_issue_url:'https://github.com/gridgoph/gridgo-web/issues/1'});
+    await client.query("UPDATE issue_reports SET priority=true");
+    await runner(migrationOptions(schema,"down",1,client));
+    assert.equal((await client.query("SELECT status FROM issue_reports")).rows[0].status,'published');
   });
 });
