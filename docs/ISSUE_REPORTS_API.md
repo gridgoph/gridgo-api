@@ -40,7 +40,7 @@ Send a Clerk session token as `Authorization: Bearer <token>`. The account's ver
 - `GET /issue-reports/:id` returns one report.
 - `PATCH /issue-reports/:id` with `{ "status": "published", "publishedIn": "09-24-2026" }` marks it handled. `publishedIn` is kept only for `published`.
 
-The list response is `{ reports, counts: { new, tracked, published, dismissed } }`. Each report is `{ id, issue, category, status, publishedIn, trackerIssueUrl, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
+The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities } }`. Each report is `{ id, issue, category, status, priority, publishedIn, trackerIssueUrl, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
 Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL_SECONDS`, default 5 minutes), so download them right after listing.
 
 ## Statuses and the tracker issue link
@@ -63,3 +63,11 @@ routes are `404 not_found`; a missing or wrong token is `401 unauthorized`. They
 - `GET /firstmate/issue-reports?status=new[&since=&limit=]` returns `{ reports, counts }` with each screenshot's signed `url`.
 - `GET /firstmate/issue-reports/:id`
 - `PATCH /firstmate/issue-reports/:id` with `{ "status": "tracked", "trackerIssueUrl": "https://github.com/gridgoph/gridgo-api/issues/94" }` (or `publishedIn`).
+
+## Shared priorities
+
+Operations and Super Admin can PATCH `/ops/issue-reports/:id` with only `{ "priority": true }` (pin) or `{ "priority": false }` (unpin). Values must be booleans and priority cannot be combined with workflow fields. This preserves status, `publishedIn`, `trackerIssueUrl`, and original list position. Status updates preserve priority. Public submissions cannot set it, and support desk/firstmate PATCH callers cannot change it.
+
+Every report includes `priority` (default false). All list routes accept `priority=true` to return pinned reports across statuses, with the existing `before`/`limit` paging. Optional `status` and `since` further narrow the query. `counts.priorities` is the total number of pinned reports across all statuses; existing status counts stay unchanged. Pinning a report does not change its linked GitHub issue.
+
+Migration `1791976000000_issue_report_priorities` adds the boolean and last priority actor/time (`priority_updated_by`, `priority_updated_at`) and a partial paging index. Deploy API/migration before dashboard.

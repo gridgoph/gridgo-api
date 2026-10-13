@@ -256,6 +256,7 @@ async function projectReports(database, storage, rows) {
     issue: row.issue,
     category: row.category,
     status: row.status,
+    priority: row.priority,
     publishedIn: row.published_in,
     trackerIssueUrl: row.tracker_issue_url,
     createdAt: asIso(row.created_at),
@@ -264,20 +265,21 @@ async function projectReports(database, storage, rows) {
   }));
 }
 
-const REPORT_COLUMNS = "id, issue, category, status, published_in, tracker_issue_url, created_at, updated_at";
+const REPORT_COLUMNS = "id, issue, category, status, published_in, tracker_issue_url, priority, created_at, updated_at";
 
 /**
  * Newest first, with `id` breaking ties so pages never overlap. `before` is
  * the id of the last report of the previous page: only older reports follow.
  */
-export async function listIssueReports(database, storage, { status = null, since = null, limit = 200, before = null } = {}) {
+export async function listIssueReports(database, storage, { status = null, since = null, limit = 200, before = null, priority = false } = {}) {
   const result = await database.query(
     `SELECT ${REPORT_COLUMNS} FROM issue_reports
      WHERE ($1::text IS NULL OR status = $1) AND ($2::timestamptz IS NULL OR created_at >= $2)
+       AND (NOT $5::boolean OR priority)
        AND ($4::uuid IS NULL OR (created_at, id) < (SELECT created_at, id FROM issue_reports WHERE id = $4))
      ORDER BY created_at DESC, id DESC
      LIMIT $3`,
-    [status, since, limit, before],
+    [status, since, limit, before, priority],
   );
   return projectReports(database, storage, result.rows);
 }
@@ -308,6 +310,7 @@ async function reportCounts(database) {
   const result = await database.query("SELECT status, count(*)::int AS n FROM issue_reports GROUP BY status");
   const counts = Object.fromEntries(ISSUE_STATUSES.map((status) => [status, 0]));
   for (const row of result.rows) counts[row.status] = row.n;
+  counts.priorities = (await database.query("SELECT count(*)::int AS n FROM issue_reports WHERE priority")).rows[0].n;
   return counts;
 }
 
@@ -337,7 +340,7 @@ function trackerIssueUrlInput(body) {
  * and firstmate's service token (`/firstmate/issue-reports`); the caller has
  * already decided who may reach it.
  */
-async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch }) {
+async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch, priorityActor = null }) {
   if (method === "GET" && path === base) {
     const status = url?.searchParams.get("status") || null;
     if (status && !ISSUE_STATUSES.includes(status)) {
@@ -359,7 +362,11 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
         throw new ReportError(400, "invalid_request", "before must be the id of an issue report.");
       }
     }
-    const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit, before });
+    const priorityRaw = url?.searchParams.get("priority");
+    if (priorityRaw != null && !["true", "false"].includes(priorityRaw)) {
+      throw new ReportError(400, "invalid_request", "priority must be true or false.");
+    }
+    const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit, before, priority: priorityRaw === "true" });
     send(res, 200, { reports, counts: await reportCounts(database) });
     return true;
   }
@@ -371,6 +378,20 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
   if (!UUID_RE.test(id)) throw notFound;
   if (method === "PATCH") {
     const body = await readPatch();
+    if (body && Object.hasOwn(body, "priority")) {
+      if (!priorityActor) throw new ReportError(403, "forbidden", "Only Operations and Super Admin can change priority.");
+      if (typeof body.priority !== "boolean" || Object.keys(body).some(key => key !== "priority")) {
+        throw new ReportError(400, "invalid_request", "Send priority as true or false, separately from status changes.");
+      }
+      const result = await database.transaction(() => database.query(
+        `UPDATE issue_reports SET priority = $2, priority_updated_by = $3,
+           priority_updated_at = now(), updated_at = now()
+         WHERE id = $1 RETURNING id`, [id, body.priority, priorityActor.id],
+      ), { lockKey: ISSUE_LOCK });
+      if (!result.rowCount) throw notFound;
+      send(res, 200, await findIssueReport(database, storage, id));
+      return true;
+    }
     const status = asTrimmedString(body?.status);
     if (!ISSUE_STATUSES.includes(status)) {
       throw new ReportError(400, "invalid_request", `status must be one of: ${ISSUE_STATUSES.join(", ")}.`);
@@ -461,7 +482,7 @@ export async function routeStaffIssueReports({ req, res, pathname, url, user, re
       throw new ReportError(403, "forbidden", "Only Operations and Super Admin can read issue reports.");
     }
     if (await reviewIssueReports({
-      method: req.method, path, base: STAFF_BASE, url, res, send, database, storage,
+      method: req.method, path, base: STAFF_BASE, url, res, send, database, storage, priorityActor: user,
       readPatch: () => readBody(req),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
