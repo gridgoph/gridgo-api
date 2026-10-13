@@ -132,7 +132,7 @@ export function createGithubClient({ token, apiUrl = GITHUB_API_URL, fetch = glo
     if (!response.ok) {
       throw new TrackerError(502, "tracker_github_unavailable", `GitHub answered HTTP ${response.status}. Try again in a moment.`);
     }
-    return response.json();
+    return response.status === 204 ? null : response.json();
   }
 
   return {
@@ -154,6 +154,11 @@ export function createGithubClient({ token, apiUrl = GITHUB_API_URL, fetch = glo
     },
     updateIssue({ owner, name }, number, patch) {
       return call("PATCH", `/repos/${owner}/${name}/issues/${number}`, patch);
+    },
+    async setPriority({ owner, name }, number, priority) {
+      const path = `/repos/${owner}/${name}/issues/${number}/labels`;
+      if (priority) return call("POST", path, { labels: ["priority"] });
+      return call("DELETE", `${path}/priority`);
     },
     comment({ owner, name }, number, text) {
       return call("POST", `/repos/${owner}/${name}/issues/${number}/comments`, { body: text });
@@ -327,6 +332,7 @@ export function projectTrackerItem(issue, decisions = []) {
     developer: developerOf(issue, marker),
     requirement: text(marker.summary) ?? issue.title,
     category: text(marker.category),
+    priority: issue.labels.some(label => label.toLowerCase() === "priority"),
     ...trackerStatusOf(issue),
     ...parseDecisionSection(issue.body),
     decisions,
@@ -637,6 +643,29 @@ export function createTracker({
     return { fetchedAt, items };
   }
 
+  async function changePriority(user, repo, number, body) {
+    if (!body || typeof body.priority !== "boolean" || Object.keys(body).some(key => key !== "priority")) {
+      throw new TrackerError(400, "invalid_request", "Send priority as true or false.");
+    }
+    return database.transaction(async () => {
+      const issue = await freshTrackedIssue(repo, number);
+      const from = issue.labels.some(label => label.toLowerCase() === "priority");
+      if (from === body.priority) {
+        remember(issue);
+        return issue;
+      }
+      // Label-specific writes preserve concurrent edits to status and unrelated labels.
+      await github.setPriority(repo, number, body.priority);
+      const updated = await freshTrackedIssue(repo, number);
+      await commitDomain(store => audit(store, {
+        actor: user, action: "tracker.priority", entityType: "tracker_item",
+        entityId: `${repo.name}#${number}`, detail: { from, to: body.priority },
+      }));
+      remember(updated);
+      return updated;
+    }, { lockKey: TRACKER_LOCK });
+  }
+
   async function changeStatus(user, repo, number, input) {
     return database.transaction(async () => {
       const issue = await freshTrackedIssue(repo, number);
@@ -759,16 +788,18 @@ export function createTracker({
         send(res, 200, await itemResponse(issue));
         return true;
       }
-      const itemAction = /^\/admin\/tracker\/([^/]+)\/([^/]+)\/(status|decisions)$/.exec(pathname);
+      const itemAction = /^\/admin\/tracker\/([^/]+)\/([^/]+)\/(status|decisions|priority)$/.exec(pathname);
       const route = itemAction && `${method} ${itemAction[3]}`;
-      if (route === "PATCH status" || route === "POST decisions") {
+      if (route === "PATCH status" || route === "POST decisions" || route === "PATCH priority") {
         const repo = repoFor(segment(itemAction[1]));
         const number = Number(itemAction[2]);
         if (!Number.isSafeInteger(number) || number < 1) {
           throw new TrackerError(404, "tracker_item_not_found", `${itemAction[2]} is not an issue number.`);
         }
         const body = await readBody(req);
-        const updated = route === "PATCH status"
+        const updated = route === "PATCH priority"
+          ? await changePriority(user, repo, number, body)
+          : route === "PATCH status"
           ? await changeStatus(user, repo, number, statusInput(body))
           : await recordDecision(user, repo, number, decisionInput(body));
         send(res, 200, await itemResponse(updated));

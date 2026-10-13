@@ -80,7 +80,7 @@ test("projectTrackerItem maps the marker, developer label and module fallback", 
   assert.deepEqual(item, {
     key: "gridgo-api#7", repo: "gridgo-api", number: 7, url: "https://github.com/gridgoph/gridgo-api/issues/7",
     section: "step-01", order: 2, ref: "1.2", module: "Step 01", developer: "Mark",
-    requirement: "Client can pay", category: "Payments", status: "open", statusSource: "derived", decisions: [],
+    requirement: "Client can pay", category: "Payments", status: "open", statusSource: "derived", priority: false, decisions: [],
     decisionQuestions: [], decisionMarkdown: "",
   });
   const noLabel = projectTrackerItem(issue({ body: '<!-- tracker: {"owner":"ven","module":"Supplier onboarding","section":"supplier"} -->' }));
