@@ -22,6 +22,9 @@ RUN npm ci --omit=dev
 FROM node:22-alpine AS runner
 WORKDIR /app
 
+# First-page document previews; Writer only, no office suite metapackage.
+RUN apk add --no-cache poppler-utils libreoffice-writer font-liberation util-linux
+
 ARG GRIDGO_BUILD_SHA=unknown
 ARG GRIDGO_BUILD_TIME=unknown
 

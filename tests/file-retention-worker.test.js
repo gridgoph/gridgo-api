@@ -102,3 +102,19 @@ test('a restored active account cancels eligibility of a queued verification cle
   assert.equal(await f.worker.finishPending('artwork'), false);
   assert.equal(f.store.files[0].state, 'delete_pending'); assert.equal(f.objects.size, 3);
 });
+
+
+test('derived previews share holds and are removed even without a committed preview descriptor', async () => {
+  const f = fixture({ enabled: true });
+  f.store.files[0].detectedContentType = 'application/pdf';
+  const derived = `${f.store.files[0].objectKey}.preview-v1.png`;
+  f.objects.add(derived);
+  f.hold();
+  await assert.rejects(f.worker.deleteEarly('artwork', { id: 'admin', role: 'super_admin' }, 'Reason'), { code: 'file_retention_hold' });
+  await f.worker.run({ dryRun: false });
+  assert.ok(f.objects.has(derived));
+  f.store.issues = [];
+  await f.worker.deleteEarly('artwork', { id: 'admin', role: 'super_admin' }, 'Reason');
+  assert.ok(!f.objects.has(derived));
+  assert.equal(f.store.files[0].state, 'deleted');
+});

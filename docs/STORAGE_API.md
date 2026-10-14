@@ -526,3 +526,88 @@ Progress images use the same private read gate as artwork. The client gallery an
 ### Pick-up chat photos
 
 `pickup_chat_image` accepts supplier/rider JPEG, PNG and WebP images up to 15 MiB, using the usual upload verification. Up to four own ready unsent photos bind through `POST /orders/:id/pickup-chat/messages`. Generic attach is refused with `pickup_chat_image_not_attachable`. Sent metadata/downloads are private to the approved assigned supplier and rider while the conversation is readable, including Office transfers; reassignment revokes access. The chat sweep queues byte deletion when the conversation closes; retained opaque order references preserve open-case holds on every retry. See [pick-up messages](OPERATIONAL_MODEL_V2_API.md#pick-up-messages).
+
+## Artwork visual previews
+
+PDF and DOCX artwork now have a **first-page PNG rendition**, generated once
+when the upload becomes ready. Existing ready files are rendered lazily on the
+first preview request. JPEG/PNG/WebP use their original image bytes. Original
+upload/download behavior, inspection measurements, page-count metadata and
+Operations' print-readiness decision are unchanged. A preview is advisory,
+not a print-ready conversion; DOCX font substitution/layout can differ from Word.
+
+`file.preview` on upload, metadata and attach responses is additive:
+
+```json
+{
+  "status": "ready",
+  "downloadUrlPath": "/files/file_abc/preview-url",
+  "retryPath": "/files/file_abc/preview"
+}
+```
+
+Statuses are `pending` (legacy/not yet rendered), `ready`, `failed`, and
+`unsupported`. A stored failure adds `error`, a stable code. These are resolver
+paths, **not image URLs**. Order responses add `artworkPreviews`, containing
+`{fileId, ...preview}` entries only for the artwork IDs visible to that reader.
+A supplier still receives no artwork before Operations releases the file check;
+multi-shop and per-line access rules apply unchanged. No preview object key,
+source path, document content, or renderer stderr appears in these projections.
+
+- `GET /files/:fileId/preview-url`: authorize the original ready artwork, lazily
+  render if necessary, check the rendition exists and matches its recorded size,
+  and return `{fileId, contentType, page: 1, url, expiresAt, expiresInSeconds}`.
+  The image URL is independently signed, with the existing storage TTL and
+  `private, no-store` response caching. Refresh it through this route on expiry.
+- `POST /files/:fileId/preview` with `{}`: explicit Retry. Regenerate a document
+  rendition and return a fresh signed response. Attempts have a 30-second
+  cooldown (`429 preview_retry_later`, or the last generation error); concurrent
+  conversions of other files receive `503 preview_busy`. Retrying an ordinary
+  image refreshes its signed original URL.
+- `POST /files/:fileId/preview-failure` with
+  `{ "reason": "image_load_failed" }` or `{ "reason": "download_failed" }`:
+  report a device-side read/decode failure after original-file authorization.
+  Returns `{ok:true}`. Arbitrary messages, URLs and document text are not accepted.
+  This is needed because direct signed MinIO reads do not pass through the API.
+
+Client follow-up: resolve `downloadUrlPath` with the Clerk bearer, then use `url`
+as the image source in the visual proof. Display an obvious error with Retry
+for non-2xx responses and image-load failures, keep **Open original file**, and
+report device failures through `preview-failure`. Retry calls `retryPath`; respect
+429/503 backoff. Never render the original PDF or DOCX URL as an image, and do not
+mistake `pending` for a permanently unsupported type.
+
+Generation and API preview-read failures log structured `artwork_preview_failed`
+records with `fileId`, `phase` and a bounded reason code. Examples include
+`preview_conversion_failed`, `preview_rasterization_failed`,
+`preview_render_timeout`, `preview_document_unsafe`, `preview_source_too_large`,
+`storage_object_missing` and `minio_unavailable`. Upload success is independent
+of rendition success; a failed preview leaves the original ready and downloadable.
+
+Rendition metadata lives on the parent `files.data.preview`; the private PNG is
+a deterministic derived MinIO object, not an independently attachable upload.
+It inherits every authorization/hold from its parent. Early and scheduled deletion
+remove both objects, including a rendition written just before a metadata-commit
+failure. A post-conversion transaction rechecks the parent under the domain lock
+before writing, so deletion cannot be undone by an in-flight renderer. Rendering
+uses a separate PostgreSQL advisory lock and does not hold the domain lock while
+converting. No migration or boot-time schema change is needed.
+
+The Docker image adds Alpine `poppler-utils`, `libreoffice-writer`, Liberation
+fonts and `util-linux` (`prlimit`). Poppler rasterizes only page 1 to at most
+1600 pixels on the long edge; Writer exports only page 1 before rasterization.
+Writer is a local subprocess, not a network service. There is no new npm
+runtime dependency. Each conversion has a private temporary directory/profile,
+no inherited API credentials, a 25-second wall-clock timeout per tool, 20 CPU
+seconds, 1 GiB virtual-memory and 8 MiB per-output-file limits. Source reads are
+bounded at 64 MiB (DOCX retains its stricter 16 MiB upload/package limits).
+One conversion runs across API replicas at a time. Temporary data is removed
+after success or failure.
+
+The DOCX rendering guard refuses external relationships, dynamic fields,
+embedded/active objects and XML entity constructs; macros are disabled in the
+private Writer profile. These preview refusals do not change upload acceptance.
+Password-protected, malformed or unsupported documents receive an explicit
+error; PSD visual conversion and legacy binary `.doc` are not implemented.
+CI installs the tools for fixture tests and also renders real small PDF/DOCX
+fixtures inside the built production image, as uid 1001 with no network.

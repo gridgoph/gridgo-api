@@ -1,3 +1,4 @@
+import { previewPdf } from './helpers/preview-fixtures.mjs';
 import { alwaysOpenOperatingHours } from "./helpers/operating-hours.mjs";
 import { docx, zip } from './helpers/docx.mjs';
 import test from "node:test";
@@ -2924,4 +2925,99 @@ test('outside-hours checkout exposes its review estimate and payment confirmatio
   const after = (await loadStore(database)).orders.find(row => row.id === orderId);
   assert.equal(after.promiseBy, original.promiseBy);
   assert.deepEqual(after.operatingClock, original.operatingClock);
+});
+
+test('artwork previews persist PDF/DOCX renditions, authorize reads, retry failures and lazily render legacy files', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL }); t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({ id: 'preview_admin', clerkUserId: 'clerk_preview_admin', email: 'preview-admin@gridgo.test', name: 'Admin', role: 'super_admin', createdAt: AT });
+    store.userRoleMemberships.push({ userId: 'preview_admin', role: 'super_admin', createdAt: AT });
+    await saveStore(database, store);
+  });
+  const objects = new Map(); let writes = 0;
+  const storage = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://storage');
+    if (url.searchParams.has('location')) { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<LocationConstraint></LocationConstraint>'); return; }
+    if (req.method === 'PUT') {
+      const chunks = []; req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => { objects.set(url.pathname, Buffer.concat(chunks)); writes++; res.writeHead(200, { ETag: '"fixture"' }); res.end(); }); return;
+    }
+    if (req.method === 'DELETE') { objects.delete(url.pathname); res.writeHead(204); res.end(); return; }
+    if (['/gridgo-uploads/', '/gridgo-uploads'].includes(url.pathname)) { res.writeHead(200); res.end(); return; }
+    const bytes = objects.get(url.pathname);
+    if (!bytes) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'Content-Length': bytes.length }); res.end(req.method === 'HEAD' ? undefined : bytes);
+  });
+  await new Promise(resolve => storage.listen(0, '127.0.0.1', resolve));
+  t.after(() => { storage.closeAllConnections(); return new Promise(resolve => storage.close(resolve)); });
+  const storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  const instance = await startApi({ extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const upload = async (bytes, type, name) => {
+    const form = new FormData(); form.set('purpose', 'artwork'); form.set('file', new Blob([bytes], { type }), name);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
+      const body = await response.json();
+      if (body.error === 'storage_initializing') { await new Promise(resolve => setTimeout(resolve, 25)); continue; }
+      assert.equal(response.status, 201, JSON.stringify(body)); return body.file;
+    }
+    assert.fail('Storage did not initialize');
+  };
+  for (const [bytes, type, name] of [
+    [previewPdf(), 'application/pdf', 'two-pages.pdf'],
+    [docx(null), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'art.docx'],
+    [readFileSync(new URL('./fixtures/artwork-check/pixel.jpg', import.meta.url)), 'image/jpeg', 'art.jpg'],
+  ]) {
+    const file = await upload(bytes, type, name);
+    assert.equal(file.preview.status, 'ready', JSON.stringify(file));
+    assert.ok(!JSON.stringify(file).includes('objectKey'));
+    const record = (await loadStore(database)).files.find(row => row.fileId === file.fileId);
+    if (type !== 'image/jpeg') assert.equal(record.preview.status, 'ready');
+    const count = writes;
+    const signed = await call(file.preview.downloadUrlPath);
+    assert.equal(signed.status, 200, JSON.stringify(signed.body));
+    const rendered = Buffer.from(await (await fetch(signed.body.url)).arrayBuffer());
+    if (type !== 'image/jpeg') assert.equal(rendered.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    else assert.deepEqual(rendered, bytes);
+    assert.equal(writes, count, 'cached reads never reconvert');
+    assert.equal((await call(file.preview.downloadUrlPath, { subject: 'clerk_supplier_b' })).status, 403);
+    assert.equal((await call(file.preview.retryPath, { method: 'POST', subject: 'clerk_supplier_b', body: {} })).status, 403);
+    assert.equal((await call(file.preview.downloadUrlPath, { subject: undefined })).status, 401);
+    if (type === 'application/pdf') {
+      // Legacy row: no cached metadata, the original already exists in MinIO.
+      await database.transaction(async () => {
+        const store = await loadStore(database); delete store.files.find(row => row.fileId === file.fileId).preview;
+        await saveStore(database, store);
+      });
+      objects.delete(`/gridgo-uploads/${record.objectKey}.preview-v1.png`);
+      const lazy = await Promise.all([call(file.preview.downloadUrlPath), call(file.preview.downloadUrlPath)]);
+      assert.ok(lazy.every(result => result.status === 200), JSON.stringify(lazy));
+      assert.equal(writes, count + 1, 'concurrent legacy reads render once');
+      objects.delete(`/gridgo-uploads/${record.objectKey}.preview-v1.png`);
+      assert.equal((await call(file.preview.downloadUrlPath)).body.error, 'storage_object_missing');
+      // Advance the bounded retry interval without slowing the suite.
+      await database.transaction(async () => {
+        const store = await loadStore(database); store.files.find(row => row.fileId === file.fileId).preview.attemptedAt = AT;
+        await saveStore(database, store);
+      });
+      assert.equal((await call(file.preview.retryPath, { method: 'POST', body: {} })).status, 200);
+      const deleted = await call(`/files/${file.fileId}`, { method: 'DELETE', subject: 'clerk_preview_admin', body: { reason: 'Preview deletion regression test' } });
+      assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
+      assert.ok(!objects.has(`/gridgo-uploads/${record.objectKey}`));
+      assert.ok(!objects.has(`/gridgo-uploads/${record.objectKey}.preview-v1.png`));
+      assert.equal((await call(file.preview.downloadUrlPath)).status, 404);
+    }
+  }
+  const broken = await upload(Buffer.from('%PDF-1.4 broken\n%%EOF'), 'application/pdf', 'broken.pdf');
+  assert.equal(broken.preview.status, 'failed');
+  assert.equal((await call(`/files/${broken.fileId}/download-url`)).status, 200, 'original remains available');
+  assert.equal((await call(broken.preview.retryPath, { method: 'POST', body: {} })).status, 429);
+  assert.equal((await call(`/files/${broken.fileId}/preview-failure`, { method: 'POST', body: { reason: 'image_load_failed' } })).status, 200);
+  assert.equal((await call(`/files/${broken.fileId}/preview-failure`, { method: 'POST', body: { reason: 'arbitrary private text' } })).status, 400);
+  assert.match(instance.output(), /artwork_preview_failed.*preview_rasterization_failed/);
+  assert.match(instance.output(), /artwork_preview_failed.*storage_object_missing/);
+  assert.match(instance.output(), /artwork_preview_failed.*client_read.*image_load_failed/);
 });
