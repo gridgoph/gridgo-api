@@ -367,6 +367,27 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
   });
 }
 
+/** Staff replies share the message transaction and the normal save/outbox boundary. */
+async function notifySupportParty({ thread, message }) {
+  if (thread.staffPeerUserId || !["client", "supplier", "rider"].includes(thread.partyRole)) return;
+  await enqueueMutation(async () => {
+    await database.query("SELECT pg_advisory_xact_lock(hashtext($1))", [DOMAIN_MUTATION_LOCK]);
+    const latest = await load();
+    const at = message.createdAt;
+    const quiet = latest.notifications.some(n => n.userId === thread.partyUserId
+      && n.appRole === thread.partyRole && n.type === "support_message" && n.threadId === thread.id
+      && !n.read && !n.deletedAt && Date.parse(at) - Date.parse(n.at) < 5 * 60_000);
+    if (quiet) return;
+    latest.notifications.push({
+      id: id("ntf"), userId: thread.partyUserId, appRole: thread.partyRole,
+      type: "support_message", threadId: thread.id,
+      title: "Message from Operations", body: "Operations sent you a message. Open your support chat to read it and reply.",
+      read: false, at,
+    });
+    await save(latest);
+  });
+}
+
 /**
  * Push a platform-wide announcement to every handset nobody has signed in on.
  *
@@ -2594,6 +2615,7 @@ async function handleRequest(req, res) {
         send,
         database,
         notifyStaff: notifyStaffDesk,
+        notifyParty: notifySupportParty,
       });
     }
 

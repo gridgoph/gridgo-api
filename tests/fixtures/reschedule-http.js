@@ -23,7 +23,7 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
-export async function apiForTest(t) {
+export async function apiForTest(t, env = {}) {
   const storage = http.createServer((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
     else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
@@ -39,6 +39,7 @@ export async function apiForTest(t) {
     HOST: '127.0.0.1', PORT: String(port), MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl,
     MINIO_ACCESS_KEY: 'reschedule-test', MINIO_SECRET_KEY: 'reschedule-test-secret', MINIO_BUCKET: 'reschedule-test',
     GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000', GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: '0',
+    ...env,
   }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (data) => { output += data; }); child.stderr.on('data', (data) => { output += data; });

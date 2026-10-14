@@ -134,3 +134,59 @@ lifecycle notice without access to call records or signals. Full API/app behavio
 ### Rider delivery milestones
 
 `POST /dispatch/:id/milestones` writes `rider_delivery_milestone` inbox rows to the owning client and every current Operations/Super Admin membership. It queues `orders`/`dispatch` invalidation before `save()`; push/SSE delivery occurs after commit. Duplicate milestone submissions retain the original event without another notification. Position uploads remain polled via the [location contract](OPERATIONAL_MODEL_V2_API.md#rider-location), without a push for every GPS fix.
+
+## Chat push delivery and app follow-up
+
+Operations/Super Admin replies to a client, supplier or rider support thread
+create `support_message` for that thread's owning user and `appRole`. The message,
+inbox row and device outbox commit together under the support-chat lock followed
+by the domain lock. Delivery uses `save()` and its after-commit drain, including
+when the recipient has no live stream. Staff-to-staff threads are unchanged.
+
+Chat routing contracts:
+
+| Type | Recipient app | Tap destination |
+|---|---|---|
+| `support_message` | Client, supplier or rider, matching the thread's party role | Exact support thread from the authenticated notification's `threadId` |
+| `delivery_message` | Client or rider | Delivery chat for `orderId` |
+| `pickup_chat_message` | Supplier or rider | Pick-up chat for `orderId` |
+
+Push data remains limited to `notificationId`, `type`, `orderId` (when present)
+and `at`. Support pushes do **not** add a thread ID to that allowlist: on tap,
+`PATCH /notifications/:notificationId` with `{ "read": true }` returns
+`notification.threadId`; the authenticated inbox list also includes it. Open
+`GET /support-chat/threads/:threadId` after resolving it. Do not guess the most
+recent thread. Missing/deleted notifications or inaccessible/closed chats need
+a safe in-app fallback. Message text and photos never enter push or inbox copy.
+
+The first message creates a notice. Further messages to the same recipient and
+conversation share its still-unread, non-deleted notice for five minutes from
+that notice's creation; suppressed messages do not extend the window. The first
+message after expiry creates another notice. Reading/deleting the inbox notice
+also ends its suppression. Support windows are per thread and party app;
+delivery and pick-up windows are per order and assigned rider. A previous
+rider's notice cannot silence the new rider. Historical delivery notices without
+a rider scope do not suppress the first new scoped notice. Chat read receipts
+and notification read state remain separate.
+
+Client/rider follow-ups (and supplier parity for support/pick-up):
+
+- Create Android channel `gridgo_default` with audible default sound and suitable
+  importance before token registration; use the same channel for foreground
+  local presentation. The server now explicitly sends
+  `android.notification.sound: "default"` for these types and already sends
+  `apns.payload.aps.sound: "default"`. Android 8+ channel settings still govern
+  sound; re-creating a previously silent channel does not reset its settings.
+  The app must handle that existing-channel case and notification permission.
+- Register/refresh a native provider token using authenticated `POST /devices`
+  with the correct `appRole` (`client`, `rider`, or `supplier`) and `tokenProvider`.
+  Signed-out/unclaimed tokens never receive personal chat pushes.
+- Handle all relevant types above both on notification tap while backgrounded
+  and on cold start. Defer navigation until authentication/navigation are ready;
+  deduplicate by `notificationId`. Preserve authorization when fetching the chat.
+- Verify on two real phones with the apps backgrounded and closed, including
+  a first message, a burst, a message after five minutes, and tap routing. Local
+  PostgreSQL/fake-FCM tests establish the server path, not handset permissions,
+  installed channels, native sound, provider credentials or production delivery.
+
+FCM field semantics: [Android notification payload](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages#AndroidNotification).

@@ -198,13 +198,13 @@ async function markRead(database, order, userId) {
 function counterpartNotice(order, party, createId, at) {
   return party === "client"
     ? {
-      id: createId("ntf"), userId: order.riderId, appRole: "rider", orderId: order.id,
+      id: createId("ntf"), userId: order.riderId, appRole: "rider", orderId: order.id, chatRiderId: order.riderId,
       type: "delivery_message", title: "Message from the client",
       body: "The client sent you a message about this delivery. Open the trip to read it and reply.",
       read: false, at,
     }
     : {
-      id: createId("ntf"), userId: order.clientId, appRole: "client", orderId: order.id,
+      id: createId("ntf"), userId: order.clientId, appRole: "client", orderId: order.id, chatRiderId: order.riderId,
       type: "delivery_message", title: "Message from your rider",
       body: "Your rider sent you a message about this delivery. Open the order to read it and reply.",
       read: false, at,
@@ -219,6 +219,7 @@ function notifyCounterpart(store, order, party, { createId, at }) {
   const notice = counterpartNotice(order, party, createId, at);
   const quiet = (store.notifications || []).some((row) => row.userId === notice.userId
     && row.orderId === order.id
+    && row.chatRiderId === order.riderId
     && row.type === "delivery_message"
     && !row.read
     && !row.deletedAt
