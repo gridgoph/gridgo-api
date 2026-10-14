@@ -1,3 +1,4 @@
+import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
@@ -95,6 +96,7 @@ const TABLES = [
   ...refundTableDefinitions,
   ...voucherTables,
   surveyTable,
+  supplierInvoiceTable,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
@@ -116,6 +118,7 @@ export function emptyStore() {
     ...emptyStaffStore(),
     ...emptyVoucherStore(),
     orderSurveys: [],
+    supplierInvoices: [],
     surveyLaunchedAt: null,
     version: 3,
     legalPenaltyGate: null,
@@ -190,6 +193,7 @@ function rowsFromStore(store) {
   staffRows(store, rows);
   voucherRows(store, rows);
   surveyRows(store, rows);
+  supplierInvoiceRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
@@ -793,6 +797,7 @@ export async function loadStore(database) {
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
   loadSurveyRows(store, loaded);
+  loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
