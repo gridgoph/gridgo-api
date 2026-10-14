@@ -573,6 +573,7 @@ export function fcmRequestBody(message, token, { validateOnly = false } = {}) {
   const notification = { title: message.title, body: message.body };
   const androidNotification = {
     channel_id: message.androidChannelId || ANDROID_NOTIFICATION_CHANNEL_ID,
+    sound: message.sound || "default",
   };
   const aps = { sound: message.sound || "default" };
   const apns = {
