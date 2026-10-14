@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planProductionTimeCorrection, applyProductionTimeCorrection } from '../src/production-time-correction.js';
@@ -84,7 +85,7 @@ test('PostgreSQL correction dry-run, audited apply, reload and rerun preserve im
   t.after(() => database.close());
   // A rollback-only transaction isolates this fixture from other focused cases.
   await database.transaction(async () => {
-    await database.query('TRUNCATE users, platform_settings, taxonomy_categories, listing_starters CASCADE');
+    await resetDatabase(database, 'TRUNCATE users, platform_settings, taxonomy_categories, listing_starters CASCADE');
     const sample = fixture();
     const store = { ...emptyStore(), ...sample };
     store.users = [

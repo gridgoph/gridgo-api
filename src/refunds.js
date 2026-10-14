@@ -357,7 +357,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   store.refundEvents.push({ id: id('revent'), requestId: request.id, requestVersion: request.version, actorId: user.id, kind: eventKind,
     reason: eventReason, createdAt: at, data: eventData });
   audit(store, { actor: user, action: `refund.${eventKind}`, entityType: 'refund_request', entityId: request.id,
-    orderId: order.id, detail: { version: request.version, ...eventData } });
+    orderId: order.id, reason: eventReason, detail: { version: request.version, ...eventData } });
   notify(store, request, order, eventKind, id, at);
   const response = { status: action === 'request' ? 201 : 200, body: { refund: publicRefund(store, request, user) } };
   store.refundCommands.push({ id: id('rcmd'), actorId: user.id, requestKey: key, route, bodyHash,

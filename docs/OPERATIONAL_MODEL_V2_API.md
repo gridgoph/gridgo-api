@@ -709,7 +709,7 @@ Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying 
 
 ## Audit access
 
-`GET /audit` returns `{ audit }`, newest first, with optional `action`, `entityType`, `entityId`, `orderId`, `actorId`, and `limit` (default 100, maximum 500) filters. The unrestricted audit log is Super Admin only.
+`GET /audit` returns `{ audit, limit, offset, nextOffset }`, newest first. It supports person/action/order/date filters, search, bounded paging and CSV export; `GET /orders/:id/audit` supplies the order workspace view. The unrestricted audit log is Super Admin only. Entries are immutable in PostgreSQL and retained indefinitely pending the accountant’s retention decision. See [Audit API](AUDIT_API.md) for entry shape, filters, export, coverage and the restricted Operations order view.
 
 Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `order.transition_refused`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
 

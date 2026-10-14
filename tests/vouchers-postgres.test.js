@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -12,7 +13,7 @@ const AT = '2026-10-09T00:00:00.000Z';
 const id = prefix => `${prefix}_${crypto.randomUUID()}`;
 const DB = process.env.DATABASE_URL;
 async function fixture(db) {
-  await db.query('TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
   const store = emptyStore(); store.settings = defaultOperationalSettings();
   store.users = ['client', 'super'].map(key => ({ id: key, role: key === 'super' ? 'super_admin' : 'client', email: `${key}@voucher.test`, name: key, clerkUserId: `clerk_${key}`, createdAt: AT, ...(key === 'client' ? { accountType: 'individual' } : {}) }));
   store.userRoleMemberships = store.users.map(u => ({ userId: u.id, role: u.role, createdAt: AT }));

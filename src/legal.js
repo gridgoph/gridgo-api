@@ -171,7 +171,7 @@ export async function routeLegal({ req, url, user, database, readBody, onEvent, 
     if (!['access','correction','deletion'].includes(body.kind) || !bounded(body.details ?? '', 4000, false)) fail(400, 'invalid_privacy_request');
     if (body.confirmed !== true) fail(400, 'confirmation_required');
     const row = (await database.query('INSERT INTO privacy_requests(id,user_id,kind,details) VALUES($1,$2,$3,$4) RETURNING *', [uid(), user.id, body.kind, body.details || ''])).rows[0];
-    await onEvent({ action: 'privacy.requested', id: row.id, actor: user });
+    await onEvent({ action: 'privacy.requested', id: row.id, actor: user, before: null, after: { status: row.status, kind: row.kind, dueAt: row.due_at } });
     return out({ request: privacyProjection(row) }, 201);
   }
   if ((mine || path === '/admin/privacy-requests') && req.method === 'GET') {
@@ -193,7 +193,7 @@ export async function routeLegal({ req, url, user, database, readBody, onEvent, 
     if (['completed','rejected'].includes(status) && !bounded(body.resolution ?? row.resolution,4000)) fail(400, 'resolution_required');
     if (handlerId != null && !(await database.query("SELECT 1 FROM user_role_memberships WHERE user_id=$1 AND role IN ('ops_admin','super_admin')", [handlerId])).rows.length) fail(400, 'invalid_privacy_handler');
     const updated = (await database.query('UPDATE privacy_requests SET status=$2,due_at=$3,handler_id=$4,resolution=$5,updated_at=now(),revision=revision+1 WHERE id=$1 RETURNING *', [row.id,status,new Date(dueAt).toISOString(),handlerId,body.resolution ?? row.resolution])).rows[0];
-    await onEvent({ action: 'privacy.updated', id: row.id, actor: user, detail: { status, dueAt, handlerId } });
+    await onEvent({ action: 'privacy.updated', id: row.id, actor: user, detail: { status, dueAt, handlerId }, before: { status: row.status, dueAt: row.due_at, handlerId: row.handler_id }, after: { status, dueAt, handlerId } });
     return out({ request: privacyProjection(updated) });
   }
   if (path === '/admin/legal/acceptances' && req.method === 'GET') {
@@ -240,7 +240,7 @@ export async function routeLegal({ req, url, user, database, readBody, onEvent, 
       const slot = LEGAL_SLOTS.find(slot => slot[0] === doc.id);
       if (slot && draft.audience !== slot[2]) fail(400,'launch_audience_immutable');
       await database.query('UPDATE legal_documents SET draft=$2,revision=revision+1 WHERE id=$1',[doc.id,draft]);
-      await onEvent({action:'legal.edited',id:doc.id,actor:user,detail:{revision:doc.revision+1,draft}});
+      await onEvent({action:'legal.edited',id:doc.id,actor:user,detail:{revision:doc.revision+1},before:{revision:doc.revision},after:{revision:doc.revision+1,audience:draft.audience,material:draft.material}});
       return out({id:doc.id,revision:doc.revision+1,draft});
     }
     if (req.method === 'POST' && match[2]) {
@@ -259,7 +259,7 @@ export async function routeLegal({ req, url, user, database, readBody, onEvent, 
       const row = (await database.query(`INSERT INTO legal_versions(id,document_id,version,audience,effective_at,placeholder,material,penalties,snapshot,pdf_file_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[uid(),doc.id,version,draft.audience,draft.effectiveAt,draft.placeholder,material,draft.penalties,draft,draft.pdfFileId])).rows[0];
       await database.query('UPDATE legal_documents SET revision=revision+1 WHERE id=$1',[doc.id]);
-      await onEvent({action:'legal.published',id:doc.id,actor:user,detail:{versionId:row.id,version,material}});
+      await onEvent({action:'legal.published',id:doc.id,actor:user,detail:{versionId:row.id,version,material},before:earlier[0]?{version:earlier[0].version,material:earlier[0].material}:null,after:{versionId:row.id,version,material,audience:draft.audience,effectiveAt:draft.effectiveAt}});
       return out({document:project(row),revision:doc.revision+1},201);
     }
   }

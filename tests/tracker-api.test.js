@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -239,7 +240,7 @@ async function startMockMinio() {
 }
 
 async function fixture(database) {
-  await database.query(`TRUNCATE tracker_decisions, audit_log, file_references, files, notifications, users RESTART IDENTITY CASCADE`);
+  await resetDatabase(database, `TRUNCATE tracker_decisions, audit_log, file_references, files, notifications, users RESTART IDENTITY CASCADE`);
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
