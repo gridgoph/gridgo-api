@@ -605,7 +605,7 @@ One conversion runs across API replicas at a time. Temporary data is removed
 after success or failure.
 
 The DOCX rendering guard refuses external relationships, dynamic fields,
-embedded/active objects and XML entity constructs; macros are disabled in the
+embedded/active objects, SVG/non-raster embedded parts and XML entity constructs; macros are disabled in the
 private Writer profile. These preview refusals do not change upload acceptance.
 Password-protected, malformed or unsupported documents receive an explicit
 error; PSD visual conversion and legacy binary `.doc` are not implemented.

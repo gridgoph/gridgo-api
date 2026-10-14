@@ -78,15 +78,26 @@ function wordParts(bytes, forPreview = false) {
     if (content.length !== entry.size || (result && result.engine.bytesWritten !== compressed.length)
         || crc32(content) !== entry.crc) return null;
     if (forPreview && /(?:embeddings|activeX)\/|vba|oleObject/i.test(entry.name)) return null;
+    if (forPreview && !/\.(?:xml|rels)$/i.test(entry.name)) {
+      // OOXML can name a part anything. Only passive raster signatures may
+      // bypass XML checks; extension-only checks would miss disguised fields
+      // and SVGs that can reference local/remote resources.
+      const raster = content.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+        || content.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
+        || /^GIF8[79]a/.test(content.subarray(0, 6).toString())
+        || content.subarray(0, 2).toString() === 'BM'
+        || (content.subarray(0, 4).toString() === 'RIFF' && content.subarray(8, 12).toString() === 'WEBP');
+      if (!raster && !(entry.name.endsWith('/') && content.length === 0)) return null;
+    }
     if (forPreview && /\.(?:xml|rels)$/i.test(entry.name)) {
       const xml = content.toString('utf8');
       // Deny DTDs/entities, external relationships and dynamic fields rather
       // than letting Writer fetch files/URLs or evaluate embedded content.
-      if (xml.includes('\0') || /<!DOCTYPE|<!ENTITY|TargetMode\s*=\s*['"]External|<(?:[\w.-]+:)?(?:instrText|fldSimple|object|altChunk)\b/i.test(xml)
+      if (xml.includes('\0') || /<!DOCTYPE|<!ENTITY|TargetMode\s*=\s*['"]External|<(?:[\w.-]+:)?(?:instrText|fldSimple|object|altChunk|svg|include)\b/i.test(xml)
           || /&#(?:x[0-9a-f]+|[0-9]+);/i.test(xml)) return null;
       if (/\.rels$/i.test(entry.name)) {
         const targets = [...xml.matchAll(/\bTarget\s*=\s*(['"])(.*?)\1/g)].map(match => match[2]);
-        if (targets.some(target => /[:\\]|^\/|(?:^|\/)\.\.(?:\/|$)|&/u.test(target))) return null;
+        if (targets.some(target => /[:\\]|^\/|(?:^|\/)\.\.(?:\/|$)|[&%]/u.test(target))) return null;
       }
     }
     if (['[Content_Types].xml', 'word/document.xml', 'docProps/app.xml'].includes(entry.name)) {
