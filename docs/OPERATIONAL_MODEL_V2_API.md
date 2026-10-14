@@ -130,6 +130,8 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/dispatch/offers` | approved rider/ops/super | available/assigned dispatches |
 | POST | `/dispatch/:id/accept` | approved rider | assign self to ready dispatch |
 | POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | record counts and pass or escalate all six checks |
+| POST | `/dispatch/:id/milestones` | assigned approved rider | [delivery milestones](#delivery-milestones) |
+| GET | `/ops/orders/:id/location-diagnostics` | ops/super | [ping diagnostics](#operations-and-diagnostics) |
 | POST/GET | `/dispatch/:id/location` | POST assigned approved rider; GET related parties/ops/super | [location contract](#rider-location) |
 | GET | `/ops/riders/locations` | ops/super | [active rider map](#rider-location) |
 | GET | `/ops/push/stats` | ops/super | [push reach and delivery](#get-opspushstats) aggregates |
@@ -725,6 +727,8 @@ Default `GET /settings` response:
     "serviceFeeVisibleToClient": true,
     "riderCommissionBps": 8500,
     "clientRiderLocationRevealDistanceMeters": 1000,
+    "riderLocationRefreshIntervalSeconds": 20,
+    "riderLocationStaleAfterSeconds": 120,
     "downpaymentPercent": 100,
     "issueWindowHours": 24,
     "productionNudge": {
@@ -1344,15 +1348,70 @@ Operations acts on the inbox row. Without it the request would sit in jsonb unre
 
 ## Rider location
 
-`POST /dispatch/:id/location` accepts `{lat,lng,accuracy?,recordedAt?}` from the assigned approved rider during `rider_assigned`, `picked_up` or `out_for_delivery`; other states return `409 tracking_not_active`. Coordinates must be finite numbers within latitude/longitude bounds; accuracy, if present, is nonnegative meters (`400 invalid_location` otherwise). Optional `recordedAt` is the source GPS fix timestamp; omission uses server time. Invalid timestamps, fixes more than 30 seconds ahead, or more than five minutes old return `400 invalid_location_timestamp`. A valid fix no newer than the current assigned rider's latest fix returns `200 {ping,ignored:true}`. Accepted fixes return `{ping}` with source time in `ping.at`.
+### Ping ingestion and privacy window
 
-`GET /dispatch/:id/location` returns `{ping}` for the current rider only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. Consumers calculate staleness from `at` and `accuracy`.
+`POST /dispatch/:id/location` accepts `{lat,lng,accuracy?,recordedAt?}` from the assigned approved rider during `rider_assigned`, `picked_up` or `out_for_delivery`; other states return `409 tracking_not_active`. Coordinates must be finite JSON numbers within latitude/longitude bounds; accuracy, if present, is nonnegative meters (`400 invalid_location` otherwise). Optional `recordedAt` is a timestamp string for the source GPS fix; omission uses server receipt time. Invalid timestamps, fixes more than 30 seconds ahead, or more than five minutes old **at receipt** return `400 invalid_location_timestamp`. Time spent waiting on authentication or the transaction lock does not age a valid request into rejection. There is no server ping-specific rate limiter. Writes still use the domain transaction/advisory lock.
 
-Client reads never expose fixes recorded before pick-up, including delayed fixes posted after handoff. Each new fix snapshots its `leg` (`pickup` or `delivery`); old unmarked delivery fixes retain their existing policy. Client reads return `{ping:null}` until the latest delivery fix is within `settings.clientRiderLocationRevealDistanceMeters` of the delivery destination (including a confirmed destination change). The default is 1,000 meters, also for existing settings without this field. Distance uses the shared straight-line calculation rounded to whole meters; the boundary is inclusive. Missing or invalid destination coordinates fail closed. No older inside-radius fix is substituted for a newer outside-radius fix. The assigned supplier sees fixes only during `rider_assigned`, with `shop: { lat, lng }` from the immutable pick-up snapshot (null if missing); after pick-up its response is `{ ping: null, hidden: "picked_up" }`. Rider reads and both Operations/Super Admin tracking endpoints are unchanged.
+A valid fix no newer than the current assignment's latest fix returns `200 {ping,ignored:true}` without changing the last position or its freshness. Accepted fixes return `201 {ping}` with source time in `ping.at`, server HTTP receipt time in `receivedAt`, and processing time in `processedAt`. These server times live in `location_pings.data`; old rows retain null/missing receipt times, never invented backfills. Each new fix snapshots `leg: "pickup" | "delivery"`. A delayed source fix from before the recorded handoff remains a pickup fix even when it arrives after pickup. Reassignment starts a new tracking window, including when the same rider is assigned again.
 
-Only Super Admin may change `clientRiderLocationRevealDistanceMeters` through `PATCH /settings` with `expectedVersion` and a nonblank `reason`. It must be a positive JSON safe integer in meters; null, strings, zero, negatives and fractions return `400 invalid_rider_location_reveal_distance`. Omission preserves the current value. The audited setting applies on the next client location read, including existing trips, without a release. Clients show progress and “Your rider is on the way” while `ping` is null and must clear any previously shown rider marker.
+`GET /dispatch/:id/location` returns `{ping}` for the current assignment only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. The assigned supplier sees pickup fixes only during `rider_assigned`, with `shop: {lat,lng}` from the immutable pickup snapshot (null if missing). After pickup its response is `{ping:null,hidden:"picked_up"}`. The shop point is never sent to the client.
 
-`GET /ops/riders/locations` returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,pickup,dropoff}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. `vehicleType` is the rider profile's `motorcycle | car | van | truck | bicycle` and `plateNumber` its plate, both `null` when no profile exists, so the map can draw the vehicle the rider actually drives. `pickup` and `dropoff` are the order's snapshot points as `{lat,lng,label}` or `null`; a collected order reports the GRIDGO Office point as `dropoff`, the same substitution `publicOrderFor` applies, so the map can draw the remaining leg of the trip. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
+**Client visibility replaces the former distance rule.** Clients see a delivery fix during `picked_up` and `out_for_delivery`, at any distance, until delivery is recorded. No fix is exposed before pickup or after delivery, completion, cancellation, or hub arrival. `deliveryEvidence.recordedAt` also closes the window. Pickup-leg fixes stay private after pickup. Unmarked legacy fixes require a recorded pickup timestamp and a source time on/after it; unprovable legacy fixes fail closed. The deprecated `clientRiderLocationRevealDistanceMeters` setting remains readable/writable for old settings screens but has no effect on visibility. Client reads omit server receipt/processing diagnostics and add:
+
+```json
+{
+  "ping": { "id": "ping_...", "orderId": "ord_...", "riderId": "user_...", "lat": 7.08, "lng": 125.62, "accuracy": 8, "at": "2026-10-14T01:00:00.000Z", "leg": "delivery" },
+  "tracking": {
+    "status": "stale",
+    "refreshIntervalSeconds": 20,
+    "staleAfterSeconds": 120,
+    "settingsVersion": 4,
+    "lastUpdatedAt": "2026-10-14T01:00:00.000Z",
+    "ageSeconds": 125,
+    "stale": true,
+    "message": "Rider location temporarily unavailable"
+  }
+}
+```
+
+`status` is `inactive | waiting | live | stale`. During an active delivery, freshness is based on the **source GPS time**, never a recent receipt of an old fix. At the threshold (default 120 seconds), keep the last eligible position and label it with `message` and `lastUpdatedAt`; do not clear it for staleness. With no eligible fix, start the grace period at pickup (unknown legacy start is stale immediately). Outside the sharing window return `ping:null`, `status:"inactive"`, null freshness times and `stale:false`; clear the marker then. A client should also clear its marker on an access refusal or order/rider change.
+
+Only Super Admin may change `riderLocationRefreshIntervalSeconds` (integer **15–30**, default **20**) and `riderLocationStaleAfterSeconds` (integer **30–600**, default **120**) through `PATCH /settings` with the existing `expectedVersion` and nonblank `reason`. Null, strings, fractions and out-of-range values return `400 invalid_rider_tracking_setting` with `field`. Missing values preserve the stored setting. Old rows use defaults; migration `1791986400000` fills missing settings and increments the settings version. Writes are audited and effective on the next read, including existing trips. Client tracking responses carry `settingsVersion`; use the normal `GET /settings`/version handshake to refresh configuration.
+
+### Delivery milestones
+
+Every delivery order projection for its owning client, assigned rider and Operations/Super Admin includes `deliveryMilestones`, independent of GPS availability. It always contains these six entries in order, each `{code,label,status,at}`:
+
+| Code | Label | Source |
+| --- | --- | --- |
+| `rider_assigned` | Rider assigned | Dispatch acceptance/assignment |
+| `heading_to_shop` | Heading to the shop | Rider progress event |
+| `at_shop` | At the shop | Rider progress event |
+| `picked_up` | Picked up | Governed pickup checklist/handoff |
+| `on_the_way` | On the way to you | `out_for_delivery` transition |
+| `arrived` | Arrived | Rider arrival event, falling back to recorded delivery |
+
+`status` is `pending`, `completed` (observed event), or `passed` (a later milestone was reached but this intermediate event was not recorded). `at` is null when the timestamp is unknown: do not invent a time for skipped events on older apps. Milestones contain no coordinates, supplier contact, evidence IDs, or internal notes. Internal `riderProgress` is stripped from ordinary order projections. New assignments reset rider progress and ignore earlier assignment history.
+
+`POST /dispatch/:id/milestones` takes `{milestone:"heading_to_shop" | "at_shop" | "arrived"}` from the assigned approved rider. Heading/at-shop events require `rider_assigned`; arrival requires `picked_up` or `out_for_delivery`. This route is for door deliveries. Unknown codes are `400 invalid_delivery_milestone`, wrong stage is `409 delivery_milestone_not_available`, and a new heading event after at-shop is `409 delivery_milestone_out_of_order`. Duplicate events within the allowed stage return the original timestamp without duplicate notifications. A rider cannot submit `picked_up` or confirm delivery through this route: arrival does not change order state, open an issue window or release money. Success is `200 {order}` with the role-aware projection. Each new event atomically records audit `dispatch.milestone`, client and all ops/super inbox rows (`rider_delivery_milestone`), and after-commit order/dispatch invalidation.
+
+### Operations and diagnostics
+
+`GET /ops/riders/locations` is ops/super only. It returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,receivedAt,lastUpdatedAt,ageSeconds,stale,pickup,dropoff}]}`. It selects the latest stored fix per rider across current `rider_assigned`/`picked_up`/`out_for_delivery` assignments. **Riders without any fix are included**, with null position/time fields. Their grace period starts at assignment; unknown legacy start is stale immediately. Dashboard maps must skip null coordinates but retain those rows in the stale-rider list so Operations can contact them. A stale fix stays in the response. Freshness uses the same live stale threshold and source timestamp as the client.
+
+`vehicleType` is `motorcycle | car | van | truck | bicycle`, and `plateNumber` is the profile plate (null when absent). `pickup` and `dropoff` are `{lat,lng,label}` or null. An office-collection order reports GRIDGO Office as `dropoff`; the shop's immutable pickup snapshot remains available only to its authorized parties/staff.
+
+`GET /ops/orders/:id/location-diagnostics` is ops/super only and returns the current assignment's `orderId`, `riderId`, freshness fields, `sampleLimit:100`, `sampleCount`, `maxReceiveGapSeconds`, `secondsSinceLastReceived`, and `samples`. Each sample has `{at,receivedAt,processedAt,receiveGapSeconds,sourceDelaySeconds}`. The bounded window contains the latest 100 accepted fixes with actual receive times, sorted by receipt; the first gap and empty summary values are null. It includes the current silence since last receipt as well as completed gaps. There are no coordinates in this diagnostic response. Legacy rows without receipt times are excluded from gap calculations.
+
+Rejected coordinate/timestamp fixes produce coordinate-free structured log events `rider_location_rejected` (`orderId,riderId,receivedAt,code`); ignored duplicate/out-of-order fixes produce `rider_location_ignored` with `code:"out_of_order_fix"`. Existing HTTP logs cover authentication, approval, assignment and inactive-state refusals with status/error codes. Logs supplement accepted-fix diagnostics; a gap alone does not prove whether the phone stopped sending, lost its network or received a refusal.
+
+### Companion app follow-ups
+
+- Client: render milestones even before location is shared; poll on a timer using `refreshIntervalSeconds`, refresh on resume, retain manual refresh as a backup, show last-update age and the stale message with the last known position, and clear private positions when the tracking window closes. The large live map uses the same endpoint and policy.
+- Rider: send fresh source fixes for each active assignment at the configured cadence, surface API refusals/ignored fixes, and send the three progress events. Detect disabled/limited permission and background/battery restrictions locally, warn with recovery instructions, and verify background behavior on physical devices. The API cannot observe phone permission or force a suspended app to send. Avoid replaying an old backlog as current GPS.
+- Dashboard: expose the two settings using the version/reason handshake, flag `stale` riders including null-coordinate rows, and make diagnostic gaps available to Operations. A client refresh timer does not itself increase the handset's GPS upload cadence.
+
+This server change fixes the distance gate and queue-time timestamp rejection hazard. It does not establish the cause of reported handset instability: measure receive/source gaps during real deliveries and correlate phone logs before claiming background sharing is fixed. No paid location service or new phone permission policy is introduced here.
 
 ## Delivery messages
 
