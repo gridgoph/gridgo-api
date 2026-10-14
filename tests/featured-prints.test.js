@@ -241,7 +241,6 @@ test('PostgreSQL HTTP: roles, signed anonymous public read, version race, audit,
         }
         store.notifications = store.notifications.filter(row => !userIds.includes(row.userId));
         store.supplierPaymentTerms = store.supplierPaymentTerms.filter(row => !userIds.includes(row.supplierId));
-        store.auditLog = store.auditLog.filter(row => !userIds.includes(row.actorId));
         if (originalSettings) store.settings = originalSettings;
         await saveStore(database, store);
       });

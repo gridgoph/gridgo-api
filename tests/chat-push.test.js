@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -48,7 +49,7 @@ async function setup(t) {
     private_key: privateKey.export({ type: "pkcs8", format: "pem" }), token_uri: `${origin}/token` }));
   const db = createDatabase({ DATABASE_URL });
   t.after(() => db.close());
-  await db.query("TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE");
+  await resetDatabase(db, "TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE");
   const store = fixture();
   Object.assign(store.orders[0], { state: "rider_assigned", riderId: "rider" });
   store.approvalCases.push({ id: "case_rider", userId: "rider", kind: "rider", status: "approved", version: 1,

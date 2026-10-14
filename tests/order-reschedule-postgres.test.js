@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
@@ -9,7 +10,7 @@ import { assessProductionLapses } from '../src/production-penalties.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const setup = async (db, store = fixture()) => {
-  await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   await db.transaction(() => saveStore(db, store));
 };
 const mutate = (db, action) => db.transaction(async () => {

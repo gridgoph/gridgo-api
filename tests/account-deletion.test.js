@@ -165,7 +165,6 @@ test('HTTP requests bypass account holds, audit atomically and notify only staff
   t.after(async () => {
     await stopApi(instance);
     await database.query('DELETE FROM account_deletion_requests WHERE user_id LIKE $1 OR contact_email=$2', [`${PREFIX}%`, `${PREFIX}@example.test`]);
-    await database.query("DELETE FROM audit_log WHERE actor_id LIKE $1 OR entity_type='account_deletion_request'", [`${PREFIX}%`]);
     await database.query('DELETE FROM notifications WHERE user_id LIKE $1', [`${PREFIX}%`]);
     await database.query('DELETE FROM user_role_memberships WHERE user_id LIKE $1', [`${PREFIX}%`]);
     await database.query('DELETE FROM users WHERE id LIKE $1', [`${PREFIX}%`]);

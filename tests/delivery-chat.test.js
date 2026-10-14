@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
@@ -64,7 +65,7 @@ function chatPhoto(fileId, ownerId, patch = {}) {
 async function setup(t, orderPatch = {}, { files = [] } = {}) {
   const db = createDatabase({ DATABASE_URL });
   t.after(() => db.close());
-  await db.query("TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE");
+  await resetDatabase(db, "TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE");
   const store = fixture();
   const order = store.orders[0];
   Object.assign(order, { state: "out_for_delivery", riderId: "rider", pickupChecklist: { status: "passed" }, ...orderPatch });

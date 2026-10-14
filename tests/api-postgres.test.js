@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import { alwaysOpenOperatingHours } from "./helpers/operating-hours.mjs";
 import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
@@ -146,7 +147,7 @@ function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
 }
 
 async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
@@ -775,6 +776,8 @@ test("sign-up endpoints require Super Admin for every applicant kind", { skip: !
   await addApprovalDecisionFixtures(database);
   const instance = await startApi();
   try {
+    // Settle the independently audited lifecycle tick before checking refused writes.
+    await request(instance.api, '/settings', { subject: 'clerk_super' });
     const before = await loadStore(database);
     for (const subject of ["clerk_ops", "clerk_client", "clerk_supplier", "clerk_rider"]) {
       const routes = [
@@ -4722,7 +4725,12 @@ test("Operations audit reads are limited to workspace actions or one file", { sk
   assert.equal((await request(instance.api, "/audit?action=file.early_delete")).status, 401);
   const unrestricted = await request(instance.api, "/audit", { subject: "clerk_super" });
   assert.equal(unrestricted.status, 200);
-  assert.deepEqual(unrestricted.body.audit.map(row => row.id).sort(), rows.map(row => row.id).sort());
+  assert.deepEqual(unrestricted.body.audit.filter(row => rows.some(fixture => fixture.id === row.id)).map(row => row.id).sort(), rows.map(row => row.id).sort());
+  const lifecycle = unrestricted.body.audit.filter(row => !rows.some(fixture => fixture.id === row.id));
+  assert.equal(lifecycle.length, 1);
+  assert.equal(lifecycle[0].action, 'order.transition');
+  assert.equal(lifecycle[0].actorRole, 'system');
+  assert.equal(lifecycle[0].entityId, 'ord_expired');
 });
 
 test("listing take-down survives PostgreSQL own-list reads and restore keeps it hidden with a shop notice", { skip: !DATABASE_URL }, async (t) => {

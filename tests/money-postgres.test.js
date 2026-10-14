@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import { down as rollbackOrganizationDiscount } from "../migrations/1791504000000_organization_discount.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,7 +18,7 @@ const SHOP = { lat: 7.064, lng: 125.6085, label: "Davao Shop" };
 const DROPOFF = { lat: 7.064, lng: 125.6085, label: "Client" };
 
 async function clear(database) {
-  await database.query("TRUNCATE users, platform_settings RESTART IDENTITY CASCADE");
+  await resetDatabase(database, "TRUNCATE users, platform_settings RESTART IDENTITY CASCADE");
 }
 
 function committedOrder(id, options) {

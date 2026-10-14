@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -679,7 +680,7 @@ test("GET /me/catalog-items q hunts this shop's name and subcategory", async () 
 
 test("GET item includes persisted photos after postgres round-trip", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
@@ -751,7 +752,7 @@ test("GET item includes persisted photos after postgres round-trip", { skip: !DA
 
 test("creating from a GRIDGO starter persists its file types", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
@@ -907,7 +908,7 @@ test("saving shop name also writes the account supplierName Account already read
 
 test("saved shop name persists as users.supplierName", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
@@ -980,7 +981,7 @@ test("a mistyped phone saves nothing at all, not even the fields beside it", asy
 test("GET /listing-starters and public shop browse answer on the live API", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   t.after(() => database.close());
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,

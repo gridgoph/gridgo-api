@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -71,7 +72,7 @@ test('call projection never copies identifiers, phone, email or surnames', () =>
 
 async function setup(t, patch = {}) {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
-  await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture(); Object.assign(store.orders[0], { riderId: 'rider', state: 'rider_assigned', ...patch });
   store.users.find(u => u.id === 'client').name = 'Alex PrivateSurname';
   store.users.push({ id: 'rider2', role: 'rider', name: 'Taylor PrivateSurname', email: 'rider2@example.invalid', clerkUserId: 'clerk_rider2', verificationStatus: 'approved', createdAt: AT });

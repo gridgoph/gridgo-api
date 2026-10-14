@@ -1,3 +1,4 @@
+import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
 import { syncSurveys } from './surveys.js';
@@ -349,6 +350,7 @@ async function save(store) {
       if (order) queueOrderInvalidate(store, order, ['orders']);
     }
   }
+  deriveMissingAudit(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
@@ -410,9 +412,9 @@ function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
 }
 
-async function legalEvent({ action, id: entityId, actor, detail }) {
+async function legalEvent({ action, id: entityId, actor, detail, before, after, reason }) {
   const latest = await load();
-  audit(latest, { actor, action, entityType: action.startsWith('privacy.') ? 'privacy_request' : 'legal_document', entityId, detail });
+  audit(latest, { actor, action, entityType: action.startsWith('privacy.') ? 'privacy_request' : 'legal_document', entityId, detail, before, after, reason });
   notifyAdmins(latest, action, action.startsWith('privacy.') ? 'Privacy request updated' : 'Legal record updated', null, `${action}:${entityId}:${id('event')}`, { createId: id, at: now() });
   queueInvalidate(latest, { resource: action.startsWith('privacy.') ? 'privacy-requests' : 'legal' });
   await save(latest);
@@ -833,7 +835,29 @@ async function verifiedClerkClaimsFor(req) {
 
 async function authenticateRequest(req, store) {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
-  return authenticateBearerToken(m?.[1] || null, store, AUTH, await verifiedClerkClaimsFor(req));
+  const verified = await verifiedClerkClaimsFor(req);
+  const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
+  if (auth.user) setAuditActor(auth.user);
+  return auth;
+}
+
+// Clerk owns sign-in. Record the first authenticated app bootstrap for a session;
+// the one-way session fingerprint deduplicates refreshes without storing credentials.
+async function recordStaffSignIn(req, store, user) {
+  const staffRole = ['super_admin', 'ops_admin', 'staff'].find(role => hasRole(store, user.id, role));
+  const session = req.gridgoVerifiedClaims?.claims?.sid;
+  if (!staffRole || !session) return;
+  const actor = { ...user, role: ['super_admin', 'ops_admin', 'staff'].includes(user.role) ? user.role : staffRole };
+  const sessionHash = crypto.createHash('sha256').update(session).digest('hex');
+  if (store.auditLog.some(row => row.action === 'staff.sign_in' && row.actorId === user.id && row.detail?.sessionHash === sessionHash)) return;
+  await enqueueMutation(async () => {
+    const latest = await load();
+    if (latest.auditLog.some(row => row.action === 'staff.sign_in' && row.actorId === user.id && row.detail?.sessionHash === sessionHash)) return;
+    setAuditActor(actor);
+    audit(latest, { actor, action: 'staff.sign_in', entityType: 'user', entityId: actor.id,
+      detail: { sessionHash, observation: 'authenticated_app_bootstrap' }, before: null, after: { authenticated: true } });
+    await saveStore(database, latest);
+  });
 }
 
 /**
@@ -1503,22 +1527,8 @@ function balanceNotRequired(res, order, installmentCode) {
 // Default platform data used by route validation and the explicit reference seed.
 // ---------------------------------------------------------------------------
 
-function audit(store, { actor, action, entityType, entityId, detail, reason, orderId }) {
-  if (!Array.isArray(store.auditLog)) store.auditLog = [];
-  const entry = {
-    id: id("aud"),
-    at: now(),
-    actorId: actor?.role === "system" ? null : actor?.id || null,
-    actorRole: actor?.role || null,
-    action,
-    entityType: entityType || null,
-    entityId: entityId || null,
-    orderId: orderId || null,
-    detail: detail || null,
-    reason: reason || null,
-  };
-  store.auditLog.push(entry);
-  return entry;
+function audit(store, entry) {
+  return appendAudit(store, entry, { id, at: now() });
 }
 
 /**
@@ -1979,7 +1989,11 @@ const TRANSITIONS = {
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
-async function handleRequest(req, res) {
+function handleRequest(req, res) {
+  return withAuditRequest(req, () => handleAuditedRequest(req, res));
+}
+
+async function handleAuditedRequest(req, res) {
   try {
     const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
     res.gridgoCorsHeaders = { Vary: "Origin" };
@@ -1993,7 +2007,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, If-Match",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-App, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -2243,6 +2257,7 @@ async function handleRequest(req, res) {
         const supplierProfile = (store.supplierProfiles || []).find(p=>p.userId===user.id);
         user = {...user,role:requestedRole,...(['supplier','rider'].includes(requestedRole)?{verificationStatus:approval?.status || 'unverified'}:{}),...(requestedRole==='supplier' && supplierProfile?{supplierName:supplierProfile.shopName,shop:supplierProfile.shop}:{})};
       }
+      await recordStaffSignIn(req, store, user);
       const projected = userWithAccountState(user);
       if ((store.userRoleMemberships || []).some(
         (membership) => membership.userId === user.id && membership.role === "rider",
@@ -2274,6 +2289,7 @@ async function handleRequest(req, res) {
           requiredRole: fixedAuthRole,
         });
       }
+      await recordStaffSignIn(req, store, { ...auth.user, role: fixedAuthRole });
       return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
     }
 
@@ -2434,7 +2450,9 @@ async function handleRequest(req, res) {
       const held = accountHoldDenial(user);
       if (held) return send(res, 403, held);
       if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
-      const inferredRole = !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
+      const auditSurface = pathname === '/audit' || /^\/orders\/[^/]+\/audit$/.test(pathname);
+      const inferredRole = !eventRole && auditSurface && isOps(user) ? (isSuper(user) ? 'super_admin' : 'ops_admin')
+        : !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
         : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
       const selectedRole = eventRole || inferredRole;
       // Actor projection is never written into users.role. Other legacy user-field
@@ -2444,6 +2462,8 @@ async function handleRequest(req, res) {
         if (!hasRole(store,user.id,selectedRole) || (['supplier','rider'].includes(selectedRole) && !approvedRole(store,user.id,selectedRole))) return send(res,403,{error:'forbidden'});
       }
     }
+
+    if (user) setAuditActor(user);
 
     if (!user
         && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
@@ -2704,6 +2724,7 @@ async function handleRequest(req, res) {
 
     const hubResponse = await routeHubHandover({ req, url, store, user, readBody, now, id, audit });
     if (hubResponse) {
+      if (req.method === 'GET' && pathname === '/staff/me' && hubResponse.status === 200) await recordStaffSignIn(req, store, user);
       res.setHeader('Cache-Control', 'private, no-store');
       if (hubResponse.mutated) await save(store);
       return send(res, hubResponse.status, hubResponse.body);
@@ -3059,6 +3080,21 @@ async function handleRequest(req, res) {
       const privateFinancial = file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice";
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
+      if (['artwork', 'mockup'].includes(file.purpose)) {
+        res.setHeader('Cache-Control', 'private, no-store');
+        await enqueueMutation(async () => {
+          const latest = await load();
+          const latestUser = selectActorRole(latest, (await authenticateRequest(req, latest)).user, eventRole,
+            { restrictMemberships: Boolean(eventRole) });
+          const latestFile = findFile(latest, file.fileId);
+          authorizeFileRead(latestUser, latest, latestFile);
+          const orderIds = [...new Set((latestFile.references || []).filter(ref => ref.type === 'order').map(ref => ref.id))];
+          audit(latest, { actor: latestUser, action: 'artwork.download_authorized', entityType: 'file', entityId: file.fileId,
+            orderId: orderIds.length === 1 ? orderIds[0] : null,
+            detail: { purpose: file.purpose }, before: null, after: { authorized: true } });
+          await save(latest);
+        });
+      }
       return send(res, 200, { fileId: file.fileId, ...signed });
     }
 
@@ -5120,29 +5156,19 @@ async function handleRequest(req, res) {
     }
 
     // ---- audit trail ----
-    if (req.method === "GET" && pathname === "/audit") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
-      let list = store.auditLog || [];
-      const entityType = url.searchParams.get("entityType");
-      const entityId = url.searchParams.get("entityId");
-      const orderId = url.searchParams.get("orderId");
-      const actorId = url.searchParams.get("actorId");
-      const action = url.searchParams.get("action");
-      // Operations needs correction/deletion bylines in daily workspaces,
-      // while the unrestricted audit log remains Super Admin only.
-      const operationalAction = ["order.production_override", "order.transition_refused", "file.early_delete", "file.retention_delete"].includes(action);
-      const specificFile = entityType === "file" && Boolean(entityId?.trim());
-      if (!isSuper(user) && !operationalAction && !specificFile) {
-        return send(res, 403, { error: "forbidden" });
+    const auditOrderId = /^\/orders\/([^/]+)\/audit$/.exec(pathname)?.[1];
+    if (req.method === 'GET' && (pathname === '/audit' || auditOrderId)) {
+      if (!isOps(user)) return send(res, 403, { error: 'forbidden' });
+      if (auditOrderId && !store.orders.some(order => order.id === auditOrderId)) return send(res, 404, { error: 'order_not_found' });
+      const result = await readAudit(database, user, url.searchParams, auditOrderId);
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (result.csv != null) {
+        res.writeHead(200, { ...res.gridgoCorsHeaders, 'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="gridgo-audit.csv"', 'X-Content-Type-Options': 'nosniff',
+          'Access-Control-Expose-Headers': 'X-Next-Offset', 'X-Next-Offset': result.nextOffset == null ? '' : String(result.nextOffset) });
+        return res.end(result.csv);
       }
-      const limit = Math.min(Number(url.searchParams.get("limit") || 100), 500);
-      if (entityType) list = list.filter((e) => e.entityType === entityType);
-      if (entityId) list = list.filter((e) => e.entityId === entityId);
-      if (orderId) list = list.filter((e) => e.orderId === orderId);
-      if (actorId) list = list.filter((e) => e.actorId === actorId);
-      if (action) list = list.filter((e) => e.action === action);
-      list = [...list].sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, limit);
-      return send(res, 200, { audit: list });
+      return send(res, result.status, result.body);
     }
 
     // ---- supplier payout milestones ----

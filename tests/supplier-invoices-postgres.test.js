@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
@@ -11,7 +12,7 @@ const own = '/me/supplier-invoices';
 const details = { fileId: 'scan', number: 'INV-001', date: '2026-10-01', amountMinor: 10000, expectedVersion: 0 };
 async function setup(t, startApi = true) {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
-  await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture();
   store.files.push({ fileId: 'scan', ownerId: 'supplier', purpose: 'supplier_invoice', state: 'ready', objectKey: 'private/scan', originalFilename: 'scan.png', detectedContentType: 'image/png', declaredContentType: 'image/png', size: 100, createdAt: AT, references: [] });
   await db.transaction(() => saveStore(db, store));

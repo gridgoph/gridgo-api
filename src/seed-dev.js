@@ -1582,7 +1582,7 @@ async function clearDevelopmentOrders(database) {
     await database.query("SET LOCAL session_replication_role = replica");
     await database.query("TRUNCATE TABLE orders CASCADE");
     await database.query("TRUNCATE TABLE notifications CASCADE");
-    await database.query("DELETE FROM audit_log WHERE entity_type IN ('order', 'job') OR order_id IS NOT NULL");
+    // Permanent audit evidence survives rebuilding the local demonstration queue.
   });
 }
 
@@ -1751,7 +1751,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
  * that reads a trail has nothing to draw.
  */
 function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
-  store.auditLog = (store.auditLog || []).filter((row) => row.orderId !== orderId);
+  store.auditLog ||= [];
 
   // Looked up rather than named: an audit row points at a real person, and a
   // guessed id fails at the foreign key rather than quietly.
@@ -1790,6 +1790,7 @@ function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
     // Spaced backwards from now, so the trail reads in the order it happened
     // rather than arriving in one instant.
     const when = new Date(Date.parse(at) - (trail.length - step) * 3_600_000).toISOString();
+    if (store.auditLog.some(row => row.id === `aud_dev_queue_${index}_${step}`)) continue;
     store.auditLog.push({
       id: `aud_dev_queue_${index}_${step}`,
       at: when,

@@ -249,7 +249,6 @@ test('legal HTTP, immutable evidence, enrollment, artwork and privacy contracts'
     await database.query('TRUNCATE legal_acceptances,legal_versions,legal_documents,privacy_requests CASCADE');
     await database.query('DELETE FROM orders WHERE id=$1',[`${prefix}_order`]);
     await database.query('DELETE FROM notifications WHERE user_id=ANY($1::text[])',[people.map(p=>p.id)]);
-    await database.query('DELETE FROM audit_log WHERE actor_id=ANY($1::text[])',[people.map(p=>p.id)]);
     await database.query('DELETE FROM user_role_memberships WHERE user_id=ANY($1::text[])',[people.map(p=>p.id)]);
     await database.query('DELETE FROM client_profiles WHERE user_id=ANY($1::text[])',[people.map(p=>p.id)]);
     await database.query('DELETE FROM users WHERE id=ANY($1::text[])',[people.map(p=>p.id)]);
