@@ -709,7 +709,7 @@ Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying 
 
 `GET /audit` returns `{ audit }`, newest first, with optional `action`, `entityType`, `entityId`, `orderId`, `actorId`, and `limit` (default 100, maximum 500) filters. The unrestricted audit log is Super Admin only.
 
-Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
+Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `order.transition_refused`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
 
 ## Settings and distance fee
 
@@ -1132,6 +1132,8 @@ POST /orders/:id/milestones/:code/release
 Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release in any order their own gates allow; in practice that is plan order. A share that waits on a file and has none is `409 pof_required` (`production_started`, `delivered`; legacy `printing`, `packaging_qc`, `delivered`, `retention`); a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before the client has the job is `409 delivery_required`; `issue_window` or `retention` before the window closes is `409 issue_window_open`); a code the order does not carry is `404 milestone_not_found`; insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold blocks every remaining stage with `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
 
 ## Production progress photos
+
+[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Production and packing photo requirements remain unchanged; supplier invoice scans remain optional.
 
 Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 claim_hold_active` while the order's claim payout-hold flag is set or any claim is `open`/`payout_held`. This applies to the assigned supplier and Operations/Super Admin corrections, before photo/override checks. Operations must release or resolve all active claims before packing can continue; a correction reason cannot bypass the hold.
 

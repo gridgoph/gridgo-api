@@ -335,6 +335,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   assert.equal(invoice.body.invoice.deliveryLines.length, 1);
   const persisted = await loadStore(database);
   const placed = persisted.orders.find((row) => row.id === checkout.body.order.id);
+  assert.deepEqual(placed.distanceZone, { key: "nearby", label: "Nearby" });
   assert.equal(placed.state, "initial_payment_review");
   // The order names its shop and carries both dates through the database.
   assert.equal(placed.supplierId, "supplier_a");

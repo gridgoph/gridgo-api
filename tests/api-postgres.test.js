@@ -4809,8 +4809,11 @@ test("claim holds block both packing paths until Operations clears every claim",
       }
       const after = await loadStore(database);
       assert.equal(after.orders.find((row) => row.id === "ord_payout").state, "production");
-      assert.equal(after.auditLog.length, before.auditLog.length);
-      assert.equal(after.notifications.length, before.notifications.length);
+      const refused = after.auditLog.filter(entry => !before.auditLog.some(old => old.id === entry.id));
+      assert.equal(refused.length, 6);
+      assert.ok(refused.every(entry => entry.action === 'order.transition_refused' && entry.detail.code === 'claim_hold_active'));
+      assert.deepEqual(after.notifications.filter(entry => entry.type !== 'order_job_details_missing'),
+        before.notifications.filter(entry => entry.type !== 'order_job_details_missing'));
     }
     await assertBlocked();
     const supplierRelease = await request(instance.api, `/claims/${claims[0]}/release`, {

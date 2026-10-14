@@ -908,7 +908,10 @@ test("client and rider order history contains only plain progress, never interna
     assert.equal(result.state, "completed");
   }
   assert.deepEqual(publicOrderFor(order, { id: "ops", role: "ops_admin" }).timeline, order.timeline);
-  assert.deepEqual(publicOrderFor(order, { id: "shop", role: "supplier" }).timeline, order.timeline);
+  const shopHistory = publicOrderFor(order, { id: "shop", role: "supplier" }).timeline;
+  assert.equal(shopHistory.length, order.timeline.length);
+  assert.doesNotMatch(JSON.stringify(shopHistory), /production_started|packaging_qc|retention|fileId|milestoneCode/);
+  assert.match(shopHistory[2].note, /Start of production/);
 });
 
 test("only the owning client gets the latest Operations correction, separate from sanitized history", () => {

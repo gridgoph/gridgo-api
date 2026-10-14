@@ -1,3 +1,4 @@
+import { displayFilename } from './display-filename.js';
 import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
@@ -698,7 +699,7 @@ export function publicFile(file, user = null) {
   return {
     fileId: file.fileId,
     purpose: file.purpose === "fulfilment_proof" && ["client", "rider"].includes(user?.role) ? "order_photo" : file.purpose,
-    originalFilename: file.originalFilename,
+    originalFilename: displayFilename(file.originalFilename),
     declaredContentType: file.declaredContentType,
     detectedContentType: file.detectedContentType,
     size: file.size,
