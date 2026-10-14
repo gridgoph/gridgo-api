@@ -34,7 +34,7 @@ test('legal HTTP, immutable evidence, enrollment, artwork and privacy contracts'
     }
     const reservation = net.createServer(); reservation.listen(0,'127.0.0.1'); await once(reservation,'listening');
     const port = reservation.address().port; await new Promise(r=>reservation.close(r));
-    child = spawn(process.execPath,['src/server.js'],{env:{...process.env,DATABASE_URL,HOST:'127.0.0.1',PORT:String(port),CLERK_SECRET_KEY:'test-only-placeholder',CLERK_ISSUER:issuer,CLERK_AUTHORIZED_PARTIES:party,CLERK_JWT_KEY:publicKey.export({type:'spki',format:'pem'}),GRIDGO_FCM_SERVICE_ACCOUNT_FILE:'',GRIDGO_APNS_KEY_FILE:''},stdio:['ignore','pipe','pipe']});
+    child = spawn(process.execPath,['src/server.js'],{env:{...process.env,DATABASE_URL,HOST:'127.0.0.1',PORT:String(port),CLERK_SECRET_KEY:'test-only-placeholder',CLERK_ISSUER:issuer,CLERK_AUTHORIZED_PARTIES:party,CLERK_JWT_KEY:publicKey.export({type:'spki',format:'pem'}),GRIDGO_FCM_SERVICE_ACCOUNT_FILE:'',GRIDGO_APNS_KEY_FILE:'',NOTIFICATION_HEARTBEAT_MS:'50'},stdio:['ignore','pipe','pipe']});
     let logs=''; child.stdout.on('data',d=>logs+=d); child.stderr.on('data',d=>logs+=d);
     const base=`http://127.0.0.1:${port}`;
     for (let i=0;i<200;i++) {
@@ -173,6 +173,76 @@ test('legal HTTP, immutable evidence, enrollment, artwork and privacy contracts'
       assert.equal(artifact.status,200);
       const escaped=await call(`/admin/legal/acceptances?userId=${user('client').id}&format=csv`,'GET','super_admin');
       assert.ok(escaped.body.includes("'=formula,")); assert.ok(escaped.body.includes('""quoted""'));
+    });
+    await t.test('legal and privacy mutations invalidate only selected Operations and Super Admin streams', async () => {
+      const partyRoles = ['client', 'supplier', 'rider', 'staff'];
+      // A privileged identity using a party app must not receive staff hints.
+      for (const role of partyRoles) {
+        await database.query('INSERT INTO user_role_memberships(user_id,role,created_at) VALUES($1,$2,now())', [user('ops_admin').id, role]);
+      }
+      const streams = [];
+      try {
+        for (const [identity, role] of [
+          ...people.map(p => [p.role, p.role]),
+          ...partyRoles.map(role => ['ops_admin', role]),
+          ['ops_admin', null],
+        ]) {
+          const controller = new AbortController();
+          const stream = { identity, role, controller, hints: [], heartbeats: 0 };
+          streams.push(stream);
+          const response = await fetch(`${base}/notifications/stream${role ? `?role=${role}` : ''}`, {
+            headers: { Authorization: `Bearer ${jwt(user(identity).id)}` }, signal: controller.signal,
+          });
+          assert.equal(response.status, 200, `${identity}/${role}`);
+          stream.read = (async () => {
+            let buffer = '';
+            const decoder = new TextDecoder();
+            try {
+              for await (const chunk of response.body) {
+                buffer += decoder.decode(chunk, { stream: true });
+                let end;
+                while ((end = buffer.indexOf('\n\n')) !== -1) {
+                  const frame = buffer.slice(0, end);
+                  buffer = buffer.slice(end + 2);
+                  if (frame.startsWith(': heartbeat')) stream.heartbeats++;
+                  if (frame.startsWith('event: invalidate\n')) {
+                    stream.hints.push(JSON.parse(frame.split('\ndata: ')[1]));
+                  }
+                }
+              }
+            } catch (error) {
+              if (error.name !== 'AbortError') stream.error = error;
+            }
+          })();
+        }
+        const document = (await call('/admin/legal/documents/cookie-notice', 'GET', 'super_admin')).body.documents[0];
+        const edited = await call('/admin/legal/documents/cookie-notice', 'PATCH', 'super_admin', {
+          expectedRevision: document.revision, draft: { text: 'Private draft for stream test' },
+        });
+        assert.equal(edited.status, 200);
+        const created = await call('/me/privacy-requests', 'POST', 'client', {
+          kind: 'correction', confirmed: true, details: 'Private request for stream test',
+        });
+        assert.equal(created.status, 201);
+        // Read through a subsequent heartbeat on every stream, including those
+        // that must receive neither hint, instead of assuming no data means denial.
+        const heartbeats = streams.map(stream => stream.heartbeats);
+        const deadline = Date.now() + 3000;
+        while (streams.some((stream, i) => stream.heartbeats <= heartbeats[i]) && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        for (const [i, stream] of streams.entries()) {
+          assert.ifError(stream.error);
+          assert.ok(stream.heartbeats > heartbeats[i], `live stream: ${stream.identity}/${stream.role}`);
+          const hints = stream.hints.filter(hint => ['legal', 'privacy-requests'].includes(hint.resource));
+          assert.deepEqual(hints, ['ops_admin', 'super_admin'].includes(stream.role)
+            ? [{ resource: 'legal' }, { resource: 'privacy-requests' }] : [], `${stream.identity}/${stream.role}`);
+        }
+      } finally {
+        for (const stream of streams) stream.controller.abort();
+        await Promise.all(streams.map(stream => stream.read));
+        await database.query('DELETE FROM user_role_memberships WHERE user_id=$1 AND role=ANY($2::text[])', [user('ops_admin').id, partyRoles]);
+      }
     });
   } finally {
     if(child && child.exitCode===null){child.kill('SIGTERM');await once(child,'exit');}
