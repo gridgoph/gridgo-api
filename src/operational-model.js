@@ -833,7 +833,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
 
   if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
-  if (supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+  if (!order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock)) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
@@ -984,6 +984,7 @@ function productionItemsFor(store, order, user) {
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
+        turnaroundMinutes: line.turnaroundMinutesSnapshot ?? (line.turnaroundHoursSnapshot == null ? null : line.turnaroundHoursSnapshot * 60),
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         documentPages: structuredClone(line.documentPages ?? null),
@@ -1034,6 +1035,7 @@ export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
   delete publicRecord.operatingClock;
+  delete publicRecord.productionTimeCorrection;
   delete publicRecord.reviewSchedule;
   delete publicRecord.reviewDelayed;
   if (['ops_admin', 'super_admin'].includes(user?.role) || (user?.role === 'client' && user.id === order.clientId)) {

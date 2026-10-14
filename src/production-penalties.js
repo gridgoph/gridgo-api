@@ -65,7 +65,8 @@ function warningText(lapse) {
 }
 
 function recordEvent(store, order, lapse, kind, at, createId) {
-  const body = kind === 'warning' ? warningText(lapse)
+  const body = kind === 'warning' ? warningText(order.productionTimeCorrection?.penaltyExempt
+    ? { ...lapse, policy: { ...lapse.policy, deductionsEnabled: false } } : lapse)
     : `A late-production deduction of ${formatMinorPhp(lapse.deductionMinor)} was applied to this order's unpaid shop payout. Nothing carries over to another order.`;
   if (kind === 'warning') lapse.warnings.push({ tier: lapse.tier, at, message: body, formal: lapse.tier !== 'minor' });
   store.auditLog.push({ id: createId('aud'), at, actorId: null, actorRole: 'system', action: `production_lapse.${kind}`,
@@ -99,6 +100,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
     if (!tier) continue;
     if (!lapse) {
       const policy = productionPenaltySettings(store.settings);
+      if (order.productionTimeCorrection?.penaltyExempt) policy.deductionsEnabled = false;
       lapse = { id: createId('lapse'), orderId: order.id, supplierId: order.supplierId,
         deadlineAt: productionDeadline(order), detectedAt: at, tier, rateBps: policy[`${tier}Bps`],
         policy, settingsVersion: store.version, warnings: [], deductionMinor: 0, remainingBalanceMinor: 0,
@@ -115,7 +117,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       changed = true;
       continue; // A warning must commit before this tier can deduct.
     }
-    if (!lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
+    if (order.productionTimeCorrection?.penaltyExempt || !lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
     if (!order.readyAt && lapse.tier !== 'severe') continue;
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
     if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
@@ -147,6 +149,6 @@ export function supplierLapses(store, supplierId) {
   return (store.productionLapses || []).filter((lapse) => lapse.supplierId === supplierId)
     .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map((lapse) => ({ ...lapse,
       reassignmentEligible: lapse.tier === 'severe',
-      status: lapse.appliedAt ? 'applied' : lapse.closedAt ? 'closed' : lapse.policy.deductionsEnabled ? 'warned' : 'warning_only',
+      status: lapse.appliedAt ? 'applied' : lapse.closedAt ? 'closed' : lapse.policy.deductionsEnabled && !(store.orders || []).find(order => order.id === lapse.orderId)?.productionTimeCorrection?.penaltyExempt ? 'warned' : 'warning_only',
     }));
 }

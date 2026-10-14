@@ -1196,7 +1196,7 @@ test("bulk breaks and speeds are replaced as a set, and refuse a rule that canno
     { label: "5 days", turnaroundHours: 120, priceMinor: 25_000 },
     { label: "2-3 hours", turnaroundHours: 3, priceMinor: 70_000 },
   ], at);
-  assert.deepEqual(store.catalogSpeedTiers.map((tier) => tier.turnaroundHours).sort((a, b) => a - b), [10, 120]);
+  assert.deepEqual(store.catalogSpeedTiers.map((tier) => tier.turnaroundHours).sort((a, b) => a - b), [3, 120]);
 
   // A speed either names its own price or adds a fee. Both, or neither, means
   // nothing, so it is refused rather than guessed at.
@@ -1429,8 +1429,8 @@ test("overriding ready-in time can state the soonest and latest hours", async ()
     },
   });
   assert.equal(saved.status, 200, JSON.stringify(saved.body));
-  assert.equal(saved.body.item.turnaroundHours, 80);
-  assert.equal(saved.body.item.minimumTurnaroundHours, 30);
+  assert.equal(saved.body.item.turnaroundHours, 72);
+  assert.equal(saved.body.item.minimumTurnaroundHours, 24);
 
   await assert.rejects(
     () => catalogCall(store, {
@@ -1787,7 +1787,7 @@ test("listing review: take-down and restore stay independent of a pending revisi
   assert.equal(store.catalogItems[0].suspendReason, "Sample still needs replacement");
 });
 
-test('listing production days are canonical and old hour writes round up', async () => {
+test('listing production days are canonical and old hour writes stay exact', async () => {
   const store = fixture();
   const response = await catalogCall(store, {
     method: 'PATCH', path: '/me/catalog-items/item',
@@ -1801,9 +1801,9 @@ test('listing production days are canonical and old hour writes round up', async
     method: 'PATCH', path: '/me/catalog-items/item',
     body: { expectedVersion: response.body.item.version, turnaroundHours: 48 },
   });
-  assert.equal(old.body.item.turnaroundDays, 5);
-  assert.equal(old.body.item.turnaroundHours, 50);
-  assert.equal(publicCatalogItem(store, store.catalogItems[0]).turnaroundDays, 5);
+  assert.equal(old.body.item.turnaroundDays, null);
+  assert.equal(old.body.item.turnaroundHours, 48);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).turnaroundDays, null);
 });
 
 
@@ -1813,4 +1813,62 @@ test('private listing search rows derive compatibility hours from canonical days
   const row = { ...store.catalogItems[0], turnaroundMode: 'override', turnaroundDays: 1, turnaroundHours: 9 };
   assert.equal(privateCatalogItem(store, row).turnaroundHours, 8.5);
   assert.equal(privateCatalogItem(store, row).turnaroundDays, 1);
+});
+
+test('same-day listing writes and checkout snapshots retain exact minutes', async () => {
+  const store = fixture();
+  const edited = await catalogCall(store, { method: 'PATCH', path: '/me/catalog-items/item',
+    body: { expectedVersion: 3, turnaroundMode: 'override', turnaroundMinutes: 75, minimumTurnaroundMinutes: 30 } });
+  assert.equal(edited.body.item.turnaroundMinutes, 75);
+  assert.equal(edited.body.item.turnaroundHours, 1.25);
+  assert.equal(edited.body.item.turnaroundDays, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).turnaroundMinutes, 75);
+  const snapshot = createOrderLineSnapshot(store, { orderId: 'order', lineItemId: 'line', catalogItemId: 'item',
+    quantity: 1, expectedVersion: edited.body.item.version, expectedServiceVersion: 1, optionIds: ['a4'], createdAt: AT });
+  assert.equal(snapshot.lineItem.turnaroundMinutesSnapshot, 75);
+});
+
+test('same-day service defaults and rush speeds inherit exactly and clear all overrides', async () => {
+  const store = fixture();
+  const saved = await catalogCall(store, { method: 'PATCH', path: '/me/supplier-services/service',
+    body: { expectedVersion: 1, turnaroundMinutes: 90, rushEnabled: true, rushTurnaroundMinutes: 30, rushPriceMinor: 1000 } });
+  assert.equal(saved.body.service.standardTurnaroundMinutes, 90);
+  assert.equal(saved.body.service.turnaroundHours, 1.5);
+  const publicItem = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(publicItem.turnaroundMinutes, 90);
+  assert.equal(publicItem.rush.turnaroundMinutes, 30);
+  replaceSpeedTiers(store, store.catalogItems[0], [{ label: 'Quick', turnaroundMinutes: 45, priceMinor: 1000 }], () => AT);
+  assert.equal(privateCatalogItem(store, store.catalogItems[0]).speedTiers[0].turnaroundHours, 0.75);
+  const edited = await catalogCall(store, { method: 'PATCH', path: '/me/catalog-items/item',
+    body: { expectedVersion: 3, turnaroundMode: 'override', turnaroundMinutes: 75 } });
+  const inherited = await catalogCall(store, { method: 'PATCH', path: '/me/catalog-items/item',
+    body: { expectedVersion: edited.body.item.version, turnaroundMode: 'inherit' } });
+  assert.equal(inherited.body.item.turnaroundMinutes, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).turnaroundMinutes, 90);
+});
+
+test('same-day starter is copied once into a listing without rounding', async () => {
+  const store = fixture();
+  Object.assign(store.listingStarters[0], { defaultTurnaroundDays: null, defaultTurnaroundMinutes: 75, defaultTurnaroundHours: 1.25 });
+  assert.equal(listingStartersFor(store, 'tarpaulins_outdoor_banners')[0].defaultTurnaroundMinutes, 75);
+  const result = await catalogCall(store, { method: 'POST', path: '/me/catalog-items', body: {
+    supplierServiceId: 'service', starterId: store.listingStarters[0].id, name: 'Quick print', basePriceMinor: 1000, printerMaxWidthFeet: 5,
+  } });
+  assert.equal(result.body.item.turnaroundMinutes, 75);
+  assert.equal(result.body.item.turnaroundHours, 1.25);
+  store.listingStarters[0].defaultTurnaroundMinutes = 120;
+  assert.equal(result.body.item.turnaroundMinutes, 75);
+});
+
+test('an exact standard service duration does not inherit the legacy default day count', () => {
+  const store = fixture();
+  Object.assign(store.supplierServices[0], { turnaroundDays: 5, turnaroundMinutes: 3000, turnaroundHours: 50,
+    standardTurnaroundDays: null, standardTurnaroundMinutes: 60, standardTurnaroundHours: 1 });
+  const item = publicCatalogItem(store, store.catalogItems[0]);
+  assert.equal(item.turnaroundDays, null);
+  assert.equal(item.turnaroundMinutes, 60);
+  const snapshot = createOrderLineSnapshot(store, { orderId: 'order', catalogItemId: 'item', optionIds: ['a4'], quantity: 1,
+    expectedVersion: 3, expectedServiceVersion: 1 });
+  assert.equal(snapshot.lineItem.turnaroundDaysSnapshot, undefined);
+  assert.equal(snapshot.lineItem.turnaroundMinutesSnapshot, 60);
 });

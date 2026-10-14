@@ -193,6 +193,16 @@ test("relational store round-trips typed money, relationships, and composite rou
   assert.equal(daysReloaded.orderLineItems[0].turnaroundDaysSnapshot, 1);
   assert.equal(daysReloaded.orderLineItems[0].turnaroundHoursSnapshot, 8.5);
   await assert.rejects(database.query("UPDATE order_line_items SET turnaround_days_snapshot=2 WHERE id='day_line'"), /immutable/);
+  Object.assign(daysReloaded.supplierServices[0], { turnaroundDays: null, turnaroundMinutes: 75, turnaroundHours: 1.25 });
+  daysReloaded.orderLineItems.push({ ...daysReloaded.orderLineItems[0], id: 'minute_line', sortOrder: 1,
+    turnaroundDaysSnapshot: null, productionDayMinutesSnapshot: null, turnaroundMinutesSnapshot: 75, turnaroundHoursSnapshot: 1.25 });
+  await database.transaction(async () => saveStore(database, daysReloaded));
+  const minutesReloaded = await loadStore(database);
+  assert.equal(minutesReloaded.supplierServices[0].turnaroundHours, 1.25);
+  assert.equal(minutesReloaded.supplierServices[0].turnaroundMinutes, 75);
+  assert.equal(minutesReloaded.orderLineItems.find(row => row.id === 'minute_line').turnaroundHoursSnapshot, 1.25);
+  await assert.rejects(database.query("UPDATE order_line_items SET turnaround_minutes_snapshot=90 WHERE id='minute_line'"), /immutable/);
+
 
   await clear(database);
   await database.close();

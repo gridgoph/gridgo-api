@@ -187,3 +187,28 @@ test('unaccepted real penalty terms never create an unresolvable penalty payout 
   assert.doesNotThrow(() => releaseMilestone(order, stage.code, {id:'ops',role:'ops_admin'}, atHours(3), store));
   assert.equal(stage.status,'released');
 });
+
+test('corrected production deadlines stay warning-only and correction evidence is private for every role', () => {
+  const store = fixture(true), order = store.orders[0];
+  order.productionTimeCorrection = { report: '39853344', penaltyExempt: true, review: { schedulingBasis: 'private review' } };
+  order.readyAt = atHours(25); order.state = 'completed';
+  const stages = structuredClone(order.payoutMilestones);
+  assess(store, 25); assess(store, 26);
+  assert.equal(store.productionLapses[0].policy.deductionsEnabled, false);
+  assert.deepEqual(order.payoutMilestones, stages);
+  for (const role of ['client', 'supplier', 'rider', 'ops_admin', 'super_admin']) {
+    assert.equal(publicOrderFor(order, { id: role, role }, store).productionTimeCorrection, undefined);
+  }
+  for (const stage of order.payoutMilestones) releaseMilestone(order, stage.code, { id: 'ops', role: 'ops_admin' }, atHours(27), store);
+});
+
+test('a pre-existing warning cannot enable deductions after reviewed time correction', () => {
+  const store = fixture(true), order = store.orders[0];
+  const before = structuredClone(order.payoutMilestones);
+  assess(store, 2);
+  order.productionTimeCorrection = { penaltyExempt: true };
+  assess(store, 25); assess(store, 26);
+  assert.equal(supplierLapses(store, 'shop')[0].status, 'warning_only');
+  assert.match(store.productionLapses[0].warnings.at(-1).message, /warning only/);
+  assert.deepEqual(order.payoutMilestones, before);
+});

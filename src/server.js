@@ -4,7 +4,7 @@ import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
 import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
 import { routeAccountDeletion } from './account-deletion.js';
-import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
+import { productionDuration, shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
 import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
@@ -1072,7 +1072,7 @@ function approvalCaseDetail(store, approvalCase) {
   }
   const services = (store.supplierServices || [])
     .filter((service) => service.supplierId === approvalCase.userId)
-    .map(summarizeService);
+    .map(service => summarizeService(service, store));
   return {
     ...base,
     supplierProfile: supplierProfileProjection(store, approvalCase.userId),
@@ -1767,7 +1767,7 @@ function eligibleSuppliersForOrder(store, order) {
         eligible: false,
         reasons: ["no_live_services"],
         matchingServiceIds: [],
-        services: services.map(summarizeService),
+        services: services.map(service => summarizeService(service, store)),
       });
       continue;
     }
@@ -1784,7 +1784,7 @@ function eligibleSuppliersForOrder(store, order) {
         eligible: false,
         reasons: rejectNotes.length ? rejectNotes : ["no_covering_service"],
         matchingServiceIds: [],
-        services: services.map(summarizeService),
+        services: services.map(service => summarizeService(service, store)),
       });
       continue;
     }
@@ -1793,7 +1793,7 @@ function eligibleSuppliersForOrder(store, order) {
       eligible: true,
       reasons: [],
       matchingServiceIds: matching.map((s) => s.id),
-      services: matching.map(summarizeService),
+      services: matching.map(service => summarizeService(service, store)),
       rankingInputs: {
         liveServiceCount: live.length,
         matchingServiceCount: matching.length,
@@ -1814,7 +1814,7 @@ function eligibleSuppliersForOrder(store, order) {
   return { product, candidates: results };
 }
 
-function summarizeService(s) {
+function summarizeService(s, store) {
   return {
     id: s.id,
     supplierId: s.supplierId,
@@ -1829,8 +1829,10 @@ function summarizeService(s) {
     pricingBasis: s.pricingBasis,
     referenceRateMinor: s.referenceRateMinor,
     turnaroundDays: s.turnaroundDays,
+    turnaroundMinutes: s.turnaroundMinutes ?? s.turnaroundHours * 60,
+    standardTurnaroundMinutes: s.standardTurnaroundMinutes ?? s.turnaroundMinutes,
     standardTurnaroundDays: s.standardTurnaroundDays ?? s.turnaroundDays,
-    productionDayMinutes: s.turnaroundDays ? s.turnaroundHours * 60 / s.turnaroundDays : 600,
+    productionDayMinutes: displayProductionDayMinutes(store, s.supplierId),
     turnaroundHours: s.turnaroundHours,
     capacityDaily: s.capacityDaily,
     capacityWeekly: s.capacityWeekly,
@@ -2262,7 +2264,7 @@ async function handleRequest(req, res) {
       const refreshed = await authenticateRequest(req, store);
       const response = fixedAuthProjection(store, refreshed, role);
       if (role === "supplier") {
-        response.supplierServices = (result.supplierServices || []).map(summarizeService);
+        response.supplierServices = (result.supplierServices || []).map(service => summarizeService(service, store));
       }
       return send(res, result.status, response);
     }
@@ -3043,7 +3045,7 @@ async function handleRequest(req, res) {
           });
         }
         await save(latestStore);
-        return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
+        return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record, latestStore) });
       });
     }
 
@@ -4144,7 +4146,7 @@ async function handleRequest(req, res) {
         return send(res, 403, { error: "forbidden" });
       }
       if (stateParam) list = list.filter((s) => s.state === stateParam);
-      return send(res, 200, { services: list.map(summarizeService) });
+      return send(res, 200, { services: list.map(service => summarizeService(service, store)) });
     }
 
     if (req.method === "POST" && pathname === "/supplier-services") {
@@ -4178,6 +4180,7 @@ async function handleRequest(req, res) {
         referenceRateMinor,
         ...duration,
         standardTurnaroundDays: duration.turnaroundDays,
+        standardTurnaroundMinutes: duration.turnaroundMinutes,
         standardTurnaroundHours: duration.turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
@@ -4203,7 +4206,7 @@ async function handleRequest(req, res) {
         detail: { categoryCode: service.categoryCode, state: service.state },
       });
       await save(store);
-      return send(res, 201, { service: summarizeService(service) });
+      return send(res, 201, { service: summarizeService(service, store) });
     }
 
     if (req.method === "GET" && /^\/supplier-services\/[^/]+$/.test(pathname)) {
@@ -4216,7 +4219,7 @@ async function handleRequest(req, res) {
       if (user.role !== "supplier" && !isOps(user)) {
         return send(res, 403, { error: "forbidden" });
       }
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "PATCH" && /^\/supplier-services\/[^/]+$/.test(pathname)) {
@@ -4249,7 +4252,7 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, toValidate);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
-      const duration = body.turnaroundDays != null || body.turnaroundHours != null
+      const duration = body.turnaroundMinutes != null || body.turnaroundDays != null || body.turnaroundHours != null
         ? productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, service.supplierId), "invalid_service") : null;
       const turnaroundHours = duration?.turnaroundHours;
       if (
@@ -4294,6 +4297,7 @@ async function handleRequest(req, res) {
         if (duration) {
           Object.assign(service, duration);
           service.standardTurnaroundDays = duration.turnaroundDays;
+          service.standardTurnaroundMinutes = duration.turnaroundMinutes;
           service.standardTurnaroundHours = duration.turnaroundHours;
         }
         // Capability expansion on a live service requires re-verification
@@ -4321,7 +4325,7 @@ async function handleRequest(req, res) {
         detail: { state: service.state },
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/submit$/.test(pathname)) {
@@ -4353,7 +4357,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/verify$/.test(pathname)) {
@@ -4385,7 +4389,7 @@ async function handleRequest(req, res) {
         reason: body.reason || null,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/suspend$/.test(pathname)) {
@@ -4411,7 +4415,7 @@ async function handleRequest(req, res) {
         reason: body.reason,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/withdraw$/.test(pathname)) {
@@ -4431,7 +4435,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     // ---- matching support ----
