@@ -1,3 +1,5 @@
+import { routeSurveys } from './survey-routes.js';
+import { syncSurveys } from './surveys.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { ACTIVE_TRACKING_STATES, assignmentTime, pickupTime, currentRiderPings, latestPing, trackingSettings, locationFreshness, clientTracking, pingDiagnostics } from './rider-tracking.js';
 import { routeVouchers } from './voucher-routes.js';
@@ -324,6 +326,7 @@ function notifyMissingJobDetails(store, order) {
 async function save(store) {
   await reconcileCalls(database, store, { createId: id, at: now() });
   cancelVoucherReservations(store, { id, at: now() });
+  syncSurveys(store, { id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
     // Existing completed/ready orders keep their legacy contract until a new
@@ -2461,6 +2464,19 @@ async function handleRequest(req, res) {
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
+    const surveyResponse = await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id });
+    if (surveyResponse) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (surveyResponse.mutated) await save(store);
+      if (surveyResponse.bytes) {
+        res.writeHead(surveyResponse.status, { 'Content-Type': surveyResponse.contentType,
+          'Content-Disposition': `attachment; filename="${surveyResponse.filename}"`, 'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(surveyResponse.bytes);
+      }
+      return send(res, surveyResponse.status, surveyResponse.body);
+    }
+
     const voucherResponse = await routeVouchers({ req, url, store, user, readBody, readRawBody, now, id });
     if (voucherResponse) {
       if (voucherResponse.mutated) await save(store);
@@ -6899,6 +6915,22 @@ async function runLifecycleWork() {
         await enqueueMutation(async () => {
           const store = await load();
           if (sweepVouchers(store, { id, at: now() })) await save(store);
+        });
+      },
+      async () => {
+        const candidate = await database.query(`SELECT 1 FROM orders o CROSS JOIN survey_launch l
+          CROSS JOIN LATERAL (SELECT coalesce(o.issue_window_opened_at,
+            (SELECT (e->>'at')::timestamptz FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.data->'timeline')='array' THEN o.data->'timeline' ELSE '[]'::jsonb END)
+              WITH ORDINALITY AS entry(e,n) WHERE e->>'state'='delivered' ORDER BY n LIMIT 1)) AS completed_at) c
+          WHERE o.state IN ('delivered','issue_window_open','completed','payout_released')
+            AND c.completed_at >= l.launched_at - interval '336 hours'
+            AND greatest(c.completed_at,l.launched_at) <= $1
+            AND greatest(c.completed_at,l.launched_at) + interval '168 hours' > $1
+            AND NOT EXISTS (SELECT 1 FROM order_surveys s WHERE s.order_id=o.id) LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (syncSurveys(store, { id, at: now() })) await save(store);
         });
       },
       drainVoucherEmail,

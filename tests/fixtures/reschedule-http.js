@@ -57,6 +57,6 @@ export async function apiForTest(t, env = {}) {
       headers: { ...(key ? { Authorization: `Bearer ${token(key, opts.claims)}` } : {}),
         'Content-Type': 'application/json', 'Idempotency-Key': opts.key || id('httpkey'), ...opts.headers },
       ...(body ? { body: JSON.stringify(body) } : {}) });
-    return { status: res.status, body: await res.json(), headers: res.headers };
+    return { status: res.status, body: opts.raw ? await res.text() : await res.json(), headers: res.headers };
   };
 }
