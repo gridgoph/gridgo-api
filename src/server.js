@@ -1,3 +1,4 @@
+import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
 import { syncSurveys } from './surveys.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
@@ -324,6 +325,7 @@ function notifyMissingJobDetails(store, order) {
 }
 
 async function save(store) {
+  syncSupplierInvoiceExpectations(store, originalDomainStore(store), { at: now(), id, audit });
   await reconcileCalls(database, store, { createId: id, at: now() });
   cancelVoucherReservations(store, { id, at: now() });
   syncSurveys(store, { id, at: now() });
@@ -2677,6 +2679,13 @@ async function handleRequest(req, res) {
       return send(res, 200, { categories: board.categories, ...table });
     }
 
+    const supplierInvoiceResponse = await routeSupplierInvoices({ req, url, store, user, readBody, now, id, audit, storage: objectStorage });
+    if (supplierInvoiceResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (supplierInvoiceResponse.mutated) await save(store);
+      return send(res, supplierInvoiceResponse.status, supplierInvoiceResponse.body);
+    }
+
     const hubResponse = await routeHubHandover({ req, url, store, user, readBody, now, id, audit });
     if (hubResponse) {
       res.setHeader('Cache-Control', 'private, no-store');
@@ -2950,7 +2959,7 @@ async function handleRequest(req, res) {
             body: fs.createReadStream(file.tempPath),
             contentType: detectedContentType,
             size: file.size,
-            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose),
+            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence", "supplier_invoice"].includes(purpose),
           });
         } catch (error) {
           await compensatePendingFile(fileId, objectKey);
@@ -2990,7 +2999,7 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
-      if (file.purpose.startsWith("refund_")) res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      if (file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice") res.setHeader("Cache-Control", "private, no-store, max-age=0");
       return send(res, 200, { file: publicFile(file, user) });
     }
 
@@ -3031,7 +3040,7 @@ async function handleRequest(req, res) {
         stream.pipe(res);
         return;
       }
-      const privateFinancial = file.purpose.startsWith("refund_");
+      const privateFinancial = file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice";
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
       return send(res, 200, { fileId: file.fileId, ...signed });
@@ -3043,8 +3052,8 @@ async function handleRequest(req, res) {
       const file = findFile(store, fileId);
       authorizeFileAttachOwner(user, file);
       const target = resolveFileTarget(store, file.purpose, body, user);
-      authorizeFileAttach(user, file, target);
-      if (target.type === "order") assertRefundWorkAllowed(store, target.record);
+      authorizeFileAttach(user, file, target, store);
+      if (target.type === "order" && file.purpose !== "supplier_invoice") assertRefundWorkAllowed(store, target.record);
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
         throw new AttachmentError(
@@ -3065,8 +3074,8 @@ async function handleRequest(req, res) {
         const latestFile = findFile(latestStore, fileId);
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
-        authorizeFileAttach(latestUser, latestFile, latestTarget);
-        if (latestTarget.type === "order") assertRefundWorkAllowed(latestStore, latestTarget.record);
+        authorizeFileAttach(latestUser, latestFile, latestTarget, latestStore);
+        if (latestTarget.type === "order" && latestFile.purpose !== "supplier_invoice") assertRefundWorkAllowed(latestStore, latestTarget.record);
         if (latestFile.purpose === 'artwork' && latestTarget.type === 'order') {
           await recordArtworkConsent(database, latestUser, latestTarget.record, body);
         }
@@ -3109,6 +3118,10 @@ async function handleRequest(req, res) {
         }
         attachFileReference(latestFile, latestTarget);
         const attachedAt = now();
+        if (latestFile.purpose === 'supplier_invoice') {
+          audit(latestStore, { actor: latestUser, action: 'supplier_invoice.scan_attached', entityType: 'supplier_invoice',
+            entityId: latestTarget.record.id, orderId: latestTarget.record.id, detail: { fileId, supplierId: latestUser.id } });
+        }
         latestTarget.record.updatedAt = attachedAt;
         if (latestTarget.type === "order") {
           if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
@@ -3136,6 +3149,11 @@ async function handleRequest(req, res) {
           }
           queueOrderInvalidate(latestStore, latestTarget.record, ["orders", "jobs"]);
           await save(latestStore);
+          // A retained invoice obligation grants paperwork access, not access to
+          // the replacement shop's order, artwork or customer details.
+          if (latestFile.purpose === 'supplier_invoice' && latestTarget.record.supplierId !== latestUser.id) {
+            return send(res, 200, { file: publicFile(latestFile, latestUser) });
+          }
           return send(res, 200, { file: publicFile(latestFile, latestUser), order: await publicOrder(latestTarget.record, latestUser, latestStore) });
         }
         if (latestTarget.type === "user") {

@@ -526,3 +526,20 @@ Progress images use the same private read gate as artwork. The client gallery an
 ### Pick-up chat photos
 
 `pickup_chat_image` accepts supplier/rider JPEG, PNG and WebP images up to 15 MiB, using the usual upload verification. Up to four own ready unsent photos bind through `POST /orders/:id/pickup-chat/messages`. Generic attach is refused with `pickup_chat_image_not_attachable`. Sent metadata/downloads are private to the approved assigned supplier and rider while the conversation is readable, including Office transfers; reassignment revokes access. The chat sweep queues byte deletion when the conversation closes; retained opaque order references preserve open-case holds on every retry. See [pick-up messages](OPERATIONAL_MODEL_V2_API.md#pick-up-messages).
+
+
+## Supplier invoice scans
+
+`supplier_invoice` uses the existing supplier-owned multipart upload and order
+attachment flow: JPEG/PNG/WebP/PDF, maximum 15 MiB. `POST /files/:fileId/attach`
+accepts `{orderId}` and writes `supplierInvoiceFileIds`; approved owning shops and
+Operations/Super Admin alone can read metadata and signed bytes. Invoice uploads,
+metadata reads and signed downloads use private/no-store caching. Scans remain
+optional for dispatch and payouts. An invoice obligation snapshots the shop on
+first readiness; subsequent invoice attachments honor that owner after recovery.
+Refund work holds do not block invoice paperwork. Existing financial retention
+and open-case holds still apply.
+
+Use [Supplier invoices](SUPPLIER_INVOICES_API.md) for entered invoice number/date/
+amount, monthly expected/received/missing counts, the shop reminder and audited
+paper collection. Reuse this file purpose; do not introduce another upload flow.

@@ -998,11 +998,12 @@ function hasApprovedWorkRole(user, role) {
   return approval ? approval.status === "approved" : user.role === role && user.verificationStatus === "approved";
 }
 
-export function authorizeFileAttach(user, file, target) {
+export function authorizeFileAttach(user, file, target, store = null) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
   if (file.purpose === 'supplier_invoice') {
-    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
+    const supplierId = store?.supplierInvoices?.find(row => row.orderId === record?.id)?.supplierId || record?.supplierId;
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || supplierId !== user.id) forbidden();
     return;
   }
   if (file.purpose === "packing_photo") {
