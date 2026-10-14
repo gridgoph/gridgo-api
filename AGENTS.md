@@ -85,7 +85,7 @@ Listing approval, grandfathered live rows, private revisions, required specs, an
 
 Super Admin listing take-downs and shop-controlled republication follow `docs/SUPPLIER_CATALOG_API.md#staff-listing-index-and-take-down`.
 
-Production durations use whole shop working days with additive day fields and legacy hour adapters; conversion, release-gap fields, and calendar refusal rules: `docs/SUPPLIER_CATALOG_API.md#production-time-in-working-days`, `src/production-days.js`. Existing order promises stay immutable.
+Production durations use exact minutes for same-day work and whole shop working days for multi-day work; legacy hour-only writes stay exact; conversion, release-gap fields, and calendar refusal rules: `docs/SUPPLIER_CATALOG_API.md#production-time-in-working-days`, `src/production-days.js`. Order duration snapshots stay immutable; historical promise corrections require reviewed recovery.
 
 Shop listings live under a service line (`docs/SUPPLIER_CATALOG_API.md`). They never create matchable capability. Additive fields are `subcategoryCode`, `pricingUnit`, `packageQty`, and inherit/override turnaround. Tarpaulin listings (`tarpaulins_outdoor_banners`) require integer `printerMaxWidthFeet` (1–20); other families store null. Starters are copied at create time. Shop-board hunt is `GET /me/catalog-items?q=` (PostgreSQL `search_tsv` + `pg_trgm` on `supplier_catalog_items`); it does not affect matching and is not a second search product.
 

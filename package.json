@@ -12,7 +12,8 @@
     "seed": "node --env-file-if-exists=.env src/seed.js",
     "seed:dev": "node --env-file-if-exists=.env src/seed-dev.js",
     "bootstrap-admin": "node --env-file-if-exists=.env src/bootstrap-admin.js",
-    "files:retention": "node --env-file-if-exists=.env src/file-retention-cli.js"
+    "files:retention": "node --env-file-if-exists=.env src/file-retention-cli.js",
+    "production:correct": "node --env-file-if-exists=.env scripts/correct-production-time.mjs"
   },
   "engines": {
     "node": ">=20.9.0"

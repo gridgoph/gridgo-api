@@ -107,7 +107,7 @@ function listingCompleteness(item) {
   if (String(item.name || "").trim()) score += 8;
   if (String(item.description || "").trim()) score += 10;
   if (Number.isSafeInteger(item.fromPriceMinor) && item.fromPriceMinor >= 0) score += 7;
-  if (Number.isSafeInteger(item.turnaroundHours) && item.turnaroundHours > 0) score += 7;
+  if (Number.isFinite(item.turnaroundHours) && item.turnaroundHours > 0) score += 7;
   if ((item.photos || []).length) score += 7;
   if ((item.acceptedFormats || []).length) score += 5;
   if ((item.optionGroups || []).length) score += 3;
@@ -202,9 +202,10 @@ function allowanceMinutesFrom(settings) {
 }
 
 /** One queue/calendar projection for matching, cart previews, and checkout. */
-export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, units, now }) {
+export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes, units, now }) {
   const hours = Number.isSafeInteger(turnaroundDays) && turnaroundDays > 0
     ? turnaroundDays * shopProductionDayMinutes(store, supplierId) / 60
+    : Number.isSafeInteger(turnaroundMinutes) && turnaroundMinutes > 0 ? turnaroundMinutes / 60
     : Number.isFinite(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
   const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
   const queue = queueMinutesFor(store, supplierId, hours);
@@ -355,7 +356,7 @@ function otherListing(row) {
       "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "priceTiers", "speedTiers", "pricingBasis",
-      "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version",
+      "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version",
     ].map((key) => [key, item[key]])),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
     fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,

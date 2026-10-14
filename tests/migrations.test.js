@@ -1323,11 +1323,13 @@ test("issue-report priority migration defaults existing reports to unpinned and 
     await runner({...migrationOptions(schema,"up",1791975800000,client), timestamp:true});
     await client.query(`INSERT INTO issue_reports(id,issue,status,published_in,tracker_issue_url)
       VALUES ('11111111-1111-4111-8111-111111111111','Keep existing metadata','published','10-13-2026','https://github.com/gridgoph/gridgo-web/issues/1')`);
-    await runner(migrationOptions(schema,"up",undefined,client));
+    // Exercise this migration's rollback without crossing later forward-only boundaries.
+    await runner({...migrationOptions(schema,"up",1791976000000,client), timestamp:true});
     const row = (await client.query("SELECT priority,status,published_in,tracker_issue_url FROM issue_reports")).rows[0];
     assert.deepEqual(row,{priority:false,status:'published',published_in:'10-13-2026',tracker_issue_url:'https://github.com/gridgoph/gridgo-web/issues/1'});
     await client.query("UPDATE issue_reports SET priority=true");
     await runner(migrationOptions(schema,"down",1,client));
     assert.equal((await client.query("SELECT status FROM issue_reports")).rows[0].status,'published');
+    assert.equal((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='issue_reports' AND column_name='priority'", [schema])).rowCount, 0);
   });
 });

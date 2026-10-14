@@ -34,9 +34,9 @@ test('converted turnaround never promises earlier, including short jobs and part
 });
 
 test('duration adapter validates whole days, preserves null, and gives days precedence', () => {
-  assert.deepEqual(productionDuration({ turnaroundHours: 48 }, {}, 'turnaround', 600), { turnaroundDays: 5, turnaroundHours: 50 });
-  assert.deepEqual(productionDuration({ turnaroundDays: 2, turnaroundHours: 48 }, {}, 'turnaround', 540), { turnaroundDays: 2, turnaroundHours: 18 });
-  assert.deepEqual(productionDuration({ minimumTurnaroundDays: null }, {}, 'minimumTurnaround', 600), { minimumTurnaroundDays: null, minimumTurnaroundHours: null });
+  assert.deepEqual(productionDuration({ turnaroundHours: 48 }, {}, 'turnaround', 600), { turnaroundDays: null, turnaroundMinutes: 2880, turnaroundHours: 48 });
+  assert.deepEqual(productionDuration({ turnaroundDays: 2, turnaroundHours: 48 }, {}, 'turnaround', 540), { turnaroundDays: 2, turnaroundMinutes: 1080, turnaroundHours: 18 });
+  assert.deepEqual(productionDuration({ minimumTurnaroundDays: null }, {}, 'minimumTurnaround', 600), { minimumTurnaroundDays: null, minimumTurnaroundMinutes: null, minimumTurnaroundHours: null });
   for (const value of [0, -1, 1.5, '2', Number.MAX_SAFE_INTEGER]) assert.throws(() => productionDuration({ turnaroundDays: value }, {}, 'turnaround', 600));
 });
 
@@ -47,4 +47,20 @@ test('a split shift counts its open minutes; an ambiguous or empty week is refus
   ] }), 480);
   assert.throws(() => productionDayMinutes({ utcOffsetMinutes: 480, week: [] }));
   assert.throws(() => productionDayMinutes({ ...schedule, week: schedule.week.map((row, i) => ({ ...row, closesMinute: i === 0 ? 1020 : 1080 })) }), { code: 'production_day_length_unavailable' });
+});
+
+test('legacy one-hour and fractional-hour writes retain exact working minutes', () => {
+  assert.deepEqual(productionDuration({ turnaroundHours: 1 }, { turnaroundDays: 1 }, 'turnaround', 600),
+    { turnaroundDays: null, turnaroundMinutes: 60, turnaroundHours: 1 });
+  assert.deepEqual(productionDuration({ turnaroundHours: 1.25 }, {}, 'turnaround', 600),
+    { turnaroundDays: null, turnaroundMinutes: 75, turnaroundHours: 1.25 });
+});
+
+test('same-day minutes schedule across closing without becoming a full working day', () => {
+  const duration = productionDuration({ turnaroundMinutes: 90 }, {}, 'turnaround', 600);
+  const { projection } = projectShopFinish(store, { supplierId: 'shop', ...duration, now: '2026-09-04T09:30:00.000Z' });
+  assert.equal(projection.readyBy, '2026-09-07T01:00:00.000Z');
+  for (const value of [0, -1, 1.5, '60', 600, 601]) {
+    assert.throws(() => productionDuration({ turnaroundMinutes: value }, {}, 'turnaround', 600));
+  }
 });

@@ -282,43 +282,60 @@ Each successful action commits the item, audit (`catalog_item.suspend` or `catal
 
 ## Production time in working days
 
-Refs gridgoph/gridgo-supplier#122 (7 October 2026 decision). A production day is
-one shop working day's open time, using its configured schedule. The fallback
-remains Monday–Saturday, 08:00–18:00 (600 minutes). Closed weekdays and dated
-closures still do not consume production time. An evening request starts at the
-next opening. For split shifts, sum open minutes; schedules without a positive,
-consistent daily length refuse conversion (`production_day_length_unavailable`).
+A production day is one shop working day's open time, using its configured
+schedule. The fallback is Monday–Saturday, 08:00–18:00 (600 minutes). Closed
+weekdays, dated closures and split-shift breaks consume no production time.
+Schedules without a positive, consistent daily length refuse duration writes
+(`production_day_length_unavailable`). A same-day duration means less than a
+working day of effort, **not a guarantee of calendar-day completion**: queue,
+review, capacity and closing time still govern the server's ready/promise dates.
 
-Listing create/update accepts `turnaroundDays` (maximum) and nullable
-`minimumTurnaroundDays`. Both are whole integers >= 1; the minimum cannot exceed
-the maximum. `turnaroundMode: "inherit"` clears the two listing overrides.
-Private listing responses return the overrides; public catalogue, match and cart
-listing responses return the effective maximum. `productionDayMinutes` identifies
-the calendar divisor (null when a saved calendar is unavailable).
+Supplier app and web pickers offer **Hours / Working days**:
 
-Services accept `turnaroundDays` and `rushTurnaroundDays`; reads also expose
-`standardTurnaroundDays`. Speed tiers use `turnaroundDays`; starters expose
-`defaultTurnaroundDays`. Existing endpoints and ready/promise timestamps remain
-unchanged. Use the server's timestamps for dates; never divide a duration by 24.
+- Hours sends integer `turnaroundMinutes` (for example 1 hour = 60, 1¼ hours =
+  75), between 1 and `productionDayMinutes - 1`. Working days sends whole
+  `turnaroundDays >= 1`. Send only the selected duration field in a PATCH.
+- Listing ranges use the same choices for nullable `minimumTurnaroundMinutes`
+  or `minimumTurnaroundDays`; the minimum cannot exceed the maximum in minutes.
+  `turnaroundMode: "inherit"` clears all listing duration overrides.
+- Services accept `turnaroundMinutes` / `turnaroundDays` and
+  `rushTurnaroundMinutes` / `rushTurnaroundDays`. Standard reads also expose
+  `standardTurnaroundMinutes` and `standardTurnaroundDays`.
+- Speed tiers use `turnaroundMinutes` / `turnaroundDays`; starters expose
+  `defaultTurnaroundMinutes` / `defaultTurnaroundDays` and are copied at create.
+- Non-null explicit days take precedence if multiple representations are sent;
+  otherwise minutes take precedence over legacy hours. A minute/hour write
+  clears the corresponding days value. An explicit null clears an optional
+  duration; required service/listing/tier durations cannot be cleared.
 
-During the installed-app release gap, legacy `*TurnaroundHours`/`turnaroundHours`
-fields remain. Hour-only writes convert to `max(1, ceil(hours * 60 /
-productionDayMinutes))`; explicit days win when both forms are present. Hour
-responses express the whole-day duration in working hours. For example, a default
-shop receives 2 days/20 hours from a 2-day write and 5 days/50 hours from an old
-48-hour write. There is no new sub-day option.
+Responses include exact integer minutes and compatible hours (`minutes / 60`).
+Days are null for exact minute/hour durations, and retained for day-based work.
+`productionDayMinutes` identifies the shop divisor (null if its calendar cannot
+be displayed). Day-based durations continue to follow the shop calendar before
+checkout. Accepted order promises and duration snapshots never follow later
+calendar changes. Public catalogue, match and cart listings expose the effective
+inherited duration; private listing responses expose their overrides.
 
-Migration `1791936000000` rounds existing listings, service defaults/rush, speed
-tiers, starters and approved listing snapshots up. It refuses ambiguous saved
-calendars and keeps existing order snapshots/promises untouched. Tier IDs and
-prices survive even when multiple speeds round to the same day. The canonical
-columns are additive; old hour columns remain as compatibility projections.
-`src/production-days.js` owns request conversion and the compatibility view;
-`src/availability.js` remains the calendar engine. New order-line snapshots keep
-`turnaroundDaysSnapshot` and `productionDayMinutesSnapshot`; they are immutable
-and old orders remain null. Order `productionItems` expose `turnaroundDays`, and
-checkout `jobs` expose `estimatedDays` (null for historical hour-only records).
-Exact integer production minutes keep half-hour shop shifts precise through
-checkout and queue reloads; legacy integer-hour database columns round up only
-as compatibility storage. Production data was not queried
-by the implementation worker: run migrations through the normal deployment gate.
+Older applications can keep writing `turnaroundHours` and the other `*Hours`
+fields. **Hour-only writes now pass through exactly**, including longer legacy
+values that are not whole working days: 48 hours is 2,880 minutes, not 50 hours.
+The result must fit positive integer minutes (maximum 2,147,483,647). This legacy
+compatibility path does not change the new picker's multi-day whole-days choice.
+A 2-day write in the default calendar still returns 2 days / 1,200 minutes /
+20 hours. Use the server's ready/promise timestamps for “Ready today” copy;
+never derive a date by dividing duration by 24.
+
+Migration `1791981000000` adds exact minute columns to listings, services, speed
+tiers and starters, preserving the already-converted day durations. It also adds
+immutable `turnaroundMinutesSnapshot` for new order lines. Historical snapshots
+remain untouched. `productionItems` expose minute/day durations; checkout jobs
+expose `estimatedProductionMinutes` and compatible `estimatedHours`.
+`estimatedDays` is null when a job contains exact-duration lines or a reviewed
+historical correction. Legacy integer hour columns retain rounded storage only;
+API responses, checkout and queues recover exact hours from canonical minutes.
+
+The published `1791936000000` migration is unchanged. It rounded source times
+and overwrote old hour columns; the new migration cannot guess those original
+values. [The reviewed recovery procedure](PRODUCTION_TIME_CORRECTION.md) handles
+report 39853344 separately and is dry-run by default. New deployments never
+execute the recovery script automatically.

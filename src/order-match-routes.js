@@ -715,7 +715,9 @@ function publicMatchedOrder(store, order) {
       deliveryDistanceMeters: job.deliveryDistanceMeters,
       deliveryFeeMinor: job.deliveryFeeMinor,
       estimatedHours: job.estimatedHours,
-      estimatedDays: (store.orderLineItems || []).some(line => line.jobId === job.id && line.turnaroundDaysSnapshot != null)
+      estimatedProductionMinutes: job.estimatedProductionMinutes ?? Math.round(job.estimatedHours * 60),
+      estimatedDays: !order.productionTimeCorrection && (store.orderLineItems || []).some(line => line.jobId === job.id)
+        && store.orderLineItems.filter(line => line.jobId === job.id).every(line => line.turnaroundDaysSnapshot != null)
         ? Math.max(...store.orderLineItems.filter(line => line.jobId === job.id).map(line => line.turnaroundDaysSnapshot || 0)) : null,
       scheduledFor: job.scheduledFor ?? null,
       deadline: job.deadline ?? order.deadline ?? null,

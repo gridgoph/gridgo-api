@@ -538,11 +538,11 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     })),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
-    ...productionProjection({ ...item, turnaroundDays: item.turnaroundMode === "override" ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays, turnaroundHours: itemTurnaroundHours(item, service) }, displayProductionDayMinutes(store, item.supplierId)),
+    ...productionProjection({ ...item, turnaroundDays: item.turnaroundMode === "override" ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays), turnaroundMinutes: item.turnaroundMode === "override" ? item.turnaroundMinutes : (service.standardTurnaroundHours != null ? service.standardTurnaroundMinutes : service.turnaroundMinutes), turnaroundHours: itemTurnaroundHours(item, service) }, displayProductionDayMinutes(store, item.supplierId)),
     turnaroundHours: itemTurnaroundHours(item, service),
     minimumTurnaroundHours: item.minimumTurnaroundHours ?? null,
     rush: service.rushEnabled ? {
-      ...productionProjection({ turnaroundDays: service.rushTurnaroundDays, turnaroundHours: service.rushTurnaroundHours }, displayProductionDayMinutes(store, service.supplierId), ["turnaround"]),
+      ...productionProjection({ turnaroundDays: service.rushTurnaroundDays, turnaroundMinutes: service.rushTurnaroundMinutes, turnaroundHours: service.rushTurnaroundHours }, displayProductionDayMinutes(store, service.supplierId), ["turnaround"]),
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
       clientPriceMinor: clientMoneyMinor(store, service.rushPriceMinor),
@@ -641,8 +641,7 @@ export function listingStartersFor(store, subcategoryCode) {
       name: starter.name,
       defaultPricingUnit: starter.defaultPricingUnit,
       defaultPackageQty: starter.defaultPackageQty ?? null,
-      defaultTurnaroundDays: starter.defaultTurnaroundDays ?? null,
-      defaultTurnaroundHours: starter.defaultTurnaroundHours ?? null,
+      ...productionProjection(starter, 600, ["defaultTurnaround"]),
       defaultFormatCodes: [...(starter.defaultFormatCodes || [])],
       groups: (store.listingStarterGroups || [])
         .filter((group) => group.starterId === starter.id)
@@ -895,11 +894,12 @@ export function createOrderLineSnapshot(store, selection, createId) {
       pricingBasisSnapshot: service.pricingBasis || item.pricingUnit || "per_unit",
       pricingUnitSnapshot: item.pricingUnit || "per_unit",
       packageQtySnapshot: item.packageQty ?? null,
-      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays) == null ? {} : {
-        turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays,
+      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays)) == null ? {} : {
+        turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays),
         productionDayMinutesSnapshot: displayProductionDayMinutes(store, item.supplierId),
       }),
       turnaroundHoursSnapshot: itemTurnaroundHours(item, service),
+      turnaroundMinutesSnapshot: Math.round(itemTurnaroundHours(item, service) * 60),
       baseUnitPriceMinor: item.basePriceMinor,
       effectiveUnitPriceMinor,
       quantity,
