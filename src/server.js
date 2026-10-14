@@ -182,6 +182,7 @@ import {
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
+import { publicFeaturedPrints, routeFeaturedPrints } from './featured-prints.js';
 import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
@@ -696,7 +697,7 @@ function readyPaymentQrFile(store) {
 }
 
 function publicOperationalSettings(settings, store = null) {
-  const { paymentQrFileId: _paymentQrFileId, ...rest } = settings || {};
+  const { paymentQrFileId: _paymentQrFileId, featuredPrints: _featuredPrints, ...rest } = settings || {};
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
@@ -2192,6 +2193,13 @@ async function handleRequest(req, res) {
       return send(res, response.status, response.body);
     }
 
+    if (req.method === 'GET' && pathname === '/featured-prints') {
+      const body = publicFeaturedPrints(store);
+      await decorateCatalogPhotoUrls(store, body);
+      res.setHeader('Cache-Control', 'no-store');
+      return send(res, 200, body);
+    }
+
     if (req.method === 'POST' && pathname === '/auth/staff/redeem') {
       const body = await readBody(req);
       const result = redeemStaffInvite({ store, claims: req.gridgoVerifiedClaims?.claims,
@@ -2557,6 +2565,14 @@ async function handleRequest(req, res) {
     if (accountProfileResponse) {
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
+    const featuredResponse = await routeFeaturedPrints({ req, url, store, user, readBody, now, id, audit });
+    if (featuredResponse) {
+      if (featuredResponse.mutated) await save(store);
+      await decorateCatalogPhotoUrls(store, featuredResponse.body);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, featuredResponse.status, featuredResponse.body);
     }
 
     const seasonResponse = await routeSeasonWindows({ req, url, store, user, readBody, now, createId: id, audit });
