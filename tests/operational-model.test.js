@@ -1025,17 +1025,23 @@ test("client rider reveal radius defaults to 1 km and requires positive whole me
   assert.equal(validateOperationalSettings(legacy), true);
 });
 
-test("client rider location fails closed and reveals only within the current radius", () => {
-  const order = { fulfillmentMode: "delivery", dropoff: { lat: 0, lng: 0 } };
-  const ping = { lat: 0, lng: 0.005, at: AT };
-  assert.equal(clientRiderLocationPing(order, ping, {}), ping);
-  assert.equal(clientRiderLocationPing(order, { ...ping, lng: 0.02 }, {}), null);
-  assert.equal(clientRiderLocationPing(order, ping, { clientRiderLocationRevealDistanceMeters: 555 }), null);
-  assert.equal(clientRiderLocationPing(order, ping, { clientRiderLocationRevealDistanceMeters: 556 }), ping);
-  assert.equal(clientRiderLocationPing(order, null, {}), null);
-  for (const dropoff of [null, {}, { lat: null, lng: 0 }, { lat: 91, lng: 0 }, { lat: 0, lng: "0" }]) {
-    assert.equal(clientRiderLocationPing({ ...order, dropoff }, ping, {}), null);
+test("client rider location is confined to delivery after pickup, independent of distance", () => {
+  const order = { fulfillmentMode: 'delivery', state: 'picked_up', riderId: 'rider',
+    pickupChecklist: { completedAt: AT }, dropoff: { lat: 0, lng: 0 } };
+  const ping = { riderId: 'rider', lat: 50, lng: 50, at: AT };
+  assert.equal(clientRiderLocationPing(order, ping, {}), ping, 'legacy fix with a proven handoff remains readable');
+  assert.equal(clientRiderLocationPing({ ...order, dropoff: null }, ping, {}), ping);
+  for (const state of ['rider_assigned', 'ready_for_dispatch', 'delivered', 'issue_window_open', 'completed', 'cancelled', 'awaiting_collection']) {
+    assert.equal(clientRiderLocationPing({ ...order, state }, ping, {}), null);
   }
-  const moved = { ...order, dropoffConfirmation: { status: "confirmed", point: { lat: 1, lng: 1 } } };
-  assert.equal(clientRiderLocationPing(moved, ping, {}), null);
+  assert.equal(clientRiderLocationPing({ ...order, fulfillmentMode: 'pickup' }, ping), null);
+  assert.equal(clientRiderLocationPing({ ...order, deliveryEvidence: { recordedAt: AT } }, ping), null);
+  assert.equal(clientRiderLocationPing(order, { ...ping, leg: 'pickup' }), null);
+  assert.equal(clientRiderLocationPing(order, { ...ping, riderId: 'previous' }), null);
+  assert.equal(clientRiderLocationPing(order, { ...ping, at: '2026-08-10T11:59:59.000Z' }), null);
+  assert.equal(clientRiderLocationPing({ ...order, pickupChecklist: null }, ping), null);
+  assert.equal(clientRiderLocationPing({ ...order, pickupChecklist: null }, { ...ping, leg: 'delivery' }).lat, 50);
+  for (const point of [null, { lat: undefined }, { lat: 91, lng: 0 }, { lat: 0, lng: '0' }]) {
+    assert.equal(clientRiderLocationPing(order, point && { ...ping, ...point }), null);
+  }
 });

@@ -1,4 +1,5 @@
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
+import { ACTIVE_TRACKING_STATES, assignmentTime, pickupTime, currentRiderPings, latestPing, trackingSettings, locationFreshness, clientTracking, pingDiagnostics } from './rider-tracking.js';
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
@@ -678,6 +679,8 @@ function publicOperationalSettings(settings, store = null) {
     operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
+    riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
+    riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
@@ -3438,6 +3441,10 @@ async function handleRequest(req, res) {
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
+        riderLocationRefreshIntervalSeconds: Object.hasOwn(body, 'riderLocationRefreshIntervalSeconds')
+          ? body.riderLocationRefreshIntervalSeconds : trackingSettings(store.settings).refreshIntervalSeconds,
+        riderLocationStaleAfterSeconds: Object.hasOwn(body, 'riderLocationStaleAfterSeconds')
+          ? body.riderLocationStaleAfterSeconds : trackingSettings(store.settings).staleAfterSeconds,
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
         hubPickupEnabled: Object.hasOwn(body, "hubPickupEnabled") ? body.hubPickupEnabled : store.settings.hubPickupEnabled === true,
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
@@ -5386,20 +5393,27 @@ async function handleRequest(req, res) {
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
+    if (req.method === 'GET' && /^\/ops\/orders\/[^/]+\/location-diagnostics$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(row => row.id === pathname.split('/')[3]);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      const pings = currentRiderPings(store, order);
+      return send(res, 200, { orderId: order.id, riderId: order.riderId ?? null,
+        ...locationFreshness(latestPing(pings), store.settings, Date.now(), assignmentTime(order)),
+        ...pingDiagnostics(pings) });
+    }
+
     // ---- orders list / create ----
-    // Latest ping per rider who is currently sharing location on an active trip.
+    // Include active riders who have never sent a fix, so Operations can contact them.
     if (req.method === "GET" && pathname === "/ops/riders/locations") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
-      const tracking = new Set(["picked_up", "out_for_delivery"]);
+      const tracking = new Set(ACTIVE_TRACKING_STATES);
       const latestByRider = new Map();
       for (const order of store.orders || []) {
         if (!order.riderId || !tracking.has(order.state)) continue;
-        const ping = (store.locationPings || [])
-          .filter((p) => p.orderId === order.id && p.riderId === order.riderId)
-          .sort((a, b) => b.at.localeCompare(a.at))[0];
-        if (!ping) continue;
+        const ping = latestPing(currentRiderPings(store, order));
         const prev = latestByRider.get(order.riderId);
-        if (!prev || ping.at > prev.ping.at) {
+        if (!prev || (ping?.at || '') > (prev.ping?.at || '')) {
           latestByRider.set(order.riderId, { order, ping });
         }
       }
@@ -5418,10 +5432,12 @@ async function handleRequest(req, res) {
           orderId: order.id,
           orderTitle: order.title || null,
           state: order.state,
-          lat: ping.lat,
-          lng: ping.lng,
-          accuracy: ping.accuracy ?? null,
-          at: ping.at,
+          lat: ping?.lat ?? null,
+          lng: ping?.lng ?? null,
+          accuracy: ping?.accuracy ?? null,
+          at: ping?.at ?? null,
+          receivedAt: ping?.receivedAt ?? null,
+          ...locationFreshness(ping, store.settings, Date.now(), assignmentTime(order)),
           pickup: mapPointOrNull(order.pickup),
           dropoff,
         };
@@ -5982,6 +5998,8 @@ async function handleRequest(req, res) {
       }
       if (next === "rider_assigned") {
         order.riderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
+        order.riderAssignedAt = now();
+        delete order.riderProgress;
       }
       // The moment the shop's own work is done. Its on-time record is measured
       // from this against readyBy -- the date its board promised -- and never
@@ -6061,6 +6079,8 @@ async function handleRequest(req, res) {
       }
       if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       order.riderId = user.id;
+      order.riderAssignedAt = now();
+      delete order.riderProgress;
       order.state = "rider_assigned";
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
@@ -6303,6 +6323,42 @@ async function handleRequest(req, res) {
       });
     }
 
+    // Rider-reported progress never advances the governed pickup or delivery state.
+    if (req.method === 'POST' && /^\/dispatch\/[^/]+\/milestones$/.test(pathname)) {
+      if (user.role !== 'rider' || !approvedRole(store, user.id, 'rider')) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(row => row.id === pathname.split('/')[2] && row.riderId === user.id);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      const { milestone } = await readBody(req);
+      if (!['heading_to_shop', 'at_shop', 'arrived'].includes(milestone)) return send(res, 400, { error: 'invalid_delivery_milestone' });
+      const allowed = milestone === 'arrived' ? ['picked_up', 'out_for_delivery'] : ['rider_assigned'];
+      if (order.fulfillmentMode !== 'delivery' || !allowed.includes(order.state) || order.deliveryEvidence?.recordedAt) {
+        return send(res, 409, { error: 'delivery_milestone_not_available' });
+      }
+      const assignedAt = assignmentTime(order);
+      if (order.riderProgress?.riderId !== user.id || order.riderProgress?.assignedAt !== assignedAt) {
+        order.riderProgress = { riderId: user.id, assignedAt, events: {} };
+      }
+      const events = order.riderProgress.events;
+      if (!events[milestone]) {
+        if (milestone === 'heading_to_shop' && events.at_shop) return send(res, 409, { error: 'delivery_milestone_out_of_order' });
+        const at = now();
+        events[milestone] = at;
+        order.updatedAt = at;
+        const label = { heading_to_shop: 'Heading to the shop', at_shop: 'At the shop', arrived: 'Arrived' }[milestone];
+        const recipients = [{ userId: order.clientId, role: 'client' }, ...privilegedAdminMemberships(store)];
+        for (const membership of recipients) store.notifications.push({
+          id: id('ntf'), userId: membership.userId, appRole: membership.role,
+          type: 'rider_delivery_milestone', orderId: order.id, title: label,
+          body: `Delivery progress: ${label.toLowerCase()}.`, read: false, at,
+        });
+        audit(store, { actor: user, action: 'dispatch.milestone', entityType: 'order', entityId: order.id,
+          orderId: order.id, detail: { milestone } });
+        queueOrderInvalidate(store, order, ['orders', 'dispatch']);
+        await save(store);
+      }
+      return send(res, 200, { order: await publicOrder(order, user, store) });
+    }
+
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
       if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
@@ -6312,18 +6368,28 @@ async function handleRequest(req, res) {
         return send(res, 409, { error: "tracking_not_active", state: order.state });
       }
       const body = await readBody(req);
-      const sourceMs = body.recordedAt == null ? Date.now() : Date.parse(body.recordedAt);
-      if (!Number.isFinite(sourceMs)) return send(res,400,{error:"invalid_location_timestamp"});
+      const receivedMs = Date.parse(req.receivedAt);
+      const rejectLocation = (code) => {
+        console.warn(JSON.stringify({ event: 'rider_location_rejected', orderId, riderId: user.id,
+          receivedAt: req.receivedAt, code }));
+        return send(res, 400, { error: code });
+      };
+      const sourceMs = body.recordedAt == null ? receivedMs
+        : typeof body.recordedAt === 'string' ? Date.parse(body.recordedAt) : NaN;
+      if (!Number.isFinite(sourceMs)) return rejectLocation('invalid_location_timestamp');
       const recordedAt = new Date(sourceMs).toISOString();
       const fixMs = Date.parse(recordedAt);
-      if (!Number.isFinite(fixMs) || fixMs > Date.now()+30000 || fixMs < Date.now()-5*60*1000) return send(res,400,{error:'invalid_location_timestamp'});
-      if (!Number.isFinite(body.lat) || Math.abs(body.lat)>90 || !Number.isFinite(body.lng) || Math.abs(body.lng)>180 || (body.accuracy != null && (!Number.isFinite(body.accuracy) || body.accuracy < 0))) return send(res,400,{error:'invalid_location'});
-      const latest = store.locationPings.filter(p=>p.orderId===orderId&&p.riderId===order.riderId).sort((a,b)=>b.at.localeCompare(a.at))[0];
-      if (latest && Date.parse(latest.at)>=fixMs) return send(res,200,{ping:latest,ignored:true});
+      if (fixMs > receivedMs + 30000 || fixMs < receivedMs - 5 * 60 * 1000) return rejectLocation('invalid_location_timestamp');
+      if (!Number.isFinite(body.lat) || Math.abs(body.lat)>90 || !Number.isFinite(body.lng) || Math.abs(body.lng)>180 || (body.accuracy != null && (!Number.isFinite(body.accuracy) || body.accuracy < 0))) return rejectLocation('invalid_location');
+      const latest = latestPing(currentRiderPings(store, order));
+      if (latest && Date.parse(latest.at) >= fixMs) {
+        console.info(JSON.stringify({ event: 'rider_location_ignored', orderId, riderId: user.id,
+          receivedAt: req.receivedAt, code: 'out_of_order_fix' }));
+        return send(res, 200, { ping: latest, ignored: true });
+      }
       // A delayed handset fix from before the handoff is still a pick-up ping,
       // even if it arrives after the checklist has moved the order forward.
-      const pickupAt = order.pickupChecklist?.completedAt
-        || (order.timeline || []).findLast((entry) => entry.state === "picked_up")?.at;
+      const pickupAt = pickupTime(order);
       const pickupLeg = order.state === "rider_assigned" || (pickupAt && fixMs < Date.parse(pickupAt));
       const ping = {
         id: id("ping"),
@@ -6333,6 +6399,8 @@ async function handleRequest(req, res) {
         lng: Number(body.lng),
         accuracy: body.accuracy ?? null,
         at: recordedAt,
+        receivedAt: req.receivedAt,
+        processedAt: now(),
         leg: pickupLeg ? "pickup" : "delivery",
       };
       store.locationPings.push(ping);
@@ -6353,11 +6421,16 @@ async function handleRequest(req, res) {
       }
       const point = mapPointOrNull(order.pickup);
       const shop = user.role === "supplier" ? { shop: point ? { lat: point.lat, lng: point.lng } : null } : {};
-      const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId
-        && (user.role !== "supplier" || p.leg === "pickup"));
-      if (!pings.length) return send(res, 200, { ping: null, ...shop });
-      const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
-      return send(res, 200, { ping: user.role === "client" ? clientRiderLocationPing(order, ping, store.settings) : ping, ...shop });
+      const pings = currentRiderPings(store, order).filter(p => user.role !== 'supplier' || p.leg === 'pickup');
+      const ping = latestPing(pings);
+      if (user.role === 'client') {
+        const visible = clientRiderLocationPing(order, ping);
+        // Explicit fields keep server receive/queue diagnostics private to staff and the rider.
+        const publicPing = visible ? { id: visible.id, orderId, riderId: visible.riderId,
+          lat: visible.lat, lng: visible.lng, accuracy: visible.accuracy ?? null, at: visible.at, leg: 'delivery' } : null;
+        return send(res, 200, { ping: publicPing, tracking: clientTracking(order, ping, store.settings, store.version) });
+      }
+      return send(res, 200, { ping, ...shop });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {
@@ -6562,6 +6635,7 @@ function logHttpRequest(req, res, pathname, started) {
 }
 
 const server = http.createServer((req, res) => {
+  req.receivedAt = now();
   // The same WHATWG normalization handleRequest routes on — a raw string split
   // would let dot-segment paths reach a route the dispatch classified
   // differently.

@@ -1,5 +1,7 @@
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { displayFilename } from './display-filename.js';
+import { deliveryMilestones } from './rider-tracking.js';
+export { clientRiderLocationPing } from './rider-tracking.js';
 import { defaultOperatingHours, validateOperatingHours, orderReviewTiming } from './operating-hours.js';
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { pickupChatProjection } from "./pickup-chat.js";
@@ -228,7 +230,9 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
-    clientRiderLocationRevealDistanceMeters: 1_000,
+    clientRiderLocationRevealDistanceMeters: 1_000, // Deprecated; no longer controls visibility.
+    riderLocationRefreshIntervalSeconds: 20,
+    riderLocationStaleAfterSeconds: 120,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
     hubPickupEnabled: false,
@@ -254,6 +258,14 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  for (const [field, min, max] of [
+    ['riderLocationRefreshIntervalSeconds', 15, 30],
+    ['riderLocationStaleAfterSeconds', 30, 600],
+  ]) {
+    if (settings?.[field] !== undefined && (!Number.isSafeInteger(settings[field]) || settings[field] < min || settings[field] > max)) {
+      fail(400, 'invalid_rider_tracking_setting', `${field} must be a whole number from ${min} to ${max} seconds.`, { field });
+    }
+  }
   if (settings?.operatingHours !== undefined) validateOperatingHours(settings.operatingHours);
   if (settings?.clientRiderLocationRevealDistanceMeters !== undefined &&
       (!Number.isSafeInteger(settings.clientRiderLocationRevealDistanceMeters) || settings.clientRiderLocationRevealDistanceMeters <= 0)) {
@@ -420,19 +432,6 @@ function validateNudgeSpan(value, unit, field) {
 
 function radians(degrees) {
   return (degrees * Math.PI) / 180;
-}
-
-export function clientRiderLocationPing(order, ping, settings) {
-  // New pre-pick-up pings must never become visible after the state changes.
-  // Unmarked pings predate pick-up tracking and retain the old radius policy.
-  if (order.state === "rider_assigned" || ping?.leg === "pickup") return null;
-  const destination = deliveryDestination(order);
-  for (const point of [destination, ping]) {
-    if (!point || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90 ||
-        !Number.isFinite(point.lng) || Math.abs(point.lng) > 180) return null;
-  }
-  const radius = settings?.clientRiderLocationRevealDistanceMeters ?? 1_000;
-  return distanceMetersBetween(ping, destination) <= radius ? ping : null;
 }
 
 export function distanceMetersBetween(pickup, dropoff) {
@@ -1036,6 +1035,12 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.riderProgress;
+  delete publicRecord.deliveryMilestones;
+  if (order.fulfillmentMode === 'delivery' && (['ops_admin', 'super_admin'].includes(user?.role)
+      || (user?.role === 'client' && user.id === order.clientId) || (user?.role === 'rider' && user.id === order.riderId))) {
+    publicRecord.deliveryMilestones = deliveryMilestones(order);
+  }
   delete publicRecord.operatingClock;
   delete publicRecord.productionTimeCorrection;
   delete publicRecord.reviewSchedule;

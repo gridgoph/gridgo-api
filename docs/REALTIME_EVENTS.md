@@ -130,3 +130,7 @@ ring deadline or termination. Push data remains the four-field allowlist.
 `order_call_activity` gives each Operations/Super Admin membership a generic
 lifecycle notice without access to call records or signals. Full API/app behavior:
 [Calls API](CALLS_API.md).
+
+### Rider delivery milestones
+
+`POST /dispatch/:id/milestones` writes `rider_delivery_milestone` inbox rows to the owning client and every current Operations/Super Admin membership. It queues `orders`/`dispatch` invalidation before `save()`; push/SSE delivery occurs after commit. Duplicate milestone submissions retain the original event without another notification. Position uploads remain polled via the [location contract](OPERATIONAL_MODEL_V2_API.md#rider-location), without a push for every GPS fix.
