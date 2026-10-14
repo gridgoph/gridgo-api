@@ -1,3 +1,5 @@
+import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
+import { displayFilename } from './display-filename.js';
 import { defaultOperatingHours, validateOperatingHours, orderReviewTiming } from './operating-hours.js';
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { pickupChatProjection } from "./pickup-chat.js";
@@ -10,7 +12,7 @@ import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
 import { packingProgressFor } from "./packing-progress.js";
-import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
+import { productionProgressFor, publicProgressTimeline, supplierProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
 
@@ -1164,6 +1166,19 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.packingPhotoFileIds;
   if (ops || owningClient || assignedSupplier) {
     publicRecord.packingProgress = packingProgressFor(store, order);
+  }
+  delete publicRecord.transitionReadiness;
+  delete publicRecord.jobDetails;
+  if (ops || assignedSupplier) {
+    publicRecord.transitionReadiness = Object.fromEntries(PACKAGING_STATES.map(next =>
+      [next, productionTransitionReadiness(store, order, next)]));
+    publicRecord.jobDetails = supplierJobDetails(order, publicRecord.productionItems, store);
+  }
+  if (assignedSupplier) {
+    publicRecord.promisedDate = publicRecord.jobDetails.missing.includes("promisedDate") ? null : publicRecord.jobDetails.promisedDate;
+    publicRecord.material = publicRecord.jobDetails.material;
+    publicRecord.artworkName = displayFilename(publicRecord.artworkName);
+    publicRecord.timeline = supplierProgressTimeline(order);
   }
   // Only the two people in the conversation learn it exists (gridgo-client#198).
   delete publicRecord.pickupChat;

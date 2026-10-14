@@ -1,3 +1,4 @@
+import { payoutStageLabel } from './payout-plan.js';
 /** Shared evidence rule for packing and the client progress gallery. */
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const SHOP_PROOF_CODES = new Set(["production_started", "printing", "packaging_qc"]);
@@ -65,4 +66,18 @@ export function publicProgressTimeline(timeline) {
     result.push({ at: entry.at, state: entry.state, note: PROGRESS_LABELS[entry.state] });
   }
   return result;
+}
+
+/** Shops keep instructions and payment updates, with readable stage names.
+ * File references and arbitrary internal event fields belong to their own views.
+ */
+export function supplierProgressTimeline(order) {
+  return (order.timeline || []).map(entry => {
+    const progress = publicProgressTimeline([entry])[0]?.note;
+    let note = typeof entry.note === 'string' && entry.note.trim() ? entry.note : progress || 'Order updated';
+    if (entry.by === order.clientId || entry.state === 'delivered') note = progress || 'Client updated order';
+    note = note.replace(/\b(production_started|packaging_qc|issue_window|printing|retention)\b/g,
+      code => payoutStageLabel(code));
+    return { at: entry.at, state: entry.state, note };
+  });
 }

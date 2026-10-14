@@ -932,6 +932,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   }
   order.supplierId = job.supplierId;
   order.pickup = { ...job.pickup };
+  order.distanceZone = job.deliveryDistanceMeters == null ? null
+    : distanceZoneForDistance(job.deliveryDistanceMeters, store.settings);
   // The shop's own date, which it is held to. Never shown to the client.
   order.readyBy = projection.readyBy;
   // The padded date the client was promised. Never shown to the shop.

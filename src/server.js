@@ -1,3 +1,4 @@
+import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
@@ -306,6 +307,19 @@ function kickPushDrain() {
   });
 }
 
+function notifyMissingJobDetails(store, order) {
+  if (!order?.supplierId) return;
+  const lines = (store.orderLineItems || []).filter(line => line.orderId === order.id)
+    .map(line => ({ structuredSpec: line.structuredSpecSnapshot || {}, options: (store.orderLineItemOptions || [])
+      .filter(option => option.orderLineItemId === line.id)
+      .map(option => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })) }));
+  const details = supplierJobDetails(order, lines, store);
+  const labels = { material: 'material', zone: 'zone', promisedDate: 'promised date' };
+  if (details.missing.length) notifyAdmins(store, 'order_job_details_missing',
+    `Job details need review: ${details.missing.map(key => labels[key]).join(', ')}`, order,
+    `job-details:${order.id}:${details.missing.slice().sort().join(',')}`, { createId: id, at: now() });
+}
+
 async function save(store) {
   await reconcileCalls(database, store, { createId: id, at: now() });
   cancelVoucherReservations(store, { id, at: now() });
@@ -478,7 +492,30 @@ function writeJsonResponse(res, status, body) {
   res.end(payload);
 }
 
+function transitionRefusalMessage(code) {
+  return {
+    forbidden: 'This account cannot update this order. Refresh the job or ask Operations for help.',
+    order_not_found: 'This order is no longer available. Refresh your jobs.',
+    handover_verification_required: 'Complete the verified handover before closing this order.',
+    shop_acceptance_expired: 'The shop acceptance time has expired. Operations must arrange the next step.',
+    shop_cancel_reason_required: 'Explain why the shop cannot take this job, using at most 2,000 characters.',
+    payout_held: 'Operations must resolve the payout hold before releasing payment.',
+    payment_authorization_started: 'Payment review has already started. Operations must review any price change.',
+    quote_supersession_reason_required: 'Explain why the existing quote needs to change.',
+    supplier_payment_terms_required: 'Set the shop payment terms before issuing a quote.',
+    quote_stale: 'The quote has changed. Refresh the order and review the latest quote.',
+    payment_plan_not_offered: 'The shop does not offer this payment plan. Refresh and choose an available plan.',
+    invalid_payment_plan: 'Choose a supported payment plan for this fulfillment method.',
+    pickup_not_available: 'This shop does not offer pickup. Choose an available fulfillment method.',
+  }[code] || 'This step could not be completed. Refresh the order and ask Operations to review what is needed.';
+}
+
 function send(res, status, body, { afterCommit = true } = {}) {
+  if (status >= 400 && status < 500 && res.gridgoTransitionRefusal) {
+    const record = res.gridgoTransitionRefusal;
+    delete res.gridgoTransitionRefusal;
+    return record(status, body);
+  }
   if (afterCommit && database.inWriteTransaction()) {
     database.afterCommit(() => writeJsonResponse(res, status, body));
     return;
@@ -2321,6 +2358,29 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    // All authenticated transition refusals, including common work/identity guards,
+    // commit an audit before responding. Reload discards unsaved partial route edits.
+    if (user && req.method === 'POST' && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
+      const transitionBody = await readBody(req);
+      const requestedOrderId = pathname.split('/')[2];
+      res.gridgoTransitionRefusal = async (status, response) => {
+        const latest = await load();
+        const order = latest.orders.find(row => row.id === requestedOrderId);
+        const next = typeof transitionBody.state === 'string' ? transitionBody.state.slice(0, 100) : null;
+        const message = response.message || transitionRefusalMessage(response.error);
+        const visible = order && (isOps(user) || (user.role === 'supplier' && order.supplierId === user.id));
+        const readiness = visible && PACKAGING_STATES.includes(next) && ![401, 403, 404].includes(status)
+          ? productionTransitionReadiness(latest, order, next, { operations: isOps(user), reason: transitionBody.reason }) : null;
+        const missing = readiness?.missing.length ? readiness.missing : [{ code: response.error, message }];
+        const body = { ...response, message, missing };
+        audit(latest, { actor: user, action: 'order.transition_refused', entityType: 'order',
+          entityId: requestedOrderId, orderId: order?.id, reason: message,
+          detail: { from: order?.state || null, to: next, code: response.error, status, missing } });
+        if (visible) notifyMissingJobDetails(latest, order);
+        await save(latest);
+        return send(res, status, body);
+      };
+    }
     if (!pathname.startsWith("/admin/") && await legalResponse(req, res, url, user)) return;
     if (pathname === '/me/account-deletion-request') {
       const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
@@ -4987,7 +5047,7 @@ async function handleRequest(req, res) {
       const action = url.searchParams.get("action");
       // Operations needs correction/deletion bylines in daily workspaces,
       // while the unrestricted audit log remains Super Admin only.
-      const operationalAction = ["order.production_override", "file.early_delete", "file.retention_delete"].includes(action);
+      const operationalAction = ["order.production_override", "order.transition_refused", "file.early_delete", "file.retention_delete"].includes(action);
       const specificFile = entityType === "file" && Boolean(entityId?.trim());
       if (!isSuper(user) && !operationalAction && !specificFile) {
         return send(res, 403, { error: "forbidden" });
@@ -5626,35 +5686,19 @@ async function handleRequest(req, res) {
         || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
         requireOperatingHours(store.settings, now(), next === 'rider_assigned' || next === 'picked_up' ? 'Dispatch' : 'Artwork review');
       }
-      if (["supplier_self_qc", "ready_for_dispatch"].includes(next)) {
-        if (order.payoutHold || activePayoutHold(store, order.id)) {
-          return send(res, 409, {
-            error: "claim_hold_active",
-            message: "This order cannot be packaged for pickup while a claim holds payouts. Operations must clear the claim first.",
-          });
+      if (PACKAGING_STATES.includes(next)) {
+        const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason });
+        if (!readiness.allowed) {
+          const first = readiness.missing[0];
+          return send(res, first.code === 'production_override_reason_required' ? 400 : 409,
+            { error: first.code, message: first.message, missing: readiness.missing });
         }
-        const photoMissing = productionPhotoFiles(store, order).length === 0;
-        const packingPhotoMissing = next === "ready_for_dispatch" && packingPhotoFiles(store, order).length === 0;
-        if (["ops_admin", "super_admin"].includes(user.role)) {
-          const reason = typeof body.reason === "string" ? body.reason.trim() : "";
-          if (!reason) return send(res, 400, {
-            error: "production_override_reason_required",
-            message: "Explain why Operations is correcting this production step.",
-          });
-          audit(store, {
-            actor: user, action: "order.production_override", entityType: "order", entityId: order.id,
-            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing, packingPhotoMissing },
-          });
-        } else if (photoMissing) {
-          return send(res, 409, {
-            error: "production_photo_required",
-            message: "Attach at least one production progress photo before marking this job packed or ready for dispatch. A start-of-production photo counts.",
-          });
-        }
-      }
-      if (next === "ready_for_dispatch" && user.role === "supplier" && !packingPhotoFiles(store, order).length) {
-        return send(res, 409, { error: "packing_photo_required",
-          message: "Add a photo of the finished prints packed and ready before marking Ready for dispatch." });
+        if (isOps(user)) audit(store, {
+          actor: user, action: 'order.production_override', entityType: 'order', entityId: order.id,
+          orderId: order.id, reason: body.reason.trim(), detail: { from: order.state, to: next,
+            photoMissing: productionPhotoFiles(store, order).length === 0,
+            packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0 },
+        });
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
@@ -5942,6 +5986,7 @@ async function handleRequest(req, res) {
       if (next === "ready_for_dispatch" && !order.readyAt) {
         order.readyAt = now();
       }
+      notifyMissingJobDetails(store, order);
       const previousState = order.state;
       const previousFileCheck = JSON.stringify(order.fileCheck);
       order.state = next;
@@ -6475,6 +6520,9 @@ async function handleRequest(req, res) {
 
     return send(res, 404, { error: "not_found", path: pathname });
   } catch (err) {
+    if (res.gridgoTransitionRefusal && Number.isInteger(err?.status) && err.status >= 400 && err.status < 500 && err.code) {
+      return sendDomainError(res, err);
+    }
     database.markRollback();
     if (res.headersSent) {
       res.destroy(err);
