@@ -162,7 +162,7 @@ Issue and 48/24-hour reminders use existing durable inbox/push outbox enqueueing
 
 Adult-confirmed recipients additionally queue plain-text transactional emails using existing `EMAIL_USER`/`EMAIL_PASSWORD` Gmail SMTP configuration. Provider I/O runs outside the issuing transaction. The durable queue retries failures up to eight attempts and never fails issuance; without SMTP configuration, messages remain pending. Delivery may be at least once after a process crash around SMTP acknowledgement. Sent, expired, void or used vouchers are not newly mailed. Under-18/unknown recipients never enter the email queue and have push disabled. Animated/countdown email images are deliberately post-launch.
 
-The future survey reward integration should call exported `issueVoucher(store, campaign, clientId, {id,at,actorId,adultConfirmed})` from `src/vouchers.js` inside the existing domain transaction, then call the normal server `save()` once. It returns `{voucher,issued}` and provides the same idempotency, caps, age handling, ledger and notifications. Do not call SMTP/push directly or introduce another public reward-issuance endpoint.
+The [post-order survey](SURVEY_API.md) reward integration calls exported `issueVoucher(store, campaign, clientId, {id,at,actorId,adultConfirmed})` from `src/vouchers.js` inside the existing domain transaction, then calls the normal server `save()` once. Survey campaigns are internally managed and use `purpose: "survey"`; their private copyable codes resolve only to the owning account's already-issued voucher. It returns `{voucher,issued}` and provides the same idempotency, caps, age handling, ledger and notifications. Do not call SMTP/push directly or introduce another public reward-issuance endpoint.
 
 ## Errors and tests
 
