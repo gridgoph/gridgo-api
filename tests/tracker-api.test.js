@@ -403,7 +403,8 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     assert.equal(statusAudit.length, 4);
     assert.deepEqual(statusAudit[0], {
       actor_id: "user_super", entity_type: "tracker_item", entity_id: "gridgo-api#1",
-      data: { detail: { from: "open", to: "in-review", note: "PR up" }, reason: null },
+      data: { actorName: "Ria Super", app: "api", device: "node", before: "open", after: "in-review",
+        detail: { from: "open", to: "in-review", note: "PR up" }, reason: null },
     });
     assert.deepEqual(statusAudit[1].data.detail, { from: "in-review", to: "live", note: null });
 
@@ -468,7 +469,8 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     const decisionAudit = (await database.query("SELECT actor_id, entity_id, data FROM audit_log WHERE action = 'tracker.decision'")).rows;
     assert.deepEqual(decisionAudit, [{
       actor_id: "user_super", entity_id: "gridgo-api#2",
-      data: { detail: { decisionId: decision.id, from: "needs-decision", to: "open", attachmentCount: 2 }, reason: null },
+      data: { actorName: "Ria Super", app: "api", device: "node", before: "needs-decision", after: "open",
+        detail: { decisionId: decision.id, from: "needs-decision", to: "open", attachmentCount: 2 }, reason: null },
     }]);
     const pinned = (await database.query("SELECT file_id FROM file_references WHERE reference_type = 'tracker_decision' AND reference_id = $1 ORDER BY file_id", [decision.id])).rows;
     assert.deepEqual(pinned.map((pin) => pin.file_id), [...attachmentIds].sort());

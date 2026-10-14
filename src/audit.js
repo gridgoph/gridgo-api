@@ -89,8 +89,8 @@ export function finalizeAuditEntries(store, baseline) {
       const target = TARGETS[entry.entityType];
       entry.orderId = target ? (store[target[0]] || []).find(row => row.id === entry.entityId)?.orderId || null : null;
     }
-    entry.before = safeAuditValue(entry.before !== undefined ? entry.before : entry.detail?.previous ?? entry.detail?.before ?? auditSnapshot(baseline, entry.entityType, entry.entityId));
-    entry.after = safeAuditValue(entry.after !== undefined ? entry.after : entry.detail?.current ?? entry.detail?.after ?? auditSnapshot(store, entry.entityType, entry.entityId));
+    entry.before = safeAuditValue(entry.before !== undefined ? entry.before : entry.detail?.previous ?? entry.detail?.before ?? auditSnapshot(baseline, entry.entityType, entry.entityId) ?? entry.detail?.from ?? null);
+    entry.after = safeAuditValue(entry.after !== undefined ? entry.after : entry.detail?.current ?? entry.detail?.after ?? auditSnapshot(store, entry.entityType, entry.entityId) ?? entry.detail?.to ?? null);
     entry.detail = safeAuditValue(entry.detail);
     entry.reason = safeAuditValue(entry.reason ?? entry.detail?.reason ?? null);
     const file = entry.entityType === 'file' ? (store.files || []).find(row => row.fileId === entry.entityId) : null;
