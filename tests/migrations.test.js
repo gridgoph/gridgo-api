@@ -1221,7 +1221,10 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     ]);
     await runner(migrationOptions(schema, "up", undefined, client));
     const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
-    assert.equal(migrated.version, 15);
+    // Zone pricing, operating hours, and rider tracking each advance the settings handshake.
+    assert.equal(migrated.version, 16);
+    assert.equal(migrated.settings.riderLocationRefreshIntervalSeconds, 20);
+    assert.equal(migrated.settings.riderLocationStaleAfterSeconds, 120);
     assert.equal(migrated.settings.operatingHours.artworkReviewMinutes, 60);
     assert.equal(migrated.settings.operatingHours.priorityDispatchCutoffMinute, 960);
     assert.deepEqual(migrated.settings.operatingHours.schedule.week.map(row => row.weekday), [1, 2, 3, 4, 5, 6]);
