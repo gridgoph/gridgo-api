@@ -181,7 +181,10 @@ selection](ORDER_MATCH_API.md#document-page-selection) for manual DOCX counts.
 Artwork `detected` also reports `colorMode` (`rgb | cmyk | grayscale | mixed`
 or `null`), and WebP/PSD uploads report their pixel size. Resolution and colour
 are warnings judged at the ordered size, never upload or checkout blocks; see
-[ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
+[ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md). Artwork `detected.colors`
+lists the colours the file uses (PDF spot and process colours, PNG dominant
+pixel colours, otherwise `status: "unknown"`); see
+[EXACT_COLOURS_API.md](EXACT_COLOURS_API.md#colours-read-from-the-file).
 
 Client file pickers must offer `.docx` and its MIME above (or use the governed
 registry's uploadable types); clients must permit entering `measurement.pages`

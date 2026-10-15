@@ -9,6 +9,7 @@ import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
 import { assertCheckoutPrintLayout, listingPrintLayouts, parseCartPrintLayout, printLayoutCheck } from "./print-layout.js";
+import { artworkColorsFor, colorTargetsFor, colorTargetsSnapshot, parseColorTargets } from "./color-targets.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
 import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
@@ -593,6 +594,9 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       printLayout: line.printLayout ?? null,
       printLayoutCheck: item ? printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout ?? null }) : null,
       artworkGuidance: item ? evaluateLineArtwork(store, item, line, artworkFileIdsFor(line)) : null,
+      // The client's exact colours, and what each uploaded file uses beside them.
+      colorTargets: colorTargetsFor(line),
+      artworkColors: artworkColorsFor(store, artworkFileIdsFor(line)),
       specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
@@ -950,6 +954,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
           check: printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout }),
         };
       }
+      // Exact colours are part of the agreed spec too.
+      const colorTargets = colorTargetsSnapshot(line);
+      if (colorTargets) snapshot.lineItem.colorTargets = colorTargets;
       snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       // Warnings never block; accepted or not, the figures travel with the order.
@@ -1663,6 +1670,10 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     syncDocumentPages(store, item, line, body);
     // Optional here so a cart can be filled in steps; checkout requires it.
     if (Object.hasOwn(body, "printLayout")) line.printLayout = parseCartPrintLayout(item, body.printLayout, fail);
+    if (Object.hasOwn(body, "colorTargets")) {
+      const targets = parseColorTargets(body.colorTargets);
+      if (targets.length) line.colorTargets = targets;
+    }
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
@@ -1715,6 +1726,11 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
     if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
+    // Replaced as a whole; [] or null clears them.
+    if (Object.hasOwn(body, "colorTargets")) {
+      const targets = parseColorTargets(body.colorTargets);
+      line.colorTargets = targets.length ? targets : null;
+    }
     writeArtworkAttachments(line, body, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
     if (["artworkFileId", "artworkAttachments"].some(key => Object.hasOwn(body, key))) {
       for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
