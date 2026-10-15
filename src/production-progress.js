@@ -8,7 +8,7 @@ export function productionPhotoFiles(store, order) {
     file.state === "ready" && file.ownerId === order.supplierId
     && IMAGE_TYPES.has(file.detectedContentType) && file.objectKey
     && (file.references || []).some((ref) => ref.type === "order" && ref.id === order.id
-      && (file.purpose === "production_photo"
+      && (["production_photo", "finished_product_photo"].includes(file.purpose)
         || (file.purpose === "fulfilment_proof" && SHOP_PROOF_CODES.has(ref.milestoneCode)))),
   );
 }

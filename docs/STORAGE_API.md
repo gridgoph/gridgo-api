@@ -1,5 +1,11 @@
 # GRIDGO Storage API contract
 
+[Shop handover](SHOP_HANDOVER_API.md) adds `finished_product_photo` (supplier,
+JPEG/PNG/WebP, 200 MiB, production only) and permits the assigned rider to upload
+and attach `packing_photo` after a version-2 unpacked inspection. Both follow
+private production-photo retention. Legacy packing-photo permissions remain as
+below; rider packing/signature references bind to the current inspection.
+
 This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, the platform payment QR, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision

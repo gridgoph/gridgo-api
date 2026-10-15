@@ -1,3 +1,4 @@
+import { riderPackingFlow, handoverRequirements, forcedStepError } from './shop-handover.js';
 import { productionPhotoFiles } from './production-progress.js';
 import { packingPhotoFiles } from './packing-progress.js';
 import { assertRefundWorkAllowed } from './refund-policy.js';
@@ -6,7 +7,7 @@ export const PACKAGING_STATES = ['supplier_self_qc', 'ready_for_dispatch'];
 const requirement = (code, message) => ({ code, message });
 
 /** Shared preflight and write-time evidence policy. Receipt scans remain optional. */
-export function productionTransitionReadiness(store, order, next, { operations = false, reason = '' } = {}) {
+export function productionTransitionReadiness(store, order, next, { operations = false, reason = '', reasonCode } = {}) {
   const missing = [];
   const fromAllowed = order.state === 'production'
     || (order.state === 'supplier_self_qc' && next === 'ready_for_dispatch');
@@ -22,8 +23,10 @@ export function productionTransitionReadiness(store, order, next, { operations =
       'This order cannot be packaged for pickup while a claim holds payouts. Operations must clear the claim first.'));
   }
   if (operations) {
-    if (typeof reason !== 'string' || !reason.trim()) missing.push(requirement('production_override_reason_required',
-      'Explain why Operations is correcting this production step.'));
+    const code = forcedStepError({ reason, reasonCode });
+    if (code) missing.push(requirement(code, 'Explain why GRIDGO is forcing this step: choose a reason code and add a note of at most 2000 characters.'));
+  } else if (riderPackingFlow(order)) {
+    missing.push(...handoverRequirements(store, order, next));
   } else {
     if (!productionPhotoFiles(store, order).length) missing.push(requirement('production_photo_required',
       'Attach at least one production progress photo before marking this job packed or ready for dispatch. A start-of-production photo counts.'));

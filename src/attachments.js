@@ -1,3 +1,4 @@
+import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
 import { displayFilename } from './display-filename.js';
 import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
@@ -23,6 +24,7 @@ const KINDS = new Set([
   "artwork",
   "fulfilment_proof",
   "production_photo",
+  "finished_product_photo",
   "packing_photo",
   "delivery_photo",
   "handoff_signature",
@@ -55,7 +57,8 @@ export const PURPOSE_POLICIES = Object.freeze({
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   supplier_invoice: { roles: ["supplier"], maxBytes: 15 * 1024 * 1024, contentTypes: [...CONTENT_TYPES] },
-  packing_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
+  packing_photo: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
+  finished_product_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   production_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
@@ -1006,7 +1009,18 @@ export function authorizeFileAttach(user, file, target, store = null) {
     if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || supplierId !== user.id) forbidden();
     return;
   }
+  if (file.purpose === 'finished_product_photo') {
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
+    if (!riderPackingFlow(record) || record.state !== 'production') fail(409, 'finished_product_photo_upload_not_allowed', 'Attach finished, unpacked product photos during production, before submitting them for review.');
+    return;
+  }
   if (file.purpose === "packing_photo") {
+    if (riderPackingFlow(record)) {
+      if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'rider') || record.riderId !== user.id) forbidden();
+      if (record.state !== 'rider_assigned' || !currentInspection(record)) fail(409, 'unpacked_inspection_required', 'Complete the unpacked item checks before photographing the packed job.');
+      if (claimBlocksHandover(store || {}, record) || store?.escalations?.some(row => row.orderId === record.id && row.status === 'open')) fail(409, 'pickup_held', 'Resolve all holds and pickup escalations first.');
+      return;
+    }
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
       fail(409, "packing_photo_upload_not_allowed", "Add the packing photo before marking the package ready for dispatch.");
@@ -1046,6 +1060,7 @@ export function authorizeFileAttach(user, file, target, store = null) {
   }
   if (file.purpose === "handoff_signature") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
+    if (riderPackingFlow(record) && !inspectedPackingPhotos(store, record).length) fail(409, 'packing_photo_required', 'Attach the rider packing photo after inspection before signing.');
     if (!HANDOFF_SIGNATURE_STATES.has(record.state)) {
       fail(
         409,
@@ -1154,6 +1169,7 @@ export function attachFileReference(file, target) {
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
     production_photo: "productionPhotoFileIds",
+    finished_product_photo: "finishedProductPhotoFileIds",
     packing_photo: "packingPhotoFileIds",
     delivery_photo: "deliveryPhotoFileIds",
     handoff_signature: "handoffSignatureFileIds",
@@ -1182,6 +1198,7 @@ export function attachFileReference(file, target) {
       type: target.type,
       id: target.record.id,
       field,
+      ...((['packing_photo', 'handoff_signature'].includes(file.purpose) && riderPackingFlow(target.record)) ? { inspectionId: target.record.pickupChecklist.inspectionId } : {}),
       ...(target.milestoneCode ? { milestoneCode: target.milestoneCode } : {}),
       ...(target.documentType ? { documentType: target.documentType } : {}),
     });
@@ -1304,7 +1321,9 @@ export function authorizeFileRead(user, store, file) {
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === "client_verification_document") forbidden();
-  if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)) forbidden();
+  if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)
+    && !(user.role === 'rider' && (file.references || []).some(ref => ref.type === 'order'
+      && store.orders.some(order => order.id === ref.id && riderPackingFlow(order) && order.riderId === user.id)))) forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"

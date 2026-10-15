@@ -1,3 +1,4 @@
+import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { displayFilename } from './display-filename.js';
 import { deliveryMilestones } from './rider-tracking.js';
@@ -12,7 +13,7 @@ import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
-import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
+import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier } from './production-penalties.js';
 import { packingProgressFor } from "./packing-progress.js";
 import { productionProgressFor, publicProgressTimeline, supplierProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
@@ -689,6 +690,7 @@ export function createPayoutMilestones(money, { version = CURRENT_PAYOUT_PLAN_VE
  */
 export function snapshotPayoutPlan(order, money = order) {
   order.payoutPlanVersion = CURRENT_PAYOUT_PLAN_VERSION;
+  order.shopHandoverVersion = 2;
   order.payoutMilestones = createPayoutMilestones(money, { version: CURRENT_PAYOUT_PLAN_VERSION });
   return order.payoutMilestones;
 }
@@ -836,7 +838,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
   if (!order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
-      && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock)) {
+      && productionLatenessTier(order, at)) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
   }
 
@@ -1171,8 +1173,24 @@ export function publicOrderFor(order, user, store = null) {
   // Same related parties as artwork; signing rechecks file authorization.
   delete publicRecord.packingProgress;
   delete publicRecord.packingPhotoFileIds;
-  if (ops || owningClient || assignedSupplier) {
+  if (ops || owningClient || assignedSupplier || (riderPackingFlow(order) && rider && order.riderId === user.id)) {
     publicRecord.packingProgress = packingProgressFor(store, order);
+  }
+  delete publicRecord.finishedProductPhotoFileIds;
+  delete publicRecord.shopHandover;
+  delete publicRecord.forcedSteps;
+  const relatedRider = rider && order.riderId === user.id;
+  if (ops || assignedSupplier || relatedRider) {
+    publicRecord.shopHandover = structuredClone(order.shopHandover || {});
+    publicRecord.forcedSteps = structuredClone(order.forcedSteps || []);
+    publicRecord.handoverFlow = riderPackingFlow(order) ? 'rider_packs' : 'legacy';
+    if (riderPackingFlow(order)) publicRecord.pickupReminder = 'Ready for rider pickup. Prepare packing materials. Do not pack yet; unpack any already-packed items for the rider check.';
+  }
+  publicRecord.forcedByGridgo = Boolean(order.forcedSteps?.length);
+  if (ops) {
+    publicRecord.forcedStepReasonCodes = [...FORCED_STEP_REASONS];
+    publicRecord.shopArrivedPackedCount = (store?.orders || []).reduce((count, candidate) => count
+      + (candidate.shopHandover?.arrivedPacked || []).filter(event => event.supplierId === order.supplierId).length, 0);
   }
   delete publicRecord.transitionReadiness;
   delete publicRecord.jobDetails;
@@ -1200,6 +1218,10 @@ export function publicOrderFor(order, user, store = null) {
   }
   if (!ops && !assignedSupplier) {
     publicRecord.timeline = publicProgressTimeline(order.timeline);
+    if (riderPackingFlow(order)) for (const entry of publicRecord.timeline) {
+      if (entry.state === 'supplier_self_qc') entry.note = 'Checking your finished order';
+      if (entry.state === 'ready_for_dispatch') entry.note = 'Ready for rider pickup';
+    }
     if (publicRecord.state === "payout_released") publicRecord.state = "completed";
     for (const field of ["payoutMilestones", "payoutPlanVersion", "payoutHold", "fulfilmentProofFileIds", "productionPhotoFileIds"]) {
       delete publicRecord[field];

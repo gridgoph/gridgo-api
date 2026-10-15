@@ -1,3 +1,4 @@
+import { riderPackingFlow } from './shop-handover.js';
 import { slaElapsed } from './operating-hours.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { formatMinorPhp } from './payout-copy.js';
@@ -27,6 +28,43 @@ export function latenessTier(deadlineAt, finishedAt, noCommunication = false, cl
   const late = !deadlineAt || !finishedAt ? NaN : slaElapsed(clock, deadlineAt, finishedAt);
   if (!Number.isFinite(late) || late <= 0) return null;
   return noCommunication || late > 24 * 3600000 ? 'severe' : late > 6 * 3600000 ? 'moderate' : 'minor';
+}
+
+/** The QA wait is staff time, not shop production time. Keep readyBy/readyAt
+ * snapshots untouched; all lateness consumers use this same effective clock.
+ * Rejected attempts earn only their actual review interval, in the order's
+ * snapshotted operating calendar. A new supplier never inherits that credit.
+ */
+export function productionTiming(order, at) {
+  let finishedAt = order.readyAt || null;
+  let endpoint = finishedAt || at;
+  let pendingReview = false;
+  let reviewWaitMs = 0;
+  if (riderPackingFlow(order)) {
+    const handover = order.shopHandover;
+    const submitted = handover?.finished?.supplierId === order.supplierId ? handover.finished : null;
+    if (submitted && (!handover.review || handover.review.decision === 'approved')) {
+      endpoint = submitted.at;
+      pendingReview = !handover.review && !order.readyAt && order.state === 'supplier_self_qc';
+      if (handover.review?.decision === 'approved' || order.readyAt) finishedAt = submitted.at;
+    }
+    for (const attempt of (endpoint ? handover?.attempts || [] : [])) {
+      if (attempt.finished?.supplierId !== order.supplierId || attempt.review?.decision !== 'rejected') continue;
+      const end = new Date(Math.min(Date.parse(attempt.review.at), Date.parse(endpoint))).toISOString();
+      if (Date.parse(end) > Date.parse(attempt.finished.at)) {
+        reviewWaitMs += Math.max(0, slaElapsed(order.operatingClock, attempt.finished.at, end));
+      }
+    }
+  }
+  const elapsedMs = productionDeadline(order) && endpoint
+    ? slaElapsed(order.operatingClock, productionDeadline(order), endpoint) - reviewWaitMs : NaN;
+  return { finishedAt, pendingReview, elapsedMs, reviewWaitMs };
+}
+
+export function productionLatenessTier(order, at, noCommunication = Boolean(order.productionNoCommunication)) {
+  const { elapsedMs } = productionTiming(order, at);
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+  return noCommunication || elapsedMs > 24 * 3600000 ? 'severe' : elapsedMs > 6 * 3600000 ? 'moderate' : 'minor';
 }
 
 export function cappedPenaltyMinor(remainingMinor, rateBps) {
@@ -96,7 +134,8 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       continue;
     }
     if (!order.readyAt && !WATCHED.has(order.state)) continue;
-    const tier = latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock);
+    const timing = productionTiming(order, at);
+    const tier = productionLatenessTier(order, at);
     if (!tier) continue;
     if (!lapse) {
       const policy = productionPenaltySettings(store.settings);
@@ -118,7 +157,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       continue; // A warning must commit before this tier can deduct.
     }
     if (order.productionTimeCorrection?.penaltyExempt || !lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
-    if (!order.readyAt && lapse.tier !== 'severe') continue;
+    if (timing.pendingReview || (!timing.finishedAt && lapse.tier !== 'severe')) continue;
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
     if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
       && ['open', 'payout_held'].includes(claim.status))) continue;

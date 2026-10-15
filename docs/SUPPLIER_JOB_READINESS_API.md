@@ -1,5 +1,9 @@
 # Supplier job readiness and readable details
 
+Version-2 handovers supersede the legacy photo gates below: see
+[Shop handover](SHOP_HANDOVER_API.md) for finished-product QA, rider packing and
+forced-step reasons. Receipt scans remain optional in both flows.
+
 Report 6C695C15. Supplier app and supplier web must adopt this additive contract.
 No production order was inspected or changed during backend implementation.
 
