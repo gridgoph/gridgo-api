@@ -14,6 +14,7 @@ const dayValid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.tes
   && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 export function validateOperatingHours(value) {
   if (!value || value.timeZone !== 'Asia/Manila' || value.schedule?.utcOffsetMinutes !== 480
+    || Object.hasOwn(value.schedule, 'extension')
     || !Number.isSafeInteger(value.artworkReviewMinutes) || value.artworkReviewMinutes < 1 || value.artworkReviewMinutes > 540
     || !Number.isSafeInteger(value.priorityDispatchCutoffMinute) || value.priorityDispatchCutoffMinute < 0 || value.priorityDispatchCutoffMinute > 1439
     || !Array.isArray(value.schedule?.week) || value.schedule.week.length > 7

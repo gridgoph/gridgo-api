@@ -1,3 +1,4 @@
+import { shopSlaClock } from './shop-hours.js';
 import { riderPackingFlow } from './shop-handover.js';
 import { slaElapsed } from './operating-hours.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -52,12 +53,12 @@ export function productionTiming(order, at) {
       if (attempt.finished?.supplierId !== order.supplierId || attempt.review?.decision !== 'rejected') continue;
       const end = new Date(Math.min(Date.parse(attempt.review.at), Date.parse(endpoint))).toISOString();
       if (Date.parse(end) > Date.parse(attempt.finished.at)) {
-        reviewWaitMs += Math.max(0, slaElapsed(order.operatingClock, attempt.finished.at, end));
+        reviewWaitMs += Math.max(0, slaElapsed(shopSlaClock(order), attempt.finished.at, end));
       }
     }
   }
   const elapsedMs = productionDeadline(order) && endpoint
-    ? slaElapsed(order.operatingClock, productionDeadline(order), endpoint) - reviewWaitMs : NaN;
+    ? slaElapsed(shopSlaClock(order), productionDeadline(order), endpoint) - reviewWaitMs : NaN;
   return { finishedAt, pendingReview, elapsedMs, reviewWaitMs };
 }
 

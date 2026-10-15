@@ -371,6 +371,11 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   // The order names its shop and carries both dates through the database.
   assert.equal(placed.supplierId, "supplier_a");
   assert.ok(placed.readyBy && placed.promiseBy);
+  assert.equal(placed.shopClockVersion, 1);
+  assert.equal(placed.shopClock.supplierId, "supplier_a");
+  assert.deepEqual(placed.shopClock.schedule, persisted.supplierProfiles.find(row => row.userId === "supplier_a").schedule
+    || { utcOffsetMinutes: 480, week: [1, 2, 3, 4, 5, 6].map(weekday => ({ weekday, opensMinute: 480, closesMinute: 1080 })), closures: [] });
+  assert.equal(checkout.body.order.shopClock, undefined);
   assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   const inbox = persisted.notifications.map((row) => `${row.userId}:${row.type}`).sort();
   assert.deepEqual(inbox, [

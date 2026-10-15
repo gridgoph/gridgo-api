@@ -1,3 +1,4 @@
+import { routeShopHours } from './shop-hours.js';
 import { productionDuration, productionProjection, shopProductionDayMinutes } from "./production-days.js";
 import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { routeCatalogReview, catalogReviewNotice } from "./catalog-review-routes.js";
@@ -637,6 +638,8 @@ function parseFormatFinderQuery(url) {
 }
 
 export async function routeSupplierCatalog(args) {
+  const hours = await routeShopHours(args);
+  if (hours) return hours;
   const review = await routeCatalogReview(args);
   if (review) return review;
   const { req, url, store } = args;
