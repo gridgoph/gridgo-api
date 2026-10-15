@@ -235,13 +235,15 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, turnarou
   return { projection, queue };
 }
 
-function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
+function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
   store = approvedCatalogView(store);
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
+  const activeSubcategories = new Set((store.taxonomy?.subcategories || []).filter(row => row.active !== false).map(row => row.code));
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {
-    if (item.subcategoryCode !== subcategoryCode) continue;
+    if (subcategoryCode ? item.subcategoryCode !== subcategoryCode : !activeSubcategories.has(item.subcategoryCode)) continue;
+    if (onlySupplierId && item.supplierId !== onlySupplierId) continue;
     if (excluded.has(item.supplierId) || !shops.has(item.supplierId)) continue;
     const held = itemsBySupplier.get(item.supplierId);
     if (held) held.push(item);
@@ -371,6 +373,16 @@ function otherListing(row) {
     review: row.projection.review ?? null,
     readyBy: row.projection.promiseBy, placeInLine: row.queue.jobsAhead + 1,
   };
+}
+
+/** Read-only add-more catalogue: the same eligibility/promise and anonymous card as matching. */
+export function cartGroupListings(store, { supplierId, deadline, cartLines, now }) {
+  const { rows, missedDeadline } = candidateRows(store, {
+    supplierId, deadline, now, dropoff: null, widthRequest: { cartLines },
+  });
+  const listings = rows.flatMap(row => row.choices.map(otherListing));
+  return { listings, emptyReason: listings.length ? null
+    : missedDeadline.length ? "deadline_not_met" : "no_orderable_listings" };
 }
 
 function reasonsFor(row, ranking, distanceZone) {

@@ -1245,6 +1245,52 @@ test('add-more matching filters capacity already consumed by the same draft grou
     subcategoryCode: 'flyers', units: 1 }), (error) => error.code === 'deadline_not_met' || error.code === 'match_not_found');
 });
 
+test('cart group listings count combined capacity and each product minimum quantity', async () => {
+  const { store, client } = fixture();
+  store.settings.promiseAllowanceMinutes = 0;
+  Object.assign(store.supplierServices[0], { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
+  store.catalogItems.find(row => row.id === 'item_a2').minimumOrderQuantity = 10;
+  const call = caller(store, client);
+  const deadline = '2026-08-24T10:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { deadline })).body.cart;
+  const added = await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', quantity: 9, optionIds: [] });
+  const groupId = added.body.cart.groups[0].id;
+  const read = () => call('GET', `/me/carts/${cart.id}/groups/${groupId}/listings`);
+  assert.deepEqual((await read()).body.listings.map(row => row.id), ['item_a']);
+  store.cartLines[0].quantity = 10;
+  const full = await read();
+  assert.deepEqual(full.body.listings, []);
+  assert.equal(full.body.emptyReason, 'deadline_not_met');
+  store.carts[0].state = 'checked_out';
+  await assert.rejects(read(), { code: 'cart_checked_out' });
+});
+
+test('cart group listings use the selected group date and count earlier draft groups at that shop', async () => {
+  const { store, client } = fixture();
+  store.settings.promiseAllowanceMinutes = 0;
+  delete store.settings.operatingHours;
+  Object.assign(store.supplierServices[0], { capacityDaily: 100, turnaroundHours: 8, standardTurnaroundHours: 8 });
+  const call = caller(store, client);
+  const early = '2026-08-24T10:00:00.000Z', later = '2026-08-25T10:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { deadline: early })).body.cart;
+  for (const deadline of [early, later]) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline, quantity: 1, optionIds: [] });
+  const groupId = store.cartLines[1].id;
+  const read = () => call('GET', `/me/carts/${cart.id}/groups/${groupId}/listings`);
+  const available = await read();
+  assert.equal(available.body.deadline, later);
+  assert.equal(available.body.listings.length, 2);
+  // Eight earlier hours + eight for this group need two working days.
+  store.cartLines[1].deadline = '2026-08-25T04:00:00.000Z';
+  const tight = await read();
+  assert.deepEqual(tight.body.listings, []);
+  assert.equal(tight.body.emptyReason, 'deadline_not_met');
+  // A slow later group must not contaminate the earlier group's promise.
+  store.cartLines[1].catalogItemId = 'item_a2';
+  Object.assign(store.catalogItems.find(row => row.id === 'item_a2'), { turnaroundMode: 'override', turnaroundHours: 100 });
+  const earlier = await call('GET', `/me/carts/${cart.id}/groups/${store.cartLines[0].id}/listings`);
+  assert.deepEqual(earlier.body.listings.map(row => row.id), ['item_a']);
+});
+
 test("explicit delivery needs a destination even without distance-first ranking; legacy matches remain accepted", async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
