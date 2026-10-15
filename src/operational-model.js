@@ -1023,6 +1023,10 @@ function productionItemsFor(store, order, user) {
         artworkLinks: structuredClone(line.artworkLinks || []),
         artworkAttachments: artworkAttachmentsFor(line),
         artworkPreviewFileId: artworkPreviewFileId(store, line),
+        // The client's layout and the fit they were shown. Null on products
+        // without a layout choice and on older orders.
+        printLayout: line.printLayout?.code ?? null,
+        printLayoutCheck: structuredClone(line.printLayout?.check ?? null),
         // What the uploaded files measured against the product type, and which
         // warnings the client accepted at checkout. Null on older orders.
         artworkGuidance: publicArtworkGuidance(line.artworkGuidance, user),

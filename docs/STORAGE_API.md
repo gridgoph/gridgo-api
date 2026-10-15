@@ -172,7 +172,9 @@ This is a bounded package check, not a full Word validator or print preview.
 The automatic artwork verdict accepts a structurally valid DOCX even without
 page metadata. `detected` uses `kind: "document"`, `pageCount` from a positive
 safe-integer `docProps/app.xml` `<Pages>` value, or `null` when absent/unusable.
-Dimensions stay unknown. Word's cached page count is advisory and can depend on
+Dimensions come from the first section's declared `<w:pgSz>` page size, and
+`pageEnvelope` covers every section ([print layout](PRINT_LAYOUT_API.md#file-page-size));
+both stay `null` when no section declares one. Word's cached page count is advisory and can depend on
 fonts/layout; Operations still checks print readiness. See [document page
 selection](ORDER_MATCH_API.md#document-page-selection) for manual DOCX counts.
 

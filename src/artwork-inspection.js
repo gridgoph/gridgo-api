@@ -103,11 +103,14 @@ function inspectPdf(bytes) {
 
   let mediaBox = null;
   let pageCount = null;
+  const leafBoxes = [];
+  const inheritedBoxes = [];
   const spaces = new Set();
   for (const text of texts) {
     mediaBox = mediaBox || firstMediaBox(text);
     const counted = pageTreeCount(text);
     if (counted != null && (pageCount == null || counted > pageCount)) pageCount = counted;
+    collectPageBoxes(text, leafBoxes, inheritedBoxes);
     for (const space of declaredColorSpaces(text)) spaces.add(space);
   }
 
@@ -127,6 +130,7 @@ function inspectPdf(bytes) {
     kind: "pdf",
     pageCount,
     ...dimensions,
+    pageBoxes: pageBoxesOf(leafBoxes, inheritedBoxes, pageCount, mediaBox),
     // A PDF's page box is a physical size already, so there is no density to
     // report and nothing downstream should ask for one.
     dpi: null,
@@ -178,6 +182,98 @@ function firstMediaBox(text) {
   const height = Math.abs(y1 - y0);
   if (!width || !height || !Number.isFinite(width) || !Number.isFinite(height)) return null;
   return { width, height };
+}
+
+const MEDIA_BOX = /\/MediaBox\s*\[\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\]/g;
+
+/** Enough page boxes for a long plan set; a file past this keeps the boxes already read. */
+const MAX_PAGE_BOXES = 2000;
+
+/**
+ * Every page box in this text, split by who owns it.
+ *
+ * A leaf page's own `/MediaBox` is its size. A box on a `/Type /Pages` node is
+ * inherited by the pages under it that state none. Keeping them apart is what
+ * stops a root box that every page overrides from being counted as a page.
+ *
+ * One pass over the `<<`/`>>` nesting finds each box's own dictionary, so a
+ * file with thousands of pages costs one scan rather than one per page.
+ */
+function collectPageBoxes(text, leaves, inherited) {
+  const boxes = [];
+  MEDIA_BOX.lastIndex = 0;
+  let match;
+  while (leaves.length + inherited.length + boxes.length < MAX_PAGE_BOXES && (match = MEDIA_BOX.exec(text)) !== null) {
+    const [, x0, y0, x1, y1] = match.map(Number);
+    const width = Math.abs(x1 - x0);
+    const height = Math.abs(y1 - y0);
+    if (width && height && Number.isFinite(width) && Number.isFinite(height)) boxes.push({ at: match.index, width, height });
+  }
+  if (!boxes.length) return;
+
+  // Where each page-tree node says so. Marked on its innermost dictionary in
+  // the same pass, so no dictionary body is ever scanned twice.
+  const pagesTokens = [];
+  const PAGES_TYPE = /\/Type\s*\/Pages\b/g;
+  let token;
+  while (pagesTokens.length < MAX_PAGE_BOXES && (token = PAGES_TYPE.exec(text)) !== null) pagesTokens.push(token.index);
+
+  const open = [];
+  const owned = new Map();
+  const pagesNodes = new Set();
+  let pending = 0;
+  const classify = (start) => {
+    const own = owned.get(start);
+    if (!own) return;
+    owned.delete(start);
+    pending -= 1;
+    const pagesNode = pagesNodes.has(start);
+    for (const box of own) (pagesNode ? inherited : leaves).push({ width: box.width, height: box.height });
+  };
+  const delimiters = /<<|>>/g;
+  let next = 0;
+  let nextToken = 0;
+  let delimiter;
+  // Keep reading until every dictionary that owns a box has closed: a page
+  // object written before its page tree must not be judged by the tree.
+  while ((next < boxes.length || pending > 0) && (delimiter = delimiters.exec(text)) !== null) {
+    const owner = open.length ? open[open.length - 1] : -1;
+    while (nextToken < pagesTokens.length && pagesTokens[nextToken] < delimiter.index) {
+      if (owner >= 0) pagesNodes.add(owner);
+      nextToken += 1;
+    }
+    while (next < boxes.length && boxes[next].at < delimiter.index) {
+      if (!owned.has(owner)) {
+        owned.set(owner, []);
+        if (owner >= 0) pending += 1;
+      }
+      owned.get(owner).push(boxes[next]);
+      next += 1;
+    }
+    if (delimiter[0] === "<<") {
+      if (open.length < 4096) open.push(delimiter.index);
+    } else if (open.length) {
+      classify(open.pop());
+    }
+  }
+  // Boxes past the last delimiter, or in dictionaries the file never closes,
+  // still describe pages; with no dictionary to read they count as leaves.
+  for (; next < boxes.length; next += 1) leaves.push({ width: boxes[next].width, height: boxes[next].height });
+  for (const own of owned.values()) for (const box of own) leaves.push({ width: box.width, height: box.height });
+}
+
+/**
+ * The page boxes that describe the pages, in points.
+ *
+ * Inherited boxes count only when some page has no box of its own -- fewer
+ * leaf boxes than the page tree's count. A file whose tree yielded no boxes at
+ * all keeps its first box, which is what the single-size read always used.
+ */
+function pageBoxesOf(leaves, inherited, pageCount, first) {
+  const boxes = [...leaves];
+  if (!leaves.length || (pageCount != null && leaves.length < pageCount)) boxes.push(...inherited);
+  if (!boxes.length && first) boxes.push(first);
+  return boxes;
 }
 
 /**
@@ -565,7 +661,20 @@ export function inspectArtwork(bytes, contentType) {
   let read = null;
   if (contentType === DOCX_CONTENT_TYPE) {
     const docx = inspectDocx(bytes);
-    if (docx) read = { kind: "document", pageCount: docx.pageCount };
+    if (docx) {
+      // Word states each section's page in twips, a twentieth of a point.
+      const sections = (docx.pageSizes || []).map(size => ({
+        widthMilli: round(size.widthTwips / 20 * MM_PER_POINT * MILLI),
+        heightMilli: round(size.heightTwips / 20 * MM_PER_POINT * MILLI),
+      }));
+      read = {
+        kind: "document",
+        pageCount: docx.pageCount,
+        widthMilli: sections[0]?.widthMilli ?? null,
+        heightMilli: sections[0]?.heightMilli ?? null,
+        sections,
+      };
+    }
   } else if (contentType === "application/pdf") {
     read = inspectPdf(bytes);
   } else if (contentType === "image/png") {
@@ -582,6 +691,12 @@ export function inspectArtwork(bytes, contentType) {
 
   const { widthMilli, heightMilli } = read;
   const known = Number.isFinite(widthMilli) && Number.isFinite(heightMilli) && widthMilli > 0 && heightMilli > 0;
+  const pages = !known ? []
+    : read.pageBoxes?.length ? read.pageBoxes.map(box => ({
+      widthMilli: round(box.width * MM_PER_POINT * MILLI),
+      heightMilli: round(box.height * MM_PER_POINT * MILLI),
+    }))
+      : read.sections?.length ? read.sections : [{ widthMilli, heightMilli }];
   return {
     kind: read.kind,
     pageCount: read.pageCount ?? null,
@@ -595,5 +710,23 @@ export function inspectArtwork(bytes, contentType) {
     heightMilli: known ? heightMilli : null,
     pageSize: known ? namePageSize(widthMilli, heightMilli) : null,
     orientation: known ? orientationOf(widthMilli, heightMilli) : null,
+    // The page sizes above are the first page's. This covers every page, so a
+    // plan set with one oversized drawing is not judged by its cover.
+    pageEnvelope: known ? pageEnvelope(pages) : null,
+  };
+}
+
+/** The largest short side and long side across pages, either way round, and whether sizes differ. */
+function pageEnvelope(pages) {
+  const sized = pages.filter(page => page.widthMilli > 0 && page.heightMilli > 0);
+  const distinct = new Set(sized.map(page => {
+    const short = Math.round(Math.min(page.widthMilli, page.heightMilli) / MILLI);
+    const long = Math.round(Math.max(page.widthMilli, page.heightMilli) / MILLI);
+    return `${short}x${long}`;
+  }));
+  return {
+    shortSideMilli: Math.max(...sized.map(page => Math.min(page.widthMilli, page.heightMilli))),
+    longSideMilli: Math.max(...sized.map(page => Math.max(page.widthMilli, page.heightMilli))),
+    mixed: distinct.size > 1,
   };
 }

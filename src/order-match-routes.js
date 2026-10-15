@@ -8,6 +8,7 @@ import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './opera
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
+import { assertCheckoutPrintLayout, listingPrintLayouts, parseCartPrintLayout, printLayoutCheck } from "./print-layout.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
 import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
@@ -390,6 +391,7 @@ function publicCartListingStub(store, item, optionIds) {
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
     clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
+    printLayouts: listingPrintLayouts(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
 }
@@ -587,6 +589,9 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       artworkLinks: structuredClone(line.artworkLinks || []),
       artworkAttachments: artworkAttachmentsFor(line),
       artworkPreviewFileId: artworkPreviewFileId(store, line),
+      // Null on products whose shop marked no layout; those ask nothing.
+      printLayout: line.printLayout ?? null,
+      printLayoutCheck: item ? printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout ?? null }) : null,
       artworkGuidance: item ? evaluateLineArtwork(store, item, line, artworkFileIdsFor(line)) : null,
       specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
@@ -890,6 +895,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, {}, { required: true });
+    assertCheckoutPrintLayout(item, line, fail);
     assertArtworkAttachmentLimit(artworkAttachmentsFor(line));
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (!line.artworkFileId && !(line.artworkLinks || []).length) {
@@ -937,6 +943,13 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
       if (line.artworkAttachments) snapshot.lineItem.artworkAttachments = artworkAttachmentsFor(line);
+      // The layout is part of the agreed spec, with the fit the client saw.
+      if (line.printLayout) {
+        snapshot.lineItem.printLayout = {
+          version: 1, code: line.printLayout,
+          check: printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout }),
+        };
+      }
       snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       // Warnings never block; accepted or not, the figures travel with the order.
@@ -1088,6 +1101,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       artworkPreviewFileId: artworkPreviewFileId(store, lineItem),
       specialInstructions: lineItem.specialInstructions || "",
       documentPages: structuredClone(lineItem.documentPages ?? null),
+      printLayout: lineItem.printLayout?.code ?? null,
       mockupFileId: cartLine.mockupFileId ?? null,
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
     })),
@@ -1211,7 +1225,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes"].includes(pathname)) return true;
+  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
@@ -1508,6 +1522,21 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
 
+  if (pathname === "/me/print-layout-check" && req.method === "GET") {
+    // The warnings and preview figures for a product before it is in a cart:
+    // the same check a cart line carries, for the options and files on screen.
+    requireClient(user);
+    const item = (store.catalogItems || []).find((row) => row.id === text(url.searchParams.get("catalogItemId"), "catalogItemId", 120));
+    if (!item || !publicCatalogItem(store, item)) fail(409, "catalog_item_stale", "That listing changed or is no longer public.");
+    const list = (name) => url.searchParams.getAll(name).flatMap((value) => String(value).split(",")).map((value) => value.trim()).filter(Boolean);
+    const optionIds = list("optionIds");
+    const fileIds = [...new Set(list("fileIds"))];
+    if (fileIds.length > 10) fail(400, "invalid_request", "Check at most ten files at once.", { field: "fileIds" });
+    for (const fileId of fileIds) fileFor(store, user, fileId, "artwork", "fileIds");
+    const layout = parseCartPrintLayout(item, url.searchParams.get("layout") || null, fail);
+    return { status: 200, mutated: false, body: { check: printLayoutCheck(store, item, { optionIds, fileIds, layout }) } };
+  }
+
   const groupListingsMatch = /^\/me\/carts\/([^/]+)\/groups\/([^/]+)\/listings$/.exec(pathname);
   if (groupListingsMatch && req.method === "GET") {
     const cart = ownCart(store, user, decodeURIComponent(groupListingsMatch[1]), { draft: true });
@@ -1632,6 +1661,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, body);
+    // Optional here so a cart can be filled in steps; checkout requires it.
+    if (Object.hasOwn(body, "printLayout")) line.printLayout = parseCartPrintLayout(item, body.printLayout, fail);
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
@@ -1690,6 +1721,10 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       if (patchedItem) assertListingArtwork(store, patchedItem, line);
     }
     if (patchedItem) syncDocumentPages(store, patchedItem, line, body, { previousFileId: storedLine.artworkFileId });
+    if (Object.hasOwn(body, "printLayout")) {
+      if (!patchedItem) fail(409, "catalog_item_stale", "That listing is no longer available.");
+      line.printLayout = parseCartPrintLayout(patchedItem, body.printLayout, fail);
+    }
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach
