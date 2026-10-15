@@ -108,6 +108,9 @@ function inspectPdf(bytes) {
     const counted = pageTreeCount(text);
     if (counted != null && (pageCount == null || counted > pageCount)) pageCount = counted;
   }
+  const colorMode = colorModeFromTexts(texts);
+  const fonts = fontsFromTexts(texts);
+  const bleedMilli = bleedMilliFromTexts(texts);
 
   // A PDF that yielded neither a page box nor a count told us nothing, and an
   // object of nulls reads downstream as "inspected, no measurements" when the
@@ -130,7 +133,116 @@ function inspectPdf(bytes) {
     dpi: null,
     pixelWidth: null,
     pixelHeight: null,
+    // Null when the bytes never said. A missing colour space is not "RGB".
+    colorMode,
+    fonts,
+    bleedMilli,
+    hasAlpha: null,
   };
+}
+
+/**
+ * Device colour spaces a page resource actually names.
+ *
+ * Read from the same text the page box is read from, including inflated
+ * streams. Content operators (`rg`, `k`) are too easy to mistake for ordinary
+ * words, so only PDF names count. More than one device space is mixed: a
+ * CMYK page with an RGB image is not "CMYK".
+ */
+function colorModeFromTexts(texts) {
+  const found = new Set();
+  const names = [
+    ["cmyk", /\/DeviceCMYK\b/],
+    ["rgb", /\/DeviceRGB\b/],
+    ["gray", /\/DeviceGray\b/],
+    ["icc", /\/ICCBased\b/],
+    ["spot", /\/Separation\b|\/DeviceN\b/],
+  ];
+  for (const text of texts) {
+    for (const [name, pattern] of names) {
+      if (pattern.test(text)) found.add(name);
+    }
+  }
+  const device = ["cmyk", "rgb", "gray"].filter((name) => found.has(name));
+  if (device.length > 1) return "mixed";
+  if (device.length === 1) return device[0];
+  if (found.has("icc")) return "icc";
+  if (found.has("spot")) return "spot";
+  return null;
+}
+
+/** Subset prefixes (`ABCDEF+Arial`) are the writer's private tag, not the font. */
+function fontFaceName(raw) {
+  return raw.replace(/^[A-Z]{6}\+/, "");
+}
+
+/**
+ * Embedded fonts, from the font descriptor sitting next to the name.
+ *
+ * `/FontFile`, `/FontFile2` and `/FontFile3` are the embedded program. A name
+ * with none of them was referenced and not embedded. No names at all is null:
+ * a scan of a poster often has no fonts, and that is not "zero fonts missing".
+ */
+function fontsFromTexts(texts) {
+  const found = new Map();
+  for (const text of texts) {
+    const names = /\/(?:BaseFont|FontName)\s*\/([^\s[\]<>/]+)/g;
+    let match;
+    while ((match = names.exec(text)) !== null) {
+      const name = fontFaceName(match[1]);
+      if (!name) continue;
+      const window = text.slice(Math.max(0, match.index - 500), match.index + 500);
+      const embedded = /\/FontFile(?:2|3)?\b/.test(window);
+      const previous = found.get(name);
+      found.set(name, { name, embedded: Boolean(previous?.embedded || embedded) });
+    }
+  }
+  return found.size ? [...found.values()] : null;
+}
+
+/** The first page box of this name, in PDF points, or null. */
+function firstNamedBox(text, name) {
+  const match = new RegExp(
+    `\\/${name}\\s*\\[\\s*(-?[\\d.]+)\\s+(-?[\\d.]+)\\s+(-?[\\d.]+)\\s+(-?[\\d.]+)\\s*\\]`,
+  ).exec(text);
+  if (!match) return null;
+  const [x0, y0, x1, y1] = match.slice(1).map(Number);
+  if (![x0, y0, x1, y1].every((value) => Number.isFinite(value))) return null;
+  return {
+    x0: Math.min(x0, x1),
+    y0: Math.min(y0, y1),
+    x1: Math.max(x0, x1),
+    y1: Math.max(y0, y1),
+  };
+}
+
+/**
+ * Smallest bleed margin, in thousandths of a millimetre.
+ *
+ * Bleed is the gap between the trim and the bleed box, or the media box when
+ * the file has a trim and no bleed box. No trim means the file did not say,
+ * and a missing answer stays null rather than "no bleed".
+ */
+function bleedMilliFromTexts(texts) {
+  let trim = null;
+  let bleed = null;
+  let media = null;
+  for (const text of texts) {
+    trim = trim || firstNamedBox(text, "TrimBox");
+    bleed = bleed || firstNamedBox(text, "BleedBox");
+    media = media || firstNamedBox(text, "MediaBox");
+  }
+  const outer = bleed || (trim ? media : null);
+  if (!trim || !outer) return null;
+  const margins = [
+    trim.x0 - outer.x0,
+    trim.y0 - outer.y0,
+    outer.x1 - trim.x1,
+    outer.y1 - trim.y1,
+  ];
+  if (margins.some((margin) => !Number.isFinite(margin) || margin < -1)) return null;
+  const smallest = Math.min(...margins.map((margin) => Math.max(0, margin)));
+  return round(smallest * MM_PER_POINT * MILLI);
 }
 
 /**
@@ -366,7 +478,25 @@ function inspectPng(bytes) {
   const pixelWidth = bytes.readUInt32BE(16);
   const pixelHeight = bytes.readUInt32BE(20);
   if (!pixelWidth || !pixelHeight) return null;
-  return { pixelWidth, pixelHeight, dpi: pngDensity(bytes) };
+  return { pixelWidth, pixelHeight, dpi: pngDensity(bytes), ...pngColor(bytes) };
+}
+
+/**
+ * PNG colour type lives in the IHDR, one byte after the bit depth.
+ *
+ * A zero bit depth is an unfinished header, not grayscale. Indexed and alpha
+ * are reported as themselves so a print check can warn instead of calling
+ * a palette "RGB".
+ */
+function pngColor(bytes) {
+  if (bytes.length < 26) return { colorMode: null, hasAlpha: null };
+  const bitDepth = bytes[24];
+  const colorType = bytes[25];
+  if (![1, 2, 4, 8, 16].includes(bitDepth)) return { colorMode: null, hasAlpha: null };
+  const modes = { 0: "gray", 2: "rgb", 3: "indexed", 4: "gray", 6: "rgb" };
+  const colorMode = modes[colorType] ?? null;
+  if (!colorMode) return { colorMode: null, hasAlpha: null };
+  return { colorMode, hasAlpha: colorType === 4 || colorType === 6 };
 }
 
 /**
@@ -403,6 +533,7 @@ function inspectJpeg(bytes) {
   let at = 2;
   let dpi = null;
   let size = null;
+  let colorMode = null;
   while (at + 4 <= bytes.length) {
     if (bytes[at] !== 0xff) {
       at += 1;
@@ -419,6 +550,7 @@ function inspectJpeg(bytes) {
 
     if (isFrameMarker(marker) && at + 9 <= bytes.length) {
       size = { pixelHeight: bytes.readUInt16BE(at + 5), pixelWidth: bytes.readUInt16BE(at + 7) };
+      if (at + 10 <= bytes.length) colorMode = jpegColorMode(bytes[at + 9]);
     } else if (marker === 0xe0 && dpi == null && at + 16 <= bytes.length) {
       if (bytes.toString("latin1", at + 4, at + 9) === "JFIF\0") {
         const unit = bytes[at + 11];
@@ -434,7 +566,15 @@ function inspectJpeg(bytes) {
     at += 2 + length;
   }
   if (!size?.pixelWidth || !size?.pixelHeight) return null;
-  return { ...size, dpi };
+  return { ...size, dpi, colorMode, hasAlpha: false };
+}
+
+/** JPEG frame component count: 1 gray, 3 YCbCr/RGB, 4 CMYK. Anything else is unread. */
+function jpegColorMode(components) {
+  if (components === 1) return "gray";
+  if (components === 3) return "rgb";
+  if (components === 4) return "cmyk";
+  return null;
 }
 
 /**
@@ -493,5 +633,9 @@ export function inspectArtwork(bytes, contentType) {
     heightMilli: known ? heightMilli : null,
     pageSize: known ? namePageSize(widthMilli, heightMilli) : null,
     orientation: known ? orientationOf(widthMilli, heightMilli) : null,
+    colorMode: read.colorMode ?? null,
+    fonts: read.fonts ?? null,
+    bleedMilli: Number.isFinite(read.bleedMilli) ? read.bleedMilli : null,
+    hasAlpha: typeof read.hasAlpha === "boolean" ? read.hasAlpha : null,
   };
 }

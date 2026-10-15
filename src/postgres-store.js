@@ -99,7 +99,7 @@ const TABLES = [
   { name: "credit_ledger", keys: ["id"], columns: ["id", "user_id", "amount_minor", "balance_after_minor", "created_at", "position", "data"] },
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
   { name: "issues", keys: ["id"], columns: ["id", "order_id", "client_id", "claim_id", "kind", "status", "created_at", "updated_at", "position", "data"] },
-  { name: "audit_log", keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"] },
+  { name: "audit_log", keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"], appendOnly: true },
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
@@ -686,7 +686,12 @@ function rowsFromStore(store) {
   }
   for (const [position, claim] of (store.claims || []).entries()) rows.claims.push({ id: claim.id, order_id: claim.orderId, status: claim.status, created_at: claim.createdAt, updated_at: claim.updatedAt, position, data: without(claim, ["id", "orderId", "status", "createdAt", "updatedAt"]) });
   for (const [position, issue] of (store.issues || []).entries()) rows.issues.push({ id: issue.id, order_id: issue.orderId, client_id: issue.clientId, claim_id: issue.claimId ?? null, kind: issue.kind, status: issue.status, created_at: issue.createdAt, updated_at: issue.updatedAt, position, data: without(issue, ["id", "orderId", "clientId", "claimId", "kind", "status", "createdAt", "updatedAt"]) });
-  for (const [position, entry] of (store.auditLog || []).entries()) rows.audit_log.push({ id: entry.id, at: entry.at, actor_id: entry.actorId ?? null, actor_role: entry.actorRole ?? null, action: entry.action, entity_type: entry.entityType ?? null, entity_id: entry.entityId ?? null, order_id: entry.orderId ?? null, position, data: without(entry, ["id", "at", "actorId", "actorRole", "action", "entityType", "entityId", "orderId"]) });
+  let auditPosition = 0;
+  for (const entry of store.auditLog || []) {
+    const position = Number.isInteger(entry.position) ? entry.position : auditPosition;
+    auditPosition = Math.max(auditPosition, position + 1);
+    rows.audit_log.push({ id: entry.id, at: entry.at, actor_id: entry.actorId ?? null, actor_role: entry.actorRole ?? null, action: entry.action, entity_type: entry.entityType ?? null, entity_id: entry.entityId ?? null, order_id: entry.orderId ?? null, position, data: without(entry, ["id", "at", "actorId", "actorRole", "action", "entityType", "entityId", "orderId", "position"]) });
+  }
   for (const [position, item] of (store.notifications || []).entries()) rows.notifications.push({ id: item.id, user_id: item.userId, type: item.type || "general", order_id: item.orderId ?? null, created_at: item.at || item.createdAt, read_at: item.readAt ?? (item.read ? (item.at || item.createdAt) : null), deleted_at: item.deletedAt ?? null, position, data: without(item, ["id", "userId", "type", "orderId", "at", "createdAt", "read", "readAt", "deletedAt"]) });
   for (const [position, ping] of (store.locationPings || []).entries()) rows.location_pings.push({ id: ping.id, order_id: ping.orderId, rider_id: ping.riderId, lat: ping.lat, lng: ping.lng, accuracy_meters: ping.accuracy ?? null, at: ping.at, position, data: without(ping, ["id", "orderId", "riderId", "lat", "lng", "accuracy", "at"]) });
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
@@ -1172,7 +1177,7 @@ export async function loadStore(database) {
   readRefundRows(store, loaded);
   store.claims = ordered(loaded.claims).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.issues = ordered(loaded.issues).map((row) => { const item = { ...row.data, id: row.id, orderId: row.order_id, clientId: row.client_id, kind: row.kind, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }; present(item, "claimId", row.claim_id); return item; });
-  store.auditLog = ordered(loaded.audit_log).map((row) => ({ ...row.data, id: row.id, at: row.at, actorId: row.actor_id, actorRole: row.actor_role, action: row.action, entityType: row.entity_type, entityId: row.entity_id, orderId: row.order_id }));
+  store.auditLog = ordered(loaded.audit_log).map((row) => ({ ...row.data, id: row.id, at: row.at, actorId: row.actor_id, actorRole: row.actor_role, action: row.action, entityType: row.entity_type, entityId: row.entity_id, orderId: row.order_id, position: row.position }));
   store.notifications = ordered(loaded.notifications).map((row) => { const item = { ...row.data, id: row.id, userId: row.user_id, type: row.type, read: row.read_at != null, at: row.created_at }; if (row.order_id != null) item.orderId = row.order_id; if (row.deleted_at != null) item.deletedAt = row.deleted_at; return item; });
   store.locationPings = ordered(loaded.location_pings).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, lat: row.lat, lng: row.lng, accuracy: row.accuracy_meters, at: row.at }));
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));

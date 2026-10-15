@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { formatMinorPhp } from './payout-copy.js';
 import { refundHold, refundSettlementFor } from './refund-policy.js';
@@ -63,9 +64,14 @@ function recordEvent(store, order, lapse, kind, at, createId) {
   const body = kind === 'warning' ? warningText(lapse)
     : `A late-production deduction of ${formatMinorPhp(lapse.deductionMinor)} was applied to this order's unpaid shop payout. Nothing carries over to another order.`;
   if (kind === 'warning') lapse.warnings.push({ tier: lapse.tier, at, message: body, formal: lapse.tier !== 'minor' });
-  store.auditLog.push({ id: createId('aud'), at, actorId: null, actorRole: 'system', action: `production_lapse.${kind}`,
+  appendAudit(store, {
+    id: createId('aud'), at, actor: { role: 'system' }, action: `production_lapse.${kind}`,
     entityType: 'order', entityId: order.id, orderId: order.id,
-    detail: { lapseId: lapse.id, tier: lapse.tier, deductionMinor: lapse.deductionMinor }, reason: null });
+    previous: kind === 'deduction' ? { deductionMinor: 0 } : null,
+    current: { lapseId: lapse.id, tier: lapse.tier, deductionMinor: lapse.deductionMinor },
+    detail: { lapseId: lapse.id, tier: lapse.tier, deductionMinor: lapse.deductionMinor },
+    reason: null,
+  });
   const recipients = [{ userId: lapse.supplierId, role: 'supplier' }, ...privilegedAdminMemberships(store)];
   for (const recipient of recipients) writeDraft(store, {
     userId: recipient.userId, appRole: recipient.role, type: `production_lapse_${kind}`,

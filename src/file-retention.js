@@ -1,18 +1,20 @@
+import { appendAudit } from "./audit-record.js";
 import { invalidateRiderDocumentsForFile, markFileDeleted } from './attachments.js';
 import { assertEarlyFileDeletion, fileRelationships, retentionDecision } from './file-retention-policy.js';
 
 export function createFileRetention({ database, load, save, storage, enabled = false,
   now = () => new Date().toISOString(), id }) {
-  function audit(store, file, action, actor, reason) {
-    store.auditLog ||= [];
-    store.auditLog.push({ id: id('aud'), at: now(), actorId: actor?.id || null,
-      actorRole: actor?.role || 'system', action, entityType: 'file', entityId: file.fileId,
-      reason: reason || null, detail: { purpose: file.purpose } });
-  }
   function pending(store, file, source, actor, reason) {
+    const previous = file.state;
     file.state = 'delete_pending'; file.deleteRequestedAt = now(); file.deletionSource = source;
     invalidateRiderDocumentsForFile(store, file, now());
-    audit(store, file, source === 'retention' ? 'file.retention_delete' : 'file.early_delete', actor, reason);
+    appendAudit(store, {
+      id: id('aud'), at: now(), actor: actor || { role: 'system' },
+      action: source === 'retention' ? 'file.retention_delete' : 'file.early_delete',
+      entityType: 'file', entityId: file.fileId,
+      previous, current: 'delete_pending',
+      reason: reason || null, detail: { purpose: file.purpose },
+    });
   }
   async function finishPending(fileId) {
     return database.transaction(async () => {

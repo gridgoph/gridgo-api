@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { CLIENT_APPLICATION_FIELDS, validateClientApplication, bindClientApplication } from "./client-applications.js";
 import crypto from "node:crypto";
@@ -495,7 +496,7 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
       actorKind: "applicant", requestId: enrollmentRequestId("business_client", user.id, idempotencyKey),
       snapshot: { ...application, handover: Boolean(account?.currentOfficer), requestPayloadHash: payloadHash(body) }, createdAt: at });
     bindClientApplication(store, user, existingCase, application, at);
-    store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
+    appendAudit(store, { id: createId("aud"), at, actorId: user.id, actorRole: "client",
       action: account?.currentOfficer ? "organization.officer_handover" : "client_application.resubmit",
       entityType: "approval_case", entityId: existingCase.id,
       detail: { applicationRevision: existingCase.applicationRevision } });
@@ -782,7 +783,7 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
     snapshot: { previous, correctionSummary, requestPayloadHash: payloadHash(body) },
     createdAt: at,
   });
-  store.auditLog.push({
+  appendAudit(store, {
     id: createId("aud"),
     at,
     actorId: user.id,

@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
@@ -994,8 +995,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     cart.checkedOutAt = at;
     updateCart(cart, at);
   }
-  store.auditLog ||= [];
-  store.auditLog.push({
+  appendAudit(store, {
     id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "order_match.checkout",
     entityType: "order", entityId: orderId, orderId,
     detail: { jobCount: jobs.length, itemSubtotalMinor, ...fee, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
@@ -1068,7 +1068,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   cart.checkedOutOrderId = first.id;
   cart.checkedOutAt = at;
   updateCart(cart, at);
-  store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
+  appendAudit(store, { id: createId("aud"), at, actorId: user.id, actorRole: "client",
     action: "basket.checkout", entityType: "basket", entityId: basket.id,
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
   notifyOpsPaymentSubmitted(store, first, { createId, at });

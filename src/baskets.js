@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { groupSummary } from "./cart-groups.js";
 import { publicOrganizationDiscount } from "./organization-money.js";
 import { clientInvoice } from "./invoice-projection.js";
@@ -113,7 +114,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   const firstOrder = store.orders.find((row) => row.id === basket.receiptOrderId);
   if (action === 'reject') notifyClientPaymentRejected(store, firstOrder, { createId: id, at, reason: payment.rejectionReason });
   if (action === 'submit') notifyOpsPaymentSubmitted(store, firstOrder, { createId: id, at });
-  store.auditLog.push({ id: id('aud'), at, actorId: user.id, actorRole: user.role,
+  appendAudit(store, { id: id('aud'), at, actorId: user.id, actorRole: user.role,
     action: `basket.payment_${action}`, entityType: 'basket', entityId: basket.id,
     detail: { orderIds: basket.orderIds, amountMinor: basket.totalMinor }, reason: body.reason || null });
   return { status: 200, body: { basket: publicBasket(store, basket, user) }, mutated: true };

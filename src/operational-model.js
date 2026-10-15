@@ -306,6 +306,12 @@ export function validateOperationalSettings(settings) {
       "Set the checkout downpayment to 75 or 100 percent.",
       { field: "downpaymentPercent", allowed: [...DOWNPAYMENT_PERCENTS] });
   }
+  if (settings?.pricingFixedCostsMinor != null && (!Number.isSafeInteger(settings.pricingFixedCostsMinor) || settings.pricingFixedCostsMinor < 0)) {
+    fail(400, "invalid_pricing_fixed_costs", "Set monthly fixed costs to a whole number of centavos, or leave them unset.", { field: "pricingFixedCostsMinor" });
+  }
+  if (settings?.pricingPaymentFeeBps != null && (!Number.isInteger(settings.pricingPaymentFeeBps) || settings.pricingPaymentFeeBps < 0 || settings.pricingPaymentFeeBps > 10_000)) {
+    fail(400, "invalid_pricing_payment_fee", "Set the payment-fee percentage to a whole number from 0 to 10,000 basis points, or leave it unset.", { field: "pricingPaymentFeeBps" });
+  }
   const issueWindowHours = settings?.issueWindowHours;
   if (!Number.isInteger(issueWindowHours) || issueWindowHours < 1 || issueWindowHours > 720) {
     fail(
@@ -977,8 +983,15 @@ function productionItemsFor(store, order, user) {
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         documentPages: structuredClone(line.documentPages ?? null),
-        structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
-          ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
+        structuredSpec: Object.fromEntries(
+          ["size", "material", "finish", "colorMode", "colourMode", "sides", "bleed", "layout", "binding", "instructions", "notes", "specialInstructions"]
+            .filter((key) => ["string", "number", "boolean"].includes(typeof spec[key]))
+            .map((key) => [key, spec[key]]),
+        ),
+        ...(["ops_admin", "super_admin"].includes(user?.role) ? {
+          effectiveUnitPriceMinor: line.effectiveUnitPriceMinor ?? null,
+          lineSubtotalMinor: line.lineSubtotalMinor ?? null,
+        } : {}),
         options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
           .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
           .map((option) => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })),
@@ -1030,6 +1043,7 @@ export function publicOrderFor(order, user, store = null) {
       delete publicRecord.fileCheck.checklist;
     }
   } else delete publicRecord.fileCheck;
+  if (!["ops_admin", "super_admin"].includes(user?.role)) delete publicRecord.qaHold;
   delete publicRecord.rescheduleRequest;
   const reschedule = publicReschedule(order, user);
   if (reschedule) publicRecord.rescheduleRequest = reschedule;

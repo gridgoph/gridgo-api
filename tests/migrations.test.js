@@ -140,6 +140,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791957600000_delivery_chat_images",
         "1791961200000_order_qa_checklist",
         "1791964800000_docx_artwork",
+        "1792041000000_audit_log_is_permanent",
+        "1792044600000_funnel_events",
       ],
     );
 
@@ -325,6 +327,12 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     assert.deepEqual((await client.query("SELECT extensions, mime_types FROM accepted_file_formats WHERE code='docx'")).rows[0], {
       extensions: ['docx'], mime_types: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
     });
+
+    // Reverse checkout-funnel events, then the append-only audit lock.
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('funnel_events') AS t")).rows[0].t, null);
+    await runner(migrationOptions(schema, "down", 1, client));
+
     await client.query(`INSERT INTO files
       (file_id, owner_id, purpose, original_filename, declared_content_type, detected_content_type,
         size_bytes, state, object_key, created_at, position)

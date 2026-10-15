@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { synchronizeProductionHours } from "./production-days.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -1582,7 +1583,6 @@ async function clearDevelopmentOrders(database) {
     await database.query("SET LOCAL session_replication_role = replica");
     await database.query("TRUNCATE TABLE orders CASCADE");
     await database.query("TRUNCATE TABLE notifications CASCADE");
-    await database.query("DELETE FROM audit_log WHERE entity_type IN ('order', 'job') OR order_id IS NOT NULL");
   });
 }
 
@@ -1790,7 +1790,7 @@ function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
     // Spaced backwards from now, so the trail reads in the order it happened
     // rather than arriving in one instant.
     const when = new Date(Date.parse(at) - (trail.length - step) * 3_600_000).toISOString();
-    store.auditLog.push({
+    appendAudit(store, {
       id: `aud_dev_queue_${index}_${step}`,
       at: when,
       actorId,

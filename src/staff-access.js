@@ -32,6 +32,7 @@ export function redeemStaffInvite({ store, claims, clerkUser, code, id, at, audi
   const invite = (store.staffInvites || []).find(i => i.codeHash === staffHash(code));
   if (!invite || invite.revokedAt || Date.parse(invite.expiresAt) <= Date.parse(at)) staffError(409, 'staff_invite_invalid');
   let user = store.users.find(u => u.clerkUserId === claims.sub);
+  let created = false;
   if (user && !activeAccount(user)) staffError(403, 'forbidden');
   if (invite.redeemedBy) {
     if (invite.redeemedBy !== user?.id) staffError(409, 'staff_invite_used');
@@ -44,11 +45,18 @@ export function redeemStaffInvite({ store, claims, clerkUser, code, id, at, audi
     if (store.users.some(u => u.email.toLowerCase() === profile.email)) staffError(409, 'email_already_registered');
     user = { id: id('user'), clerkUserId: claims.sub, email: profile.email, name: profile.name, role: 'staff', accountStatus: 'active', createdAt: at };
     store.users.push(user);
+    created = true;
   }
   if (hasMembership(store, user, 'staff')) staffError(409, 'staff_already_enrolled');
   store.userRoleMemberships.push({ userId: user.id, role: 'staff', createdAt: at, createdBy: invite.createdBy });
   store.staffProfiles.push({ userId: user.id, roleCode: invite.roleCode, active: true, updatedAt: at });
   invite.redeemedBy = user.id; invite.redeemedAt = at;
+  if (created) {
+    audit(store, {
+      actor: user, action: 'user.account_create', entityType: 'user', entityId: user.id,
+      previous: null, current: { role: user.role, email: user.email }, reason: null,
+    });
+  }
   audit(store, { actor: user, action: 'staff.invite_redeemed', entityType: 'staff_invite', entityId: invite.id, detail: { roleCode: invite.roleCode } });
   return { staff: staffAccess(store, user), mutated: true };
 }

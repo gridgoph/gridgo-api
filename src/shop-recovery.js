@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -122,7 +123,7 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
   order.shopRecovery = { id: event.id, status: requiresOps ? 'ops_review' : 'awaiting_client', originalSupplierId: order.supplierId,
     stage: order.state, createdAt: at, originalSnapshot: { pickup: structuredClone(order.pickup || null), readyBy: order.readyBy || null, promiseBy: order.promiseBy || null }, proposal: requiresOps ? null : findReplacementShop(store, order, at) };
   order.updatedAt = at;
-  store.auditLog.push({ id: createId('aud'), at, actorId, actorRole: actorId ? 'supplier' : 'system',
+  appendAudit(store, { id: createId('aud'), at, actorId, actorRole: actorId ? 'supplier' : 'system',
     action: `order.shop_${kind}`, entityType: 'order', entityId: order.id, orderId: order.id, detail: event, reason });
   notifyRecovery(store, order, 'offered', at, createId);
   return event;

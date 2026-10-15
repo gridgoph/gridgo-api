@@ -122,7 +122,6 @@ test('HTTP season roles and CRUD persist; locked concurrent sweeps enqueue once 
     if (child && child.exitCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
     await db.transaction(async () => {
       await db.query('DELETE FROM season_windows WHERE id=$1', [windowId || '']);
-      await db.query('DELETE FROM audit_log WHERE entity_id=$1 OR actor_id=ANY($2::text[])', [windowId || '', users.map(u => u.id)]);
       await db.query('DELETE FROM notifications WHERE user_id=ANY($1::text[]) OR data->>\'seasonWindowId\'=$2', [users.map(u => u.id), windowId || '']);
       await db.query('DELETE FROM device_tokens WHERE id=$1', [`${prefix}_device`]);
       await db.query('DELETE FROM user_role_memberships WHERE user_id=ANY($1::text[])', [users.map(u => u.id)]);

@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { currentApplication, decideClientApplication, sentBackNotificationBody } from "./client-applications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { assertRiderApprovalReady } from "./enrollment.js";
@@ -258,7 +259,7 @@ function restoreSupplierServices(store, approvalCase, serviceIds, context) {
     delete service.approvalSuspensionPreviousState;
     delete service.approvalSuspensionCaseId;
     service.updatedAt = at;
-    store.auditLog.push({
+    appendAudit(store, {
       id: createId("aud"),
       at,
       actorId,
@@ -460,7 +461,7 @@ export function decideApprovalCase({
   if (!Array.isArray(store.approvalCaseEvents)) store.approvalCaseEvents = [];
   store.approvalCaseEvents.push(event);
 
-  store.auditLog.push({
+  appendAudit(store, {
     id: createId("aud"),
     at,
     actorId: actor.id,

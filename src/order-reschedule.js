@@ -1,3 +1,4 @@
+import { appendAudit } from "./audit-record.js";
 import { recoveryHeld, startShopAcceptance } from './shop-recovery.js';
 import { approvedRole, hasRole, privilegedAdminMemberships, queueOrderInvalidate, queueInvalidate } from './notifications.js';
 import { writeDraft } from './client-order-notifications.js';
@@ -33,7 +34,7 @@ const hasReleasedShare = (store, order) => (order.payoutMilestones || []).some((
 function event(store, order, kind, actor, at, id) {
   const request = order.rescheduleRequest;
   store.auditLog ||= [];
-  store.auditLog.push({ id: id('aud'), at, actorId: actor?.id || null, actorRole: actor?.role || 'system',
+  appendAudit(store, { id: id('aud'), at, actorId: actor?.id || null, actorRole: actor?.role || 'system',
     action: `order.reschedule_${kind}`, entityType: 'order', entityId: order.id, orderId: order.id,
     detail: { requestId: request.id, status: request.status, resolution: request.resolution || null }, reason: kind === 'resolved' ? request.resolutionReason : request.reason });
   const copy = {
