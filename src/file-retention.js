@@ -1,3 +1,5 @@
+import { isPreviewDocument, previewObjectKey } from './artwork-preview.js';
+import { DOCX_CONTENT_TYPE } from './docx.js';
 import { invalidateRiderDocumentsForFile, markFileDeleted } from './attachments.js';
 import { assertEarlyFileDeletion, fileRelationships, retentionDecision } from './file-retention-policy.js';
 
@@ -23,6 +25,13 @@ export function createFileRetention({ database, load, save, storage, enabled = f
         || fileRelationships(store, file).held) return false;
       // Keep the domain lock until deletion finishes: opening a case cannot race
       // the final protection check. The pending intent was committed separately.
+      // Delete the deterministic derivative even if a crash prevented its
+      // metadata commit. All parent holds apply to both objects.
+      // Word rendering is deferred, but any previously cached Word rendition
+      // still belongs to the parent and must share its deletion/hold lifecycle.
+      if (file.objectKey && (isPreviewDocument(file) || (file.purpose === 'artwork' && file.detectedContentType === DOCX_CONTENT_TYPE))) {
+        await storage.deleteObject(previewObjectKey(file.objectKey));
+      }
       if (file.objectKey) await storage.deleteObject(file.objectKey);
       markFileDeleted(file, now());
       await save(store);
