@@ -2,6 +2,7 @@ import { carriedToOffice } from './operational-model.js';
 import { notifyAdmins } from './domain-events.js';
 import { queueOrderInvalidate } from './notifications.js';
 import { issueVoucher, publicVoucher, generatedVoucherCode, voucherFail as fail } from './vouchers.js';
+import { PRICING_OPTIONS, csvCell, pricingFilter, surveyResponseRow } from './pricing-feedback.js';
 
 const DAY = 86400000;
 const iso = ms => new Date(ms).toISOString();
@@ -11,8 +12,13 @@ export const SURVEY_OPTIONS = Object.freeze({
     pickup: ['easy_to_find', 'ready_on_time', 'long_wait', 'helpful_staff', 'clear_instructions', 'inconvenient_hours', 'damaged_package', 'other'],
   },
   easeTags: ['easy_to_find_product', 'clear_options', 'easy_checkout', 'upload_difficulty', 'confusing_steps', 'payment_difficulty', 'slow_app', 'other'],
-  priceFeeling: ['very_cheap', 'cheap', 'fair', 'expensive', 'very_expensive'],
+  priceFeeling: PRICING_OPTIONS.priceFeeling,
+  directShopComparison: PRICING_OPTIONS.directShopComparison,
+  priceWorthTags: PRICING_OPTIONS.priceWorthTags,
+  orderAgainAtPrice: PRICING_OPTIONS.orderAgainAtPrice,
 });
+const ANSWER_KEYS = ['fulfillmentStars', 'fulfillmentTags', 'easeStars', 'easeTags', 'priceFeeling', 'expectedPriceMinor',
+  'directShopComparison', 'priceWorthTags', 'orderAgainAtPrice', 'qualityStars', 'recommendScore', 'improvementNote'];
 function invitation(store, order) {
   const launch = Date.parse(store.surveyLaunchedAt);
   const completedAt = order.issueWindowOpenedAt || order.timeline?.find(e => e.state === 'delivered')?.at;
@@ -31,7 +37,7 @@ export function syncSurveys(store, { id, at }) {
     if (existing.has(order.id)) continue;
     const record = invitation(store, order);
     if (!record || Date.parse(at) < Date.parse(record.openedAt) || Date.parse(at) >= Date.parse(record.expiresAt)) continue;
-    store.orderSurveys.push({ ...record, notifiedAt: at, fulfillmentTags: [], easeTags: [], needsFollowUp: false });
+    store.orderSurveys.push({ ...record, notifiedAt: at, fulfillmentTags: [], easeTags: [], priceWorthTags: [], needsFollowUp: false });
     store.notifications.push({ id: id('not'), userId: order.clientId, appRole: 'client', orderId: order.id,
       type: 'order_survey_available', title: 'How did your order go?',
       body: 'Share your experience in a short optional survey. Open this order to answer within 7 days. Survey reward limits apply.', at, read: false });
@@ -53,10 +59,9 @@ export function publicSurvey(store, order, at) {
   const status = s.submittedAt ? 'submitted' : Date.parse(at) >= Date.parse(s.expiresAt) ? 'expired' : 'open';
   const nextRewardAt = rewardNextAt(store, order.clientId);
   const voucher = s.rewardVoucherId && store.vouchers.find(v => v.id === s.rewardVoucherId);
-  const answerKeys = ['fulfillmentStars', 'fulfillmentTags', 'easeStars', 'easeTags', 'priceFeeling', 'expectedPriceMinor', 'qualityStars', 'recommendScore', 'improvementNote'];
   return { orderId: order.id, status, fulfillmentKind: s.fulfillmentKind, openedAt: s.openedAt, expiresAt: s.expiresAt,
     dismissedAt: s.dismissedAt || null, submittedAt: s.submittedAt || null,
-    answers: s.submittedAt ? Object.fromEntries(answerKeys.map(key => [key, s[key] ?? null])) : null,
+    answers: s.submittedAt ? Object.fromEntries(ANSWER_KEYS.map(key => [key, s[key] ?? (key === 'priceWorthTags' ? [] : null)])) : null,
     needsFollowUp: s.needsFollowUp || false,
     rewardStatus: s.rewardStatus || null, reward: voucher ? publicVoucher(store, voucher, at) : null,
     rewardEligible: status === 'open' && (!nextRewardAt || Date.parse(at) >= Date.parse(nextRewardAt)), nextRewardAt,
@@ -78,6 +83,15 @@ function validateAnswers(body, kind) {
     if (!Array.isArray(value) || value.length > 8 || value.some(v => !allowed.includes(v)) || new Set(value).size !== value.length) fail(400, 'invalid_survey_tags');
     result[key] = [...value];
   }
+  for (const key of ['directShopComparison', 'orderAgainAtPrice']) {
+    if (body[key] != null && !SURVEY_OPTIONS[key].includes(body[key])) fail(400, 'invalid_survey_answers');
+    result[key] = body[key] ?? null;
+  }
+  const worth = body.priceWorthTags ?? [];
+  // "Not worth it" is the opposite of every reason, so it stands alone.
+  if (!Array.isArray(worth) || worth.some(v => !SURVEY_OPTIONS.priceWorthTags.includes(v)) || new Set(worth).size !== worth.length
+    || worth.includes('not_worth_it') && worth.length > 1) fail(400, 'invalid_survey_tags');
+  result.priceWorthTags = [...worth];
   if (body.expectedPriceMinor != null && (!Number.isSafeInteger(body.expectedPriceMinor) || body.expectedPriceMinor < 0)) fail(400, 'invalid_survey_expected_price');
   if (body.improvementNote != null && (typeof body.improvementNote !== 'string' || body.improvementNote.length > 2000)) fail(400, 'invalid_survey_note');
   result.expectedPriceMinor = body.expectedPriceMinor ?? null;
@@ -112,7 +126,6 @@ export function submitSurvey(store, order, body, { id, at }) {
   queueOrderInvalidate(store, order, ['orders', 'notifications']);
   return publicSurvey(store, order, at);
 }
-const csvCell = value => '"' + String(value ?? '').replace(/^[\s]*[=+@\-]/, "'$&").replace(/^[\t\r\n]/, "'$&").replaceAll('"', '""') + '"';
 export function surveyReport(store, params) {
   for (const key of ['from', 'to']) if (params.has(key) && !Number.isFinite(Date.parse(params.get(key)))) fail(400, 'invalid_survey_filter');
   if (params.has('from') && params.has('to') && Date.parse(params.get('from')) > Date.parse(params.get('to'))) fail(400, 'invalid_survey_filter');
@@ -123,9 +136,11 @@ export function surveyReport(store, params) {
   for (const [key, max, min] of [['fulfillmentStars', 5, 1], ['easeStars', 5, 1], ['qualityStars', 5, 1], ['priceFeeling', 5, 1], ['recommendScore', 10, 0]]) {
     if (params.has(key) && (!/^\d+$/.test(params.get(key)) || Number(params.get(key)) < min || Number(params.get(key)) > max)) fail(400, 'invalid_survey_filter');
   }
+  const matchesPricing = pricingFilter(store, params);
   const offset = Number(params.get('offset') || 0), limit = Number(params.get('limit') || 100);
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) fail(400, 'invalid_pagination');
-  const rows = (store.orderSurveys || []).filter(s => s.submittedAt
+  const rows = (store.orderSurveys || []).filter(s => s.submittedAt).map(s => surveyResponseRow(store, s)).filter(s =>
+    matchesPricing(s)
     && ['clientId', 'orderId', 'fulfillmentKind', 'rewardStatus'].every(k => !params.has(k) || s[k] === params.get(k))
     && ['fulfillmentStars', 'easeStars', 'qualityStars', 'priceFeeling', 'recommendScore'].every(k => !params.has(k) || s[k] === Number(params.get(k)))
     && (!params.has('needsFollowUp') || s.needsFollowUp === (params.get('needsFollowUp') === 'true'))
@@ -145,8 +160,10 @@ export function surveyReport(store, params) {
     nps: counts.recommendScore ? 100 * (promoters - detractors) / counts.recommendScore : null };
   if (params.get('format') === 'csv') {
     const fields = ['orderId', 'clientId', 'fulfillmentKind', 'submittedAt', 'fulfillmentStars', 'fulfillmentTags', 'easeStars', 'easeTags',
-      'priceFeeling', 'expectedPriceMinor', 'qualityStars', 'recommendScore', 'improvementNote', 'needsFollowUp', 'rewardStatus', 'rewardVoucherId'];
+      'priceFeeling', 'expectedPriceMinor', 'qualityStars', 'recommendScore', 'improvementNote', 'needsFollowUp', 'rewardStatus', 'rewardVoucherId',
+      'directShopComparison', 'priceWorthTags', 'orderAgainAtPrice', 'orderTotalMinor', 'orderSize', 'categoryCodes', 'accountType'];
     return { bytes: Buffer.from([fields.join(','), ...rows.map(s => fields.map(k => csvCell(Array.isArray(s[k]) ? s[k].join('|') : s[k])).join(','))].join('\r\n')) };
   }
   return { responses: rows.slice(offset, offset + limit), total: rows.length, aggregates };
 }
+

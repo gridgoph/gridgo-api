@@ -2,6 +2,8 @@
 
 Server contract for report **81CA4493**. Client and dashboard UI ship separately.
 Rewards use the existing [GRIDGO-funded voucher wallet and ledger](VOUCHERS_API.md).
+Optional pricing questions, the checkout exit question and Admin pricing results:
+[Pricing feedback](PRICING_FEEDBACK_API.md).
 Survey answers never change order money, payout holds, issues, claims, refunds,
 listing ratings, or matching rank.
 
@@ -65,6 +67,9 @@ Submission body (integer PHP minor units for expected price):
   "easeTags": ["easy_checkout"],
   "priceFeeling": 3,
   "expectedPriceMinor": 10000,
+  "directShopComparison": "about_the_same",
+  "priceWorthTags": ["door_delivery"],
+  "orderAgainAtPrice": "yes",
   "qualityStars": 5,
   "recommendScore": 8,
   "improvementNote": "More delivery updates would help."
@@ -86,7 +91,10 @@ pickup according to `fulfillmentKind`.
 `expectedPriceMinor` is optional/null, nonnegative, and a safe integer.
 `qualityStars` is optional/null, integer 1–5. `recommendScore` is optional/null,
 integer 0–10 so completing the first three questions alone can earn the reward.
-`improvementNote` is optional/null, trimmed, maximum 2,000 characters. No age,
+`improvementNote` is optional/null, trimmed, maximum 2,000 characters.
+`directShopComparison`, `priceWorthTags` and `orderAgainAtPrice` are optional
+pricing questions defined in [Pricing feedback](PRICING_FEEDBACK_API.md); they
+never affect the reward or `needsFollowUp`. No age,
 adult-confirmation, role, reward amount or reward identifier is accepted from
 the client. There is no partial-save or answer-edit endpoint: submit once after
 collecting whichever optional answers the client wants to give. A replay returns
@@ -104,7 +112,7 @@ A survey card contains:
   "expiresAt": "2026-10-21T08:00:00.000Z",
   "dismissedAt": null,
   "submittedAt": "2026-10-14T08:05:00.000Z",
-  "answers": {"fulfillmentStars":2,"fulfillmentTags":["late"],"easeStars":4,"easeTags":["easy_checkout"],"priceFeeling":3,"expectedPriceMinor":10000,"qualityStars":5,"recommendScore":8,"improvementNote":"More delivery updates would help."},
+  "answers": {"fulfillmentStars":2,"fulfillmentTags":["late"],"easeStars":4,"easeTags":["easy_checkout"],"priceFeeling":3,"expectedPriceMinor":10000,"directShopComparison":"about_the_same","priceWorthTags":["door_delivery"],"orderAgainAtPrice":"yes","qualityStars":5,"recommendScore":8,"improvementNote":"More delivery updates would help."},
   "needsFollowUp": true,
   "rewardStatus": "issued",
   "reward": {"id":"vch_...","campaignId":"vcamp_...","code":"7AFD123456789ABC","name":"Thank you for your order feedback","valueMinor":1500,"status":"available","issuedAt":"2026-10-14T08:05:00.000Z","expiresAt":"2026-11-13T08:05:00.000Z","secondsRemaining":2592000,"redeemable":true,"reservation":null,"fundedBy":"GRIDGO","transferable":false,"cashValue":false},
@@ -178,11 +186,14 @@ Filters combine with AND:
 - Exact `fulfillmentStars`, `easeStars`, `qualityStars`, `priceFeeling`, `recommendScore`.
 - `tag` matches either answer's tag set.
 - Inclusive ISO `from` and `to`, applied to submission time.
+- `categoryCode`, `orderSize` and `accountType`, as defined in
+  [Pricing feedback](PRICING_FEEDBACK_API.md#filters).
 - `offset` (default 0), `limit` (default 100, maximum 500).
 
 JSON: `{serverTime,responses,total,aggregates}`. Rows include order/client IDs,
 original completion/window/notified/dismissed/submitted timestamps, fulfillment
-kind, all scores/tags/comment, flag, reward status and voucher ID. No email,
+kind, all scores/tags/comment, pricing answers, flag, reward status and voucher ID,
+plus the order total, order size bracket, category codes and account type. No email,
 Clerk subject, private files or voucher code is included. Rows sort by submission
 descending, then order ID ascending. `total` and aggregates cover **all matching
 responses**, not just the page.
@@ -196,7 +207,7 @@ Averages/NPS may be fractional; dashboard display can round them.
 
 `format=csv` downloads `survey-responses.csv` as UTF-8 CSV. The same filters apply;
 pagination does not truncate export. Columns include scores, tags (pipe-separated),
-comment, flag and reward references. Cells are quoted, quotes doubled, and
+comment, flag, reward references, pricing answers and the filter facts. Cells are quoted, quotes doubled, and
 spreadsheet formula prefixes escaped, including leading whitespace. Exports and
 JSON use `Cache-Control: private, no-store`.
 
