@@ -7,6 +7,7 @@ import { createServer } from 'node:net';
 import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore } from '../src/postgres-store.js';
 import { seedReferenceData } from '../src/seed.js';
+import { DEFAULT_SERVICE_FEE_SCHEDULE } from '../src/service-fee.js';
 import { publicFeaturedPrints, routeFeaturedPrints } from '../src/featured-prints.js';
 import { listingSnapshot } from '../src/catalog-review-state.js';
 
@@ -132,6 +133,8 @@ test('PostgreSQL HTTP: roles, signed anonymous public read, version race, audit,
       const store = await loadStore(database);
       originalSettings = structuredClone(store.settings);
       store.settings.serviceFeeRateBps = 1000;
+      store.settings.serviceFeeSchedule = structuredClone(DEFAULT_SERVICE_FEE_SCHEDULE);
+      delete store.settings.scheduledServiceFee;
       delete store.settings.featuredPrints;
       for (const [key, rows] of Object.entries(data)) {
         if (['settings', 'acceptedFileFormats'].includes(key)) continue;
@@ -185,7 +188,8 @@ test('PostgreSQL HTTP: roles, signed anonymous public read, version race, audit,
     assert.equal(publicRead.status, 200);
     assert.equal(publicRead.cacheControl, 'no-store');
     assert.deepEqual(publicRead.body.items.map(item => item.id), [...ids].reverse());
-    assert.equal(publicRead.body.items[0].clientFromPriceMinor, 1102);
+    // Fresh reference settings use 45% on this 1,002-centavo shop price.
+    assert.equal(publicRead.body.items[0].clientFromPriceMinor, 1453);
     assert.match(publicRead.body.items[0].photos[0].downloadUrl, /^https:\/\/samples\.example\.test\/.*X-Amz-Signature=/);
     assert.ok(Date.parse(publicRead.body.items[0].photos[0].downloadUrlExpiresAt) > Date.now());
     assert.doesNotMatch(JSON.stringify(publicRead.body), /PRIVATE|supplierId|supplierServiceId|ownerId|basePriceMinor|fromPriceMinor|description/);
