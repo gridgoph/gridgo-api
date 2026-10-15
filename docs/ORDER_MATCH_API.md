@@ -226,7 +226,7 @@ Add-line body:
 }
 ```
 
-PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, `artworkAttachments`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
 
 ### Artwork design links
 
@@ -241,7 +241,7 @@ Both add-line and patch-line requests accept `artworkLinks`, independently of `a
 }
 ```
 
-The array has at most **3** entries. Each entry has `formatCode: "canva_link" | "google_drive" | "dropbox" | "we_transfer" | "other_link"` and a string `url` of at most **2,000 characters**. Stored URLs must be absolute HTTPS URLs without credentials, whitespace, control characters, or backslashes. Provider codes require the matching domain; lookalike domains do not qualify:
+The array has at most **10** entries, subject to the combined limit of **10 files and links per item** below. Each entry has `formatCode: "canva_link" | "google_drive" | "dropbox" | "we_transfer" | "other_link"` and a string `url` of at most **2,000 characters**. Stored URLs must be absolute HTTPS URLs without credentials, whitespace, control characters, or backslashes. Provider codes require the matching domain; lookalike domains do not qualify:
 
 | Code | Input hosts |
 | --- | --- |
@@ -259,9 +259,81 @@ Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid
 
 Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Top-level `artworkFileIds` and `mockupFileIds` follow the same job scope; metadata and signed downloads enforce it independently. Legacy fallback and combined-delivery rules are in [Storage API](STORAGE_API.md#get-filesfileid--metadata). Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
 
+### Multiple artwork attachments
+
+Report C6625C57. Apply migration `1792068000000_artwork_attachments` before
+releasing clients that send the new field. Add-line and patch-line accept:
+
+```json
+{
+  "artworkAttachments": [
+    { "kind": "file", "fileId": "file_front", "label": "Front" },
+    { "kind": "file", "fileId": "file_back", "label": "Back" },
+    { "kind": "link", "formatCode": "canva_link", "url": "https://www.canva.com/design/ABC/view", "label": "Logo design" }
+  ]
+}
+```
+
+Array order is display order; replace the array to reorder. `label` is optional,
+trimmed, and limited to 80 characters on one line. Empty/null labels are omitted.
+Each entry is either `kind: "file"` with `fileId`, or `kind: "link"` with the
+existing `formatCode` and `url`. File bytes still use the existing upload API.
+Every file must belong to the client, be ready artwork, and match the listing's
+accepted formats. Each link follows the provider, HTTPS, short-link resolution,
+and public-access checks above. Client-supplied verdicts/download URLs are ignored.
+
+There are **at most 10 attachments per line, files and links together**.
+Overflow returns `400 artwork_attachment_limit_exceeded`. Malformed arrays,
+entries, labels, or a request mixing `artworkAttachments` with the legacy artwork
+fields return `400 invalid_artwork_attachments`; existing link/file refusal codes
+still identify format/access/check failures. Omit the array on PATCH to preserve
+it; `[]` clears all artwork; `null` is invalid. An empty draft is allowed, but
+checkout returns `409 artwork_required`. Checkout requires every supplied file
+and link to pass, not merely the primary attachment. A changed attachment list,
+including its labels or order, invalidates the pre-lock link-check fingerprint.
+
+Released apps can continue sending `artworkFileId` and/or `artworkLinks`.
+`artworkFileId` is the first **file** in the ordered list; `artworkLinks` contains
+all links in their relative order. A legacy file PATCH replaces/removes only that
+first file, retaining secondary uploads; removing it promotes the next file.
+A legacy links PATCH replaces all links and places them after the retained files;
+`artworkLinks: []` removes links only. A legacy row without the new stored array
+projects its file first, followed by its links. The combined limit also applies
+to legacy writes. Send only the writable fields, not an echoed full response.
+
+Full and compact cart lines, immutable invoice lines, and
+`order.productionItems[]` expose `artworkAttachments`. File entries add
+`downloadUrl` and `downloadUrlExpiresAt` at response time, under the same file
+read authorization as `/files/:id/download-url`. Signed URLs are never persisted.
+If signing/storage is unavailable, the entry remains visible without a URL;
+retry that download endpoint. Link entries retain their provider URL. Top-level
+`order.artworkFileIds` includes all scoped uploaded attachments. Owning clients
+and Operations/Super Admin see every line; shops and riders see only their job's
+lines. Shops remain blocked until the existing GRIDGO Team file-check handoff.
+Secondary files retain the same open-case and active-cart deletion holds.
+
+For the customer, dashboard, and shop follow-ups: render the complete array with
+its optional labels, an open action for each link, and a download action for each
+file. The GRIDGO Team must review **all** entries when passing the existing
+order-level file check; this release does not add a separate staff verdict per
+attachment. Existing single-file screens continue to use the primary field.
+
+**Artwork proof and mockup preview source:** `artworkPreviewFileId` names the first
+ready image/PDF upload in attachment order (or null if there is none). Use this
+as the default proof/mockup canvas source; a one-file image/PDF keeps its current
+behavior. Resolve `/files/:fileId/preview-url` for the image rendition; never use
+the original PDF URL as an image. Design links are opened at their provider, never silently fetched into
+a mockup. The separately uploaded `mockupFileId` still takes precedence when
+showing a saved mockup; adding attachments does not generate or merge mockups.
+The single `pageRange`/`documentPages` pricing contract stays tied to the primary
+`artworkFileId`; secondary reference files do not add billable pages. Put the
+print document first for per-page work and use a separate cart line for another
+independently priced document. Order attachments and their labels/order cannot
+be rewritten after checkout.
+
 ### Artwork checkout gate and Operations handoff
 
-`POST /me/carts/:id/checkout` checks artwork on **every line**. No new client request field or check token is required. Released clients that skip `/artwork/link-check` receive the same explicit checkout errors; a client-supplied verdict never grants permission. The API probes every saved link afresh before taking the domain transaction lock, then verifies the exact line artwork is unchanged in the transaction. All supplied links must pass, even when the line also has an uploaded file. To use an upload instead, clear failed links with `artworkLinks: []`.
+`POST /me/carts/:id/checkout` checks artwork on **every line**. No new client request field or check token is required. Released clients that skip `/artwork/link-check` receive the same explicit checkout errors; a client-supplied verdict never grants permission. The API probes every saved link afresh before taking the domain transaction lock, then verifies the exact line artwork is unchanged in the transaction. All supplied links must pass, even when the line also has an uploaded file. To use uploads instead, remove failed link entries from `artworkAttachments` (or clear legacy links with `artworkLinks: []`).
 
 | Checkout error | HTTP | Client fix |
 | --- | --- | --- |

@@ -1,3 +1,4 @@
+import { artworkFileIdsFor } from './artwork-attachments.js';
 import { supplierArtworkReleased } from "./artwork-gates.js";
 // Shared by order projections and file metadata/download authorization.
 export function canReadOrderArtwork(user, store, order, fileId, purpose, file = null) {
@@ -12,16 +13,16 @@ export function canReadOrderArtwork(user, store, order, fileId, purpose, file = 
   const ownJobs = new Set(jobs.filter((job) => job[partyField] === user.id).map((job) => job.id));
   const ownsLine = (line) => jobs.length ? ownJobs.has(line.jobId) : order[partyField] === user.id;
   const lines = (store?.orderLineItems || []).filter((line) => line.orderId === order.id);
-  const field = `${purpose}FileId`;
+  const hasFile = line => purpose === "artwork" ? artworkFileIdsFor(line).includes(fileId) : line.mockupFileId === fileId;
   const record = file || (store?.files || []).find((candidate) => candidate.fileId === fileId);
   const lineRefs = (record?.references || []).filter((ref) =>
     ref.type === "order" && ref.id === order.id && ref.field?.startsWith("line:"));
   if (lineRefs.length) {
     // A broad legacy reference must not bypass a specific (even stale) line reference.
     return lineRefs.some((ref) => lines.some((line) =>
-      ref.field === `line:${line.id}:${purpose}` && line[field] === fileId && ownsLine(line)));
+      ref.field === `line:${line.id}:${purpose}` && hasFile(line) && ownsLine(line)));
   }
-  const fileLines = lines.filter((line) => line[field] === fileId);
+  const fileLines = lines.filter((line) => hasFile(line));
   if (fileLines.length) return fileLines.some(ownsLine);
 
   // Unattributed legacy files are safe only when the order has one shop.

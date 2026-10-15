@@ -91,6 +91,27 @@ async function request(api, pathname, { method = "GET", subject, body } = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+// Receipts retain the same commercial/artwork snapshot while each HTTP read
+// refreshes private download credentials. Validate those credentials separately.
+function assertSameInvoiceSnapshot(actual, expected) {
+  const snapshot = (invoice) => {
+    const copy = structuredClone(invoice);
+    for (const section of [copy, ...(copy.groups || [])]) {
+      for (const line of section.lines || []) {
+        for (const attachment of line.artworkAttachments || []) {
+          if (attachment.kind !== 'file') continue;
+          assert.match(attachment.downloadUrl, /X-Amz-Signature=/);
+          assert.ok(Date.parse(attachment.downloadUrlExpiresAt) > Date.now());
+          delete attachment.downloadUrl;
+          delete attachment.downloadUrlExpiresAt;
+        }
+      }
+    }
+    return copy;
+  };
+  assert.deepEqual(snapshot(actual), snapshot(expected));
+}
+
 async function requestEventually(api, pathname, options, predicate) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const response = await request(api, pathname, options);
@@ -2212,6 +2233,7 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
       assert.equal((await call(`/baskets/${basket.id}`)).body.basket.pickupFeeMinor, 2501);
     }
     const intake = await loadStore(database);
+    assert.equal(JSON.stringify(intake.orderInvoices).includes("downloadUrl"), false);
     assert.equal(intake.notifications.filter(row => row.type === 'ops_job_needs_qa' && row.userId === 'user_ops').length, groupCount);
     assert.equal(basket.payment.amountMinor, invoice.totalMinor);
     assert.equal((await post(`/orders/${first}/payments/initial/confirm`)).body.error, 'basket_payment_required');
@@ -2225,7 +2247,7 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
     assert.equal((await post(`/baskets/${basket.id}/payment/confirm`)).status, 409);
     for (const group of basket.groups) {
       const receipt = await call(`/orders/${group.orderId}/invoice`);
-      assert.deepEqual(receipt.body.invoice, invoice);
+      assertSameInvoiceSnapshot(receipt.body.invoice, invoice);
     }
     const ops = await call(`/baskets/${basket.id}`, { subject: 'clerk_ops' });
     assert.equal(ops.body.basket.groups[0].order.supplierId, 'supplier_a');
@@ -2277,7 +2299,7 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
     assert.equal(persisted.orders.find((order) => order.id === second).state, 'cancelled');
     assert.equal(persisted.orders.find((order) => order.id === first).state, 'production');
     assert.equal(persisted.orders.find((order) => order.id === first).payoutMilestones[0].status, 'released');
-    assert.deepEqual((await call(`/baskets/${basket.id}/invoice`)).body.invoice, invoice);
+    assertSameInvoiceSnapshot((await call(`/baskets/${basket.id}/invoice`)).body.invoice, invoice);
     await assert.rejects(database.transaction(async () => {
       await database.query("UPDATE order_payments SET status='not_submitted' WHERE order_id=$1 AND code='initial'", [first]);
     }), /basket payment/);
@@ -3139,4 +3161,112 @@ test('bracket checkout persists locked groups and immutable working, keeps clien
   assert.equal(invoice.body.invoice.lines.reduce((sum,line)=>sum+line.clientAmountMinor,0),1330000);
   await assert.rejects(database.query("UPDATE orders SET data=jsonb_set(data,'{serviceFeeSchedule,brackets,0,rateBps}','1') WHERE id=$1",[order.id]),{code:'23514'});
   await assert.rejects(database.query("UPDATE orders SET data=data-'serviceFeeSchedule' WHERE id=$1",[order.id]),{code:'23514'});
+});
+
+test('multiple artwork attachments survive checkout with labels, order, checks and scoped downloads', { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const original = store.files.find(file => file.fileId === 'file_art');
+    for (const fileId of ['file_back', 'file_logo']) store.files.push({ ...structuredClone(original), fileId, objectKey: `client/${fileId}.pdf` });
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'service_supplier_a', formatCode: 'canva_link' });
+    await saveStore(database, store);
+  });
+  let denied = false;
+  const seen = new Set();
+  const provider = http.createServer((req, res) => {
+    seen.add(req.url);
+    if (req.method === 'HEAD' && req.url.includes('/client/')) { res.writeHead(200, { 'Content-Length': 10 }); res.end(); return; }
+    res.writeHead(denied && req.url.includes('BACK') ? 401 : 200, { 'content-type': 'application/pdf' });
+    res.end(readFileSync(new URL('./fixtures/artwork-check/page.pdf', import.meta.url)));
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => { provider.closeAllConnections(); return new Promise(resolve => provider.close(resolve)); });
+  const storageUrl = `http://127.0.0.1:${provider.address().port}`;
+  const instance = await startApi({ preload: './tests/helpers/artwork-link-transport.mjs', extraEnv: {
+    ARTWORK_TEST_PORT: String(provider.address().port), MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl,
+  } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
+  const attachments = [
+    { kind: 'link', formatCode: 'canva_link', url: 'https://www.canva.com/design/FRONT/view', label: 'Front design' },
+    { kind: 'file', fileId: 'file_art', label: 'Front' },
+    { kind: 'file', fileId: 'file_back', label: 'Back' },
+    { kind: 'link', formatCode: 'canva_link', url: 'https://www.canva.com/design/BACK/view', label: 'Back design' },
+  ];
+  const add = await call(`/me/carts/${cartId}/lines`, { method: 'POST', body: {
+    catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkAttachments: attachments,
+  } });
+  assert.equal(add.status, 201, JSON.stringify(add.body));
+  const line = add.body.cart.lines[0];
+  const bare = entries => entries.map(({ downloadUrl, downloadUrlExpiresAt, ...entry }) => entry);
+  assert.deepEqual(bare(line.artworkAttachments), attachments);
+  assert.equal(line.artworkFileId, 'file_art');
+  assert.equal(line.artworkPreviewFileId, 'file_art');
+  const patch = body => call(`/me/carts/${cartId}/lines/${line.id}`, { method: 'PATCH', body });
+  assert.deepEqual(bare((await call(`/me/carts/${cartId}`)).body.cart.lines[0].artworkAttachments), attachments);
+  assert.equal((await patch({ artworkAttachments: Array(11).fill(attachments[1]) })).body.error, 'artwork_attachment_limit_exceeded');
+  assert.equal((await patch({ artworkAttachments: [{ kind: 'file', fileId: 'file_qr' }] })).status, 409);
+  const checkout = () => call(`/me/carts/${cartId}/checkout`, { method: 'POST', body: { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'MULTI-ART' } } });
+  await patch({ artworkAttachments: [] });
+  assert.equal((await checkout()).body.error, 'artwork_required');
+  const ten = Array.from({ length: 10 }, (_, index) => ({ kind: 'file', fileId: 'file_art', label: `Part ${index + 1}` }));
+  assert.equal((await patch({ artworkAttachments: ten })).status, 200);
+  assert.deepEqual((await loadStore(database)).cartLines[0].artworkAttachments, ten);
+  assert.equal((await patch({ artworkLinks: [{ formatCode: 'canva_link', url: 'https://www.canva.com/design/EXTRA/view' }] })).body.error, 'artwork_attachment_limit_exceeded');
+  await assert.rejects(database.query("UPDATE client_cart_lines SET artwork_attachments = $1 WHERE id = $2", [JSON.stringify(Array(11).fill(ten[0])), line.id]), { code: '23514' });
+  assert.equal((await patch({ artworkAttachments: attachments })).status, 200);
+  denied = true;
+  assert.equal((await checkout()).body.error, 'artwork_link_check_failed');
+  assert.equal((await loadStore(database)).orders.length, 0);
+  denied = false;
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.find(file => file.fileId === 'file_back').artworkCheck.status = 'failed';
+    await saveStore(database, store);
+  });
+  assert.equal((await checkout()).body.error, 'artwork_file_check_failed');
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.files.find(file => file.fileId === 'file_back').artworkCheck.status = 'passed';
+    await saveStore(database, store);
+  });
+  // Released app replaces only its primary upload; secondary files and links survive.
+  const legacy = await patch({ artworkFileId: 'file_logo' });
+  attachments[1].fileId = 'file_logo';
+  assert.deepEqual(bare(legacy.body.cart.lines[0].artworkAttachments), attachments);
+  const placed = await checkout();
+  assert.equal(placed.status, 201, JSON.stringify(placed.body));
+  const orderId = placed.body.order.id;
+  const store = await loadStore(database);
+  assert.deepEqual(store.orderLineItems[0].artworkAttachments, attachments);
+  assert.deepEqual(store.orderInvoices[0].snapshot.lines[0].artworkAttachments, attachments);
+  assert.ok(seen.has('/design/FRONT/view') && seen.has('/design/BACK/view'));
+  assert.equal((await call(`/orders/${orderId}`, { subject: 'clerk_supplier_a' })).status, 403);
+  const pendingReview = await call(`/orders/${orderId}`, { subject: 'clerk_ops' });
+  assert.deepEqual(bare(pendingReview.body.order.productionItems[0].artworkAttachments), attachments);
+  assert.match(pendingReview.body.order.productionItems[0].artworkAttachments[2].downloadUrl, /X-Amz-Signature=/);
+  await call(`/orders/${orderId}/payments/initial/confirm`, { method: 'POST', subject: 'clerk_ops', body: {} });
+  await call(`/orders/${orderId}/transition`, { method: 'POST', subject: 'clerk_ops', body: { state: 'supplier_assigned' } });
+  for (const subject of ['clerk_client', 'clerk_ops', 'clerk_supplier_a']) {
+    const response = await call(`/orders/${orderId}`, { subject });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    const actual = response.body.order.productionItems[0].artworkAttachments;
+    assert.deepEqual(bare(actual), attachments);
+    for (const attachment of actual.filter(entry => entry.kind === 'file')) {
+      assert.match(attachment.downloadUrl, /X-Amz-Signature=/);
+      const download = await call(`/files/${attachment.fileId}/download-url`, { subject });
+      assert.equal(download.status, 200, JSON.stringify(download.body));
+    }
+  }
+  const jobs = (await call('/jobs', { subject: 'clerk_supplier_a' })).body.jobs;
+  assert.deepEqual(bare(jobs.find(order => order.id === orderId).productionItems[0].artworkAttachments), attachments);
+  const invoice = (await call(`/orders/${orderId}/invoice`)).body.invoice;
+  assert.deepEqual(bare(invoice.lines[0].artworkAttachments), attachments);
+  assert.match(invoice.lines[0].artworkAttachments[2].downloadUrl, /X-Amz-Signature=/);
+  assert.equal((await call('/files/file_back/download-url', { subject: 'clerk_supplier_b' })).status, 403);
+  await assert.rejects(database.query("UPDATE order_line_items SET artwork_attachments = '[]' WHERE order_id = $1", [orderId]), { code: '23514' });
 });

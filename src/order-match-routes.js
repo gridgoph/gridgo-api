@@ -1,3 +1,4 @@
+import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId, assertArtworkAttachmentLimit, validateArtworkAttachments, writeArtworkAttachments } from './artwork-attachments.js';
 import { specialInstructions } from './special-instructions.js';
 import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
@@ -301,11 +302,12 @@ function fileFor(store, user, fileId, purpose, field) {
 }
 
 function assertListingArtwork(store, item, line) {
-  if (!line.artworkFileId) return;
-  const file = (store.files || []).find(row => row.fileId === line.artworkFileId);
-  if (!listingAcceptsArtwork(publicCatalogItem(store, item)?.acceptedFormats, file?.detectedContentType)) {
-    fail(409, "artwork_file_format_not_accepted", "Choose an artwork file type accepted by this listing.",
-      { lineId: line.id, fileId: line.artworkFileId, field: "artwork" });
+  for (const fileId of artworkFileIdsFor(line)) {
+    const file = (store.files || []).find(row => row.fileId === fileId);
+    if (!listingAcceptsArtwork(publicCatalogItem(store, item)?.acceptedFormats, file?.detectedContentType)) {
+      fail(409, "artwork_file_format_not_accepted", "Choose an artwork file type accepted by this listing.",
+        { lineId: line.id, fileId, field: "artwork" });
+    }
   }
 }
 
@@ -581,6 +583,8 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
       artworkLinks: structuredClone(line.artworkLinks || []),
+      artworkAttachments: artworkAttachmentsFor(line),
+      artworkPreviewFileId: artworkPreviewFileId(store, line),
       specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
@@ -883,12 +887,13 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, {}, { required: true });
+    assertArtworkAttachmentLimit(artworkAttachmentsFor(line));
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (!line.artworkFileId && !(line.artworkLinks || []).length) {
       fail(409, "artwork_required", "Upload artwork or add a publicly viewable design link before checkout.", { lineId: line.id, field: "artwork" });
     }
-    if (line.artworkFileId) {
-      const file = fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
+    for (const fileId of artworkFileIdsFor(line)) {
+      const file = fileFor(store, user, fileId, "artwork", "artworkFileId");
       if (file.artworkCheck?.status !== "passed") fail(409, "artwork_file_check_failed",
         file.artworkCheck?.message || "This artwork has not passed its file check. Upload the original file again and replace the cart artwork.",
         { lineId: line.id, fileId: file.fileId, field: "artwork", reason: file.artworkCheck?.reason || "file_check_required" });
@@ -928,6 +933,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       snapshot.lineItem.jobId = jobId;
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
+      if (line.artworkAttachments) snapshot.lineItem.artworkAttachments = artworkAttachmentsFor(line);
       snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
@@ -1051,7 +1057,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   for (const snapshot of snapshots) {
     store.orderLineItems.push(snapshot.lineItem);
     store.orderLineItemOptions.push(...snapshot.options);
-    if (snapshot.lineItem.artworkFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.artworkFileId, "artwork", "artworkFileId"), orderId, `line:${snapshot.lineItem.id}:artwork`);
+    for (const fileId of artworkFileIdsFor(snapshot.lineItem)) attachOrderFile(fileFor(store, user, fileId, "artwork", "artworkFileId"), orderId, `line:${snapshot.lineItem.id}:artwork`);
     if (snapshot.lineItem.mockupFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.mockupFileId, "mockup", "mockupFileId"), orderId, `line:${snapshot.lineItem.id}:mockup`);
   }
   attachOrderFile(proof, orderId, "payment:initial:proof");
@@ -1072,6 +1078,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       amountMinor: lineItem.lineSubtotalMinor,
       artworkFileId: cartLine.artworkFileId ?? null,
       artworkLinks: structuredClone(lineItem.artworkLinks || []),
+      artworkAttachments: artworkAttachmentsFor(lineItem),
+      artworkPreviewFileId: artworkPreviewFileId(store, lineItem),
       specialInstructions: lineItem.specialInstructions || "",
       documentPages: structuredClone(lineItem.documentPages ?? null),
       mockupFileId: cartLine.mockupFileId ?? null,
@@ -1211,7 +1219,7 @@ export function isCartArtworkWrite(method, pathname) {
 // Server calls this before opening the mutation transaction. The actual route
 // repeats authorization and format validation against its locked store snapshot.
 export async function prepareCartArtworkLinks({ req, pathname, store, user, body, checker }) {
-  if (!isCartArtworkWrite(req.method, pathname) || !hasShortArtworkLinks(body?.artworkLinks)) return;
+  if (!isCartArtworkWrite(req.method, pathname) || !hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) return;
   requireClient(user);
   const parts = pathname.split("/");
   const cart = ownCart(store, user, decodeURIComponent(parts[3]), { draft: true });
@@ -1222,12 +1230,19 @@ export async function prepareCartArtworkLinks({ req, pathname, store, user, body
     itemId = line.catalogItemId;
   }
   const item = (store.catalogItems || []).find((row) => row.id === itemId);
-  body.artworkLinks = await resolveArtworkLinks(body.artworkLinks, item ? publicCatalogItem(store, item)?.acceptedFormats : [],
+  const formats = item ? publicCatalogItem(store, item)?.acceptedFormats : [];
+  if (Object.hasOwn(body, "artworkAttachments")) {
+    const entries = validateArtworkAttachments(body.artworkAttachments, formats, { allowShortLinks: true });
+    const links = await resolveArtworkLinks(entries.filter(entry => entry.kind === "link"), formats,
+      checker || ((link) => checkArtworkLinkForUser(user.id, link)));
+    let index = 0;
+    body.artworkAttachments = entries.map(entry => entry.kind === "link" ? { kind: "link", ...links[index++] } : entry);
+  } else body.artworkLinks = await resolveArtworkLinks(body.artworkLinks, formats,
     checker || ((link) => checkArtworkLinkForUser(user.id, link)));
 }
 
 const checkoutChecks = Symbol("artworkCheckoutChecks");
-const artworkFingerprint = line => JSON.stringify([line.artworkFileId || null, line.artworkLinks || []]);
+const artworkFingerprint = line => JSON.stringify(artworkAttachmentsFor(line));
 export function isArtworkCheckout(method, pathname) {
   return method === "POST" && /^\/me\/carts\/[^/]+\/checkout$/.test(pathname);
 }
@@ -1591,8 +1606,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     };
     assertMatchDeadline(store, item, line, at);
     if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
-    if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
-    if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
+    writeArtworkAttachments(line, body, publicCatalogItem(store, item)?.acceptedFormats);
+    for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, body);
     assertCartLinePriceable(store, item, line);
@@ -1644,19 +1659,21 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       if (measured !== undefined) line.measurement = measured;
     }
     if (Object.hasOwn(body, "structuredSpec")) line.structuredSpec = structuredClone(record(body.structuredSpec, "structuredSpec"));
-    if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
     if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
-    if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
-    if (patchedItem && Object.hasOwn(body, "artworkFileId")) assertListingArtwork(store, patchedItem, line);
+    writeArtworkAttachments(line, body, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
+    if (["artworkFileId", "artworkAttachments"].some(key => Object.hasOwn(body, key))) {
+      for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
+      if (patchedItem) assertListingArtwork(store, patchedItem, line);
+    }
     if (patchedItem) syncDocumentPages(store, patchedItem, line, body, { previousFileId: storedLine.artworkFileId });
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach
     // is still allowed; the quantity is fixed through the sheet, not here.
     const repriced = ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field))
-      || (patchedItem?.pricingUnit === "per_page" && ["artworkFileId", "pageRange"].some(field => Object.hasOwn(body, field)));
+      || (patchedItem?.pricingUnit === "per_page" && ["artworkFileId", "artworkAttachments", "pageRange"].some(field => Object.hasOwn(body, field)));
     if (repriced && patchedItem) {
       try {
         assertCartLinePriceable(store, patchedItem, line);
