@@ -249,6 +249,17 @@ test("PDF page boxes: a two-thousand-page file is read in one pass", () => {
   assert.equal(read.pageEnvelope.longSideMilli, 841_001);
 });
 
+test("PDF page boxes: deeply nested boxes cannot make the inspection quadratic", () => {
+  const depth = 2000;
+  const nested = "<< /MediaBox [0 0 595 842] ".repeat(depth) + "x".repeat(2 * 1024 * 1024) + " >>".repeat(depth);
+  const bytes = Buffer.from(`%PDF-1.4\n1 0 obj${nested}endobj\n2 0 obj<</Type /Pages /Count 1>>endobj\ntrailer<<>>\n%%EOF`, "latin1");
+  const started = process.hrtime.bigint();
+  const read = inspectArtwork(bytes, "application/pdf");
+  // The per-dictionary rescan this replaced took about a second here.
+  assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 400, "inspection stays linear in the file size");
+  assert.equal(read.pageEnvelope.longSideMilli, 297_039);
+});
+
 test("PDF page boxes inside a compressed object stream are read", () => {
   const hidden = zlib.deflateSync(Buffer.from("<</Type /Pages /Count 2 /Kids [5 0 R 6 0 R]>> <</Type /Page /MediaBox [" + A4 + "]>> <</Type /Page /MediaBox [" + A3 + "]>>", "latin1"));
   const bytes = Buffer.concat([

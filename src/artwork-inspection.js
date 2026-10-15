@@ -211,25 +211,38 @@ function collectPageBoxes(text, leaves, inherited) {
   }
   if (!boxes.length) return;
 
+  // Where each page-tree node says so. Marked on its innermost dictionary in
+  // the same pass, so no dictionary body is ever scanned twice.
+  const pagesTokens = [];
+  const PAGES_TYPE = /\/Type\s*\/Pages\b/g;
+  let token;
+  while (pagesTokens.length < MAX_PAGE_BOXES && (token = PAGES_TYPE.exec(text)) !== null) pagesTokens.push(token.index);
+
   const open = [];
   const owned = new Map();
+  const pagesNodes = new Set();
   let pending = 0;
-  const classify = (start, end) => {
+  const classify = (start) => {
     const own = owned.get(start);
     if (!own) return;
     owned.delete(start);
     pending -= 1;
-    const pagesNode = start >= 0 && /\/Type\s*\/Pages\b/.test(text.slice(start, end));
+    const pagesNode = pagesNodes.has(start);
     for (const box of own) (pagesNode ? inherited : leaves).push({ width: box.width, height: box.height });
   };
   const delimiters = /<<|>>/g;
   let next = 0;
+  let nextToken = 0;
   let delimiter;
   // Keep reading until every dictionary that owns a box has closed: a page
   // object written before its page tree must not be judged by the tree.
   while ((next < boxes.length || pending > 0) && (delimiter = delimiters.exec(text)) !== null) {
+    const owner = open.length ? open[open.length - 1] : -1;
+    while (nextToken < pagesTokens.length && pagesTokens[nextToken] < delimiter.index) {
+      if (owner >= 0) pagesNodes.add(owner);
+      nextToken += 1;
+    }
     while (next < boxes.length && boxes[next].at < delimiter.index) {
-      const owner = open.length ? open[open.length - 1] : -1;
       if (!owned.has(owner)) {
         owned.set(owner, []);
         if (owner >= 0) pending += 1;
@@ -240,7 +253,7 @@ function collectPageBoxes(text, leaves, inherited) {
     if (delimiter[0] === "<<") {
       if (open.length < 4096) open.push(delimiter.index);
     } else if (open.length) {
-      classify(open.pop(), delimiter.index + 2);
+      classify(open.pop());
     }
   }
   // Boxes past the last delimiter, or in dictionaries the file never closes,
