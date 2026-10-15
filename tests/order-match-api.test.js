@@ -1,4 +1,5 @@
 import { previewPdf } from './helpers/preview-fixtures.mjs';
+import { resetDatabase } from './fixtures/reset-database.js';
 import { alwaysOpenOperatingHours } from "./helpers/operating-hours.mjs";
 import { docx, zip } from './helpers/docx.mjs';
 import test from "node:test";
@@ -100,7 +101,7 @@ async function requestEventually(api, pathname, options, predicate) {
 }
 
 async function fixture(database) {
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, order_invoices,
     client_cart_lines, client_carts, client_saved_addresses, client_match_preferences,

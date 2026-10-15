@@ -40,7 +40,7 @@ export function parseVoucherCsv(text) {
 const csvCell = value => '"' + String(value ?? '').replace(/^[=+@\-\t\r]/, "'$&").replaceAll('"', '""') + '"';
 function audit(store, user, action, entityId, detail, id, at) {
   store.auditLog ||= [];
-  store.auditLog.push({ id: id('aud'), at, actorId: user.id, actorRole: user.role, action: `voucher.${action}`, entityType: 'voucher', entityId, detail });
+  store.auditLog.push({ id: id('aud'), at, actorId: user.id, actorRole: user.role, action: `voucher.${action}`, entityType: (action.startsWith('campaign_') || action === 'bulk_issue') ? 'voucher_campaign' : 'voucher', entityId, detail });
 }
 export async function routeVouchers({ req, url, store, user, readBody, readRawBody, id, now }) {
   const path = url.pathname;

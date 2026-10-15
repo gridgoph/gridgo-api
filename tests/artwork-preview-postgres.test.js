@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { resetDatabase } from './fixtures/reset-database.js';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore } from '../src/postgres-store.js';
@@ -9,7 +10,7 @@ import { createFileRetention } from '../src/file-retention.js';
 const DATABASE_URL = process.env.DATABASE_URL;
 test('deleting artwork during conversion cannot recreate original or derived bytes', { skip: !DATABASE_URL }, async t => {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
-  await db.query('TRUNCATE users CASCADE');
+  await resetDatabase(db, 'TRUNCATE users CASCADE');
   await db.transaction(async () => {
     const store = await loadStore(db);
     store.users.push({ id: 'preview-owner', clerkUserId: 'clerk_preview_owner', role: 'client', accountType: 'individual', email: 'owner@preview.test', name: 'Owner', createdAt: '2026-10-01T00:00:00Z' });

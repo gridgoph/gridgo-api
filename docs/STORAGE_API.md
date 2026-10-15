@@ -619,3 +619,19 @@ Password-protected or malformed PDFs receive an explicit error; PSD visual
 conversion and legacy binary `.doc` are not implemented. CI installs Poppler for
 fixture tests and also renders real small PDFs and verifies Word refusal inside
 the built production image, as uid 1001 with no network.
+
+## Supplier invoice scans
+
+`supplier_invoice` uses the existing supplier-owned multipart upload and order
+attachment flow: JPEG/PNG/WebP/PDF, maximum 15 MiB. `POST /files/:fileId/attach`
+accepts `{orderId}` and writes `supplierInvoiceFileIds`; approved owning shops and
+Operations/Super Admin alone can read metadata and signed bytes. Invoice uploads,
+metadata reads and signed downloads use private/no-store caching. Scans remain
+optional for dispatch and payouts. An invoice obligation snapshots the shop on
+first readiness; subsequent invoice attachments honor that owner after recovery.
+Refund work holds do not block invoice paperwork. Existing financial retention
+and open-case holds still apply.
+
+Use [Supplier invoices](SUPPLIER_INVOICES_API.md) for entered invoice number/date/
+amount, monthly expected/received/missing counts, the shop reminder and audited
+paper collection. Reuse this file purpose; do not introduce another upload flow.

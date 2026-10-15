@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import { issueVoucher, reserveVoucher, confirmVoucher } from '../src/vouchers.js';
 import { voucherMoney, applyVoucherMoney } from '../src/voucher-money.js';
 import test from 'node:test';
@@ -61,7 +62,7 @@ function orderFixture({ state = 'payment_authorized', paidPercent = 100, release
   return order;
 }
 async function fixture(db, options = {}) {
-  await db.query('TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
   const store = emptyStore(); store.settings = defaultOperationalSettings();
   store.users = Object.entries(roles).map(([key, role]) => ({ id: key, role, clerkUserId: `clerk_${key}`,
     email: `${key}@refund.test`, name: key, createdAt: AT, ...(role === 'client' ? { accountType: 'individual' } : {}),

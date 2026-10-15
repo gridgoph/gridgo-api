@@ -93,6 +93,8 @@ An own-account `role_changed` push may reach the account's still-owned device wh
 
 Listing review and product-type requests emit `catalog_review_pending` / `catalog_review_decided` durable inbox rows to the owning supplier and every current Operations/Super Admin membership, plus scoped `catalog` invalidation. Review changes use the transaction/save/outbox boundary. See [listing review](SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker).
 
+Featured Prints curation emits `featured_prints_updated` durable inbox rows to every current Operations/Super Admin membership (no push), plus generic `catalog` and staff `notifications` invalidation. Selection, audit and inbox rows commit together. The public Home read contains only approved anonymous product cards; see [Featured Prints](FEATURED_PRINTS_API.md).
+
 Paper-invoice promises write `physical_invoice_promised` to the owning client's inbox when Operations/Super Admin first sets or changes `promisedDeliveryAt`. The body states the paper invoice delivery date and time in Asia/Manila. Repeating the same promise does not notify again. This uses the ordinary notification/outbox boundary at `save()`; no separate push sender is required.
 
 ### Idle rider job alerts

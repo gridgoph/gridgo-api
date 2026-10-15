@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
@@ -13,7 +14,7 @@ const answers = { fulfillmentStars: 2, fulfillmentTags: ['late'], easeStars: 4, 
   expectedPriceMinor: 10000, qualityStars: 5, recommendScore: 6, improvementNote: '=Fix the delay, please\nThank you' };
 async function setup(db, state = 'issue_window_open') {
   assert.match(new URL(DB).pathname, /(?:_|-)test(?:_|$)/);
-  await db.query('TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
   const store = fixture(), at = new Date().toISOString();
   store.surveyLaunchedAt = (await db.query('SELECT launched_at FROM survey_launch')).rows[0].launched_at;
   Object.assign(store.orders[0], { state, ...(state === 'awaiting_collection' ? { fulfillmentMode: 'pickup' } : {}), issueWindowOpenedAt: state === 'issue_window_open' ? at : undefined,

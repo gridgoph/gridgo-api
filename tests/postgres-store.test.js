@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -9,7 +10,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const AT = "2026-08-16T00:00:00.000Z";
 
 async function clear(database) {
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     order_invoices, client_cart_lines, client_carts, client_saved_addresses,

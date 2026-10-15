@@ -1,3 +1,5 @@
+import { finalizeAuditEntries } from './audit.js';
+import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
@@ -95,6 +97,7 @@ const TABLES = [
   ...refundTableDefinitions,
   ...voucherTables,
   surveyTable,
+  supplierInvoiceTable,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
@@ -104,7 +107,7 @@ const TABLES = [
   { name: "credit_ledger", keys: ["id"], columns: ["id", "user_id", "amount_minor", "balance_after_minor", "created_at", "position", "data"] },
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
   { name: "issues", keys: ["id"], columns: ["id", "order_id", "client_id", "claim_id", "kind", "status", "created_at", "updated_at", "position", "data"] },
-  { name: "audit_log", keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"] },
+  { name: "audit_log", appendOnly: true, keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"] },
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
@@ -116,6 +119,7 @@ export function emptyStore() {
     ...emptyStaffStore(),
     ...emptyVoucherStore(),
     orderSurveys: [],
+    supplierInvoices: [],
     surveyLaunchedAt: null,
     version: 3,
     legalPenaltyGate: null,
@@ -190,6 +194,7 @@ function rowsFromStore(store) {
   staffRows(store, rows);
   voucherRows(store, rows);
   surveyRows(store, rows);
+  supplierInvoiceRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
@@ -793,6 +798,7 @@ export async function loadStore(database) {
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
   loadSurveyRows(store, loaded);
+  loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
@@ -1306,6 +1312,7 @@ async function upsertChanged(database, table, before, current) {
 
 export async function saveStore(database, store) {
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
+  finalizeAuditEntries(store, originalDomainStore(store));
   const currentRows = rowsFromStore(store);
   const baselineRows = store[BASELINE] || Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   const maps = new Map(TABLES.map((table) => [table.name, { before: rowMap(baselineRows[table.name] || [], table), current: rowMap(currentRows[table.name], table) }]));

@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
@@ -10,7 +11,7 @@ const PATH = '/dispatch/order/location';
 async function setup(t, orderPatch = {}) {
   const db = createDatabase({ DATABASE_URL });
   t.after(() => db.close());
-  await db.query('TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture();
   Object.assign(store.orders[0], { riderId: 'rider', state: 'rider_assigned',
     dropoff: { lat: 7.06, lng: 125.6 }, ...orderPatch }); // Even a client next to the shop must not see this leg.

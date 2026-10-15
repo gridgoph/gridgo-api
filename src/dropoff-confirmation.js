@@ -78,7 +78,7 @@ export async function routeDropoffConfirmation({ req, url, store, user, readBody
     ...(allowed ? { point } : { requestedPoint: point }) };
   order.updatedAt = at;
   audit(store, { actor: user, action: allowed ? 'order.dropoff_confirmed' : 'order.dropoff_review_requested',
-    entityType: 'order', entityId: order.id, orderId: order.id, detail: { point, original: previous.original } });
+    entityType: 'order', entityId: order.id, orderId: order.id, detail: { point, original: previous.original }, before: previous, after: order.dropoffConfirmation });
   const recipients = privilegedAdminMemberships(store).map(({ userId, role }) => ({ userId, appRole: role }));
   if (allowed && order.riderId) recipients.push({ userId: order.riderId, appRole: 'rider' });
   for (const recipient of recipients) {
