@@ -280,6 +280,10 @@ Private listing detail, the staff index, and `GET /me/catalog-items` (including 
 
 Each successful action commits the item, audit (`catalog_item.suspend` or `catalog_item.restore`, entity type `supplier_catalog_item`) and shop inbox notice together. `listing_suspended` tells the owning shop the reason. `listing_restored` tells it the take-down is lifted and the listing remains hidden until the shop turns it on. Both notices carry `catalogItemId`, use the supplier role, and invalidate the shop's notifications and catalogue after commit. Push data retains its existing privacy allowlist.
 
+## Shop hours
+
+Supplier hours/closures, temporary closure, same-day extensions, staff reads and audited changes are defined in [Shop hours](SHOP_HOURS_API.md). Base open days must have equal daily totals for this release; extensions do not change the working-day divisor.
+
 ## Production time in working days
 
 A production day is one shop working day's open time, using its configured

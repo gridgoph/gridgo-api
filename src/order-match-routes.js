@@ -1,4 +1,5 @@
 import { specialInstructions } from './special-instructions.js';
+import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
 import { selectVoucher, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
@@ -814,6 +815,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const downpaymentPercent = basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
+    shopClockVersion: 1,
     operatingClock: operatingClockSnapshot(store.settings, store.version),
     reviewSchedule: reviewTiming(store.settings, at),
     clientId: user.id,
@@ -964,6 +966,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     }
   }
   order.supplierId = job.supplierId;
+  snapshotShopClock(store, order);
   order.pickup = { ...job.pickup };
   order.distanceZone = job.deliveryDistanceMeters == null ? null
     : distanceZoneForDistance(job.deliveryDistanceMeters, store.settings);

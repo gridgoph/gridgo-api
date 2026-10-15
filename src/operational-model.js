@@ -19,7 +19,7 @@ import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
-import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier } from './production-penalties.js';
+import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier, productionTiming } from './production-penalties.js';
 import { packingProgressFor } from "./packing-progress.js";
 import { productionProgressFor, publicProgressTimeline, supplierProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
@@ -1083,6 +1083,14 @@ export function publicOrderFor(order, user, store = null) {
     publicRecord.deliveryMilestones = deliveryMilestones(order);
   }
   delete publicRecord.operatingClock;
+  delete publicRecord.shopClock;
+  delete publicRecord.shopClockVersion;
+  if (order.shopClockVersion === 1 && (['ops_admin', 'super_admin'].includes(user?.role)
+      || (user?.role === 'client' && user.id === order.clientId))) {
+    const finishedAt = order.readyAt && productionTiming(order, order.readyAt).finishedAt;
+    publicRecord.readyEarly = Boolean(finishedAt && order.readyBy && Date.parse(finishedAt) < Date.parse(order.readyBy));
+    publicRecord.readyLabel = publicRecord.readyEarly ? 'Ready early' : null;
+  }
   delete publicRecord.productionTimeCorrection;
   delete publicRecord.reviewSchedule;
   delete publicRecord.reviewDelayed;

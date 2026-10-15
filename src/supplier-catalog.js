@@ -1,3 +1,4 @@
+import { shopHoursStatus } from './shop-hours.js';
 import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
@@ -472,7 +473,7 @@ function clientModifierMinor(store, amount) {
   return amount < 0 ? -clientMoneyMinor(store, -amount) : clientMoneyMinor(store, amount);
 }
 
-export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
+export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
   store = approvedCatalogView(store);
   item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
@@ -503,6 +504,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
   const fromPriceMinor = minimumCatalogPrice(store, item);
   const rating = publicShopRating(store, item.supplierId);
   return {
+    shopHours: shopHoursStatus((store.supplierProfiles || []).find(row => row.userId === item.supplierId), store.settings, at),
     distanceZone: null,
     ...(rating ? { rating } : {}),
     id: item.id,
@@ -597,6 +599,7 @@ export function publicSupplierShop(store, supplierId) {
   return {
     supplierId,
     shopName: profile.shopName,
+    hours: shopHoursStatus(profile, store.settings),
     shop: profile.shop,
     media: publicShopMedia(store, supplierId),
     categories: [...new Set(services.map((service) => service.categoryCode))],
@@ -620,6 +623,7 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
     shops.push({
       supplierId: shop.supplierId,
       shopName: shop.shopName,
+      hours: shop.hours,
       shop: shop.shop,
       media: shop.media,
       categories: shop.categories,

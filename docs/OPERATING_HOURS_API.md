@@ -96,13 +96,15 @@ An edit that delays a pending review tags its order `reviewDelayed` in the same 
 
 ## Work gates and prospective SLA clocks
 
-New orders snapshot an internal `operatingClock` with `version: 1`, settings version and schedule at creation. No migration or read path opts an old order into this clock. The snapshot governs:
+Orders introduced by the platform-hours release snapshot an internal `operatingClock` with `version: 1`, settings version and schedule at creation. No migration or read path opts an old order into this clock. For orders created before the shop-hours release, this snapshot governs:
 
 - The shop's one-hour acceptance window.
 - Production inactivity reminder initial/repeat/reset delays (including durations configured as seconds, minutes, hours or days; a day remains 24 hours of counted time).
 - Production lateness: minor through six operating hours, moderate through 24, severe thereafter, with the existing no-communication rule. Payout assessment and release checks use the same clock.
 
 This is a prospective calendar policy: later settings edits do not recalculate an existing order's clock, promises, warnings or deductions. Already-applied/closed lapse records retain the existing assessment guard and are never recomputed. Legacy orders keep their existing acceptance/shop-calendar, reminder/wall-clock and penalty/wall-clock behavior. This separation protects existing financial decisions while making the schedule editable for new orders.
+
+The shop-hours release moves acceptance, inactivity grace and lateness to a separate prospective shop snapshot; see [Shop hours](SHOP_HOURS_API.md). Existing platform-clock orders keep their clock unchanged. Review and dispatch continue to use GRIDGO hours.
 
 For new orders, manual QA decisions from `needs_qa`, dispatch assignment/acceptance, and pickup checklist completion require the **current** platform window. Closed requests return `409 outside_operating_hours` with the next `scheduledReviewAt`. New unassigned dispatch offers are hidden while closed; assigned trips remain visible. Trips already picked up can continue and deliver after closing. Legacy in-flight orders retain their prior gates. Packing can finish while closed and await dispatch.
 

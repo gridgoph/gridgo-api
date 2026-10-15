@@ -1854,6 +1854,10 @@ function eligibleSuppliersForOrder(store, order) {
   const results = [];
 
   for (const supplier of suppliers) {
+    if ((store.supplierProfiles || []).find(profile => profile.userId === supplier.id)?.isClosed) {
+      results.push({ supplier: publicUser(supplier), eligible: false, reasons: ['shop_closed'], matchingServiceIds: [], services: [] });
+      continue;
+    }
     const reasons = [];
     if (supplier.verificationStatus !== "approved") {
       results.push({
@@ -2508,6 +2512,7 @@ async function handleAuditedRequest(req, res) {
     const privateCatalogRoute = pathname === "/listing-starters"
       || pathname === "/me/supplier-readiness"
       || pathname === "/me/supplier-profile"
+      || pathname === "/me/shop-hours"
       || pathname === "/me/supplier-payment-terms"
       || pathname.startsWith("/me/supplier-services")
       || pathname.startsWith("/me/catalog-items")
@@ -5697,6 +5702,7 @@ async function handleAuditedRequest(req, res) {
       const requestedDropoff = dropoffFor(address, zoneCode);
       const order = {
         id: id("ord"),
+        shopClockVersion: 1,
         operatingClock: operatingClockSnapshot(store.settings, store.version),
         ...(body.submit ? { fileCheck: { status: 'pending', requestedAt: ts, reviewedAt: null, reviewedBy: null, reason: null },
           reviewSchedule: reviewTiming(store.settings, ts) } : {}),

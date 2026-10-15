@@ -371,6 +371,11 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   // The order names its shop and carries both dates through the database.
   assert.equal(placed.supplierId, "supplier_a");
   assert.ok(placed.readyBy && placed.promiseBy);
+  assert.equal(placed.shopClockVersion, 1);
+  assert.equal(placed.shopClock.supplierId, "supplier_a");
+  assert.deepEqual(placed.shopClock.schedule, persisted.supplierProfiles.find(row => row.userId === "supplier_a").schedule
+    || { utcOffsetMinutes: 480, week: [1, 2, 3, 4, 5, 6].map(weekday => ({ weekday, opensMinute: 480, closesMinute: 1080 })), closures: [] });
+  assert.equal(checkout.body.order.shopClock, undefined);
   assert.equal(persisted.orderJobs.filter((row) => row.orderId === checkout.body.order.id).length, 1);
   const inbox = persisted.notifications.map((row) => `${row.userId}:${row.type}`).sort();
   assert.deepEqual(inbox, [
@@ -2602,8 +2607,9 @@ test('replacement preserves an applied original-shop penalty ledger and resets o
     order.fileCheck.status = 'passed';
     order.state = 'production'; order.readyBy = '2026-01-01T00:00:00.000Z';
     const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
-    assessProductionLapses(store, { at: '2026-01-03T00:00:00.000Z', createId });
-    assessProductionLapses(store, { at: '2026-01-03T00:01:00.000Z', createId });
+    // Thu/Fri/Sat contribute 30 shop hours: enough for an unfinished severe lapse.
+    assessProductionLapses(store, { at: '2026-01-05T00:00:00.000Z', createId });
+    assessProductionLapses(store, { at: '2026-01-05T00:01:00.000Z', createId });
     await saveStore(database, store);
   });
   const before = (await loadStore(database)).productionLapses[0];
@@ -2616,14 +2622,16 @@ test('replacement preserves an applied original-shop penalty ledger and resets o
   assert.deepEqual(store.productionLapses[0], before);
   assert.ok(store.orders[0].payoutMilestones.every((row) => !row.productionDeductionMinor));
   assert.equal(store.orders[0].supplierId, 'supplier_a');
+  assert.equal(store.orders[0].shopClock.supplierId, 'supplier_a');
   assert.equal(store.orderJobs[0].supplierId, 'supplier_a');
   await database.transaction(async () => {
     const current = await loadStore(database);
     current.orders[0].state = 'production';
     current.orders[0].readyBy = '2026-01-04T00:00:00.000Z';
     const createId = (prefix) => `${prefix}_${crypto.randomUUID()}`;
-    assessProductionLapses(current, { at: '2026-01-06T00:00:00.000Z', createId });
-    assessProductionLapses(current, { at: '2026-01-06T00:01:00.000Z', createId });
+    // Sunday is closed; Mon/Tue/Wed contribute another 30 shop hours.
+    assessProductionLapses(current, { at: '2026-01-08T00:00:00.000Z', createId });
+    assessProductionLapses(current, { at: '2026-01-08T00:01:00.000Z', createId });
     await saveStore(database, current);
   });
   const later = await loadStore(database);
