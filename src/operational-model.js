@@ -1,3 +1,4 @@
+import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId } from './artwork-attachments.js';
 import { changesFor, publicChange, supplementTotals, changePayoutsFor } from './order-change-policy.js';
 import { instructionLines } from './special-instructions.js';
 import { publicDeliveryPin } from './delivery-pin.js';
@@ -948,7 +949,7 @@ function fillOrderSpecFromLineItems(store, order) {
   const spec = first.structuredSpecSnapshot && typeof first.structuredSpecSnapshot === "object"
     ? first.structuredSpecSnapshot
     : {};
-  const artworkIds = lines.map((line) => line.artworkFileId).filter(Boolean);
+  const artworkIds = [...new Set(lines.flatMap(artworkFileIdsFor))];
   const mockupIds = lines.map((line) => line.mockupFileId).filter(Boolean);
   const lastArtworkId = artworkIds[artworkIds.length - 1] || null;
   const artworkFile = lastArtworkId
@@ -966,9 +967,7 @@ function fillOrderSpecFromLineItems(store, order) {
   if (emptySpec(order.address)) {
     order.address = order.dropoff?.label || first.dropoff?.label || "";
   }
-  if (!Array.isArray(order.artworkFileIds) || order.artworkFileIds.length === 0) {
-    if (artworkIds.length) order.artworkFileIds = artworkIds;
-  }
+  if (artworkIds.length) order.artworkFileIds = [...new Set([...(order.artworkFileIds || []), ...artworkIds])];
   if (!Array.isArray(order.mockupFileIds) || order.mockupFileIds.length === 0) {
     if (mockupIds.length) order.mockupFileIds = mockupIds;
   }
@@ -1019,6 +1018,8 @@ function productionItemsFor(store, order, user) {
           .map((option) => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })),
         artworkFileId: line.artworkFileId || null, mockupFileId: line.mockupFileId || null,
         artworkLinks: structuredClone(line.artworkLinks || []),
+        artworkAttachments: artworkAttachmentsFor(line),
+        artworkPreviewFileId: artworkPreviewFileId(store, line),
       };
     });
 }

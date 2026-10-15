@@ -796,9 +796,10 @@ test("artwork links enforce effective URL formats, shape and HTTPS on add/patch/
   const add = (artworkLinks) => call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "item_a", optionIds: [], quantity: 1, artworkLinks });
   await assert.rejects(add(DESIGN_LINKS), { code: "artwork_link_format_not_accepted" });
   enableDesignLinks(store);
-  for (const links of [null, {}, [null], Array(4).fill(DESIGN_LINKS[0]), [{ formatCode: "pdf", url: "https://example.com" }], [{ formatCode: "canva_link", url: "https://canva.com.evil.test/design/a/edit" }], [{ formatCode: "canva_link", url: "http://canva.com/design/a/edit" }], [{ formatCode: "canva_link", url: `https://canva.com/${"a".repeat(2000)}` }], [{ formatCode: "canva_link", url: "https://user:password@canva.com/design/a/edit" }]]) {
+  for (const links of [null, {}, [null], [{ formatCode: "pdf", url: "https://example.com" }], [{ formatCode: "canva_link", url: "https://canva.com.evil.test/design/a/edit" }], [{ formatCode: "canva_link", url: "http://canva.com/design/a/edit" }], [{ formatCode: "canva_link", url: `https://canva.com/${"a".repeat(2000)}` }], [{ formatCode: "canva_link", url: "https://user:password@canva.com/design/a/edit" }]]) {
     await assert.rejects(add(links), { code: "invalid_artwork_links" });
   }
+  await assert.rejects(add(Array(11).fill(DESIGN_LINKS[0])), { code: "artwork_attachment_limit_exceeded" });
   const lineId = (await add(DESIGN_LINKS)).body.cart.lines[0].id;
   await assert.rejects(call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { artworkLinks: [{ formatCode: "other_link", url: "https://example.com/design" }] }), { code: "artwork_link_format_not_accepted" });
   const cleared = await call("PATCH", `/me/carts/${cartId}/lines/${lineId}`, { artworkLinks: [] });
@@ -1851,4 +1852,50 @@ test('multi-shop checkout keeps each special instruction with only its own indep
     const order = store.orders.find(o => o.supplierId === supplierId);
     assert.deepEqual(store.orderLineItems.filter(l => l.orderId === order.id).map(l => l.specialInstructions), [note]);
   }
+});
+
+test('mixed attachment short links retain order and labels, and checkout binds every attachment', async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  const pathname = `/me/carts/${cartId}/lines`;
+  const body = { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkAttachments: [
+    { kind: 'file', fileId: 'file_art', label: 'Front' },
+    { kind: 'link', formatCode: 'other_link', url: 'https://canva.link/demo', label: 'Back' },
+  ] };
+  await prepareCartArtworkLinks({ req: { method: 'POST' }, pathname, store, user: client, body,
+    checker: async () => ({ url: 'https://www.canva.com/design/ABC/view', formatCode: 'canva_link' }) });
+  assert.deepEqual(body.artworkAttachments[1], { kind: 'link', formatCode: 'canva_link', url: 'https://www.canva.com/design/ABC/view', label: 'Back' });
+  const added = await call('POST', pathname, body);
+  assert.deepEqual(added.body.cart.lines[0].artworkAttachments, body.artworkAttachments);
+  const checkoutPath = `/me/carts/${cartId}/checkout`;
+  const req = { method: 'POST' };
+  const checked = [];
+  await prepareArtworkCheckout({ req, pathname: checkoutPath, store, user: client, checker: async link => { checked.push(link.url); return { ok: true }; } });
+  assert.deepEqual(checked, ['https://www.canva.com/design/ABC/view']);
+  store.cartLines[0].artworkAttachments[0].label = 'Changed while checking';
+  await assert.rejects(routeOrderMatch({ req, url: new URL(`http://gridgo.test${checkoutPath}`), store, user: client,
+    readBody: async () => ({ payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'CHANGED' } }), id: prefix => prefix, now: () => AT }), { code: 'artwork_check_required' });
+});
+
+test('ten links can be checked out and every secondary upload is validated', async () => {
+  const { store, client } = fixture();
+  enableDesignLinks(store);
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+  const path = `/me/carts/${cartId}/lines`;
+  const attachments = Array.from({ length: 10 }, (_, index) => ({ kind: 'link', formatCode: 'canva_link', url: `https://www.canva.com/design/ID${index}/view` }));
+  const added = await call('POST', path, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkAttachments: attachments });
+  const linePath = `${path}/${added.body.cart.lines[0].id}`;
+  for (const changes of [{ ownerId: 'someone-else' }, { state: 'pending_upload' }, { purpose: 'mockup' }, { detectedContentType: 'image/jpeg' }]) {
+    const original = store.files.find(file => file.fileId === 'file_art');
+    store.files.push({ ...structuredClone(original), fileId: 'invalid-secondary', ...changes });
+    await assert.rejects(call('PATCH', linePath, { artworkAttachments: [{ kind: 'file', fileId: 'file_art' }, { kind: 'file', fileId: 'invalid-secondary' }] }),
+      { code: changes.detectedContentType ? 'artwork_file_format_not_accepted' : 'file_not_ready' });
+    store.files.pop();
+  }
+  const placed = await call('POST', `/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'TEN' } });
+  assert.equal(placed.status, 201);
+  assert.deepEqual(store.orderLineItems[0].artworkAttachments, attachments);
 });

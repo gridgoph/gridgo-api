@@ -8,7 +8,7 @@ export function setAuditActor(actor) { if (context.getStore()) context.getStore(
 
 // Audit evidence is a business projection, never a copy of request bodies or files.
 // Defense in depth also applies to the legacy detail objects supplied by writers.
-const PRIVATE_KEY = /token|secret|password|authorization|cookie|clerkUserId|sessionId|objectKey|downloadUrl|uploadUrl|signedUrl|otp|credential|qrPayload|qrToken|inviteCode|codeHash|email|phone|address|documents?|permit|license|licence|birth|guardian|signature|artworkLinks|bankAccount|accountNumber|^text$|^resolution$|^details$|^bytes$|^base64$/i;
+const PRIVATE_KEY = /token|secret|password|authorization|cookie|clerkUserId|sessionId|objectKey|downloadUrl|uploadUrl|signedUrl|otp|credential|qrPayload|qrToken|inviteCode|codeHash|email|phone|address|documents?|permit|license|licence|birth|guardian|signature|artworkLinks|artworkAttachments|bankAccount|accountNumber|^text$|^resolution$|^details$|^bytes$|^base64$/i;
 export function safeAuditValue(value, depth = 0) {
   if (depth > 12) return '[omitted]';
   if (value == null) return null;

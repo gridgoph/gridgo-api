@@ -1,3 +1,4 @@
+import { signArtworkAttachments } from './artwork-attachments.js';
 import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
 import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique } from './order-change-policy.js';
 import { specialInstructions, acknowledgeInstructions } from './special-instructions.js';
@@ -1755,6 +1756,11 @@ async function publicOrder(order, user, orderStore) {
     authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
     presignGet: (key) => objectStorage.presignGet(key),
   }, "packingProgress");
+  await signArtworkAttachments(record, {
+    findFile: (fileId) => findFile(orderStore, fileId),
+    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
+    presignGet: (key) => objectStorage.presignGet(key),
+  });
   return record;
 }
 
@@ -2881,6 +2887,11 @@ async function handleAuditedRequest(req, res) {
       }
       if (orderMatchResponse.status < 400) {
         await decorateCatalogPhotoUrls(store, orderMatchResponse.body);
+        await signArtworkAttachments(orderMatchResponse.body, {
+          findFile: (fileId) => findFile(store, fileId),
+          authorizeRead: (file) => authorizeFileRead(user, store, file),
+          presignGet: (key) => objectStorage.presignGet(key),
+        });
       }
       return send(res, orderMatchResponse.status, orderMatchResponse.body);
     }
@@ -7090,7 +7101,7 @@ const server = http.createServer((req, res) => {
         if (!verified?.claims?.sub) return handleRequest(req, res);
         if (isCartArtworkWrite(req.method, pathname)) {
           const body = await readBody(req);
-          if (hasShortArtworkLinks(body?.artworkLinks)) {
+          if (hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) {
             const store = await load();
             const auth = await authenticateRequest(req, store);
             if (auth.user && !accountHoldDenial(auth.user)) {
