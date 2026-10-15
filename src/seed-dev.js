@@ -1,3 +1,4 @@
+import { organizationFeeMoney } from './organization-money.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -1627,9 +1628,8 @@ async function seedDevelopmentQueue(database, clientId, now) {
       });
 
       const itemSubtotalMinor = priced.lineSubtotalMinor;
-      const serviceFeeMinor = Math.round(
-        (itemSubtotalMinor * (store.settings?.serviceFeeRateBps ?? 1_000)) / 10_000,
-      );
+      const fee = organizationFeeMoney(itemSubtotalMinor, store.settings);
+      const { serviceFeeMinor } = fee;
       const deliveryFeeMinor = 5_000;
       const totalMinor = itemSubtotalMinor + serviceFeeMinor + deliveryFeeMinor;
       const downpaymentMinor = Math.round((totalMinor * 7_500) / 10_000);
@@ -1657,6 +1657,8 @@ async function seedDevelopmentQueue(database, clientId, now) {
         fulfillmentMode: entry.fulfillmentMode ?? (index % 3 === 0 ? "pickup" : "delivery"),
         supplierSubtotalMinor: itemSubtotalMinor,
         subtotalMinor: itemSubtotalMinor,
+        ...fee,
+        serviceFeeRateBps: fee.serviceFeeSchedule.version === 1 ? fee.serviceFeeSchedule.rateBps : null,
         serviceFeeMinor,
         deliveryFeeMinor,
         totalMinor,

@@ -63,7 +63,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   if (!basket || (!privileged && basket.clientId !== user.id)) fail(404, 'basket_not_found', 'That basket is unavailable.');
   if (req.method === 'GET' && !match[2]) return { status: 200, body: { basket: publicBasket(store, basket, user) } };
   if (req.method === 'GET' && match[2] === 'invoice') {
-    return { status: 200, body: { invoice: clientInvoice(store.orderInvoices.find((row) => row.orderId === basket.receiptOrderId).snapshot, { hideSupplierAmounts: !privileged }) } };
+    return { status: 200, body: { invoice: clientInvoice(store.orderInvoices.find((row) => row.orderId === basket.receiptOrderId).snapshot, { hideSupplierAmounts: !privileged, exposeWorking: privileged }) } };
   }
   if (req.method !== 'POST' || !match[3]) fail(404, 'not_found', 'Route not found.');
   const action = match[3];

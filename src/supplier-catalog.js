@@ -1,8 +1,9 @@
+import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
-import { gridgoAmountMinor, measurementKindFor, priceLine } from "./pricing.js";
+import { measurementKindFor, priceLine } from "./pricing.js";
 
 /** Volume breaks and speeds a listing sells, ordered as the client reads them. */
 function priceTiersFor(store, itemId) {
@@ -462,8 +463,7 @@ export function itemTurnaroundHours(item, service) {
  */
 export function clientMoneyMinor(store, supplierMinor) {
   if (!Number.isSafeInteger(supplierMinor)) return null;
-  const rate = store.settings?.serviceFeeRateBps ?? 0;
-  return gridgoAmountMinor(supplierMinor, rate);
+  return supplierMinor == null ? null : supplierMinor + serviceFeeMoney(supplierMinor, feeSchedule(store.settings)).grossServiceFeeMinor;
 }
 
 // Option discounts round the magnitude, then restore the sign, like the client UI.

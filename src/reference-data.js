@@ -1,3 +1,4 @@
+import { DEFAULT_SERVICE_FEE_SCHEDULE } from './service-fee.js';
 import { defaultOperationalSettings } from "./operational-model.js";
 import { defaultListingStarters } from "./listing-starters.js";
 import { defaultTaxonomy } from "./taxonomy.js";
@@ -89,7 +90,7 @@ export function referenceData() {
   return {
     catalog: defaultCatalog(),
     taxonomy: defaultTaxonomy(),
-    settings: defaultOperationalSettings(),
+    settings: { ...defaultOperationalSettings(), serviceFeeSchedule: structuredClone(DEFAULT_SERVICE_FEE_SCHEDULE) },
     zones: defaultZones(),
     acceptedFileFormats: defaultAcceptedFileFormats(),
     ...starters,

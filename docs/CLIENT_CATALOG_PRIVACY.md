@@ -1,5 +1,7 @@
 # Client catalogue privacy: staged release
 
+Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
+
 Refs gridgoph/gridgo-api#132. Decision: 4 October 2026.
 
 The final contract exposes GRIDGO client prices, distance zones and ratings,

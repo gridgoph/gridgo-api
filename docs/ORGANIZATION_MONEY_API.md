@@ -1,5 +1,7 @@
 # Organization discount and statements
 
+Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
+
 Refs gridgoph/gridgo-client#166 and gridgoph/gridgo-client#160.
 
 ## Eligibility
@@ -21,9 +23,10 @@ Delivery is added unchanged. Supplier principal remains PHP 100.
 `PATCH /settings` (Super Admin, existing `expectedVersion` and audited `reason`)
 accepts integer `organizationDiscountRateBps` from 0 to 10000. Both directions of
 an invalid fee/discount combination return `400 organization_discount_exceeds_service_fee`.
-Malformed discount rates return `400 invalid_organization_discount`. The final
-combined settings must have `serviceFeeRateBps >= organizationDiscountRateBps`.
-PostgreSQL also enforces this floor. Migration refuses an existing below-floor
+Malformed discount rates return `400 invalid_organization_discount`. For legacy flat-only settings, the final
+combined settings must have `serviceFeeRateBps >= organizationDiscountRateBps`;
+PostgreSQL also enforces this floor. Bracket schedules instead cap the computed
+organization discount at the computed gross service fee. Migration refuses an existing below-floor
 configuration; it does not silently raise the service fee.
 
 Client integration:

@@ -1337,3 +1337,41 @@ test("issue-report priority migration defaults existing reports to unpinned and 
     assert.equal((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='issue_reports' AND column_name='priority'", [schema])).rowCount, 0);
   });
 });
+
+test('bracket migration freezes legacy carts and open quotes before an audited settings activation', { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t,async ({schema,client})=>{
+    await runner({...migrationOptions(schema,'up',1792029000000,client),timestamp:true});
+    const { defaultOperationalSettings } = await import('../src/operational-model.js');
+    await client.query('INSERT INTO platform_settings(singleton,version,settings) VALUES(true,42,$1)',[defaultOperationalSettings()]);
+    await client.query(`
+      INSERT INTO users(id,clerk_user_id,email,name,role,account_type,verification_status,created_at,position) VALUES
+        ('fee_client','fee_c','fee_c@test.invalid','Client','client','individual',NULL,now(),0),
+        ('fee_shop','fee_s','fee_s@test.invalid','Shop','supplier',NULL,'approved',now(),1);
+      INSERT INTO taxonomy_categories(id,code,name,active,sort_order,position) VALUES('fee_cat','fee_cat','Category',true,0,0);
+      INSERT INTO taxonomy_subcategories(id,code,category_code,name,active,sort_order,position) VALUES('fee_sub','fee_sub','fee_cat','Subcategory',true,0,0);
+      INSERT INTO supplier_services(id,supplier_id,category_code,state,reference_rate_minor,turnaround_hours,created_at,updated_at,position)
+        VALUES('fee_service','fee_shop','fee_cat','live',200000,24,now(),now(),0);
+      INSERT INTO supplier_catalog_items(id,supplier_id,supplier_service_id,subcategory_code,name,base_price_minor,sort_order,created_at,updated_at)
+        VALUES('fee_item','fee_shop','fee_service','fee_sub','Item',200000,0,now(),now());
+      INSERT INTO client_carts(id,client_id,created_at,updated_at,deadline) VALUES('fee_cart','fee_client',now(),now(),'2026-12-01T00:00:00Z');
+      INSERT INTO client_cart_lines(id,cart_id,supplier_id,catalog_item_id,quantity,sort_order,created_at,updated_at)
+        VALUES('fee_line','fee_cart','fee_shop','fee_item',1,0,now(),now());
+      INSERT INTO orders(id,client_id,state,created_at,updated_at,position,data)
+        VALUES('fee_quote','fee_client','awaiting_checkout',now(),now(),0,'{"pendingQuote":{"version":1,"supplierSubtotalMinor":200000}}');
+    `);
+    await runner({...migrationOptions(schema,'up',1792037400000,client),timestamp:true});
+    const settings=(await client.query('SELECT * FROM platform_settings')).rows[0];
+    assert.equal(settings.version,43);
+    assert.equal(settings.settings.serviceFeeSchedule.version,2);
+    const cart=(await client.query('SELECT service_fee_snapshot FROM client_cart_lines')).rows[0].service_fee_snapshot;
+    assert.deepEqual(cart,{groupKey:['fee_shop','2026-12-01T00:00:00.000Z'],schedule:{version:1,rateBps:1000}});
+    const quote=(await client.query('SELECT data FROM orders')).rows[0].data.pendingQuote;
+    assert.deepEqual(quote.serviceFeeSchedule,{version:1,rateBps:1000});
+    const audit=(await client.query("SELECT data FROM audit_log WHERE id='aud_service_fee_brackets_1792037400000'")).rows[0].data;
+    assert.equal(audit.detail.previous.serviceFeeRateBps,1000);
+    assert.equal(audit.detail.current.serviceFeeSchedule.version,2);
+    const fees=await client.query('SELECT gridgo_service_fee(n,$1) AS fee FROM unnest(ARRAY[0,1,199900,200000,500000,2000000,5000000]::numeric[]) n',[settings.settings.serviceFeeSchedule]);
+    assert.deepEqual(fees.rows.map(row=>Number(row.fee)),[0,0,89955,90000,165000,540000,990000]);
+    await assert.rejects(client.query("UPDATE platform_settings SET settings=jsonb_set(settings,'{serviceFeeSchedule,brackets,0,rateBps}','10001')"),{code:'23514'});
+  });
+});

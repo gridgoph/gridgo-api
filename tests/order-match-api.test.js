@@ -100,7 +100,7 @@ async function requestEventually(api, pathname, options, predicate) {
   throw new Error(`Timed out waiting for ${pathname}`);
 }
 
-async function fixture(database) {
+async function fixture(database, { brackets = false } = {}) {
   await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, order_invoices,
@@ -118,6 +118,8 @@ async function fixture(database) {
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
+    // Existing flow tests explicitly exercise retained flat-rate compatibility.
+    if (!brackets) delete store.settings.serviceFeeSchedule;
     store.settings.operatingHours = alwaysOpenOperatingHours();
     store.settings.handoverOtpEnabled = true;
     store.settings.hubPickupEnabled = true;
@@ -3059,4 +3061,74 @@ test('artwork previews persist PDF renditions, defer Word, authorize reads, retr
   assert.match(instance.output(), /artwork_preview_failed.*preview_rasterization_failed/);
   assert.match(instance.output(), /artwork_preview_failed.*storage_object_missing/);
   assert.match(instance.output(), /artwork_preview_failed.*client_read.*image_load_failed/);
+});
+
+test('bracket settings preview, staff privacy, compare-and-swap and scheduled changes are audited', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL }); t.after(() => database.close());
+  await fixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({ id:'user_super',clerkUserId:'clerk_super',email:'super@gridgo.test',name:'Super',role:'super_admin',createdAt:AT });
+    store.userRoleMemberships.push({userId:'user_super',role:'super_admin',createdAt:AT});
+    await saveStore(database,store);
+  });
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit',resolve)); });
+  const call = (path,subject,method='GET',body) => request(instance.api,path,{subject,method,body});
+  const current = (await call('/settings','clerk_super')).body;
+  const brackets = [{upToMinor:200000,rateBps:4500},{upToMinor:2000000,rateBps:2500},{upToMinor:null,rateBps:1500}];
+  const body = {expectedVersion:current.version,reason:'Bracket rollout',serviceFeeBrackets:brackets};
+  assert.equal((await call('/settings','clerk_ops','PATCH',body)).status,403);
+  assert.equal((await call('/settings/service-fee/preview','clerk_client','POST',body)).status,403);
+  const preview = await call('/settings/service-fee/preview','clerk_ops','POST',body);
+  assert.equal(preview.status,200,JSON.stringify(preview.body));
+  assert.deepEqual(preview.body.examples.map(row=>row.next.grossServiceFeeMinor),[22500,89955,90000,165000,540000,990000]);
+  assert.equal((await call('/settings','clerk_client')).body.settings.serviceFeeSchedule,undefined);
+  const effectiveFrom = new Date(Date.now()+86400000).toISOString();
+  const patch = await call('/settings','clerk_super','PATCH',{...body,serviceFeeEffectiveFrom:effectiveFrom});
+  assert.equal(patch.status,200,JSON.stringify(patch.body));
+  assert.equal(patch.body.version,current.version+1);
+  assert.equal(patch.body.settings.scheduledServiceFee.effectiveFrom,effectiveFrom);
+  assert.equal((await call('/settings','clerk_super','PATCH',body)).status,409);
+  assert.equal((await call('/settings','clerk_super','PATCH',{...body,expectedVersion:patch.body.version,serviceFeeBrackets:[]})).status,400);
+  const stored = await loadStore(database);
+  assert.ok(stored.auditLog.some(row=>row.action==='settings.operational_update' && row.detail.current.scheduledServiceFee.effectiveFrom===effectiveFrom));
+});
+
+test('bracket checkout persists locked groups and immutable working, keeps client invoices private and refunds fee-based', { skip: !DATABASE_URL }, async t => {
+  const database=createDatabase({DATABASE_URL});t.after(()=>database.close());
+  await fixture(database,{brackets:true});
+  const instance=await startApi();
+  t.after(async()=>{instance.child.kill('SIGTERM');await new Promise(resolve=>instance.child.once('exit',resolve));});
+  const call=(path,options={})=>request(instance.api,path,{subject:'clerk_client',...options});
+  const created=await call('/me/carts',{method:'POST',body:{fulfillmentMode:'delivery',
+    deadline:new Date(Date.now()+90*86400000).toISOString(),defaultDropoff:{lat:7.08,lng:125.62,label:'Destination'}}});
+  const path=`/me/carts/${created.body.cart.id}`;
+  for (const [shop,quantity] of [['a',50],['b',25]]) {
+    const added=await call(`${path}/lines`,{method:'POST',body:{catalogItemId:`item_supplier_${shop}`,quantity,optionIds:[],artworkFileId:'file_art'}});
+    assert.equal(added.status,201,JSON.stringify(added.body));
+  }
+  let stored=await loadStore(database);
+  assert.ok(stored.cartLines.every(line=>line.serviceFeeSnapshot.schedule.version===2));
+  // A subsequent settings update cannot alter either stored group schedule.
+  await database.transaction(async()=>{stored.settings.serviceFeeSchedule.brackets=[{upToMinor:null,rateBps:1000}];await saveStore(database,stored);});
+  const cart=await call(path);
+  assert.deepEqual(cart.body.cart.groups.map(g=>g.clientItemSubtotalMinor),[665000,665000]);
+  const checkout=await call(`${path}/checkout`,{method:'POST',body:{payment:{method:'qr_manual',reference:'BRACKETS',proofFileId:'file_qr'}}});
+  assert.equal(checkout.status,201,JSON.stringify(checkout.body));
+  for (const key of ['serviceFeeSchedule','serviceFeeWorking','serviceFeeMinor','grossServiceFeeMinor']) assert.equal(JSON.stringify(checkout.body).includes(`"${key}"`),false,key);
+  assert.equal(checkout.body.invoice.clientItemSubtotalMinor,1330000);
+  stored=await loadStore(database);
+  assert.deepEqual(stored.orders.map(o=>o.grossServiceFeeMinor),[165000,165000]);
+  const order=stored.orders[0];
+  assert.equal(order.serviceFeeRateBps,null);
+  assert.equal(order.serviceFeeWorking[1].amountMinor,75000);
+  assert.equal(order.payoutMilestones.reduce((sum,m)=>sum+m.amountMinor,0),500000);
+  const staff=await call(`/orders/${order.id}`,{subject:'clerk_ops'});
+  assert.equal(staff.body.order.serviceFeeWorking[1].amountMinor,75000);
+  const invoice=await call(`/baskets/${checkout.body.basket.id}/invoice`);
+  assert.equal(invoice.body.invoice.clientItemSubtotalMinor,1330000);
+  assert.equal(invoice.body.invoice.lines.reduce((sum,line)=>sum+line.clientAmountMinor,0),1330000);
+  await assert.rejects(database.query("UPDATE orders SET data=jsonb_set(data,'{serviceFeeSchedule,brackets,0,rateBps}','1') WHERE id=$1",[order.id]),{code:'23514'});
+  await assert.rejects(database.query("UPDATE orders SET data=data-'serviceFeeSchedule' WHERE id=$1",[order.id]),{code:'23514'});
 });
