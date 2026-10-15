@@ -119,7 +119,7 @@ Uploads spool to `$PWD/.tmp/uploads`; the image must keep it writable by uid 100
 
 ## Constraints
 
-- Plain `node:http`; approved direct dependencies are `pg`, `node-pg-migrate`, `minio`, `@clerk/backend`, and `nodemailer`.
+- Plain `node:http`; approved direct dependencies are `pg`, `node-pg-migrate`, `minio`, `@clerk/backend`, `nodemailer`, and `web-push` (supplier browser push).
 - Authorization on every non-public route; errors use `{ error: "snake_case" }`.
 - Public landing support tickets live in `support_admins` / `support_tickets` (`src/support-desk.js`). They use `DATABASE_URL` through `database.query` / transactions, not a second Pool. Desk access (tickets and `/issue-reports`) is a Clerk session whose verified primary email is on `SUPPORT_DESK_ALLOWED_EMAILS` (`deskOperatorFromRequest`); `POST /admin/login` is retired and the landing origin must be a Clerk authorized party. Gmail replies are optional via `EMAIL_USER` / `EMAIL_PASSWORD`.
 - The Super Admin Tracker (`src/tracker.js`, contract `docs/TRACKER_API.md`) reads and writes GitHub issues labelled `tracker` over plain `fetch` with the server-only `GITHUB_TRACKER_TOKEN`; GitHub stays the status source of truth, PostgreSQL keeps only `tracker_decisions`. Unset token = `503 tracker_not_configured`; unset `FIRSTMATE_TRACKER_TOKEN` = firstmate routes `404`. Its writes hold the `gridgo-tracker` lock during GitHub calls and take the domain lock only for the final audit commit. Tests mock GitHub via `GITHUB_TRACKER_API_URL`; never call the real API.
