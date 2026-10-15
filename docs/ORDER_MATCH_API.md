@@ -120,6 +120,87 @@ Response:
 
 No supplier ID, service ID, shop name, shop point/address, contact, or logo is projected into an alternative. `photos` starts with only `fileId`, `sortOrder`, and metadata `url`; the common catalog decorator adds `downloadUrl` and `downloadUrlExpiresAt` when storage signing succeeds. Photo alt text is omitted. Listing names, option labels and product photos are supplier-authored product content; this projection does not inspect image pixels. Existing Top Pick `shop` and listing supplier fields remain for compatibility as explicitly required by this rollout; the new matching UI must not display those shop fields. Cart and post-order shop projections are unchanged.
 
+### Add more from a cart group
+
+For report C86B13A1, the client checkout's **Add more from Shop A/B** should open
+the group's available GRIDGO listings directly:
+
+```http
+GET /me/carts/:cartId/groups/:groupId/listings
+Authorization: Bearer <Clerk session JWT>
+```
+
+Use `cart.groups[].id` as `groupId`. It is an opaque cart-line reference, not a
+supplier ID. Only a client membership owning that draft cart can read it.
+The server resolves both the shop and the group's effective deadline from the
+cart; the caller cannot override either through this read.
+
+```json
+{
+  "groupId": "cline_...",
+  "label": "Shop A",
+  "deadline": "2026-11-02T10:00:00.000Z",
+  "listings": [
+    {
+      "id": "ci_...",
+      "name": "Tri-fold brochures",
+      "categoryCode": "marketing_collateral",
+      "subcategoryCode": "brochures",
+      "clientFromPriceMinor": 29000,
+      "readyBy": "2026-10-20T10:00:00.000Z",
+      "photos": []
+    }
+  ],
+  "emptyReason": null
+}
+```
+
+The example abbreviates each listing. Listings use the anonymous alternative
+card allowlist above, including configuration fields and signed sample photos,
+but have **no `selectToken`**. No shop object, supplier/service ID, shop name,
+address, coordinates, contact, or logo is returned. `label` is the same anonymous
+Shop A/B label as the cart. Render prices from `client*` fields and images from
+`photos[].downloadUrl`; `photos[].url` is only the metadata route. The retained
+raw price fields follow existing catalogue compatibility rules. Use the existing
+catalogue quote endpoint for a configured price; do not sum marked-up components.
+
+This read includes all active product subcategories at this group's shop, using
+the approved catalogue snapshot, live service and supplier standing gates, and
+the same queue/calendar promise calculation as matching. It accounts for earlier
+draft groups at the same shop and the selected group's existing quantity and
+slowest production time. Each candidate is checked at its minimum order quantity
+(or one when no minimum is set). Existing products may be listed again so another
+configuration can be added. A group without a deadline has no deadline cutoff.
+
+An empty result is `200` with `listings: []` and `emptyReason`:
+
+- `no_orderable_listings`: no eligible listings remain; show “No products are currently available to add from this group.”
+- `deadline_not_met`: eligible products cannot fit the group's date; show “No more products can be added for this date.”
+
+Client follow-up sequence:
+
+1. Open this read instead of the category picker and render the returned cards.
+2. On selection, call `POST /me/matches` with `{cartId, groupId, subcategoryCode}`
+   using the selected card's subcategory. Omit `deadline` to retain the group's
+   date. When configuration changes quantity or dimensions, send `units` and the
+   existing measurement/spec fields to recheck that configuration.
+3. Find the selected card's `id` in that response's `listings`, then send its
+   `selectToken`, the response's `matchRequestId`, and the chosen configuration
+   to `POST /me/carts/:cartId/lines`. Do not substitute the first listing or use a
+   supplier ID. The token carries the group shop/date into the existing add flow.
+4. Refresh the cart after adding. If the card is no longer offered, refresh this
+   list and ask for another choice. Availability is a live estimate, not a
+   reservation; changed quantity, configuration, queues or shop standing still
+   undergo the existing match/add/checkout validation.
+
+The read issues no tokens and changes no cart or selection records. Errors are
+`401 unauthorized` without a valid session, `403 membership_required` without a
+client membership, `403 forbidden` for another client's cart, `404 cart_not_found`
+for a missing cart, `404 cart_group_not_found` for a missing/foreign/stale group
+reference, and `409 cart_checked_out` for a completed cart.
+
+### Adding a selected listing
+
 Choose either the Top Pick listing or an alternative through the existing add-line endpoint:
 
 ```http

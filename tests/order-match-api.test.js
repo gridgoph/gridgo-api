@@ -15,6 +15,7 @@ import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
 import { checklistDigest, createPayoutMilestones } from "../src/operational-model.js";
 import { seedReferenceData } from "../src/seed.js";
+import { listingSnapshot } from "../src/catalog-review-state.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
@@ -191,6 +192,135 @@ async function fixture(database, { brackets = false } = {}) {
     await saveStore(database, store);
   });
 }
+
+test('cart group listings are anonymous, signed, owner-scoped and selectable through group matching', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database, { brackets: true });
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({ id: 'other_client', clerkUserId: 'clerk_other', email: 'other@gridgo.test', name: 'Other', role: 'client', accountType: 'individual', createdAt: AT });
+    store.userRoleMemberships.push({ userId: 'other_client', role: 'client', createdAt: AT });
+    // Real uploads and listing IDs are opaque; do not encode the shop in test IDs or object keys.
+    for (const [index, item] of store.catalogItems.entries()) {
+      const photo = store.catalogItemPhotos.find(row => row.catalogItemId === item.id);
+      const file = store.files.find(row => row.fileId === photo.fileId);
+      item.id = `ci_${index}`;
+      item.name = item.subcategoryCode === 'flyers' ? 'Flyers' : 'Brochures';
+      photo.catalogItemId = item.id;
+      photo.fileId = file.fileId = `sample_${index}`;
+      file.objectKey = `catalog_item_photo/2026/10/sample_${index}.jpg`;
+    }
+    await saveStore(database, store);
+  });
+  const instance = await startApi({ extraEnv: { MINIO_ENDPOINT: 'http://127.0.0.1:1', MINIO_PUBLIC_URL: 'https://media.gridgo.test',
+    MINIO_ACCESS_KEY: 'test-access', MINIO_SECRET_KEY: 'test-secret', MINIO_BUCKET: 'gridgo-uploads', MINIO_REGION: 'us-east-1' } });
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const deadline = new Date(Date.now() + 30 * 86400000).toISOString();
+  const cart = (await call('/me/carts', { method: 'POST', body: { deadline, fulfillmentMode: 'pickup' } })).body.cart;
+  const path = `/me/carts/${cart.id}`;
+  const add = await call(`${path}/lines`, { method: 'POST', body: { catalogItemId: 'ci_0', quantity: 1, optionIds: [] } });
+  assert.equal(add.status, 201, JSON.stringify(add.body));
+  const groupId = add.body.cart.groups[0].id;
+  const readPath = `${path}/groups/${groupId}/listings`;
+  const before = await loadStore(database);
+  const result = await call(readPath);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.groupId, groupId);
+  assert.equal(result.body.label, 'Shop A');
+  assert.equal(result.body.deadline, deadline);
+  assert.equal(result.body.emptyReason, null);
+  assert.deepEqual(result.body.listings.map(row => row.id).sort(), ['ci_0', 'ci_1']);
+  for (const listing of result.body.listings) {
+    assert.ok(listing.clientFromPriceMinor > listing.fromPriceMinor);
+    assert.ok(Date.parse(listing.readyBy) <= Date.parse(deadline));
+    assert.match(listing.photos[0].downloadUrl, /X-Amz-Signature=/);
+    assert.ok(Date.parse(listing.photos[0].downloadUrlExpiresAt) > Date.now());
+  }
+  const serialized = JSON.stringify(result.body);
+  for (const secret of ['supplier_a', 'supplier_b', 'supplierId', 'supplierServiceId', 'shopName', 'contactName', '"shop"', '"lat"', '"lng"', 'objectKey', 'shopReadyBy']) {
+    assert.equal(serialized.includes(secret), false, secret);
+  }
+  const after = await loadStore(database);
+  assert.deepEqual(after.cartLines, before.cartLines);
+  assert.deepEqual(after.carts, before.carts);
+  assert.deepEqual(after.matchSelections, before.matchSelections, 'GET never issues persistent selection tokens');
+  assert.equal((await call(readPath, { subject: undefined })).status, 401);
+  for (const subject of ['clerk_supplier_a', 'clerk_ops', 'clerk_other']) assert.equal((await call(readPath, { subject })).status, 403);
+  assert.equal((await call(`${path}/groups/missing/listings`)).body.error, 'cart_group_not_found');
+  const another = (await call('/me/carts', { method: 'POST', body: {} })).body.cart;
+  assert.equal((await call(`/me/carts/${another.id}/groups/${groupId}/listings`)).body.error, 'cart_group_not_found');
+  const chosen = result.body.listings.find(row => row.subcategoryCode === 'brochures');
+  const match = await call('/me/matches', { method: 'POST', body: { cartId: cart.id, groupId, subcategoryCode: chosen.subcategoryCode } });
+  assert.equal(match.status, 200, JSON.stringify(match.body));
+  const selected = match.body.listings.find(row => row.id === chosen.id);
+  const added = await call(`${path}/lines`, { method: 'POST', body: { selectToken: selected.selectToken, matchRequestId: match.body.matchRequestId, quantity: 1, optionIds: [] } });
+  assert.equal(added.status, 201, JSON.stringify(added.body));
+  assert.equal(added.body.cart.groups.length, 1);
+  assert.equal(added.body.cart.groups[0].id, groupId);
+  assert.equal(added.body.cart.groups[0].deadline, deadline);
+  assert.equal(added.body.cart.groups[0].lineIds.length, 2);
+});
+
+test('cart group listings filter unavailable revisions and deadlines and return normal empty reasons', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const deadline = new Date(Date.now() + 14 * 86400000).toISOString();
+  const cart = (await call('/me/carts', { method: 'POST', body: { deadline } })).body.cart;
+  const added = await call(`/me/carts/${cart.id}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', quantity: 1, optionIds: [] } });
+  const groupId = added.body.cart.groups[0].id;
+  const read = () => call(`/me/carts/${cart.id}/groups/${groupId}/listings`);
+  const baseline = await loadStore(database);
+  const change = async edit => database.transaction(async () => {
+    const store = structuredClone(baseline);
+    edit(store, store.catalogItems.find(row => row.id === 'item_supplier_a_brochures'));
+    await saveStore(database, store);
+  });
+  assert.equal((await read()).status, 200);
+  for (const edit of [
+    (_store, item) => { item.active = false; },
+    (_store, item) => { item.reviewStatus = 'pending'; },
+    (_store, item) => { item.suspendReason = 'Staff hold'; item.suspendedAt = AT; },
+    (_store, item) => { item.turnaroundMode = 'override'; item.turnaroundHours = 400; },
+    store => { Object.assign(store.files.find(row => row.fileId === 'photo_supplier_a_brochures'), { state: 'deleted', objectKey: null }); },
+  ]) {
+    await change(edit);
+    const response = await read();
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.deepEqual(response.body.listings.map(row => row.id), ['item_supplier_a']);
+  }
+  await change((store, item) => {
+    item.approvedSnapshot = listingSnapshot(store, item);
+    item.basePriceMinor = 999999;
+    item.reviewStatus = 'pending';
+  });
+  const revision = (await read()).body.listings.find(row => row.id === 'item_supplier_a_brochures');
+  assert.equal(revision.fromPriceMinor, 20000, 'only approved pricing is visible');
+  for (const edit of [
+    store => { store.supplierProfiles.find(row => row.userId === 'supplier_a').isClosed = true; },
+    store => { Object.assign(store.users.find(row => row.id === 'supplier_a'), {
+      accountStatus: 'suspended', accountStatusReason: 'Test hold', accountStatusAt: AT, accountStatusBy: 'user_ops',
+    }); },
+    store => { store.supplierServices.find(row => row.supplierId === 'supplier_a').state = 'suspended'; },
+    store => { store.approvalCases.find(row => row.userId === 'supplier_a').status = 'pending'; },
+  ]) {
+    await change(edit);
+    const response = await read();
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.deepEqual(response.body.listings, []);
+    assert.equal(response.body.emptyReason, 'no_orderable_listings');
+  }
+  await change(store => { store.carts.find(row => row.id === cart.id).deadline = new Date(Date.now() + 60000).toISOString(); });
+  const tooLate = await read();
+  assert.equal(tooLate.status, 200);
+  assert.deepEqual(tooLate.body.listings, []);
+  assert.equal(tooLate.body.emptyReason, 'deadline_not_met');
+});
 
 /**
  * The supplier's signature, already on the order. Written straight into the

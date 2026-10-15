@@ -49,6 +49,7 @@ import {
 import { AvailabilityError, fitsDeadline } from "./availability.js";
 import {
   MatchError,
+  cartGroupListings,
   deadlineDays,
   matchShop,
   multiplyMinor,
@@ -1500,6 +1501,22 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
+  }
+
+  const groupListingsMatch = /^\/me\/carts\/([^/]+)\/groups\/([^/]+)\/listings$/.exec(pathname);
+  if (groupListingsMatch && req.method === "GET") {
+    const cart = ownCart(store, user, decodeURIComponent(groupListingsMatch[1]), { draft: true });
+    const lines = (store.cartLines || []).filter(line => line.cartId === cart.id)
+      .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
+    const groupId = decodeURIComponent(groupListingsMatch[2]);
+    const group = cartGroups(cart, lines).find(row => row.lines[0].id === groupId);
+    if (!group) fail(404, "cart_group_not_found", "That group does not belong to this cart.");
+    const suppliers = [...new Set(lines.map(line => line.supplierId))];
+    return { status: 200, mutated: false, body: {
+      groupId, label: shopLabel(suppliers.indexOf(group.supplierId)), deadline: group.deadline,
+      ...cartGroupListings(store, { supplierId: group.supplierId, deadline: group.deadline,
+        cartLines: lines.map(line => ({ ...line, deadline: lineDeadline(cart, line) })), now: now() }),
+    } };
   }
 
   const voucherRoute = /^\/me\/carts\/([^/]+)\/voucher$/.exec(pathname);
