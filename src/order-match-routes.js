@@ -480,7 +480,7 @@ function cartVoucherPlan(store, cart, lines, at) {
   return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0) };
 }
 
-function clientCartQuote(store, cart, lines, at) {
+export function clientCartQuote(store, cart, lines, at) {
   const reasons = [];
   if (!lines.length) reasons.push({ code: "cart_empty" });
   const subtotals = lines.map((line) => {

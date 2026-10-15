@@ -11,6 +11,7 @@ import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './a
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
+import { routePricingFeedback } from './pricing-feedback-routes.js';
 import { syncSurveys } from './surveys.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { ACTIVE_TRACKING_STATES, assignmentTime, pickupTime, currentRiderPings, latestPing, trackingSettings, locationFreshness, clientTracking, pingDiagnostics } from './rider-tracking.js';
@@ -2539,7 +2540,8 @@ async function handleAuditedRequest(req, res) {
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
-    const surveyResponse = await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id });
+    const surveyResponse = await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id })
+      || await routePricingFeedback({ req, url, store, user, readBody, now, id });
     if (surveyResponse) {
       res.setHeader("Cache-Control", "private, no-store");
       if (surveyResponse.mutated) await save(store);
