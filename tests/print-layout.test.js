@@ -417,3 +417,25 @@ test("the shop marks layouts on its listing, and the change goes to listing revi
   });
   assert.equal(renamed.body.item.reviewStatus, "approved");
 });
+
+test("layouts on an unapproved listing draft cannot be chosen through the cart routes", async () => {
+  const { store: fixture, client } = store({ printLayouts: [] });
+  const item = fixture.catalogItems[0];
+  // The approved version offers no layout; the shop's pending draft adds one.
+  item.approvedSnapshot = { item: structuredClone(item), catalogOptionGroups: structuredClone(fixture.catalogOptionGroups),
+    catalogOptions: structuredClone(fixture.catalogOptions), catalogItemPhotos: structuredClone(fixture.catalogItemPhotos),
+    catalogPriceTiers: [], catalogSpeedTiers: [], catalogItemFileFormats: [] };
+  Object.assign(item, { reviewStatus: "pending", printLayouts: ["fit_to_paper"] });
+  const call = caller(fixture, client);
+  const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+  await assert.rejects(call("POST", `/me/carts/${cartId}/lines`, {
+    catalogItemId: "plans", optionIds: ["opt_a4"], quantity: 1, artworkFileId: "page_a4", printLayout: "fit_to_paper",
+  }), { code: "print_layout_not_supported" });
+  await assert.rejects(call("GET", "/me/print-layout-check?catalogItemId=plans&layout=fit_to_paper"), { code: "print_layout_not_supported" });
+  const added = await call("POST", `/me/carts/${cartId}/lines`, { catalogItemId: "plans", optionIds: ["opt_a4"], quantity: 1, artworkFileId: "page_a4" });
+  assert.equal(added.body.cart.lines[0].printLayoutCheck, null);
+  assert.deepEqual(added.body.cart.lines[0].listing.printLayouts, []);
+  // Checkout follows the approved version too: no layout is required yet.
+  const placed = await call("POST", `/me/carts/${cartId}/checkout`, { payment: { method: "qr_manual", proofFileId: "proof", reference: "DRAFT" } });
+  assert.equal(placed.status, 201);
+});
