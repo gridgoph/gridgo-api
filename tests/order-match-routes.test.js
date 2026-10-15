@@ -436,6 +436,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     clientFromPriceMinor: 13_750,
     clientEffectivePriceMinor: 13_750,
     printerMaxWidthFeet: null,
+    printLayouts: [],
     selectedOptions: [{ id: "option_item_a_matte", label: "Matte" }],
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 25_000);

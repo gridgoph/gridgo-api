@@ -2,6 +2,7 @@ import { shopHoursStatus } from './shop-hours.js';
 import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
+import { listingPrintLayouts } from "./print-layout.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { measurementKindFor, priceLine } from "./pricing.js";
@@ -530,6 +531,8 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
+    // Layouts the client must choose from; empty means the product asks nothing.
+    printLayouts: listingPrintLayouts(item),
     priceTiers: priceTiersFor(store, item.id).map((tier) => ({
       ...tier, clientUnitPriceMinor: clientMoneyMinor(store, tier.unitPriceMinor),
     })),
@@ -1249,6 +1252,7 @@ export function privateCatalogItem(store, item) {
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
+    printLayouts: listingPrintLayouts(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),
     turnaroundMode: item.turnaroundMode || "inherit",

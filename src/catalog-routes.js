@@ -1,6 +1,7 @@
 import { routeShopHours } from './shop-hours.js';
 import { productionDuration, productionProjection, shopProductionDayMinutes } from "./production-days.js";
 import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
+import { parsePrintLayouts } from "./print-layout.js";
 import { routeCatalogReview, catalogReviewNotice } from "./catalog-review-routes.js";
 import {
   MEASURE_UNITS,
@@ -1003,6 +1004,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       basePriceMinor: moneyMinor(body.basePriceMinor ?? 0, "basePriceMinor"),
       ...pricing,
       ...printerCapFields(body, {}, subcategoryCode),
+      printLayouts: Object.hasOwn(body, "printLayouts") ? parsePrintLayouts(body.printLayouts, fail) : [],
       fileFormatMode: "inherit",
       active: body.active == null ? true : booleanValue(body.active, "active"),
       sortOrder: integer(body.sortOrder ?? existing.length, "sortOrder", { min: 0 }),
@@ -1058,6 +1060,8 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     if (body.subcategoryCode != null) item.subcategoryCode = subcategoryForService(store, service, body.subcategoryCode);
     Object.assign(item, pricingFields(body, item, shopProductionDayMinutes(store, item.supplierId)));
     Object.assign(item, printerCapFields(body, item, item.subcategoryCode));
+    // Which layouts the shop prints, replaced as a set like the tiers below.
+    if (Object.hasOwn(body, "printLayouts")) item.printLayouts = parsePrintLayouts(body.printLayouts, fail);
     // Tiers are small ordered sets a shop edits as a whole -- add a break,
     // change a price, drop a speed -- so they are replaced wholesale rather
     // than through six more routes each with its own version check.

@@ -110,6 +110,24 @@ function wordParts(bytes, forPreview = false) {
   return previous === directory ? parts : null;
 }
 
+/**
+ * Each section's declared page, in twips, in document order.
+ *
+ * `<w:pgSz>` is the page Word lays the section out on, already oriented: a
+ * landscape section states the wider side as `w:w`. Only whole-number twips
+ * are read; a section without one is skipped rather than guessed.
+ */
+function sectionPageSizes(document) {
+  const sizes = [];
+  for (const [, attributes] of document.matchAll(/<(?:[\w.-]+:)?pgSz\b([^>]*)>/g)) {
+    const width = Number(/(?:^|\s)(?:[\w.-]+:)?w\s*=\s*['"]([0-9]{1,6})['"]/.exec(attributes)?.[1]);
+    const height = Number(/(?:^|\s)(?:[\w.-]+:)?h\s*=\s*['"]([0-9]{1,6})['"]/.exec(attributes)?.[1]);
+    if (width > 0 && height > 0) sizes.push({ widthTwips: width, heightTwips: height });
+    if (sizes.length >= 200) break;
+  }
+  return sizes;
+}
+
 /** Bounded package sniff and advisory metadata only; no layout or rendering. */
 export function inspectDocx(bytes, { forPreview = false } = {}) {
   try {
@@ -124,7 +142,7 @@ export function inspectDocx(bytes, { forPreview = false } = {}) {
         || !/<(?:[\w.-]+:)?body\b/.test(document) || !/<\/(?:[\w.-]+:)?document\s*>\s*$/.test(document)) return null;
     const raw = /<(?:[\w.-]+:)?Pages\b[^>]*>\s*([0-9]+)\s*<\/(?:[\w.-]+:)?Pages\s*>/.exec(parts.get('docProps/app.xml') || '')?.[1];
     const pages = Number(raw);
-    return { pageCount: Number.isSafeInteger(pages) && pages > 0 ? pages : null };
+    return { pageCount: Number.isSafeInteger(pages) && pages > 0 ? pages : null, pageSizes: sectionPageSizes(document) };
   } catch {
     // Corrupt headers, truncated streams and bounded-inflate refusals all fail closed.
     return null;
