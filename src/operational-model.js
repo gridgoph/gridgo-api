@@ -1,3 +1,5 @@
+import { publicDeliveryPin } from './delivery-pin.js';
+import { adjustedDeliverySplit, effectiveDeliveryFeeMinor, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { feeSchedule, validateFeeSchedule } from './service-fee.js';
 import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
@@ -748,9 +750,12 @@ export function moneyReportingForOrder(order, store = null) {
       && order.payments?.[allocation.paymentCode]?.status === "confirmed")
     .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
   const serviceFeeCollectedMinor = collectedComponent("service_fee");
-  const split = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000);
-  const deliveryCollectedMinor = collectedComponent("delivery_pass_through");
-  const collectedSplit = deliverySplit(deliveryCollectedMinor, split.riderCommissionBps);
+  const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000));
+  const deliveryCollectedMinor = collectedComponent("delivery_pass_through") + deliveryPinCollectedMinor(order);
+  const baseCollectedSplit = deliverySplit(collectedComponent("delivery_pass_through"), split.riderCommissionBps);
+  const extraSplit = deliverySplit(deliveryPinCollectedMinor(order), split.riderCommissionBps);
+  const collectedSplit = { riderPayoutMinor: baseCollectedSplit.riderPayoutMinor + extraSplit.riderPayoutMinor,
+    platformDeliveryShareMinor: baseCollectedSplit.platformDeliveryShareMinor + extraSplit.platformDeliveryShareMinor };
   const platformCollectedMinor = serviceFeeCollectedMinor + collectedSplit.platformDeliveryShareMinor;
   const adjustedMinor = (order.revenueAdjustments || [])
     .filter((adjustment) => adjustment.kind === "adjustment")
@@ -781,7 +786,7 @@ export function moneyReportingForOrder(order, store = null) {
       ),
     },
     deliverySettlement: {
-      deliveryFeeMinor: order.deliveryFeeMinor ?? 0,
+      deliveryFeeMinor: effectiveDeliveryFeeMinor(order),
       ...split,
       collectedMinor: deliveryCollectedMinor,
       riderCollectedMinor: collectedSplit.riderPayoutMinor,
@@ -1155,6 +1160,19 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.attachments;
   // Credentials are available only from the caller-scoped handover endpoint.
   delete publicRecord.handover;
+  delete publicRecord.deliveryPin;
+  const deliveryPin = publicDeliveryPin(order, user?.role);
+  if (deliveryPin) {
+    publicRecord.deliveryPin = deliveryPin;
+    publicRecord.address = deliveryPin.point.label;
+    if (order.deliveryPin.change?.status === 'applied') publicRecord.deliveryDistanceMeters = order.deliveryPin.change.distanceMeters;
+    if (user?.role === 'rider') {
+      delete publicRecord.requestedDropoff;
+      delete publicRecord.requestFulfillment;
+    }
+    publicRecord.effectiveDeliveryFeeMinor = effectiveDeliveryFeeMinor(order);
+    publicRecord.effectiveTotalMinor = order.totalMinor + (effectiveDeliveryFeeMinor(order) - order.deliveryFeeMinor);
+  }
   delete publicRecord.dropoffConfirmationPricing;
   delete publicRecord.dropoffConfirmation;
   const dropoffConfirmation = publicDropoffConfirmation(order, user?.role);
@@ -1248,7 +1266,7 @@ export function publicOrderFor(order, user, store = null) {
   }
   if (ops || rider) {
     if (order.deliveryFeeMinor != null) Object.assign(publicRecord,
-      deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000));
+      adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000)));
   } else {
     for (const field of ["riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor"]) {
       delete publicRecord[field];
@@ -1460,7 +1478,7 @@ export function publicOrderFor(order, user, store = null) {
       for (const key of ['acceptedQuote','pendingQuote','quoteHistory','invoice','billing',
         'credit','credits','organizationDiscountMinor','organizationDiscountRateBps','serviceFeeMinor',
         'serviceFeeRateBps','grossServiceFeeMinor','supplierSubtotalMinor','subtotalMinor','totalMinor',
-        'supplierPlatformPayoutMinor','onlineDueMinor','directStoreDueMinor','paymentPlan']) delete publicRecord[key];
+        'supplierPlatformPayoutMinor','onlineDueMinor','directStoreDueMinor','paymentPlan','effectiveTotalMinor']) delete publicRecord[key];
     }
   }
   return publicRecord;

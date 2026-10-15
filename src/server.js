@@ -1,3 +1,5 @@
+import { requestDeliveryPin, routeDeliveryPin } from './delivery-pin.js';
+import { deliveryPinPaymentPending, deliveryPinLocked } from './delivery-pin-policy.js';
 import { feeSchedule, feeSettings, nextFeeSettings, serviceFeePreview } from './service-fee.js';
 import { organizationFeeMoney } from './organization-money.js';
 import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
@@ -338,6 +340,12 @@ async function save(store) {
   syncSurveys(store, { id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
+    if (deliveryPinPaymentPending(order) && deliveryPinLocked(order)) {
+      throw Object.assign(new Error('Verify or reject the submitted delivery transfer before dispatch or closure.'), { status: 409, code: 'delivery_pin_payment_pending' });
+    }
+    if (order.deliveryPin && !before.get(order.id)?.riderId && order.riderId) {
+      order.deliveryPin.dispatchedAt ||= now();
+    }
     // Existing completed/ready orders keep their legacy contract until a new
     // physical readiness transition; unrelated saves never activate the gate.
     if (before.get(order.id)?.state !== order.state && ['ready_for_dispatch', 'awaiting_collection'].includes(order.state)) {
@@ -2780,8 +2788,18 @@ async function handleAuditedRequest(req, res) {
         }
         const reconcileBalance = /^payments\/(final_online|balance)\/(confirm|reject)$/.test(refundGuard[2])
           && guardedOrder && refundHold(store, guardedOrder) && !refundSettlementFor(store, guardedOrder);
-        if (guardedOrder && !reconcileBalance) assertRefundWorkAllowed(store, guardedOrder);
+        // Resolve money already sent before an independent work hold; never reopen fulfillment.
+        const reconcilePin = /^delivery-pin\/payment\/(confirm|reject)$/.test(refundGuard[2])
+          && guardedOrder && isOps(user) && deliveryPinPaymentPending(guardedOrder);
+        if (guardedOrder && !reconcileBalance && !reconcilePin) assertRefundWorkAllowed(store, guardedOrder);
       }
+    }
+
+    const pinResponse = await routeDeliveryPin({ req, url, store, user, readBody, now, id, audit });
+    if (pinResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (pinResponse.mutated) await save(store);
+      return send(res, pinResponse.status, pinResponse.body);
     }
 
     const dropoffResponse = await routeDropoffConfirmation({ req, url, store, user, readBody, now, id, audit });
@@ -6186,6 +6204,7 @@ async function handleAuditedRequest(req, res) {
       const previousFileCheck = JSON.stringify(order.fileCheck);
       order.state = next;
       order.updatedAt = now();
+      if (['supplier_self_qc', 'ready_for_dispatch'].includes(next)) requestDeliveryPin(store, order, { at: order.updatedAt, id, audit, user });
       if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
       recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist, store.settings);
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
@@ -6232,6 +6251,7 @@ async function handleAuditedRequest(req, res) {
         order.shopHandover.finished = { at, by: user.id, supplierId: order.supplierId, photoFileIds: photos.map(file => file.fileId) };
         order.shopHandover.review = null;
         order.state = 'supplier_self_qc';
+        requestDeliveryPin(store, order, { at, id, audit, user });
         notifyAdmins(store, 'order_finished_review_required', 'Finished products need review', order, `finished:${at}`, { createId: id, at });
       } else {
         if (order.state !== 'supplier_self_qc' || !order.shopHandover.finished || order.shopHandover.finished.supplierId !== order.supplierId || order.shopHandover.review) return send(res, 409, { error: 'production_review_not_available' });
