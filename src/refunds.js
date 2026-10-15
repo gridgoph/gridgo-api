@@ -1,3 +1,4 @@
+import { changePaymentPending } from './order-change-policy.js';
 import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
@@ -66,7 +67,7 @@ export function publicRefund(store, request, user) {
     result.attempt = attempt || null;
     result.payment = payment ? { ...payment, evidenceLabel: 'Wallet transfer evidence' } : null;
     const order = store.orders.find((row) => row.id === request.orderId);
-    result.collections = collectedRefundComponents(order);
+    result.collections = collectedRefundComponents(order, store);
     result.releasedShopMinor = sumMinor([...(order.payoutMilestones || []), ...(store.refundSupplierPayouts || []).filter((row) => row.orderId === order.id)]
       .filter((row) => row.status === 'released').map((row) => row.amountMinor));
     result.previousRefunds = (store.refundSettlements || []).filter((row) => row.orderId === order.id && row.requestId !== request.id);
@@ -129,8 +130,8 @@ function settlementCalculation(store, order, request, body) {
   if (recoveryRefund && (body.shopEntitlementMinor !== 0 || body.riderEntitlementMinor !== 0)) {
     fail(409, 'shop_recovery_full_refund_required', 'This client chose a full refund. Resolve released obligations with Operations first.');
   }
-  const maximum = calculateRefundSettlement(order, input);
-  const amounts = calculateRefundSettlement(order, { ...input, principalMinor: body.principalMinor });
+  const maximum = calculateRefundSettlement(order, { ...input, store });
+  const amounts = calculateRefundSettlement(order, { ...input, store, principalMinor: body.principalMinor });
   if (recoveryRefund && amounts.totalMinor !== sumMinor(Object.values(amounts.collected))) {
     fail(409, 'shop_recovery_full_refund_required', 'Refund every verified collected component.');
   }
@@ -185,12 +186,13 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   let eventReason = action === 'destination' ? 'Client replaced receiving QR.' : text(body.reason, 'reason');
   let eventData = {};
   if (action === 'request') {
+    if (changePaymentPending(store, order)) fail(409, 'change_payment_pending', 'Resolve the submitted change transfer first.');
     if (deliveryPinPaymentPending(order)) fail(409, 'delivery_pin_payment_pending', 'Resolve the submitted delivery transfer before filing a refund.');
     if (store.refundRequests.some(row => row.orderId === order.id && ACTIVE_REFUND_STATUSES.includes(row.status))) fail(409, 'refund_already_open', 'This order already has an active refund request.');
     const late = lateFiling(store, order, at);
     if (late && user.role !== 'super_admin') fail(409, 'refund_window_closed', 'The filing window is closed. Contact Super Admin.', { escalateTo: 'super_admin' });
     if (!['cancellation', 'complaint'].includes(body.kind)) fail(400, 'invalid_refund_kind', 'Choose cancellation or complaint.');
-    if (!sumMinor(Object.values(collectedRefundComponents(order)))) fail(409, 'refund_payment_not_verified', 'Operations must verify the payment before a refund can be requested.');
+    if (!sumMinor(Object.values(collectedRefundComponents(order, store)))) fail(409, 'refund_payment_not_verified', 'Operations must verify the payment before a refund can be requested.');
     const evidenceIds = body.evidenceFileIds ?? [];
     if (!Array.isArray(evidenceIds) || evidenceIds.length > 10 || new Set(evidenceIds).size !== evidenceIds.length) fail(400, 'invalid_refund_evidence', 'Attach up to ten distinct evidence files.');
     const evidence = evidenceIds.map((fileId) => readyFile(store, fileId, 'refund_evidence', user.id));

@@ -1,3 +1,4 @@
+import { supplementTotals, changePayoutsFor } from './order-change-policy.js';
 import { deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 /** Option B: cash already collected, with earned obligations protected. */
@@ -72,7 +73,7 @@ export function assertRefundWorkAllowed(store, order) {
   }
 }
 
-export function collectedRefundComponents(order) {
+export function collectedRefundComponents(order, store = null) {
   if (Object.values(order.payments || {}).some((payment) => payment.status === 'confirmed' && payment.method !== 'qr_manual')) {
     refundFail(409, 'refund_collection_reconciliation_required', 'Only verified cash transfers are refundable. Pilot Credits are never cash.');
   }
@@ -89,26 +90,29 @@ export function collectedRefundComponents(order) {
     refundFail(409, 'refund_collection_reconciliation_required', 'Operations must reconcile verified payment allocations before settlement.');
   }
   components.deliveryMinor = sumMinor([components.deliveryMinor, deliveryPinCollectedMinor(order)]);
+  const supplement = supplementTotals(store, order);
+  components.principalMinor = sumMinor([components.principalMinor, supplement.principalMinor]);
+  components.feeMinor = sumMinor([components.feeMinor, supplement.feeMinor]);
   return components;
 }
 
 /** Cumulative proportional rounding gives the final refund the exact remainder. */
-function proportionalFee(order, principal, collected, earlier) {
-  const basis = refundMinor(order.supplierSubtotalMinor, 'supplierSubtotalMinor');
+function proportionalFee(order, principal, collected, earlier, store) {
+  const basis = refundMinor(order.supplierSubtotalMinor + supplementTotals(store, order).principalMinor, 'supplierSubtotalMinor');
   if (!basis) return 0;
   const cumulativePrincipal = BigInt(sumMinor([earlier.principalMinor, principal]));
   const denominator = BigInt(basis);
-  const cumulativeFee = Number((BigInt(refundMinor(order.serviceFeeMinor - (order.voucherServiceFeeMinor || 0), 'serviceFeeMinor')) * cumulativePrincipal + denominator / 2n) / denominator);
+  const cumulativeFee = Number((BigInt(refundMinor(order.serviceFeeMinor - (order.voucherServiceFeeMinor || 0) + supplementTotals(store, order).feeMinor, 'serviceFeeMinor')) * cumulativePrincipal + denominator / 2n) / denominator);
   return Math.max(0, Math.min(collected.feeMinor - earlier.feeMinor, cumulativeFee - earlier.feeMinor));
 }
 
 export function calculateRefundSettlement(order, {
-  beforeProduction, shopEntitlementMinor, riderEntitlementMinor, earlier = {}, principalMinor, settlementPaidMinor = 0,
+  store = null, beforeProduction, shopEntitlementMinor, riderEntitlementMinor, earlier = {}, principalMinor, settlementPaidMinor = 0,
 }) {
-  const collected = collectedRefundComponents(order);
+  const collected = collectedRefundComponents(order, store);
   const previous = Object.fromEntries(['principalMinor', 'feeMinor', 'deliveryMinor'].map((field) =>
     [field, refundMinor(earlier[field] ?? 0, field)]));
-  const releasedMinor = sumMinor([settlementPaidMinor, ...(order.payoutMilestones || []).filter((stage) => stage.status === 'released')
+  const releasedMinor = sumMinor([settlementPaidMinor, ...changePayoutsFor(store, order).map(row => row.amountMinor), ...(order.payoutMilestones || []).filter((stage) => stage.status === 'released')
     .map((stage) => stage.amountMinor)]);
   refundMinor(shopEntitlementMinor, 'shopEntitlementMinor');
   refundMinor(riderEntitlementMinor, 'riderEntitlementMinor');
@@ -134,7 +138,7 @@ export function calculateRefundSettlement(order, {
       availablePrincipalMinor, escalateTo: 'super_admin',
     });
   }
-  const feeMinor = beforeProduction ? collected.feeMinor - previous.feeMinor : proportionalFee(order, principal, collected, previous);
+  const feeMinor = beforeProduction ? collected.feeMinor - previous.feeMinor : proportionalFee(order, principal, collected, previous, store);
   const deliveryMinor = deliveryCompleted(order) ? 0
     : Math.max(0, collected.deliveryMinor - previous.deliveryMinor - Math.max(0, riderEntitlementMinor - (order.voucherDeliveryMinor || 0)));
   const amounts = { principalMinor: principal, feeMinor, deliveryMinor };

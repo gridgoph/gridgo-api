@@ -1,3 +1,5 @@
+import { changesFor, publicChange, supplementTotals, changePayoutsFor } from './order-change-policy.js';
+import { instructionLines } from './special-instructions.js';
 import { publicDeliveryPin } from './delivery-pin.js';
 import { adjustedDeliverySplit, effectiveDeliveryFeeMinor, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { feeSchedule, validateFeeSchedule } from './service-fee.js';
@@ -739,17 +741,17 @@ export function collectedSupplierPrincipalMinor(order) {
 export function moneyReportingForOrder(order, store = null) {
   const settlement = refundSettlementFor(store, order);
   const deductionsMinor = orderPenaltyMinor(order);
-  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) - deductionsMinor);
+  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor);
   const refundedPrincipalMinor = (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
     .reduce((sum, row) => sum + row.principalMinor, 0);
-  const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order)]
+  const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order), ...changePayoutsFor(store, order).map(row => ({ ...row, status: "released" }))]
     .filter((milestone) => milestone.status === "released")
     .reduce((sum, milestone) => sum + finiteMinor(milestone.amountMinor, "milestone.amountMinor"), 0);
   const collectedComponent = (component) => (order.paymentAllocations || [])
     .filter((allocation) => allocation.component === component
       && order.payments?.[allocation.paymentCode]?.status === "confirmed")
     .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
-  const serviceFeeCollectedMinor = collectedComponent("service_fee");
+  const serviceFeeCollectedMinor = collectedComponent("service_fee") + supplementTotals(store, order).feeMinor;
   const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000));
   const deliveryCollectedMinor = collectedComponent("delivery_pass_through") + deliveryPinCollectedMinor(order);
   const baseCollectedSplit = deliverySplit(collectedComponent("delivery_pass_through"), split.riderCommissionBps);
@@ -765,14 +767,15 @@ export function moneyReportingForOrder(order, store = null) {
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
   const handedOver = ["delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
   const receivedAtStoreMinor = 0;
-  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order) + supplementTotals(store, order).principalMinor;
   const protectedPaymentMinor = Math.max(
     0,
-    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
+    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
   );
   return {
     supplierSettlement: {
       orderPriceMinor: order.supplierSubtotalMinor,
+      ...(supplementTotals(store, order).principalMinor ? { supplementalPrincipalMinor: supplementTotals(store, order).principalMinor } : {}),
       dueAtStoreMinor: order.directStoreDueMinor || 0,
       receivedAtStoreMinor,
       collectedSupplierPrincipalMinor: collectedPrincipalMinor,
@@ -798,8 +801,8 @@ export function moneyReportingForOrder(order, store = null) {
       ...(order.voucher ? { voucherDiscountMinor: order.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
       organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
-      netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0),
-      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor - (order.voucherDiscountMinor || 0) : 0,
+      netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0) + supplementTotals(store, order).feeMinor,
+      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + supplementTotals(store, order).feeMinor + split.platformDeliveryShareMinor - (order.voucherDiscountMinor || 0) : 0,
       collectedMinor: platformCollectedMinor,
       recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
       adjustedMinor,
@@ -1004,6 +1007,11 @@ function productionItemsFor(store, order, user) {
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         documentPages: structuredClone(line.documentPages ?? null),
+        ...(['client','supplier','ops_admin','super_admin'].includes(user?.role) ? {
+          specialInstructions: line.specialInstructions || '',
+          ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.proposedSpec).at(-1);
+            return change ? { agreedChange: { id: change.id, proposedSpec: change.data.proposedSpec, appliedAt: change.data.appliedAt } } : {}; })(),
+        } : {}),
         structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
           ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
         options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
@@ -1057,6 +1065,17 @@ export function publicOrderFor(order, user, store = null) {
       delete record.serviceFeeWorking;
     }
   }
+  delete publicRecord.changeRequests;
+  if (['client','supplier','ops_admin','super_admin'].includes(user?.role)) {
+    publicRecord.changeRequests = changesFor(store, order).map(row => publicChange(store, row, user.role));
+    publicRecord.specialInstructionLines = instructionLines(store, order, user);
+  } else { delete publicRecord.specialInstructions; delete publicRecord.specialInstructionsAcknowledgement; }
+  if (user?.role === 'client' && publicRecord.specialInstructionsAcknowledgement) delete publicRecord.specialInstructionsAcknowledgement.supplierId;
+  const supplement = supplementTotals(store, order);
+  if (['client','ops_admin','super_admin'].includes(user?.role) && supplement.totalMinor) {
+    publicRecord.supplementalTotalMinor = supplement.totalMinor;
+    publicRecord.totalIncludingSupplementsMinor = order.totalMinor + supplement.totalMinor;
+  }
   delete publicRecord.riderProgress;
   delete publicRecord.deliveryMilestones;
   if (order.fulfillmentMode === 'delivery' && (['ops_admin', 'super_admin'].includes(user?.role)
@@ -1104,7 +1123,7 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.rescheduleRequest;
   const reschedule = publicReschedule(order, user);
   if (reschedule) publicRecord.rescheduleRequest = reschedule;
-  if (order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
+  if (changesFor(store, order).some(row => row.status === 'applied' && row.data.proposedReadyBy) || order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
     publicRecord.promisedDate = user?.role === 'supplier' ? order.readyBy : order.promiseBy;
   }
   if (["supplier", "rider"].includes(user?.role)) {
@@ -1511,7 +1530,7 @@ function closeIssueWindow(store, order, at, { by, note }) {
   order.updatedAt = at;
   if (!Array.isArray(order.timeline)) order.timeline = [];
   order.timeline.push({ at, state: "completed", by, note });
-  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION) return;
+  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
   const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
   if (retention?.pofFileIds?.length) {
     releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);

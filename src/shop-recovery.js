@@ -1,3 +1,4 @@
+import { supplementTotals, changePaymentPending } from './order-change-policy.js';
 import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
 import { approvedCatalogView } from "./catalog-review-state.js";
 
@@ -13,7 +14,7 @@ import { refundHold, refundSettlementFor } from './refund-policy.js';
 export const CANCELLABLE_SHOP_STATES = new Set(['supplier_assigned', 'awaiting_checkout', 'awaiting_initial_payment',
   'payment_authorized', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'rider_assigned']);
 export const recoveryHeld = (order) => Boolean(order.shopRecovery && order.shopRecovery.status !== 'accepted');
-export const paidShopShare = (store, order) => (order.payoutMilestones || []).some((stage) => stage.status === 'released')
+export const paidShopShare = (store, order) => supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
   || (store.refundSupplierPayouts || []).some((row) => row.orderId === order.id && row.status === 'released');
 const fail = (code) => { throw Object.assign(new Error(code), { status: 409, code }); };
 const normalized = (value) => String(value || '').trim().toLowerCase();
@@ -133,7 +134,7 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
 export function expireShopAcceptances(store, { at, createId }) {
   let changed = false;
   for (const order of store.orders || []) {
-    if (!order.supplierId || order.state !== 'supplier_assigned' || recoveryHeld(order) || refundHold(store, order) || refundSettlementFor(store, order)) continue;
+    if (changePaymentPending(store, order) || !order.supplierId || order.state !== 'supplier_assigned' || recoveryHeld(order) || refundHold(store, order) || refundSettlementFor(store, order)) continue;
     // Existing assignments receive a full window on rollout, never a retroactive penalty.
     if (!order.shopAcceptance || order.shopAcceptance.supplierId !== order.supplierId) { startShopAcceptance(store, order, at); changed = true; }
     if (order.shopAcceptance.status === 'pending' && Date.parse(at) >= Date.parse(order.shopAcceptance.deadlineAt)) {

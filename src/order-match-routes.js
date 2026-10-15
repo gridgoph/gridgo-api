@@ -1,3 +1,4 @@
+import { specialInstructions } from './special-instructions.js';
 import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
@@ -580,6 +581,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
       artworkLinks: structuredClone(line.artworkLinks || []),
+      specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
@@ -926,6 +928,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       snapshot.lineItem.jobId = jobId;
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
+      snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
       if (line.dropoff) snapshot.lineItem.dropoff = { ...line.dropoff };
@@ -1069,6 +1072,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       amountMinor: lineItem.lineSubtotalMinor,
       artworkFileId: cartLine.artworkFileId ?? null,
       artworkLinks: structuredClone(lineItem.artworkLinks || []),
+      specialInstructions: lineItem.specialInstructions || "",
       documentPages: structuredClone(lineItem.documentPages ?? null),
       mockupFileId: cartLine.mockupFileId ?? null,
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
@@ -1586,6 +1590,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       createdAt: at, updatedAt: at,
     };
     assertMatchDeadline(store, item, line, at);
+    if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
     if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     assertListingArtwork(store, item, line);
@@ -1642,6 +1647,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+    if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
     if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
     if (patchedItem && Object.hasOwn(body, "artworkFileId")) assertListingArtwork(store, patchedItem, line);
     if (patchedItem) syncDocumentPages(store, patchedItem, line, body, { previousFileId: storedLine.artworkFileId });

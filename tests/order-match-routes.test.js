@@ -1818,3 +1818,37 @@ test('fee schedule locks per shop/deadline group, survives edits, and resets onl
   assert.equal(JSON.stringify(result).includes('serviceFeeSchedule'), false);
   assert.equal(JSON.stringify(result).includes('serviceFeeWorking'), false);
 });
+
+test('special instructions are masked per cart item and frozen at checkout without changing the price', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const created = await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: { lat: 7.0731, lng: 125.6128, label: 'Home' } });
+  const cartId = created.body.cart.id;
+  const first = await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1,
+    artworkFileId: 'file_art', specialInstructions: 'Darker lines. Call +63 917 123 4567 or me@example.com; @myshop https://example.com' });
+  const lineId = first.body.cart.lines[0].id;
+  assert.equal(first.body.cart.lines[0].specialInstructions, 'Darker lines. Call [masked] or [masked]; [masked] [masked]');
+  await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a2', optionIds: [], quantity: 1,
+    artworkFileId: 'file_art', specialInstructions: 'Staple on left' });
+  await call('PATCH', `/me/carts/${cartId}/lines/${lineId}`, { specialInstructions: 'Keep the black border' });
+  const checkedOut = await call('POST', `/me/carts/${cartId}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'QR-NOTES' } });
+  assert.equal(checkedOut.status, 201);
+  assert.deepEqual(store.orderLineItems.map(line => line.specialInstructions), ['Keep the black border', 'Staple on left']);
+  assert.equal(store.orders[0].supplierSubtotalMinor, 30000);
+  assert.deepEqual(store.orderInvoices[0].snapshot.lines.map(line => line.specialInstructions), ['Keep the black border', 'Staple on left']);
+});
+test('multi-shop checkout keeps each special instruction with only its own independent group', async () => {
+  const { store, client } = fixture(); const call = caller(store, client);
+  const created = await call('POST', '/me/carts', { deadline: '2026-09-10T00:00:00.000Z', fulfillmentMode: 'delivery', defaultDropoff: { lat: 7.0731, lng: 125.6128, label: 'Home' } });
+  const path = `/me/carts/${created.body.cart.id}`;
+  for (const [catalogItemId, specialInstructions] of [['item_a', 'Darker lines'], ['item_b', 'Left staple']]) {
+    await call('POST', `${path}/lines`, { catalogItemId, specialInstructions, optionIds: [], quantity: 1, artworkFileId: 'file_art' });
+  }
+  const checkout = await call('POST', `${path}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'MULTI-NOTES' } });
+  assert.equal(checkout.status, 201);
+  assert.equal(store.orders.length, 2);
+  for (const [supplierId, note] of [['supplier_a', 'Darker lines'], ['supplier_b', 'Left staple']]) {
+    const order = store.orders.find(o => o.supplierId === supplierId);
+    assert.deepEqual(store.orderLineItems.filter(l => l.orderId === order.id).map(l => l.specialInstructions), [note]);
+  }
+});
