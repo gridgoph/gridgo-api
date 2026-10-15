@@ -3,7 +3,8 @@ import { addOpeningMilliseconds } from './availability.js';
 import { shopProductionDayMinutes } from "./production-days.js";
 import { cartGroups } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
-import { recentLapseQualityPenalty } from './production-penalties.js';
+import { riderPackingFlow } from './shop-handover.js';
+import { recentLapseQualityPenalty, productionTiming } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
@@ -118,10 +119,11 @@ function listingCompleteness(item) {
 /** Whether the shop hit the date its own board promised, across finished work. */
 export function onTimeRate(store, supplierId) {
   const finished = (store.orders || []).filter(
-    (order) => order.supplierId === supplierId && order.readyBy && order.readyAt,
+    (order) => order.supplierId === supplierId && order.readyBy && productionTiming(order, null).finishedAt,
   );
   if (finished.length === 0) return null;
-  const onTime = finished.filter((order) => Date.parse(order.readyAt) <= Date.parse(order.readyBy));
+  const onTime = finished.filter((order) => riderPackingFlow(order)
+    ? productionTiming(order, null).elapsedMs <= 0 : Date.parse(order.readyAt) <= Date.parse(order.readyBy));
   return { count: finished.length, rate: onTime.length / finished.length };
 }
 

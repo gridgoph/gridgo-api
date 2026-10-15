@@ -1137,7 +1137,15 @@ Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release 
 
 ## Production progress photos
 
-[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Production and packing photo requirements remain unchanged; supplier invoice scans remain optional.
+[Shop-to-rider handover](SHOP_HANDOVER_API.md) supersedes the packing sequence
+below for version-2 handovers: finished unpacked photos → GRIDGO QA → ready for
+rider pickup → unpacked inspection → rider packed photo → signature/pickup.
+Plan-1 and already-ready jobs keep the legacy flow below. Receipt scans stay
+optional. Every staff production correction in either flow now requires a
+listed `reasonCode` plus the `reason` note and exposes the Forced by GRIDGO tag.
+
+
+[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Legacy production and packing photo requirements follow this section; version-2 handovers follow the linked handover contract. Supplier invoice scans remain optional.
 
 Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 claim_hold_active` while the order's claim payout-hold flag is set or any claim is `open`/`payout_held`. This applies to the assigned supplier and Operations/Super Admin corrections, before photo/override checks. Operations must release or resolve all active claims before packing can continue; a correction reason cannot bypass the hold.
 
@@ -1145,7 +1153,7 @@ Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 cl
 
 One production photo is sufficient for the production-photo gate: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
 
-Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
+Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reasonCode": "evidence_verified_offline", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
 
 Order list/detail and order mutation responses expose this additive projection to the owning client, assigned supplier/rider and Operations/Super Admin:
 
@@ -1167,6 +1175,9 @@ Order list/detail and order mutation responses expose this additive projection t
 With no qualifying image, the response is `{ "status": "waiting_for_photo", "photos": [] }`. The client should display **Waiting for a progress photo** during production and subsequent steps until evidence exists, even after a staff correction. A gallery row exposes no uploader, private key, filename, payout stage or proof code. Signed links use the same authorization and TTL as artwork; unrelated clients and unassigned riders browsing dispatch offers receive none. If signing fails, the photo identity remains and the app can retry `GET /files/:fileId/download-url`. Attaching evidence queues order/job invalidations before commit.
 
 ### Packing photos
+
+This subsection describes legacy handovers. For version 2 the assigned rider
+attaches the packing photo after inspection; see [Shop handover](SHOP_HANDOVER_API.md).
 
 After production, the shop uploads a separate `packing_photo` showing the finished prints packed and ready. Use `POST /files` then `POST /files/:fileId/attach` with `{ "orderId": "..." }` while `production` or `supplier_self_qc`. The existing upload validation and transactional attach checks apply. Only a ready attached JPEG/PNG/WebP owned by the assigned supplier counts; production photos, payout proofs, PDFs, pending uploads and client-supplied flags never do.
 
@@ -1227,6 +1238,10 @@ Packaging readiness is not a passed pickup quality check. It makes the job avail
 `POST /orders/:id/decline` accepts an optional `{reason}` from the assigned approved supplier while `supplier_assigned`. Success returns only `{order:{id,state},replaced}`; the departing supplier must remove the job from its local list and must not expect the previous full order projection. `replaced:true` leaves the order in `supplier_assigned`; `false` returns it to `approved_for_matching` for Operations. A later-state decline returns `409 decline_not_available`.
 
 ## Rider pickup checklist and escalation
+
+Version-2 handovers use this checklist to record an unpacked inspection, then
+require the rider packed photo and `/pickup-confirm` to transfer custody. Legacy
+handovers retain the single request below. See [Shop handover](SHOP_HANDOVER_API.md).
 
 ```http
 POST /dispatch/:id/pickup-checklist

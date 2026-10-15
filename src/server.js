@@ -1,3 +1,4 @@
+import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
 import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './artwork-preview.js';
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
@@ -32,7 +33,7 @@ import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-ga
 import { hubPickupSettings, publicHubPickup } from "./hub-pickup.js";
 import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
-import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
+import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionTiming, productionLatenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
 import { packingPhotoFiles } from "./packing-progress.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
@@ -1975,8 +1976,8 @@ const TRANSITIONS = {
   downpayment_review: {},
   payment_authorized: { production: ["supplier"], cancelled: ["ops_admin", "super_admin"] },
   production: {
-    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // packed; supplier and rider check together at pickup
-    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // compatibility for older clients and portal workflows
+    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // versioned photo/QA readiness; joint pickup inspection still required
+    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // legacy self-QC or version-2 finished-product review
   },
   supplier_self_qc: { ready_for_dispatch: ["supplier", "ops_admin", "super_admin"] },
   ready_for_dispatch: { rider_assigned: ["rider", "ops_admin", "super_admin"] },
@@ -2427,7 +2428,7 @@ async function handleAuditedRequest(req, res) {
         const message = response.message || transitionRefusalMessage(response.error);
         const visible = order && (isOps(user) || (user.role === 'supplier' && order.supplierId === user.id));
         const readiness = visible && PACKAGING_STATES.includes(next) && ![401, 403, 404].includes(status)
-          ? productionTransitionReadiness(latest, order, next, { operations: isOps(user), reason: transitionBody.reason }) : null;
+          ? productionTransitionReadiness(latest, order, next, { operations: isOps(user), reason: transitionBody.reason, reasonCode: transitionBody.reasonCode }) : null;
         const missing = readiness?.missing.length ? readiness.missing : [{ code: response.error, message }];
         const body = { ...response, message, missing };
         audit(latest, { actor: user, action: 'order.transition_refused', entityType: 'order',
@@ -3231,9 +3232,16 @@ async function handleAuditedRequest(req, res) {
               id: id("ntf"), userId: order.clientId, appRole: "client",
               type: "order_packed", orderId: order.id, occurrenceKey: `packing:${latestFile.fileId}`,
               title: "Your order is packed",
-              body: "Your order is packed and waiting for the rider. Open the order to see the packing photo.",
+              body: riderPackingFlow(order) ? "Your order was checked and packed in front of the rider. Open the order to see the packing photo." : "Your order is packed and waiting for the rider. Open the order to see the packing photo.",
               read: false, at: attachedAt,
             });
+            if (riderPackingFlow(order)) {
+              const evidence = { at: attachedAt, by: latestUser.id, fileId: latestFile.fileId, inspectionId: order.pickupChecklist.inspectionId };
+              (order.shopHandover ||= {}).packingPhotos ||= [];
+              order.shopHandover.packingPhotos.push(evidence);
+              audit(latestStore, { actor: latestUser, action: 'order.rider_packing_photo', entityType: 'order', entityId: order.id,
+                orderId: order.id, detail: evidence });
+            }
             notifyAdmins(latestStore, "order_packing_photo_received", "Packing photo received", order,
               `packing:${latestFile.fileId}`, { createId: id, at: attachedAt });
           }
@@ -3550,8 +3558,9 @@ async function handleAuditedRequest(req, res) {
       const body = await readBody(req);
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "reason_required" });
-      if (!order.supplierId || order.readyAt || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
-          || !latenessTier(productionDeadline(order), now(), false, order.operatingClock)) return send(res, 409, { error: "production_deadline_not_missed" });
+      const timing = productionTiming(order, now());
+      if (!order.supplierId || timing.finishedAt || timing.pendingReview || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
+          || !productionLatenessTier(order, now(), false)) return send(res, 409, { error: "production_deadline_not_missed" });
       if (!order.productionNoCommunication) {
         order.productionNoCommunication = { at: now(), by: user.id, reason };
         audit(store, { actor: user, action: "production_lapse.no_communication", entityType: "order", entityId: order.id, orderId: order.id, reason });
@@ -5843,18 +5852,26 @@ async function handleAuditedRequest(req, res) {
         requireOperatingHours(store.settings, now(), next === 'rider_assigned' || next === 'picked_up' ? 'Dispatch' : 'Artwork review');
       }
       if (PACKAGING_STATES.includes(next)) {
-        const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason });
+        const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason, reasonCode: body.reasonCode });
         if (!readiness.allowed) {
           const first = readiness.missing[0];
-          return send(res, first.code === 'production_override_reason_required' ? 400 : 409,
+          return send(res, first.code.startsWith('production_override_reason') ? 400 : 409,
             { error: first.code, message: first.message, missing: readiness.missing });
         }
-        if (isOps(user)) audit(store, {
-          actor: user, action: 'order.production_override', entityType: 'order', entityId: order.id,
-          orderId: order.id, reason: body.reason.trim(), detail: { from: order.state, to: next,
-            photoMissing: productionPhotoFiles(store, order).length === 0,
-            packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0 },
-        });
+        if (isOps(user)) {
+          const skippedChecks = riderPackingFlow(order) ? handoverRequirements(store, order, next).map(item => item.code)
+            : [!productionPhotoFiles(store, order).length && 'production_photo_required',
+              next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length && 'packing_photo_required'].filter(Boolean);
+          const forced = { at: now(), by: user.id, role: user.role, from: order.state, to: next,
+            reasonCode: body.reasonCode, note: body.reason.trim(), skippedChecks };
+          (order.forcedSteps ||= []).push(forced);
+          audit(store, {
+            actor: user, action: 'order.production_override', entityType: 'order', entityId: order.id,
+            orderId: order.id, reason: body.reason.trim(), detail: { ...forced,
+              photoMissing: productionPhotoFiles(store, order).length === 0,
+              packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0 },
+          });
+        }
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
@@ -6174,6 +6191,72 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
+    // Finished-product review is separate from the pre-production artwork check.
+    if (req.method === 'POST' && /^\/orders\/[^/]+\/(production-finished|production-review)$/.test(pathname)) {
+      const order = store.orders.find(row => row.id === pathname.split('/')[2]);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      const review = pathname.endsWith('/production-review');
+      if (review ? !isOps(user) : user.role !== 'supplier' || !approvedRole(store, user.id, 'supplier') || order.supplierId !== user.id) {
+        return send(res, 403, { error: 'forbidden' });
+      }
+      if (!riderPackingFlow(order)) return send(res, 409, { error: 'handover_flow_not_available' });
+      if (claimBlocksHandover(store, order)) return send(res, 409, { error: 'claim_hold_active' });
+      const body = await readBody(req);
+      const at = now();
+      order.shopHandover ||= {};
+      if (!review) {
+        if (order.state !== 'production') return send(res, 409, { error: 'production_finish_not_available' });
+        const photos = finishedProductPhotos(store, order).filter(file => !(order.shopHandover.attempts || [])
+          .some(attempt => attempt.finished.photoFileIds.includes(file.fileId)));
+        if (!photos.length) return send(res, 409, { error: 'finished_product_photo_required' });
+        order.shopHandover.finished = { at, by: user.id, supplierId: order.supplierId, photoFileIds: photos.map(file => file.fileId) };
+        order.shopHandover.review = null;
+        order.state = 'supplier_self_qc';
+        notifyAdmins(store, 'order_finished_review_required', 'Finished products need review', order, `finished:${at}`, { createId: id, at });
+      } else {
+        if (order.state !== 'supplier_self_qc' || !order.shopHandover.finished || order.shopHandover.finished.supplierId !== order.supplierId || order.shopHandover.review) return send(res, 409, { error: 'production_review_not_available' });
+        if (!['approved', 'rejected'].includes(body.decision)) return send(res, 400, { error: 'invalid_production_review' });
+        if (body.decision === 'rejected' && (typeof body.note !== 'string' || !body.note.trim())) return send(res, 400, { error: 'production_review_note_required' });
+        const reviewPhotos = finishedProductPhotos(store, order);
+        if (!order.shopHandover.finished.photoFileIds.every(fileId => reviewPhotos.some(file => file.fileId === fileId))) return send(res, 409, { error: 'finished_product_photo_required' });
+        order.shopHandover.review = { at, by: user.id, decision: body.decision, note: typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '' };
+        (order.shopHandover.attempts ||= []).push({ finished: structuredClone(order.shopHandover.finished), review: structuredClone(order.shopHandover.review) });
+        if (body.decision === 'rejected') { order.state = 'production'; order.shopHandover.finished = null; }
+        store.notifications.push({ id: id('ntf'), userId: order.supplierId, appRole: 'supplier', type: 'order_finished_reviewed',
+          orderId: order.id, title: body.decision === 'approved' ? 'Ready for rider pickup' : 'Finished products need a correction',
+          body: body.decision === 'approved' ? 'Prepare packing materials. Do not pack yet; the rider checks the unpacked items first.' : order.shopHandover.review.note, read: false, at });
+        notifyAdmins(store, 'order_finished_reviewed', 'Finished-product review recorded', order, `review:${at}`, { createId: id, at });
+      }
+      order.updatedAt = at;
+      order.timeline.push({ at, state: order.state, by: user.id, note: review ? `Finished-product review: ${body.decision}` : 'Finished, unpacked products submitted for review' });
+      audit(store, { actor: user, action: review ? 'order.production_review' : 'order.production_finished', entityType: 'order', entityId: order.id,
+        orderId: order.id, detail: { finished: order.shopHandover.finished, review: order.shopHandover.review, attempt: order.shopHandover.attempts?.at(-1) || null } });
+      notifyOrderParties(store, order, { createId: id, at });
+      queueOrderInvalidate(store, order, ['orders', 'jobs']);
+      await save(store);
+      return send(res, 200, { order: await publicOrder(order, user, store) });
+    }
+
+    if (req.method === 'POST' && /^\/dispatch\/[^/]+\/arrived-packed$/.test(pathname)) {
+      if (user.role !== 'rider' || !approvedRole(store, user.id, 'rider')) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(row => row.id === pathname.split('/')[2] && row.riderId === user.id);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      if (!riderPackingFlow(order) || order.state !== 'rider_assigned' || currentInspection(order)) return send(res, 409, { error: 'arrived_packed_not_available' });
+      order.shopHandover ||= {};
+      const events = order.shopHandover.arrivedPacked ||= [];
+      if (!events.some(event => event.riderId === user.id && event.assignedAt === (order.riderAssignedAt || null))) {
+        const at = now();
+        const event = { at, riderId: user.id, supplierId: order.supplierId, assignedAt: order.riderAssignedAt || null };
+        events.push(event);
+        order.updatedAt = at;
+        audit(store, { actor: user, action: 'order.arrived_packed', entityType: 'order', entityId: order.id, orderId: order.id, detail: event });
+        notifyAdmins(store, 'order_arrived_packed', 'Shop presented an already-packed job', order, `arrived-packed:${at}`, { createId: id, at });
+        queueOrderInvalidate(store, order, ['orders', 'jobs']);
+        await save(store);
+      }
+      return send(res, 200, { order: await publicOrder(order, user, store) });
+    }
+
     // ---- dispatch (rider) ----
     if (req.method === "GET" && pathname === "/dispatch/offers") {
       if (user.role !== "rider" && user.role !== "ops_admin" && user.role !== "super_admin") {
@@ -6227,7 +6310,7 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
-    if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
+    if (req.method === "POST" && /^\/dispatch\/[^/]+\/(pickup-checklist|pickup-confirm)$/.test(pathname)) {
       if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       if (user.verificationStatus !== "approved") {
         return send(res, 403, {
@@ -6257,6 +6340,17 @@ async function handleAuditedRequest(req, res) {
         });
       }
       const body = await readBody(req);
+      const confirming = pathname.endsWith('/pickup-confirm');
+      const riderPacks = riderPackingFlow(order);
+      if (confirming && !riderPacks) return send(res, 409, { error: 'handover_flow_not_available' });
+      if (riderPacks && claimBlocksHandover(store, order)) return send(res, 409, { error: 'claim_hold_active' });
+      const inspection = currentInspection(order);
+      if (confirming) {
+        if (!inspection) return send(res, 409, { error: 'unpacked_inspection_required' });
+        if (!inspectedPackingPhotos(store, order).length) return send(res, 409, { error: 'packing_photo_required' });
+        body.checks = inspection.checks;
+        body.counts = inspection.counts;
+      }
       let checks = Array.isArray(body.checks) ? body.checks : [];
       const expected = new Set(PICKUP_CHECK_CODES);
       const received = new Set(checks.map((item) => item?.code));
@@ -6382,6 +6476,20 @@ async function handleAuditedRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store), escalation });
       }
 
+      if (riderPacks && !confirming) {
+        order.pickupChecklist = { status: 'inspected', inspectionId: id('inspection'), checks: structuredClone(checks), counts,
+          completedAt: checkedAt, completedBy: user.id, handoffSignature: null, signOffPrompt: PICKUP_SIGN_OFF_PROMPT };
+        (order.shopHandover ||= {}).inspections ||= [];
+        order.shopHandover.inspections.push(structuredClone(order.pickupChecklist));
+        order.updatedAt = checkedAt;
+        audit(store, { actor: user, action: 'pickup_checklist.inspected', entityType: 'order', entityId: order.id, orderId: order.id,
+          detail: { inspectionId: order.pickupChecklist.inspectionId, checks, counts } });
+        notifyAdmins(store, 'order_unpacked_checked', 'Rider checked the unpacked products', order, order.pickupChecklist.inspectionId, { createId: id, at: checkedAt });
+        queueOrderInvalidate(store, order, ['orders', 'jobs']);
+        await save(store);
+        return send(res, 200, { order: await publicOrder(order, user, store) });
+      }
+
       /*
         Six passes move nothing on their own. Custody changes hands only once
         the supplier has signed for the handoff on the rider's phone, so the
@@ -6412,6 +6520,11 @@ async function handleAuditedRequest(req, res) {
           fileId: signatureFileId,
         });
       }
+      if (riderPacks && !attachedReadyOrderFile(store, order, signatureFileId, 'handoff_signature', user.id).references
+        .some(ref => ref.type === 'order' && ref.id === order.id && ref.inspectionId === inspection.inspectionId)) {
+        return send(res, 400, { error: 'invalid_handoff_signature' });
+      }
+      const packedFileIds = riderPacks ? inspectedPackingPhotos(store, order).map(file => file.fileId) : [];
       const handoffSignature = {
         fileId: signatureFileId,
         signerName,
@@ -6421,6 +6534,7 @@ async function handleAuditedRequest(req, res) {
       };
 
       order.pickupChecklist = {
+        ...(riderPacks ? { inspectionId: inspection.inspectionId, inspectedAt: inspection.completedAt, packedPhotoFileIds: packedFileIds } : {}),
         status: "passed",
         checks: structuredClone(checks),
         counts,
@@ -6447,7 +6561,7 @@ async function handleAuditedRequest(req, res) {
         entityType: "order",
         entityId: order.id,
         orderId: order.id,
-        detail: { fileId: signatureFileId, signerName, counts, checklistHash: handoffSignature.checklistHash },
+        detail: { fileId: signatureFileId, signerName, counts, packedPhotoFileIds: packedFileIds, checklistHash: handoffSignature.checklistHash },
       });
       notifyOrderParties(store, order, { createId: id, at: checkedAt });
       queueOrderInvalidate(store, order, ["orders", "jobs"]);

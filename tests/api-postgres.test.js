@@ -1591,7 +1591,7 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
 
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/balance/submit`, { method: "POST", subject: "clerk_client", body: { method: "qr_manual", reference: "BAL-API" } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/balance/confirm`, { method: "POST", subject: "clerk_ops", body: {} })).status, 200);
-    for (const state of ["production", "supplier_self_qc", "ready_for_dispatch"]) {
+    for (const state of ["production", "ready_for_dispatch"]) {
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
       assert.equal(transitioned.status, 200, `${JSON.stringify(transitioned.body)}\n${instance.output()}`);
       if (state === "production") {
@@ -1601,9 +1601,11 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
             originalFilename: "start.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
             size: 100, state: "ready", objectKey: "proof/start.jpg", createdAt: AT, readyAt: AT,
             references: [{ type: "order", id: orderId, field: "fulfilmentProofFileIds", milestoneCode: "production_started" }] });
-          store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_start_packing", purpose: "packing_photo", objectKey: "packing/start.jpg", references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
+          store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_start_packing", purpose: "finished_product_photo", objectKey: "packing/start.jpg", references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
           await saveStore(database, store);
         });
+        assert.equal((await request(instance.api, `/orders/${orderId}/production-finished`, { method: 'POST', subject: 'clerk_supplier', body: {} })).status, 200);
+        assert.equal((await request(instance.api, `/orders/${orderId}/production-review`, { method: 'POST', subject: 'clerk_ops', body: { decision: 'approved' } })).status, 200);
         // The escrow split of the shop's own price, snapshotted when the quote
         // was accepted, and starting the press pays nobody: every stage waits
         // for its proof and a person.
@@ -1621,14 +1623,19 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal((await request(instance.api, `/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} })).status, 200);
     const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"]
       .map((code) => ({ code, passed: true }));
+    const inspected = await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: 'POST', subject: 'clerk_rider', body: { checks, counts: [{ lineItemId: null, countedQuantity: 1 }] } });
+    assert.equal(inspected.status, 200, JSON.stringify(inspected.body));
+    assert.equal(inspected.body.order.state, 'rider_assigned');
     // The supplier's signature on the rider's phone, written straight into the
     // store: the transition is what is under test here, not the pad.
     await database.transaction(async () => {
       const store = await loadStore(database);
-      store.files.push({ fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [{ type: "order", id: orderId, field: "handoffSignatureFileIds" }], createdAt: AT });
+      store.files.push({ fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [{ type: "order", id: orderId, field: "handoffSignatureFileIds", inspectionId: inspected.body.order.pickupChecklist.inspectionId }], createdAt: AT });
+      store.files.push({ ...structuredClone(store.files.at(-1)), fileId: 'file_rider_packed', purpose: 'packing_photo', objectKey: 'rider/packed.png',
+        references: [{ type: 'order', id: orderId, field: 'packingPhotoFileIds', inspectionId: inspected.body.order.pickupChecklist.inspectionId }] });
       await saveStore(database, store);
     });
-    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks, counts: [{ lineItemId: null, countedQuantity: 1 }], signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
+    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-confirm`, { method: "POST", subject: "clerk_rider", body: { signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" } })).status, 200);
 
     const released = await request(instance.api, "/orders/ord_payout/milestones/printing/release", { method: "POST", subject: "clerk_ops", body: {} });
@@ -4444,7 +4451,7 @@ test("production photo gate covers both packing paths and audited Operations cor
     assert.equal(missingReason.status, 400);
     assert.equal(missingReason.body.error, "production_override_reason_required");
     const corrected = await request(instance.api, "/orders/ord_payout/transition", {
-      method: "POST", subject: "clerk_ops", body: { state: "ready_for_dispatch", reason: "Verified finished legacy job at the counter" },
+      method: "POST", subject: "clerk_ops", body: { state: "ready_for_dispatch", reasonCode: "evidence_verified_offline", reason: "Verified finished legacy job at the counter" },
     });
     assert.equal(corrected.status, 200, JSON.stringify(corrected.body));
     const saved = await loadStore(database);

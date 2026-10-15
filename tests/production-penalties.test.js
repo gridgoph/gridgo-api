@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assessProductionLapses, cappedPenaltyMinor, defaultProductionPenalty, latenessTier,
-  recentLapseQualityPenalty, validateProductionPenalty, supplierLapses } from '../src/production-penalties.js';
+  recentLapseQualityPenalty, validateProductionPenalty, supplierLapses, productionTiming } from '../src/production-penalties.js';
 import { createPayoutMilestones, releaseMilestone, moneyReportingForOrder, publicOrderFor } from '../src/operational-model.js';
 
 const DEADLINE = '2026-10-01T00:00:00.000Z';
@@ -211,4 +211,91 @@ test('a pre-existing warning cannot enable deductions after reviewed time correc
   assert.equal(supplierLapses(store, 'shop')[0].status, 'warning_only');
   assert.match(store.productionLapses[0].warnings.at(-1).message, /warning only/);
   assert.deepEqual(order.payoutMilestones, before);
+});
+
+test('on-time finished submission never receives a lapse or deduction for GRIDGO QA delay', () => {
+  const store = fixture(), order = store.orders[0];
+  order.shopHandoverVersion = 2; order.state = 'supplier_self_qc';
+  order.shopHandover = { finished: { at: atHours(-1), supplierId: 'shop' }, review: null };
+  const before = structuredClone(order.payoutMilestones);
+  assert.equal(assess(store, 25), false);
+  assert.equal(assess(store, 26), false);
+  assert.deepEqual(store.productionLapses, []);
+  order.shopHandover.review = { at: atHours(48), decision: 'approved' };
+  order.state = 'ready_for_dispatch'; order.readyAt = atHours(50);
+  assert.equal(assess(store, 60), false);
+  assert.deepEqual(order.payoutMilestones, before);
+  // QA waiting must not add the payout gate either.
+  order.payoutMilestones[0].status = 'pof_attached';
+  assert.doesNotThrow(() => releaseMilestone(order, 'production_started', { role: 'ops_admin' }, atHours(60), store));
+});
+
+test('late submission freezes its tier while QA is pending and deducts only after approval', () => {
+  const store = fixture(), order = store.orders[0];
+  order.shopHandoverVersion = 2; order.state = 'supplier_self_qc';
+  order.shopHandover = { finished: { at: atHours(2), supplierId: 'shop' }, review: null };
+  assess(store, 25); assess(store, 50);
+  assert.equal(store.productionLapses[0].tier, 'minor');
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
+  order.shopHandover.review = { at: atHours(51), decision: 'approved' };
+  assess(store, 52);
+  assert.equal(store.productionLapses[0].tier, 'minor');
+  assert.equal(store.productionLapses[0].deductionMinor, 3000);
+  const applied = structuredClone(store.productionLapses[0]);
+  order.shopHandover.finished.at = atHours(-1);
+  assess(store, 100);
+  assert.deepEqual(store.productionLapses[0], applied, 'already-applied money stays immutable');
+});
+
+test('rejected QA resumes production with review intervals excluded across repeated attempts', () => {
+  const store = fixture(), order = store.orders[0];
+  order.shopHandoverVersion = 2;
+  order.shopHandover = { finished: null, review: { decision: 'rejected' }, attempts: [
+    { finished: { at: atHours(-1), supplierId: 'shop' }, review: { at: atHours(25), decision: 'rejected' } },
+  ] };
+  assert.equal(assess(store, 25.5), false); // 26 review hours; still 30 minutes of shop time left.
+  assess(store, 27);
+  assert.equal(store.productionLapses[0].tier, 'minor');
+  order.shopHandover.attempts.push({ finished: { at: atHours(27), supplierId: 'shop' }, review: { at: atHours(51), decision: 'rejected' } });
+  assess(store, 55);
+  assert.equal(store.productionLapses[0].tier, 'minor'); // 55 - 26 - 24 = 5 hours
+  assess(store, 57);
+  assert.equal(store.productionLapses[0].tier, 'moderate');
+  assert.equal(store.productionLapses[0].deductionMinor, 0);
+});
+
+test('pending severe QA cannot deduct; legacy and replacement shops do not inherit QA timing credits', () => {
+  const store = fixture(), order = store.orders[0];
+  order.shopHandoverVersion = 2; order.state = 'supplier_self_qc';
+  order.shopHandover = { finished: { at: atHours(25), supplierId: 'shop' }, review: null };
+  assess(store, 26); assess(store, 27);
+  assert.equal(store.productionLapses[0].tier, 'severe');
+  assert.equal(store.productionLapses[0].appliedAt, null);
+  const legacy = fixture(), legacyOrder = legacy.orders[0];
+  legacyOrder.shopHandover = structuredClone(order.shopHandover);
+  assess(legacy, 26); assess(legacy, 27);
+  assert.ok(legacy.productionLapses[0].appliedAt);
+  const replacement = fixture(), replacementOrder = replacement.orders[0];
+  replacementOrder.shopHandoverVersion = 2;
+  replacementOrder.shopHandover = { finished: { at: atHours(-1), supplierId: 'old_shop' }, review: { decision: 'approved' }, attempts: [
+    { finished: { at: atHours(-10), supplierId: 'old_shop' }, review: { at: atHours(20), decision: 'rejected' } },
+  ] };
+  assess(replacement, 25);
+  assert.equal(replacement.productionLapses[0].tier, 'severe');
+});
+
+
+test('rejected review credits use snapshotted operating hours, including closed days and intervals before the deadline', () => {
+  const store = fixture(), order = store.orders[0];
+  order.shopHandoverVersion = 2;
+  order.operatingClock = { version: 1, schedule: { utcOffsetMinutes: 480, closures: [], week: [1, 2, 3, 4, 5]
+    .map(weekday => ({ weekday, opensMinute: 480, closesMinute: 1020 })) } };
+  order.readyBy = '2026-10-09T09:00:00.000Z'; // Friday 17:00 Manila
+  order.shopHandover = { attempts: [{ finished: { at: '2026-10-09T08:00:00.000Z', supplierId: 'shop' },
+    review: { at: '2026-10-12T01:00:00.000Z', decision: 'rejected' } }] };
+  const monday10 = productionTiming(order, '2026-10-12T02:00:00.000Z');
+  assert.equal(monday10.reviewWaitMs, 2 * 3600000); // Friday 16-17 and Monday 8-9 only
+  assert.equal(monday10.elapsedMs, 0);
+  assert.equal(productionTiming(order, '2026-10-12T03:00:00.000Z').elapsedMs, 3600000);
+  assert.equal(productionTiming(order, null).finishedAt, null);
 });
