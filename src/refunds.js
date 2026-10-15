@@ -1,7 +1,8 @@
+import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
-  supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents } from './refund-policy.js';
+  supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents, ACTIVE_REFUND_STATUSES } from './refund-policy.js';
 import { deliverySplit } from './operational-model.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { resolvePayoutReceipt, bindPayoutReceipt, paymentReferenceValue } from './payout-receipt.js';
@@ -92,7 +93,7 @@ function notify(store, request, order, kind, createId, at) {
     seen.add(key);
     store.notifications.push({ id: createId('notif'), userId, appRole: role, orderId: order.id,
       type: `refund_${kind}`, title: 'Client refund',
-      body: role === 'supplier' && kind === 'rejected'
+      body: request.kind === 'delivery_pin' ? 'The delivery-fee credit was updated. Fulfillment and shop entitlements continue unchanged.' : role === 'supplier' && kind === 'rejected'
         ? 'The refund request was rejected. Open the order for its work and payout status.' : copy[kind], read: false, at });
   }
   queueOrderInvalidate(store, order, ['orders', 'payouts', 'claims']);
@@ -133,7 +134,7 @@ function settlementCalculation(store, order, request, body) {
   if (recoveryRefund && amounts.totalMinor !== sumMinor(Object.values(amounts.collected))) {
     fail(409, 'shop_recovery_full_refund_required', 'Refund every verified collected component.');
   }
-  const split = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10000);
+  const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10000));
   if (deliveryCompleted(order) && amounts.riderEntitlementMinor < split.riderPayoutMinor) {
     fail(409, 'refund_requires_super_admin', 'Earned rider pay must be protected. Refer exceptions to Super Admin.', { escalateTo: 'super_admin' });
   }
@@ -184,7 +185,8 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   let eventReason = action === 'destination' ? 'Client replaced receiving QR.' : text(body.reason, 'reason');
   let eventData = {};
   if (action === 'request') {
-    if (refundHold(store, order)) fail(409, 'refund_already_open', 'This order already has an active refund request.');
+    if (deliveryPinPaymentPending(order)) fail(409, 'delivery_pin_payment_pending', 'Resolve the submitted delivery transfer before filing a refund.');
+    if (store.refundRequests.some(row => row.orderId === order.id && ACTIVE_REFUND_STATUSES.includes(row.status))) fail(409, 'refund_already_open', 'This order already has an active refund request.');
     const late = lateFiling(store, order, at);
     if (late && user.role !== 'super_admin') fail(409, 'refund_window_closed', 'The filing window is closed. Contact Super Admin.', { escalateTo: 'super_admin' });
     if (!['cancellation', 'complaint'].includes(body.kind)) fail(400, 'invalid_refund_kind', 'Choose cancellation or complaint.');
@@ -233,7 +235,10 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     });
     if (body.totalMinor !== amounts.totalMinor) fail(409, 'refund_amount_mismatch', 'Review the calculated component amounts before approving.', { amounts });
     // Returned delivery is unused service. Attribute only the collected platform share to revenue.
-    const collectedSplit = deliverySplit(amounts.collected.deliveryMinor, order.riderCommissionBps ?? 10000);
+    const extra = deliveryPinCollectedMinor(order);
+    const originalCollectedSplit = deliverySplit(amounts.collected.deliveryMinor - extra, order.riderCommissionBps ?? 10000);
+    const extraCollectedSplit = deliverySplit(extra, order.riderCommissionBps ?? 10000);
+    const collectedSplit = { platformDeliveryShareMinor: sumMinor([originalCollectedSplit.platformDeliveryShareMinor, extraCollectedSplit.platformDeliveryShareMinor]) };
     const previousPlatform = sumMinor(store.refundSettlements.filter((row) => row.orderId === order.id).map((row) => row.platformDeliveryMinor));
     const platformDeliveryMinor = Math.min(amounts.deliveryMinor, Math.max(0, collectedSplit.platformDeliveryShareMinor - previousPlatform));
     const settlement = { id: id('rsettle'), requestId: request.id, orderId: order.id, createdBy: user.id, createdAt: at,
@@ -344,7 +349,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     bind(receipt, request, 'transfer_evidence');
     store.refundPayments.push(payment); attempt.status = 'paid'; attempt.updatedAt = at; request.status = 'paid';
     const settlement = settlementFor(store, request);
-    restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
+    if (request.kind !== 'delivery_pin') restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
     order.revenueAdjustments ||= [];
     const returnedPlatform = sumMinor([settlement.feeMinor, settlement.platformDeliveryMinor]);
     if (returnedPlatform) order.revenueAdjustments.push({ id: id('rev'), kind: 'refund', amountMinor: -returnedPlatform,

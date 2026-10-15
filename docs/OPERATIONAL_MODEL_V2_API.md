@@ -1512,7 +1512,13 @@ See [Production deadline requests](ORDER_RESCHEDULE_API.md) for the one-request 
 See [Shop acceptance and recovery](SHOP_RECOVERY_API.md) for the opening-hour deadline,
 shop cancellation, client-approved replacement or full-refund choice, and dashboard failure history.
 
+## Production-finished delivery pin
+
+[Delivery pin confirmation and one change](DELIVERY_PIN_API.md) defines the new production-finished prompt, first-dispatch lock, verified QR surcharge, non-cancelling delivery credit, role-safe final pin and app follow-ups. Existing checkout snapshots and already-running trips remain compatible.
+
 ## Out-for-delivery drop-off confirmation
+
+This section applies to legacy trips without the new `deliveryPin` record; new-flow orders use the contract above.
 
 A door delivery entering `out_for_delivery` records `dropoffConfirmation: {status:"pending", requestedAt}` and its client notification/push asks the client to confirm or change the pin. Hub pickup and already-running older trips without this record retain their previous behavior. The original order/job destination, distance, paid fee, installments and rider split remain immutable snapshots.
 

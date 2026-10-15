@@ -1,3 +1,4 @@
+import { deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 /** Option B: cash already collected, with earned obligations protected. */
 export class RefundError extends Error {
@@ -45,12 +46,12 @@ export function deliveryCompleted(order) {
 }
 
 export function refundHold(store, order) {
-  return (store?.refundRequests || []).some((request) => request.orderId === order.id
+  return (store?.refundRequests || []).some((request) => request.orderId === order.id && request.kind !== 'delivery_pin'
     && ACTIVE_REFUND_STATUSES.includes(request.status));
 }
 
 export function refundSettlementFor(store, order) {
-  return (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
+  return (store?.refundSettlements || []).filter((row) => row.orderId === order.id && row.disposition !== 'delivery_adjustment')
     .sort((a, b) => a.sequence - b.sequence).at(-1) || null;
 }
 
@@ -87,6 +88,7 @@ export function collectedRefundComponents(order) {
   if (sumMinor(Object.values(components)) !== verified) {
     refundFail(409, 'refund_collection_reconciliation_required', 'Operations must reconcile verified payment allocations before settlement.');
   }
+  components.deliveryMinor = sumMinor([components.deliveryMinor, deliveryPinCollectedMinor(order)]);
   return components;
 }
 

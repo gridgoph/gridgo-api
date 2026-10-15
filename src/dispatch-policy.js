@@ -1,3 +1,4 @@
+import { deliveryPinPaymentPending } from './delivery-pin-policy.js';
 import { operatingHours } from './operating-hours.js';
 import { isOpenAt } from './availability.js';
 import { isContainedPickup } from "./operational-model.js";
@@ -6,7 +7,7 @@ import { rescheduleHold } from "./order-reschedule-policy.js";
 import { recoveryHeld } from "./shop-recovery.js";
 
 export function dispatchWorkHeld(store, order) {
-  return Boolean(refundHold(store, order) || refundSettlementFor(store, order)
+  return Boolean(deliveryPinPaymentPending(order) || refundHold(store, order) || refundSettlementFor(store, order)
     || recoveryHeld(order) || rescheduleHold(order));
 }
 

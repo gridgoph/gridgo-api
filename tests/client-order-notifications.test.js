@@ -520,3 +520,8 @@ for (const serviceFeeVisibleToClient of [false, true, undefined]) {
     assert.equal(second.created, false);
   });
 }
+
+test('production-confirmed pins do not invite an impossible new change after dispatch', () => {
+  const notification = clientNotificationDraft({ id: 'order', clientId: 'client', state: 'out_for_delivery', fulfillmentMode: 'delivery', deliveryPin: { status: 'confirmed' } });
+  assert.doesNotMatch(notification.body, /choose a new|confirm your/i);
+});

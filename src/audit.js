@@ -22,7 +22,7 @@ export function safeAuditValue(value, depth = 0) {
 const pick = (record, fields) => record == null ? null : safeAuditValue(Object.fromEntries(fields.filter(key => Object.hasOwn(record, key)).map(key => [key, record[key]])));
 const COMMON = ['id', 'userId', 'orderId', 'status', 'state', 'version', 'createdAt', 'updatedAt'];
 const TARGETS = {
-  order: ['orders', [...COMMON, 'clientId', 'supplierId', 'riderId', 'readyBy', 'promiseBy', 'fulfillmentMode', 'pickup', 'dropoff', 'fileCheck', 'pickupChecklist', 'supplierSubtotalMinor', 'serviceFeeMinor', 'deliveryFeeMinor', 'totalMinor', 'payments', 'payoutMilestones', 'payoutHold', 'claimHold', 'rescheduleRequest', 'shopRecovery', 'refund', 'productionDeductionMinor', 'physicalInvoiceRequest', 'dropoffConfirmation']],
+  order: ['orders', [...COMMON, 'clientId', 'supplierId', 'riderId', 'readyBy', 'promiseBy', 'fulfillmentMode', 'pickup', 'dropoff', 'fileCheck', 'pickupChecklist', 'supplierSubtotalMinor', 'serviceFeeMinor', 'deliveryFeeMinor', 'totalMinor', 'payments', 'payoutMilestones', 'payoutHold', 'claimHold', 'rescheduleRequest', 'shopRecovery', 'refund', 'productionDeductionMinor', 'physicalInvoiceRequest', 'dropoffConfirmation', 'deliveryPin']],
   user: ['users', [...COMMON, 'name', 'role', 'accountType', 'accountStatus', 'accountStatusReason', 'verificationStatus', 'shop']],
   claim: ['claims', [...COMMON, 'holdReason', 'reason', 'releaseReason']],
   issue: ['issues', [...COMMON, 'kind', 'category', 'claimId']],
@@ -49,6 +49,7 @@ export function auditSnapshot(store, type, id) {
   const row = (store[target[0]] || []).find(item => (item.id ?? item.fileId ?? item.userId) === id);
   if (type === 'staff' && !row) return auditSnapshot(store, 'staff_invite', id) ?? pick((store.staffRoles || []).find(role => role.code === id), ['code', 'name', 'canHandout']);
   const snapshot = pick(row, target[1]);
+  if (type === 'order' && snapshot?.deliveryPin) delete snapshot.deliveryPin.pricing;
   if (type === 'refund_request' && snapshot) {
     snapshot.settlements = (store.refundSettlements || []).filter(item => item.requestId === id).map(item => pick(item,
       ['id', 'sequence', 'disposition', 'shopEntitlementMinor', 'riderEntitlementMinor', 'principalMinor', 'feeMinor', 'deliveryMinor', 'totalMinor']));

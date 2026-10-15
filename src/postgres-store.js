@@ -172,6 +172,7 @@ export function emptyStore() {
     files: [],
     riderDocuments: [],
     credits: {},
+    deliveryPinPayments: [],
     refundRequests: [],
     refundSettlements: [],
     refundSupplierPayouts: [],
