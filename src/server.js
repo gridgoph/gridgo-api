@@ -223,8 +223,10 @@ import {
   publicOrderFor,
   recordDeliveryProof,
   releaseMilestone,
+  OperationalError,
   validateOperationalSettings,
 } from "./operational-model.js";
+import { artworkGuidanceSettings, validateArtworkGuidance } from "./artwork-guidance.js";
 import {
   parseAllowedOrigins,
   validateProductionServerEnvironment,
@@ -751,6 +753,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
+    artworkGuidance: artworkGuidanceSettings(rest),
     paymentQr,
   };
 }
@@ -3703,6 +3706,10 @@ async function handleAuditedRequest(req, res) {
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
+        artworkGuidance: Object.hasOwn(body, "artworkGuidance")
+          ? validateArtworkGuidance(body.artworkGuidance, store.taxonomy, (status, code, message, details) => {
+            throw new OperationalError(status, code, message, details);
+          }) : artworkGuidanceSettings(store.settings),
       };
       validateOperationalSettings(next);
       next.deliveryFeeBands = next.deliveryFeeBands.map((band) => ({

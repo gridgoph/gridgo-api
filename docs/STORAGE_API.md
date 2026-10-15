@@ -176,6 +176,11 @@ Dimensions stay unknown. Word's cached page count is advisory and can depend on
 fonts/layout; Operations still checks print readiness. See [document page
 selection](ORDER_MATCH_API.md#document-page-selection) for manual DOCX counts.
 
+Artwork `detected` also reports `colorMode` (`rgb | cmyk | grayscale | mixed`
+or `null`), and WebP/PSD uploads report their pixel size. Resolution and colour
+are warnings judged at the ordered size, never upload or checkout blocks; see
+[ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
+
 Client file pickers must offer `.docx` and its MIME above (or use the governed
 registry's uploadable types); clients must permit entering `measurement.pages`
 when a DOCX's detected count is null. This API change does not update any app.

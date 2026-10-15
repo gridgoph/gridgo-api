@@ -18,6 +18,7 @@ import { organizationFeeMoney, validateOrganizationFee } from "./organization-mo
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
+import { defaultArtworkGuidance, publicArtworkGuidance } from "./artwork-guidance.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier, productionTiming } from './production-penalties.js';
@@ -256,6 +257,8 @@ export function defaultOperationalSettings() {
     productionNudge: defaultProductionNudge(),
     productionPenalty: defaultProductionPenalty(),
     seasonWindowPush: { enabled: false, version: 1 },
+    /** Recommended resolution and colour per product type. Warnings only; Super Admin edits it. */
+    artworkGuidance: defaultArtworkGuidance(),
     deliveryFeeBands: [
       { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 8_900 },
       { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 14_900 },
@@ -1020,6 +1023,9 @@ function productionItemsFor(store, order, user) {
         artworkLinks: structuredClone(line.artworkLinks || []),
         artworkAttachments: artworkAttachmentsFor(line),
         artworkPreviewFileId: artworkPreviewFileId(store, line),
+        // What the uploaded files measured against the product type, and which
+        // warnings the client accepted at checkout. Null on older orders.
+        artworkGuidance: publicArtworkGuidance(line.artworkGuidance, user),
       };
     });
 }
