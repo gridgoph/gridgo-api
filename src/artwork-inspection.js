@@ -103,10 +103,12 @@ function inspectPdf(bytes) {
 
   let mediaBox = null;
   let pageCount = null;
+  const spaces = new Set();
   for (const text of texts) {
     mediaBox = mediaBox || firstMediaBox(text);
     const counted = pageTreeCount(text);
     if (counted != null && (pageCount == null || counted > pageCount)) pageCount = counted;
+    for (const space of declaredColorSpaces(text)) spaces.add(space);
   }
 
   // A PDF that yielded neither a page box nor a count told us nothing, and an
@@ -130,7 +132,34 @@ function inspectPdf(bytes) {
     dpi: null,
     pixelWidth: null,
     pixelHeight: null,
+    colorMode: pdfColorMode(spaces),
   };
+}
+
+/**
+ * The colour spaces a PDF names: device spaces, and ICC profiles by their
+ * component count. Paint operators are not read, so a text-only file that
+ * names no colour space reports nothing rather than a guess.
+ */
+function declaredColorSpaces(text) {
+  const found = new Set();
+  if (/\/DeviceCMYK\b/.test(text)) found.add("cmyk");
+  if (/\/(?:DeviceRGB|CalRGB)\b/.test(text)) found.add("rgb");
+  if (/\/(?:DeviceGray|CalGray)\b/.test(text)) found.add("grayscale");
+  if (/\/ICCBased\b/.test(text) || /\/Alternate\b/.test(text)) {
+    for (const match of text.matchAll(/\/N\s+([134])(?![\d.]|\s+\d+\s+R)/g)) {
+      found.add({ 1: "grayscale", 3: "rgb", 4: "cmyk" }[match[1]]);
+    }
+  }
+  return found;
+}
+
+function pdfColorMode(spaces) {
+  if (spaces.has("cmyk") && spaces.has("rgb")) return "mixed";
+  if (spaces.has("cmyk")) return "cmyk";
+  if (spaces.has("rgb")) return "rgb";
+  if (spaces.has("grayscale")) return "grayscale";
+  return null;
 }
 
 /**
@@ -366,8 +395,11 @@ function inspectPng(bytes) {
   const pixelWidth = bytes.readUInt32BE(16);
   const pixelHeight = bytes.readUInt32BE(20);
   if (!pixelWidth || !pixelHeight) return null;
-  return { pixelWidth, pixelHeight, dpi: pngDensity(bytes) };
+  return { pixelWidth, pixelHeight, dpi: pngDensity(bytes), colorMode: PNG_COLOR_MODES[bytes[25]] ?? null };
 }
+
+/** PNG colour types: grey, RGB, palette (RGB entries), grey + alpha, RGBA. PNG has no CMYK. */
+const PNG_COLOR_MODES = { 0: "grayscale", 2: "rgb", 3: "rgb", 4: "grayscale", 6: "rgb" };
 
 /**
  * A PNG's declared density, in dots per inch.
@@ -399,10 +431,13 @@ function isFrameMarker(marker) {
 }
 
 /** JPEG: walk the segment chain for the frame header and the JFIF density. */
+const JPEG_COLOR_MODES = { 1: "grayscale", 3: "rgb", 4: "cmyk" };
+
 function inspectJpeg(bytes) {
   let at = 2;
   let dpi = null;
   let size = null;
+  let colorMode = null;
   while (at + 4 <= bytes.length) {
     if (bytes[at] !== 0xff) {
       at += 1;
@@ -417,8 +452,11 @@ function inspectJpeg(bytes) {
     const length = bytes.readUInt16BE(at + 2);
     if (length < 2) break;
 
-    if (isFrameMarker(marker) && at + 9 <= bytes.length) {
+    if (isFrameMarker(marker) && at + 10 <= bytes.length) {
       size = { pixelHeight: bytes.readUInt16BE(at + 5), pixelWidth: bytes.readUInt16BE(at + 7) };
+      // One component is grey, three are RGB (stored as YCbCr), four are CMYK
+      // (Adobe's YCCK is CMYK too). The frame says so whatever the header claims.
+      colorMode = JPEG_COLOR_MODES[bytes[at + 9]] ?? null;
     } else if (marker === 0xe0 && dpi == null && at + 16 <= bytes.length) {
       if (bytes.toString("latin1", at + 4, at + 9) === "JFIF\0") {
         const unit = bytes[at + 11];
@@ -434,7 +472,66 @@ function inspectJpeg(bytes) {
     at += 2 + length;
   }
   if (!size?.pixelWidth || !size?.pixelHeight) return null;
-  return { ...size, dpi };
+  return { ...size, dpi, colorMode };
+}
+
+/** Photoshop header colour modes: bitmap, grey, indexed, RGB, CMYK, duotone. */
+const PSD_COLOR_MODES = { 0: "grayscale", 1: "grayscale", 2: "rgb", 3: "rgb", 4: "cmyk", 8: "grayscale" };
+
+/** PSD: size and colour mode are in the fixed header, the density is image resource 0x03ED. */
+function inspectPsd(bytes) {
+  if (bytes.length < 26 || bytes.toString("latin1", 0, 4) !== "8BPS") return null;
+  const pixelHeight = bytes.readUInt32BE(14);
+  const pixelWidth = bytes.readUInt32BE(18);
+  if (!pixelWidth || !pixelHeight) return null;
+  return { pixelWidth, pixelHeight, dpi: psdDensity(bytes), colorMode: PSD_COLOR_MODES[bytes.readUInt16BE(24)] ?? null };
+}
+
+function psdDensity(bytes) {
+  let at = 26;
+  if (at + 4 > bytes.length) return null;
+  at += 4 + bytes.readUInt32BE(at);
+  if (at + 4 > bytes.length) return null;
+  const end = Math.min(bytes.length, at + 4 + bytes.readUInt32BE(at));
+  at += 4;
+  while (at + 12 <= end && bytes.toString("latin1", at, at + 4) === "8BIM") {
+    const id = bytes.readUInt16BE(at + 4);
+    const nameLength = bytes[at + 6];
+    const nameBytes = (nameLength + 2) & ~1;
+    const sizeAt = at + 6 + nameBytes;
+    if (sizeAt + 4 > end) return null;
+    const size = bytes.readUInt32BE(sizeAt);
+    const data = sizeAt + 4;
+    if (id === 0x03ed && size >= 16 && data + 6 <= end) {
+      const perUnit = bytes.readUInt32BE(data) / 65536;
+      const unit = bytes.readUInt16BE(data + 4);
+      if (!(perUnit > 0)) return null;
+      return round(unit === 2 ? perUnit * 2.54 : perUnit);
+    }
+    at = data + size + (size & 1);
+  }
+  return null;
+}
+
+/** WebP: the canvas size from whichever bitstream chunk comes first. WebP is always RGB. */
+function inspectWebp(bytes) {
+  if (bytes.length < 30 || bytes.toString("latin1", 0, 4) !== "RIFF" || bytes.toString("latin1", 8, 12) !== "WEBP") return null;
+  const chunk = bytes.toString("latin1", 12, 16);
+  let pixelWidth = 0;
+  let pixelHeight = 0;
+  if (chunk === "VP8X") {
+    pixelWidth = bytes.readUIntLE(24, 3) + 1;
+    pixelHeight = bytes.readUIntLE(27, 3) + 1;
+  } else if (chunk === "VP8 " && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+    pixelWidth = bytes.readUInt16LE(26) & 0x3fff;
+    pixelHeight = bytes.readUInt16LE(28) & 0x3fff;
+  } else if (chunk === "VP8L" && bytes[20] === 0x2f) {
+    const bits = bytes.readUInt32LE(21);
+    pixelWidth = (bits & 0x3fff) + 1;
+    pixelHeight = ((bits >>> 14) & 0x3fff) + 1;
+  }
+  if (!pixelWidth || !pixelHeight) return null;
+  return { pixelWidth, pixelHeight, dpi: null, colorMode: "rgb" };
 }
 
 /**
@@ -477,6 +574,9 @@ export function inspectArtwork(bytes, contentType) {
   } else if (contentType === "image/jpeg") {
     const raster = inspectJpeg(bytes);
     if (raster) read = { kind: "raster", pageCount: 1, ...raster, ...rasterPhysicalSize(raster) };
+  } else if (contentType === "image/webp" || contentType === "image/vnd.adobe.photoshop") {
+    const raster = contentType === "image/webp" ? inspectWebp(bytes) : inspectPsd(bytes);
+    if (raster) read = { kind: "raster", pageCount: 1, ...raster, ...rasterPhysicalSize(raster) };
   }
   if (!read) return null;
 
@@ -488,6 +588,8 @@ export function inspectArtwork(bytes, contentType) {
     pixelWidth: read.pixelWidth ?? null,
     pixelHeight: read.pixelHeight ?? null,
     dpi: read.dpi ?? null,
+    // rgb | cmyk | grayscale | mixed (a PDF naming both RGB and CMYK) | null when the file does not say.
+    colorMode: read.colorMode ?? null,
     measureUnit: known ? "mm" : null,
     widthMilli: known ? widthMilli : null,
     heightMilli: known ? heightMilli : null,
