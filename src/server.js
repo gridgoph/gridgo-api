@@ -1,3 +1,6 @@
+import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
+import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique } from './order-change-policy.js';
+import { specialInstructions, acknowledgeInstructions } from './special-instructions.js';
 import { requestDeliveryPin, routeDeliveryPin } from './delivery-pin.js';
 import { deliveryPinPaymentPending, deliveryPinLocked } from './delivery-pin-policy.js';
 import { feeSchedule, feeSettings, nextFeeSettings, serviceFeePreview } from './service-fee.js';
@@ -334,12 +337,21 @@ function notifyMissingJobDetails(store, order) {
 }
 
 async function save(store) {
+  assertSupplementCollectionsUnique(store);
   syncSupplierInvoiceExpectations(store, originalDomainStore(store), { at: now(), id, audit });
   await reconcileCalls(database, store, { createId: id, at: now() });
   cancelVoucherReservations(store, { id, at: now() });
   syncSurveys(store, { id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
+    if (changePaymentPending(store, order) && (!changeWindowOpen(order)
+        || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted'))) {
+      throw Object.assign(new Error('Resolve the submitted change transfer before closing production or changing shops.'), { status: 409, code: 'change_payment_pending' });
+    }
+    if (before.get(order.id)?.supplierId !== order.supplierId && supplementTotals(store, order).totalMinor > 0) {
+      throw Object.assign(new Error('Reconcile the paid supplement before reassignment.'), { status: 409, code: 'change_payment_reconciliation_required' });
+    }
+    closeUnavailableChanges(store, order, { at: now(), id, audit });
     if (deliveryPinPaymentPending(order) && deliveryPinLocked(order)) {
       throw Object.assign(new Error('Verify or reject the submitted delivery transfer before dispatch or closure.'), { status: 409, code: 'delivery_pin_payment_pending' });
     }
@@ -2752,6 +2764,12 @@ async function handleAuditedRequest(req, res) {
 
     if (pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
+    const changeResponse = await routeOrderChanges({ req, url, store, user, readBody, now, id, audit });
+    if (changeResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (changeResponse.mutated) await save(store);
+      return send(res, changeResponse.status, changeResponse.body);
     }
     const rescheduleResponse = await routeOrderReschedule({ req, url, store, user, readBody, now, id, audit });
     if (rescheduleResponse) {
@@ -5267,6 +5285,8 @@ async function handleAuditedRequest(req, res) {
       const milestone = releaseMilestone(order, milestoneCode, user, releasedAt, store);
       if (receipt) bindPayoutReceipt(order, milestone, receipt);
       if (reference) milestone.reference = reference;
+      const supplementalAmountMinor = releaseChangePayouts(store, order, milestoneCode,
+        { user, reference, receipt, amountMinor: body.amountMinor, at: releasedAt, id, audit });
       order.updatedAt = releasedAt;
       order.timeline.push({
         at: releasedAt,
@@ -5285,6 +5305,7 @@ async function handleAuditedRequest(req, res) {
         orderId: order.id,
         detail: {
           milestoneCode,
+          supplementalAmountMinor,
           amountMinor: milestone.amountMinor,
           reference: reference || null,
           receiptFileId: receipt?.fileId || null,
@@ -5306,7 +5327,7 @@ async function handleAuditedRequest(req, res) {
           type: "shop_payout_released",
           appRole: "supplier",
           orderId: order.id,
-          title: `${formatMinorPhp(milestone.amountMinor)} released`,
+          title: `${formatMinorPhp(milestone.amountMinor + supplementalAmountMinor)} released`,
           body: reference
             ? `${payoutStageLabel(milestoneCode)} was sent, reference ${reference}. Open the payout ledger for the receipt.`
             : `${payoutStageLabel(milestoneCode)} was recorded as released. Open the payout ledger for the recorded details.`,
@@ -5686,6 +5707,7 @@ async function handleAuditedRequest(req, res) {
         state: body.submit ? "submitted" : "draft",
         productId: product.id,
         title: body.title || product.name,
+        specialInstructions: specialInstructions(body.specialInstructions),
         quantity: qty,
         size: body.size || "",
         material: body.material || "",
@@ -5744,6 +5766,10 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if (order.state === 'supplier_assigned' && ['supplier_accepted', 'payment_authorized'].includes(next)
+          && user.role === 'supplier' && user.id === order.supplierId) {
+        acknowledgeInstructions(store, order, user, body, now(), audit);
+      }
       if (order.handover && ['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(next)
           && !order.handover.consumedAt) return send(res, 409, { error: 'handover_verification_required' });
       if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});

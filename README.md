@@ -2,6 +2,8 @@
 
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
 
+Per-item special instructions, shop acknowledgement and paid specification changes are documented in [Order changes](docs/ORDER_CHANGES_API.md).
+
 Delivery pin confirmation, one change before dispatch, QR surcharges and non-cancelling credits are documented in [Delivery pins](docs/DELIVERY_PIN_API.md).
 
 Staff invitations, QR/OTP handovers, hub reminders and receipt scans are documented in [Hub handovers](docs/HUB_HANDOVER_API.md). Monthly supplier invoice details and paper collection are documented in [Supplier invoices](docs/SUPPLIER_INVOICES_API.md). OTP rollout defaults off until the companion app updates are ready.
