@@ -1,5 +1,7 @@
 # GRIDGO Operational Model v2 API
 
+Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
+
 This is the rebuild contract for the three mobile apps and Operations web portal. Field names, enum values, money units, authorization, and state transitions are case-sensitive. `docs/STORAGE_API.md` and `docs/TAXONOMY_API.md` remain authoritative for file bytes and taxonomy structure.
 
 ## Conventions

@@ -1792,3 +1792,29 @@ for (const multi of [false, true]) for (const percent of [75, 100]) test(`vouche
   } else confirmVoucher(discounted.store, discounted.store.orders, { id: prefix => `${prefix}_${crypto.randomUUID()}`, at: AT, actorId: 'ops' });
   assert.equal(discounted.store.vouchers[0].status, 'used');
 });
+
+test('fee schedule locks per shop/deadline group, survives edits, and resets only when emptied', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const cart = (await call('POST', '/me/carts', {})).body.cart;
+  const path = `/me/carts/${cart.id}`;
+  const first = (await call('POST', `${path}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 20 })).body.cart;
+  assert.equal(first.groups[0].clientItemSubtotalMinor, 220000);
+  store.settings.serviceFeeSchedule = { version: 2, rounding: 'half_up_once', brackets: [
+    { upToMinor: 200000, rateBps: 4500 }, { upToMinor: 2000000, rateBps: 2500 }, { upToMinor: null, rateBps: 1500 },
+  ] };
+  assert.equal((await call('GET', path)).body.cart.groups[0].clientItemSubtotalMinor, 220000);
+  let result = (await call('POST', `${path}/lines`, { catalogItemId: 'item_a2', optionIds: [], quantity: 15 })).body.cart;
+  assert.equal(result.groups[0].clientItemSubtotalMinor, 550000);
+  const second = result.lines.find(line => line.id !== first.lines[0].id);
+  await call('DELETE', `${path}/lines/${first.lines[0].id}`);
+  result = (await call('PATCH', `${path}/lines/${second.id}`, { quantity: 25 })).body.cart;
+  assert.equal(result.groups[0].clientItemSubtotalMinor, 550000);
+  await call('DELETE', `${path}/lines/${second.id}`);
+  result = (await call('POST', `${path}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 50 })).body.cart;
+  assert.equal(result.groups[0].clientItemSubtotalMinor, 665000);
+  result = (await call('POST', `${path}/lines`, { catalogItemId: 'item_b', optionIds: [], quantity: 25 })).body.cart;
+  assert.deepEqual(result.groups.map(g => g.clientItemSubtotalMinor), [665000,665000]);
+  assert.equal(JSON.stringify(result).includes('serviceFeeSchedule'), false);
+  assert.equal(JSON.stringify(result).includes('serviceFeeWorking'), false);
+});

@@ -1,3 +1,5 @@
+import { feeSchedule, feeSettings, nextFeeSettings, serviceFeePreview } from './service-fee.js';
+import { organizationFeeMoney } from './organization-money.js';
 import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
 import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './artwork-preview.js';
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
@@ -701,8 +703,12 @@ function readyPaymentQrFile(store) {
   return file;
 }
 
-function publicOperationalSettings(settings, store = null) {
+function publicOperationalSettings(settings, store = null, user = null) {
   const { paymentQrFileId: _paymentQrFileId, featuredPrints: _featuredPrints, ...rest } = settings || {};
+  if (!['ops_admin', 'super_admin'].includes(user?.role)) {
+    delete rest.serviceFeeSchedule;
+    delete rest.scheduledServiceFee;
+  }
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
@@ -3574,9 +3580,16 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/settings") {
       return send(res, 200, {
         version: store.version,
-        settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store),
+        settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store, user),
         operatingStatus: reviewTiming(store.settings, now()),
       });
+    }
+
+    if (req.method === "POST" && pathname === "/settings/service-fee/preview") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      if (body.expectedVersion !== store.version) return send(res, 409, { error: "settings_version_conflict", version: store.version });
+      return send(res, 200, serviceFeePreview(store.settings, body, store.version, now()));
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
@@ -3593,6 +3606,7 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        ...nextFeeSettings(store.settings, body, store.version + 1, now()),
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
@@ -3646,7 +3660,7 @@ async function handleAuditedRequest(req, res) {
         reason,
       });
       await save(store);
-      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store), operatingStatus: reviewTiming(store.settings, now()) });
+      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store, user), operatingStatus: reviewTiming(store.settings, now()) });
     }
 
     if (req.method === "POST" && pathname === "/settings/payment-qr") {
@@ -3674,7 +3688,7 @@ async function handleAuditedRequest(req, res) {
       if (previousId === file.fileId) {
         return send(res, 200, {
           version: store.version,
-          settings: publicOperationalSettings(store.settings, store),
+          settings: publicOperationalSettings(store.settings, store, user),
         });
       }
       store.settings = { ...store.settings, paymentQrFileId: file.fileId };
@@ -3690,7 +3704,7 @@ async function handleAuditedRequest(req, res) {
       await save(store);
       return send(res, 200, {
         version: store.version,
-        settings: publicOperationalSettings(store.settings, store),
+        settings: publicOperationalSettings(store.settings, store, user),
       });
     }
 
@@ -5920,7 +5934,7 @@ async function handleAuditedRequest(req, res) {
           if (priorQuote) order.quoteHistory.push(structuredClone(priorQuote));
           order.dropoff = order.requestedDropoff ? structuredClone(order.requestedDropoff) : order.dropoff;
           for (const field of [
-            "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor",
+            "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "serviceFeeSchedule", "serviceFeeWorking",
             "deliveryDistanceMeters", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode",
             "paymentPlan", "supplierDownpaymentRateBps", "initialSupplierPrincipalMinor",
             "supplierRemainderMinor", "initialOnlineMinor", "finalOnlineMinor", "onlineDueMinor",
@@ -5962,6 +5976,7 @@ async function handleAuditedRequest(req, res) {
         order.pendingQuote = {
           version: quoteVersion,
           supplierSubtotalMinor,
+          ...organizationFeeMoney(supplierSubtotalMinor, feeSettings(store.settings, feeSchedule(store.settings, now())), approvedOrganization(store, order.clientId)),
           promisedDate: order.promisedDate,
           supplierShop: structuredClone(order.pickup),
           paymentTerms: structuredClone(terms),
@@ -6051,7 +6066,8 @@ async function handleAuditedRequest(req, res) {
           supplierDownpaymentRateBps,
           pickup: quote.supplierShop,
           dropoff: order.dropoff,
-          settings: store.settings,
+          settings: feeSettings({ ...store.settings, organizationDiscountRateBps: quote.organizationDiscountRateBps ?? store.settings.organizationDiscountRateBps },
+            quote.serviceFeeSchedule || { version: 1, rateBps: quote.serviceFeeRateBps ?? store.settings.serviceFeeRateBps }),
         });
         const schedule = createPaymentSchedule(money);
         const committedAt = now();
@@ -6067,6 +6083,8 @@ async function handleAuditedRequest(req, res) {
             acceptedAt: committedAt,
             fulfillmentMode,
             paymentPlan,
+            serviceFeeSchedule: structuredClone(money.serviceFeeSchedule),
+            serviceFeeWorking: structuredClone(money.serviceFeeWorking),
             serviceFeeRateBps: money.serviceFeeRateBps,
             serviceFeeMinor: money.serviceFeeMinor,
             grossServiceFeeMinor: money.grossServiceFeeMinor,
@@ -6106,6 +6124,8 @@ async function handleAuditedRequest(req, res) {
             quoteVersion: quote.version,
             fulfillmentMode,
             paymentPlan,
+            serviceFeeSchedule: structuredClone(order.serviceFeeSchedule),
+            serviceFeeWorking: structuredClone(order.serviceFeeWorking),
             serviceFeeRateBps: order.serviceFeeRateBps,
             serviceFeeMinor: order.serviceFeeMinor,
           },

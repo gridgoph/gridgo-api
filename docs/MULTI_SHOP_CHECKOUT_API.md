@@ -1,5 +1,7 @@
 # Multi-shop checkout
 
+Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
+
 Implements the 4–5 October 2026 decisions in [#117](https://github.com/gridgoph/gridgo-api/issues/117).
 All amounts are safe integer PHP minor units. Use the existing [cart and matching](ORDER_MATCH_API.md),
 [fulfillment/payout](OPERATIONAL_MODEL_V2_API.md), and [available_funds_v1 refund](REFUNDS_API.md) contracts.
@@ -132,7 +134,8 @@ in finance reporting.
 Per group:
 
 ```text
-serviceFeeMinor = round_bps(group item subtotal, current service fee bps)
+grossServiceFeeMinor = progressive_fee(group item subtotal, locked group schedule)
+serviceFeeMinor = grossServiceFeeMinor - organizationDiscountMinor
 totalMinor = item subtotal + service fee + group delivery fee
 basket.totalMinor = sum(group.totalMinor)
 ```

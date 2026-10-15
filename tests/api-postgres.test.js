@@ -161,6 +161,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
+    delete store.settings.serviceFeeSchedule; // Legacy flat-fee integration coverage.
     store.settings.operatingHours = alwaysOpenOperatingHours();
     store.users.push(
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
@@ -5328,4 +5329,35 @@ test('operating hours settings require Super Admin/version/reason, persist with 
     await new Promise(resolve => instance.child.once('exit', resolve));
     await database.close();
   }
+});
+
+test('an open bracket quote keeps its table and fee when accepted after settings change', { skip: !DATABASE_URL }, async t => {
+  const database=createDatabase({DATABASE_URL});t.after(()=>database.close());
+  await clearAndFixture(database);
+  const brackets=[{upToMinor:200000,rateBps:4500},{upToMinor:2000000,rateBps:2500},{upToMinor:null,rateBps:1500}];
+  await database.transaction(async()=>{const store=await loadStore(database);
+    store.settings.serviceFeeSchedule={version:2,rounding:'half_up_once',brackets};await saveStore(database,store);});
+  const instance=await startApi();
+  t.after(async()=>{instance.child.kill('SIGTERM');await new Promise(resolve=>instance.child.once('exit',resolve));});
+  const call=(path,subject,body)=>request(instance.api,path,{method:'POST',subject,body});
+  const created=await call('/orders','clerk_client',{productId:'prod_tarpaulin',title:'Bracket quote',quantity:1,
+    size:'2m x 3m',material:'13oz tarpaulin',finish:'hemmed',address:'Bajada',zone:'davao_central',submit:true});
+  assert.equal(created.status,201,JSON.stringify(created.body));
+  const path=`/orders/${created.body.order.id}/transition`;
+  for(const state of ['needs_qa','approved_for_matching','supplier_assigned']) {
+    const result=await call(path,'clerk_ops',{state,...(state==='supplier_assigned'?{supplierId:'user_supplier'}:{})});
+    assert.equal(result.status,200,JSON.stringify(result.body));
+  }
+  const quoted=await call(path,'clerk_supplier',{state:'supplier_accepted',supplierSubtotalMinor:500000});
+  assert.equal(quoted.status,200,JSON.stringify(quoted.body));
+  await database.transaction(async()=>{const store=await loadStore(database);
+    store.settings.serviceFeeSchedule.brackets=[{upToMinor:null,rateBps:1000}];await saveStore(database,store);});
+  const accepted=await call(path,'clerk_client',{state:'awaiting_initial_payment',quoteVersion:1,fulfillmentMode:'delivery',paymentPlan:'delivery_online'});
+  assert.equal(accepted.status,200,JSON.stringify(accepted.body));
+  assert.equal(accepted.body.order.clientItemSubtotalMinor,665000);
+  assert.equal(JSON.stringify(accepted.body).includes('serviceFeeWorking'),false);
+  const order=(await loadStore(database)).orders.find(row=>row.id===created.body.order.id);
+  assert.equal(order.grossServiceFeeMinor,165000);
+  assert.deepEqual(order.serviceFeeSchedule.brackets,brackets);
+  assert.equal(order.serviceFeeRateBps,null);
 });

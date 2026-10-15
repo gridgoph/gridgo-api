@@ -20,7 +20,7 @@ export function splitVoucherMinor(total, weights) {
 /** Gross delivery and supplier amounts are entitlements, never discounted. */
 export function voucherMoney(groups, valueMinor = 0) {
   const fees = groups.map(g => minor(g.grossServiceFeeMinor ?? g.serviceFeeMinor));
-  const deliveries = groups.map(g => minor(g.deliveryFeeMinor));
+  const deliveries = groups.map(g => g.serviceFeeSchedule?.version === 2 ? 0 : minor(g.deliveryFeeMinor));
   const feeTotal = sumMinor(fees), deliveryTotal = sumMinor(deliveries);
   const organizationDiscountMinor = sumMinor(groups.map(g => minor(g.organizationDiscountMinor ?? 0)));
   const candidate = Math.min(minor(valueMinor), sumMinor([feeTotal, deliveryTotal]));
@@ -49,8 +49,8 @@ export function voucherMoney(groups, valueMinor = 0) {
         serviceFeeMinor: fees[index] - organization, voucherDiscountMinor: discount,
         voucherServiceFeeMinor: feeShares[index], voucherDeliveryMinor: deliveryShares[index],
         clientServiceFeeMinor: fees[index] - organization - feeShares[index],
-        clientDeliveryFeeMinor: deliveries[index] - deliveryShares[index],
-        totalMinor: sumMinor([minor(group.supplierSubtotalMinor), fees[index] - organization - feeShares[index], deliveries[index] - deliveryShares[index]]) };
+        clientDeliveryFeeMinor: group.deliveryFeeMinor - deliveryShares[index],
+        totalMinor: sumMinor([minor(group.supplierSubtotalMinor), fees[index] - organization - feeShares[index], group.deliveryFeeMinor - deliveryShares[index]]) };
     }) };
 }
 

@@ -1,4 +1,5 @@
-import { voucherMoney, applyVoucherMoney } from './voucher-money.js';
+import { feeSchedule, feeSettings } from './service-fee.js';
+import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
 import { selectVoucher, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
 import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './operating-hours.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
@@ -443,6 +444,22 @@ function cartDelivery(store, cart, supplierId, lines) {
   return { ...farthest, feeMinor: deliveryFeeForDistance(farthest.distance, store.settings) };
 }
 
+// Snapshot the schedule on every priced line, bound to its shop/deadline group.
+// Removing the final line removes the lock; moving a line does not carry it to a new group.
+function groupFeeSettings(store, cart, lines, at) {
+  const key = JSON.stringify([lines[0]?.supplierId, lineDeadline(cart, lines[0] || {})]);
+  const saved = lines.find(line => JSON.stringify(line.serviceFeeSnapshot?.groupKey) === key)?.serviceFeeSnapshot;
+  return feeSettings(store.settings, saved?.schedule || feeSchedule(store.settings, at));
+}
+function lockCartFeeSchedules(store, cart, at) {
+  for (const group of cartGroups(cart, store.cartLines.filter(line => line.cartId === cart.id))) {
+    if (group.lines.some(line => cartLineSubtotal(store, line) == null)) continue;
+    const schedule = groupFeeSettings(store, cart, group.lines, at).serviceFeeSchedule;
+    const groupKey = [group.supplierId, group.deadline];
+    for (const line of group.lines) line.serviceFeeSnapshot = { groupKey, schedule: structuredClone(schedule) };
+  }
+}
+
 function cartVoucherPlan(store, cart, lines, at) {
   const grouped = cartGroups(cart, lines);
   const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, grouped.length);
@@ -451,7 +468,7 @@ function cartVoucherPlan(store, cart, lines, at) {
     const supplierSubtotalMinor = amounts.some(amount => amount == null) ? null : addMinor(amounts, "voucher.items");
     const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? pickupShares[index] : cartDelivery(store, cart, group.supplierId, group.lines).feeMinor;
     if (supplierSubtotalMinor == null || deliveryFeeMinor == null) return null;
-    return { supplierSubtotalMinor, deliveryFeeMinor, ...organizationFeeMoney(supplierSubtotalMinor, store.settings, approvedOrganization(store, cart.clientId)) };
+    return { supplierSubtotalMinor, deliveryFeeMinor, ...organizationFeeMoney(supplierSubtotalMinor, groupFeeSettings(store, cart, group.lines, at), approvedOrganization(store, cart.clientId)) };
   });
   if (money.some(group => !group)) return null;
   const voucher = selectVoucher(store, cart, money, at);
@@ -473,7 +490,7 @@ function clientCartQuote(store, cart, lines, at) {
 
   const grouped = cartGroups(cart, lines);
   const clientItemSubtotalMinor = subtotals.some((amount) => amount == null) ? null
-    : addMinor(grouped.map(({ lines: entries }) => clientMoneyMinor(store,
+    : addMinor(grouped.map(({ lines: entries }) => clientMoneyMinor({ settings: groupFeeSettings(store, cart, entries, at) },
       addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"))), "quote.items");
   const deliveryLines = cart.fulfillmentMode === "pickup" ? [] : grouped.map(({ supplierId, deadline, lines: entries }) => {
     const delivery = cartDelivery(store, cart, supplierId, entries);
@@ -489,7 +506,7 @@ function clientCartQuote(store, cart, lines, at) {
   const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
     : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
   let organizationDiscountMinor = subtotals.some((amount) => amount == null) ? null : addMinor(grouped.map(({ lines: entries }) => organizationFeeMoney(
-    addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"), store.settings, approvedOrganization(store, cart.clientId)).organizationDiscountMinor), "quote.discount");
+    addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"), groupFeeSettings(store, cart, entries, at), approvedOrganization(store, cart.clientId)).organizationDiscountMinor), "quote.discount");
   let totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
     : addMinor([clientItemSubtotalMinor - organizationDiscountMinor, deliveryFeeMinor], "quote.total");
   const voucherPlan = totalMinor == null ? null : cartVoucherPlan(store, cart, lines, at);
@@ -512,7 +529,11 @@ function clientCartQuote(store, cart, lines, at) {
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
     voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
     discountKind: voucherPlan?.discountKind || null,
-    voucherGroups: voucherPlan?.groups.map((group, index) => ({ groupId: grouped[index].lines[0].id, ...group })) || [],
+    voucherGroups: voucherPlan?.groups.map((group, index) => ({ groupId: grouped[index].lines[0].id,
+      ...(voucherPlan.money[index].serviceFeeSchedule?.version === 2 ? {
+        organizationDiscountMinor: group.organizationDiscountMinor, voucherDiscountMinor: group.voucherDiscountMinor,
+        totalMinor: group.totalMinor,
+      } : group) })) || [],
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
@@ -564,7 +585,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       listing,
       promiseBy: cartLinePromiseBy(store, line, item, at),
       lineSubtotalMinor,
-      clientLineSubtotalMinor: clientMoneyMinor(store, lineSubtotalMinor),
+      clientLineSubtotalMinor: clientMoneyMinor({ settings: groupFeeSettings(store, cart, lines.filter(entry => entry.supplierId === line.supplierId && lineDeadline(cart, entry) === lineDeadline(cart, line)), at) }, lineSubtotalMinor),
     };
   });
   const supplierIds = [...new Set(lines.map((line) => line.supplierId))];
@@ -578,8 +599,14 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
         ? deliveryFeeForDistance(Math.max(...dropoffs.map((dropoff) => distanceMetersBetween(profile.shop, dropoff))), store.settings) : null;
     const amounts = groupLines.map((line) => cartLineSubtotal(store, line));
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
-    const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, cart.clientId));
+    const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, groupLines, at), approvedOrganization(store, cart.clientId));
     const serviceFeeMinor = fee?.grossServiceFeeMinor ?? null;
+    if (fee?.serviceFeeSchedule.version === 2) {
+      const shares = splitVoucherMinor(serviceFeeMinor, amounts);
+      groupLines.forEach((line, index) => {
+        publicLines.find(row => row.id === line.id).clientLineSubtotalMinor = amounts[index] + shares[index];
+      });
+    }
     let readyBy = null;
     try {
       const items = groupLines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
@@ -728,7 +755,7 @@ function publicMatchedOrder(store, order) {
     ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
     state: order.state,
     ...publicOrganizationDiscount(order),
-    ...(order.basketId || order.organizationDiscountRateBps > 0 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
+    ...(order.basketId || order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
       itemSubtotalMinor: order.supplierSubtotalMinor,
       serviceFeeRateBps: order.serviceFeeRateBps,
       serviceFeeMinor: order.serviceFeeMinor,
@@ -802,7 +829,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     fileCheck: { status: "pending", requestedAt: at, reviewedAt: null, reviewedBy: null, reason: null },
     supplierSubtotalMinor: 0,
     subtotalMinor: 0,
-    serviceFeeRateBps: store.settings.serviceFeeRateBps,
+    serviceFeeRateBps: groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.version === 1
+      ? groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.rateBps : null,
     serviceFeeMinor: 0,
     deliveryFeeMinor: 0,
     totalMinor: 0,
@@ -945,7 +973,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Pickup is a per-order platform charge. The internal trip to the hub keeps
   // the existing zero-charge job contract and never earns a share of this fee.
   const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
-  const fee = organizationFeeMoney(itemSubtotalMinor, store.settings, !voucher && approvedOrganization(store, user.id));
+  const fee = organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, cartLines, at), !voucher && approvedOrganization(store, user.id));
   const { serviceFeeMinor } = fee;
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
@@ -1043,7 +1071,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
     })),
     itemSubtotalMinor,
-    serviceFeeRateBps: store.settings.serviceFeeRateBps,
+    serviceFeeRateBps: groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.version === 1
+      ? groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.rateBps : null,
     serviceFeeMinor,
     deliveryLines: jobs.map((job) => ({ jobId: job.id, shopName: publicSupplierShop(store, job.supplierId)?.shopName || "Shop", amountMinor: job.deliveryFeeMinor })),
     deliveryFeeMinor: deliveryTotalMinor,
@@ -1060,6 +1089,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     cart.state = "checked_out";
     cart.checkedOutOrderId = orderId;
     cart.checkedOutAt = at;
+    lockCartFeeSchedules(store, cart, at);
     updateCart(cart, at);
   }
   store.auditLog ||= [];
@@ -1126,6 +1156,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     groups: results.map((result, index) => ({ orderId: result.order.id, label: result.order.groupLabel, deadline: groups[index].deadline,
       lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
       ...(result.invoice.voucher ? { voucher: result.invoice.voucher, voucherDiscountMinor: result.invoice.voucherDiscountMinor } : {}),
+      serviceFeeSchedule: result.invoice.serviceFeeSchedule, serviceFeeWorking: result.invoice.serviceFeeWorking, serviceFeeRateBps: result.invoice.serviceFeeRateBps,
       grossServiceFeeMinor: result.invoice.grossServiceFeeMinor, organizationDiscountMinor: result.invoice.organizationDiscountMinor,
       serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
       ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
@@ -1148,7 +1179,8 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   cart.state = "checked_out";
   cart.checkedOutOrderId = first.id;
   cart.checkedOutAt = at;
-  updateCart(cart, at);
+  lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
   store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
     action: "basket.checkout", entityType: "basket", entityId: basket.id,
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
@@ -1243,7 +1275,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId) || invoice.snapshot.organizationDiscountRateBps > 0) && !privileged });
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId) || invoice.snapshot.organizationDiscountRateBps > 0 || invoice.snapshot.serviceFeeSchedule?.version === 2) && !privileged, exposeWorking: privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
@@ -1443,6 +1475,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   if (cartMatch && req.method === "PATCH") {
     const cart = ownCart(store, user, decodeURIComponent(cartMatch[1]), { draft: true });
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
+    lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
@@ -1482,12 +1515,13 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
-    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(result.basket || result.invoice.organizationDiscountRateBps > 0) });
+    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(result.basket || result.invoice.organizationDiscountRateBps > 0 || result.invoice.serviceFeeSchedule?.version === 2) });
     return { status: 201, body: result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
+    lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
@@ -1506,6 +1540,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
         line.updatedAt = now();
       }
     }
+    lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
@@ -1556,6 +1591,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
     store.cartLines.push(line);
+    lockCartFeeSchedules(store, cart, at);
     updateCart(cart, at);
     return { status: 201, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }
@@ -1570,7 +1606,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const at = now();
     if (req.method === "DELETE") {
       store.cartLines = store.cartLines.filter((row) => row !== storedLine);
-      updateCart(cart, at);
+      lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
     const body = record(await readBody(req));
@@ -1621,6 +1658,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     }
     line.updatedAt = at;
     Object.assign(storedLine, line);
+    lockCartFeeSchedules(store, cart, at);
     updateCart(cart, at);
     return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }
@@ -1633,6 +1671,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const body = record(await readBody(req));
     line.mockupFileId = fileFor(store, user, text(body.fileId, "fileId", 120), "mockup", "fileId").fileId;
     line.updatedAt = now();
+    lockCartFeeSchedules(store, cart, line.updatedAt);
     updateCart(cart, line.updatedAt);
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }

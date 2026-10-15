@@ -1,3 +1,4 @@
+import { feeSchedule, validateFeeSchedule } from './service-fee.js';
 import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
@@ -260,6 +261,11 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings.serviceFeeSchedule) validateFeeSchedule(settings.serviceFeeSchedule);
+  if (settings.scheduledServiceFee) {
+    validateFeeSchedule(settings.scheduledServiceFee);
+    if (!Number.isFinite(Date.parse(settings.scheduledServiceFee.effectiveFrom))) fail(400, 'invalid_service_fee_effective_from', 'Use an ISO timestamp.');
+  }
   for (const [field, min, max] of [
     ['riderLocationRefreshIntervalSeconds', 15, 30],
     ['riderLocationStaleAfterSeconds', 30, 600],
@@ -501,7 +507,8 @@ export function calculateOrderMoney({
 }) {
   validateOperationalSettings(settings);
   const supplierSubtotal = finiteMinor(supplierSubtotalMinor, "supplierSubtotalMinor");
-  const serviceFeeRateBps = finiteBps(settings.serviceFeeRateBps, "serviceFeeRateBps");
+  const schedule = feeSchedule(settings);
+  const serviceFeeRateBps = schedule.version === 1 ? schedule.rateBps : null;
   const fee = organizationFeeMoney(supplierSubtotal, settings, organizationEligible);
   const { serviceFeeMinor } = fee;
   const allowedPlans = new Set(["delivery_online", "pickup_full_online", "pickup_downpayment_store"]);
@@ -1038,6 +1045,13 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (!["ops_admin", "super_admin"].includes(user?.role)) {
+    for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
+      if (!record) continue;
+      delete record.serviceFeeSchedule;
+      delete record.serviceFeeWorking;
+    }
+  }
   delete publicRecord.riderProgress;
   delete publicRecord.deliveryMilestones;
   if (order.fulfillmentMode === 'delivery' && (['ops_admin', 'super_admin'].includes(user?.role)
@@ -1053,7 +1067,7 @@ export function publicOrderFor(order, user, store = null) {
     if (review) publicRecord.review = review;
   }
   if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
-  if (user?.role === "client" && order.organizationDiscountRateBps > 0) {
+  if (user?.role === "client" && (order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 || order.pendingQuote?.serviceFeeSchedule?.version === 2)) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
       if (!record) continue;
       if (record.supplierSubtotalMinor != null && record.serviceFeeMinor != null) record.clientItemSubtotalMinor = record.supplierSubtotalMinor + (record.grossServiceFeeMinor ?? record.serviceFeeMinor);
