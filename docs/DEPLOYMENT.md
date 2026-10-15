@@ -328,3 +328,44 @@ authentication refusal, cancellation, timeout/missed push, app background/resume
 reassignment and hangup at pickup/delivery. Test IPv6/carrier combinations used
 by riders. STUN-only operation is an explicit degraded mode and cannot prove
 carrier connectivity. This backend task does not perform that production rollout.
+
+## Supplier browser Web Push
+
+Apply migration `1792058200000_web_push` before deploying. With **all three** VAPID
+variables absent, the API generates one P-256 VAPID pair under the domain advisory
+lock and persists it in PostgreSQL `web_push_vapid`. Concurrent starts and later
+container replacements reuse that row. The fallback subject is
+`https://gridgo-api.talasora.com`. This needs no new server secret file, compose
+change, Firebase setup, or APNs key. Only data is initialized at boot, never schema.
+
+Operators may instead supply a complete explicit configuration in `gridgo-api.env`:
+
+```dotenv
+VAPID_PUBLIC_KEY=<base64url public key>
+VAPID_PRIVATE_KEY=<base64url private key>
+VAPID_SUBJECT=mailto:<operator-contact-address>
+```
+
+The complete environment triple takes precedence over the database. Partial,
+invalid, or mismatched configuration disables Web Push and makes its registration
+and public-key routes return `503 web_push_unavailable`; it does not rotate or
+replace the database key, disable native push, or prevent API startup. Check
+`/health.push.webPush.status` independently of FCM/APNs. `configured` means keys are
+loaded, not that a browser has received a notification.
+
+The database VAPID private key and browser endpoint/auth keys are secrets: retain
+them in protected encrypted PostgreSQL backups and never expose them to clients,
+logs or analytics. A database restore must retain this key row to keep existing
+subscriptions usable. To move to environment-managed credentials without breaking
+subscriptions, securely transfer the existing key pair and subject through the
+operator's secret-management procedure. Changing the key pair requires browsers
+to unsubscribe and subscribe again with the newly returned public key; switching
+back from environment keys to a different stored pair has the same consequence.
+Do not delete the key row on deploy or seed.
+
+The supplier portal origin must already be in `CLERK_AUTHORIZED_PARTIES` and the
+API CORS allowlist. In production the portal uses HTTPS; the portal release
+supplies its service worker, manifest, explicit permission action, and iPhone
+Home Screen install instructions. Allow outbound HTTPS to Apple, Google, Mozilla
+and Windows browser push services. Browser subscription lifecycle, logout cleanup,
+payload/click contract and endpoint restrictions are in [Web Push API](WEB_PUSH_API.md).

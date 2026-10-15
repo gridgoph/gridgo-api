@@ -17,6 +17,7 @@ import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
+import { loadVapid, createWebPushDelivery, routeWebPush, unregisterWebSubscription } from "./web-push.js";
 import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
 import { routeAccountDeletion } from './account-deletion.js';
 import { productionDuration, shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
@@ -309,7 +310,8 @@ const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS |
 // Longest a single notification stream stays open before the client must reconnect with a fresh token.
 const NOTIFICATION_STREAM_MAX_MS = Number(process.env.NOTIFICATION_STREAM_MAX_MS || 10 * 60_000);
 let storageInitializing = true;
-const drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery});
+let webPushDelivery = createWebPushDelivery();
+let drainPushOutbox;
 
 /**
  * Send freshly committed outbox rows now instead of on the next lifecycle
@@ -383,7 +385,7 @@ async function save(store) {
   );
   await saveStore(database, store);
   const queuedPushes = await enqueueNotificationPushes(database,store,createdNotifications);
-  if (queuedPushes > 0 && pushDelivery.configured) database.afterCommit(kickPushDrain);
+  if (queuedPushes > 0 && (pushDelivery.configured || webPushDelivery.configured)) database.afterCommit(kickPushDrain);
   await realtimeTransport.enqueue(store,createdNotifications);
 }
 
@@ -2060,7 +2062,7 @@ async function handleAuditedRequest(req, res) {
         builtAt: BUILD_TIME,
         database: databaseHealth,
         storage: objectStorage.health(),
-        push: pushDelivery.health(),
+        push: { ...pushDelivery.health(), webPush: { status: webPushDelivery.configured ? "configured" : "misconfigured" } },
         emailConfigured: emailConfigured(process.env),
         at: now(),
       });
@@ -2437,6 +2439,9 @@ async function handleAuditedRequest(req, res) {
           token: deviceToken,
           at: now(),
         }).released;
+      }
+      if (typeof body?.webPushEndpoint === 'string') {
+        await unregisterWebSubscription(database, auth.user.id, body.webPushEndpoint);
       }
       if (released) await save(store);
       // `deviceUnregistered` keeps its published meaning — this phone no longer
@@ -3329,6 +3334,13 @@ async function handleAuditedRequest(req, res) {
         return latestUser;
       }, body?.reason);
       return send(res, 200, { file: publicFile(deleted, user) });
+    }
+
+    if (pathname.startsWith('/web-push/')) {
+      const result = await routeWebPush({ database, store, user, method: req.method, pathname,
+        body: req.method === 'POST' ? await readBody(req) : null,
+        userAgent: req.headers['user-agent'], delivery: webPushDelivery });
+      return send(res, result.status, result.body);
     }
 
     // ---- push device registrations ----
@@ -7228,8 +7240,15 @@ async function runLifecycleWork() {
   } finally { lifecycleBusy = false; }
 }
 // Migrations and the reference seed are explicit operator steps. Boot never
-// creates schema or data; it refuses before listening when PostgreSQL is not ready.
+// creates schema; it refuses before listening when PostgreSQL is not ready.
+// The only automatic data initialization here is the durable Web Push key pair.
 await database.assertReady();
+try {
+  webPushDelivery = createWebPushDelivery({ vapid: await loadVapid(database) });
+} catch {
+  console.warn('Web Push unavailable: check VAPID configuration and web_push_vapid migration');
+}
+drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery,webDelivery:webPushDelivery});
 await realtimeTransport.start();
 
 server.listen(PORT, HOST, () => {
