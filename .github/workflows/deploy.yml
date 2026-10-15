@@ -49,8 +49,8 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - name: Install document preview tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils libreoffice-writer fonts-liberation util-linux
+      - name: Install PDF preview tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils util-linux
       - run: npm ci
       - run: npm run migrate
       - run: npm run seed
@@ -116,7 +116,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Render PDF and DOCX in the production image as uid 1001
+      - name: Render PDF and refuse Word previews in the production image as uid 1001
         run: docker run --rm --network none -v "$PWD/tests:/app/tests:ro" "${{ steps.meta.outputs.primary }}" node --test tests/artwork-preview-renderer.test.js
 
       # Every ref logs in: the smoke test pulls GRIDGO's private MinIO/mc images

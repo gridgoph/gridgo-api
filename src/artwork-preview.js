@@ -7,17 +7,18 @@ import { DOCX_CONTENT_TYPE } from './docx.js';
 import { DOMAIN_MUTATION_LOCK } from './database.js';
 import { renderArtworkPreview, PREVIEW_MAX_SOURCE, previewError } from './artwork-preview-renderer.js';
 
-const DOCUMENTS = ['application/pdf', DOCX_CONTENT_TYPE];
+const DOCUMENTS = ['application/pdf'];
 const IMAGES = ['image/jpeg', 'image/png', 'image/webp'];
 export const previewObjectKey = key => `${key}.preview-v1.png`;
 export const isPreviewDocument = file => file?.purpose === 'artwork' && DOCUMENTS.includes(file.detectedContentType);
 export function publicArtworkPreview(file) {
   if (file?.purpose !== 'artwork' || file.state !== 'ready') return undefined;
   const supported = DOCUMENTS.includes(file.detectedContentType) || IMAGES.includes(file.detectedContentType);
+  const word = file.detectedContentType === DOCX_CONTENT_TYPE;
   return {
     status: !supported ? 'unsupported' : IMAGES.includes(file.detectedContentType) ? 'ready' : file.preview?.status || 'pending',
     downloadUrlPath: `/files/${file.fileId}/preview-url`, retryPath: `/files/${file.fileId}/preview`,
-    ...(file.preview?.error ? { error: file.preview.error } : {}),
+    ...(word ? { error: 'preview_word_not_available' } : file.preview?.error ? { error: file.preview.error } : {}),
   };
 }
 export function logPreviewFailure(fileId, phase, error) {
@@ -35,6 +36,8 @@ export function createArtworkPreviews({ database, load, save, storage, render = 
       let store = await load();
       let file = store.files.find(row => row.fileId === fileId);
       await authorize(store, file);
+      // Keep Word originals usable, but never render or sign old Word previews.
+      if (file.purpose === 'artwork' && file.detectedContentType === DOCX_CONTENT_TYPE) throw previewError('preview_word_not_available', 422);
       if (!isPreviewDocument(file) && !IMAGES.includes(file.detectedContentType)) throw previewError('preview_not_supported', 422);
       if (file.purpose !== 'artwork') throw previewError('preview_not_supported', 422);
       const image = IMAGES.includes(file.detectedContentType);

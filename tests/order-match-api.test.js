@@ -2927,7 +2927,7 @@ test('outside-hours checkout exposes its review estimate and payment confirmatio
   assert.deepEqual(after.operatingClock, original.operatingClock);
 });
 
-test('artwork previews persist PDF/DOCX renditions, authorize reads, retry failures and lazily render legacy files', { skip: !DATABASE_URL }, async t => {
+test('artwork previews persist PDF renditions, defer Word, authorize reads, retry failures and lazily render legacy files', { skip: !DATABASE_URL }, async t => {
   const database = createDatabase({ DATABASE_URL }); t.after(() => database.close());
   await fixture(database);
   await database.transaction(async () => {
@@ -2956,19 +2956,18 @@ test('artwork previews persist PDF/DOCX renditions, authorize reads, retry failu
   const instance = await startApi({ extraEnv: { MINIO_ENDPOINT: storageUrl, MINIO_PUBLIC_URL: storageUrl } });
   t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
   const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
-  const upload = async (bytes, type, name) => {
+  const upload = async (bytes, type, name, expectedStatus = 201) => {
     const form = new FormData(); form.set('purpose', 'artwork'); form.set('file', new Blob([bytes], { type }), name);
     for (let attempt = 0; attempt < 100; attempt++) {
       const response = await fetch(`${instance.api}/files`, { method: 'POST', headers: { Authorization: `Bearer ${token('clerk_client')}` }, body: form });
       const body = await response.json();
       if (body.error === 'storage_initializing') { await new Promise(resolve => setTimeout(resolve, 25)); continue; }
-      assert.equal(response.status, 201, JSON.stringify(body)); return body.file;
+      assert.equal(response.status, expectedStatus, JSON.stringify(body)); return expectedStatus === 201 ? body.file : body;
     }
     assert.fail('Storage did not initialize');
   };
   for (const [bytes, type, name] of [
     [previewPdf(), 'application/pdf', 'two-pages.pdf'],
-    [docx(null), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'art.docx'],
     [readFileSync(new URL('./fixtures/artwork-check/pixel.jpg', import.meta.url)), 'image/jpeg', 'art.jpg'],
   ]) {
     const file = await upload(bytes, type, name);
@@ -3011,6 +3010,33 @@ test('artwork previews persist PDF/DOCX renditions, authorize reads, retry failu
       assert.equal((await call(file.preview.downloadUrlPath)).status, 404);
     }
   }
+  for (const [type, name] of [
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'art.docx'],
+  ]) {
+    const bytes = docx(null), count = writes;
+    const word = await upload(bytes, type, name);
+    assert.equal(writes, count + 1, 'Word upload writes only the original');
+    assert.equal(word.preview.status, 'unsupported');
+    assert.equal(word.preview.error, 'preview_word_not_available');
+    for (const [pathname, method] of [[word.preview.downloadUrlPath, 'GET'], [word.preview.retryPath, 'POST']]) {
+      const response = await call(pathname, { method, ...(method === 'POST' ? { body: {} } : {}) });
+      assert.equal(response.status, 422);
+      assert.equal(response.body.error, 'preview_word_not_available');
+      assert.equal(response.body.message, 'Preview not available for Word files yet - open the original');
+      assert.equal((await call(pathname, { method, subject: 'clerk_supplier_b' })).status, 403);
+      assert.equal((await call(pathname, { method, subject: undefined })).status, 401);
+    }
+    assert.equal(writes, count + 1, 'Word reads and Retry never generate a rendition');
+    const original = await call(`/files/${word.fileId}/download-url`);
+    assert.equal(original.status, 200);
+    assert.deepEqual(Buffer.from(await (await fetch(original.body.url)).arrayBuffer()), bytes);
+  }
+  // Filename/declared MIME cannot opt Word bytes into the PDF renderer.
+  const writesBeforeMismatch = writes;
+  const disguised = await upload(docx(null), 'application/pdf', 'disguised.pdf', 415);
+  assert.equal(disguised.error, 'invalid_file_type');
+  assert.equal(disguised.reason, 'file_type_mismatch');
+  assert.equal(writes, writesBeforeMismatch, 'disguised Word is rejected before storing or rendering');
   const broken = await upload(Buffer.from('%PDF-1.4 broken\n%%EOF'), 'application/pdf', 'broken.pdf');
   assert.equal(broken.preview.status, 'failed');
   assert.equal((await call(`/files/${broken.fileId}/download-url`)).status, 200, 'original remains available');

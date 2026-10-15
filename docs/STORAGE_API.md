@@ -529,12 +529,13 @@ Progress images use the same private read gate as artwork. The client gallery an
 
 ## Artwork visual previews
 
-PDF and DOCX artwork now have a **first-page PNG rendition**, generated once
+PDF artwork has a **first-page PNG rendition**, generated once
 when the upload becomes ready. Existing ready files are rendered lazily on the
 first preview request. JPEG/PNG/WebP use their original image bytes. Original
 upload/download behavior, inspection measurements, page-count metadata and
 Operations' print-readiness decision are unchanged. A preview is advisory,
-not a print-ready conversion; DOCX font substitution/layout can differ from Word.
+not a print-ready conversion. Word previews are deferred to a separate isolated
+converter; the API does not run an office suite.
 
 `file.preview` on upload, metadata and attach responses is additive:
 
@@ -547,8 +548,16 @@ not a print-ready conversion; DOCX font substitution/layout can differ from Word
 ```
 
 Statuses are `pending` (legacy/not yet rendered), `ready`, `failed`, and
-`unsupported`. A stored failure adds `error`, a stable code. These are resolver
-paths, **not image URLs**. Order responses add `artworkPreviews`, containing
+`unsupported`. A stored failure adds `error`, a stable code. DOCX always projects
+`status: "unsupported"` and `error: "preview_word_not_available"`, including files
+with older cached preview metadata. Authorized GET/Retry requests for DOCX return
+`422` with `{error: "preview_word_not_available", message: "Preview not available for Word files yet - open the original"}`.
+The client should show that message and retain **Open original file**. Word
+uploads, page counts, checkout and original downloads are unchanged. No Word
+rendition is generated, read or signed; Retry returns the same reason without
+starting conversion. The existing Retry contract for PDFs and images is unchanged.
+
+`downloadUrlPath` and `retryPath` are resolver paths, **not image URLs**. Order responses add `artworkPreviews`, containing
 `{fileId, ...preview}` entries only for the artwork IDs visible to that reader.
 A supplier still receives no artwork before Operations releases the file check;
 multi-shop and per-line access rules apply unchanged. No preview object key,
@@ -559,7 +568,7 @@ source path, document content, or renderer stderr appears in these projections.
   and return `{fileId, contentType, page: 1, url, expiresAt, expiresInSeconds}`.
   The image URL is independently signed, with the existing storage TTL and
   `private, no-store` response caching. Refresh it through this route on expiry.
-- `POST /files/:fileId/preview` with `{}`: explicit Retry. Regenerate a document
+- `POST /files/:fileId/preview` with `{}`: explicit Retry. Regenerate a PDF
   rendition and return a fresh signed response. Attempts have a 30-second
   cooldown (`429 preview_retry_later`, or the last generation error); concurrent
   conversions of other files receive `503 preview_busy`. Retrying an ordinary
@@ -579,8 +588,8 @@ mistake `pending` for a permanently unsupported type.
 
 Generation and API preview-read failures log structured `artwork_preview_failed`
 records with `fileId`, `phase` and a bounded reason code. Examples include
-`preview_conversion_failed`, `preview_rasterization_failed`,
-`preview_render_timeout`, `preview_document_unsafe`, `preview_source_too_large`,
+`preview_rasterization_failed`, `preview_render_timeout`,
+`preview_word_not_available`, `preview_source_too_large`,
 `storage_object_missing` and `minio_unavailable`. Upload success is independent
 of rendition success; a failed preview leaves the original ready and downloadable.
 
@@ -593,21 +602,20 @@ before writing, so deletion cannot be undone by an in-flight renderer. Rendering
 uses a separate PostgreSQL advisory lock and does not hold the domain lock while
 converting. No migration or boot-time schema change is needed.
 
-The Docker image adds Alpine `poppler-utils`, `libreoffice-writer`, Liberation
-fonts and `util-linux` (`prlimit`). Poppler rasterizes only page 1 to at most
-1600 pixels on the long edge; Writer exports only page 1 before rasterization.
-Writer is a local subprocess, not a network service. There is no new npm
-runtime dependency. Each conversion has a private temporary directory/profile,
-no inherited API credentials, a 25-second wall-clock timeout per tool, 20 CPU
-seconds, 1 GiB virtual-memory and 8 MiB per-output-file limits. Source reads are
-bounded at 64 MiB (DOCX retains its stricter 16 MiB upload/package limits).
-One conversion runs across API replicas at a time. Temporary data is removed
-after success or failure.
+The Docker image adds Alpine `poppler-utils` and `util-linux` (`prlimit`).
+LibreOffice, its office libraries and the explicitly installed Liberation fonts
+are not included. Poppler rasterizes only page 1 to at most 1600 pixels on the
+long edge. There is no new npm runtime dependency. Each render has a private
+temporary directory, no inherited API credentials, a 25-second wall-clock
+timeout, 20 CPU seconds, 1 GiB virtual-memory and 8 MiB per-output-file limits.
+PDF source reads are bounded at 64 MiB. One render runs across API replicas at
+a time. Temporary data is removed after success or failure.
 
-The DOCX rendering guard refuses external relationships, dynamic fields,
-embedded/active objects, SVG/non-raster embedded parts and XML entity constructs; macros are disabled in the
-private Writer profile. These preview refusals do not change upload acceptance.
-Password-protected, malformed or unsupported documents receive an explicit
-error; PSD visual conversion and legacy binary `.doc` are not implemented.
-CI installs the tools for fixture tests and also renders real small PDF/DOCX
-fixtures inside the built production image, as uid 1001 with no network.
+The existing DOCX upload/package limits and stricter preview inspection helper
+remain intact, including guards against active content disguised by extension.
+No Word content is sent to a converter in this release. Preview eligibility uses
+the detected content type, so a Word upload named `.pdf` cannot enable conversion.
+Password-protected or malformed PDFs receive an explicit error; PSD visual
+conversion and legacy binary `.doc` are not implemented. CI installs Poppler for
+fixture tests and also renders real small PDFs and verifies Word refusal inside
+the built production image, as uid 1001 with no network.
