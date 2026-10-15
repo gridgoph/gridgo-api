@@ -2856,6 +2856,11 @@ async function handleAuditedRequest(req, res) {
     const basketResponse = await routeBaskets({ req, url, store, user, readBody, id, now });
     if (basketResponse) {
       if (basketResponse.mutated) await save(store);
+      await signArtworkAttachments(basketResponse.body, {
+        findFile: (fileId) => findFile(store, fileId),
+        authorizeRead: (file) => authorizeFileRead(user, store, file),
+        presignGet: (key) => objectStorage.presignGet(key),
+      });
       return send(res, basketResponse.status, basketResponse.body);
     }
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\//.test(pathname)) {

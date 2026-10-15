@@ -91,6 +91,27 @@ async function request(api, pathname, { method = "GET", subject, body } = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+// Receipts retain the same commercial/artwork snapshot while each HTTP read
+// refreshes private download credentials. Validate those credentials separately.
+function assertSameInvoiceSnapshot(actual, expected) {
+  const snapshot = (invoice) => {
+    const copy = structuredClone(invoice);
+    for (const section of [copy, ...(copy.groups || [])]) {
+      for (const line of section.lines || []) {
+        for (const attachment of line.artworkAttachments || []) {
+          if (attachment.kind !== 'file') continue;
+          assert.match(attachment.downloadUrl, /X-Amz-Signature=/);
+          assert.ok(Date.parse(attachment.downloadUrlExpiresAt) > Date.now());
+          delete attachment.downloadUrl;
+          delete attachment.downloadUrlExpiresAt;
+        }
+      }
+    }
+    return copy;
+  };
+  assert.deepEqual(snapshot(actual), snapshot(expected));
+}
+
 async function requestEventually(api, pathname, options, predicate) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const response = await request(api, pathname, options);
@@ -2212,6 +2233,7 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
       assert.equal((await call(`/baskets/${basket.id}`)).body.basket.pickupFeeMinor, 2501);
     }
     const intake = await loadStore(database);
+    assert.equal(JSON.stringify(intake.orderInvoices).includes("downloadUrl"), false);
     assert.equal(intake.notifications.filter(row => row.type === 'ops_job_needs_qa' && row.userId === 'user_ops').length, groupCount);
     assert.equal(basket.payment.amountMinor, invoice.totalMinor);
     assert.equal((await post(`/orders/${first}/payments/initial/confirm`)).body.error, 'basket_payment_required');
@@ -2225,7 +2247,7 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
     assert.equal((await post(`/baskets/${basket.id}/payment/confirm`)).status, 409);
     for (const group of basket.groups) {
       const receipt = await call(`/orders/${group.orderId}/invoice`);
-      assert.deepEqual(receipt.body.invoice, invoice);
+      assertSameInvoiceSnapshot(receipt.body.invoice, invoice);
     }
     const ops = await call(`/baskets/${basket.id}`, { subject: 'clerk_ops' });
     assert.equal(ops.body.basket.groups[0].order.supplierId, 'supplier_a');
@@ -2277,7 +2299,7 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
     assert.equal(persisted.orders.find((order) => order.id === second).state, 'cancelled');
     assert.equal(persisted.orders.find((order) => order.id === first).state, 'production');
     assert.equal(persisted.orders.find((order) => order.id === first).payoutMilestones[0].status, 'released');
-    assert.deepEqual((await call(`/baskets/${basket.id}/invoice`)).body.invoice, invoice);
+    assertSameInvoiceSnapshot((await call(`/baskets/${basket.id}/invoice`)).body.invoice, invoice);
     await assert.rejects(database.transaction(async () => {
       await database.query("UPDATE order_payments SET status='not_submitted' WHERE order_id=$1 AND code='initial'", [first]);
     }), /basket payment/);
