@@ -1322,8 +1322,9 @@ export function authorizeFileRead(user, store, file) {
   if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === "client_verification_document") forbidden();
   if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)
-    && !(user.role === 'rider' && (file.references || []).some(ref => ref.type === 'order'
-      && store.orders.some(order => order.id === ref.id && riderPackingFlow(order) && order.riderId === user.id)))) forbidden();
+    && !(user.role === 'rider' && ((file.ownerId === user.id && !(file.references || []).length)
+      || (file.references || []).some(ref => ref.type === 'order'
+        && store.orders.some(order => order.id === ref.id && riderPackingFlow(order) && order.riderId === user.id))))) forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"

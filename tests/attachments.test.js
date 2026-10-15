@@ -869,3 +869,13 @@ test('legacy packing photos attach only before dispatch and exclude rider reads'
   for (const actor of [client,supplier,ops,superAdmin]) authorizeFileRead(actor,store,file);
   for (const actor of [rider,otherClient,otherSupplier]) expectError(() => authorizeFileRead(actor,store,file),403,'forbidden');
 });
+
+
+test('unattached rider packing uploads are private to their owner and staff', () => {
+  const file = readyFile('packing_photo', { ownerId: rider.id, references: [] });
+  const store = { orders: [], supplierServices: [] };
+  assert.doesNotThrow(() => authorizeFileRead(rider, store, file));
+  assert.doesNotThrow(() => authorizeFileRead(ops, store, file));
+  expectError(() => authorizeFileRead(client, store, file), 403, 'forbidden');
+  expectError(() => authorizeFileRead({ ...rider, id: 'another-rider' }, store, file), 403, 'forbidden');
+});

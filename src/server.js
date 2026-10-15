@@ -1974,8 +1974,8 @@ const TRANSITIONS = {
   downpayment_review: {},
   payment_authorized: { production: ["supplier"], cancelled: ["ops_admin", "super_admin"] },
   production: {
-    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // packed; supplier and rider check together at pickup
-    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // compatibility for older clients and portal workflows
+    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // versioned photo/QA readiness; joint pickup inspection still required
+    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // legacy self-QC or version-2 finished-product review
   },
   supplier_self_qc: { ready_for_dispatch: ["supplier", "ops_admin", "super_admin"] },
   ready_for_dispatch: { rider_assigned: ["rider", "ops_admin", "super_admin"] },

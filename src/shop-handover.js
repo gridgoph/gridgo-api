@@ -21,9 +21,10 @@ export function inspectedPackingPhotos(store, order) {
 }
 export function handoverRequirements(store, order, next) {
   const missing = [];
-  if (!order.shopHandover?.finished || order.shopHandover.finished.supplierId !== order.supplierId) missing.push({ code: 'production_finished_required', message: 'Submit photos of the finished, unpacked products for GRIDGO review first.' });
+  const submittedForShop = order.shopHandover?.finished?.supplierId === order.supplierId && Boolean(order.shopHandover?.finished);
+  if (!submittedForShop) missing.push({ code: 'production_finished_required', message: 'Submit photos of the finished, unpacked products for GRIDGO review first.' });
   if (order.shopHandover?.finished && !order.shopHandover.finished.photoFileIds.every(fileId => finishedProductPhotos(store, order).some(file => file.fileId === fileId))) missing.push({ code: 'finished_product_photo_required', message: 'The reviewed finished-product photos must remain available before readiness.' });
-  if (next === 'ready_for_dispatch' && order.shopHandover?.review?.decision !== 'approved') {
+  if (next === 'ready_for_dispatch' && (!submittedForShop || order.shopHandover?.review?.decision !== 'approved')) {
     missing.push({ code: 'production_review_required', message: 'Wait for GRIDGO to approve the finished-product photos before calling a rider. Do not pack yet.' });
   }
   return missing;
