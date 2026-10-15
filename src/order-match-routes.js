@@ -22,6 +22,7 @@ import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
+import { acceptArtworkWarnings, artworkGuidanceSnapshot, evaluateLineArtwork } from "./artwork-guidance.js";
 import {
   identityHasMembership } from "./authorization-context.js";
 import {
@@ -591,6 +592,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       // Null on products whose shop marked no layout; those ask nothing.
       printLayout: line.printLayout ?? null,
       printLayoutCheck: item ? printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout ?? null }) : null,
+      artworkGuidance: item ? evaluateLineArtwork(store, item, line, artworkFileIdsFor(line)) : null,
       specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
@@ -950,6 +952,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       }
       snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
+      // Warnings never block; accepted or not, the figures travel with the order.
+      const guidance = artworkGuidanceSnapshot(store, item, line, artworkFileIdsFor(line), at);
+      if (guidance) snapshot.lineItem.artworkGuidance = guidance;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
       if (line.dropoff) snapshot.lineItem.dropoff = { ...line.dropoff };
       return { cartLine: line, ...snapshot };
@@ -1737,6 +1742,20 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     line.updatedAt = at;
     Object.assign(storedLine, line);
     lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
+    return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
+  }
+
+  const warningsMatch = /^\/me\/carts\/([^/]+)\/lines\/([^/]+)\/artwork-warnings$/.exec(pathname);
+  if (warningsMatch && req.method === "PUT") {
+    const cart = ownCart(store, user, decodeURIComponent(warningsMatch[1]), { draft: true });
+    const line = (store.cartLines || []).find((row) => row.id === decodeURIComponent(warningsMatch[2]) && row.cartId === cart.id);
+    if (!line) fail(404, "cart_line_not_found", "That cart line no longer exists.");
+    const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+    if (!item) fail(409, "catalog_item_stale", "That listing is no longer available.");
+    const at = now();
+    acceptArtworkWarnings(store, item, line, artworkFileIdsFor(line), record(await readBody(req)), at, fail);
+    line.updatedAt = at;
     updateCart(cart, at);
     return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }

@@ -752,6 +752,8 @@ Default `GET /settings` response:
 }
 ```
 
+`artworkGuidance` (the recommended resolution and colour per product type, Super Admin editable through the same `PATCH /settings` handshake) is described in [ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
+
 `paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
 
 Upload is two steps: Operations or Super Admin may upload the file; only Super Admin may activate it:

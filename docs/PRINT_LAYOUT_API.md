@@ -79,8 +79,8 @@ How each accepted type is read:
 | --- | --- | --- |
 | PDF | Each page's `/MediaBox` in points, including page trees inside compressed object streams. A box on a page-tree node counts only for pages that state none. | The page size every PDF must declare. A file over the 16 MiB inspection window, or one whose page tree cannot be found, reads as unknown. `/CropBox` and `/Rotate` are not applied; rotation does not matter because the check allows either orientation. |
 | DOCX | Each section's `<w:pgSz>` in twips. | The page Word lays the document out on. A file with no declared section size reads as unknown. |
-| PNG, JPEG | Pixels divided by the declared density. | Only when the file declares a density; a raster without one has no physical size and reads as unknown rather than being guessed at 72 or 96 DPI. |
-| WebP, PSD | Not read by this API yet. | Unknown. |
+| PNG, JPEG, PSD | Pixels divided by the declared density (PNG `pHYs`, JFIF, Photoshop resolution resource). | Only when the file declares a density; a raster without one has no physical size and reads as unknown rather than being guessed at 72 or 96 DPI. |
+| WebP | Pixels only; WebP declares no density. | Unknown. |
 
 Files uploaded before this change keep the first-page size they already
 stored (PDF) and have no `pageEnvelope`; the check falls back to the first
