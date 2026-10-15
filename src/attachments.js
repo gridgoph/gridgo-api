@@ -1,4 +1,5 @@
 import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
+import { publicArtworkPreview } from './artwork-preview.js';
 import { displayFilename } from './display-filename.js';
 import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
@@ -701,6 +702,7 @@ export function publicFile(file, user = null) {
   if (!file) return null;
   return {
     fileId: file.fileId,
+    ...(publicArtworkPreview(file) ? { preview: publicArtworkPreview(file) } : {}),
     purpose: file.purpose === "fulfilment_proof" && ["client", "rider"].includes(user?.role) ? "order_photo" : file.purpose,
     originalFilename: displayFilename(file.originalFilename),
     declaredContentType: file.declaredContentType,

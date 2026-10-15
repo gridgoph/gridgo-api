@@ -11,7 +11,7 @@ function fixture() {
     orderJobs: ["a", "b"].map((key) => ({ id: `job-${key}`, orderId: order.id, supplierId: `supplier-${key}`, riderId: `rider-${key}` })),
     orderLineItems: ["a", "b"].map((key) => ({ id: `line-${key}`, orderId: order.id, jobId: `job-${key}`, quantity: 1, artworkFileId: `artwork-${key}`, mockupFileId: `mockup-${key}` })),
     files: ["artwork", "mockup"].flatMap((purpose) => ["a", "b"].map((key) => ({
-      fileId: `${purpose}-${key}`, purpose, state: "ready", ownerId: "client-a", originalFilename: `${purpose}-${key}.pdf`,
+      fileId: `${purpose}-${key}`, purpose, detectedContentType: "application/pdf", state: "ready", ownerId: "client-a", originalFilename: `${purpose}-${key}.pdf`,
       references: [{ type: "order", id: order.id, field: `line:line-${key}:${purpose}` }],
     }))),
   };
@@ -28,6 +28,7 @@ for (const role of ["supplier", "rider"]) for (const key of ["a", "b"]) {
     const { order, store } = fixture();
     const view = publicOrderFor(order, actor(role, key), store);
     assert.deepEqual(view.artworkFileIds, [`artwork-${key}`]);
+    assert.deepEqual(view.artworkPreviews.map(preview => preview.fileId), [`artwork-${key}`]);
     assert.deepEqual(view.mockupFileIds, [`mockup-${key}`]);
     assert.deepEqual(view.productionItems.map((line) => line.id), [`line-${key}`]);
     assert.equal(view.artworkName, `artwork-${key}.pdf`);
@@ -144,4 +145,11 @@ test("lists inferred from line snapshots are scoped before the order response le
     assert.deepEqual(view.mockupFileIds, ["mockup-a"]);
   }
   assert.equal(order.artworkFileIds, undefined);
+});
+
+
+test('preview projections stay behind Operations artwork release', () => {
+  const { store, order } = fixture();
+  order.fileCheck = { status: 'pending' };
+  assert.deepEqual(publicOrderFor(order, actor('supplier'), store).artworkPreviews, []);
 });

@@ -1,4 +1,5 @@
 import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
+import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './artwork-preview.js';
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
@@ -263,6 +264,7 @@ const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
+const artworkPreviews = createArtworkPreviews({ database, storage: objectStorage, load: () => load(), save: store => save(store), now });
 // Push is optional configuration, not a startup requirement. A hosted pilot
 // without a usable service-account file must still serve every route — the
 // phones simply fall back to in-app and SSE delivery — because the deploy that
@@ -3023,6 +3025,17 @@ async function handleAuditedRequest(req, res) {
             await save(latestStore);
             return latestFile;
           });
+          if (isPreviewDocument(ready)) {
+            try {
+              await artworkPreviews.resolve(fileId, { sourcePath: file.tempPath,
+                authorize: (current, record) => authorizeFileRead(user, current, record) });
+            } catch (error) {
+              // Original upload remains usable even when rendering/storage fails.
+              logPreviewFailure(fileId, 'upload', error);
+            }
+            try { ready.preview = findFile(await load(), fileId)?.preview; }
+            catch (error) { logPreviewFailure(fileId, 'upload_metadata', error); }
+          }
           // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
           return send(res, 201, { file: publicFile(ready) });
         } catch (error) {
@@ -3032,6 +3045,31 @@ async function handleAuditedRequest(req, res) {
       } finally {
         await fs.promises.unlink(file.tempPath).catch(() => {});
       }
+    }
+
+    if ((req.method === 'GET' && /^\/files\/[^/]+\/preview-url$/.test(pathname))
+        || (req.method === 'POST' && /^\/files\/[^/]+\/(preview|preview-failure)$/.test(pathname))) {
+      const fileId = pathname.split('/')[2];
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      try {
+        const authorize = async (current, file) => {
+          const actor = selectActorRole(current, (await authenticateRequest(req, current)).user, eventRole,
+            { restrictMemberships: Boolean(eventRole) });
+          authorizeFileRead(actor, current, file);
+        };
+        await authorize(store, findFile(store, fileId));
+        if (pathname.endsWith('/preview-failure')) {
+          const body = await readBody(req);
+          if (!['image_load_failed', 'download_failed'].includes(body.reason)) {
+            throw new AttachmentError(400, 'invalid_preview_failure', 'Choose a supported preview failure reason.');
+          }
+          logPreviewFailure(fileId, 'client_read', { code: body.reason });
+          return send(res, 200, { ok: true });
+        }
+        if (storageInitializing) throw new AttachmentError(503, 'storage_initializing', 'File storage is still initializing. Retry shortly.');
+        const preview = await artworkPreviews.resolve(fileId, { authorize, retry: req.method === 'POST' });
+        return send(res, 200, preview);
+      } catch (error) { logPreviewFailure(fileId, 'route', error); throw error; }
     }
 
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
@@ -6863,6 +6901,7 @@ const server = http.createServer((req, res) => {
   // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
     (req.method === "POST" && pathname === "/files") ||
+    (req.method === 'POST' && /^\/files\/[^/]+\/(preview|preview-failure)$/.test(pathname)) ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
     (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
   // Read-only despite POST: never hold the domain lock during outbound checks.

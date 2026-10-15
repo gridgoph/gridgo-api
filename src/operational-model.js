@@ -1,4 +1,5 @@
 import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
+import { publicArtworkPreview } from './artwork-preview.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { displayFilename } from './display-filename.js';
 import { deliveryMilestones } from './rider-tracking.js';
@@ -1092,6 +1093,10 @@ export function publicOrderFor(order, user, store = null) {
     publicRecord.artworkName = (store?.files || []).find((file) => file.fileId === lastId)?.originalFilename
       || (lastId && unchanged ? publicRecord.artworkName : null) || null;
   }
+  publicRecord.artworkPreviews = (publicRecord.artworkFileIds || [])
+    .map(fileId => (store?.files || []).find(file => file.fileId === fileId))
+    .filter(file => publicArtworkPreview(file))
+    .map(file => ({ fileId: file.fileId, ...publicArtworkPreview(file) }));
   /*
     Whether this order has been rated, so a client is asked once.
 
