@@ -177,7 +177,7 @@ async function attachHandoffSignature(database, orderId, fileId = "file_sign") {
   await database.transaction(async () => {
     const store = await loadStore(database);
     const file = store.files.find((candidate) => candidate.fileId === fileId);
-    file.references = [{ type: "order", id: orderId, field: "handoffSignatureFileIds" }];
+    file.references = [{ type: "order", id: orderId, field: "handoffSignatureFileIds", inspectionId: store.orders.find(row => row.id === orderId).pickupChecklist?.inspectionId }];
     await saveStore(database, store);
   });
   return { fileId, signerName: "Ana Reyes" };
@@ -228,7 +228,7 @@ async function attachProofDirectly(database, orderId, code) {
   });
 }
 
-async function attachProgressPhoto(database, orderId) {
+async function finishProductionAndReview(database, orderId, call) {
   await database.transaction(async () => {
     const store = await loadStore(database);
     const order = store.orders.find((row) => row.id === orderId);
@@ -236,19 +236,46 @@ async function attachProgressPhoto(database, orderId) {
       purpose: "production_photo", originalFilename: "progress.jpg", detectedContentType: "image/jpeg",
       declaredContentType: "image/jpeg", size: 100, state: "ready", objectKey: `progress/${orderId}.jpg`, createdAt: AT, readyAt: AT,
       references: [{ type: "order", id: orderId, field: "productionPhotoFileIds" }] });
-    store.files.push({ ...structuredClone(store.files.at(-1)), fileId: `packing_${orderId}`, purpose: "packing_photo", objectKey: `packing/${orderId}.jpg`, references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
+    store.files.push({ ...structuredClone(store.files.at(-1)), fileId: `finished_${orderId}`, purpose: "finished_product_photo", objectKey: `finished/${orderId}.jpg`, references: [{ type: "order", id: orderId, field: "finishedProductPhotoFileIds" }] });
+    await saveStore(database, store);
+  });
+  for (const [action, subject, body] of [["production-finished", "clerk_supplier_a", {}], ["production-review", "clerk_ops", { decision: "approved" }]]) {
+    const result = await call(`/orders/${orderId}/${action}`, { method: "POST", subject, body });
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+  }
+}
+
+async function attachRiderPackingPhoto(database, orderId) {
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    const order = store.orders.find(row => row.id === orderId);
+    store.files.push({ fileId: `packing_${orderId}`, ownerId: order.riderId, purpose: "packing_photo",
+      originalFilename: "packed.jpg", detectedContentType: "image/jpeg", declaredContentType: "image/jpeg",
+      size: 100, state: "ready", objectKey: `packing/${orderId}.jpg`, createdAt: AT, readyAt: AT,
+      references: [{ type: "order", id: orderId, field: "packingPhotoFileIds", inspectionId: order.pickupChecklist.inspectionId }] });
     await saveStore(database, store);
   });
 }
 
-// From a job packed and ready to the client's door: the rider takes it, runs
-// the six checks with the shop's signature, and records the drop-off photo.
+async function completePickup(call, database, orderId) {
+  const checks = ALL_SIX.map(code => ({ code, passed: true }));
+  const inspected = await call(`/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks, counts: await matchingCounts(database, orderId) } });
+  assert.equal(inspected.status, 200, JSON.stringify(inspected.body));
+  assert.equal(inspected.body.order.state, "rider_assigned");
+  await attachRiderPackingPhoto(database, orderId);
+  const result = await call(`/dispatch/${orderId}/pickup-confirm`, { method: "POST", subject: "clerk_rider", body: { signature: await attachHandoffSignature(database, orderId) } });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.order.state, "picked_up");
+  return result;
+}
+
+// From a job reviewed and ready to the client's door: the rider takes it, runs
+// the six checks, photographs the packed item, obtains the shop's signature,
+// and records the drop-off photo.
 async function dispatchAndDeliver({ call, database, orderId }) {
   const post = (path, subject, body = {}) => call(path, { method: "POST", subject, body });
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
-  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  const checked = await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, counts: await matchingCounts(database, orderId), signature: await attachHandoffSignature(database, orderId) });
-  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  await completePickup(call, database, orderId);
   assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "out_for_delivery" })).status, 200);
   await database.transaction(async () => {
     const store = await loadStore(database);
@@ -828,7 +855,7 @@ test("a new order pays the shop 40/35/25 of its own cost, each stage only after 
   assert.equal((await transition("production")).status, 200);
   await refusedWith("production_started", "pof_required");
   await attachProofDirectly(database, orderId, "production_started");
-  await attachProgressPhoto(database, orderId);
+  await finishProductionAndReview(database, orderId, call);
   for (const subject of ["clerk_supplier_a", "clerk_client"]) {
     const denied = await release("production_started", subject);
     assert.equal(denied.status, 403, `${subject}: ${JSON.stringify(denied.body)}`);
@@ -840,9 +867,7 @@ test("a new order pays the shop 40/35/25 of its own cost, each stage only after 
 
   // Delivered: no delivery proof exists while the job is still at the shop.
   await refusedWith("delivered", "pof_required");
-  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
-    assert.equal((await transition(state)).status, 200, state);
-  }
+  assert.equal((await transition("ready_for_dispatch")).status, 200);
   await refusedWith("delivered", "pof_required");
   await dispatchAndDeliver({ call, database, orderId });
 
@@ -900,11 +925,9 @@ test("a claim holds every remaining share, and the last one waits out the clock"
     assert.equal((await transition(state, subject)).status, 200, state);
   }
   await attachProofDirectly(database, orderId, "production_started");
-  await attachProgressPhoto(database, orderId);
+  await finishProductionAndReview(database, orderId, call);
   assert.equal((await release("production_started")).status, 200);
-  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
-    assert.equal((await transition(state)).status, 200, state);
-  }
+  assert.equal((await transition("ready_for_dispatch")).status, 200);
   await dispatchAndDeliver({ call, database, orderId });
 
   // A claim during the window holds both shares still owed, and the client
@@ -958,18 +981,18 @@ test("a client rates a finished order once, and only quality reaches matching", 
     ["supplier_assigned", "clerk_ops"],
     ["payment_authorized", "clerk_supplier_a"],
     ["production", "clerk_supplier_a"],
-    ["supplier_self_qc", "clerk_supplier_a"],
     ["ready_for_dispatch", "clerk_supplier_a"],
   ]) {
     const moved = await call(`/orders/${orderId}/transition`, { method: "POST", subject, body: { state } });
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
-    if (state === "production") await attachProgressPhoto(database, orderId);
+    if (state === "production") await finishProductionAndReview(database, orderId, call);
   }
 
-  // Finishing the work stamps when the shop was actually done, so its on-time
-  // record can be measured against the date its own board promised.
+  // Retain dispatch readiness and the reviewed submission used for the shop's
+  // on-time record against the date its own board promised.
   const ready = (await call(`/orders/${orderId}`, { subject: "clerk_ops" })).body.order;
-  assert.ok(ready.readyAt, "the shop's finish time is recorded");
+  assert.ok(ready.readyAt, "dispatch readiness is recorded");
+  assert.ok(ready.shopHandover.finished.at, "the reviewed shop finish time is recorded");
   assert.ok(ready.readyBy, "and the date it was held to");
 
   const store = await (async () => {
@@ -1116,14 +1139,12 @@ test("a collected order runs the whole journey, because a rider takes it to the 
   assert.equal(started.status, 200, JSON.stringify(started.body));
   assert.equal(started.body.order.state, "production");
 
-  await attachProgressPhoto(database, orderId);
+  await finishProductionAndReview(database, orderId, call);
   // Through to staged for a rider.
-  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
-    const moved = await call(`/orders/${orderId}/transition`, {
-      method: "POST", subject: "clerk_supplier_a", body: { state },
-    });
-    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
-  }
+  const ready = await call(`/orders/${orderId}/transition`, {
+    method: "POST", subject: "clerk_supplier_a", body: { state: "ready_for_dispatch" },
+  });
+  assert.equal(ready.status, 200, JSON.stringify(ready.body));
 
   // A rider is offered it. Collecting does not mean the job stays at the shop:
   // somebody carries it to the counter the client will collect from, and
@@ -1158,27 +1179,19 @@ test("a collected order stops on the counter, and only the counter hands it over
   const { call, database, orderId } = await placedOrder(t, { fulfillmentMode: "pickup", downpaymentPercent: 75 });
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
-  for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
+  for (const state of ["payment_authorized", "production", "ready_for_dispatch"]) {
     const moved = await call(`/orders/${orderId}/transition`, {
       method: "POST", subject: "clerk_supplier_a", body: { state },
     });
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
-    if (state === "production") await attachProgressPhoto(database, orderId);
+    if (state === "production") await finishProductionAndReview(database, orderId, call);
   }
 
   // The balance is not settled, and it does not stop the carrying. Nothing is
   // being handed to anybody: the job is going onto GRIDGO's own shelf.
   const accepted = await call(`/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} });
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
-  const checked = await call(`/dispatch/${orderId}/pickup-checklist`, {
-    method: "POST", subject: "clerk_rider",
-    body: {
-      checks: ALL_SIX.map((code) => ({ code, passed: true })),
-      counts: await matchingCounts(database, orderId),
-      signature: await attachHandoffSignature(database, orderId),
-    },
-  });
-  assert.equal(checked.status, 200, JSON.stringify(checked.body));
+  await completePickup(call, database, orderId);
   const started = await call(`/orders/${orderId}/transition`, {
     method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" },
   });
@@ -1239,10 +1252,10 @@ test("a shop-ready delivery is offered even when the remaining balance is unpaid
   const { call, database, orderId } = await placedOrder(t);
   await call(`/orders/${orderId}/payments/initial/confirm`, { method: "POST", subject: "clerk_ops", body: {} });
   await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_ops", body: { state: "supplier_assigned" } });
-  for (const state of ["payment_authorized", "production", "supplier_self_qc", "ready_for_dispatch"]) {
+  for (const state of ["payment_authorized", "production", "ready_for_dispatch"]) {
     const moved = await call(`/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier_a", body: { state } });
     assert.equal(moved.status, 200, JSON.stringify(moved.body));
-    if (state === "production") await attachProgressPhoto(database, orderId);
+    if (state === "production") await finishProductionAndReview(database, orderId, call);
   }
 
   const offered = (await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers;
@@ -1253,7 +1266,7 @@ test("a shop-ready delivery is offered even when the remaining balance is unpaid
   assert.equal(accepted.body.order.state, "rider_assigned");
 });
 
-test("packaging ready offers the job atomically and joint pickup checks still gate transport", { skip: !DATABASE_URL }, async (t) => {
+test("unpacked readiness offers the job atomically and joint pickup checks still gate transport", { skip: !DATABASE_URL }, async (t) => {
   const { call, database, orderId } = await placedOrder(t);
   // Other outbox tests lease every due row, so retire this fixture's devices
   // and their queued pushes after the API exits, including on assertion failure.
@@ -1304,15 +1317,15 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
 
   const missingPhoto = await transition("ready_for_dispatch");
   assert.equal(missingPhoto.status, 409);
-  assert.equal(missingPhoto.body.error, "production_photo_required");
-  await attachProgressPhoto(database, orderId);
+  assert.equal(missingPhoto.body.error, "production_finished_required");
+  await finishProductionAndReview(database, orderId, call);
   const ready = await transition("ready_for_dispatch");
   assert.equal(ready.status, 200, JSON.stringify(ready.body));
   assert.equal(ready.body.order.state, "ready_for_dispatch");
   const stored = await loadStore(database);
   const packed = stored.orders.find((row) => row.id === orderId);
   assert.ok(packed.readyAt);
-  assert.equal(packed.timeline.some((row) => row.state === "supplier_self_qc"), false);
+  assert.equal(packed.timeline.some((row) => row.state === "supplier_self_qc"), true);
   assert.equal(stored.orderJobs.find((row) => row.orderId === orderId).state, "ready_for_dispatch");
   assert.deepEqual(packed.payments, before.payments);
   assert.deepEqual(packed.payoutMilestones, before.payoutMilestones);
@@ -1354,28 +1367,31 @@ test("packaging ready offers the job atomically and joint pickup checks still ga
   assert.equal(resolved.status, 200);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 409);
 
-  // Six passes move nothing on their own: custody changes hands only once the
-  // supplier has signed on the rider's phone. A client that never learned
-  // about the signature is refused rather than let through on the checks.
-  const unsigned = await check({ checks });
+  // Inspection records the counts without moving custody. Packed evidence and
+  // the shop signature are required by the separate final confirmation.
+  const inspected = await check({ checks });
+  assert.equal(inspected.status, 200, JSON.stringify(inspected.body));
+  assert.equal(inspected.body.order.state, "rider_assigned");
+  assert.equal(inspected.body.order.pickupChecklist.status, "inspected");
+  const confirm = body => call(`/dispatch/${orderId}/pickup-confirm`, { method: "POST", subject: "clerk_rider", body });
+  assert.equal((await confirm({})).body.error, "packing_photo_required");
+  await attachRiderPackingPhoto(database, orderId);
+  const unsigned = await confirm({});
   assert.equal(unsigned.status, 409, JSON.stringify(unsigned.body));
   assert.equal(unsigned.body.error, "handoff_signature_required");
-  assert.equal((await call(`/orders/${orderId}`, { subject: "clerk_rider" })).body.order.state, "rider_assigned");
-  // The signature has to be a file this rider attached to this order first.
-  const unattached = await check({ checks, signature: { fileId: "file_sign", signerName: "Ana Reyes" } });
+  // The signature has to be a file this rider attached to this inspection.
+  const unattached = await confirm({ signature: { fileId: "file_sign", signerName: "Ana Reyes" } });
   assert.equal(unattached.status, 400, JSON.stringify(unattached.body));
   assert.equal(unattached.body.error, "invalid_handoff_signature");
   const signature = await attachHandoffSignature(database, orderId);
-  // A signature nobody is named on proves nothing.
-  const anonymous = await check({ checks, signature: { fileId: signature.fileId, signerName: " " } });
+  const anonymous = await confirm({ signature: { fileId: signature.fileId, signerName: " " } });
   assert.equal(anonymous.status, 400, JSON.stringify(anonymous.body));
   assert.equal(anonymous.body.error, "handoff_signer_name_required");
-  // The rider's own name is prefilled from the shop profile the API projects.
   const atCounter = (await call(`/orders/${orderId}`, { subject: "clerk_rider" })).body.order;
   assert.deepEqual(atCounter.supplierContact, { shopName: "supplier_a Shop", contactName: "supplier_a" });
-  assert.equal(atCounter.pickupChecklist.status, "escalation_resolved");
+  assert.equal(atCounter.pickupChecklist.status, "inspected");
 
-  const passed = await check({ checks, signature });
+  const passed = await confirm({ signature });
   assert.equal(passed.status, 200, JSON.stringify(passed.body));
   assert.equal(passed.body.order.state, "picked_up");
   assert.equal(passed.body.order.pickupChecklist.completedBy, "user_rider");
@@ -1409,7 +1425,7 @@ async function counterOrder(t) {
   assert.equal((await post(`/orders/${orderId}/payments/initial/confirm`, "clerk_ops")).status, 200);
   for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized", "clerk_supplier_a"], ["production", "clerk_supplier_a"], ["ready_for_dispatch", "clerk_supplier_a"]]) {
     assert.equal((await post(`/orders/${orderId}/transition`, subject, { state })).status, 200);
-    if (state === "production") await attachProgressPhoto(database, orderId);
+    if (state === "production") await finishProductionAndReview(database, orderId, call);
   }
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
   await database.transaction(async () => {
@@ -1478,7 +1494,7 @@ test("counter shortages override a claimed quantity pass and preserve evidence f
   assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "picked_up" })).status, 409);
   assert.equal((await post(`/orders/${orderId}/transition`, "clerk_rider", { state: "out_for_delivery" })).status, 409);
   assert.equal((await post(`/escalations/${record.escalationId}/resolve`, "clerk_super", { resolution: "Shop replaced the missing flyer; recount" })).status, 200);
-  const passed = await check({ checks, counts, signature });
+  const passed = await completePickup(call, database, orderId);
   assert.equal(passed.status, 200, JSON.stringify(passed.body));
   assert.equal(passed.body.order.state, "picked_up");
   assert.deepEqual(passed.body.order.pickupChecklist.counts, [{ lineItemId: counts[0].lineItemId, expectedQuantity: 1, countedQuantity: 1 }]);
@@ -1515,11 +1531,10 @@ test("final QR receipt survives submission and only Operations clears delivery",
   assert.equal((await transition("supplier_assigned", "clerk_ops")).status, 200);
   assert.equal((await transition("payment_authorized")).status, 200);
   assert.equal((await transition("production")).status, 200);
-  await attachProgressPhoto(database, orderId);
+  await finishProductionAndReview(database, orderId, call);
   assert.equal((await transition("ready_for_dispatch")).status, 200);
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
-  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, counts: await matchingCounts(database, orderId), signature: await attachHandoffSignature(database, orderId) })).status, 200);
+  await completePickup(call, database, orderId);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
   const current = () => call(`/orders/${orderId}`, { subject: "clerk_client" });
   const submit = (proofFileId, route = "final_online") => post(`/orders/${orderId}/payments/${route}/submit`, "clerk_client", { method: "qr_manual", reference: "FINAL-123", ...(proofFileId === undefined ? {} : { proofFileId }) });
@@ -1619,12 +1634,10 @@ test("a paid-up-front order runs from one confirmation to a fully released payou
     assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
   }
   await attachProofDirectly(database, orderId, "production_started");
-  await attachProgressPhoto(database, orderId);
+  await finishProductionAndReview(database, orderId, call);
   assert.equal((await release("production_started")).status, 200);
-  for (const state of ["supplier_self_qc", "ready_for_dispatch"]) {
-    const moved = await transition(state);
-    assert.equal(moved.status, 200, `${state}: ${JSON.stringify(moved.body)}`);
-  }
+  const ready = await transition("ready_for_dispatch");
+  assert.equal(ready.status, 200, JSON.stringify(ready.body));
 
   // The client is never asked for a balance along the way.
   const inbox = (await call("/notifications", { subject: "clerk_client" })).body.notifications;
@@ -1681,11 +1694,10 @@ test("a legacy 75/25 order still needs its balance before delivery", { skip: !DA
   assert.equal(confirmed.body.order.paymentStatus, "initial_payment_confirmed");
   for (const [state, subject] of [["supplier_assigned", "clerk_ops"], ["payment_authorized"], ["production"], ["ready_for_dispatch"]]) {
     assert.equal((await transition(state, subject)).status, 200, state);
-    if (state === "production") await attachProgressPhoto(database, orderId);
+    if (state === "production") await finishProductionAndReview(database, orderId, call);
   }
   assert.equal((await post(`/dispatch/${orderId}/accept`, "clerk_rider")).status, 200);
-  const checks = ALL_SIX.map((code) => ({ code, passed: true }));
-  assert.equal((await post(`/dispatch/${orderId}/pickup-checklist`, "clerk_rider", { checks, counts: await matchingCounts(database, orderId), signature: await attachHandoffSignature(database, orderId) })).status, 200);
+  await completePickup(call, database, orderId);
   assert.equal((await transition("out_for_delivery", "clerk_rider")).status, 200);
   await database.transaction(async () => {
     const store = await loadStore(database);

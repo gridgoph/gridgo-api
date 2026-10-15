@@ -20,7 +20,7 @@ async function setup(t, startApi = true) {
   return { db, api };
 }
 async function ready(api) {
-  const result = await api('ops', 'POST', '/orders/order/transition', { state: 'ready_for_dispatch', reason: 'Verified production and packing at the counter' });
+  const result = await api('ops', 'POST', '/orders/order/transition', { state: 'ready_for_dispatch', reasonCode: 'evidence_verified_offline', reason: 'Verified production and packing at the counter' });
   assert.equal(result.status, 200, JSON.stringify(result.body));
 }
 async function attach(api) {
