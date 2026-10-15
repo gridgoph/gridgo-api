@@ -30,7 +30,7 @@ test('only approved idle riders with a claimed rider device enter the push outbo
   notifyOrderParties(s, s.orders[0], options);
   assert.deepEqual(offers(s).map(n => n.userId), ['idle','no_device','other_app']);
   const queued = [];
-  await enqueueNotificationPushes({query:async (_sql,args) => {queued.push(args);return {rowCount:1};}}, s, offers(s));
+  await enqueueNotificationPushes({query:async (sql,args) => {if (sql.startsWith('SELECT')) return {rows:[]}; queued.push(args);return {rowCount:1};}}, s, offers(s));
   assert.deepEqual(queued.map(row => row.slice(1)), [['device_idle','idle']]);
 });
 

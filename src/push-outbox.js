@@ -1,3 +1,4 @@
+import { listWebSubscriptions } from "./web-push.js";
 import { seasonPushAllowed } from "./season-windows.js";
 import { notificationVisible } from "./notifications.js";
 import { pushMessageFor } from "./push.js";
@@ -49,8 +50,15 @@ export async function enqueueNotificationPushes(
   notifications,
 ) {
   let queued = 0;
+  const webSubscriptions = notifications.length ? await listWebSubscriptions(database) : [];
   for (const n of notifications) {
     if (n.push === false || !notificationVisible(store, n, n.userId)) continue;
+    for (const d of webSubscriptions)
+      if (deviceAcceptsNotification(store, d, n))
+        queued += (await database.query(
+          `INSERT INTO notification_push_outbox(notification_id,web_subscription_id,user_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+          [n.id, d.id, n.userId],
+        ))?.rowCount || 0;
     for (const d of store.deviceTokens || [])
       if (deviceAcceptsNotification(store, d, n))
         queued += (
@@ -77,6 +85,7 @@ export function createOutboxWorker({
   database,
   loadStore,
   delivery,
+  webDelivery,
   clock = () => Date.now(),
 }) {
   let busy = false;
@@ -101,8 +110,8 @@ export function createOutboxWorker({
     await database.query(
       `UPDATE notification_push_outbox SET status='expired',updated_at=now() WHERE status IN ('pending','sending') AND expires_at<=now()`,
     );
-    if (!delivery.configured) return;
-    async function processRow(row, store) {
+    if (!delivery.configured && !webDelivery?.configured) return;
+    async function processRow(row, store, webSubscriptions) {
       // A slow earlier send may outlive a batch lease. Renew only if this
       // attempt still owns the row; another worker's newer claim wins.
       const lease = await database.query(
@@ -111,7 +120,9 @@ export function createOutboxWorker({
       );
       if (!lease.rowCount) return;
       const n = store.notifications.find((n) => n.id === row.notification_id);
-      const d = store.deviceTokens.find((d) => d.id === row.device_id);
+      const isWeb = Boolean(row.web_subscription_id);
+      const d = isWeb ? webSubscriptions.find(d => d.id === row.web_subscription_id)
+        : store.deviceTokens.find((d) => d.id === row.device_id);
       let results = [];
       let status = "suppressed";
       if (
@@ -122,7 +133,7 @@ export function createOutboxWorker({
         deviceAcceptsNotification(store, d, n, new Date(clock()).toISOString())
       ) {
         try {
-          results = await delivery.send(pushMessageFor(n), [d]);
+          results = await (isWeb ? webDelivery : delivery).send(pushMessageFor(n), [d]);
         } catch {
           results = [{ deviceId: d.id, ok: false, prune: false, code: "transport_error" }];
         }
@@ -142,7 +153,20 @@ export function createOutboxWorker({
           row.attempts,
         ],
       );
-      if (results.some((r) => r.prune))
+      if (isWeb && d && results.length) {
+        await database.transaction(async () => {
+          if (results.some(r => r.prune)) {
+            await database.query('DELETE FROM web_push_subscriptions WHERE id=$1 AND user_id=$2', [d.id, row.user_id]);
+          } else {
+            await database.query(`UPDATE web_push_subscriptions SET
+              last_success_at=CASE WHEN $3 THEN now() ELSE last_success_at END,
+              last_failure_at=CASE WHEN $3 THEN last_failure_at ELSE now() END,
+              last_failure_code=CASE WHEN $3 THEN NULL ELSE $4 END WHERE id=$1 AND user_id=$2`,
+              [d.id, row.user_id, results.some(r => r.ok), results[0]?.code || null]);
+          }
+        });
+      }
+      if (!isWeb && results.some((r) => r.prune))
         await database.transaction(() =>
           database.query(
             "DELETE FROM device_tokens WHERE id=$1 AND user_id=$2 AND token=$3",
@@ -154,7 +178,8 @@ export function createOutboxWorker({
       const claimed = await database.transaction(
         () =>
           database.query(
-            `WITH due AS (SELECT id FROM notification_push_outbox WHERE status IN ('pending','sending') AND next_attempt_at<=now() AND expires_at>now() ORDER BY id LIMIT 25 FOR UPDATE SKIP LOCKED) UPDATE notification_push_outbox o SET status='sending',attempts=attempts+1,next_attempt_at=now()+interval '5 minutes',updated_at=now() FROM due WHERE o.id=due.id RETURNING o.*`,
+            `WITH due AS (SELECT id FROM notification_push_outbox WHERE status IN ('pending','sending') AND ((device_id IS NOT NULL AND $1) OR (web_subscription_id IS NOT NULL AND $2)) AND next_attempt_at<=now() AND expires_at>now() ORDER BY id LIMIT 25 FOR UPDATE SKIP LOCKED) UPDATE notification_push_outbox o SET status='sending',attempts=attempts+1,next_attempt_at=now()+interval '5 minutes',updated_at=now() FROM due WHERE o.id=due.id RETURNING o.*`,
+            [delivery.configured, Boolean(webDelivery?.configured)],
           ),
         { lockKey: "gridgo-push-outbox-claim" },
       );
@@ -163,11 +188,12 @@ export function createOutboxWorker({
       // membership and deletion rechecks still see every commit that
       // preceded this attempt.
       const store = await loadStore(database);
+      const webSubscriptions = claimed.rows.some(row => row.web_subscription_id) ? await listWebSubscriptions(database) : [];
       let next = 0;
       async function worker() {
         while (next < claimed.rows.length) {
           const row = claimed.rows[next++];
-          await processRow(row, store);
+          await processRow(row, store, webSubscriptions);
         }
       }
       const outcomes = await Promise.allSettled(
