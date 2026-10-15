@@ -1,5 +1,7 @@
 # Shop acceptance and recovery
 
+New orders use the prospective [shop-hours clock](SHOP_HOURS_API.md) for acceptance. Orders from the earlier platform-hours release retain their platform calendar; older orders retain the original shop-calendar behavior.
+
 Refs gridgoph/gridgo-supplier#102. All endpoints require a Clerk session and the
 specified database membership. Mutations use the domain transaction lock; the
 order, event history, audit and notification outbox commit together.

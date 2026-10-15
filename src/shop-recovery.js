@@ -1,3 +1,4 @@
+import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
 import { approvedCatalogView } from "./catalog-review-state.js";
 
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -18,7 +19,8 @@ const fail = (code) => { throw Object.assign(new Error(code), { status: 409, cod
 const normalized = (value) => String(value || '').trim().toLowerCase();
 
 export function startShopAcceptance(store, order, at) {
-  const schedule = structuredClone(order.operatingClock?.schedule || store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
+  snapshotShopClock(store, order);
+  const schedule = structuredClone(shopSlaClock(order)?.schedule || store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
   order.shopAcceptance = { supplierId: order.supplierId, assignedAt: at, deadlineAt: addOpeningMilliseconds(schedule, at, 3600000),
     workingMinutes: 60, schedule, status: 'pending' };
 }

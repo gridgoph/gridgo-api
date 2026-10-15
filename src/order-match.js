@@ -1,3 +1,4 @@
+import { shopHoursStatus } from './shop-hours.js';
 import { operatingHours, reviewTiming } from './operating-hours.js';
 import { addOpeningMilliseconds } from './availability.js';
 import { shopProductionDayMinutes } from "./production-days.js";
@@ -122,7 +123,7 @@ export function onTimeRate(store, supplierId) {
     (order) => order.supplierId === supplierId && order.readyBy && productionTiming(order, null).finishedAt,
   );
   if (finished.length === 0) return null;
-  const onTime = finished.filter((order) => riderPackingFlow(order)
+  const onTime = finished.filter((order) => order.shopClock || riderPackingFlow(order)
     ? productionTiming(order, null).elapsedMs <= 0 : Date.parse(order.readyAt) <= Date.parse(order.readyBy));
   return { count: finished.length, rate: onTime.length / finished.length };
 }
@@ -182,10 +183,11 @@ function approvedOpenSuppliers(store) {
   return profiles;
 }
 
-function matchShopCard(profile, listings) {
+function matchShopCard(profile, listings, settings, at) {
   return {
     supplierId: profile.userId,
     shopName: profile.shopName,
+    hours: shopHoursStatus(profile, settings, at),
     shop: profile.shop,
     media: [],
     categories: [...new Set(listings.map((item) => item.categoryCode))],
@@ -250,7 +252,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
   const missedDeadline = [];
   for (const [supplierId, items] of itemsBySupplier) {
     const eligibleListings = items
-      .map((item) => publicCatalogItem(store, item))
+      .map((item) => publicCatalogItem(store, item, { at: now }))
       .filter(Boolean)
       .filter((listing) => listingFitsPrinterCap(listing, widthRequest, store));
     const profile = shops.get(supplierId);
@@ -301,7 +303,7 @@ function candidateRows(store, { subcategoryCode, dropoff, excludedSupplierIds, d
     choices.sort((a, b) => compareFactors(a, b, ranking) || a.listing.id.localeCompare(b.listing.id));
     if (!choices.length) continue;
     const row = { ...choices[0], listings: choices.map((choice) => choice.listing), choices,
-      shop: matchShopCard(profile, choices.map((choice) => choice.listing)) };
+      shop: matchShopCard(profile, choices.map((choice) => choice.listing), store.settings, now) };
     rows.push(row);
   }
   return { rows, missedDeadline };

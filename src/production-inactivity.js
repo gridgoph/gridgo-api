@@ -1,3 +1,4 @@
+import { shopSlaClock } from './shop-hours.js';
 import { slaDueAt } from './operating-hours.js';
 /**
  * Production inactivity reminders.
@@ -195,7 +196,7 @@ export function applyProductionNudges(store, { at, createId, limit = 100 } = {})
     if (activePayoutHold(store, order)) continue;
     const sent = sentForState(store, order);
     const lastNudgeAt = sent.reduce((latest, notification) => laterIso(latest, notification.at), null);
-    const due = nextNudgeDueAt(lastShopProductionAt(order, store), lastNudgeAt, sent.length, policy, order.operatingClock);
+    const due = nextNudgeDueAt(lastShopProductionAt(order, store), lastNudgeAt, sent.length, policy, shopSlaClock(order));
     if (!due || Date.parse(due) > Date.parse(at)) continue;
     const n = sent.length + 1;
     if (n > policy.maxCount) continue;
