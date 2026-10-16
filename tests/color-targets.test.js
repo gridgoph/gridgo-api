@@ -378,6 +378,7 @@ test("the upload read stores the file's colours beside its measurements", async 
 });
 
 test("hostile files cost bounded work and say why they stopped", async () => {
+  const hostileStarted = Date.now();
   // A header claiming a row wider than any print file is refused before allocating it.
   const huge = png({ width: 1, height: 1, rows: [Buffer.from([1, 2, 3])] });
   huge.writeUInt32BE(0x7fffffff, 16);
@@ -406,6 +407,21 @@ test("hostile files cost bounded work and say why they stopped", async () => {
   assert.ok(readPdfColors(tiny).reasons.includes("inspection_limit"));
   assert.ok(Date.now() - tinyStarted < 3_000, `${Date.now() - tinyStarted} ms`);
 
+  // One large resource dictionary referenced from every page is walked once;
+  // unclosed inline ones share a single scan budget.
+  const shared = `5 0 obj<<${" /K [".repeat(3000)}>>endobj`;
+  const references = readPdfColors(Buffer.from(`%PDF-1.4\n${shared}\n${"/ColorSpace 5 0 R ".repeat(200_000)}`, "latin1"));
+  const inline = readPdfColors(Buffer.from(`%PDF-1.4\n${`/ColorSpace <<${" /K [".repeat(1000)} >> `.repeat(1000)}`, "latin1"));
+  for (const read of [references, inline]) assert.equal(read.status, "unknown");
+  assert.ok(inline.reasons.includes("inspection_limit"), inline.reasons.join());
+
+  // An ASCII85 run of "z" (four zero bytes each) stops at the decode budget instead of growing without bound.
+  const zeros = "z".repeat(15 * 1024 * 1024);
+  const a85Started = Date.now();
+  const a85 = readPdfColors(Buffer.from(`%PDF-1.4\n4 0 obj<</Length ${zeros.length} /Filter /ASCII85Decode>>stream\n${zeros}~>\nendstream\nendobj\n`, "latin1"));
+  assert.ok(a85.reasons.includes("inspection_limit"), a85.reasons.join());
+  assert.ok(Date.now() - a85Started < 3_000, `${Date.now() - a85Started} ms`);
+
   // A huge interlaced 1-bit image stops once enough pixels are sampled.
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(40_000, 0);
@@ -429,4 +445,5 @@ test("hostile files cost bounded work and say why they stopped", async () => {
   const sampled = await readPngColors(interlaced, { complete: true });
   assert.deepEqual(sampled.colors.map(({ hex, shareBps }) => ({ hex, shareBps })), [{ hex: "#FFFFFF", shareBps: 10_000 }]);
   assert.ok(Date.now() - pngStarted < 5_000, `${Date.now() - pngStarted} ms`);
+  assert.ok(Date.now() - hostileStarted < 15_000, `${Date.now() - hostileStarted} ms in all`);
 });

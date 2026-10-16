@@ -83,32 +83,54 @@ const MAX_DECLARATIONS = 1000;
 /** Content tokens walked across the whole file: a detailed vector poster fits, and a hostile one costs well under a second. */
 const MAX_TOKENS = 750_000;
 
+/**
+ * Characters the structure scans of one read may cover in all. Each scan is
+ * already bounded; this bounds how many of them a file can ask for. The read
+ * is synchronous, so one counter per read is enough.
+ */
+const MAX_SCAN_CHARS = 32 * 1024 * 1024;
+let scanBudget = MAX_SCAN_CHARS;
+let scanExhausted = false;
+
+/** Spend scan budget; false once it is gone. */
+function charge(chars) {
+  scanBudget -= chars;
+  if (scanBudget < 0) scanExhausted = true;
+  return !scanExhausted;
+}
+
 /** The `<< ... >>` starting at `start`, or null. */
 function dictionaryAt(text, start) {
+  if (scanExhausted) return null;
   let depth = 0;
-  for (let i = start, stop = Math.min(text.length - 1, start + MAX_STRUCTURE); i < stop; i += 1) {
+  const stop = Math.min(text.length - 1, start + MAX_STRUCTURE);
+  for (let i = start; i < stop; i += 1) {
     if (text[i] === "<" && text[i + 1] === "<") {
       depth += 1;
       i += 1;
     } else if (text[i] === ">" && text[i + 1] === ">") {
       depth -= 1;
       i += 1;
-      if (depth === 0) return text.slice(start, i + 1);
+      if (depth === 0) return charge(i + 1 - start) ? text.slice(start, i + 1) : null;
     }
   }
+  charge(stop - start);
   return null;
 }
 
 /** The `[ ... ]` starting at `start`, nesting included, or null. */
 function arrayAt(text, start) {
+  if (scanExhausted) return null;
   let depth = 0;
-  for (let i = start, stop = Math.min(text.length, start + MAX_STRUCTURE); i < stop; i += 1) {
+  const stop = Math.min(text.length, start + MAX_STRUCTURE);
+  for (let i = start; i < stop; i += 1) {
     if (text[i] === "[") depth += 1;
     else if (text[i] === "]") {
       depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
+      if (depth === 0) return charge(i + 1 - start) ? text.slice(start, i + 1) : null;
     }
   }
+  charge(stop - start);
   return null;
 }
 
@@ -160,8 +182,8 @@ function pdfStreams(bytes, text, notes) {
     const remaining = MAX_CONTENT_BYTES - decodedTotal;
     try {
       for (const filter of filters) {
-        if (filter === "ASCII85Decode") data = ascii85(data);
-        else if (filter === "ASCIIHexDecode") data = asciiHex(data);
+        if (filter === "ASCII85Decode") data = ascii85(data, remaining);
+        else if (filter === "ASCIIHexDecode") data = asciiHex(data, remaining);
         else {
           data = zlib.inflateSync(data, {
             finishFlush: zlib.constants.Z_SYNC_FLUSH,
@@ -182,16 +204,27 @@ function pdfStreams(bytes, text, notes) {
   return streams;
 }
 
-/** ASCII85 (`<~ ... ~>`), as PDF writes it. */
-function ascii85(data) {
+/** The error a decoder raises when its output would pass the read's budget, as zlib does. */
+function tooLarge() {
+  return Object.assign(new RangeError("decoded stream exceeds the inspection budget"), { code: "ERR_BUFFER_TOO_LARGE" });
+}
+
+/** ASCII85 (`<~ ... ~>`), as PDF writes it, into at most `limit` bytes. */
+function ascii85(data, limit) {
   const text = data.toString("latin1").replace(/\s+/g, "").replace(/^<~/, "");
   const stop = text.indexOf("~>");
   const body = stop === -1 ? text : text.slice(0, stop);
-  const out = [];
+  // Five characters make four bytes, and `z` alone makes four zero bytes.
+  const out = Buffer.alloc(Math.min(limit, body.length * 4));
+  let length = 0;
+  const put = (byte) => {
+    if (length >= out.length) throw tooLarge();
+    out[length++] = byte;
+  };
   let group = [];
   for (const char of body) {
     if (char === "z" && !group.length) {
-      out.push(0, 0, 0, 0);
+      for (let i = 0; i < 4; i += 1) put(0);
       continue;
     }
     const code = char.charCodeAt(0) - 33;
@@ -199,7 +232,7 @@ function ascii85(data) {
     group.push(code);
     if (group.length === 5) {
       const value = group.reduce((sum, digit) => sum * 85 + digit, 0);
-      out.push((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff);
+      for (const shift of [24, 16, 8, 0]) put((value >>> shift) & 0xff);
       group = [];
     }
   }
@@ -207,16 +240,18 @@ function ascii85(data) {
     const count = group.length - 1;
     while (group.length < 5) group.push(84);
     const value = group.reduce((sum, digit) => sum * 85 + digit, 0);
-    out.push(...[(value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff].slice(0, count));
+    for (const shift of [24, 16, 8, 0].slice(0, count)) put((value >>> shift) & 0xff);
   }
-  return Buffer.from(out);
+  return out.subarray(0, length);
 }
 
-function asciiHex(data) {
+/** ASCIIHex (`... >`), into at most `limit` bytes. */
+function asciiHex(data, limit) {
   const text = data.toString("latin1").replace(/\s+/g, "");
   const stop = text.indexOf(">");
   const digits = stop === -1 ? text : text.slice(0, stop);
   if (/[^0-9A-Fa-f]/.test(digits)) throw new Error("asciihex");
+  if (Math.ceil(digits.length / 2) > limit) throw tooLarge();
   return Buffer.from(digits.length % 2 ? `${digits}0` : digits, "hex");
 }
 
@@ -346,7 +381,7 @@ function declaredSpots(objects, functions, sources) {
   for (const source of sources) {
     const SEPARATION = /\/Separation\b/g;
     let match;
-    for (let seen = 0; seen < MAX_DECLARATIONS && (match = SEPARATION.exec(source)) !== null; seen += 1) {
+    for (let seen = 0; seen < MAX_DECLARATIONS && !scanExhausted && (match = SEPARATION.exec(source)) !== null; seen += 1) {
       const tokens = [];
       let at = match.index + match[0].length;
       for (let i = 0; i < 3; i += 1) {
@@ -381,7 +416,7 @@ function declaredSpots(objects, functions, sources) {
       }
     }
     const DEVICE_N = /\/DeviceN\s*\[/g;
-    for (let seen = 0; seen < MAX_DECLARATIONS && (match = DEVICE_N.exec(source)) !== null; seen += 1) {
+    for (let seen = 0; seen < MAX_DECLARATIONS && !scanExhausted && (match = DEVICE_N.exec(source)) !== null; seen += 1) {
       const names = arrayAt(source, match.index + match[0].length - 1)?.match(/\/(?:[^\s/[\]()<>{}%]|#[0-9A-Fa-f]{2})+/g) || [];
       for (const token of names) {
         const name = pdfName(token);
@@ -398,12 +433,19 @@ function declaredSpots(objects, functions, sources) {
 function resourceSpaces(objects, sources) {
   const spaces = new Map();
   const conflicted = new Set();
+  const visited = new Set();
   for (const source of sources) {
     const RESOURCE = /\/ColorSpace\s*(<<|\d+\s+\d+\s+R)/g;
     let match;
-    for (let seen = 0; seen < MAX_DECLARATIONS && (match = RESOURCE.exec(source)) !== null; seen += 1) {
+    for (let seen = 0; seen < MAX_DECLARATIONS && !scanExhausted && (match = RESOURCE.exec(source)) !== null; seen += 1) {
+      // A dictionary many pages share by reference is read once.
+      if (match[1] !== "<<") {
+        const ref = match[1].replace(/\s+/g, " ");
+        if (visited.has(ref)) continue;
+        visited.add(ref);
+      }
       const dict = match[1] === "<<" ? dictionaryAt(source, match.index + match[0].length - 2) : resolve(objects, match[1]);
-      if (!dict?.trim().startsWith("<<")) continue;
+      if (!dict?.trim().startsWith("<<") || !charge(dict.length)) continue;
       const inner = dict.trim().slice(2, -2);
       const KEY = /\/((?:[^\s/[\]()<>{}%]|#[0-9A-Fa-f]{2})+)/g;
       let key;
@@ -528,6 +570,8 @@ function scanContent(stream, spaces, spots, process, notes, budget) {
 }
 
 export function readPdfColors(bytes, { complete = true } = {}) {
+  scanBudget = MAX_SCAN_CHARS;
+  scanExhausted = false;
   const notes = new Set();
   if (!complete) notes.add("file_larger_than_inspection_window");
   const text = bytes.toString("latin1");
@@ -537,6 +581,7 @@ export function readPdfColors(bytes, { complete = true } = {}) {
   const functions = new Map(streams.filter((stream) => stream.kind === "function" && Number.isInteger(stream.number)).map((stream) => [stream.number, stream.body]));
   const spots = declaredSpots(objects, functions, definitions);
   const spaces = resourceSpaces(objects, definitions);
+  if (scanExhausted) notes.add("inspection_limit");
   const process = new Map();
   const contents = streams.filter((stream) => stream.kind === "content" || stream.kind === "form");
   const budget = { tokens: MAX_TOKENS };
