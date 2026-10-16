@@ -59,7 +59,9 @@ test("the same picture is the same proof; a different picture never is, whatever
   // Stored before hashing: the uploader's own name, size and type.
   const old = (fileId, overrides) => proof(fileId, { contentSha256: undefined, ...overrides });
   assert.equal(sameProofFile(old("a"), old("b")), true);
-  assert.equal(sameProofFile(old("a"), proof("b")), true, "one side unhashed falls back to what was sent");
+  assert.equal(sameProofFile(old("a"), proof("b")), false, "a hashed upload is never matched by name");
+  assert.equal(sameProofFile(proof("a"), old("b")), false, "a hashed upload is never matched by name");
+  assert.equal(sameProofFile(old("a"), old("b"), { byMetadata: false }), false, "bytes only");
   assert.equal(sameProofFile(old("a"), old("b", { size: 2049 })), false);
   assert.equal(sameProofFile(old("a"), old("b", { originalFilename: "IMG_0002.jpeg" })), false);
   assert.equal(sameProofFile(old("a"), old("b", { ownerId: rider.id })), false);
@@ -159,4 +161,7 @@ test("every role that sees payout stages sees each picture once; the client gall
     assert.equal(publicOrderFor(record, user, store).payoutMilestones, undefined, user.role);
   }
   assert.deepEqual(productionProgressFor(store, record).photos.map((photo) => photo.fileId), ["shop_a", "shop_b"]);
+  // The gallery compares bytes only: two unhashed files that share a name stay two photos.
+  const unhashed = files.map((file) => ({ ...file, contentSha256: undefined }));
+  assert.deepEqual(productionProgressFor({ ...store, files: unhashed }, record).photos.map((photo) => photo.fileId), ["shop_a", "shop_b", "shop_a_again"]);
 });

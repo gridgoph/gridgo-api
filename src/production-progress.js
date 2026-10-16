@@ -4,7 +4,7 @@ import { sameProofFile } from './payout-proofs.js';
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const SHOP_PROOF_CODES = new Set(["production_started", "printing", "packaging_qc"]);
 
-/** One per picture: a photo uploaded twice is shown once. */
+/** One per picture: the same bytes uploaded twice are shown once. */
 export function productionPhotoFiles(store, order) {
   const files = (store?.files || []).filter((file) =>
     file.state === "ready" && file.ownerId === order.supplierId
@@ -13,7 +13,7 @@ export function productionPhotoFiles(store, order) {
       && (["production_photo", "finished_product_photo"].includes(file.purpose)
         || (file.purpose === "fulfilment_proof" && SHOP_PROOF_CODES.has(ref.milestoneCode)))),
   );
-  return files.filter((file, index) => !files.slice(0, index).some((earlier) => sameProofFile(earlier, file)));
+  return files.filter((file, index) => !files.slice(0, index).some((earlier) => sameProofFile(earlier, file, { byMetadata: false })));
 }
 
 export function productionProgressFor(store, order) {

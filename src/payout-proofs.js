@@ -8,20 +8,22 @@
  retrying a filing whose answer was lost does the same. Each upload is its own
  file id, so comparing ids alone lists the picture twice.
 
- Two uploads are the same picture when their bytes hash the same. Files stored
- before uploads were hashed fall back to what the uploader sent: same owner,
- same file name, same size and same type. Different pictures never share all
- four in practice, and a hashed pair is never compared by name.
+ Two uploads are the same picture when their bytes hash the same. Two files
+ stored before uploads were hashed fall back to what the uploader sent: same
+ owner, same file name, same size and same type. That is what cleans a stage
+ already stored twice. It never decides for a hashed upload, so a new picture
+ is never hidden behind an old one that shares its name.
 */
 
 /** How many distinct pictures one stage takes; a shop may file this many. */
 export const MAX_PROOFS_PER_MILESTONE = 50;
 
-export function sameProofFile(a, b) {
+/** `byMetadata: false` compares bytes only, for lists no stage stored twice. */
+export function sameProofFile(a, b, { byMetadata = true } = {}) {
   if (!a || !b) return false;
   if (a.fileId === b.fileId) return true;
-  if (a.contentSha256 && b.contentSha256) return a.contentSha256 === b.contentSha256;
-  return Boolean(a.ownerId && a.originalFilename && Number.isFinite(a.size))
+  if (a.contentSha256 || b.contentSha256) return a.contentSha256 === b.contentSha256;
+  return byMetadata && Boolean(a.ownerId && a.originalFilename && Number.isFinite(a.size))
     && a.ownerId === b.ownerId
     && a.originalFilename === b.originalFilename
     && a.size === b.size
