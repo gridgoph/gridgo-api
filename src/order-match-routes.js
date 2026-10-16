@@ -9,6 +9,7 @@ import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
 import { assertCheckoutPrintLayout, listingPrintLayouts, parseCartPrintLayout, printLayoutCheck } from "./print-layout.js";
+import { assertCheckoutCoverSpine, assertCoverFileAttached, coverSpineApplies, coverSpineRequiredSetting, coverSpineSnapshot, parseCoverSpine, publicCartCoverSpine, publicOrderCoverSpine } from "./hardbound-cover.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
 import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
@@ -392,6 +393,7 @@ function publicCartListingStub(store, item, optionIds) {
     clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     printLayouts: listingPrintLayouts(item),
+    coverSpineForm: coverSpineApplies(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
 }
@@ -593,6 +595,9 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       printLayout: line.printLayout ?? null,
       printLayoutCheck: item ? printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout ?? null }) : null,
       artworkGuidance: item ? evaluateLineArtwork(store, item, line, artworkFileIdsFor(line)) : null,
+      // Null until given; only hardbound and binding products ask.
+      coverSpine: publicCartCoverSpine(line),
+      coverSpineRequired: Boolean(item && coverSpineApplies(item) && coverSpineRequiredSetting(store.settings)),
       specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
@@ -896,6 +901,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, {}, { required: true });
     assertCheckoutPrintLayout(item, line, fail);
+    assertCheckoutCoverSpine(store, item, line, fail);
     assertArtworkAttachmentLimit(artworkAttachmentsFor(line));
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (!line.artworkFileId && !(line.artworkLinks || []).length) {
@@ -950,6 +956,10 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
           check: printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout }),
         };
       }
+      // The cover and spine are part of the agreed spec; "not given" is kept too,
+      // so the shop and the GRIDGO Team know the product asked.
+      const coverSpine = coverSpineSnapshot(item, line);
+      if (coverSpine) snapshot.lineItem.coverSpine = coverSpine;
       snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
       // Warnings never block; accepted or not, the figures travel with the order.
@@ -1102,6 +1112,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       specialInstructions: lineItem.specialInstructions || "",
       documentPages: structuredClone(lineItem.documentPages ?? null),
       printLayout: lineItem.printLayout?.code ?? null,
+      coverSpine: publicOrderCoverSpine(lineItem.coverSpine ?? null),
       mockupFileId: cartLine.mockupFileId ?? null,
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
     })),
@@ -1663,6 +1674,10 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     syncDocumentPages(store, item, line, body);
     // Optional here so a cart can be filled in steps; checkout requires it.
     if (Object.hasOwn(body, "printLayout")) line.printLayout = parseCartPrintLayout(item, body.printLayout, fail);
+    if (Object.hasOwn(body, "coverSpine")) {
+      line.coverSpine = parseCoverSpine(item, body.coverSpine, fail);
+      assertCoverFileAttached(line, fail);
+    }
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
@@ -1725,6 +1740,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       if (!patchedItem) fail(409, "catalog_item_stale", "That listing is no longer available.");
       line.printLayout = parseCartPrintLayout(patchedItem, body.printLayout, fail);
     }
+    if (Object.hasOwn(body, "coverSpine")) {
+      if (!patchedItem) fail(409, "catalog_item_stale", "That listing is no longer available.");
+      line.coverSpine = parseCoverSpine(patchedItem, body.coverSpine, fail);
+    }
+    // A separate cover page must stay one of the line's files, whichever side changed.
+    if (["coverSpine", "artworkFileId", "artworkAttachments"].some(key => Object.hasOwn(body, key))) assertCoverFileAttached(line, fail);
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach

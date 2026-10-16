@@ -116,7 +116,7 @@ Response:
 
 - Card: `id` (listing ID), `name` (product name), `photos`, `fromPriceMinor` (supplier price), `clientFromPriceMinor` (includes GRIDGO service fee), `pricingUnit`, `packageQty`, `distanceZone`, `readyBy`, `placeInLine`, `selectToken`.
 - Conditional: `distanceKm` only Out of Zone; `rating: {average,count}` only with at least five valid reviews.
-- Configuration for the selection sheet: `categoryCode`, `subcategoryCode`, `basePriceMinor`, `effectivePriceMinor`, `clientEffectivePriceMinor`, `measurementKind`, `measureUnit`, `minimumWidthMilli`, `minimumHeightMilli`, `minimumLengthMilli`, `minimumOrderQuantity`, `printerMaxWidthFeet`, `printLayouts`, `priceTiers`, `speedTiers`, `pricingBasis`, `turnaroundHours`, `minimumTurnaroundHours`, `rush`, `acceptedFormats`, `optionGroups`, `version`. These retain their catalog semantics. Supply chosen `optionIds`, quantity and any required measurement when adding to cart.
+- Configuration for the selection sheet: `categoryCode`, `subcategoryCode`, `basePriceMinor`, `effectivePriceMinor`, `clientEffectivePriceMinor`, `measurementKind`, `measureUnit`, `minimumWidthMilli`, `minimumHeightMilli`, `minimumLengthMilli`, `minimumOrderQuantity`, `printerMaxWidthFeet`, `printLayouts`, `coverSpineForm`, `priceTiers`, `speedTiers`, `pricingBasis`, `turnaroundHours`, `minimumTurnaroundHours`, `rush`, `acceptedFormats`, `optionGroups`, `version`. These retain their catalog semantics. Supply chosen `optionIds`, quantity and any required measurement when adding to cart.
 
 No supplier ID, service ID, shop name, shop point/address, contact, or logo is projected into an alternative. `photos` starts with only `fileId`, `sortOrder`, and metadata `url`; the common catalog decorator adds `downloadUrl` and `downloadUrlExpiresAt` when storage signing succeeds. Photo alt text is omitted. Listing names, option labels and product photos are supplier-authored product content; this projection does not inspect image pixels. Existing Top Pick `shop` and listing supplier fields remain for compatibility as explicitly required by this rollout; the new matching UI must not display those shop fields. Cart and post-order shop projections are unchanged.
 
@@ -310,6 +310,8 @@ Add-line body:
 PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, `artworkAttachments`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
 
 Add and PATCH also accept `printLayout` for listings whose `printLayouts` is non-empty; checkout requires it there. Lines return `printLayout` and `printLayoutCheck`. Contract: [print layout](PRINT_LAYOUT_API.md#client-the-cart-line).
+
+Add and PATCH also accept `coverSpine` (cover choice and spine text) for listings whose `coverSpineForm` is true (hardbound and binding products). Lines return `coverSpine` and `coverSpineRequired`. Contract: [hardbound cover](HARDBOUND_COVER_API.md#client-the-cart-line).
 
 ### Artwork design links
 
