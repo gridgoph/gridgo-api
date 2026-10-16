@@ -238,3 +238,66 @@ test('PostgreSQL regression: an on-time finished job waiting days for QA keeps i
   assert.deepEqual(onTimeRate(saved, 'supplier'), { count: 1, rate: 1 });
   assert.equal(saved.orders[0].readyBy, '2026-10-10T00:00:00.000Z');
 });
+
+const allWeek = { utcOffsetMinutes: 480, week: Array.from({ length: 7 }, (_, weekday) => ({ weekday, opensMinute: 0, closesMinute: 1440 })), closures: [] };
+const openHours = { timeZone: 'Asia/Manila', artworkReviewMinutes: 60, priorityDispatchCutoffMinute: 960, schedule: allWeek };
+function closedHours() {
+  // Close today and tomorrow in Manila so the test does not depend on the machine clock.
+  const today = new Date(Date.now() + 480 * 60000).toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+  return { ...openHours, schedule: { ...allWeek, closures: [{ startDay: today, endDay: tomorrow }] } };
+}
+const withClock = hours => store => {
+  store.settings.operatingHours = hours;
+  store.orders[0].operatingClock = { version: 1, settingsVersion: 1, schedule: structuredClone(allWeek) };
+};
+async function closeGridgo(ctx) {
+  await ctx.db.transaction(async () => {
+    const store = await loadStore(ctx.db); store.settings.operatingHours = closedHours(); await saveStore(ctx.db, store);
+  });
+}
+
+test('an assigned rider completes the rider-packs handover and delivery after operating hours; the timeline marks each step', { skip: !DATABASE_URL }, async t => {
+  const ctx = await setup(t, withClock(openHours)); await ready(ctx);
+  await closeGridgo(ctx);
+  ok(await inspect(ctx));
+  ok(await ctx.attach('packed', 'rider'));
+  ok(await ctx.attach('signature', 'rider'));
+  const picked = ok(await confirm(ctx)).order;
+  assert.equal(picked.state, 'picked_up');
+  ok(await ctx.post('rider', 'transition', { state: 'out_for_delivery' }));
+  ok(await ctx.attach('failure', 'rider'));
+  const delivered = ok(await ctx.dispatch('delivery', { evidenceType: 'photo', evidenceFileId: 'failure' })).order;
+  assert.equal(delivered.state, 'issue_window_open');
+  const timeline = (await loadStore(ctx.db)).orders[0].timeline;
+  for (const state of ['picked_up', 'out_for_delivery', 'delivered']) {
+    assert.equal(timeline.find(row => row.state === state)?.outsideOperatingHours, true, state);
+  }
+  assert.equal(timeline.find(row => row.state === 'rider_assigned').outsideOperatingHours, undefined);
+});
+
+test('a new rider assignment after operating hours is still refused', { skip: !DATABASE_URL }, async t => {
+  const ctx = await setup(t, withClock(closedHours()));
+  ok(await ctx.attach('finished'));
+  ok(await ctx.post('supplier', 'production-finished'));
+  ok(await ctx.post('ops', 'production-review', { decision: 'approved' }));
+  ok(await ctx.post('supplier', 'transition', { state: 'ready_for_dispatch' }));
+  const accepted = await ctx.dispatch('accept');
+  assert.equal(accepted.status, 409);
+  assert.equal(accepted.body.error, 'outside_operating_hours');
+  const assigned = await ctx.post('ops', 'transition', { state: 'rider_assigned', riderId: 'rider' });
+  assert.equal(assigned.body.error, 'outside_operating_hours');
+  assert.equal((await loadStore(ctx.db)).orders[0].riderId ?? null, null);
+});
+
+test('rider-packs handoff signature names the first missing step: unpacked inspection, then packing photo', { skip: !DATABASE_URL }, async t => {
+  const ctx = await setup(t); await ready(ctx);
+  const early = await ctx.attach('signature', 'rider');
+  assert.equal(early.status, 409);
+  assert.equal(early.body.error, 'unpacked_inspection_required');
+  ok(await inspect(ctx));
+  assert.equal((await ctx.attach('signature', 'rider')).body.error, 'packing_photo_required');
+  ok(await ctx.attach('packed', 'rider'));
+  ok(await ctx.attach('signature', 'rider'));
+  assert.equal(ok(await confirm(ctx)).order.state, 'picked_up');
+});
