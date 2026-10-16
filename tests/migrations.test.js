@@ -1221,8 +1221,9 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     ]);
     await runner(migrationOptions(schema, "up", undefined, client));
     const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
-    // Zone pricing, operating hours, rider tracking, bracket activation and artwork guidance advance the handshake.
-    assert.equal(migrated.version, 18);
+    // Zone pricing, operating hours, rider tracking, bracket activation, artwork guidance and colour thresholds advance the handshake.
+    assert.equal(migrated.version, 19);
+    assert.equal(migrated.settings.colourDetection.a3MonochromeMaxBps, 1000);
     assert.equal(migrated.settings.artworkGuidance.subcategories.custom_apparel.minimumDpi, 150);
     assert.equal(migrated.settings.riderLocationRefreshIntervalSeconds, 20);
     assert.equal(migrated.settings.riderLocationStaleAfterSeconds, 120);

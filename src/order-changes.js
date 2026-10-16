@@ -1,3 +1,4 @@
+import { parseColourCorrection } from './colour-correction.js';
 import crypto from 'node:crypto';
 import { serviceFeeMoney } from './service-fee.js';
 import { specialInstructions, instructionLines } from './special-instructions.js';
@@ -91,7 +92,9 @@ export async function routeOrderChanges({ req, url, store, user, readBody, now, 
     if (jobs.some(j => j.supplierId !== user.id)) fail(409, 'change_request_multi_shop_legacy');
     const line = (store.orderLineItems || []).find(l => l.id === body.lineItemId && l.orderId === order.id);
     if (!line && (body.lineItemId != null || (store.orderLineItems || []).some(l => l.orderId === order.id))) fail(400, 'invalid_change_line');
-    const extra = body.extraPrincipalMinor ?? 0;
+    const colourCorrection = body.colourCorrection == null ? null : parseColourCorrection(store,order,line,body.colourCorrection);
+    const extra = colourCorrection ? colourCorrection.correctedLineSubtotalMinor - colourCorrection.originalLineSubtotalMinor : body.extraPrincipalMinor ?? 0;
+    if (colourCorrection && body.extraPrincipalMinor != null && body.extraPrincipalMinor !== extra) fail(400,'invalid_change_amount');
     if (!Number.isSafeInteger(extra) || extra < 0) fail(400, 'invalid_change_amount');
     const proposedSpec = specialInstructions(body.proposedSpec);
     let proposedReadyBy = null, proposedPromiseBy = null;
@@ -103,14 +106,14 @@ export async function routeOrderChanges({ req, url, store, user, readBody, now, 
       proposedReadyBy = new Date(body.proposedReadyBy).toISOString();
       proposedPromiseBy = new Date(Date.parse(proposedReadyBy) + allowance).toISOString();
     }
-    if (!proposedSpec && !proposedReadyBy) fail(400, 'change_terms_required');
+    if (!proposedSpec && !proposedReadyBy && !colourCorrection) fail(400, 'change_terms_required');
     const feeSchedule = order.serviceFeeSchedule || { version: 1, rateBps: order.serviceFeeRateBps };
     const originalPrincipalMinor = order.supplierSubtotalMinor + supplementTotals(store, order).principalMinor;
     const feeMinor = serviceFeeMoney(originalPrincipalMinor + extra, feeSchedule).grossServiceFeeMinor - serviceFeeMoney(originalPrincipalMinor, feeSchedule).grossServiceFeeMinor;
     if (!Number.isSafeInteger(order.totalMinor + supplementTotals(store, order).totalMinor + extra + feeMinor)) fail(400, 'invalid_change_amount');
     request = { id: id('change'), orderId: order.id, supplierId: user.id, lineItemId: line?.id || null, status: 'pending', version: 1,
       extraPrincipalMinor: extra, feeMinor, totalMinor: extra + feeMinor, createdAt: at,
-      data: { reason: text(body.reason, 2000), proposedSpec, proposedReadyBy, proposedPromiseBy, feeSchedule: structuredClone(feeSchedule),
+      data: { ...(colourCorrection ? {colourCorrection} : {}), reason: text(body.reason, 2000), proposedSpec, proposedReadyBy, proposedPromiseBy, feeSchedule: structuredClone(feeSchedule),
         originalPrincipalMinor, originalReadyBy: order.readyBy, originalPromiseBy: order.promiseBy,
         originalInstructions: line?.specialInstructions || order.specialInstructions || '' } };
     (store.orderChanges ||= []).push(request); kind = 'requested';

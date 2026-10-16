@@ -1,3 +1,6 @@
+import { colourSettings } from './colour-pricing.js';
+import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './colour-analysis.js';
+import { createColourWorker } from './colour-worker.js';
 import { signArtworkAttachments } from './artwork-attachments.js';
 import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
 import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique } from './order-change-policy.js';
@@ -289,6 +292,7 @@ const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
+const drainColourAnalyses = createColourWorker({ database, storage: objectStorage, load: () => load(), save: store => save(store), now, id });
 const artworkPreviews = createArtworkPreviews({ database, storage: objectStorage, load: () => load(), save: store => save(store), now });
 // Push is optional configuration, not a startup requirement. A hosted pilot
 // without a usable service-account file must still serve every route — the
@@ -356,6 +360,7 @@ function notifyMissingJobDetails(store, order) {
 }
 
 async function save(store) {
+  if ((store.files || []).some(file => file.colourAnalyses?.some(job => job.status === "pending"))) database.afterCommit(() => { void drainColourAnalyses().catch(() => console.warn("colour worker failed")); });
   assertSupplementCollectionsUnique(store);
   syncSupplierInvoiceExpectations(store, originalDomainStore(store), { at: now(), id, audit });
   await reconcileCalls(database, store, { createId: id, at: now() });
@@ -759,6 +764,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    colourDetection: colourSettings(settings),
     operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
@@ -3120,6 +3126,7 @@ async function handleAuditedRequest(req, res) {
             }
             authorizeFileUpload(latestUser, purpose);
             markFileReady(latestFile, now());
+            queueColourRequest(latestFile, sourceColourRequest(latestStore.settings), now());
             await save(latestStore);
             return latestFile;
           });
@@ -3680,6 +3687,11 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, { lapses: supplierLapses(store, order.supplierId).filter((row) => row.orderId === order.id) });
     }
 
+    if (req.method === 'GET' && pathname === '/ops/colour-price-checks') {
+      if (!['ops_admin', 'super_admin'].includes(user?.role)) return send(res, 403, {error:'forbidden'});
+      return send(res, 200, { checks: colourPriceChecks(store).slice(0, 100) });
+    }
+
     // ---- global operational settings ----
     if (req.method === "GET" && pathname === "/settings") {
       return send(res, 200, {
@@ -3743,6 +3755,7 @@ async function handleAuditedRequest(req, res) {
         pricingPaymentFeeBps: Object.hasOwn(body, "pricingPaymentFeeBps")
           ? body.pricingPaymentFeeBps
           : (store.settings.pricingPaymentFeeBps ?? null),
+        colourDetection: Object.hasOwn(body, "colourDetection") ? body.colourDetection : colourSettings(store.settings),
         artworkGuidance: Object.hasOwn(body, "artworkGuidance")
           ? validateArtworkGuidance(body.artworkGuidance, store.taxonomy, (status, code, message, details) => {
             throw new OperationalError(status, code, message, details);
@@ -7463,6 +7476,7 @@ async function runLifecycleWork() {
           if (syncSurveys(store, { id, at: now() })) await save(store);
         });
       },
+      drainColourAnalyses,
       drainVoucherEmail,
       sweepOrganizationOfficers,
       sweepDeliveryChats,

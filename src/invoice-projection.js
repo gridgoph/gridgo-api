@@ -1,3 +1,4 @@
+import { publicColourQuote } from './colour-projection.js';
 import { splitVoucherMinor } from './voucher-money.js';
 import { clientMoneyMinor } from './supplier-catalog.js';
 
@@ -15,7 +16,8 @@ export function clientInvoice(snapshot, { exposeWorking = false, hideSupplierAmo
       const line = { ...source };
       line.clientUnitPriceMinor = clientMoneyMinor(pricing, line.unitPriceMinor);
       line.clientAmountMinor = shares ? line.amountMinor + shares[index] : clientMoneyMinor(pricing, line.amountMinor);
-      if (hideSupplierAmounts) {
+      if (source.colourPricing) line.colourPricing = publicColourQuote(source.colourPricing,exposeWorking ? "ops_admin" : "client",line.clientAmountMinor);
+      if (hideSupplierAmounts || (!exposeWorking && source.colourPricing?.pricedByColour)) {
         delete line.unitPriceMinor;
         delete line.amountMinor;
       }

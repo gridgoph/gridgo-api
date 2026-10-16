@@ -1,3 +1,4 @@
+import { parseColourListing } from './colour-pricing.js';
 import { routeShopHours } from './shop-hours.js';
 import { productionDuration, productionProjection, shopProductionDayMinutes } from "./production-days.js";
 import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
@@ -1013,6 +1014,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       createdAt: at,
       updatedAt: at,
     };
+    Object.assign(item, parseColourListing(body, item));
     if (!Array.isArray(store.catalogItems)) store.catalogItems = [];
     if (!Array.isArray(store.catalogOptionGroups)) store.catalogOptionGroups = [];
     if (!Array.isArray(store.catalogOptions)) store.catalogOptions = [];
@@ -1063,6 +1065,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     Object.assign(item, printerCapFields(body, item, item.subcategoryCode));
     // Which layouts the shop prints, replaced as a set like the tiers below.
     if (Object.hasOwn(body, "printLayouts")) item.printLayouts = parsePrintLayouts(body.printLayouts, fail);
+    Object.assign(item, parseColourListing(body, item));
     // Tiers are small ordered sets a shop edits as a whole -- add a break,
     // change a price, drop a speed -- so they are replaced wholesale rather
     // than through six more routes each with its own version check.
