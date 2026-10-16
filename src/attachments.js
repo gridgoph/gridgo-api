@@ -735,6 +735,11 @@ export function publicFile(file, user = null) {
     // Only present when the file said something about itself, so a client can
     // tell "we read 210 x 297 mm" from "we could not tell".
     ...(file.artworkCheck ? { artworkCheck: { ...file.artworkCheck } } : {}),
+    ...(file.purpose === 'artwork' && file.colourAnalyses?.length ? {colourAnalysis:(() => {
+      const job = file.colourAnalyses.filter(row => row.request.layout === 'source').at(-1);
+      return job ? {status:job.status,version:1,thresholds:job.request.thresholds,completedAt:job.completedAt ?? null,
+        ...(job.pages ? {pages:structuredClone(job.pages)} : {}),...(job.error ? {error:job.error} : {})} : null;
+    })()} : {}),
     ...(file.detected ? { detected: { ...file.detected } } : {}),
     ...(file.verificationDocumentType ? { verificationDocumentType: file.verificationDocumentType } : {}),
   };

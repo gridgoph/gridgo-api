@@ -16,7 +16,7 @@ export const INVALIDATE_RESOURCES = Object.freeze([
   "claims",
   "dispatch",
   "payouts",
-  "notifications", "identity", "catalog", "services", "availability", "settings", "location", "credits",
+  "carts", "notifications", "identity", "catalog", "services", "availability", "settings", "location", "credits",
   ...STAFF_INVALIDATE_RESOURCES,
 ]);
 
@@ -248,7 +248,7 @@ export function invalidateAudienceIds(store, event) {
   ) {
     if (!order || supplierArtworkReleased(order)) ids.add(event.supplierId);
   }
-  if (event.clientId && event.resource === "orders") ids.add(event.clientId);
+  if (event.clientId && ["orders", "carts"].includes(event.resource)) ids.add(event.clientId);
   if (
     event.riderId
     && (event.resource === "dispatch" || event.resource === "orders" || event.resource === "jobs")

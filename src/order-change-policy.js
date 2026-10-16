@@ -1,3 +1,4 @@
+import { publicColourChange } from './colour-projection.js';
 // Pure policy shared by projections, refunds and the change-request route.
 export const changesFor = (store, order) => (store?.orderChanges || []).filter(row => row.orderId === order.id);
 export const changePaymentsFor = (store, order) => (store?.orderChangePayments || []).filter(row => row.orderId === order.id);
@@ -18,6 +19,7 @@ export function publicChange(store, row, role) {
     delete result.feeSchedule; delete result.originalPrincipalMinor; delete result.feeMinor;
     delete result.originalReadyBy; delete result.originalPromiseBy; delete result.priorLapse;
   }
+  if (row.data.colourCorrection) result.colourCorrection = publicColourChange(store,(store.orders || []).find(order => order.id === row.orderId),row,role);
   if (role === 'client') { delete result.extraPrincipalMinor; delete result.supplierId; delete result.proposedReadyBy; }
   if (role === 'supplier') { delete result.payment; delete result.paymentHistory; delete result.totalMinor; }
   if (['supplier', 'ops_admin', 'super_admin'].includes(role) && row.status === 'applied' && row.extraPrincipalMinor > 0) {

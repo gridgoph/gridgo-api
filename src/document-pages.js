@@ -38,6 +38,7 @@ export function documentPagesFor(store, item, line, range = line.documentPages?.
   }
   const file = (store.files || []).find(row => row.fileId === line.artworkFileId && row.state === 'ready' && row.purpose === 'artwork');
   let total = file?.detected?.pageCount;
+  if (['image/png','image/jpeg','image/webp'].includes(file?.detectedContentType)) total = 1;
   if ((!Number.isSafeInteger(total) || total < 1) && file?.detectedContentType === DOCX_CONTENT_TYPE) {
     total = line.documentPages?.total ?? line.measurement?.pages;
   }
