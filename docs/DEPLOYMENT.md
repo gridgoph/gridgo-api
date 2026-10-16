@@ -160,6 +160,8 @@ Migrations are ordered files under `migrations/` and run through `node-pg-migrat
 npm run migrate
 ```
 
+`npm run migrate` passes `--no-check-order`. Work merged to `main` ahead of `dev` can apply a later-dated migration first (production applied `1792058200000_web_push` before nine earlier-dated `dev` migrations), and the default order check would then refuse every pending older file. Each migration must therefore stay independent of later-dated migrations that may have been applied before it.
+
 The API never executes DDL at boot. It checks database connectivity and the migrated `platform_settings` table before listening. A missing schema produces a specific instruction to run migrations.
 
 Every deployment runs `migrate` and `seed` before API start through compose dependencies. Forward migrations must be compatible with the image being deployed. Roll back application code by pinning `GRIDGO_API_TAG` to a prior immutable `sha-...` tag only when that image understands the already-forward database schema; database rollback requires a tested backup restore, not a down migration guess.
