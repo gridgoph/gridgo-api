@@ -311,6 +311,8 @@ PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artwo
 
 Add and PATCH also accept `printLayout` for listings whose `printLayouts` is non-empty; checkout requires it there. Lines return `printLayout` and `printLayoutCheck`. Contract: [print layout](PRINT_LAYOUT_API.md#client-the-cart-line).
 
+Add and PATCH also accept optional `colorTargets` (the client's exact colours); lines return `colorTargets` and `artworkColors`. Contract: [exact colours](EXACT_COLOURS_API.md#client-the-cart-line).
+
 ### Artwork design links
 
 Both add-line and patch-line requests accept `artworkLinks`, independently of `artworkFileId`:

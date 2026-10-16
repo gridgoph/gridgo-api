@@ -15,6 +15,7 @@ import path from "node:path";
 import { approvalCaseFor, authorizationContextFor, identityHasMembership } from "./authorization-context.js";
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
+import { readArtworkColors } from "./artwork-colors.js";
 import { payoutPlanFor, payoutStageFor } from "./payout-plan.js";
 import { publicCatalogMediaFile, publicSupplierShop } from "./supplier-catalog.js";
 
@@ -602,7 +603,12 @@ export async function readArtworkMeasurements(file, detectedContentType, purpose
     handle = await fs.open(file.tempPath, "r");
     const bytes = Buffer.alloc(Math.min(file.size ?? INSPECT_BYTES, INSPECT_BYTES));
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-    return inspectArtwork(bytes.subarray(0, bytesRead), detectedContentType);
+    const read = bytes.subarray(0, bytesRead);
+    const detected = inspectArtwork(read, detectedContentType);
+    if (!detected) return null;
+    // The colours the file uses, for comparing with the client's exact
+    // colours. Unknown, with the reason, where the file does not say.
+    return { ...detected, colors: await readArtworkColors(read, detectedContentType, { complete: bytesRead >= (file.size ?? bytesRead) }) };
   } catch {
     return null;
   } finally {
