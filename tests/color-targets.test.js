@@ -389,4 +389,44 @@ test("hostile files cost bounded work and say why they stopped", async () => {
   assert.equal(busy.status, "partial");
   assert.deepEqual(busy.reasons, ["inspection_limit"]);
   assert.ok(Date.now() - started < 5_000);
+
+  // Streams that each inflate to the limit and fail are charged for the attempt.
+  const bomb = zlib.deflateSync(Buffer.alloc(32 * 1024 * 1024, 0x20));
+  const bombs = Buffer.concat([pdf({ content: "1 0 0 rg 0 0 1 1 re f" }), ...Array.from({ length: 30 }, (_, index) => Buffer.concat([
+    Buffer.from(`${20 + index} 0 obj<</Length ${bomb.length} /Filter /FlateDecode>>stream\n`, "latin1"), bomb, Buffer.from("\nendstream\nendobj\n", "latin1"),
+  ]))]);
+  const bombStarted = Date.now();
+  const bombed = readPdfColors(bombs);
+  assert.ok(bombed.reasons.includes("inspection_limit"));
+  assert.ok(Date.now() - bombStarted < 3_000, `${Date.now() - bombStarted} ms`);
+
+  // A file of tiny skipped streams stops at its visit budget.
+  const tiny = Buffer.from(`%PDF-1.4\n${"1 0 obj<</Subtype /Image>>stream\nx\nendstream\n".repeat(300_000)}`, "latin1");
+  const tinyStarted = Date.now();
+  assert.ok(readPdfColors(tiny).reasons.includes("inspection_limit"));
+  assert.ok(Date.now() - tinyStarted < 3_000, `${Date.now() - tinyStarted} ms`);
+
+  // A huge interlaced 1-bit image stops once enough pixels are sampled.
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(40_000, 0);
+  ihdr.writeUInt32BE(40_000, 4);
+  ihdr[8] = 1;
+  ihdr[9] = 0;
+  ihdr[12] = 1;
+  const rows = [];
+  for (const [x0, dx, y0, dy] of [[0, 8, 0, 8], [4, 8, 0, 8], [0, 4, 4, 8], [2, 4, 0, 4]]) {
+    const pixels = Math.ceil((40_000 - x0) / dx);
+    const count = Math.ceil((40_000 - y0) / dy);
+    const row = Buffer.alloc(1 + Math.ceil(pixels / 8), 0xff);
+    row[0] = 0;
+    for (let y = 0; y < count; y += 1) rows.push(row);
+  }
+  const interlaced = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr),
+    chunk("IDAT", zlib.deflateSync(Buffer.concat(rows))), chunk("IEND", Buffer.alloc(0)),
+  ]);
+  const pngStarted = Date.now();
+  const sampled = await readPngColors(interlaced, { complete: true });
+  assert.deepEqual(sampled.colors.map(({ hex, shareBps }) => ({ hex, shareBps })), [{ hex: "#FFFFFF", shareBps: 10_000 }]);
+  assert.ok(Date.now() - pngStarted < 5_000, `${Date.now() - pngStarted} ms`);
 });

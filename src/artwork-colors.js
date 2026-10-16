@@ -27,11 +27,17 @@ const MAX_PIXEL_COLORS = 8;
 const MIN_SHARE_BPS = 50;
 
 const MAX_STREAMS = 400;
+/** Streams looked at, read or skipped; past this the file is not walked further. */
+const MAX_STREAM_VISITS = 4000;
+/** Deflate cannot expand more than about 1032 to 1, which bounds what a failed inflate produced. */
+const MAX_DEFLATE_RATIO = 1032;
 const MAX_CONTENT_BYTES = 16 * 1024 * 1024;
 /** Raw scanline bytes decoded from one PNG: an A3 page at 300 DPI in RGB, with room. */
 const MAX_PNG_RAW_BYTES = 96 * 1024 * 1024;
 /** One scanline: 200,000 pixels of 16-bit RGBA, far past any print width. */
 const MAX_PNG_ROW_BYTES = 1_600_000;
+/** Pixels counted from one image, however it is stored. */
+const MAX_SAMPLED_PIXELS = 4_000_000;
 
 const PROCESS_SEPARATIONS = new Set(["Cyan", "Magenta", "Yellow", "Black", "All", "None"]);
 
@@ -116,8 +122,9 @@ function pdfStreams(bytes, text, notes) {
   let decodedTotal = 0;
   const STREAM = /\bstream(?:\r\n|\n|\r)/g;
   let match;
+  let visits = 0;
   while ((match = STREAM.exec(text)) !== null) {
-    if (streams.length >= MAX_STREAMS) {
+    if (streams.length >= MAX_STREAMS || ++visits > MAX_STREAM_VISITS) {
       notes.add("inspection_limit");
       break;
     }
@@ -125,10 +132,10 @@ function pdfStreams(bytes, text, notes) {
     const end = text.indexOf("endstream", bodyStart);
     if (end === -1) break;
     STREAM.lastIndex = end + 9;
-    const windowStart = Math.max(0, match.index - 8192);
+    const windowStart = Math.max(0, match.index - 2048);
     const local = text.slice(windowStart, match.index).lastIndexOf(" obj");
     const objectStart = local === -1 ? -1 : windowStart + local;
-    const dictionary = text.slice(objectStart === -1 ? Math.max(0, match.index - 2048) : objectStart, match.index);
+    const dictionary = text.slice(objectStart === -1 ? Math.max(0, match.index - 1024) : objectStart, match.index);
     const kind = streamKind(dictionary);
     const number = objectStart === -1 ? null : Number(/(\d+)\s+\d+$/.exec(text.slice(Math.max(0, objectStart - 24), objectStart))?.[1] ?? NaN);
     if (kind === "image") {
@@ -150,6 +157,7 @@ function pdfStreams(bytes, text, notes) {
       continue;
     }
     let data = bytes.subarray(bodyStart, end);
+    const remaining = MAX_CONTENT_BYTES - decodedTotal;
     try {
       for (const filter of filters) {
         if (filter === "ASCII85Decode") data = ascii85(data);
@@ -161,8 +169,11 @@ function pdfStreams(bytes, text, notes) {
           });
         }
       }
-    } catch {
-      notes.add(kind === "content" ? "content_not_readable" : "inspection_limit");
+    } catch (error) {
+      // A failed inflate still did its work: charge what it could have
+      // produced, so a file of streams that each fail cannot multiply the cost.
+      decodedTotal += error?.code === "ERR_BUFFER_TOO_LARGE" ? remaining : Math.min(remaining, (end - bodyStart) * MAX_DEFLATE_RATIO);
+      notes.add(error?.code === "ERR_BUFFER_TOO_LARGE" ? "inspection_limit" : kind === "content" ? "content_not_readable" : "inspection_limit");
       continue;
     }
     decodedTotal += data.length;
@@ -624,6 +635,7 @@ export async function readPngColors(bytes, { complete = true } = {}) {
   const counts = new Uint32Array(4096);
   const sums = new Float64Array(4096 * 3);
   let opaque = 0;
+  let sampled = 0;
   const max = (1 << depth) - 1;
   const palette = chunks.plte;
   const trns = chunks.trns;
@@ -640,7 +652,7 @@ export async function readPngColors(bytes, { complete = true } = {}) {
 
   // A fixed grid of about four million pixels is plenty to rank colours that
   // each cover half a percent or more, and keeps a poster-sized file cheap.
-  const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / 4_000_000)));
+  const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / MAX_SAMPLED_PIXELS)));
   const rowStep = interlaced ? 1 : step;
   const columnStep = interlaced ? 1 : step;
   const countRow = (row, pixels) => {
@@ -668,6 +680,7 @@ export async function readPngColors(bytes, { complete = true } = {}) {
         b = toByte(blue);
         if (type === 6) alpha = toByte(sample(row, x * channels + 3));
       }
+      sampled += 1;
       if (alpha < 128) continue;
       const bin = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
       counts[bin] += 1;
@@ -737,6 +750,9 @@ export async function readPngColors(bytes, { complete = true } = {}) {
         if (filled === stride) finishRow();
       }
       if (passIndex >= passes.length) stop("complete");
+      // Interlaced passes are counted whole, but the first passes already
+      // cover the image on an even grid, so enough of them is a fair sample.
+      else if (interlaced && sampled >= MAX_SAMPLED_PIXELS) stop("complete");
       else if (total >= MAX_PNG_RAW_BYTES) stop("limit");
     });
     inflate.on("end", () => stop(passIndex >= passes.length ? "complete" : "short"));
