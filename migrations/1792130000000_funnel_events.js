@@ -11,6 +11,9 @@ export async function up(pgm) {
       exit_answer text
     );
     CREATE INDEX funnel_events_at ON funnel_events (at, id);
+    -- Dashboard reads one kind over a bounded range; posting dedupes and caps per client.
+    CREATE INDEX funnel_events_kind_at ON funnel_events (kind, at);
+    CREATE INDEX funnel_events_client_at ON funnel_events (client_id, at);
   `);
 }
 

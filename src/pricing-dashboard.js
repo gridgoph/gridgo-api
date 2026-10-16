@@ -10,6 +10,13 @@
 export const FUNNEL_KINDS = ["product_viewed", "listing_viewed", "checkout_reached", "paid", "checkout_left"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const OPS_ROLES = new Set(["ops_admin", "super_admin"]);
+export const DEFAULT_RANGE_DAYS = 30;
+export const MAX_RANGE_DAYS = 366;
+export const EXIT_ANSWERS_SHOWN = 50;
+export const FUNNEL_BODY_MAX_BYTES = 2048;
+export const FUNNEL_DEDUPE_MS = 60_000;
+export const FUNNEL_DAILY_LIMIT = 2000;
+export const FUNNEL_BURST = { limit: 120, windowMs: 10 * 60 * 1000 };
 const COMPLETED = new Set(["completed", "payout_released"]);
 
 export const PRICE_BRACKETS = [
@@ -75,22 +82,222 @@ export async function insertFunnelEvent(database, event) {
   );
 }
 
-export async function readFunnelEvents(database, store) {
-  if (!database?.query) return [...(store?.funnelEvents || [])];
+function funnelFail(status, code, message) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  throw error;
+}
+
+/** One event per request, small enough that a client cannot ship a payload in it. */
+export function assertFunnelBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    funnelFail(400, "invalid_funnel_event", "Send one funnel event per request.");
+  }
+  if (Buffer.byteLength(JSON.stringify(body), "utf8") > FUNNEL_BODY_MAX_BYTES) {
+    funnelFail(413, "funnel_event_too_large", `A funnel event is at most ${FUNNEL_BODY_MAX_BYTES} bytes.`);
+  }
+}
+
+/**
+ * The stored twin of this event from the same client inside the dedupe window,
+ * or null. The daily cap counts what this client stored in the last 24 hours.
+ */
+export async function recentFunnelState(database, event) {
+  const since = new Date(Date.parse(event.at) - FUNNEL_DEDUPE_MS).toISOString();
+  const day = new Date(Date.parse(event.at) - DAY_MS).toISOString();
   const result = await database.query(
-    `SELECT id, at, client_id, kind, order_id, listing_id, product_code, exit_answer
-     FROM funnel_events ORDER BY at, id`,
+    `SELECT
+       (SELECT count(*)::int FROM funnel_events WHERE client_id = $1 AND at > $2::timestamptz) AS today,
+       (SELECT jsonb_build_object('id', id, 'at', at) FROM funnel_events
+         WHERE client_id = $1 AND at > $3::timestamptz AND kind = $4
+           AND order_id IS NOT DISTINCT FROM $5 AND listing_id IS NOT DISTINCT FROM $6
+           AND product_code IS NOT DISTINCT FROM $7 AND exit_answer IS NOT DISTINCT FROM $8
+         ORDER BY at DESC, id DESC LIMIT 1) AS duplicate`,
+    [event.clientId, day, since, event.kind, event.orderId, event.listingId, event.productCode, event.exitAnswer],
   );
-  return result.rows.map((row) => ({
-    id: row.id,
-    at: row.at instanceof Date ? row.at.toISOString() : row.at,
-    clientId: row.client_id,
-    kind: row.kind,
-    orderId: row.order_id,
-    listingId: row.listing_id,
-    productCode: row.product_code,
-    exitAnswer: row.exit_answer,
-  }));
+  const row = result.rows[0] || {};
+  const duplicate = row.duplicate ? { id: row.duplicate.id, at: new Date(row.duplicate.at).toISOString() } : null;
+  return { today: row.today || 0, duplicate };
+}
+
+const iso = (value) => (value instanceof Date ? value.toISOString() : value);
+
+function rangeFail(code, message) {
+  funnelFail(400, code, message);
+}
+
+function rangeBound(value, end, field) {
+  if (value == null || value === "") return null;
+  const text = String(value);
+  const bound = /^\d{4}-\d{2}-\d{2}$/.test(text) ? (end ? `${text}T23:59:59.999Z` : `${text}T00:00:00.000Z`) : text;
+  const ms = Date.parse(bound);
+  if (!Number.isFinite(ms)) rangeFail("invalid_pricing_range", `Use a date such as 2026-10-01 for ${field}.`);
+  return new Date(ms).toISOString();
+}
+
+function dayStartBefore(iso, days) {
+  const start = new Date(Date.parse(iso) - (days - 1) * DAY_MS);
+  start.setUTCHours(0, 0, 0, 0);
+  return start.toISOString();
+}
+
+function checkedRange(from, to) {
+  if (Date.parse(from) > Date.parse(to)) rangeFail("invalid_pricing_range", "The start date is after the end date.");
+  if (Date.parse(to) - Date.parse(from) > MAX_RANGE_DAYS * DAY_MS) {
+    rangeFail("pricing_range_too_long", `Choose a range of ${MAX_RANGE_DAYS} days or fewer.`);
+  }
+  return { from, to };
+}
+
+/**
+ * Every figure is read over a bounded range. With no dates the dashboard shows
+ * the last 30 days; a comparison needs both of its dates.
+ */
+export function pricingRanges(query = {}, now) {
+  const nowIso = new Date(Number.isFinite(Date.parse(now)) ? Date.parse(now) : Date.now()).toISOString();
+  let from = rangeBound(query.from, false, "from");
+  let to = rangeBound(query.to, true, "to");
+  if (!to) to = from && Date.parse(from) > Date.parse(nowIso) ? rangeBound(query.from, true, "from") : nowIso;
+  if (!from) from = dayStartBefore(to, DEFAULT_RANGE_DAYS);
+  const period = checkedRange(from, to);
+  const compareFrom = rangeBound(query.compareFrom, false, "compareFrom");
+  const compareTo = rangeBound(query.compareTo, true, "compareTo");
+  if (Boolean(compareFrom) !== Boolean(compareTo)) {
+    rangeFail("invalid_pricing_range", "Choose both a start and an end date to compare.");
+  }
+  return { period, compare: compareFrom ? checkedRange(compareFrom, compareTo) : null };
+}
+
+/**
+ * Which funnel events the dashboard filters keep. The same rules run in SQL
+ * (funnelScopeSql) and in memory (funnelScopeMatches).
+ */
+export function funnelScope({ filters, orders = [], users = [], selectedOrderIds = [] }) {
+  const firstOrderAt = new Map();
+  for (const order of orders) {
+    if (!order.clientId || !order.createdAt) continue;
+    const prior = firstOrderAt.get(order.clientId);
+    if (!prior || order.createdAt < prior) firstOrderAt.set(order.clientId, order.createdAt);
+  }
+  const typed = (type) => users.filter((user) => user.accountType === type).map((user) => user.id);
+  const accountType = filters.accountType || "";
+  return {
+    accountType,
+    accountIds: accountType === "business" || accountType === "organization" ? typed(accountType) : null,
+    nonIndividualIds: accountType === "individual" ? [...typed("business"), ...typed("organization")] : null,
+    cohort: filters.cohort || "",
+    firstOrderAt: filters.cohort ? firstOrderAt : null,
+    orderIds: filters.category || filters.bracket ? [...selectedOrderIds] : null,
+    productCode: filters.category && !filters.bracket ? filters.category : null,
+  };
+}
+
+export function funnelScopeMatches(event, scope) {
+  if (scope.accountType) {
+    if (scope.accountIds) { if (!scope.accountIds.includes(event.clientId)) return false; }
+    else if (scope.nonIndividualIds) { if (scope.nonIndividualIds.includes(event.clientId)) return false; }
+    else return false;
+  }
+  if (scope.cohort) {
+    const first = scope.firstOrderAt.get(event.clientId);
+    const cohort = !first || Date.parse(event.at) <= Date.parse(first) ? "new" : "repeat";
+    if (cohort !== scope.cohort) return false;
+  }
+  if (scope.orderIds) {
+    if (scope.orderIds.includes(event.orderId)) return true;
+    return Boolean(scope.productCode) && event.productCode === scope.productCode;
+  }
+  return true;
+}
+
+function funnelScopeSql(scope, params) {
+  const add = (value) => { params.push(value); return `$${params.length}`; };
+  const where = [];
+  let join = "";
+  if (scope.accountType) {
+    if (scope.accountIds) where.push(`e.client_id = ANY(${add(scope.accountIds)}::text[])`);
+    else if (scope.nonIndividualIds) where.push(`NOT (e.client_id = ANY(${add(scope.nonIndividualIds)}::text[]))`);
+    else where.push("false");
+  }
+  if (scope.cohort) {
+    const entries = [...scope.firstOrderAt.entries()];
+    join = `LEFT JOIN unnest(${add(entries.map(([id]) => id))}::text[], ${add(entries.map(([, at]) => at))}::timestamptz[])
+      AS f(client_id, first_at) ON f.client_id = e.client_id`;
+    where.push(`(CASE WHEN f.first_at IS NULL OR e.at <= f.first_at THEN 'new' ELSE 'repeat' END) = ${add(scope.cohort)}`);
+  }
+  if (scope.orderIds) {
+    where.push(`(e.order_id = ANY(${add(scope.orderIds)}::text[])${scope.productCode ? ` OR e.product_code = ${add(scope.productCode)}` : ""})`);
+  }
+  return { join, where: where.length ? ` AND ${where.join(" AND ")}` : "" };
+}
+
+function funnelSummary({ counts, answers, checkouts, paid }, nowMs) {
+  const all = Object.fromEntries(FUNNEL_KINDS.map((kind) => [kind, 0]));
+  for (const [kind, count] of Object.entries(counts)) if (all[kind] != null) all[kind] = count;
+  return {
+    counts: all,
+    ...funnelDropOff(checkouts, paid, nowMs),
+    exitQuestion: answers.length
+      ? { asked: true, message: null, answers }
+      : { asked: false, message: EXIT_QUESTION_ABSENT, answers: [] },
+  };
+}
+
+const answerOrder = (a, b) => b.count - a.count || a.answer.localeCompare(b.answer);
+const inWindow = (at, from, to) => Date.parse(at) >= Date.parse(from) && Date.parse(at) <= Date.parse(to);
+const paidUntil = (to) => new Date(Date.parse(to) + DAY_MS).toISOString();
+
+/** In-memory twin of readFunnelSummary, for stores without PostgreSQL. */
+export function funnelFromEvents(events, range, scope, nowMs) {
+  const visible = events.filter((event) => funnelScopeMatches(event, scope));
+  const inRange = visible.filter((event) => inWindow(event.at, range.from, range.to));
+  const counts = {};
+  const tally = new Map();
+  for (const event of inRange) {
+    counts[event.kind] = (counts[event.kind] || 0) + 1;
+    if (event.kind === "checkout_left" && event.exitAnswer) tally.set(event.exitAnswer, (tally.get(event.exitAnswer) || 0) + 1);
+  }
+  const byTime = (a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id));
+  return funnelSummary({
+    counts,
+    answers: [...tally.entries()].map(([answer, count]) => ({ answer, count })).sort(answerOrder).slice(0, EXIT_ANSWERS_SHOWN),
+    checkouts: inRange.filter((event) => event.kind === "checkout_reached").sort(byTime),
+    paid: visible.filter((event) => event.kind === "paid" && inWindow(event.at, range.from, paidUntil(range.to))).sort(byTime),
+  }, nowMs);
+}
+
+/**
+ * Funnel figures for one range from indexed aggregates. Only the checkout and
+ * payment rows the 24-hour pairing needs are read, never the whole table.
+ */
+export async function readFunnelSummary(database, range, scope, nowMs) {
+  const run = async (select, extra, tail = "") => {
+    const params = [range.from, range.to];
+    const { join, where } = funnelScopeSql(scope, params);
+    const sql = `SELECT ${select} FROM funnel_events e ${join} WHERE ${extra(params)}${where} ${tail}`;
+    return (await database.query(sql, params)).rows;
+  };
+  const between = () => "e.at >= $1::timestamptz AND e.at <= $2::timestamptz";
+  // One pooled client may serve a read snapshot, so these run in turn.
+  const countRows = await run("e.kind, count(*)::int AS count", between, "GROUP BY e.kind");
+  const answerRows = await run("e.exit_answer AS answer, count(*)::int AS count",
+    () => `${between()} AND e.kind = 'checkout_left' AND e.exit_answer IS NOT NULL`,
+    `GROUP BY e.exit_answer ORDER BY count DESC, answer LIMIT ${EXIT_ANSWERS_SHOWN}`);
+  const checkoutRows = await run("e.id, e.at, e.client_id, e.order_id",
+    () => `${between()} AND e.kind = 'checkout_reached'`, "ORDER BY e.at, e.id");
+  const paidRows = await run("e.id, e.at, e.client_id, e.order_id",
+    () => `e.kind = 'paid' AND e.at >= $1::timestamptz AND e.at <= $2::timestamptz + interval '24 hours'
+      AND e.client_id IN (SELECT c.client_id FROM funnel_events c
+        WHERE c.kind = 'checkout_reached' AND c.at >= $1::timestamptz AND c.at <= $2::timestamptz)`,
+    "ORDER BY e.at, e.id");
+  const event = (kind) => (row) => ({ id: row.id, at: iso(row.at), clientId: row.client_id, kind, orderId: row.order_id });
+  return funnelSummary({
+    counts: Object.fromEntries(countRows.map((row) => [row.kind, row.count])),
+    answers: answerRows.map((row) => ({ answer: row.answer, count: row.count })).sort(answerOrder),
+    checkouts: checkoutRows.map(event("checkout_reached")),
+    paid: paidRows.map(event("paid")),
+  }, nowMs);
 }
 
 export function averageAndMedian(values) {
@@ -167,36 +374,18 @@ export function bracketOf(minor) {
   return PRICE_BRACKETS.find((band) => minor >= band.min && (band.max == null || minor < band.max))?.id ?? null;
 }
 
-export function categoryOf(order, lines, catalog) {
-  const line = (lines || []).find((item) => item.orderId === order.id);
+function categoryFrom(order, line, item) {
   const spec = line?.structuredSpecSnapshot || {};
   if (typeof spec.subcategoryCode === "string" && spec.subcategoryCode) return spec.subcategoryCode;
   if (typeof spec.categoryCode === "string" && spec.categoryCode) return spec.categoryCode;
-  const item = (catalog || []).find((row) => row.id === line?.sourceCatalogItemId);
   if (typeof item?.subcategoryCode === "string" && item.subcategoryCode) return item.subcategoryCode;
   if (typeof order.subcategoryCode === "string" && order.subcategoryCode) return order.subcategoryCode;
   return "unspecified";
 }
 
-function accountTypeOf(order, users) {
-  const user = (users || []).find((row) => row.id === order.clientId);
-  if (user?.accountType === "business" || user?.accountType === "organization") return user.accountType;
-  return "individual";
-}
-
-function cohortOf(order, orders) {
-  const first = (orders || [])
-    .filter((row) => row.clientId === order.clientId)
-    .map((row) => row.createdAt)
-    .filter(Boolean)
-    .sort()[0];
-  return order.createdAt && order.createdAt === first ? "new" : "repeat";
-}
-
-function bound(day, end) {
-  if (!day) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return end ? `${day}T23:59:59.999Z` : `${day}T00:00:00.000Z`;
-  return day;
+export function categoryOf(order, lines, catalog) {
+  const line = (lines || []).find((item) => item.orderId === order.id);
+  return categoryFrom(order, line, (catalog || []).find((row) => row.id === line?.sourceCatalogItemId));
 }
 
 function inRange(at, from, to) {
@@ -216,14 +405,25 @@ function qaMillis(order) {
   return Number.isFinite(ms) && ms >= 0 ? ms : null;
 }
 
-function firstOpsMillis(order, audit) {
+/** Operations actions per order, read from the audit log once. */
+function opsActivity(audit) {
+  const byOrder = new Map();
+  for (const entry of audit || []) {
+    if (!entry.orderId || !OPS_ROLES.has(entry.actorRole)) continue;
+    const row = byOrder.get(entry.orderId) || { count: 0, first: null };
+    row.count += 1;
+    const at = entry.at ? Date.parse(entry.at) : NaN;
+    if (Number.isFinite(at) && (row.first == null || at < row.first)) row.first = at;
+    byOrder.set(entry.orderId, row);
+  }
+  return byOrder;
+}
+
+function firstOpsMillis(order, ops) {
   if (!order.createdAt) return null;
-  const times = (audit || [])
-    .filter((entry) => entry.orderId === order.id && OPS_ROLES.has(entry.actorRole) && entry.at)
-    .map((entry) => Date.parse(entry.at))
-    .filter((value) => Number.isFinite(value));
-  if (!times.length) return null;
-  const ms = Math.min(...times) - Date.parse(order.createdAt);
+  const first = ops.get(order.id)?.first;
+  if (first == null) return null;
+  const ms = first - Date.parse(order.createdAt);
   return Number.isFinite(ms) && ms >= 0 ? ms : null;
 }
 
@@ -265,15 +465,13 @@ function orderEarnings(order, refunds, paymentFeeBps) {
   return earnings;
 }
 
-function priceGroups(orders, lines, catalog) {
+function priceGroups(rows) {
   const byCategory = new Map();
   const byBracket = new Map(PRICE_BRACKETS.map((band) => [band.id, []]));
-  for (const order of orders) {
+  for (const { order, category, bracket } of rows) {
     if (!Number.isSafeInteger(order.supplierSubtotalMinor)) continue;
-    const category = categoryOf(order, lines, catalog);
     if (!byCategory.has(category)) byCategory.set(category, []);
     byCategory.get(category).push(order.supplierSubtotalMinor);
-    const bracket = bracketOf(order.supplierSubtotalMinor);
     if (bracket) byBracket.get(bracket).push(order.supplierSubtotalMinor);
   }
   const pack = (id, label, values) => ({ id, label, ...averageAndMedian(values) });
@@ -296,13 +494,8 @@ function sameMonth(at, now) {
   return when.getUTCFullYear() === current.getUTCFullYear() && when.getUTCMonth() === current.getUTCMonth();
 }
 
-function periodReport(orders, eventsInRange, allEvents, audit, refundRequests, refunds, lines, catalog, paymentFeeBps, nowMs) {
-  const counts = Object.fromEntries(FUNNEL_KINDS.map((kind) => [kind, 0]));
-  for (const event of eventsInRange) if (counts[event.kind] != null) counts[event.kind] += 1;
-  const checkouts = eventsInRange.filter((event) => event.kind === "checkout_reached");
-  const answers = eventsInRange.filter((event) => event.kind === "checkout_left" && event.exitAnswer);
-  const tally = new Map();
-  for (const event of answers) tally.set(event.exitAnswer, (tally.get(event.exitAnswer) || 0) + 1);
+function periodReport(rows, funnel, ops, refundRequests, refunds, paymentFeeBps) {
+  const orders = rows.map((row) => row.order);
   const orderIds = new Set(orders.map((order) => order.id));
   const refundOrders = new Set([
     ...refundRequests.filter((row) => orderIds.has(row.orderId)).map((row) => row.orderId),
@@ -310,18 +503,12 @@ function periodReport(orders, eventsInRange, allEvents, audit, refundRequests, r
   ]);
   const settlements = refunds.filter((row) => orderIds.has(row.orderId));
   return {
-    funnel: {
-      counts,
-      ...funnelDropOff(checkouts, allEvents, nowMs),
-      exitQuestion: answers.length
-        ? { asked: true, message: null, answers: [...tally.entries()].map(([answer, count]) => ({ answer, count })) }
-        : { asked: false, message: EXIT_QUESTION_ABSENT, answers: [] },
-    },
+    funnel,
     operations: {
       note: OPERATIONS_MINIMUM,
       qualityCheck: averageAndMedian(orders.map(qaMillis).filter((value) => value != null)),
-      firstAction: averageAndMedian(orders.map((order) => firstOpsMillis(order, audit)).filter((value) => value != null)),
-      manualInterventions: (audit || []).filter((entry) => orderIds.has(entry.orderId) && OPS_ROLES.has(entry.actorRole)).length,
+      firstAction: averageAndMedian(orders.map((order) => firstOpsMillis(order, ops)).filter((value) => value != null)),
+      manualInterventions: orders.reduce((total, order) => total + (ops.get(order.id)?.count || 0), 0),
     },
     reprints: {
       recorded: false,
@@ -341,24 +528,9 @@ function periodReport(orders, eventsInRange, allEvents, audit, refundRequests, r
       shop: shareOf(settlements, "shopEntitlementMinor"),
       rider: shareOf(settlements, "riderEntitlementMinor"),
     },
-    prices: priceGroups(orders, lines, catalog),
+    prices: priceGroups(rows),
     earnings: orders.map((order) => orderEarnings(order, refunds, paymentFeeBps)),
   };
-}
-
-function eventMatches(event, filters, orders, users, selected) {
-  if (filters.accountType && accountTypeOf({ clientId: event.clientId }, users) !== filters.accountType) return false;
-  if (filters.cohort) {
-    const first = orders.filter((row) => row.clientId === event.clientId).map((row) => row.createdAt).filter(Boolean).sort()[0];
-    const cohort = !first || (event.at && event.at <= first) ? "new" : "repeat";
-    if (cohort !== filters.cohort) return false;
-  }
-  if (filters.category || filters.bracket) {
-    if (selected.some((row) => row.order.id === event.orderId)) return true;
-    if (filters.category && !filters.bracket && event.productCode === filters.category) return true;
-    return false;
-  }
-  return true;
 }
 
 function matches(order, index, filters) {
@@ -369,42 +541,66 @@ function matches(order, index, filters) {
   return true;
 }
 
-export function pricingDashboard({
-  orders = [], lines = [], catalog = [], users = [], audit = [], refundRequests = [], refunds = [],
-  events = [], settings = {}, version = null, query = {}, now,
-}) {
-  const from = bound(query.from, false);
-  const to = bound(query.to, true);
-  const compareFrom = bound(query.compareFrom, false);
-  const compareTo = bound(query.compareTo, true);
+/** Orders kept by the dashboard filters, each indexed once (no per-order scans). */
+function pricingSelection({ orders = [], lines = [], catalog = [], users = [], query = {} }) {
   const filters = {
     category: query.category || "",
     bracket: query.bracket || "",
     accountType: query.accountType || "",
     cohort: query.cohort || "",
   };
-  const indexed = orders.map((order) => ({
-    order,
-    category: categoryOf(order, lines, catalog),
-    bracket: bracketOf(order.supplierSubtotalMinor),
-    accountType: accountTypeOf(order, users),
-    cohort: cohortOf(order, orders),
-  }));
-  const selected = indexed.filter((row) => matches(row.order, row, filters));
-  const visibleEvents = events.filter((event) => eventMatches(event, filters, orders, users, selected));
+  const firstLine = new Map();
+  for (const line of lines) if (!firstLine.has(line.orderId)) firstLine.set(line.orderId, line);
+  const catalogById = new Map(catalog.map((item) => [item.id, item]));
+  const usersById = new Map(users.map((user) => [user.id, user]));
+  const firstOrderAt = new Map();
+  for (const order of orders) {
+    if (!order.createdAt) continue;
+    const prior = firstOrderAt.get(order.clientId);
+    if (!prior || order.createdAt < prior) firstOrderAt.set(order.clientId, order.createdAt);
+  }
+  const indexed = orders.map((order) => {
+    const line = firstLine.get(order.id);
+    const accountType = usersById.get(order.clientId)?.accountType;
+    return {
+      order,
+      category: categoryFrom(order, line, catalogById.get(line?.sourceCatalogItemId)),
+      bracket: bracketOf(order.supplierSubtotalMinor),
+      accountType: accountType === "business" || accountType === "organization" ? accountType : "individual",
+      cohort: order.createdAt && order.createdAt === firstOrderAt.get(order.clientId) ? "new" : "repeat",
+    };
+  });
+  return { filters, selected: indexed.filter((row) => matches(row.order, row, filters)) };
+}
+
+function dashboardContext(input) {
+  const ranges = pricingRanges(input.query, input.now);
+  const { filters, selected } = pricingSelection(input);
+  const scope = funnelScope({ filters, orders: input.orders, users: input.users, selectedOrderIds: selected.map((row) => row.order.id) });
+  const nowMs = Number.isFinite(Date.parse(input.now)) ? Date.parse(input.now) : Date.now();
+  return { ranges, filters, selected, scope, nowMs };
+}
+
+/**
+ * The dashboard over bounded ranges. Funnel figures come from `funnel`
+ * ({ period, compare }, see readPricingDashboard) or, without PostgreSQL,
+ * from the in-memory `events`.
+ */
+export function pricingDashboard(input) {
+  const {
+    audit = [], refundRequests = [], refunds = [], events = [], funnel = null,
+    settings = {}, version = null, query = {}, now,
+  } = input;
+  const { ranges, filters, selected, scope, nowMs } = dashboardContext(input);
   const paymentFeeBps = Number.isInteger(settings.pricingPaymentFeeBps) ? settings.pricingPaymentFeeBps : null;
-  const nowMs = Date.parse(now);
-  const slice = (start, end) => periodReport(
-    selected.filter((row) => inRange(row.order.createdAt, start, end)).map((row) => row.order),
-    visibleEvents.filter((event) => inRange(event.at, start, end)),
-    visibleEvents,
-    audit,
+  const ops = opsActivity(audit);
+  const slice = (range, summary) => periodReport(
+    selected.filter((row) => inRange(row.order.createdAt, range.from, range.to)),
+    summary ?? funnelFromEvents(events, range, scope, nowMs),
+    ops,
     refundRequests,
     refunds,
-    lines,
-    catalog,
     paymentFeeBps,
-    Number.isFinite(nowMs) ? nowMs : Date.now(),
   );
   const monthOrders = selected.filter((row) => {
     const at = completedAt(row.order);
@@ -417,14 +613,26 @@ export function pricingDashboard({
     scope: FUNNEL_SCOPE,
     brackets: PRICE_BRACKETS.map(({ id, label }) => ({ id, label })),
     filters: { from: query.from || "", to: query.to || "", ...filters },
+    range: { ...ranges.period, defaultDays: DEFAULT_RANGE_DAYS, maxDays: MAX_RANGE_DAYS },
+    compareRange: ranges.compare,
     settings: {
       version,
       fixedCostsMinor: Number.isSafeInteger(settings.pricingFixedCostsMinor) ? settings.pricingFixedCostsMinor : null,
       paymentFeeBps,
     },
-    period: slice(from, to),
-    compare: query.compareFrom || query.compareTo ? slice(compareFrom, compareTo) : null,
+    period: slice(ranges.period, funnel?.period),
+    compare: ranges.compare ? slice(ranges.compare, funnel?.compare) : null,
     completedThisMonth: monthOrders.length,
     breakEven: breakEvenOrders(settings.pricingFixedCostsMinor, averageFee, settings.pricingPaymentFeeBps),
   };
+}
+
+/** The dashboard with funnel figures from indexed PostgreSQL aggregates. */
+export async function readPricingDashboard(database, input) {
+  const { ranges, scope, nowMs } = dashboardContext(input);
+  const funnel = {
+    period: await readFunnelSummary(database, ranges.period, scope, nowMs),
+    compare: ranges.compare ? await readFunnelSummary(database, ranges.compare, scope, nowMs) : null,
+  };
+  return pricingDashboard({ ...input, funnel });
 }

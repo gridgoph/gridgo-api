@@ -2,11 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FUNNEL_BODY_MAX_BYTES,
+  MAX_RANGE_DAYS,
+  assertFunnelBody,
   averageAndMedian,
   breakEvenOrders,
   buildFunnelEvent,
   funnelDropOff,
+  funnelScope,
+  funnelScopeMatches,
   pricingDashboard,
+  pricingRanges,
   subtractEarnings,
 } from "../src/pricing-dashboard.js";
 
@@ -108,4 +114,40 @@ test("a stored exit answer is counted, and the event still requires a client and
   const event = buildFunnelEvent({ kind: "checkout_left", exitAnswer: "Too expensive" }, { id: "c" }, start, "fun_1");
   assert.equal(event.exitAnswer, "Too expensive");
   assert.throws(() => buildFunnelEvent({ kind: "elsewhere" }, { id: "c" }, start, "fun_2"), /kind/);
+});
+
+test("the dashboard reads a bounded range: 30 days by default, 366 at most, and a comparison needs both dates", () => {
+  const now = "2026-10-16T05:00:00.000Z";
+  assert.deepEqual(pricingRanges({}, now), {
+    period: { from: "2026-09-17T00:00:00.000Z", to: now }, compare: null,
+  });
+  assert.deepEqual(pricingRanges({ from: "2026-01-01", to: "2026-12-31" }, now).period,
+    { from: "2026-01-01T00:00:00.000Z", to: "2026-12-31T23:59:59.999Z" });
+  assert.throws(() => pricingRanges({ from: "2025-01-01", to: "2026-10-01" }, now), { code: "pricing_range_too_long" });
+  assert.throws(() => pricingRanges({ from: "2026-10-05", to: "2026-10-01" }, now), { code: "invalid_pricing_range" });
+  assert.throws(() => pricingRanges({ from: "soon" }, now), { code: "invalid_pricing_range" });
+  assert.throws(() => pricingRanges({ compareFrom: "2026-09-01" }, now), { code: "invalid_pricing_range" });
+  const report = pricingDashboard({ now, query: {} });
+  assert.equal(report.range.from, "2026-09-17T00:00:00.000Z");
+  assert.equal(report.range.maxDays, MAX_RANGE_DAYS);
+});
+
+test("funnel filters keep the same events in memory as the order filters select", () => {
+  const scope = (filters, extra = {}) => funnelScope({ filters, orders: [{ id: "ord_1", clientId: "c", createdAt: start }], users: [{ id: "biz", accountType: "business" }], ...extra });
+  const event = (clientId, at, extra = {}) => ({ id: `${clientId}-${at}`, at, clientId, kind: "product_viewed", orderId: null, ...extra });
+  assert.equal(funnelScopeMatches(event("c", start), scope({ accountType: "individual" })), true);
+  assert.equal(funnelScopeMatches(event("biz", start), scope({ accountType: "individual" })), false);
+  assert.equal(funnelScopeMatches(event("biz", start), scope({ accountType: "business" })), true);
+  assert.equal(funnelScopeMatches(event("c", start), scope({ accountType: "nonsense" })), false);
+  assert.equal(funnelScopeMatches(event("c", start), scope({ cohort: "new" })), true);
+  assert.equal(funnelScopeMatches(event("c", at(hour)), scope({ cohort: "repeat" })), true);
+  assert.equal(funnelScopeMatches(event("c", start, { productCode: "flyers" }), scope({ category: "flyers" })), true);
+  assert.equal(funnelScopeMatches(event("c", start, { orderId: "ord_1" }), scope({ bracket: "under_500" }, { selectedOrderIds: ["ord_1"] })), true);
+  assert.equal(funnelScopeMatches(event("c", start, { productCode: "flyers" }), scope({ category: "flyers", bracket: "under_500" })), false);
+});
+
+test("a funnel post is one small event, not a batch or a payload", () => {
+  assert.throws(() => assertFunnelBody([{ kind: "paid" }]), { code: "invalid_funnel_event" });
+  assert.throws(() => assertFunnelBody({ kind: "checkout_left", exitAnswer: "x".repeat(FUNNEL_BODY_MAX_BYTES) }), { status: 413, code: "funnel_event_too_large" });
+  assert.doesNotThrow(() => assertFunnelBody({ kind: "paid", orderId: "ord_1" }));
 });

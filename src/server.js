@@ -21,8 +21,11 @@ import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
 import { loadVapid, createWebPushDelivery, routeWebPush, unregisterWebSubscription } from "./web-push.js";
 import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
-import { buildFunnelEvent, insertFunnelEvent, pricingDashboard, readFunnelEvents } from "./pricing-dashboard.js";
+import {
+  FUNNEL_BURST, FUNNEL_DAILY_LIMIT, assertFunnelBody, buildFunnelEvent, insertFunnelEvent, readPricingDashboard, recentFunnelState,
+} from "./pricing-dashboard.js";
 import { routeAccountDeletion } from './account-deletion.js';
+import { tooManyRequests } from "./support-rate-limit.js";
 import { productionDuration, shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
@@ -242,6 +245,7 @@ import { isSupportChatRoute, postMessage, routeSupportChat } from "./support-cha
 import {
   artworkDownloadAudits,
   orderArtworkFileIds,
+  qaCheckState,
   qaClientActionAudit,
   qaRequestFileAudit,
   qaTickAudit,
@@ -5318,40 +5322,51 @@ async function handleAuditedRequest(req, res) {
 
     if (req.method === "POST" && pathname === "/funnel-events") {
       if (!user || user.role !== "client") return send(res, 403, { error: "forbidden" });
+      if (tooManyRequests(`funnel-event:${user.id}`, FUNNEL_BURST.limit, FUNNEL_BURST.windowMs)) {
+        return send(res, 429, { error: "too_many_funnel_events", message: "Too many funnel events from this account. Wait a few minutes." });
+      }
       const body = await readBody(req);
       let event;
       try {
+        assertFunnelBody(body);
         event = buildFunnelEvent(body, user, now(), id("fun"));
       } catch (error) {
         return send(res, error.status || 400, { error: error.code || "invalid_funnel_event" });
       }
       try {
+        // The domain lock serialises this check with the insert, so a twin cannot slip in between.
+        const recent = await recentFunnelState(database, event);
+        if (recent.duplicate) return send(res, 200, { ...recent.duplicate, duplicate: true });
+        if (recent.today >= FUNNEL_DAILY_LIMIT) {
+          return send(res, 429, { error: "funnel_event_daily_limit", message: "This account has sent the most funnel events allowed for one day." });
+        }
         await insertFunnelEvent(database, event);
       } catch {
         return send(res, 500, { error: "funnel_event_not_stored" });
       }
-      store.funnelEvents ||= [];
-      store.funnelEvents.push(event);
       return send(res, 201, { id: event.id, at: event.at });
     }
 
     if (req.method === "GET" && pathname === "/admin/pricing") {
       if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
-      const events = await readFunnelEvents(database, store);
-      return send(res, 200, pricingDashboard({
-        orders: store.orders || [],
-        lines: store.orderLineItems || [],
-        catalog: store.catalogItems || [],
-        users: store.users || [],
-        audit: store.auditLog || [],
-        refundRequests: store.refundRequests || [],
-        refunds: store.refundSettlements || [],
-        events,
-        settings: store.settings || {},
-        version: store.version,
-        query: Object.fromEntries(url.searchParams.entries()),
-        now: now(),
-      }));
+      try {
+        return send(res, 200, await readPricingDashboard(database, {
+          orders: store.orders || [],
+          lines: store.orderLineItems || [],
+          catalog: store.catalogItems || [],
+          users: store.users || [],
+          audit: store.auditLog || [],
+          refundRequests: store.refundRequests || [],
+          refunds: store.refundSettlements || [],
+          settings: store.settings || {},
+          version: store.version,
+          query: Object.fromEntries(url.searchParams.entries()),
+          now: now(),
+        }));
+      } catch (error) {
+        if (error?.status === 400 && error.code) return send(res, 400, { error: error.code, message: error.message });
+        throw error;
+      }
     }
 
     // ---- audit trail ----
@@ -5918,12 +5933,16 @@ async function handleAuditedRequest(req, res) {
       } catch (error) {
         return send(res, error.status || 400, { error: error.code || "invalid_qa_check", message: error.message });
       }
-      audit(store, {
-        actor: user, action: tick.action, entityType: "order", entityId: order.id, orderId: order.id,
-        detail: tick.detail, reason: null,
-      });
-      await save(store);
-      return send(res, 200, { ok: true, checkId: tick.detail.checkId, checked: tick.detail.checked });
+      // The permanent log records state changes only; re-sending the current state writes nothing.
+      const recorded = qaCheckState(store, order, tick.detail.checkId) !== tick.detail.checked;
+      if (recorded) {
+        audit(store, {
+          actor: user, action: tick.action, entityType: "order", entityId: order.id, orderId: order.id,
+          detail: tick.detail, reason: null,
+        });
+        await save(store);
+      }
+      return send(res, 200, { ok: true, checkId: tick.detail.checkId, checked: tick.detail.checked, recorded });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/qa-actions$/.test(pathname)) {
@@ -5957,6 +5976,7 @@ async function handleAuditedRequest(req, res) {
       if (!posted?.thread) {
         return send(res, 502, { error: "qa_message_failed", message: "The client was not told. Try again." });
       }
+      // qaHold is display-only for Operations and Super Admin: nothing reads it as a gate yet.
       if (body.action === "hold") {
         order.qaHold = { at: now(), by: user.id, reason: planned.reason };
         order.updatedAt = order.qaHold.at;

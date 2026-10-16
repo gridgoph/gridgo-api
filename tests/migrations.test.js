@@ -1381,6 +1381,8 @@ test("checkout-funnel events migration adds and removes its own table only", { s
   await withMigrationSchema(t, async ({ schema, client }) => {
     await runner({ ...migrationOptions(schema, "up", 1792130000000, client), timestamp: true });
     assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name, "1792130000000_funnel_events");
+    assert.deepEqual((await client.query("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'funnel_events' AND indexname <> 'funnel_events_pkey' ORDER BY indexname")).rows.map(row => row.indexname),
+      ['funnel_events_at', 'funnel_events_client_at', 'funnel_events_kind_at']);
     await client.query(`INSERT INTO funnel_events (id, at, client_id, kind) VALUES ('fun_1', now(), 'client_1', 'paid')`);
     await assert.rejects(client.query(`INSERT INTO funnel_events (id, at, client_id, kind) VALUES ('fun_2', now(), 'client_1', 'unknown')`), { code: "23514" });
     await runner(migrationOptions(schema, "down", 1, client));

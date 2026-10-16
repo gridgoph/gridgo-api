@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   artworkDownloadAudits,
   orderArtworkFileIds,
+  qaCheckState,
   qaClientActionAudit,
   qaRequestFileAudit,
   qaTickAudit,
@@ -66,4 +67,17 @@ test("line artwork is included when the order row has not copied it yet", () => 
     { id: "ord_1", artworkFileIds: ["file_row", "file_line"] },
   );
   assert.deepEqual(ids, ["file_row", "file_line"]);
+});
+
+test("a check's state is its latest tick in the current QA round, and starts unticked", () => {
+  const order = { id: "ord_1", fileCheck: { requestedAt: "2026-10-02T00:00:00.000Z" } };
+  const tick = (at, checkId, checked) => ({ action: "order.qa_tick", orderId: "ord_1", at, detail: { checkId, checked } });
+  const store = { auditLog: [tick("2026-10-01T00:00:00.000Z", "artwork", true)] };
+  assert.equal(qaCheckState(store, order, "artwork"), false, "a tick from an earlier round does not carry over");
+  store.auditLog.push(tick("2026-10-02T01:00:00.000Z", "artwork", true), tick("2026-10-02T02:00:00.000Z", "spec", true));
+  assert.equal(qaCheckState(store, order, "artwork"), true);
+  store.auditLog.push(tick("2026-10-02T03:00:00.000Z", "artwork", false));
+  assert.equal(qaCheckState(store, order, "artwork"), false);
+  assert.equal(qaCheckState(store, order, "spec"), true);
+  assert.equal(qaCheckState(store, { id: "ord_2" }, "spec"), false);
 });

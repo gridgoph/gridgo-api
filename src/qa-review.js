@@ -42,6 +42,26 @@ export function qaTickAudit(checkId, checked) {
   return { action: "order.qa_tick", detail: { checkId, checked } };
 }
 
+/** When the order last entered QA; ticks from an earlier round do not carry over. */
+function qaRoundOpenedAt(order) {
+  const times = [order?.fileCheck?.requestedAt, ...(order?.timeline || []).filter((event) => event.state === "needs_qa").map((event) => event.at)]
+    .map((at) => (at ? Date.parse(at) : NaN))
+    .filter((ms) => Number.isFinite(ms));
+  return times.length ? Math.max(...times) : null;
+}
+
+/** A check's recorded state in this QA round. Every check starts unticked. */
+export function qaCheckState(store, order, checkId) {
+  const opened = qaRoundOpenedAt(order);
+  let checked = false;
+  for (const entry of store?.auditLog || []) {
+    if (entry.action !== "order.qa_tick" || entry.orderId !== order?.id || entry.detail?.checkId !== checkId) continue;
+    if (opened != null && Date.parse(entry.at) < opened) continue;
+    checked = entry.detail.checked === true;
+  }
+  return checked;
+}
+
 const NOTE_MAX = 2000;
 
 function clientNote(note) {
