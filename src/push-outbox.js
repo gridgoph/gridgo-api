@@ -1,7 +1,7 @@
 import { listWebSubscriptions } from "./web-push.js";
 import { seasonPushAllowed } from "./season-windows.js";
 import { notificationVisible } from "./notifications.js";
-import { pushMessageFor } from "./push.js";
+import { installChannelOf, pushMessageFor } from "./push.js";
 import { availableDispatch, riderHasActiveDelivery } from "./dispatch-policy.js";
 export function retryAt(attempts, at) {
   return at + Math.min(3600000, 30000 * 2 ** Math.max(0, attempts - 1));
@@ -19,6 +19,8 @@ export function deviceAcceptsNotification(store, device, notification, at) {
       && (!availableDispatch((store.orders || []).find(order => order.id === notification.orderId), store)
         || riderHasActiveDelivery(store, notification.userId))) return false;
   if (notification.type === "season_window" && !seasonPushAllowed(store, device, notification, at)) return false;
+  // A Play or TestFlight install must not hear about an APK before its store has it, and vice versa.
+  if (notification.releaseChannel && installChannelOf(device) !== notification.releaseChannel) return false;
   // A removed membership must not strand the only installed app without the
   // generic access-change notice. This exception never carries an order/case.
   if (

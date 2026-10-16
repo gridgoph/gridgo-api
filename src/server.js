@@ -177,6 +177,7 @@ import {
 import { createObjectStorage } from "./object-storage.js";
 import {
   DEVICE_PLATFORMS,
+  INSTALL_CHANNELS,
   announcementPushMessage,
   createPushDeliveryOrDisable,
   deviceTokensFor,
@@ -450,9 +451,9 @@ async function notifySupportParty({ thread, message }) {
  * staff announcements and release announcements, and `pushDelivery.send` refuses
  * anything but a stranger-safe message for these devices regardless.
  */
-function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
+function deliverAnnouncementPush(devices, { title, body, imageUrl, releaseChannel }) {
   if (!pushDelivery.configured || devices.length === 0) return;
-  fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
+  fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl, releaseChannel }), devices);
 }
 
 async function legalEvent({ action, id: entityId, actor, detail, before, after, reason }) {
@@ -2192,12 +2193,17 @@ async function handleAuditedRequest(req, res) {
           allowed: DEVICE_PLATFORMS,
         });
       }
+      const installChannel = body.installChannel ?? null;
+      if (installChannel !== null && !INSTALL_CHANNELS.includes(installChannel)) {
+        return send(res, 400, { error: "invalid_install_channel", allowed: INSTALL_CHANNELS });
+      }
       const result = await enqueueDeviceMutation(async () => {
         const deviceStore = await loadDeviceTokenStore(database);
         const outcome = registerUnclaimedDeviceToken(deviceStore, {
           token,
           tokenProvider,
           platform,
+          installChannel,
           at: now(),
           limit: MAX_UNCLAIMED_DEVICES,
         });
@@ -3424,11 +3430,16 @@ async function handleAuditedRequest(req, res) {
       if (appRole && (!EVENT_ROLES.includes(appRole) || !hasRole(store,user.id,appRole))) return send(res,403,{error:'forbidden'});
       const tokenProvider = body.tokenProvider || "fcm";
       if (!['fcm','apns'].includes(tokenProvider) || (tokenProvider === 'apns' && platform !== 'ios')) return send(res,400,{error:'invalid_token_provider'});
+      // Absent means a build that predates the field: an APK install.
+      const installChannel = body.installChannel ?? null;
+      if (installChannel !== null && !INSTALL_CHANNELS.includes(installChannel)) {
+        return send(res, 400, { error: "invalid_install_channel", allowed: INSTALL_CHANNELS });
+      }
       const { device, created, reassignedFrom } = registerDeviceToken(store, {
         userId: user.id,
         token,
         platform,
-        appRole, tokenProvider,
+        appRole, tokenProvider, installChannel,
         at: now(),
       });
       await save(store);

@@ -168,7 +168,7 @@ test("the public device projection never carries the raw token", () => {
     at: AT,
   });
   const projected = publicDevice(device);
-  assert.deepEqual(Object.keys(projected).sort(), ["appRole", "createdAt", "id", "platform", "tokenProvider", "tokenTail", "updatedAt", "userId"]);
+  assert.deepEqual(Object.keys(projected).sort(), ["appRole", "createdAt", "id", "installChannel", "platform", "tokenProvider", "tokenTail", "updatedAt", "userId"]);
   assert.equal(projected.tokenTail, "ijklmnop");
   assert.equal(JSON.stringify(projected).includes("abcdefgh"), false);
 });
@@ -520,6 +520,21 @@ test("a personal notification is refused before it can reach a stranger's handse
     "a personal message type was allowed onto an anonymous handset",
   );
   assert.throws(() => assertStrangerSafeMessage({ title: "T", body: "B" }), PushAudienceError);
+});
+
+test("a release notice carries only a fixed channel and store target to a signed-out handset", () => {
+  for (const [releaseChannel, storeTarget] of [["apk", "apk_download"], ["play", "play_store"], ["ios", "testflight"]]) {
+    const message = announcementPushMessage({ title: "T", body: "B", releaseChannel });
+    assert.deepEqual(message.data, { type: "announcement", releaseChannel, storeTarget });
+    assertStrangerSafeMessage(message);
+  }
+  for (const data of [
+    { type: "announcement", releaseChannel: "play", storeTarget: "apk_download" },
+    { type: "announcement", releaseChannel: "web", storeTarget: "play_store" },
+    { type: "announcement", storeTarget: "testflight" },
+    { type: "announcement", releaseChannel: "play" },
+    { type: "announcement", releaseChannel: "__proto__", storeTarget: "play_store" },
+  ]) assert.throws(() => assertStrangerSafeMessage({ title: "T", body: "B", data }), PushAudienceError, JSON.stringify(data));
 });
 
 test("the delivery client refuses a fan-out that would push personal content to an unclaimed device", async () => {
