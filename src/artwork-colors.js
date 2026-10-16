@@ -354,10 +354,23 @@ function valueAt(text, at) {
 
 const DEVICE = { "/DeviceGray": "gray", "/G": "gray", "/CalGray": "gray", "/DeviceRGB": "rgb", "/RGB": "rgb", "/CalRGB": "rgb", "/DeviceCMYK": "cmyk", "/CMYK": "cmyk" };
 
+/** Colour spaces already resolved in this read, by object number. */
+let spaceCache = new Map();
+
 /** What a colour space value is: `{ space }`, `{ spot }` or null when it cannot be told. */
 function colorSpaceOf(objects, value, depth = 0) {
-  const text = resolve(objects, value)?.trim();
-  if (!text || depth > 3) return null;
+  const ref = /^(\d+)\s+\d+\s+R$/.exec(value?.trim() || "");
+  if (ref) {
+    const number = Number(ref[1]);
+    if (!spaceCache.has(number)) spaceCache.set(number, readColorSpace(objects, objects.get(number) ?? null, depth));
+    return spaceCache.get(number);
+  }
+  return readColorSpace(objects, value, depth);
+}
+
+function readColorSpace(objects, value, depth) {
+  const text = value?.trim();
+  if (!text || depth > 3 || !charge(text.length)) return null;
   if (DEVICE[text]) return { space: DEVICE[text] };
   if (!text.startsWith("[")) return null;
   const tokens = text.slice(1, -1).match(TOKEN) || [];
@@ -365,6 +378,7 @@ function colorSpaceOf(objects, value, depth = 0) {
   if (DEVICE[family]) return { space: DEVICE[family] };
   if (family === "/ICCBased") {
     const profile = resolve(objects, tokens.slice(1, 4).join(" "));
+    if (!profile || !charge(profile.length)) return null;
     const components = /\/N\s+([134])\b/.exec(profile || "")?.[1];
     return components ? { space: { 1: "gray", 3: "rgb", 4: "cmyk" }[components] } : null;
   }
@@ -440,16 +454,17 @@ function resourceSpaces(objects, sources) {
     for (let seen = 0; seen < MAX_DECLARATIONS && !scanExhausted && (match = RESOURCE.exec(source)) !== null; seen += 1) {
       // A dictionary many pages share by reference is read once.
       if (match[1] !== "<<") {
-        const ref = match[1].replace(/\s+/g, " ");
-        if (visited.has(ref)) continue;
-        visited.add(ref);
+        // By object number: `5 0 R`, `5 1 R` and `05 0 R` all reach object 5.
+        const number = Number(/^\d+/.exec(match[1])[0]);
+        if (visited.has(number)) continue;
+        visited.add(number);
       }
       const dict = match[1] === "<<" ? dictionaryAt(source, match.index + match[0].length - 2) : resolve(objects, match[1]);
       if (!dict?.trim().startsWith("<<") || !charge(dict.length)) continue;
       const inner = dict.trim().slice(2, -2);
       const KEY = /\/((?:[^\s/[\]()<>{}%]|#[0-9A-Fa-f]{2})+)/g;
       let key;
-      while ((key = KEY.exec(inner)) !== null) {
+      while (!scanExhausted && (key = KEY.exec(inner)) !== null) {
         const space = /\s*/y;
         space.lastIndex = key.index + key[0].length;
         space.exec(inner);
@@ -572,6 +587,7 @@ function scanContent(stream, spaces, spots, process, notes, budget) {
 export function readPdfColors(bytes, { complete = true } = {}) {
   scanBudget = MAX_SCAN_CHARS;
   scanExhausted = false;
+  spaceCache = new Map();
   const notes = new Set();
   if (!complete) notes.add("file_larger_than_inspection_window");
   const text = bytes.toString("latin1");

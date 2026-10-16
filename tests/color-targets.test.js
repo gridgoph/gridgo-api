@@ -412,6 +412,15 @@ test("hostile files cost bounded work and say why they stopped", async () => {
   const shared = `5 0 obj<<${" /K [".repeat(3000)}>>endobj`;
   const references = readPdfColors(Buffer.from(`%PDF-1.4\n${shared}\n${"/ColorSpace 5 0 R ".repeat(200_000)}`, "latin1"));
   const inline = readPdfColors(Buffer.from(`%PDF-1.4\n${`/ColorSpace <<${" /K [".repeat(1000)} >> `.repeat(1000)}`, "latin1"));
+  // The same object reached through differently written references, each key
+  // pointing at one large array: resolved once, charged, and cut off.
+  const big = `6 0 obj[/Indexed${" 0".repeat(7000)}]endobj`;
+  const keys = `5 0 obj<<${Array.from({ length: 2500 }, (_, i) => ` /K${i} 6 0 R`).join("")}>>endobj`;
+  const spellings = Array.from({ length: 1000 }, (_, i) => `/ColorSpace ${"0".repeat(i % 7)}5 ${i} R `).join("");
+  const differential = Date.now();
+  const respelled = readPdfColors(Buffer.from(`%PDF-1.4\n${big}\n${keys}\n${spellings}`, "latin1"));
+  assert.equal(respelled.status, "unknown");
+  assert.ok(Date.now() - differential < 3_000, `${Date.now() - differential} ms`);
   for (const read of [references, inline]) assert.equal(read.status, "unknown");
   assert.ok(inline.reasons.includes("inspection_limit"), inline.reasons.join());
 
