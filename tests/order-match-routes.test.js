@@ -437,6 +437,7 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     clientEffectivePriceMinor: 13_750,
     printerMaxWidthFeet: null,
     printLayouts: [],
+    express: false,
     coverSpineForm: false,
     selectedOptions: [{ id: "option_item_a_matte", label: "Matte" }],
   });

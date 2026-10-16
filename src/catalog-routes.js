@@ -1005,6 +1005,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       ...pricing,
       ...printerCapFields(body, {}, subcategoryCode),
       printLayouts: Object.hasOwn(body, "printLayouts") ? parsePrintLayouts(body.printLayouts, fail) : [],
+      express: body.express == null ? false : booleanValue(body.express, "express"),
       fileFormatMode: "inherit",
       active: body.active == null ? true : booleanValue(body.active, "active"),
       sortOrder: integer(body.sortOrder ?? existing.length, "sortOrder", { min: 0 }),
@@ -1077,8 +1078,13 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       item.active = nextActive;
     }
     if (body.sortOrder != null) item.sortOrder = integer(body.sortOrder, "sortOrder", { min: 0 });
+    // Express applies at once, like turnaround: it is the shop's own promise
+    // about time, not what the client buys or pays (docs/EXPRESS_API.md).
+    const expressBefore = item.express === true;
+    if (body.express != null) item.express = booleanValue(body.express, "express");
     bumpVersion(item, now());
-    auditChange(audit, store, user, "catalog_item.update", "supplier_catalog_item", item.id);
+    auditChange(audit, store, user, "catalog_item.update", "supplier_catalog_item", item.id,
+      (item.express === true) !== expressBefore ? { express: item.express === true } : undefined);
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }
 

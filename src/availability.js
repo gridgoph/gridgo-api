@@ -380,5 +380,9 @@ export function projectFinish({
  */
 export function fitsDeadline(projection, deadline) {
   if (deadline == null) return true;
-  return Date.parse(projection.promiseBy) <= instantOf(deadline, "deadline");
+  const deadlineMs = instantOf(deadline, "deadline");
+  // An Express promise was made for its deadline (src/express.js), including a
+  // same-day one whose clock time had passed; it meets that and anything later.
+  if (projection.express === true && deadlineMs >= Date.parse(projection.expressDeadline)) return true;
+  return Date.parse(projection.promiseBy) <= deadlineMs;
 }
