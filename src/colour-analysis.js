@@ -82,13 +82,7 @@ export function colourQuoteFor(store,item,line) {
   if (!line.quantityMode && priced.status === 'priced') return {...base,status:'quantity_mode_required',pages:priced.pages,totalSheets};
   return {...base,...priced, quantityMode:line.quantityMode ?? null, paperSize:size.paperSize,tierSet:size.tierSet,warning};
 }
-export function publicColourQuote(quote,role) {
-  if (!quote || !['client','supplier','ops_admin','super_admin'].includes(role)) return null;
-  const result = structuredClone(quote);
-  // These are page printing prices, not payout or milestone figures. Client
-  // totals continue to use the existing all-in group fee allocation.
-  return result;
-}
+export { publicColourQuote } from './colour-projection.js';
 export function colourPriceChecks(store) {
   const view = approvedCatalogView(store);
   return (view.cartLines || []).flatMap(line => {

@@ -1,3 +1,4 @@
+import { publicColourListing, publicColourQuote } from './colour-projection.js';
 import { colourQuoteFor } from './colour-analysis.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { feeSchedule, serviceFeeMoney } from './service-fee.js';
@@ -522,9 +523,9 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     subcategoryCode: item.subcategoryCode,
     name: item.name,
     description: item.description,
-    basePriceMinor: item.basePriceMinor,
-    clientBasePriceMinor: clientMoneyMinor(store, item.basePriceMinor),
-    fromPriceMinor,
+    basePriceMinor: item.pricedByColour ? null : item.basePriceMinor,
+    clientBasePriceMinor: item.pricedByColour ? null : clientMoneyMinor(store, item.basePriceMinor),
+    fromPriceMinor: item.pricedByColour ? clientMoneyMinor(store,fromPriceMinor) : fromPriceMinor,
     effectivePriceMinor,
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
     clientEffectivePriceMinor: clientMoneyMinor(store, effectivePriceMinor),
@@ -542,7 +543,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     printLayouts: listingPrintLayouts(item),
     pricedByColour: item.pricedByColour === true,
     oneColour: item.oneColour === true,
-    colourPricing: structuredClone(item.colourPricing ?? null),
+    colourPricing: publicColourListing(item.colourPricing),
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     // Same-day availability the shop switched on (docs/EXPRESS_API.md).
     express: listingExpress(item),
@@ -959,7 +960,7 @@ export function priceCatalogSelection(store, item, { selectedOptions, quantity, 
   if (item.pricedByColour) {
     if (item.minimumOrderQuantity != null && quantity < item.minimumOrderQuantity) throw new CatalogError(409, 'below_minimum_quantity', 'This shop does not run an order that small.');
     const colourPricing = artworkSelection && colourQuoteFor(store,item,{...artworkSelection,quantity});
-    if (colourPricing?.status !== 'priced') throw new CatalogError(409, colourPricing?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {colourPricing});
+    if (colourPricing?.status !== 'priced') throw new CatalogError(409, colourPricing?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {colourPricing:publicColourQuote(colourPricing,'client')});
     return {unit:'per_page',quantity,unitRateMinor:0,billableMilliUnits:checkedNumber(BigInt(colourPricing.totalSheets)*1000n, 'billableMilliUnits'),lineSubtotalMinor:colourPricing.lineSubtotalMinor,colourPricing};
   }
   return priceLine({

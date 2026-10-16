@@ -1,3 +1,4 @@
+import { orderColourClientAmount, publicColourChange } from './colour-projection.js';
 import { colourSettings, validateColourSettings } from './colour-pricing.js';
 import { publicColourQuote } from './colour-analysis.js';
 import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId } from './artwork-attachments.js';
@@ -1036,13 +1037,13 @@ function productionItemsFor(store, order, user) {
         documentPages: structuredClone(line.documentPages ?? null),
         quantityMode: line.quantityMode ?? null,
         totalSheets: line.colourPricing?.totalSheets ?? (line.measurement?.pages ? line.measurement.pages * line.quantity : null),
-        colourPricing: publicColourQuote(line.colourPricing,user?.role),
+        colourPricing: publicColourQuote(line.colourPricing,user?.role,line.colourPricing ? orderColourClientAmount(store,order,line) : null),
         ...(['client','supplier','ops_admin','super_admin'].includes(user?.role) ? {
           specialInstructions: line.specialInstructions || '',
           ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.proposedSpec).at(-1);
             return change ? { agreedChange: { id: change.id, proposedSpec: change.data.proposedSpec, appliedAt: change.data.appliedAt } } : {}; })(),
           ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.colourCorrection).at(-1);
-            return change ? { agreedColourCorrection: { id: change.id, appliedAt: change.data.appliedAt, ...structuredClone(change.data.colourCorrection) } } : {}; })(),
+            return change ? { agreedColourCorrection: { id: change.id, appliedAt: change.data.appliedAt, ...publicColourChange(store,order,change,user.role) } } : {}; })(),
         } : {}),
         structuredSpec: Object.fromEntries(
           ["size", "material", "finish", "colorMode", "colourMode", "sides", "bleed", "layout", "binding", "instructions", "notes", "specialInstructions"]

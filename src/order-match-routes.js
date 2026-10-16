@@ -1,3 +1,4 @@
+import { publicColourQuote, publicColourListing } from './colour-projection.js';
 import { parseQuantityMode } from './colour-pricing.js';
 import { colourQuoteFor, queueLineColour } from './colour-analysis.js';
 import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId, assertArtworkAttachmentLimit, validateArtworkAttachments, writeArtworkAttachments } from './artwork-attachments.js';
@@ -396,13 +397,13 @@ function publicCartListingStub(store, item, optionIds) {
     id: item.id,
     name: item.name,
     supplierId: item.supplierId,
-    fromPriceMinor,
+    fromPriceMinor: item.pricedByColour ? clientMoneyMinor(store,fromPriceMinor) : fromPriceMinor,
     effectivePriceMinor: selected.effectiveUnitPriceMinor,
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
     clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     printLayouts: listingPrintLayouts(item),
-    ...(item.pricedByColour || item.oneColour || item.colourPricing ? {pricedByColour: item.pricedByColour === true, oneColour: item.oneColour === true, colourPricing: structuredClone(item.colourPricing ?? null)} : {}),
+    ...(item.pricedByColour || item.oneColour || item.colourPricing ? {pricedByColour: item.pricedByColour === true, oneColour: item.oneColour === true, colourPricing: publicColourListing(item.colourPricing)} : {}),
     express: listingExpress(item),
     coverSpineForm: coverSpineApplies(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
@@ -498,7 +499,23 @@ function cartVoucherPlan(store, cart, lines, at) {
   return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0) };
 }
 
+function clientCartLineAmounts(store,cart,lines,at) {
+  const amounts = new Map();
+  for (const group of cartGroups(cart,lines)) {
+    const subtotals = group.lines.map(line => cartLineSubtotal(store,line));
+    if (subtotals.some(amount => amount == null)) {for (const line of group.lines) amounts.set(line.id,null);continue;}
+    const settings = groupFeeSettings(store,cart,group.lines,at);
+    if (settings.serviceFeeSchedule.version === 2) {
+      const principal = addMinor(subtotals,'colour.groupPrincipal');
+      const shares = splitVoucherMinor(clientMoneyMinor({settings},principal)-principal,subtotals);
+      group.lines.forEach((line,index) => amounts.set(line.id,subtotals[index]+shares[index]));
+    } else group.lines.forEach((line,index) => amounts.set(line.id,clientMoneyMinor({settings},subtotals[index])));
+  }
+  return amounts;
+}
+
 export function clientCartQuote(store, cart, lines, at) {
+  const colourAmounts = clientCartLineAmounts(store,cart,lines,at);
   const reasons = [];
   if (!lines.length) reasons.push({ code: "cart_empty" });
   const subtotals = lines.map((line) => {
@@ -549,7 +566,7 @@ export function clientCartQuote(store, cart, lines, at) {
   }
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
-    colourPricing: lines.flatMap(line => { const item = store.catalogItems.find(row => row.id === line.catalogItemId); const quote = item && colourQuoteFor(store,item,line); return quote ? [{lineId:line.id,...quote}] : []; }),
+    colourPricing: lines.flatMap(line => { const item = store.catalogItems.find(row => row.id === line.catalogItemId); const quote = item && colourQuoteFor(store,item,line); return quote ? [{lineId:line.id,...publicColourQuote(quote,"client",colourAmounts.get(line.id))}] : []; }),
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
     voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
     discountKind: voucherPlan?.discountKind || null,
@@ -672,6 +689,15 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       totalMinor: plan.groups[index].totalMinor, organizationDiscountMinor: plan.groups[index].organizationDiscountMinor,
       voucherDiscountMinor: plan.groups[index].voucherDiscountMinor,
     }));
+  }
+  const colourAmounts = clientCartLineAmounts(store,cart,lines,at);
+  for (const line of publicLines) {
+    if (!line.colourPricing) continue;
+    line.colourPricing = publicColourQuote(line.colourPricing,'client',colourAmounts.get(line.id));
+    if (line.colourPricing.pricedByColour) {
+      delete line.lineSubtotalMinor;
+      line.clientLineSubtotalMinor = colourAmounts.get(line.id) ?? null;
+    }
   }
   if (groups.length > 1) {
     for (const line of publicLines) {
@@ -928,7 +954,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     syncDocumentPages(store, item, line, {}, { required: !item.pricedByColour });
     if (item.pricedByColour) {
       const colour = colourQuoteFor(store,item,line);
-      if (colour?.status !== 'priced') fail(409, colour?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {lineId:line.id,colourPricing:colour});
+      if (colour?.status !== 'priced') fail(409, colour?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {lineId:line.id,colourPricing:publicColourQuote(colour,"client")});
       line.measurement = {pages:colour.pages.length};
     }
     assertCheckoutPrintLayout(item, line, fail);
@@ -1409,14 +1435,17 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       writeArtworkAttachments(line,body,publicCatalogItem(store,item)?.acceptedFormats);
       for (const fileId of artworkFileIdsFor(line)) fileFor(store,user,fileId,'artwork','artworkFileId');
       colourPricing = colourQuoteFor(store,item,line);
-      if (item.pricedByColour) return {status:200,body:{quote:{catalogItemId:item.id,quantity,colourPricing,
-        clientLineSubtotalMinor:clientMoneyMinor(store,colourPricing.lineSubtotalMinor)}},mutated:false};
+      if (item.pricedByColour) {
+        const clientLineSubtotalMinor = clientMoneyMinor(store,colourPricing.lineSubtotalMinor);
+        return {status:200,body:{quote:{catalogItemId:item.id,quantity,colourPricing:publicColourQuote(colourPricing,'client',clientLineSubtotalMinor),
+          clientLineSubtotalMinor}},mutated:false};
+      }
     }
     const priced = priceCatalogSelection(store, item, { selectedOptions, quantity, measurement });
     const service = store.supplierServices.find((row) => row.id === item.supplierServiceId);
     return { status: 200, body: { quote: {
       catalogItemId: item.id, version: item.version, serviceVersion: service.version || 1, quantity: priced.quantity,
-      ...(colourPricing ? {colourPricing} : {}),
+      ...(colourPricing ? {colourPricing:publicColourQuote(colourPricing,"client",clientMoneyMinor(store,priced.lineSubtotalMinor))} : {}),
       clientUnitRateMinor: clientMoneyMinor(store, priced.unitRateMinor),
       clientLineSubtotalMinor: clientMoneyMinor(store, priced.lineSubtotalMinor),
       billableMilliUnits: priced.billableMilliUnits, minimumMeasurementApplied: priced.minimumMeasurementApplied,

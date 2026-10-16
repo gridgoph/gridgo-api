@@ -46,9 +46,10 @@ Prices in this table are the complete sheet rate for the configured listing;
 legacy base prices, option modifiers/multipliers, quantity tiers and speed prices
 are not applied on top. Configure separate listings when other specifications
 change those rates. Existing required option selection and minimum quantity gates
-still apply. `fromPriceMinor` is the lowest explicitly offered sheet price;
-`effectivePriceMinor` is null until artwork can be quoted. Legacy base fields stay
-for compatibility and are not a colour checkout price.
+still apply. Public `fromPriceMinor` and `clientFromPriceMinor` are the lowest
+explicitly offered sheet rate with the client service fee included;
+`effectivePriceMinor` is null until artwork can be quoted. Public colour listings
+return null base-price fields; those fields are not a colour checkout price.
 
 These fields participate in the existing listing review: supplier drafts never
 change approved client prices, matching, carts or checkout. New colour listings
@@ -58,8 +59,11 @@ Only the owning shop can set these rates; staff review does not invent prices.
 Fixed-price CAD plotting, blueprint and photo-paper listings keep
 `pricedByColour:false`. Mark a blueprint/monochrome listing `oneColour:true` to
 show the colour warning. The two flags cannot both be true. No service name is
-used to infer a flag. Public, private, match and compact cart listing projections
-include the flags and price table. Compact stubs omit these fields on legacy,
+used to infer a flag. Private supplier/staff listing projections include the flags
+and shop price table. Public, match and compact cart listing projections include
+the flags and size metadata, replacing each size's `prices` with `offeredTiers`
+(for example `["none","up_to_25"]`); they never expose shop tier rates.
+Compact stubs omit these fields on legacy,
 unconfigured listings (absence means false/null). Per-page listings also return:
 
 ```json
@@ -148,20 +152,45 @@ Poll those reads or refetch on the `carts` realtime invalidation.
 Cart lines return `quantityMode`, `totalSheets`, `colourPricing`; cart quotes
 include `colourPricing:[{lineId,...result}]`. `/me/catalog-quotes` also accepts
 artwork, layout and quantity mode to read an already-completed analysis; use the
-cart endpoint to queue work. Example result:
+cart endpoint to queue work. Example owning-client result with a 45% fee allocated
+to this line (all money is integer PHP centavos):
 
 ```json
 {
   "version":1,"status":"priced","pricedByColour":true,"estimate":true,
   "quantityMode":"document_sets","quantity":3,"totalSheets":6,
-  "paperSize":"20x30","tierSet":"large_format","lineSubtotalMinor":27000,
+  "paperSize":"20x30","tierSet":"large_format","clientLineSubtotalMinor":39150,
+  "pagePriceBasis":"per_sheet_all_in",
   "warning":null,
   "pages":[
-    {"fileId":"file_pdf","page":1,"strongColourBps":0,"strongColourPercent":0,"tier":"none","sheetPriceMinor":3000,"status":"priced"},
-    {"fileId":"file_pdf","page":2,"strongColourBps":1800,"strongColourPercent":18,"tier":"up_to_25","sheetPriceMinor":6000,"status":"priced"}
+    {"fileId":"file_pdf","page":1,"strongColourBps":0,"strongColourPercent":0,"tier":"none","sheetPriceMinor":4350,"clientSheetPriceMinor":4350,"clientPageTotalMinor":13050,"clientPageRoundingMinor":0,"status":"priced"},
+    {"fileId":"file_pdf","page":2,"strongColourBps":1800,"strongColourPercent":18,"tier":"up_to_25","sheetPriceMinor":8700,"clientSheetPriceMinor":8700,"clientPageTotalMinor":26100,"clientPageRoundingMinor":0,"status":"priced"}
   ]
 }
 ```
+
+Client projections never expose the shop `lineSubtotalMinor`. Their
+`sheetPriceMinor` is an alias of the all-in `clientSheetPriceMinor`; display that
+per-sheet amount with the colour level (for example “Page 2: 18% strong colour,
+₱87”). `clientPageTotalMinor` covers **all** copies/sets of that page and sums
+exactly to `clientLineSubtotalMinor`. Fees use the existing shop/deadline group
+allocation, including other cart lines, rather than marking up pages separately.
+These item amounts are before separately shown organization/voucher discounts
+and fulfillment charges, matching the existing client line/invoice amounts.
+
+For rounding, use `clientPageTotalMinor` as the exact payable page allocation.
+The display sheet rate is rounded half up to a centavo; signed
+`clientPageRoundingMinor` reconciles
+`clientSheetPriceMinor × quantity + clientPageRoundingMinor = clientPageTotalMinor`.
+For example, three copies allocated five centavos display two centavos per sheet
+and a minus-one-centavo rounding adjustment. Do not reconstruct the quote by
+multiplying rounded display rates without that adjustment.
+
+Supplier projections preserve shop `sheetPriceMinor` and `lineSubtotalMinor`
+(3000/6000 and 27000 in this example). Staff projections retain those original
+shop fields and add the client fields above. Client cart reads/mutations, quote
+responses, checkout errors, order production items and invoices all use the
+client projection; supplier/staff evidence remains unchanged in storage.
 
 Results also include `request:{version,layout,paper,thresholds}`. Ready pages keep
 `analysisKey`, `detectedAt`, source physical dimensions and sampled/strong pixel
@@ -190,8 +219,10 @@ Statuses before a colour price can be accepted:
 | fixed_price | Analysis is advisory for a one-colour fixed-price listing |
 
 On an unpriced page, `sheetPriceMinor:null`, `status:"needs_price_check"` and
-`message:"This page needs a price check"`. The line/checkout total stays null;
-other priced pages retain their own rates. Checkout refuses
+`message:"This page needs a price check"`. The line/checkout total stays null.
+Clients receive null page amounts until all lines in the shop/deadline group can
+be priced, since a group fee cannot yet be allocated. Supplier/staff evidence
+retains any other pages' available shop rates. Checkout refuses
 `409 colour_price_check_required`; other incomplete colour evidence refuses
 `409 colour_analysis_required`. The existing service-fee brackets, discounts,
 vouchers, payment and basket boundaries operate on the **sum of shop page prices**,
@@ -250,6 +281,12 @@ application; existing incremental frozen fee/payout/refund controls apply. Appli
 terms appear at `productionItems[].agreedColourCorrection` (with request ID and
 application time), alongside any independently agreed specification, and the full
 request/decision history stays available. Original evidence is never overwritten.
+Client correction/history projections remove shop `originalLineSubtotalMinor`
+and `correctedLineSubtotalMinor`, replacing them with
+`originalClientLineSubtotalMinor` and `correctedClientLineSubtotalMinor`. Corrected
+pages use the same all-in sheet/extended-total/rounding fields as client quotes,
+including the frozen original line fee and subsequent incremental correction
+fees. Supplier corrections retain shop amounts; staff sees both sets of fields.
 As with existing change requests, reductions use the Operations refund procedure;
 this endpoint returns `409 colour_correction_refund_required` rather than creating
 a negative supplement or silently marking a refund paid.

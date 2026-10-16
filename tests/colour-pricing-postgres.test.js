@@ -1,3 +1,4 @@
+import { publicColourQuote } from '../src/colour-projection.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
@@ -45,12 +46,23 @@ test('PostgreSQL worker, cart quote, checkout and scoped immutable order evidenc
   assert.deepEqual(search.items[0].colourPricing,item.colourPricing);
   const api=await apiForTest(t);
   const cart=(await api('client','GET',path)).body.cart;
-  assert.equal(cart.lines[0].colourPricing.lineSubtotalMinor,600000);
+  assert.equal(cart.lines[0].colourPricing.clientLineSubtotalMinor,790000);
+  assert.equal(Object.hasOwn(cart.lines[0].colourPricing,'lineSubtotalMinor'),false);
+  assert.ok(cart.lines[0].colourPricing.pages.every(page=>page.sheetPriceMinor!==10000 && page.sheetPriceMinor===page.clientSheetPriceMinor));
+  assert.equal(cart.lines[0].colourPricing.pages.reduce((sum,page)=>sum+page.clientPageTotalMinor,0),cart.lines[0].clientLineSubtotalMinor);
   const preview=(await api('client','GET',`${path}/quote`)).body.quote;
   assert.equal(preview.clientItemSubtotalMinor,790000); // 45% on PHP 2,000, then 25% on PHP 4,000; once per group.
   const checkout=await api('client','POST',`${path}/checkout`,{payment:{method:'qr_manual',proofFileId:'colour_proof',reference:'COLOUR-CHECKOUT'}});
   assert.equal(checkout.status,201,JSON.stringify(checkout.body));
   const orderId=checkout.body.order.id;
+  assert.ok(checkout.body.invoice.lines[0].colourPricing.pages.every(page=>page.sheetPriceMinor!==10000));
+  assert.equal(checkout.body.invoice.lines[0].colourPricing.clientLineSubtotalMinor,790000);
+  const clientOrder=(await api('client','GET',`/orders/${orderId}`)).body.order;
+  assert.ok(clientOrder.productionItems[0].colourPricing.pages.every(page=>page.sheetPriceMinor!==10000 && page.sheetPriceMinor===page.clientSheetPriceMinor));
+  assert.equal(clientOrder.productionItems[0].colourPricing.clientLineSubtotalMinor,790000);
+  const invoice=(await api('client','GET',`/orders/${orderId}/invoice`)).body.invoice;
+  assert.ok(invoice.lines[0].colourPricing.pages.every(page=>page.sheetPriceMinor!==10000));
+  assert.equal(invoice.lines[0].colourPricing.clientLineSubtotalMinor,invoice.lines[0].clientAmountMinor);
   const after=await loadStore(db),order=after.orders.find(row=>row.id===orderId),line=after.orderLineItems.find(row=>row.orderId===orderId);
   assert.equal(order.supplierSubtotalMinor,600000);assert.equal(order.serviceFeeMinor,190000);
   assert.equal(line.quantityMode,'document_sets');assert.equal(line.measurement.pages,2);
@@ -67,7 +79,7 @@ test('PostgreSQL worker, cart quote, checkout and scoped immutable order evidenc
   const stale=await api('admin','PATCH','/settings',{expectedVersion:settings.version,reason:'Stale',colourDetection:settings.settings.colourDetection});
   assert.equal(stale.body.error,'settings_version_conflict');
   const read=(await api('ops','GET',`/orders/${orderId}`)).body.order;
-  assert.deepEqual(read.productionItems[0].colourPricing,quote);
+  assert.deepEqual(read.productionItems[0].colourPricing,publicColourQuote(quote,"ops_admin",790000));
 });
 test('unpriced pages create durable Ops and Super Admin notices and refuse checkout', {skip:!DATABASE_URL},async t=>{
   const {db,path}=await setup(t,{missing:true});
@@ -105,14 +117,21 @@ test('colour corrections reuse client consent and supplemental collection withou
   const path=`/orders/order/change-requests/${created.body.changeRequest.id}`;
   assert.equal((await api('client','POST',`${path}/answer`,{expectedVersion:1,answer:'accept'})).body.changeRequest.status,'pending_payment');
   const unchanged=(await api('ops','GET','/orders/order')).body.order;
-  assert.deepEqual(unchanged.productionItems[0].colourPricing,original);assert.equal(unchanged.productionItems[0].agreedChange,undefined);
+  assert.deepEqual(unchanged.productionItems[0].colourPricing,publicColourQuote(original,"ops_admin",11000));assert.equal(unchanged.productionItems[0].agreedChange,undefined);
   const paid=await api('client','POST',`${path}/payment`,{expectedVersion:2,proofFileId:'colour_proof',reference:'COLOUR-CORRECTION'});
   assert.equal(paid.status,200,JSON.stringify(paid.body));
   const confirmed=await api('ops','POST',`${path}/payment/confirm`,{expectedVersion:3,amountMinor:5500,reason:'Verified correction transfer'});
   assert.equal(confirmed.status,200,JSON.stringify(confirmed.body));
   const agreed=(await api('ops','GET','/orders/order')).body.order;
   assert.equal(agreed.productionItems[0].agreedColourCorrection.correctedLineSubtotalMinor,15000);
-  assert.deepEqual(agreed.productionItems[0].colourPricing,original);
+  assert.deepEqual(agreed.productionItems[0].colourPricing,publicColourQuote(original,"ops_admin",11000));
+  const clientAgreed=(await api('client','GET','/orders/order')).body.order;
+  assert.ok(clientAgreed.productionItems[0].colourPricing.pages.every(page=>page.sheetPriceMinor!==500));
+  assert.ok(clientAgreed.productionItems[0].agreedColourCorrection.pages.every(page=>page.sheetPriceMinor!==1000 && page.sheetPriceMinor!==500));
+  assert.equal(clientAgreed.productionItems[0].agreedColourCorrection.correctedClientLineSubtotalMinor,16500);
+  const clientHistory=(await api('client','GET','/orders/order/change-requests')).body;
+  assert.ok(clientHistory.changeRequests[0].colourCorrection.pages.every(page=>page.sheetPriceMinor!==1000 && page.sheetPriceMinor!==500));
+  assert.equal(Object.hasOwn(clientHistory.changeRequests[0].colourCorrection,'correctedLineSubtotalMinor'),false);
   const spec=await api('supplier','POST','/orders/order/change-requests',{lineItemId:'line',reason:'Finish clarification',proposedSpec:'Staple on the left'});
   assert.equal(spec.status,201,JSON.stringify(spec.body));
   assert.equal((await api('client','POST',`/orders/order/change-requests/${spec.body.changeRequest.id}/answer`,{expectedVersion:1,answer:'accept'})).body.changeRequest.status,'applied');
