@@ -361,7 +361,7 @@ function otherListing(row) {
     ...Object.fromEntries([
       "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
-      "minimumOrderQuantity", "printerMaxWidthFeet", "printLayouts", "priceTiers", "speedTiers", "pricingBasis",
+      "minimumOrderQuantity", "printerMaxWidthFeet", "printLayouts", "coverSpineForm", "priceTiers", "speedTiers", "pricingBasis",
       "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version",
     ].map((key) => [key, item[key]])),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
