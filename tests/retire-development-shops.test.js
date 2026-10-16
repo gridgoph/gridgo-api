@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -34,7 +35,7 @@ test("retirement leaves development and test fixture accounts alone", async () =
 });
 
 async function fixture(db) {
-  await db.query("TRUNCATE users, catalog_products, platform_settings, taxonomy_categories, zones RESTART IDENTITY CASCADE");
+  await resetDatabase(db, "TRUNCATE users, catalog_products, platform_settings, taxonomy_categories, zones RESTART IDENTITY CASCADE");
   await seedReferenceData(db);
   for (const [position, id] of [...targets, ...untouched].entries()) {
     await db.query(`INSERT INTO users (id, clerk_user_id, email, name, role, verification_status, created_at, position)

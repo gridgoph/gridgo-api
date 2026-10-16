@@ -1,3 +1,4 @@
+import { DEFAULT_SERVICE_FEE_SCHEDULE } from './service-fee.js';
 import { defaultOperationalSettings } from "./operational-model.js";
 import { defaultListingStarters } from "./listing-starters.js";
 import { defaultTaxonomy } from "./taxonomy.js";
@@ -52,7 +53,8 @@ export function flattenListingStarters(starters = defaultListingStarters()) {
       defaultPricingUnit: starter.defaultPricingUnit,
       defaultPackageQty: starter.defaultPackageQty ?? null,
       defaultTurnaroundDays: starter.defaultTurnaroundDays ?? null,
-      defaultTurnaroundHours: starter.defaultTurnaroundDays == null ? null : starter.defaultTurnaroundDays * 10,
+      defaultTurnaroundMinutes: starter.defaultTurnaroundMinutes ?? (starter.defaultTurnaroundDays == null ? null : starter.defaultTurnaroundDays * 600),
+      defaultTurnaroundHours: starter.defaultTurnaroundMinutes != null ? starter.defaultTurnaroundMinutes / 60 : starter.defaultTurnaroundDays == null ? null : starter.defaultTurnaroundDays * 10,
       defaultFormatCodes: starter.defaultFormatCodes || [],
     });
     for (const group of starter.groups || []) {
@@ -88,7 +90,7 @@ export function referenceData() {
   return {
     catalog: defaultCatalog(),
     taxonomy: defaultTaxonomy(),
-    settings: defaultOperationalSettings(),
+    settings: { ...defaultOperationalSettings(), serviceFeeSchedule: structuredClone(DEFAULT_SERVICE_FEE_SCHEDULE) },
     zones: defaultZones(),
     acceptedFileFormats: defaultAcceptedFileFormats(),
     ...starters,

@@ -1,7 +1,8 @@
+import { riderPackingFlow } from './shop-handover.js';
 /** Packing is separate evidence: a production or payout photo cannot satisfy it. */
 export function packingPhotoFiles(store, order) {
   return (store?.files || []).filter((file) =>
-    file.state === "ready" && file.ownerId === order.supplierId
+    file.state === "ready" && file.ownerId === (riderPackingFlow(order) ? order.riderId : order.supplierId)
     && file.purpose === "packing_photo" && file.objectKey
     && ["image/jpeg", "image/png", "image/webp"].includes(file.detectedContentType)
     && (file.references || []).some((ref) => ref.type === "order" && ref.id === order.id));

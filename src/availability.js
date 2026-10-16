@@ -119,6 +119,15 @@ export function validateShopSchedule(schedule) {
       fail(400, "invalid_schedule", "A closure cannot end before it starts.", { field: `closures[${index}]` });
     }
   }
+  if (schedule.extension != null) {
+    const { day, opensMinute, closesMinute } = schedule.extension;
+    if (typeof day !== 'string' || !DAY_KEY.test(day) || !Number.isFinite(Date.parse(day))
+      || new Date(day).toISOString().slice(0, 10) !== day
+      || !Number.isInteger(opensMinute) || opensMinute < 0
+      || !Number.isInteger(closesMinute) || closesMinute >= MINUTES_PER_DAY || closesMinute <= opensMinute) {
+      fail(400, 'invalid_schedule', 'An extension needs a valid date and an increasing same-day minute window.', { field: 'extension' });
+    }
+  }
   return true;
 }
 
@@ -158,9 +167,18 @@ function isClosed(schedule, dayKey) {
 /** Opening hours for one calendar day, earliest first. Empty when shut. */
 function windowsOn(schedule, dayKey, weekday) {
   if (isClosed(schedule, dayKey)) return [];
-  return (schedule.week || [])
+  const windows = (schedule.week || [])
     .filter((window) => window.weekday === weekday)
+    .map(window => ({ ...window }))
     .sort((left, right) => left.opensMinute - right.opensMinute);
+  const extension = schedule.extension;
+  if (extension?.day === dayKey && windows.length) {
+    const last = windows.at(-1);
+    // A declaration made after normal closing must not invent earlier open time.
+    if (extension.opensMinute <= last.closesMinute) last.closesMinute = Math.max(last.closesMinute, extension.closesMinute);
+    else windows.push({ opensMinute: extension.opensMinute, closesMinute: extension.closesMinute });
+  }
+  return windows;
 }
 
 /**
@@ -362,5 +380,9 @@ export function projectFinish({
  */
 export function fitsDeadline(projection, deadline) {
   if (deadline == null) return true;
-  return Date.parse(projection.promiseBy) <= instantOf(deadline, "deadline");
+  const deadlineMs = instantOf(deadline, "deadline");
+  // An Express promise was made for its deadline (src/express.js), including a
+  // same-day one whose clock time had passed; it meets that and anything later.
+  if (projection.express === true && deadlineMs >= Date.parse(projection.expressDeadline)) return true;
+  return Date.parse(projection.promiseBy) <= deadlineMs;
 }

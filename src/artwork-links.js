@@ -82,7 +82,8 @@ export async function resolveArtworkLinks(links, acceptedFormats, checker = chec
 }
 
 export function validateArtworkLinks(links, acceptedFormats, { allowShortLinks = false } = {}) {
-  if (!Array.isArray(links) || links.length > 3) fail(400, "invalid_artwork_links", "Send an array of at most three artwork links.");
+  if (Array.isArray(links) && links.length > 10) fail(400, "artwork_attachment_limit_exceeded", "Attach at most 10 files and design links per item in total.");
+  if (!Array.isArray(links)) fail(400, "invalid_artwork_links", "Send an array of at most ten artwork links.");
   return links.map((link) => {
     const url = linkInput(link, { httpsOnly: true, code: "invalid_artwork_links" });
     if (hostOf(url) === "canva.link") {
@@ -92,7 +93,10 @@ export function validateArtworkLinks(links, acceptedFormats, { allowShortLinks =
     if (!(acceptedFormats || []).some((format) => format.code === link.formatCode && format.inputKind === "url" && format.active !== false)) {
       fail(400, "artwork_link_format_not_accepted", "This listing does not accept that design-link format.");
     }
-    return { formatCode: link.formatCode, url: link.url };
+    if (link.label != null && (typeof link.label !== "string" || link.label.trim().length > 80 || /[\x00-\x1f\x7f]/u.test(link.label))) {
+      fail(400, "invalid_artwork_links", "Use a label of at most 80 characters on one line.");
+    }
+    return { formatCode: link.formatCode, url: link.url, ...(link.label?.trim() ? { label: link.label.trim() } : {}) };
   });
 }
 

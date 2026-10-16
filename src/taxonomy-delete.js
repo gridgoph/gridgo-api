@@ -63,6 +63,7 @@ function ordersOnListings(store, listingIds) {
 }
 
 function subcategoryUsage(store, codes) {
+  const targets = Object.keys(store.settings?.artworkGuidance?.subcategories || {}).filter((code) => codes.has(code));
   const listings = (store.catalogItems || []).filter((item) => codes.has(item.subcategoryCode) || codes.has(item.approvedSnapshot?.item?.subcategoryCode));
   const listingIds = new Set(listings.map((item) => item.id));
   const shopIds = [...new Set(listings.map((item) => item.supplierId))];
@@ -72,6 +73,8 @@ function subcategoryUsage(store, codes) {
     shops: shopIds.map((supplierId) => shopFor(store, supplierId)),
     orders: ordersOnListings(store, listingIds),
     starters: (store.listingStarters || []).filter((starter) => codes.has(starter.subcategoryCode)).length,
+    // A Super Admin resolution target names the print job; clear it in settings first.
+    ...(targets.length ? { artworkGuidance: targets.length } : {}),
   };
 }
 

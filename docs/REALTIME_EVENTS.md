@@ -12,6 +12,8 @@ Inbox/SSE `orderState` is current order context. `eventState`, when present, ide
 
 `issue-reports` (report ID) and `chat` (message ID) hints are staff-only: only an explicitly selected `ops_admin` or `super_admin` notification stream receives them, including after LISTEN recovery. A public issue report or party support-chat message writes one generic inbox row per current staff membership (`ops_issue_report_filed` / `ops_support_message`), keyed by the submitted record ID. Staff chat replies do not notify staff. Report/message text and screenshots never enter notification copy. The submitted record, inbox and outbox rows, and realtime pointers commit in one transaction; the desk lock is followed by the domain lock before loading the notification snapshot. Screenshot uploads precede that transaction and are cleaned up on failure.
 
+`legal` and `privacy-requests` are also staff-only collection hints (no `id`). Legal document/acceptance changes and privacy request creation/updates refresh the corresponding staff screens through the same transaction/save boundary, independently of inbox notices. Only explicitly selected `ops_admin` and `super_admin` streams receive these hints, including after LISTEN recovery. Client, supplier, rider, hub `staff`, and unselected-role streams never receive them, even when the identity also has a privileged membership. The payload contains no document text, acceptance evidence, or privacy-request details; staff refetch through the authorized legal/privacy routes.
+
 ## Delivery, durability and scope
 
 `save()` derives committed-domain before/after effects, stores notifications and per-device push outbox records in the domain transaction, and issues PostgreSQL NOTIFY pointers within that same transaction. Other API processes LISTEN and rehydrate current visibility before streaming; each process suppresses its own loopback. NOTIFY is commit-only. Disconnected listener recovery asks every mounted resource to refresh. Client reconnect must still refetch because resource invalidation has no Last-Event-ID history.
@@ -91,6 +93,8 @@ An own-account `role_changed` push may reach the account's still-owned device wh
 
 Listing review and product-type requests emit `catalog_review_pending` / `catalog_review_decided` durable inbox rows to the owning supplier and every current Operations/Super Admin membership, plus scoped `catalog` invalidation. Review changes use the transaction/save/outbox boundary. See [listing review](SUPPLIER_CATALOG_API.md#listing-review-and-product-type-picker).
 
+Featured Prints curation emits `featured_prints_updated` durable inbox rows to every current Operations/Super Admin membership (no push), plus generic `catalog` and staff `notifications` invalidation. Selection, audit and inbox rows commit together. The public Home read contains only approved anonymous product cards; see [Featured Prints](FEATURED_PRINTS_API.md).
+
 Paper-invoice promises write `physical_invoice_promised` to the owning client's inbox when Operations/Super Admin first sets or changes `promisedDeliveryAt`. The body states the paper invoice delivery date and time in Asia/Manila. Repeating the same promise does not notify again. This uses the ordinary notification/outbox boundary at `save()`; no separate push sender is required.
 
 ### Idle rider job alerts
@@ -111,3 +115,80 @@ idle status and job availability before sending or retrying. Push uses fixed
 customer-free copy and the existing `orderId` deep-link field on `gridgo_default`.
 
 Work holds remove dispatch offers and suppress their existing inbox/replay and queued push alerts. Refund-only changes also invalidate the prior rider pool; a stale accept returns `409 dispatch_paused` with a plain message and makes no assignment. Withdrawing or rejecting a refund restores eligibility only when no other work hold remains.
+
+## Private order calls
+
+`calls` invalidates carry only the order ID and are explicitly addressed to the
+two call parties. They never expand to staff or other order participants.
+Clients refetch authorized call state and signalling; the SSE frame contains no
+SDP, ICE, name or credential. App reconnect/focus and an active-call two-second
+HTTP polling fallback recover dropped pointers. Call GET/POST permissions use
+current order assignment and database memberships, including after reassignment.
+
+`order_call_incoming` (callee) and `order_call_missed` (callee after timeout,
+decline or cancellation) use the normal durable inbox/outbox. Incoming pushes
+are high priority, have zero provider storage TTL and are suppressed after their
+ring deadline or termination. Push data remains the four-field allowlist.
+`order_call_activity` gives each Operations/Super Admin membership a generic
+lifecycle notice without access to call records or signals. Full API/app behavior:
+[Calls API](CALLS_API.md).
+
+### Rider delivery milestones
+
+`POST /dispatch/:id/milestones` writes `rider_delivery_milestone` inbox rows to the owning client and every current Operations/Super Admin membership. It queues `orders`/`dispatch` invalidation before `save()`; push/SSE delivery occurs after commit. Duplicate milestone submissions retain the original event without another notification. Position uploads remain polled via the [location contract](OPERATIONAL_MODEL_V2_API.md#rider-location), without a push for every GPS fix.
+
+## Chat push delivery and app follow-up
+
+Operations/Super Admin replies to a client, supplier or rider support thread
+create `support_message` for that thread's owning user and `appRole`. The message,
+inbox row and device outbox commit together under the support-chat lock followed
+by the domain lock. Delivery uses `save()` and its after-commit drain, including
+when the recipient has no live stream. Staff-to-staff threads are unchanged.
+
+Chat routing contracts:
+
+| Type | Recipient app | Tap destination |
+|---|---|---|
+| `support_message` | Client, supplier or rider, matching the thread's party role | Exact support thread from the authenticated notification's `threadId` |
+| `delivery_message` | Client or rider | Delivery chat for `orderId` |
+| `pickup_chat_message` | Supplier or rider | Pick-up chat for `orderId` |
+
+Push data remains limited to `notificationId`, `type`, `orderId` (when present)
+and `at`. Support pushes do **not** add a thread ID to that allowlist: on tap,
+`PATCH /notifications/:notificationId` with `{ "read": true }` returns
+`notification.threadId`; the authenticated inbox list also includes it. Open
+`GET /support-chat/threads/:threadId` after resolving it. Do not guess the most
+recent thread. Missing/deleted notifications or inaccessible/closed chats need
+a safe in-app fallback. Message text and photos never enter push or inbox copy.
+
+The first message creates a notice. Further messages to the same recipient and
+conversation share its still-unread, non-deleted notice for five minutes from
+that notice's creation; suppressed messages do not extend the window. The first
+message after expiry creates another notice. Reading/deleting the inbox notice
+also ends its suppression. Support windows are per thread and party app;
+delivery and pick-up windows are per order and assigned rider. A previous
+rider's notice cannot silence the new rider. Historical delivery notices without
+a rider scope do not suppress the first new scoped notice. Chat read receipts
+and notification read state remain separate.
+
+Client/rider follow-ups (and supplier parity for support/pick-up):
+
+- Create Android channel `gridgo_default` with audible default sound and suitable
+  importance before token registration; use the same channel for foreground
+  local presentation. The server now explicitly sends
+  `android.notification.sound: "default"` for these types and already sends
+  `apns.payload.aps.sound: "default"`. Android 8+ channel settings still govern
+  sound; re-creating a previously silent channel does not reset its settings.
+  The app must handle that existing-channel case and notification permission.
+- Register/refresh a native provider token using authenticated `POST /devices`
+  with the correct `appRole` (`client`, `rider`, or `supplier`) and `tokenProvider`.
+  Signed-out/unclaimed tokens never receive personal chat pushes.
+- Handle all relevant types above both on notification tap while backgrounded
+  and on cold start. Defer navigation until authentication/navigation are ready;
+  deduplicate by `notificationId`. Preserve authorization when fetching the chat.
+- Verify on two real phones with the apps backgrounded and closed, including
+  a first message, a burst, a message after five minutes, and tap routing. Local
+  PostgreSQL/fake-FCM tests establish the server path, not handset permissions,
+  installed channels, native sound, provider credentials or production delivery.
+
+FCM field semantics: [Android notification payload](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages#AndroidNotification).

@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -70,7 +71,7 @@ const objectStorage = {
 
 test("development shop seed is idempotent and names Lovis Printshop", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,

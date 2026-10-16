@@ -114,7 +114,7 @@ test("invalidate audience is membership-aware ops plus the assigned shop for job
   assert.ok(!invalidateAudienceIds(store, { resource: "approvals" }).includes("user_legacy_ops"));
 });
 
-test("issue-report and chat pings reach only Operations and Super Admin", () => {
+test("staff resource pings reach only Operations and Super Admin", () => {
   const store = {
     userRoleMemberships: [
       { userId: "user_ops", role: "ops_admin" },
@@ -137,7 +137,7 @@ test("issue-report and chat pings reach only Operations and Super Admin", () => 
       { id: "d_rider", userId: "user_r", appRole: "rider" },
     ],
   };
-  for (const resource of ["issue-reports", "chat", "account-deletion-requests"]) {
+  for (const resource of ["issue-reports", "chat", "account-deletion-requests", "legal", "privacy-requests"]) {
     assert.deepEqual(
       invalidateAudienceIds(store, {
         resource,
@@ -149,6 +149,12 @@ test("issue-report and chat pings reach only Operations and Super Admin", () => 
       }).sort(),
       ["user_admin", "user_both", "user_ops"],
     );
+    for (const role of ["client", "supplier", "rider", "staff", undefined]) {
+      assert.equal(invalidateFrameVisible(resource, role), false, `${resource}: ${role}`);
+    }
+    for (const role of ["ops_admin", "super_admin"]) {
+      assert.equal(invalidateFrameVisible(resource, role), true, `${resource}: ${role}`);
+    }
   }
   for (const role of ["client", "supplier", "rider"]) {
     assert.equal(invalidateFrameVisible("issue-reports", role), false);

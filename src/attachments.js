@@ -1,7 +1,11 @@
+import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
+import { publicArtworkPreview } from './artwork-preview.js';
+import { displayFilename } from './display-filename.js';
 import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { canViewThread } from "./support-chat.js";
+import { canReadPickupChatPhoto } from "./pickup-chat.js";
 import { canReadDeliveryChatPhoto } from "./delivery-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
 import crypto from "node:crypto";
@@ -11,6 +15,7 @@ import path from "node:path";
 import { approvalCaseFor, authorizationContextFor, identityHasMembership } from "./authorization-context.js";
 import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
+import { readArtworkColors } from "./artwork-colors.js";
 import { payoutPlanFor, payoutStageFor } from "./payout-plan.js";
 import { publicCatalogMediaFile, publicSupplierShop } from "./supplier-catalog.js";
 
@@ -21,6 +26,7 @@ const KINDS = new Set([
   "artwork",
   "fulfilment_proof",
   "production_photo",
+  "finished_product_photo",
   "packing_photo",
   "delivery_photo",
   "handoff_signature",
@@ -40,6 +46,7 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  legal_document: { roles: ["super_admin"], maxBytes: 20 * 1024 * 1024, contentTypes: ["application/pdf"] },
   artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...ARTWORK_UPLOAD_CONTENT_TYPES] },
   mockup: {
     roles: ["client"],
@@ -52,7 +59,8 @@ export const PURPOSE_POLICIES = Object.freeze({
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   supplier_invoice: { roles: ["supplier"], maxBytes: 15 * 1024 * 1024, contentTypes: [...CONTENT_TYPES] },
-  packing_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
+  packing_photo: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
+  finished_product_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   production_photo: { roles: ["supplier"], maxBytes: MAX_FILE_SIZE, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   fulfilment_proof: { roles: ["supplier", "rider"], maxBytes: MAX_FILE_SIZE, contentTypes: [...CONTENT_TYPES] },
   delivery_photo: {
@@ -139,6 +147,12 @@ export const PURPOSE_POLICIES = Object.freeze({
   // is posted; deleted with the conversation one day after delivery.
   delivery_chat_image: {
     roles: ["client", "rider"],
+    maxBytes: 15 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  // Private shop-rider photos are bound by the pick-up chat message route.
+  pickup_chat_image: {
+    roles: ["supplier", "rider"],
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
@@ -589,7 +603,12 @@ export async function readArtworkMeasurements(file, detectedContentType, purpose
     handle = await fs.open(file.tempPath, "r");
     const bytes = Buffer.alloc(Math.min(file.size ?? INSPECT_BYTES, INSPECT_BYTES));
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-    return inspectArtwork(bytes.subarray(0, bytesRead), detectedContentType);
+    const read = bytes.subarray(0, bytesRead);
+    const detected = inspectArtwork(read, detectedContentType);
+    if (!detected) return null;
+    // The colours the file uses, for comparing with the client's exact
+    // colours. Unknown, with the reason, where the file does not say.
+    return { ...detected, colors: await readArtworkColors(read, detectedContentType, { complete: bytesRead >= (file.size ?? bytesRead) }) };
   } catch {
     return null;
   } finally {
@@ -689,8 +708,9 @@ export function publicFile(file, user = null) {
   if (!file) return null;
   return {
     fileId: file.fileId,
+    ...(publicArtworkPreview(file) ? { preview: publicArtworkPreview(file) } : {}),
     purpose: file.purpose === "fulfilment_proof" && ["client", "rider"].includes(user?.role) ? "order_photo" : file.purpose,
-    originalFilename: file.originalFilename,
+    originalFilename: displayFilename(file.originalFilename),
     declaredContentType: file.declaredContentType,
     detectedContentType: file.detectedContentType,
     size: file.size,
@@ -767,6 +787,13 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       400,
       "delivery_chat_image_not_attachable",
       "A delivery chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/delivery-chat/messages.",
+    );
+  }
+  if (purpose === "pickup_chat_image") {
+    fail(
+      400,
+      "pickup_chat_image_not_attachable",
+      "A pick-up chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/pickup-chat/messages.",
     );
   }
   if (!KINDS.has(purpose)) {
@@ -982,14 +1009,26 @@ function hasApprovedWorkRole(user, role) {
   return approval ? approval.status === "approved" : user.role === role && user.verificationStatus === "approved";
 }
 
-export function authorizeFileAttach(user, file, target) {
+export function authorizeFileAttach(user, file, target, store = null) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
   if (file.purpose === 'supplier_invoice') {
+    const supplierId = store?.supplierInvoices?.find(row => row.orderId === record?.id)?.supplierId || record?.supplierId;
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || supplierId !== user.id) forbidden();
+    return;
+  }
+  if (file.purpose === 'finished_product_photo') {
     if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
+    if (!riderPackingFlow(record) || record.state !== 'production') fail(409, 'finished_product_photo_upload_not_allowed', 'Attach finished, unpacked product photos during production, before submitting them for review.');
     return;
   }
   if (file.purpose === "packing_photo") {
+    if (riderPackingFlow(record)) {
+      if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'rider') || record.riderId !== user.id) forbidden();
+      if (record.state !== 'rider_assigned' || !currentInspection(record)) fail(409, 'unpacked_inspection_required', 'Complete the unpacked item checks before photographing the packed job.');
+      if (claimBlocksHandover(store || {}, record) || store?.escalations?.some(row => row.orderId === record.id && row.status === 'open')) fail(409, 'pickup_held', 'Resolve all holds and pickup escalations first.');
+      return;
+    }
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
       fail(409, "packing_photo_upload_not_allowed", "Add the packing photo before marking the package ready for dispatch.");
@@ -1029,6 +1068,7 @@ export function authorizeFileAttach(user, file, target) {
   }
   if (file.purpose === "handoff_signature") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
+    if (riderPackingFlow(record) && !inspectedPackingPhotos(store, record).length) fail(409, 'packing_photo_required', 'Attach the rider packing photo after inspection before signing.');
     if (!HANDOFF_SIGNATURE_STATES.has(record.state)) {
       fail(
         409,
@@ -1137,6 +1177,7 @@ export function attachFileReference(file, target) {
     artwork: "artworkFileIds",
     fulfilment_proof: "fulfilmentProofFileIds",
     production_photo: "productionPhotoFileIds",
+    finished_product_photo: "finishedProductPhotoFileIds",
     packing_photo: "packingPhotoFileIds",
     delivery_photo: "deliveryPhotoFileIds",
     handoff_signature: "handoffSignatureFileIds",
@@ -1165,6 +1206,7 @@ export function attachFileReference(file, target) {
       type: target.type,
       id: target.record.id,
       field,
+      ...((['packing_photo', 'handoff_signature'].includes(file.purpose) && riderPackingFlow(target.record)) ? { inspectionId: target.record.pickupChecklist.inspectionId } : {}),
       ...(target.milestoneCode ? { milestoneCode: target.milestoneCode } : {}),
       ...(target.documentType ? { documentType: target.documentType } : {}),
     });
@@ -1279,9 +1321,18 @@ export function authorizeFileRead(user, store, file) {
     if (sent.some((reference) => canReadDeliveryChatPhoto(user, store, reference))) return;
     forbidden();
   }
+  if (file.purpose === "pickup_chat_image") {
+    const sent = (file.references || []).filter((reference) => reference.type === "pickup_chat_message");
+    if (!sent.length && file.ownerId === user.id) return;
+    if (sent.some((reference) => canReadPickupChatPhoto(user, store, reference))) return;
+    forbidden();
+  }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === "client_verification_document") forbidden();
-  if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)) forbidden();
+  if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)
+    && !(user.role === 'rider' && ((file.ownerId === user.id && !(file.references || []).length)
+      || (file.references || []).some(ref => ref.type === 'order'
+        && store.orders.some(order => order.id === ref.id && riderPackingFlow(order) && order.riderId === user.id))))) forbidden();
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(file.purpose)) {
     if (user.role === "client" && ((file.purpose !== "refund_receipt" && file.ownerId === user.id)
       || (file.references || []).some((ref) => ref.type === "refund_request"

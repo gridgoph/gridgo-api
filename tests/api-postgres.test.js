@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import { alwaysOpenOperatingHours } from "./helpers/operating-hours.mjs";
 import { businessApplication } from "./helpers/client-application.mjs";
 import test from "node:test";
@@ -146,7 +147,7 @@ function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
 }
 
 async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     payout_milestones, order_payments, order_line_item_options, order_line_items, orders,
@@ -160,6 +161,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
+    delete store.settings.serviceFeeSchedule; // Legacy flat-fee integration coverage.
     store.settings.operatingHours = alwaysOpenOperatingHours();
     store.users.push(
       { id: "user_client", clerkUserId: "clerk_client", email: "client@gridgo.test", name: "Client", role: "client", accountType: "individual", createdAt: AT },
@@ -775,6 +777,8 @@ test("sign-up endpoints require Super Admin for every applicant kind", { skip: !
   await addApprovalDecisionFixtures(database);
   const instance = await startApi();
   try {
+    // Settle the independently audited lifecycle tick before checking refused writes.
+    await request(instance.api, '/settings', { subject: 'clerk_super' });
     const before = await loadStore(database);
     for (const subject of ["clerk_ops", "clerk_client", "clerk_supplier", "clerk_rider"]) {
       const routes = [
@@ -1588,7 +1592,7 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
 
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/balance/submit`, { method: "POST", subject: "clerk_client", body: { method: "qr_manual", reference: "BAL-API" } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/payments/balance/confirm`, { method: "POST", subject: "clerk_ops", body: {} })).status, 200);
-    for (const state of ["production", "supplier_self_qc", "ready_for_dispatch"]) {
+    for (const state of ["production", "ready_for_dispatch"]) {
       const transitioned = await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_supplier", body: { state } });
       assert.equal(transitioned.status, 200, `${JSON.stringify(transitioned.body)}\n${instance.output()}`);
       if (state === "production") {
@@ -1598,9 +1602,11 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
             originalFilename: "start.jpg", declaredContentType: "image/jpeg", detectedContentType: "image/jpeg",
             size: 100, state: "ready", objectKey: "proof/start.jpg", createdAt: AT, readyAt: AT,
             references: [{ type: "order", id: orderId, field: "fulfilmentProofFileIds", milestoneCode: "production_started" }] });
-          store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_start_packing", purpose: "packing_photo", objectKey: "packing/start.jpg", references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
+          store.files.push({ ...structuredClone(store.files.at(-1)), fileId: "file_start_packing", purpose: "finished_product_photo", objectKey: "packing/start.jpg", references: [{ type: "order", id: orderId, field: "packingPhotoFileIds" }] });
           await saveStore(database, store);
         });
+        assert.equal((await request(instance.api, `/orders/${orderId}/production-finished`, { method: 'POST', subject: 'clerk_supplier', body: {} })).status, 200);
+        assert.equal((await request(instance.api, `/orders/${orderId}/production-review`, { method: 'POST', subject: 'clerk_ops', body: { decision: 'approved' } })).status, 200);
         // The escrow split of the shop's own price, snapshotted when the quote
         // was accepted, and starting the press pays nobody: every stage waits
         // for its proof and a person.
@@ -1618,14 +1624,19 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
     assert.equal((await request(instance.api, `/dispatch/${orderId}/accept`, { method: "POST", subject: "clerk_rider", body: {} })).status, 200);
     const checks = ["quantity_match", "specification_match", "visible_defects", "packaging_integrity", "documentation", "supplier_sign_off"]
       .map((code) => ({ code, passed: true }));
+    const inspected = await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: 'POST', subject: 'clerk_rider', body: { checks, counts: [{ lineItemId: null, countedQuantity: 1 }] } });
+    assert.equal(inspected.status, 200, JSON.stringify(inspected.body));
+    assert.equal(inspected.body.order.state, 'rider_assigned');
     // The supplier's signature on the rider's phone, written straight into the
     // store: the transition is what is under test here, not the pad.
     await database.transaction(async () => {
       const store = await loadStore(database);
-      store.files.push({ fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [{ type: "order", id: orderId, field: "handoffSignatureFileIds" }], createdAt: AT });
+      store.files.push({ fileId: "file_sign", ownerId: "user_rider", purpose: "handoff_signature", originalFilename: "pickup-signature.png", declaredContentType: "image/png", detectedContentType: "image/png", size: 10, state: "ready", objectKey: "rider/pickup-signature.png", references: [{ type: "order", id: orderId, field: "handoffSignatureFileIds", inspectionId: inspected.body.order.pickupChecklist.inspectionId }], createdAt: AT });
+      store.files.push({ ...structuredClone(store.files.at(-1)), fileId: 'file_rider_packed', purpose: 'packing_photo', objectKey: 'rider/packed.png',
+        references: [{ type: 'order', id: orderId, field: 'packingPhotoFileIds', inspectionId: inspected.body.order.pickupChecklist.inspectionId }] });
       await saveStore(database, store);
     });
-    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-checklist`, { method: "POST", subject: "clerk_rider", body: { checks, counts: [{ lineItemId: null, countedQuantity: 1 }], signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
+    assert.equal((await request(instance.api, `/dispatch/${orderId}/pickup-confirm`, { method: "POST", subject: "clerk_rider", body: { signature: { fileId: "file_sign", signerName: "Ana Reyes" } } })).status, 200);
     assert.equal((await request(instance.api, `/orders/${orderId}/transition`, { method: "POST", subject: "clerk_rider", body: { state: "out_for_delivery" } })).status, 200);
 
     const released = await request(instance.api, "/orders/ord_payout/milestones/printing/release", { method: "POST", subject: "clerk_ops", body: {} });
@@ -1671,7 +1682,10 @@ test("PostgreSQL-backed order, payment, role, and payout behavior survives API r
       assert.equal(map.status, 200);
       assert.deepEqual(map.body.riders, [{ riderId: "user_rider", name: "Rider", vehicleType: "motorcycle", plateNumber: "GRIDGO-1",
         orderId: lifecycleOrder.id, orderTitle: "API banner", state: "out_for_delivery", lat: 7.07, lng: 125.61,
-        accuracy: 5, at: recordedAt, pickup: lifecycleOrder.pickup ?? null, dropoff: lifecycleOrder.dropoff ?? null }]);
+        accuracy: 5, at: recordedAt, receivedAt: ping.body.ping.receivedAt,
+        lastUpdatedAt: recordedAt, ageSeconds: map.body.riders[0].ageSeconds, stale: false,
+        pickup: lifecycleOrder.pickup ?? null, dropoff: lifecycleOrder.dropoff ?? null }]);
+      assert.ok(map.body.riders[0].ageSeconds >= 0 && map.body.riders[0].ageSeconds < 120);
       evidence.riderMaps[subject] = map;
     }
     const denied = await request(instance.api, "/ops/riders/locations", { subject: "clerk_client" });
@@ -4438,7 +4452,7 @@ test("production photo gate covers both packing paths and audited Operations cor
     assert.equal(missingReason.status, 400);
     assert.equal(missingReason.body.error, "production_override_reason_required");
     const corrected = await request(instance.api, "/orders/ord_payout/transition", {
-      method: "POST", subject: "clerk_ops", body: { state: "ready_for_dispatch", reason: "Verified finished legacy job at the counter" },
+      method: "POST", subject: "clerk_ops", body: { state: "ready_for_dispatch", reasonCode: "evidence_verified_offline", reason: "Verified finished legacy job at the counter" },
     });
     assert.equal(corrected.status, 200, JSON.stringify(corrected.body));
     const saved = await loadStore(database);
@@ -4719,7 +4733,12 @@ test("Operations audit reads are limited to workspace actions or one file", { sk
   assert.equal((await request(instance.api, "/audit?action=file.early_delete")).status, 401);
   const unrestricted = await request(instance.api, "/audit", { subject: "clerk_super" });
   assert.equal(unrestricted.status, 200);
-  assert.deepEqual(unrestricted.body.audit.map(row => row.id).sort(), rows.map(row => row.id).sort());
+  assert.deepEqual(unrestricted.body.audit.filter(row => rows.some(fixture => fixture.id === row.id)).map(row => row.id).sort(), rows.map(row => row.id).sort());
+  const lifecycle = unrestricted.body.audit.filter(row => !rows.some(fixture => fixture.id === row.id));
+  assert.equal(lifecycle.length, 1);
+  assert.equal(lifecycle[0].action, 'order.transition');
+  assert.equal(lifecycle[0].actorRole, 'system');
+  assert.equal(lifecycle[0].entityId, 'ord_expired');
 });
 
 test("listing take-down survives PostgreSQL own-list reads and restore keeps it hidden with a shop notice", { skip: !DATABASE_URL }, async (t) => {
@@ -4809,8 +4828,11 @@ test("claim holds block both packing paths until Operations clears every claim",
       }
       const after = await loadStore(database);
       assert.equal(after.orders.find((row) => row.id === "ord_payout").state, "production");
-      assert.equal(after.auditLog.length, before.auditLog.length);
-      assert.equal(after.notifications.length, before.notifications.length);
+      const refused = after.auditLog.filter(entry => !before.auditLog.some(old => old.id === entry.id));
+      assert.equal(refused.length, 6);
+      assert.ok(refused.every(entry => entry.action === 'order.transition_refused' && entry.detail.code === 'claim_hold_active'));
+      assert.deepEqual(after.notifications.filter(entry => entry.type !== 'order_job_details_missing'),
+        before.notifications.filter(entry => entry.type !== 'order_job_details_missing'));
     }
     await assertBlocked();
     const supplierRelease = await request(instance.api, `/claims/${claims[0]}/release`, {
@@ -5182,7 +5204,7 @@ test('packing photo gates dispatch, notifies the client once, and stays private 
 });
 
 
-test("client rider location radius is live, private and leaves staff tracking unchanged", { skip: !DATABASE_URL }, async () => {
+test("client rider tracking settings are live, private and versioned", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
   await database.transaction(async () => {
@@ -5190,19 +5212,21 @@ test("client rider location radius is live, private and leaves staff tracking un
     const order = store.orders.find(row => row.id === "ord_payout");
     order.state = "out_for_delivery";
     order.riderId = "user_rider";
-    delete store.settings.clientRiderLocationRevealDistanceMeters;
-    store.locationPings.push({ id: "ping_radius", orderId: order.id, riderId: order.riderId, lat: 7.06, lng: 125.62, accuracy: 5, at: new Date().toISOString() });
+    order.pickupChecklist = { status: "passed", completedAt: new Date(Date.now() - 60000).toISOString() };
+    delete store.settings.riderLocationRefreshIntervalSeconds;
+    store.locationPings.push({ id: "ping_far", orderId: order.id, riderId: order.riderId, lat: 7.06, lng: 125.62, accuracy: 5, at: new Date().toISOString() });
     await saveStore(database, store);
   });
   const instance = await startApi();
   const location = subject => request(instance.api, "/dispatch/ord_payout/location", { subject });
   try {
     let current = await request(instance.api, "/settings", { subject: "clerk_super" });
-    assert.equal(current.body.settings.clientRiderLocationRevealDistanceMeters, 1000);
-    assert.deepEqual((await location("clerk_client")).body, { ping: null });
+    assert.equal(current.body.settings.riderLocationRefreshIntervalSeconds, 20);
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_far");
     assert.equal((await location("clerk_promote")).status, 403);
-    for (const subject of ["clerk_ops", "clerk_super", "clerk_rider", "clerk_supplier"]) {
-      assert.equal((await location(subject)).body.ping.id, "ping_radius");
+    assert.deepEqual((await location("clerk_supplier")).body, { ping: null, hidden: "picked_up" });
+    for (const subject of ["clerk_ops", "clerk_super", "clerk_rider"]) {
+      assert.equal((await location(subject)).body.ping.id, "ping_far");
     }
     for (const subject of ["clerk_ops", "clerk_super"]) {
       const map = await request(instance.api, "/ops/riders/locations", { subject });
@@ -5210,30 +5234,32 @@ test("client rider location radius is live, private and leaves staff tracking un
       assert.equal(map.body.riders[0].lat, 7.06);
     }
     const patch = (subject, value, version = current.body.version) => request(instance.api, "/settings", {
-      method: "PATCH", subject, body: { expectedVersion: version, reason: "Update client tracking distance", clientRiderLocationRevealDistanceMeters: value },
+      method: "PATCH", subject, body: { expectedVersion: version, reason: "Update client tracking refresh", riderLocationRefreshIntervalSeconds: value },
     });
-    for (const subject of ["clerk_ops", "clerk_client", "clerk_rider", "clerk_supplier"]) assert.equal((await patch(subject, 3000)).status, 403);
-    for (const value of [null, "1000", 0, -1, 1.5]) {
+    for (const subject of ["clerk_ops", "clerk_client", "clerk_rider", "clerk_supplier"]) assert.equal((await patch(subject, 30)).status, 403);
+    for (const value of [null, "20", 0, -1, 1.5]) {
       const invalid = await patch("clerk_super", value);
       assert.equal(invalid.status, 400);
-      assert.equal(invalid.body.error, "invalid_rider_location_reveal_distance");
+      assert.equal(invalid.body.error, "invalid_rider_tracking_setting");
     }
     const staleVersion = current.body.version;
-    current = await patch("clerk_super", 3000);
+    current = await patch("clerk_super", 30);
     assert.equal(current.status, 200);
-    assert.equal((await location("clerk_client")).body.ping.id, "ping_radius");
-    assert.equal((await patch("clerk_super", 1000, staleVersion)).status, 409);
-    current = await patch("clerk_super", 1000);
+    assert.equal((await location("clerk_client")).body.tracking.refreshIntervalSeconds, current.body.settings.riderLocationRefreshIntervalSeconds);
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_far");
+    assert.equal((await patch("clerk_super", 20, staleVersion)).status, 409);
+    current = await patch("clerk_super", 20);
     assert.equal(current.status, 200);
-    assert.deepEqual((await location("clerk_client")).body, { ping: null });
+    assert.equal((await location("clerk_client")).body.tracking.refreshIntervalSeconds, current.body.settings.riderLocationRefreshIntervalSeconds);
+    assert.equal((await location("clerk_client")).body.ping.id, "ping_far");
     await database.transaction(async () => {
       const store = await loadStore(database);
-      store.locationPings.push({ id: "ping_near", orderId: "ord_payout", riderId: "user_rider", lat: 7.079, lng: 125.62, accuracy: 5, at: new Date(Date.now() + 1000).toISOString() });
+      store.locationPings.push({ id: "ping_near", orderId: "ord_payout", riderId: "user_rider", lat: 7.079, lng: 125.62, accuracy: 5, at: new Date(Date.now() + 20).toISOString() });
       await saveStore(database, store);
     });
     assert.equal((await location("clerk_client")).body.ping.id, "ping_near");
     const persisted = await loadStore(database);
-    assert.equal(persisted.settings.clientRiderLocationRevealDistanceMeters, 1000);
+    assert.equal(persisted.settings.riderLocationRefreshIntervalSeconds, 20);
     assert.ok(persisted.auditLog.some(row => row.action === "settings.operational_update"));
   } finally {
     instance.child.kill("SIGTERM");
@@ -5303,4 +5329,35 @@ test('operating hours settings require Super Admin/version/reason, persist with 
     await new Promise(resolve => instance.child.once('exit', resolve));
     await database.close();
   }
+});
+
+test('an open bracket quote keeps its table and fee when accepted after settings change', { skip: !DATABASE_URL }, async t => {
+  const database=createDatabase({DATABASE_URL});t.after(()=>database.close());
+  await clearAndFixture(database);
+  const brackets=[{upToMinor:200000,rateBps:4500},{upToMinor:2000000,rateBps:2500},{upToMinor:null,rateBps:1500}];
+  await database.transaction(async()=>{const store=await loadStore(database);
+    store.settings.serviceFeeSchedule={version:2,rounding:'half_up_once',brackets};await saveStore(database,store);});
+  const instance=await startApi();
+  t.after(async()=>{instance.child.kill('SIGTERM');await new Promise(resolve=>instance.child.once('exit',resolve));});
+  const call=(path,subject,body)=>request(instance.api,path,{method:'POST',subject,body});
+  const created=await call('/orders','clerk_client',{productId:'prod_tarpaulin',title:'Bracket quote',quantity:1,
+    size:'2m x 3m',material:'13oz tarpaulin',finish:'hemmed',address:'Bajada',zone:'davao_central',submit:true});
+  assert.equal(created.status,201,JSON.stringify(created.body));
+  const path=`/orders/${created.body.order.id}/transition`;
+  for(const state of ['needs_qa','approved_for_matching','supplier_assigned']) {
+    const result=await call(path,'clerk_ops',{state,...(state==='supplier_assigned'?{supplierId:'user_supplier'}:{})});
+    assert.equal(result.status,200,JSON.stringify(result.body));
+  }
+  const quoted=await call(path,'clerk_supplier',{state:'supplier_accepted',supplierSubtotalMinor:500000});
+  assert.equal(quoted.status,200,JSON.stringify(quoted.body));
+  await database.transaction(async()=>{const store=await loadStore(database);
+    store.settings.serviceFeeSchedule.brackets=[{upToMinor:null,rateBps:1000}];await saveStore(database,store);});
+  const accepted=await call(path,'clerk_client',{state:'awaiting_initial_payment',quoteVersion:1,fulfillmentMode:'delivery',paymentPlan:'delivery_online'});
+  assert.equal(accepted.status,200,JSON.stringify(accepted.body));
+  assert.equal(accepted.body.order.clientItemSubtotalMinor,665000);
+  assert.equal(JSON.stringify(accepted.body).includes('serviceFeeWorking'),false);
+  const order=(await loadStore(database)).orders.find(row=>row.id===created.body.order.id);
+  assert.equal(order.grossServiceFeeMinor,165000);
+  assert.deepEqual(order.serviceFeeSchedule.brackets,brackets);
+  assert.equal(order.serviceFeeRateBps,null);
 });

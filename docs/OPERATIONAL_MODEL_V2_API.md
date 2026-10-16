@@ -1,5 +1,7 @@
 # GRIDGO Operational Model v2 API
 
+Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
+
 This is the rebuild contract for the three mobile apps and Operations web portal. Field names, enum values, money units, authorization, and state transitions are case-sensitive. `docs/STORAGE_API.md` and `docs/TAXONOMY_API.md` remain authoritative for file bytes and taxonomy structure.
 
 ## Conventions
@@ -130,6 +132,8 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 | GET | `/dispatch/offers` | approved rider/ops/super | available/assigned dispatches |
 | POST | `/dispatch/:id/accept` | approved rider | assign self to ready dispatch |
 | POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | record counts and pass or escalate all six checks |
+| POST | `/dispatch/:id/milestones` | assigned approved rider | [delivery milestones](#delivery-milestones) |
+| GET | `/ops/orders/:id/location-diagnostics` | ops/super | [ping diagnostics](#operations-and-diagnostics) |
 | POST/GET | `/dispatch/:id/location` | POST assigned approved rider; GET related parties/ops/super | [location contract](#rider-location) |
 | GET | `/ops/riders/locations` | ops/super | [active rider map](#rider-location) |
 | GET | `/ops/push/stats` | ops/super | [push reach and delivery](#get-opspushstats) aggregates |
@@ -501,7 +505,7 @@ Example FCM v1 message for an eligible device:
       "orderId": "ord_demo_1",
       "at": "2026-08-11T02:00:00.000Z"
     },
-    "android": { "priority": "high", "notification": { "channel_id": "gridgo_default" } },
+    "android": { "priority": "high", "notification": { "channel_id": "gridgo_default", "sound": "default" } },
     "apns": { "headers": { "apns-priority": "10" }, "payload": { "aps": { "sound": "default" } } }
   }
 }
@@ -509,8 +513,8 @@ Example FCM v1 message for an eligible device:
 
 - Domain push copy follows the privacy policy in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope); fetch the inbox for the detailed message. Announcements retain their public broadcast copy.
 - `data` values are always strings, and the keys are exactly `notificationId`, `type`, `orderId`, `at`. Keys with no value are omitted — a notification with no order carries no `orderId`. Route on `type` and `orderId`; fetch the order and re-read `GET /notifications` after opening, because the push carries no order state.
-- **Android apps must create the notification channel `gridgo_default`** before requesting a token. A message naming a channel the app has not created is downgraded or dropped on Android 8+.
-- **`shop_production_inactive` and `ops_production_inactive` are the only types that name a different channel and sound.** Their FCM `android.notification.channel_id` is `gridgo_production_nudge` and their APNs `aps.sound` is `notification_alert.mp3`. The supplier app creates that channel and bundles the file. Every other type, including `shop_job_may_start`, stays on `gridgo_default` with `aps.sound: "default"`. Client and rider apps do not create the production channel. Lock-screen title and body stay the generic domain copy above; the detailed shop sentences live in the inbox.
+- **Android apps must create the notification channel `gridgo_default` with default sound and suitable importance** before requesting a token. If that channel does not exist on Android 8+, FCM falls back to the manifest default channel; its settings may differ. Android channel settings govern sound even when the payload requests it.
+- **`shop_production_inactive` and `ops_production_inactive` are the only types that name a different channel and sound.** Their FCM `android.notification.channel_id` is `gridgo_production_nudge`; their Android `sound` and APNs `aps.sound` are `notification_alert.mp3`. The supplier app creates that channel and bundles the file. Every other type, including `shop_job_may_start`, stays on `gridgo_default` with Android `sound: "default"` and `aps.sound: "default"`. Client and rider apps do not create the production channel. Lock-screen title and body stay the generic domain copy above; the detailed shop sentences live in the inbox.
 - `type` is the same discriminator as on the notification record: `supplier_assignment_final_price`, `pickup_check_escalation`, `pickup_escalation_resolved`, and any later value. Treat unknown types as "open the notification list".
 
 **No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Domain title/body copy is also generic under the realtime privacy policy.
@@ -707,9 +711,9 @@ Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying 
 
 ## Audit access
 
-`GET /audit` returns `{ audit }`, newest first, with optional `action`, `entityType`, `entityId`, `orderId`, `actorId`, and `limit` (default 100, maximum 500) filters. The unrestricted audit log is Super Admin only.
+`GET /audit` returns `{ audit, limit, offset, nextOffset }`, newest first. It supports person/action/order/date filters, search, bounded paging and CSV export; `GET /orders/:id/audit` supplies the order workspace view. The unrestricted audit log is Super Admin only. Entries are immutable in PostgreSQL and retained indefinitely pending the accountant’s retention decision. See [Audit API](AUDIT_API.md) for entry shape, filters, export, coverage and the restricted Operations order view.
 
-Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
+Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `order.transition_refused`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
 
 ## Settings and distance fee
 
@@ -725,6 +729,8 @@ Default `GET /settings` response:
     "serviceFeeVisibleToClient": true,
     "riderCommissionBps": 8500,
     "clientRiderLocationRevealDistanceMeters": 1000,
+    "riderLocationRefreshIntervalSeconds": 20,
+    "riderLocationStaleAfterSeconds": 120,
     "downpaymentPercent": 100,
     "issueWindowHours": 24,
     "productionNudge": {
@@ -745,6 +751,8 @@ Default `GET /settings` response:
   }
 }
 ```
+
+`artworkGuidance` (the recommended resolution and colour per product type, Super Admin editable through the same `PATCH /settings` handshake) is described in [ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
 
 `paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
 
@@ -1133,13 +1141,23 @@ Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release 
 
 ## Production progress photos
 
+[Shop-to-rider handover](SHOP_HANDOVER_API.md) supersedes the packing sequence
+below for version-2 handovers: finished unpacked photos → GRIDGO QA → ready for
+rider pickup → unpacked inspection → rider packed photo → signature/pickup.
+Plan-1 and already-ready jobs keep the legacy flow below. Receipt scans stay
+optional. Every staff production correction in either flow now requires a
+listed `reasonCode` plus the `reason` note and exposes the Forced by GRIDGO tag.
+
+
+[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Legacy production and packing photo requirements follow this section; version-2 handovers follow the linked handover contract. Supplier invoice scans remain optional.
+
 Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 claim_hold_active` while the order's claim payout-hold flag is set or any claim is `open`/`payout_held`. This applies to the assigned supplier and Operations/Super Admin corrections, before photo/override checks. Operations must release or resolve all active claims before packing can continue; a correction reason cannot bypass the hold.
 
 `POST /orders/:id/transition` refuses a supplier moving `production -> supplier_self_qc`, `production -> ready_for_dispatch`, or `supplier_self_qc -> ready_for_dispatch` with `409 production_photo_required` until the job has at least one **ready, attached JPEG/PNG/WebP owned by its assigned supplier**. Body flags, unattached uploads, pending/deleted files, PDFs, another shop's files, artwork, and rider delivery evidence do not count.
 
 One production photo is sufficient for the production-photo gate: the start-of-production image counts; a second finished-work photo is encouraged but **not required**. This is an evidence gate, not a minimum elapsed production time. Existing `fulfilment_proof` images attached for `production_started` (plan 2), `printing`, or `packaging_qc` (plan 1) count without changing payout plans. Suppliers can also upload `purpose=production_photo` and attach via `POST /files/:fileId/attach` with `{ "orderId": "..." }` while in `production` or `supplier_self_qc`; this records progress only and never satisfies or releases a payout stage. See [Storage API](STORAGE_API.md).
 
-Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
+Older orders keep their current states and original payout rules; jobs already dispatched are not rewound or blocked at rider pickup. Older production jobs can use their existing image proofs or attach a new progress image. Operations and Super Admin can correct the same three transition edges, including a legacy job without photos, with `{ "state": "ready_for_dispatch", "reasonCode": "evidence_verified_offline", "reason": "Verified finished work at the counter" }`. A blank reason returns `400 production_override_reason_required`. Every staff correction records `order.production_override` with actor, reason, prior/next state and `photoMissing`, atomically with the state change, notifications and invalidations. Existing refund work holds still apply. The override never invents photo evidence.
 
 Order list/detail and order mutation responses expose this additive projection to the owning client, assigned supplier/rider and Operations/Super Admin:
 
@@ -1161,6 +1179,9 @@ Order list/detail and order mutation responses expose this additive projection t
 With no qualifying image, the response is `{ "status": "waiting_for_photo", "photos": [] }`. The client should display **Waiting for a progress photo** during production and subsequent steps until evidence exists, even after a staff correction. A gallery row exposes no uploader, private key, filename, payout stage or proof code. Signed links use the same authorization and TTL as artwork; unrelated clients and unassigned riders browsing dispatch offers receive none. If signing fails, the photo identity remains and the app can retry `GET /files/:fileId/download-url`. Attaching evidence queues order/job invalidations before commit.
 
 ### Packing photos
+
+This subsection describes legacy handovers. For version 2 the assigned rider
+attaches the packing photo after inspection; see [Shop handover](SHOP_HANDOVER_API.md).
 
 After production, the shop uploads a separate `packing_photo` showing the finished prints packed and ready. Use `POST /files` then `POST /files/:fileId/attach` with `{ "orderId": "..." }` while `production` or `supplier_self_qc`. The existing upload validation and transactional attach checks apply. Only a ready attached JPEG/PNG/WebP owned by the assigned supplier counts; production photos, payout proofs, PDFs, pending uploads and client-supplied flags never do.
 
@@ -1221,6 +1242,10 @@ Packaging readiness is not a passed pickup quality check. It makes the job avail
 `POST /orders/:id/decline` accepts an optional `{reason}` from the assigned approved supplier while `supplier_assigned`. Success returns only `{order:{id,state},replaced}`; the departing supplier must remove the job from its local list and must not expect the previous full order projection. `replaced:true` leaves the order in `supplier_assigned`; `false` returns it to `approved_for_matching` for Operations. A later-state decline returns `409 decline_not_available`.
 
 ## Rider pickup checklist and escalation
+
+Version-2 handovers use this checklist to record an unpacked inspection, then
+require the rider packed photo and `/pickup-confirm` to transfer custody. Legacy
+handovers retain the single request below. See [Shop handover](SHOP_HANDOVER_API.md).
 
 ```http
 POST /dispatch/:id/pickup-checklist
@@ -1342,19 +1367,74 @@ Operations acts on the inbox row. Without it the request would sit in jsonb unre
 
 ## Rider location
 
-`POST /dispatch/:id/location` accepts `{lat,lng,accuracy?,recordedAt?}` from the assigned approved rider during `picked_up` or `out_for_delivery`; other states return `409 tracking_not_active`. Coordinates must be finite numbers within latitude/longitude bounds; accuracy, if present, is nonnegative meters (`400 invalid_location` otherwise). Optional `recordedAt` is the source GPS fix timestamp; omission uses server time. Invalid timestamps, fixes more than 30 seconds ahead, or more than five minutes old return `400 invalid_location_timestamp`. A valid fix no newer than the current assigned rider's latest fix returns `200 {ping,ignored:true}`. Accepted fixes return `{ping}` with source time in `ping.at`.
+### Ping ingestion and privacy window
 
-`GET /dispatch/:id/location` returns `{ping}` for the current rider only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. Consumers calculate staleness from `at` and `accuracy`.
+`POST /dispatch/:id/location` accepts `{lat,lng,accuracy?,recordedAt?}` from the assigned approved rider during `rider_assigned`, `picked_up` or `out_for_delivery`; other states return `409 tracking_not_active`. Coordinates must be finite JSON numbers within latitude/longitude bounds; accuracy, if present, is nonnegative meters (`400 invalid_location` otherwise). Optional `recordedAt` is a timestamp string for the source GPS fix; omission uses server receipt time. Invalid timestamps, fixes more than 30 seconds ahead, or more than five minutes old **at receipt** return `400 invalid_location_timestamp`. Time spent waiting on authentication or the transaction lock does not age a valid request into rejection. There is no server ping-specific rate limiter. Writes still use the domain transaction/advisory lock.
 
-Client reads return `{ping:null}` until the latest fix is within `settings.clientRiderLocationRevealDistanceMeters` of the delivery destination (including a confirmed destination change). The default is 1,000 meters, also for existing settings without this field. Distance uses the shared straight-line calculation rounded to whole meters; the boundary is inclusive. Missing or invalid destination coordinates fail closed. No older inside-radius fix is substituted for a newer outside-radius fix. Related supplier/rider reads and both Operations/Super Admin tracking endpoints are unchanged.
+A valid fix no newer than the current assignment's latest fix returns `200 {ping,ignored:true}` without changing the last position or its freshness. Accepted fixes return `201 {ping}` with source time in `ping.at`, server HTTP receipt time in `receivedAt`, and processing time in `processedAt`. These server times live in `location_pings.data`; old rows retain null/missing receipt times, never invented backfills. Each new fix snapshots `leg: "pickup" | "delivery"`. A delayed source fix from before the recorded handoff remains a pickup fix even when it arrives after pickup. Reassignment starts a new tracking window, including when the same rider is assigned again.
 
-Only Super Admin may change `clientRiderLocationRevealDistanceMeters` through `PATCH /settings` with `expectedVersion` and a nonblank `reason`. It must be a positive JSON safe integer in meters; null, strings, zero, negatives and fractions return `400 invalid_rider_location_reveal_distance`. Omission preserves the current value. The audited setting applies on the next client location read, including existing trips, without a release. Clients show progress and “Your rider is on the way” while `ping` is null and must clear any previously shown rider marker.
+`GET /dispatch/:id/location` returns `{ping}` for the current assignment only, or `{ping:null}`. Related approved supplier/rider, delivery client, and Operations/Super Admin may read it; pickup clients cannot track the internal transfer. The assigned supplier sees pickup fixes only during `rider_assigned`, with `shop: {lat,lng}` from the immutable pickup snapshot (null if missing). After pickup its response is `{ping:null,hidden:"picked_up"}`. The shop point is never sent to the client.
 
-`GET /ops/riders/locations` returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,pickup,dropoff}]}`. It selects the latest stored fix per rider across their currently assigned `picked_up`/`out_for_delivery` orders. Riders without a fix are omitted. `vehicleType` is the rider profile's `motorcycle | car | van | truck | bicycle` and `plateNumber` its plate, both `null` when no profile exists, so the map can draw the vehicle the rider actually drives. `pickup` and `dropoff` are the order's snapshot points as `{lat,lng,label}` or `null`; a collected order reports the GRIDGO Office point as `dropoff`, the same substitution `publicOrderFor` applies, so the map can draw the remaining leg of the trip. This endpoint does not impose a freshness cutoff; the map must label old fixes using `at`.
+**Client visibility replaces the former distance rule.** Clients see a delivery fix during `picked_up` and `out_for_delivery`, at any distance, until delivery is recorded. No fix is exposed before pickup or after delivery, completion, cancellation, or hub arrival. `deliveryEvidence.recordedAt` also closes the window. Pickup-leg fixes stay private after pickup. Unmarked legacy fixes require a recorded pickup timestamp and a source time on/after it; unprovable legacy fixes fail closed. The deprecated `clientRiderLocationRevealDistanceMeters` setting remains readable/writable for old settings screens but has no effect on visibility. Client reads omit server receipt/processing diagnostics and add:
+
+```json
+{
+  "ping": { "id": "ping_...", "orderId": "ord_...", "riderId": "user_...", "lat": 7.08, "lng": 125.62, "accuracy": 8, "at": "2026-10-14T01:00:00.000Z", "leg": "delivery" },
+  "tracking": {
+    "status": "stale",
+    "refreshIntervalSeconds": 20,
+    "staleAfterSeconds": 120,
+    "settingsVersion": 4,
+    "lastUpdatedAt": "2026-10-14T01:00:00.000Z",
+    "ageSeconds": 125,
+    "stale": true,
+    "message": "Rider location temporarily unavailable"
+  }
+}
+```
+
+`status` is `inactive | waiting | live | stale`. During an active delivery, freshness is based on the **source GPS time**, never a recent receipt of an old fix. At the threshold (default 120 seconds), keep the last eligible position and label it with `message` and `lastUpdatedAt`; do not clear it for staleness. With no eligible fix, start the grace period at pickup (unknown legacy start is stale immediately). Outside the sharing window return `ping:null`, `status:"inactive"`, null freshness times and `stale:false`; clear the marker then. A client should also clear its marker on an access refusal or order/rider change.
+
+Only Super Admin may change `riderLocationRefreshIntervalSeconds` (integer **15–30**, default **20**) and `riderLocationStaleAfterSeconds` (integer **30–600**, default **120**) through `PATCH /settings` with the existing `expectedVersion` and nonblank `reason`. Null, strings, fractions and out-of-range values return `400 invalid_rider_tracking_setting` with `field`. Missing values preserve the stored setting. Old rows use defaults; migration `1791986400000` fills missing settings and increments the settings version. Writes are audited and effective on the next read, including existing trips. Client tracking responses carry `settingsVersion`; use the normal `GET /settings`/version handshake to refresh configuration.
+
+### Delivery milestones
+
+Every delivery order projection for its owning client, assigned rider and Operations/Super Admin includes `deliveryMilestones`, independent of GPS availability. It always contains these six entries in order, each `{code,label,status,at}`:
+
+| Code | Label | Source |
+| --- | --- | --- |
+| `rider_assigned` | Rider assigned | Dispatch acceptance/assignment |
+| `heading_to_shop` | Heading to the shop | Rider progress event |
+| `at_shop` | At the shop | Rider progress event |
+| `picked_up` | Picked up | Governed pickup checklist/handoff |
+| `on_the_way` | On the way to you | `out_for_delivery` transition |
+| `arrived` | Arrived | Rider arrival event, falling back to recorded delivery |
+
+`status` is `pending`, `completed` (observed event), or `passed` (a later milestone was reached but this intermediate event was not recorded). `at` is null when the timestamp is unknown: do not invent a time for skipped events on older apps. Milestones contain no coordinates, supplier contact, evidence IDs, or internal notes. Internal `riderProgress` is stripped from ordinary order projections. New assignments reset rider progress and ignore earlier assignment history.
+
+`POST /dispatch/:id/milestones` takes `{milestone:"heading_to_shop" | "at_shop" | "arrived"}` from the assigned approved rider. Heading/at-shop events require `rider_assigned`; arrival requires `picked_up` or `out_for_delivery`. This route is for door deliveries. Unknown codes are `400 invalid_delivery_milestone`, wrong stage is `409 delivery_milestone_not_available`, and a new heading event after at-shop is `409 delivery_milestone_out_of_order`. Duplicate events within the allowed stage return the original timestamp without duplicate notifications. A rider cannot submit `picked_up` or confirm delivery through this route: arrival does not change order state, open an issue window or release money. Success is `200 {order}` with the role-aware projection. Each new event atomically records audit `dispatch.milestone`, client and all ops/super inbox rows (`rider_delivery_milestone`), and after-commit order/dispatch invalidation.
+
+### Operations and diagnostics
+
+`GET /ops/riders/locations` is ops/super only. It returns `{riders:[{riderId,name,vehicleType,plateNumber,orderId,orderTitle,state,lat,lng,accuracy,at,receivedAt,lastUpdatedAt,ageSeconds,stale,pickup,dropoff}]}`. It selects the latest stored fix per rider across current `rider_assigned`/`picked_up`/`out_for_delivery` assignments. **Riders without any fix are included**, with null position/time fields. Their grace period starts at assignment; unknown legacy start is stale immediately. Dashboard maps must skip null coordinates but retain those rows in the stale-rider list so Operations can contact them. A stale fix stays in the response. Freshness uses the same live stale threshold and source timestamp as the client.
+
+`vehicleType` is `motorcycle | car | van | truck | bicycle`, and `plateNumber` is the profile plate (null when absent). `pickup` and `dropoff` are `{lat,lng,label}` or null. An office-collection order reports GRIDGO Office as `dropoff`; the shop's immutable pickup snapshot remains available only to its authorized parties/staff.
+
+`GET /ops/orders/:id/location-diagnostics` is ops/super only and returns the current assignment's `orderId`, `riderId`, freshness fields, `sampleLimit:100`, `sampleCount`, `maxReceiveGapSeconds`, `secondsSinceLastReceived`, and `samples`. Each sample has `{at,receivedAt,processedAt,receiveGapSeconds,sourceDelaySeconds}`. The bounded window contains the latest 100 accepted fixes with actual receive times, sorted by receipt; the first gap and empty summary values are null. It includes the current silence since last receipt as well as completed gaps. There are no coordinates in this diagnostic response. Legacy rows without receipt times are excluded from gap calculations.
+
+Rejected coordinate/timestamp fixes produce coordinate-free structured log events `rider_location_rejected` (`orderId,riderId,receivedAt,code`); ignored duplicate/out-of-order fixes produce `rider_location_ignored` with `code:"out_of_order_fix"`. Existing HTTP logs cover authentication, approval, assignment and inactive-state refusals with status/error codes. Logs supplement accepted-fix diagnostics; a gap alone does not prove whether the phone stopped sending, lost its network or received a refusal.
+
+### Companion app follow-ups
+
+- Client: render milestones even before location is shared; poll on a timer using `refreshIntervalSeconds`, refresh on resume, retain manual refresh as a backup, show last-update age and the stale message with the last known position, and clear private positions when the tracking window closes. The large live map uses the same endpoint and policy.
+- Rider: send fresh source fixes for each active assignment at the configured cadence, surface API refusals/ignored fixes, and send the three progress events. Detect disabled/limited permission and background/battery restrictions locally, warn with recovery instructions, and verify background behavior on physical devices. The API cannot observe phone permission or force a suspended app to send. Avoid replaying an old backlog as current GPS.
+- Dashboard: expose the two settings using the version/reason handshake, flag `stale` riders including null-coordinate rows, and make diagnostic gaps available to Operations. A client refresh timer does not itself increase the handset's GPS upload cadence.
+
+This server change fixes the distance gate and queue-time timestamp rejection hazard. It does not establish the cause of reported handset instability: measure receive/source gaps during real deliveries and correlate phone logs before claiming background sharing is fixed. No paid location service or new phone permission policy is introduced here.
 
 ## Delivery messages
 
-The owning client and the assigned rider can message each other about a door delivery (`src/delivery-chat.js`, gridgo-client#198). There is no call route: neither side ever receives the other's phone number or email, and a call option waits on a masked-call provider.
+The owning client and the assigned rider can message each other about a door delivery (`src/delivery-chat.js`, gridgo-client#198). Neither side receives the other's phone number or email. Private audio calls use the separate [Calls API](CALLS_API.md); client/rider calling has the same active window, without the read-only day.
 
 - **Open** while the assigned rider has the job (`rider_assigned`, `picked_up`, `out_for_delivery`): both can read and write.
 - **Read only** for 24 hours after the delivery is recorded (`deliveryEvidence.recordedAt`, else `issueWindowOpenedAt`), whatever state follows.
@@ -1372,7 +1452,7 @@ GET /orders/:id/delivery-chat
 POST /orders/:id/delivery-chat/messages
 ```
 
-`{ "body": "Gate is the blue one", "attachmentFileIds": ["file_…"] }` — `body` trimmed, up to 1000 characters, and may be empty only when the message carries a photo (`400 invalid_request`). `attachmentFileIds` is optional, up to four of the sender's own ready, unsent `delivery_chat_image` uploads (JPEG, PNG or WebP through `POST /files`); anything else is `400 invalid_chat_image`, and a photo already sent is `409 file_already_attached`. Photos are readable through `GET /files/:id/download-url` by the two parties only while the conversation is, and are deleted with it (see `docs/STORAGE_API.md`). `201 { chat, message }`; `409 delivery_chat_read_only` once delivered; `429 too_many_requests` past 30 messages in 10 minutes; the same `401`/`403`/`404`/`409`/`410` as the read. The other party gets an inbox row and push of type `delivery_message` (`appRole` `client` or `rider`, `orderId` set). Its copy never contains the message, because inbox rows outlive the conversation, and a burst within five minutes rides on the recipient's still-unread notice instead of ringing again.
+`{ "body": "Gate is the blue one", "attachmentFileIds": ["file_…"] }` — `body` trimmed, up to 1000 characters, and may be empty only when the message carries a photo (`400 invalid_request`). `attachmentFileIds` is optional, up to four of the sender's own ready, unsent `delivery_chat_image` uploads (JPEG, PNG or WebP through `POST /files`); anything else is `400 invalid_chat_image`, and a photo already sent is `409 file_already_attached`. Photos are readable through `GET /files/:id/download-url` by the two parties only while the conversation is, and are deleted with it (see `docs/STORAGE_API.md`). `201 { chat, message }`; `409 delivery_chat_read_only` once delivered; `429 too_many_requests` past 30 messages in 10 minutes; the same `401`/`403`/`404`/`409`/`410` as the read. The other party gets an inbox row and push of type `delivery_message` (`appRole` `client` or `rider`, `orderId` set). Its copy never contains the message, because inbox rows outlive the conversation, and a burst within five minutes rides on the recipient's still-unread notice for the same assigned rider instead of ringing again. Chat push/tap contracts and app follow-ups: [Chat push delivery](REALTIME_EVENTS.md#chat-push-delivery-and-app-follow-up).
 
 ## Delivery and issue window
 
@@ -1434,7 +1514,13 @@ See [Production deadline requests](ORDER_RESCHEDULE_API.md) for the one-request 
 See [Shop acceptance and recovery](SHOP_RECOVERY_API.md) for the opening-hour deadline,
 shop cancellation, client-approved replacement or full-refund choice, and dashboard failure history.
 
+## Production-finished delivery pin
+
+[Delivery pin confirmation and one change](DELIVERY_PIN_API.md) defines the new production-finished prompt, first-dispatch lock, verified QR surcharge, non-cancelling delivery credit, role-safe final pin and app follow-ups. Existing checkout snapshots and already-running trips remain compatible.
+
 ## Out-for-delivery drop-off confirmation
+
+This section applies to legacy trips without the new `deliveryPin` record; new-flow orders use the contract above.
 
 A door delivery entering `out_for_delivery` records `dropoffConfirmation: {status:"pending", requestedAt}` and its client notification/push asks the client to confirm or change the pin. Hub pickup and already-running older trips without this record retain their previous behavior. The original order/job destination, distance, paid fee, installments and rider split remain immutable snapshots.
 
@@ -1448,3 +1534,18 @@ The reply is `200 {confirmation}`:
 An identical retry returns the saved answer without another audit/notification. A different second answer returns `409 dropoff_confirmation_answered`; a closed trip, hub pickup or missing prompt returns `409 dropoff_confirmation_unavailable`. Invalid input returns `400 invalid_dropoff_confirmation` or `invalid_dropoff_point`; foreign clients and other roles receive `403`.
 
 Authorized client, rider and Operations order projections include `dropoffConfirmation`. Rider projections omit rejected `requestedPoint`; supplier projections omit the confirmation record. Internal comparison settings and the original confirmation snapshot are never projected. For compatible navigation, projected `dropoff` becomes the confirmed `point`; storage keeps the original `dropoff`. `/ops/riders/locations` uses the same effective destination. Confirmations notify the rider and staff and invalidate `orders`, `dispatch`, and `notifications`, so an open trip updates without restarting it. Pending or rejected changes continue using the original destination and do not impose a new delivery gate. The record lives in `orders.data` JSONB; no migration is needed.
+
+## Pick-up messages
+
+C2BE8E7A ([tracker](https://github.com/gridgoph/gridgo-supplier/issues/148)) adds a separate shop–rider conversation:
+
+- `GET /orders/:id/pickup-chat` returns `{ chat, messages }` and marks the caller's messages read, under the domain transaction/lock. There is no separate read route.
+- `POST /orders/:id/pickup-chat/messages` accepts `{ body?, attachmentFileIds? }` and returns `201 { chat, message }`. Message fields and limits match delivery chat: `senderRole: "supplier" | "rider"`, up to 1,000 characters, up to four ready JPEG/PNG/WebP uploads, and 30 sends per ten minutes.
+- Only the approved assigned supplier and approved assigned rider can read/write. Authorization uses database memberships and approval cases, including `X-Gridgo-Role` selection. The current backend represents a shop by its supplier identity (`order.supplierId`); it has no separate supplier organization/member table. Clients, other shops, unassigned riders, Operations and Super Admin cannot read messages or sent photos.
+- Open in `rider_assigned`, `picked_up`, and `out_for_delivery`. Read-only for 24 hours after delivery, including the rider leaving the package at GRIDGO Office (`deliveryEvidence.recordedAt`, fallback `awaitingCollectionAt`, then `issueWindowOpenedAt`). Client collection does not restart the clock. Closed otherwise. Conversation keys are order plus rider, so reassignment starts clean.
+- Supplier/rider order and `/jobs` projections include `pickupChat: { status, unread, closesAt, retentionHours: 24 }` while readable. The supplier also gets `riderFirstName` in the chat summary. No client details or party phone/email fields are included in the chat. `GET` and successful sends set the caller's unread count to zero.
+- Upload photos with `purpose: "pickup_chat_image"`; send them through the chat endpoint, never `/files/:id/attach`. Only their uploader can access unsent photos; sent photos follow the conversation's parties and window. Closed conversations are removed by the lifecycle sweep and photos queued for byte deletion. Opaque order references remain for open-case deletion holds and retries.
+- The counterpart gets `pickup_chat_message`, `appRole: "supplier" | "rider"`, and `orderId`; apps open the job detail or rider pick-up chat. A five-minute burst shares an unread notice. Push and inbox copy omit message text/photos. Staff get a generic `pickup_chat_activity` inbox event with no conversation access.
+- Errors mirror delivery chat with `pickup_chat_not_available`, `pickup_chat_read_only`, and `pickup_chat_closed`; other validation/auth errors are unchanged.
+
+The existing client–rider delivery chat is unchanged.

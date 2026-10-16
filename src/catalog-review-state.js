@@ -3,7 +3,7 @@ export const CATALOG_REVIEW_TABLES = [
   "catalogItems", "catalogOptionGroups", "catalogOptions", "catalogItemPhotos",
   "catalogPriceTiers", "catalogSpeedTiers", "catalogItemFileFormats",
 ];
-const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt", "suspendReason", "suspendedBy", "turnaroundMode", "turnaroundDays", "minimumTurnaroundDays", "turnaroundHours", "minimumTurnaroundHours"];
+const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt", "suspendReason", "suspendedBy", "turnaroundMode", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "turnaroundHours", "minimumTurnaroundHours", "express"];
 
 export function listingSnapshot(store, item) {
   const { approvedSnapshot, reviewStatus, reviewReason, reviewedAt, reviewedBy, ...record } = item;
@@ -21,9 +21,9 @@ export function sensitiveSnapshot(snapshot) {
   // Normalize optional defaults so a released client's text-only PATCH cannot
   // open a review merely by materializing null pricing fields on an old row.
   const fields = ["supplierServiceId", "subcategoryCode", "basePriceMinor", "pricingUnit", "packageQty", "measureUnit",
-    "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli", "minimumOrderQuantity", "printerMaxWidthFeet", "fileFormatMode"];
+    "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli", "minimumOrderQuantity", "printerMaxWidthFeet", "printLayouts", "fileFormatMode"];
   value.item = Object.fromEntries(fields.map(key => [key, snapshot.item[key] ??
-    (key === "pricingUnit" ? "per_unit" : key === "fileFormatMode" ? "inherit" : null)]));
+    (key === "pricingUnit" ? "per_unit" : key === "fileFormatMode" ? "inherit" : key === "printLayouts" ? [] : null)]));
   function stable(record) {
     if (Array.isArray(record)) return record.map(stable);
     if (record && typeof record === "object") return Object.fromEntries(Object.keys(record).sort()

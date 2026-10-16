@@ -20,7 +20,7 @@ function crc32(bytes) {
 // Only stored/deflated, single-disk ZIPs; no extraction, ZIP64, encryption or
 // recursive archive expansion. Verify every entry, not just the Word parts.
 // Layout reference: https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
-function wordParts(bytes) {
+function wordParts(bytes, forPreview = false) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 22 || bytes.length > DOCX_MAX_BYTES) return null;
   let end = bytes.length - 22;
   for (; end >= Math.max(0, bytes.length - 65557); end--) {
@@ -77,6 +77,29 @@ function wordParts(bytes) {
     const content = result ? result.buffer : compressed;
     if (content.length !== entry.size || (result && result.engine.bytesWritten !== compressed.length)
         || crc32(content) !== entry.crc) return null;
+    if (forPreview && /(?:embeddings|activeX)\/|vba|oleObject/i.test(entry.name)) return null;
+    if (forPreview && !/\.(?:xml|rels)$/i.test(entry.name)) {
+      // OOXML can name a part anything. Only passive raster signatures may
+      // bypass XML checks; extension-only checks would miss disguised fields
+      // and SVGs that can reference local/remote resources.
+      const raster = content.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+        || content.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
+        || /^GIF8[79]a/.test(content.subarray(0, 6).toString())
+        || content.subarray(0, 2).toString() === 'BM'
+        || (content.subarray(0, 4).toString() === 'RIFF' && content.subarray(8, 12).toString() === 'WEBP');
+      if (!raster && !(entry.name.endsWith('/') && content.length === 0)) return null;
+    }
+    if (forPreview && /\.(?:xml|rels)$/i.test(entry.name)) {
+      const xml = content.toString('utf8');
+      // Deny DTDs/entities, external relationships and dynamic fields rather
+      // than letting Writer fetch files/URLs or evaluate embedded content.
+      if (xml.includes('\0') || /<!DOCTYPE|<!ENTITY|TargetMode\s*=\s*['"]External|<(?:[\w.-]+:)?(?:instrText|fldSimple|object|altChunk|svg|include)\b/i.test(xml)
+          || /&#(?:x[0-9a-f]+|[0-9]+);/i.test(xml)) return null;
+      if (/\.rels$/i.test(entry.name)) {
+        const targets = [...xml.matchAll(/\bTarget\s*=\s*(['"])(.*?)\1/g)].map(match => match[2]);
+        if (targets.some(target => /[:\\]|^\/|(?:^|\/)\.\.(?:\/|$)|[&%]/u.test(target))) return null;
+      }
+    }
     if (['[Content_Types].xml', 'word/document.xml', 'docProps/app.xml'].includes(entry.name)) {
       // These parts are text only. Never expand entities or resolve references.
       const xml = content.toString('utf8').replace(/^\uFEFF/, '').replace(/<!--[^]*?-->/g, '');
@@ -87,10 +110,28 @@ function wordParts(bytes) {
   return previous === directory ? parts : null;
 }
 
+/**
+ * Each section's declared page, in twips, in document order.
+ *
+ * `<w:pgSz>` is the page Word lays the section out on, already oriented: a
+ * landscape section states the wider side as `w:w`. Only whole-number twips
+ * are read; a section without one is skipped rather than guessed.
+ */
+function sectionPageSizes(document) {
+  const sizes = [];
+  for (const [, attributes] of document.matchAll(/<(?:[\w.-]+:)?pgSz\b([^>]*)>/g)) {
+    const width = Number(/(?:^|\s)(?:[\w.-]+:)?w\s*=\s*['"]([0-9]{1,6})['"]/.exec(attributes)?.[1]);
+    const height = Number(/(?:^|\s)(?:[\w.-]+:)?h\s*=\s*['"]([0-9]{1,6})['"]/.exec(attributes)?.[1]);
+    if (width > 0 && height > 0) sizes.push({ widthTwips: width, heightTwips: height });
+    if (sizes.length >= 200) break;
+  }
+  return sizes;
+}
+
 /** Bounded package sniff and advisory metadata only; no layout or rendering. */
-export function inspectDocx(bytes) {
+export function inspectDocx(bytes, { forPreview = false } = {}) {
   try {
-    const parts = wordParts(bytes);
+    const parts = wordParts(bytes, forPreview);
     if (!parts) return null;
     const types = parts.get('[Content_Types].xml'), document = parts.get('word/document.xml');
     const mainType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml';
@@ -101,7 +142,7 @@ export function inspectDocx(bytes) {
         || !/<(?:[\w.-]+:)?body\b/.test(document) || !/<\/(?:[\w.-]+:)?document\s*>\s*$/.test(document)) return null;
     const raw = /<(?:[\w.-]+:)?Pages\b[^>]*>\s*([0-9]+)\s*<\/(?:[\w.-]+:)?Pages\s*>/.exec(parts.get('docProps/app.xml') || '')?.[1];
     const pages = Number(raw);
-    return { pageCount: Number.isSafeInteger(pages) && pages > 0 ? pages : null };
+    return { pageCount: Number.isSafeInteger(pages) && pages > 0 ? pages : null, pageSizes: sectionPageSizes(document) };
   } catch {
     // Corrupt headers, truncated streams and bounded-inflate refusals all fail closed.
     return null;

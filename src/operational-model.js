@@ -1,15 +1,31 @@
+import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId } from './artwork-attachments.js';
+import { changesFor, publicChange, supplementTotals, changePayoutsFor } from './order-change-policy.js';
+import { instructionLines } from './special-instructions.js';
+import { publicDeliveryPin } from './delivery-pin.js';
+import { adjustedDeliverySplit, effectiveDeliveryFeeMinor, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
+import { feeSchedule, validateFeeSchedule } from './service-fee.js';
+import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
+import { publicArtworkPreview } from './artwork-preview.js';
+import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
+import { displayFilename } from './display-filename.js';
+import { deliveryMilestones } from './rider-tracking.js';
+export { clientRiderLocationPing } from './rider-tracking.js';
 import { defaultOperatingHours, validateOperatingHours, orderReviewTiming } from './operating-hours.js';
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
+import { pickupChatProjection } from "./pickup-chat.js";
 import { deliveryChatProjection } from "./delivery-chat.js";
 import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
+import { publicOrderCoverSpine } from "./hardbound-cover.js";
+import { defaultArtworkGuidance, publicArtworkGuidance } from "./artwork-guidance.js";
+import { artworkColorsFor, colorTargetsFor } from "./color-targets.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
-import { defaultProductionPenalty, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionDeadline, latenessTier } from './production-penalties.js';
+import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier, productionTiming } from './production-penalties.js';
 import { packingProgressFor } from "./packing-progress.js";
-import { productionProgressFor, publicProgressTimeline } from "./production-progress.js";
+import { productionProgressFor, publicProgressTimeline, supplierProgressTimeline } from "./production-progress.js";
 import { refundHold, refundSettlementFor, supplierRefundPayouts } from "./refund-policy.js";
 import crypto from "node:crypto";
 
@@ -225,7 +241,9 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
-    clientRiderLocationRevealDistanceMeters: 1_000,
+    clientRiderLocationRevealDistanceMeters: 1_000, // Deprecated; no longer controls visibility.
+    riderLocationRefreshIntervalSeconds: 20,
+    riderLocationStaleAfterSeconds: 120,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     hubPickup: hubPickupSettings(),
     hubPickupEnabled: false,
@@ -237,10 +255,18 @@ export function defaultOperationalSettings() {
      * Off until Super Admin turns it on. A request already on file stays.
      */
     physicalInvoiceRequestsEnabled: false,
+    /**
+     * Whether checkout refuses a hardbound or binding line without its cover
+     * choice and spine. Off until the client release that sends it reaches
+     * coverage; released builds cannot send it.
+     */
+    coverSpineRequired: false,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     productionPenalty: defaultProductionPenalty(),
     seasonWindowPush: { enabled: false, version: 1 },
+    /** Recommended resolution and colour per product type. Warnings only; Super Admin edits it. */
+    artworkGuidance: defaultArtworkGuidance(),
     deliveryFeeBands: [
       { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 8_900 },
       { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 14_900 },
@@ -251,6 +277,19 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings.serviceFeeSchedule) validateFeeSchedule(settings.serviceFeeSchedule);
+  if (settings.scheduledServiceFee) {
+    validateFeeSchedule(settings.scheduledServiceFee);
+    if (!Number.isFinite(Date.parse(settings.scheduledServiceFee.effectiveFrom))) fail(400, 'invalid_service_fee_effective_from', 'Use an ISO timestamp.');
+  }
+  for (const [field, min, max] of [
+    ['riderLocationRefreshIntervalSeconds', 15, 30],
+    ['riderLocationStaleAfterSeconds', 30, 600],
+  ]) {
+    if (settings?.[field] !== undefined && (!Number.isSafeInteger(settings[field]) || settings[field] < min || settings[field] > max)) {
+      fail(400, 'invalid_rider_tracking_setting', `${field} must be a whole number from ${min} to ${max} seconds.`, { field });
+    }
+  }
   if (settings?.operatingHours !== undefined) validateOperatingHours(settings.operatingHours);
   if (settings?.clientRiderLocationRevealDistanceMeters !== undefined &&
       (!Number.isSafeInteger(settings.clientRiderLocationRevealDistanceMeters) || settings.clientRiderLocationRevealDistanceMeters <= 0)) {
@@ -295,6 +334,9 @@ export function validateOperationalSettings(settings) {
       "physicalInvoiceRequestsEnabled must be a JSON boolean.",
       { field: "physicalInvoiceRequestsEnabled" },
     );
+  }
+  if (settings?.coverSpineRequired !== undefined && typeof settings.coverSpineRequired !== "boolean") {
+    fail(400, "invalid_cover_spine_required", "coverSpineRequired must be a JSON boolean.", { field: "coverSpineRequired" });
   }
   const riderCommissionBps = settings?.riderCommissionBps;
   if (riderCommissionBps !== undefined && (!Number.isInteger(riderCommissionBps)
@@ -419,16 +461,6 @@ function radians(degrees) {
   return (degrees * Math.PI) / 180;
 }
 
-export function clientRiderLocationPing(order, ping, settings) {
-  const destination = deliveryDestination(order);
-  for (const point of [destination, ping]) {
-    if (!point || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90 ||
-        !Number.isFinite(point.lng) || Math.abs(point.lng) > 180) return null;
-  }
-  const radius = settings?.clientRiderLocationRevealDistanceMeters ?? 1_000;
-  return distanceMetersBetween(ping, destination) <= radius ? ping : null;
-}
-
 export function distanceMetersBetween(pickup, dropoff) {
   for (const [field, point] of [["pickup", pickup], ["dropoff", dropoff]]) {
     if (!point || !Number.isFinite(Number(point.lat)) || !Number.isFinite(Number(point.lng))) {
@@ -494,7 +526,8 @@ export function calculateOrderMoney({
 }) {
   validateOperationalSettings(settings);
   const supplierSubtotal = finiteMinor(supplierSubtotalMinor, "supplierSubtotalMinor");
-  const serviceFeeRateBps = finiteBps(settings.serviceFeeRateBps, "serviceFeeRateBps");
+  const schedule = feeSchedule(settings);
+  const serviceFeeRateBps = schedule.version === 1 ? schedule.rateBps : null;
   const fee = organizationFeeMoney(supplierSubtotal, settings, organizationEligible);
   const { serviceFeeMinor } = fee;
   const allowedPlans = new Set(["delivery_online", "pickup_full_online", "pickup_downpayment_store"]);
@@ -684,6 +717,7 @@ export function createPayoutMilestones(money, { version = CURRENT_PAYOUT_PLAN_VE
  */
 export function snapshotPayoutPlan(order, money = order) {
   order.payoutPlanVersion = CURRENT_PAYOUT_PLAN_VERSION;
+  order.shopHandoverVersion = 2;
   order.payoutMilestones = createPayoutMilestones(money, { version: CURRENT_PAYOUT_PLAN_VERSION });
   return order.payoutMilestones;
 }
@@ -722,20 +756,23 @@ export function collectedSupplierPrincipalMinor(order) {
 export function moneyReportingForOrder(order, store = null) {
   const settlement = refundSettlementFor(store, order);
   const deductionsMinor = orderPenaltyMinor(order);
-  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) - deductionsMinor);
+  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor);
   const refundedPrincipalMinor = (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
     .reduce((sum, row) => sum + row.principalMinor, 0);
-  const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order)]
+  const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order), ...changePayoutsFor(store, order).map(row => ({ ...row, status: "released" }))]
     .filter((milestone) => milestone.status === "released")
     .reduce((sum, milestone) => sum + finiteMinor(milestone.amountMinor, "milestone.amountMinor"), 0);
   const collectedComponent = (component) => (order.paymentAllocations || [])
     .filter((allocation) => allocation.component === component
       && order.payments?.[allocation.paymentCode]?.status === "confirmed")
     .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
-  const serviceFeeCollectedMinor = collectedComponent("service_fee");
-  const split = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000);
-  const deliveryCollectedMinor = collectedComponent("delivery_pass_through");
-  const collectedSplit = deliverySplit(deliveryCollectedMinor, split.riderCommissionBps);
+  const serviceFeeCollectedMinor = collectedComponent("service_fee") + supplementTotals(store, order).feeMinor;
+  const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000));
+  const deliveryCollectedMinor = collectedComponent("delivery_pass_through") + deliveryPinCollectedMinor(order);
+  const baseCollectedSplit = deliverySplit(collectedComponent("delivery_pass_through"), split.riderCommissionBps);
+  const extraSplit = deliverySplit(deliveryPinCollectedMinor(order), split.riderCommissionBps);
+  const collectedSplit = { riderPayoutMinor: baseCollectedSplit.riderPayoutMinor + extraSplit.riderPayoutMinor,
+    platformDeliveryShareMinor: baseCollectedSplit.platformDeliveryShareMinor + extraSplit.platformDeliveryShareMinor };
   const platformCollectedMinor = serviceFeeCollectedMinor + collectedSplit.platformDeliveryShareMinor;
   const adjustedMinor = (order.revenueAdjustments || [])
     .filter((adjustment) => adjustment.kind === "adjustment")
@@ -745,14 +782,15 @@ export function moneyReportingForOrder(order, store = null) {
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
   const handedOver = ["delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
   const receivedAtStoreMinor = 0;
-  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order);
+  const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order) + supplementTotals(store, order).principalMinor;
   const protectedPaymentMinor = Math.max(
     0,
-    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
+    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
   );
   return {
     supplierSettlement: {
       orderPriceMinor: order.supplierSubtotalMinor,
+      ...(supplementTotals(store, order).principalMinor ? { supplementalPrincipalMinor: supplementTotals(store, order).principalMinor } : {}),
       dueAtStoreMinor: order.directStoreDueMinor || 0,
       receivedAtStoreMinor,
       collectedSupplierPrincipalMinor: collectedPrincipalMinor,
@@ -766,17 +804,20 @@ export function moneyReportingForOrder(order, store = null) {
       ),
     },
     deliverySettlement: {
-      deliveryFeeMinor: order.deliveryFeeMinor ?? 0,
+      deliveryFeeMinor: effectiveDeliveryFeeMinor(order),
       ...split,
       collectedMinor: deliveryCollectedMinor,
       riderCollectedMinor: collectedSplit.riderPayoutMinor,
       platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
     },
+    ...(order.voucher ? { voucherFunding: { ...order.voucher, amountMinor: order.voucherDiscountMinor,
+      serviceFeeMinor: order.voucherServiceFeeMinor, deliveryMinor: order.voucherDeliveryMinor } } : {}),
     platformRevenue: {
+      ...(order.voucher ? { voucherDiscountMinor: order.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
       organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
-      netServiceFeeMinor: order.serviceFeeMinor ?? 0,
-      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + split.platformDeliveryShareMinor : 0,
+      netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0) + supplementTotals(store, order).feeMinor,
+      billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + supplementTotals(store, order).feeMinor + split.platformDeliveryShareMinor - (order.voucherDiscountMinor || 0) : 0,
       collectedMinor: platformCollectedMinor,
       recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
       adjustedMinor,
@@ -826,9 +867,9 @@ export function releaseMilestone(order, code, actor, at, store = null) {
 
   if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
-  if (productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+  if (!order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
-      && latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock)) {
+      && productionLatenessTier(order, at)) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
   }
 
@@ -922,7 +963,7 @@ function fillOrderSpecFromLineItems(store, order) {
   const spec = first.structuredSpecSnapshot && typeof first.structuredSpecSnapshot === "object"
     ? first.structuredSpecSnapshot
     : {};
-  const artworkIds = lines.map((line) => line.artworkFileId).filter(Boolean);
+  const artworkIds = [...new Set(lines.flatMap(artworkFileIdsFor))];
   const mockupIds = lines.map((line) => line.mockupFileId).filter(Boolean);
   const lastArtworkId = artworkIds[artworkIds.length - 1] || null;
   const artworkFile = lastArtworkId
@@ -940,9 +981,7 @@ function fillOrderSpecFromLineItems(store, order) {
   if (emptySpec(order.address)) {
     order.address = order.dropoff?.label || first.dropoff?.label || "";
   }
-  if (!Array.isArray(order.artworkFileIds) || order.artworkFileIds.length === 0) {
-    if (artworkIds.length) order.artworkFileIds = artworkIds;
-  }
+  if (artworkIds.length) order.artworkFileIds = [...new Set([...(order.artworkFileIds || []), ...artworkIds])];
   if (!Array.isArray(order.mockupFileIds) || order.mockupFileIds.length === 0) {
     if (mockupIds.length) order.mockupFileIds = mockupIds;
   }
@@ -974,12 +1013,19 @@ function productionItemsFor(store, order, user) {
         // Old snapshots did not keep the unit. Never substitute today's listing unit.
         unit: ["mm", "cm", "m", "in", "ft"].includes(spec.measureUnit) ? spec.measureUnit : null,
       } : null;
+      const production = ["client", "supplier", "ops_admin", "super_admin"].includes(user?.role);
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
+        turnaroundMinutes: line.turnaroundMinutesSnapshot ?? (line.turnaroundHoursSnapshot == null ? null : line.turnaroundHoursSnapshot * 60),
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         documentPages: structuredClone(line.documentPages ?? null),
+        ...(['client','supplier','ops_admin','super_admin'].includes(user?.role) ? {
+          specialInstructions: line.specialInstructions || '',
+          ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.proposedSpec).at(-1);
+            return change ? { agreedChange: { id: change.id, proposedSpec: change.data.proposedSpec, appliedAt: change.data.appliedAt } } : {}; })(),
+        } : {}),
         structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
           ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
         options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
@@ -987,6 +1033,22 @@ function productionItemsFor(store, order, user) {
           .map((option) => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })),
         artworkFileId: line.artworkFileId || null, mockupFileId: line.mockupFileId || null,
         artworkLinks: structuredClone(line.artworkLinks || []),
+        artworkAttachments: artworkAttachmentsFor(line),
+        artworkPreviewFileId: artworkPreviewFileId(store, line),
+        // The client's layout and the fit they were shown. Null on products
+        // without a layout choice and on older orders.
+        printLayout: line.printLayout?.code ?? null,
+        printLayoutCheck: structuredClone(line.printLayout?.check ?? null),
+        // What the uploaded files measured against the product type, and which
+        // warnings the client accepted at checkout. Null on older orders.
+        artworkGuidance: publicArtworkGuidance(line.artworkGuidance, user),
+        // The client's exact colours as agreed at checkout, and the colours
+        // each uploaded file uses. Production parties only; [] for riders.
+        colorTargets: production ? colorTargetsFor(line) : [],
+        artworkColors: production ? artworkColorsFor(store, artworkFileIdsFor(line)) : [],
+        // The cover choice and spine lettering agreed at checkout. Null for
+        // products that do not ask, older orders and riders.
+        coverSpine: production ? publicOrderCoverSpine(line.coverSpine ?? null) : null,
       };
     });
 }
@@ -1008,10 +1070,58 @@ function clientCorrectionFor(order) {
   return correction;
 }
 
+function minimizePartyContact(value, rider = false) {
+  if (!value || typeof value !== 'object') return;
+  const privateKeys = new Set(['client', 'clientProfile', 'clientName', 'clientPhone', 'clientEmail',
+    'customer', 'customerName', 'customerPhone', 'customerEmail', 'billingAddress', 'organizationOfficer', 'collection',
+    'legalAcceptances', 'artworkRightsAcceptance', 'artworkRights', 'privacyRequests']);
+  for (const key of Object.keys(value)) {
+    if (key === 'supplierContact') continue;
+    if (privateKeys.has(key)) { delete value[key]; continue; }
+    // Recipient contact is delivery-only. Shop production needs neither it nor an address book.
+    if (['recipient','contact','recipientName','recipientPhone','contactName','contactPhone','phone','email'].includes(key)
+        && !rider) { delete value[key]; continue; }
+    minimizePartyContact(value[key], rider);
+  }
+}
+
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  if (!["ops_admin", "super_admin"].includes(user?.role)) {
+    for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
+      if (!record) continue;
+      delete record.serviceFeeSchedule;
+      delete record.serviceFeeWorking;
+    }
+  }
+  delete publicRecord.changeRequests;
+  if (['client','supplier','ops_admin','super_admin'].includes(user?.role)) {
+    publicRecord.changeRequests = changesFor(store, order).map(row => publicChange(store, row, user.role));
+    publicRecord.specialInstructionLines = instructionLines(store, order, user);
+  } else { delete publicRecord.specialInstructions; delete publicRecord.specialInstructionsAcknowledgement; }
+  if (user?.role === 'client' && publicRecord.specialInstructionsAcknowledgement) delete publicRecord.specialInstructionsAcknowledgement.supplierId;
+  const supplement = supplementTotals(store, order);
+  if (['client','ops_admin','super_admin'].includes(user?.role) && supplement.totalMinor) {
+    publicRecord.supplementalTotalMinor = supplement.totalMinor;
+    publicRecord.totalIncludingSupplementsMinor = order.totalMinor + supplement.totalMinor;
+  }
+  delete publicRecord.riderProgress;
+  delete publicRecord.deliveryMilestones;
+  if (order.fulfillmentMode === 'delivery' && (['ops_admin', 'super_admin'].includes(user?.role)
+      || (user?.role === 'client' && user.id === order.clientId) || (user?.role === 'rider' && user.id === order.riderId))) {
+    publicRecord.deliveryMilestones = deliveryMilestones(order);
+  }
   delete publicRecord.operatingClock;
+  delete publicRecord.shopClock;
+  delete publicRecord.shopClockVersion;
+  if (order.shopClockVersion === 1 && (['ops_admin', 'super_admin'].includes(user?.role)
+      || (user?.role === 'client' && user.id === order.clientId))) {
+    const finishedAt = order.readyAt && productionTiming(order, order.readyAt).finishedAt;
+    publicRecord.readyEarly = Boolean(finishedAt && order.readyBy && Date.parse(finishedAt) < Date.parse(order.readyBy));
+    publicRecord.readyLabel = publicRecord.readyEarly ? 'Ready early' : null;
+  }
+  delete publicRecord.productionTimeCorrection;
   delete publicRecord.reviewSchedule;
   delete publicRecord.reviewDelayed;
   if (['ops_admin', 'super_admin'].includes(user?.role) || (user?.role === 'client' && user.id === order.clientId)) {
@@ -1019,7 +1129,7 @@ export function publicOrderFor(order, user, store = null) {
     if (review) publicRecord.review = review;
   }
   if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
-  if (user?.role === "client" && order.organizationDiscountRateBps > 0) {
+  if (user?.role === "client" && (order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 || order.pendingQuote?.serviceFeeSchedule?.version === 2)) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
       if (!record) continue;
       if (record.supplierSubtotalMinor != null && record.serviceFeeMinor != null) record.clientItemSubtotalMinor = record.supplierSubtotalMinor + (record.grossServiceFeeMinor ?? record.serviceFeeMinor);
@@ -1043,7 +1153,7 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.rescheduleRequest;
   const reschedule = publicReschedule(order, user);
   if (reschedule) publicRecord.rescheduleRequest = reschedule;
-  if (order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
+  if (changesFor(store, order).some(row => row.status === 'applied' && row.data.proposedReadyBy) || order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
     publicRecord.promisedDate = user?.role === 'supplier' ? order.readyBy : order.promiseBy;
   }
   if (["supplier", "rider"].includes(user?.role)) {
@@ -1059,6 +1169,10 @@ export function publicOrderFor(order, user, store = null) {
     publicRecord.artworkName = (store?.files || []).find((file) => file.fileId === lastId)?.originalFilename
       || (lastId && unchanged ? publicRecord.artworkName : null) || null;
   }
+  publicRecord.artworkPreviews = (publicRecord.artworkFileIds || [])
+    .map(fileId => (store?.files || []).find(file => file.fileId === fileId))
+    .filter(file => publicArtworkPreview(file))
+    .map(file => ({ fileId: file.fileId, ...publicArtworkPreview(file) }));
   /*
     Whether this order has been rated, so a client is asked once.
 
@@ -1103,6 +1217,19 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.attachments;
   // Credentials are available only from the caller-scoped handover endpoint.
   delete publicRecord.handover;
+  delete publicRecord.deliveryPin;
+  const deliveryPin = publicDeliveryPin(order, user?.role);
+  if (deliveryPin) {
+    publicRecord.deliveryPin = deliveryPin;
+    publicRecord.address = deliveryPin.point.label;
+    if (order.deliveryPin.change?.status === 'applied') publicRecord.deliveryDistanceMeters = order.deliveryPin.change.distanceMeters;
+    if (user?.role === 'rider') {
+      delete publicRecord.requestedDropoff;
+      delete publicRecord.requestFulfillment;
+    }
+    publicRecord.effectiveDeliveryFeeMinor = effectiveDeliveryFeeMinor(order);
+    publicRecord.effectiveTotalMinor = order.totalMinor + (effectiveDeliveryFeeMinor(order) - order.deliveryFeeMinor);
+  }
   delete publicRecord.dropoffConfirmationPricing;
   delete publicRecord.dropoffConfirmation;
   const dropoffConfirmation = publicDropoffConfirmation(order, user?.role);
@@ -1120,6 +1247,9 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  if (!ops && !owningClient) {
+    for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor']) delete publicRecord[field];
+  }
   // Legacy payment breakdowns carry fee labels. Hide that breakdown for the
   // client when checkout hides fees, including immutable quote snapshots.
   if (owningClient && store?.settings?.serviceFeeVisibleToClient === false) {
@@ -1137,10 +1267,42 @@ export function publicOrderFor(order, user, store = null) {
   // Same related parties as artwork; signing rechecks file authorization.
   delete publicRecord.packingProgress;
   delete publicRecord.packingPhotoFileIds;
-  if (ops || owningClient || assignedSupplier) {
+  if (ops || owningClient || assignedSupplier || (riderPackingFlow(order) && rider && order.riderId === user.id)) {
     publicRecord.packingProgress = packingProgressFor(store, order);
   }
+  delete publicRecord.finishedProductPhotoFileIds;
+  delete publicRecord.shopHandover;
+  delete publicRecord.forcedSteps;
+  const relatedRider = rider && order.riderId === user.id;
+  if (ops || assignedSupplier || relatedRider) {
+    publicRecord.shopHandover = structuredClone(order.shopHandover || {});
+    publicRecord.forcedSteps = structuredClone(order.forcedSteps || []);
+    publicRecord.handoverFlow = riderPackingFlow(order) ? 'rider_packs' : 'legacy';
+    if (riderPackingFlow(order)) publicRecord.pickupReminder = 'Ready for rider pickup. Prepare packing materials. Do not pack yet; unpack any already-packed items for the rider check.';
+  }
+  publicRecord.forcedByGridgo = Boolean(order.forcedSteps?.length);
+  if (ops) {
+    publicRecord.forcedStepReasonCodes = [...FORCED_STEP_REASONS];
+    publicRecord.shopArrivedPackedCount = (store?.orders || []).reduce((count, candidate) => count
+      + (candidate.shopHandover?.arrivedPacked || []).filter(event => event.supplierId === order.supplierId).length, 0);
+  }
+  delete publicRecord.transitionReadiness;
+  delete publicRecord.jobDetails;
+  if (ops || assignedSupplier) {
+    publicRecord.transitionReadiness = Object.fromEntries(PACKAGING_STATES.map(next =>
+      [next, productionTransitionReadiness(store, order, next)]));
+    publicRecord.jobDetails = supplierJobDetails(order, publicRecord.productionItems, store);
+  }
+  if (assignedSupplier) {
+    publicRecord.promisedDate = publicRecord.jobDetails.missing.includes("promisedDate") ? null : publicRecord.jobDetails.promisedDate;
+    publicRecord.material = publicRecord.jobDetails.material;
+    publicRecord.artworkName = displayFilename(publicRecord.artworkName);
+    publicRecord.timeline = supplierProgressTimeline(order);
+  }
   // Only the two people in the conversation learn it exists (gridgo-client#198).
+  delete publicRecord.pickupChat;
+  const pickupChat = pickupChatProjection(order, user, store);
+  if (pickupChat) publicRecord.pickupChat = pickupChat;
   delete publicRecord.deliveryChat;
   const deliveryChat = deliveryChatProjection(order, user);
   if (deliveryChat) publicRecord.deliveryChat = deliveryChat;
@@ -1150,6 +1312,10 @@ export function publicOrderFor(order, user, store = null) {
   }
   if (!ops && !assignedSupplier) {
     publicRecord.timeline = publicProgressTimeline(order.timeline);
+    if (riderPackingFlow(order)) for (const entry of publicRecord.timeline) {
+      if (entry.state === 'supplier_self_qc') entry.note = 'Checking your finished order';
+      if (entry.state === 'ready_for_dispatch') entry.note = 'Ready for rider pickup';
+    }
     if (publicRecord.state === "payout_released") publicRecord.state = "completed";
     for (const field of ["payoutMilestones", "payoutPlanVersion", "payoutHold", "fulfilmentProofFileIds", "productionPhotoFileIds"]) {
       delete publicRecord[field];
@@ -1157,7 +1323,7 @@ export function publicOrderFor(order, user, store = null) {
   }
   if (ops || rider) {
     if (order.deliveryFeeMinor != null) Object.assign(publicRecord,
-      deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000));
+      adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000)));
   } else {
     for (const field of ["riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor"]) {
       delete publicRecord[field];
@@ -1229,6 +1395,7 @@ export function publicOrderFor(order, user, store = null) {
   if (assignedSupplier && reporting) publicRecord.supplierSettlement = reporting.supplierSettlement;
   if (ops && reporting) {
     publicRecord.supplierSettlement = reporting.supplierSettlement;
+    if (reporting.voucherFunding) publicRecord.voucherFunding = reporting.voucherFunding;
     publicRecord.platformRevenue = reporting.platformRevenue;
     publicRecord.deliverySettlement = reporting.deliverySettlement;
   }
@@ -1352,6 +1519,25 @@ export function publicOrderFor(order, user, store = null) {
       delete installment.rejectionReason;
     }
   }
+  if (['supplier', 'rider'].includes(user?.role)) {
+    if (user.role === 'supplier') publicRecord.timeline = publicRecord.timeline.map(entry => {
+      if (entry.state === 'delivered' || entry.by === order.clientId) {
+        const plain = publicProgressTimeline([entry])[0];
+        return { at: entry.at, state: entry.state, note: plain?.note || 'Client updated order' };
+      }
+      return entry;
+    });
+    const assignedRider = rider && (order.riderId === user.id || (store?.orderJobs || []).some(job => job.orderId === order.id && job.riderId === user.id));
+    minimizePartyContact(publicRecord, assignedRider);
+    if (rider) {
+      if (publicRecord.payments) publicRecord.payments = Object.fromEntries(Object.entries(publicRecord.payments).map(([code, payment]) => [code, { status: payment?.status }]));
+      // Delivery workers need package/count/QA and route evidence, not the client's billing history.
+      for (const key of ['acceptedQuote','pendingQuote','quoteHistory','invoice','billing',
+        'credit','credits','organizationDiscountMinor','organizationDiscountRateBps','serviceFeeMinor',
+        'serviceFeeRateBps','grossServiceFeeMinor','supplierSubtotalMinor','subtotalMinor','totalMinor',
+        'supplierPlatformPayoutMinor','onlineDueMinor','directStoreDueMinor','paymentPlan','effectiveTotalMinor']) delete publicRecord[key];
+    }
+  }
   return publicRecord;
 }
 
@@ -1374,7 +1560,7 @@ function closeIssueWindow(store, order, at, { by, note }) {
   order.updatedAt = at;
   if (!Array.isArray(order.timeline)) order.timeline = [];
   order.timeline.push({ at, state: "completed", by, note });
-  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION) return;
+  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
   const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
   if (retention?.pofFileIds?.length) {
     releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);

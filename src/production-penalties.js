@@ -1,3 +1,5 @@
+import { shopSlaClock } from './shop-hours.js';
+import { riderPackingFlow } from './shop-handover.js';
 import { slaElapsed } from './operating-hours.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { formatMinorPhp } from './payout-copy.js';
@@ -29,12 +31,53 @@ export function latenessTier(deadlineAt, finishedAt, noCommunication = false, cl
   return noCommunication || late > 24 * 3600000 ? 'severe' : late > 6 * 3600000 ? 'moderate' : 'minor';
 }
 
+/** The QA wait is staff time, not shop production time. Keep readyBy/readyAt
+ * snapshots untouched; all lateness consumers use this same effective clock.
+ * Rejected attempts earn only their actual review interval, in the order's
+ * snapshotted operating calendar. A new supplier never inherits that credit.
+ */
+export function productionTiming(order, at) {
+  let finishedAt = order.readyAt || null;
+  let endpoint = finishedAt || at;
+  let pendingReview = false;
+  let reviewWaitMs = 0;
+  if (riderPackingFlow(order)) {
+    const handover = order.shopHandover;
+    const submitted = handover?.finished?.supplierId === order.supplierId ? handover.finished : null;
+    if (submitted && (!handover.review || handover.review.decision === 'approved')) {
+      endpoint = submitted.at;
+      pendingReview = !handover.review && !order.readyAt && order.state === 'supplier_self_qc';
+      if (handover.review?.decision === 'approved' || order.readyAt) finishedAt = submitted.at;
+    }
+    for (const attempt of (endpoint ? handover?.attempts || [] : [])) {
+      if (attempt.finished?.supplierId !== order.supplierId || attempt.review?.decision !== 'rejected') continue;
+      const end = new Date(Math.min(Date.parse(attempt.review.at), Date.parse(endpoint))).toISOString();
+      if (Date.parse(end) > Date.parse(attempt.finished.at)) {
+        reviewWaitMs += Math.max(0, slaElapsed(shopSlaClock(order), attempt.finished.at, end));
+      }
+    }
+  }
+  const elapsedMs = productionDeadline(order) && endpoint
+    ? slaElapsed(shopSlaClock(order), productionDeadline(order), endpoint) - reviewWaitMs : NaN;
+  return { finishedAt, pendingReview, elapsedMs, reviewWaitMs };
+}
+
+export function productionLatenessTier(order, at, noCommunication = Boolean(order.productionNoCommunication)) {
+  const { elapsedMs } = productionTiming(order, at);
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+  return noCommunication || elapsedMs > 24 * 3600000 ? 'severe' : elapsedMs > 6 * 3600000 ? 'moderate' : 'minor';
+}
+
 export function cappedPenaltyMinor(remainingMinor, rateBps) {
   if (!Number.isSafeInteger(remainingMinor) || remainingMinor < 0 || !Number.isInteger(rateBps) || rateBps < 0) {
     throw new RangeError('Penalty amounts require non-negative safe integer minor units and integer basis points');
   }
   const amount = (BigInt(remainingMinor) * BigInt(rateBps) + 5000n) / 10000n;
   return Number(amount > BigInt(remainingMinor) ? BigInt(remainingMinor) : amount);
+}
+
+export function supplierPenaltyAllowed(store, supplierId) {
+  return !store?.legalPenaltyGate || store.legalPenaltyGate.acceptedSupplierIds.includes(supplierId);
 }
 
 export function orderPenaltyMinor(order) {
@@ -61,7 +104,8 @@ function warningText(lapse) {
 }
 
 function recordEvent(store, order, lapse, kind, at, createId) {
-  const body = kind === 'warning' ? warningText(lapse)
+  const body = kind === 'warning' ? warningText(order.productionTimeCorrection?.penaltyExempt
+    ? { ...lapse, policy: { ...lapse.policy, deductionsEnabled: false } } : lapse)
     : `A late-production deduction of ${formatMinorPhp(lapse.deductionMinor)} was applied to this order's unpaid shop payout. Nothing carries over to another order.`;
   if (kind === 'warning') lapse.warnings.push({ tier: lapse.tier, at, message: body, formal: lapse.tier !== 'minor' });
   store.auditLog.push({ id: createId('aud'), at, actorId: null, actorRole: 'system', action: `production_lapse.${kind}`,
@@ -91,10 +135,12 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       continue;
     }
     if (!order.readyAt && !WATCHED.has(order.state)) continue;
-    const tier = latenessTier(productionDeadline(order), order.readyAt || at, Boolean(order.productionNoCommunication), order.operatingClock);
+    const timing = productionTiming(order, at);
+    const tier = productionLatenessTier(order, at);
     if (!tier) continue;
     if (!lapse) {
       const policy = productionPenaltySettings(store.settings);
+      if (order.productionTimeCorrection?.penaltyExempt) policy.deductionsEnabled = false;
       lapse = { id: createId('lapse'), orderId: order.id, supplierId: order.supplierId,
         deadlineAt: productionDeadline(order), detectedAt: at, tier, rateBps: policy[`${tier}Bps`],
         policy, settingsVersion: store.version, warnings: [], deductionMinor: 0, remainingBalanceMinor: 0,
@@ -111,11 +157,12 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       changed = true;
       continue; // A warning must commit before this tier can deduct.
     }
-    if (!lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
-    if (!order.readyAt && lapse.tier !== 'severe') continue;
+    if (order.productionTimeCorrection?.penaltyExempt || !lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
+    if (timing.pendingReview || (!timing.finishedAt && lapse.tier !== 'severe')) continue;
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
     if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
       && ['open', 'payout_held'].includes(claim.status))) continue;
+    if (!supplierPenaltyAllowed(store, order.supplierId)) continue;
     const unpaid = (order.payoutMilestones || []).filter((stage) => !['released', 'superseded'].includes(stage.status));
     const remaining = unpaid.reduce((sum, stage) => sum + BigInt(stage.amountMinor), 0n);
     if (remaining > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError('Remaining payout exceeds safe integer minor units');
@@ -129,6 +176,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       stage.amountMinor -= deduction;
       left -= deduction;
     }
+    if (store.legalPenaltyGate) lapse.supplierAgreementVersionId = store.legalPenaltyGate.versionId;
     lapse.appliedAt = at;
     order.updatedAt = at;
     recordEvent(store, order, lapse, 'deduction', at, createId);
@@ -141,6 +189,6 @@ export function supplierLapses(store, supplierId) {
   return (store.productionLapses || []).filter((lapse) => lapse.supplierId === supplierId)
     .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map((lapse) => ({ ...lapse,
       reassignmentEligible: lapse.tier === 'severe',
-      status: lapse.appliedAt ? 'applied' : lapse.closedAt ? 'closed' : lapse.policy.deductionsEnabled ? 'warned' : 'warning_only',
+      status: lapse.appliedAt ? 'applied' : lapse.closedAt ? 'closed' : lapse.policy.deductionsEnabled && !(store.orders || []).find(order => order.id === lapse.orderId)?.productionTimeCorrection?.penaltyExempt ? 'warned' : 'warning_only',
     }));
 }

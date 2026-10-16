@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import { up as minuteUp } from '../migrations/1791981000000_production_minutes.js';
 import { up } from '../migrations/1791936000000_production_days.js';
 
 // Exercise the actual forward SQL on the old table shape in an isolated schema.
@@ -47,6 +48,14 @@ test('forward migration rounds every production source up and preserves collidin
     assert.equal((await db.query("SELECT default_turnaround_days FROM listing_starters WHERE id='starter'")).rows[0].default_turnaround_days, 1);
     assert.equal((await db.query("SELECT default_turnaround_days FROM listing_starters WHERE id='unset'")).rows[0].default_turnaround_days, null);
     assert.equal((await db.query("SELECT turnaround_hours_snapshot FROM order_line_items WHERE id='historic'")).rows[0].turnaround_hours_snapshot, 3);
+    const statements = [];
+    await minuteUp({ sql: value => statements.push(value) });
+    for (const statement of statements) await db.query(statement);
+    assert.equal((await db.query("SELECT turnaround_minutes FROM supplier_catalog_items WHERE id='custom_item'")).rows[0].turnaround_minutes, 1530);
+    assert.equal((await db.query("SELECT turnaround_minutes_snapshot FROM order_line_items WHERE id='historic'")).rows[0].turnaround_minutes_snapshot, null);
+    await db.query('SAVEPOINT minute_snapshot');
+    await assert.rejects(db.query("UPDATE order_line_items SET turnaround_minutes_snapshot=180 WHERE id='historic'"), /immutable/);
+    await db.query('ROLLBACK TO SAVEPOINT minute_snapshot');
     await db.query('SAVEPOINT immutable_snapshot');
     await assert.rejects(db.query("UPDATE order_line_items SET turnaround_days_snapshot=1 WHERE id='historic'"), /immutable/);
     await db.query('ROLLBACK TO SAVEPOINT immutable_snapshot');
