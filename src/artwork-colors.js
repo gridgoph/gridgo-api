@@ -635,7 +635,6 @@ export async function readPngColors(bytes, { complete = true } = {}) {
   const counts = new Uint32Array(4096);
   const sums = new Float64Array(4096 * 3);
   let opaque = 0;
-  let sampled = 0;
   const max = (1 << depth) - 1;
   const palette = chunks.plte;
   const trns = chunks.trns;
@@ -653,8 +652,10 @@ export async function readPngColors(bytes, { complete = true } = {}) {
   // A fixed grid of about four million pixels is plenty to rank colours that
   // each cover half a percent or more, and keeps a poster-sized file cheap.
   const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / MAX_SAMPLED_PIXELS)));
-  const rowStep = interlaced ? 1 : step;
-  const columnStep = interlaced ? 1 : step;
+  // Interlaced passes use the same grid within each pass, so the sample stays
+  // even across the image whichever pass it comes from.
+  const rowStep = step;
+  const columnStep = step;
   const countRow = (row, pixels) => {
     for (let x = 0; x < pixels; x += columnStep) {
       let r; let g; let b; let alpha = 255;
@@ -680,7 +681,6 @@ export async function readPngColors(bytes, { complete = true } = {}) {
         b = toByte(blue);
         if (type === 6) alpha = toByte(sample(row, x * channels + 3));
       }
-      sampled += 1;
       if (alpha < 128) continue;
       const bin = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
       counts[bin] += 1;
@@ -750,9 +750,6 @@ export async function readPngColors(bytes, { complete = true } = {}) {
         if (filled === stride) finishRow();
       }
       if (passIndex >= passes.length) stop("complete");
-      // Interlaced passes are counted whole, but the first passes already
-      // cover the image on an even grid, so enough of them is a fair sample.
-      else if (interlaced && sampled >= MAX_SAMPLED_PIXELS) stop("complete");
       else if (total >= MAX_PNG_RAW_BYTES) stop("limit");
     });
     inflate.on("end", () => stop(passIndex >= passes.length ? "complete" : "short"));
