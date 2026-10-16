@@ -377,8 +377,15 @@ Firebase project: **`gridgo-c2ce9`**. FCM apps need its `google-services.json` /
 ### `POST /devices`
 
 ```json
-{ "token": "fcm-registration-token-from-firebase", "platform": "android" }
+{ "token": "fcm-registration-token-from-firebase", "platform": "android", "installChannel": "play" }
 ```
+
+`installChannel` is optional and says how this build was installed: `apk` (the
+APK download), `play` (Google Play) or `ios` (TestFlight). A body without it —
+every build released before the field — is stored as unreported and treated as
+`apk`. Each re-registration replaces the stored value. It decides which app
+release notice the device receives; see
+[Release announcements: install channels](RELEASE_ANNOUNCEMENTS_API.md#install-channels).
 
 `201` when this token was not registered anywhere, `200` when an existing registration was updated or moved:
 
@@ -390,6 +397,7 @@ Firebase project: **`gridgo-c2ce9`**. FCM apps need its `google-services.json` /
     "platform": "android",
     "appRole": null,
     "tokenProvider": "fcm",
+    "installChannel": "play",
     "tokenTail": "a7c8d3f1",
     "createdAt": "2026-08-11T02:00:00.000Z",
     "updatedAt": "2026-08-11T02:00:00.000Z"
@@ -399,7 +407,7 @@ Firebase project: **`gridgo-c2ce9`**. FCM apps need its `google-services.json` /
 }
 ```
 
-`reassigned` is `true` when the token was taken from another account. **The raw token is never returned** by any route; `tokenTail` is its last eight characters, enough to identify a registration in a list or a support conversation.
+`installChannel` is `null` when the registration reported none. `reassigned` is `true` when the token was taken from another account. **The raw token is never returned** by any route; `tokenTail` is its last eight characters, enough to identify a registration in a list or a support conversation.
 
 Registering a token that is currently **unclaimed** claims it for the caller: the same row, now owned, and `reassigned` is `false` because nobody lost a phone.
 
@@ -408,6 +416,7 @@ Registering a token that is currently **unclaimed** claims it for the caller: th
 | `400` | `device_token_required` | `token` missing, empty, or not a string |
 | `400` | `device_token_too_long` | `token` longer than 4096 characters |
 | `400` | `invalid_token_provider` | unsupported provider, or APNs with a non-iOS platform |
+| `400` | `invalid_install_channel` | `installChannel` is present but not `apk`, `play`, or `ios`; the response repeats `allowed` |
 | `403` | `forbidden` | authenticated `appRole` is unknown or not a held membership |
 | `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
 | `401` | `unauthorized` | the request carried a bearer token that is expired or unknown |
@@ -462,8 +471,10 @@ An "update your app" notice has to reach every install, including the ones whose
 
 ```
 POST /devices          (no Authorization header)
-{ "token": "fcm-registration-token-from-firebase", "platform": "android" }
+{ "token": "fcm-registration-token-from-firebase", "platform": "android", "installChannel": "play" }
 ```
+
+`installChannel` is optional here too, with the same values and meaning.
 
 ```json
 { "ok": true }
@@ -477,6 +488,7 @@ POST /devices          (no Authorization header)
 | `400` | `invalid_device_token` | FCM token is not 64–4096 characters of `A–Z a–z 0–9 _ : . -`, or explicit APNs token is not 64 hexadecimal characters |
 | `400` | `invalid_token_provider` | unsupported provider, or APNs with a non-iOS platform |
 | `400` | `invalid_device_platform` | `platform` is not `android`, `ios`, or `web`; the response repeats `allowed` |
+| `400` | `invalid_install_channel` | `installChannel` is present but not `apk`, `play`, or `ios`; the response repeats `allowed` |
 
 What apps can rely on:
 
@@ -485,7 +497,7 @@ What apps can rely on:
 - **`POST /devices/unregister` with no `Authorization` header** removes an unclaimed registration and answers `200 {"ok": true}`. A *claimed* registration is left alone and answers identically; removing one still requires its owner's bearer token.
 - **The unclaimed pool is bounded.** Past the pilot ceiling (5,000; `GRIDGO_MAX_UNCLAIMED_DEVICES`) the least recently seen unclaimed registrations are evicted to make room. Claimed registrations are never evicted, and a phone evicted while idle re-registers on its next launch. Registration is not refused at the ceiling: a refusal would let one script close the app-update channel to every genuine new install until an operator intervened.
 
-**What an unclaimed handset may receive — the hard rule.** An unclaimed registration is an anonymous phone; nothing proves who is holding it. It may only ever be sent a general announcement: never an order, a payout, a claim, an issue, a name, an amount, or anything else tied to a person. This is enforced in the delivery path — the delivery router refuses any batch containing an unclaimed device unless the message carries `data` of exactly `{"type": "announcement"}` — not by convention at the call sites.
+**What an unclaimed handset may receive — the hard rule.** An unclaimed registration is an anonymous phone; nothing proves who is holding it. It may only ever be sent a general announcement: never an order, a payout, a claim, an issue, a name, an amount, or anything else tied to a person. This is enforced in the delivery path — the delivery router refuses any batch containing an unclaimed device unless the message carries `data` of exactly `{"type": "announcement"}`, or, for an app release notice, `{"type": "announcement", "releaseChannel": …, "storeTarget": …}` with one of the fixed channel/target pairs in [Release announcements](RELEASE_ANNOUNCEMENTS_API.md#notification-data) — not by convention at the call sites.
 
 ### What a push looks like
 
@@ -512,12 +524,12 @@ Example FCM v1 message for an eligible device:
 ```
 
 - Domain push copy follows the privacy policy in [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope); fetch the inbox for the detailed message. Announcements retain their public broadcast copy.
-- `data` values are always strings, and the keys are exactly `notificationId`, `type`, `orderId`, `at`. Keys with no value are omitted — a notification with no order carries no `orderId`. Route on `type` and `orderId`; fetch the order and re-read `GET /notifications` after opening, because the push carries no order state.
+- `data` values are always strings, and the keys are exactly `notificationId`, `type`, `orderId`, `at`, plus `releaseChannel` and `storeTarget` on an app release notice ([fixed values](RELEASE_ANNOUNCEMENTS_API.md#notification-data)). Keys with no value are omitted — a notification with no order carries no `orderId`. Route on `type` and `orderId`; fetch the order and re-read `GET /notifications` after opening, because the push carries no order state.
 - **Android apps must create the notification channel `gridgo_default` with default sound and suitable importance** before requesting a token. If that channel does not exist on Android 8+, FCM falls back to the manifest default channel; its settings may differ. Android channel settings govern sound even when the payload requests it.
 - **`shop_production_inactive` and `ops_production_inactive` are the only types that name a different channel and sound.** Their FCM `android.notification.channel_id` is `gridgo_production_nudge`; their Android `sound` and APNs `aps.sound` are `notification_alert.mp3`. The supplier app creates that channel and bundles the file. Every other type, including `shop_job_may_start`, stays on `gridgo_default` with Android `sound: "default"` and `aps.sound: "default"`. Client and rider apps do not create the production channel. Lock-screen title and body stay the generic domain copy above; the detailed shop sentences live in the inbox.
 - `type` is the same discriminator as on the notification record: `supplier_assignment_final_price`, `pickup_check_escalation`, `pickup_escalation_resolved`, and any later value. Treat unknown types as "open the notification list".
 
-**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those four keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Domain title/body copy is also generic under the realtime privacy policy.
+**No money reaches a device.** The `data` map is an allowlist, not a redaction pass: nothing outside those keys is ever sent, so supplier settlement, payout milestone amounts, service-fee amounts, and every other money field stay off the lock screen even if a future notification record carries them. Domain title/body copy is also generic under the realtime privacy policy.
 
 Native APNs sends the same allowed data fields at the payload root alongside `aps.alert` and `aps.sound: "default"`. It does not include the optional announcement image.
 

@@ -88,6 +88,10 @@ export function publicNotification(notification, order) {
   if (notification.orderId) item.orderId = notification.orderId;
   if (notification.imageUrl) item.imageUrl = notification.imageUrl;
   if (notification.announcementId) item.announcementId = notification.announcementId;
+  if (notification.releaseChannel) {
+    item.releaseChannel = notification.releaseChannel;
+    item.storeTarget = notification.storeTarget;
+  }
   if (notification.approvalCaseId) item.approvalCaseId = notification.approvalCaseId;
   if (notification.catalogItemId) item.catalogItemId = notification.catalogItemId;
   if (order?.title) item.orderTitle = order.title;

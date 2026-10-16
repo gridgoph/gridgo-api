@@ -5139,7 +5139,8 @@ test("release announcements are atomic, audience-scoped and idempotent across bo
       assert.equal(send.body.message.data.type, "announcement");
       assert.match(send.body.message.notification.title, /^GRIDGO (Client|Supplier|Rider) 1\.0\.123 is ready$/);
       assert.equal(send.body.message.notification.body, "Update now for the latest fixes and features.");
-      if (send.body.message.token.includes("anon")) assert.deepEqual(send.body.message.data, { type: "announcement" });
+      if (send.body.message.token.includes("anon")) assert.deepEqual(send.body.message.data, { type: "announcement", releaseChannel: "apk", storeTarget: "apk_download" });
+      else assert.deepEqual([send.body.message.data.releaseChannel, send.body.message.data.storeTarget], ["apk", "apk_download"]);
     }
     assert.equal((await database.query("SELECT count(*) AS count FROM release_announcements")).rows[0].count, 3);
     // Inbox retention cannot erase the durable idempotency history.
@@ -5152,6 +5153,133 @@ test("release announcements are atomic, audience-scoped and idempotent across bo
     assert.equal(nextVersion.status, 201);
     assert.notEqual(nextVersion.body.announcement.id, replay.body.announcement.id);
 
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise(resolve => instance.child.once("exit", resolve));
+    await fcm.close();
+    await database.close();
+  }
+});
+
+test("device registration records the install channel and old bodies still register as unreported", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const instance = await startApi();
+  const deviceToken = (name) => `${name}:${"x".repeat(120)}`;
+  const register = (body, subject = "clerk_client") => request(instance.api, "/devices", { method: "POST", subject, body });
+  try {
+    const legacy = await register({ token: deviceToken("legacy"), platform: "android", appRole: "client" });
+    assert.equal(legacy.status, 201, JSON.stringify(legacy.body));
+    assert.equal(legacy.body.device.installChannel, null);
+    const play = await register({ token: deviceToken("store"), platform: "android", appRole: "client", installChannel: "play" });
+    assert.equal(play.status, 201);
+    assert.equal(play.body.device.installChannel, "play");
+    // Re-registration replaces the reported channel, including back to unreported.
+    assert.equal((await register({ token: deviceToken("store"), platform: "android", appRole: "client", installChannel: "apk" })).body.device.installChannel, "apk");
+    assert.equal((await register({ token: deviceToken("store"), platform: "android", appRole: "client" })).body.device.installChannel, null);
+    const ios = await register({ token: deviceToken("phone"), platform: "ios", appRole: "client", installChannel: "ios" });
+    assert.equal(ios.body.device.installChannel, "ios");
+    for (const installChannel of ["sideload", "", "PLAY", 1]) {
+      const refused = await register({ token: deviceToken("store"), platform: "android", installChannel });
+      assert.equal(refused.status, 400);
+      assert.deepEqual(refused.body, { error: "invalid_install_channel", allowed: ["apk", "play", "ios"] });
+    }
+    const anonymous = (body) => request(instance.api, "/devices", { method: "POST", body });
+    assert.deepEqual((await anonymous({ token: deviceToken("anon-old"), platform: "android" })).body, { ok: true });
+    assert.deepEqual((await anonymous({ token: deviceToken("anon-play"), platform: "android", installChannel: "play" })).body, { ok: true });
+    assert.equal((await anonymous({ token: deviceToken("anon-bad"), platform: "android", installChannel: "web" })).status, 400);
+    const listed = await request(instance.api, "/devices", { subject: "clerk_client" });
+    assert.deepEqual(listed.body.devices.map((device) => device.installChannel).sort(), ["ios", null, null].sort());
+    const store = await loadStore(database);
+    const byName = (name) => store.deviceTokens.find((device) => device.token === deviceToken(name));
+    assert.equal(byName("anon-old").installChannel, null);
+    assert.equal(byName("anon-play").installChannel, "play");
+    assert.equal(byName("anon-bad"), undefined);
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise(resolve => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
+test("release announcements reach only their install channel, with store copy and per-channel dedupe", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  const fcm = await startMockFcm();
+  const instance = await startApi({ ...fcm.env, RELEASE_ANNOUNCE_TOKEN: "release-test-secret", GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: "0" });
+  const post = (body) => request(instance.api, "/release-announcements", {
+    method: "POST", body, headers: { Authorization: "Bearer release-test-secret" },
+  });
+  try {
+    for (const channel of ["web", "", null, "APK"]) {
+      assert.equal((await post({ app: "client", version: "2.0.0", channel })).status, 400);
+    }
+    await database.query("DELETE FROM release_announcements");
+    await database.transaction(async () => {
+      const store = await loadStore(database);
+      store.users.push(
+        { id: "user_play", clerkUserId: "clerk_play", email: "play@gridgo.test", name: "Play", role: "client", accountType: "individual", createdAt: AT },
+        { id: "user_ios", clerkUserId: "clerk_ios", email: "ios@gridgo.test", name: "iPhone", role: "client", accountType: "individual", createdAt: AT },
+        { id: "user_apk", clerkUserId: "clerk_apk", email: "apk@gridgo.test", name: "APK", role: "client", accountType: "individual", createdAt: AT },
+      );
+      for (const userId of ["user_play", "user_ios", "user_apk"]) store.userRoleMemberships.push({ userId, role: "client", createdAt: AT });
+      // user_client runs an old build that reports nothing; user_promote has no device at all.
+      for (const [deviceId, userId, installChannel, platform] of [
+        ["dev_unreported", "user_client", undefined, "android"], ["dev_apk", "user_apk", "apk", "android"],
+        ["dev_play", "user_play", "play", "android"], ["dev_ios", "user_ios", "ios", "ios"],
+        ["dev_anon_unreported", null, undefined, "android"], ["dev_anon_play", null, "play", "android"],
+        ["dev_anon_ios", null, "ios", "ios"], ["dev_anon_rider_play", null, "play", "android"],
+      ]) store.deviceTokens.push({ id: deviceId, userId, appRole: deviceId.includes("rider") ? "rider" : "client",
+        ...(installChannel ? { installChannel } : {}), token: deviceId + ":" + "x".repeat(120), platform, createdAt: AT, updatedAt: AT });
+      await saveStore(database, store);
+    });
+    const sendsFor = (version) => fcm.sends.filter((s) => s.body.message.notification.title.includes(` ${version} `));
+    const settle = async (version, count) => {
+      for (let attempt = 0; attempt < 200 && sendsFor(version).length < count; attempt++) await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return sendsFor(version);
+    };
+    const expected = {
+      apk: { devices: ["dev_anon_unreported", "dev_apk", "dev_unreported"], users: ["user_apk", "user_client", "user_promote"],
+        title: "GRIDGO Client 2.0.0 is ready", body: "Update now for the latest fixes and features.", storeTarget: "apk_download" },
+      play: { devices: ["dev_anon_play", "dev_play"], users: ["user_play"],
+        title: "GRIDGO Client 2.0.0 is on the Play Store", body: "Update from the Play Store for the latest fixes and features.", storeTarget: "play_store" },
+      ios: { devices: ["dev_anon_ios", "dev_ios"], users: ["user_ios"],
+        title: "GRIDGO Client 2.0.0 is in TestFlight", body: "Update in TestFlight for the latest fixes and features.", storeTarget: "testflight" },
+    };
+    let seen = 0;
+    for (const channel of ["apk", "play", "ios"]) {
+      // No channel is the existing APK workflow body.
+      const created = await post(channel === "apk" ? { app: "client", version: "2.0.0" } : { app: "client", version: "2.0.0", channel });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      const want = expected[channel];
+      assert.equal(created.body.announcement.releaseChannel, channel);
+      assert.equal(created.body.announcement.storeTarget, want.storeTarget);
+      assert.equal(created.body.announcement.title, want.title);
+      const sends = (await settle("2.0.0", seen + want.devices.length)).slice(seen);
+      seen += sends.length;
+      assert.deepEqual(sends.map((s) => s.body.message.token.split(":")[0]).sort(), want.devices, `${channel}: ${instance.output()}`);
+      for (const send of sends) {
+        assert.equal(send.body.message.notification.title, want.title);
+        assert.equal(send.body.message.notification.body, want.body);
+        assert.equal(send.body.message.data.releaseChannel, channel);
+        assert.equal(send.body.message.data.storeTarget, want.storeTarget);
+        if (send.body.message.token.includes("anon")) assert.deepEqual(send.body.message.data, { type: "announcement", releaseChannel: channel, storeTarget: want.storeTarget });
+      }
+      const store = await loadStore(database);
+      const rows = store.notifications.filter((n) => n.announcementId === created.body.announcement.id);
+      assert.deepEqual(rows.map((n) => n.userId).sort(), want.users);
+      assert.equal(created.body.announcement.unclaimedDevices, 1);
+      const again = await post({ app: "client", version: "2.0.0", channel });
+      assert.equal(again.status, 200);
+      assert.deepEqual(again.body.announcement, created.body.announcement);
+    }
+    assert.equal((await settle("2.0.0", seen + 1)).length, seen, "a repeated (app, version, channel) never sends twice");
+    assert.deepEqual((await database.query("SELECT channel FROM release_announcements ORDER BY channel")).rows.map((r) => r.channel), ["apk", "ios", "play"]);
+    const inbox = await request(instance.api, "/notifications", { subject: "clerk_play" });
+    const notice = inbox.body.notifications.find((n) => n.type === "announcement");
+    assert.equal(notice.releaseChannel, "play");
+    assert.equal(notice.storeTarget, "play_store");
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise(resolve => instance.child.once("exit", resolve));
