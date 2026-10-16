@@ -20,6 +20,7 @@ import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
 import { publicOrderCoverSpine } from "./hardbound-cover.js";
 import { defaultArtworkGuidance, publicArtworkGuidance } from "./artwork-guidance.js";
+import { artworkColorsFor, colorTargetsFor } from "./color-targets.js";
 import { publicRecovery } from './shop-recovery-projection.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier, productionTiming } from './production-penalties.js';
@@ -1012,6 +1013,7 @@ function productionItemsFor(store, order, user) {
         // Old snapshots did not keep the unit. Never substitute today's listing unit.
         unit: ["mm", "cm", "m", "in", "ft"].includes(spec.measureUnit) ? spec.measureUnit : null,
       } : null;
+      const production = ["client", "supplier", "ops_admin", "super_admin"].includes(user?.role);
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
@@ -1040,9 +1042,13 @@ function productionItemsFor(store, order, user) {
         // What the uploaded files measured against the product type, and which
         // warnings the client accepted at checkout. Null on older orders.
         artworkGuidance: publicArtworkGuidance(line.artworkGuidance, user),
+        // The client's exact colours as agreed at checkout, and the colours
+        // each uploaded file uses. Production parties only; [] for riders.
+        colorTargets: production ? colorTargetsFor(line) : [],
+        artworkColors: production ? artworkColorsFor(store, artworkFileIdsFor(line)) : [],
         // The cover choice and spine lettering agreed at checkout. Null for
         // products that do not ask, older orders and riders.
-        coverSpine: ['client','supplier','ops_admin','super_admin'].includes(user?.role) ? publicOrderCoverSpine(line.coverSpine ?? null) : null,
+        coverSpine: production ? publicOrderCoverSpine(line.coverSpine ?? null) : null,
       };
     });
 }
