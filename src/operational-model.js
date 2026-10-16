@@ -1,3 +1,5 @@
+import { colourSettings, validateColourSettings } from './colour-pricing.js';
+import { publicColourQuote } from './colour-analysis.js';
 import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId } from './artwork-attachments.js';
 import { changesFor, publicChange, supplementTotals, changePayoutsFor } from './order-change-policy.js';
 import { instructionLines } from './special-instructions.js';
@@ -268,6 +270,7 @@ export function defaultOperationalSettings() {
     seasonWindowPush: { enabled: false, version: 1 },
     /** Recommended resolution and colour per product type. Warnings only; Super Admin edits it. */
     artworkGuidance: defaultArtworkGuidance(),
+    colourDetection: colourSettings(),
     deliveryFeeBands: [
       { zone: "nearby", label: "Nearby", maxDistanceMeters: 5_000, feeMinor: 8_900 },
       { zone: "away", label: "Away", maxDistanceMeters: 10_000, feeMinor: 14_900 },
@@ -278,6 +281,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.colourDetection !== undefined) validateColourSettings(settings.colourDetection);
   if (settings.serviceFeeSchedule) validateFeeSchedule(settings.serviceFeeSchedule);
   if (settings.scheduledServiceFee) {
     validateFeeSchedule(settings.scheduledServiceFee);
@@ -1030,10 +1034,15 @@ function productionItemsFor(store, order, user) {
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
         measurement,
         documentPages: structuredClone(line.documentPages ?? null),
+        quantityMode: line.quantityMode ?? null,
+        totalSheets: line.colourPricing?.totalSheets ?? (line.measurement?.pages ? line.measurement.pages * line.quantity : null),
+        colourPricing: publicColourQuote(line.colourPricing,user?.role),
         ...(['client','supplier','ops_admin','super_admin'].includes(user?.role) ? {
           specialInstructions: line.specialInstructions || '',
           ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.proposedSpec).at(-1);
             return change ? { agreedChange: { id: change.id, proposedSpec: change.data.proposedSpec, appliedAt: change.data.appliedAt } } : {}; })(),
+          ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.colourCorrection).at(-1);
+            return change ? { agreedColourCorrection: { id: change.id, appliedAt: change.data.appliedAt, ...structuredClone(change.data.colourCorrection) } } : {}; })(),
         } : {}),
         structuredSpec: Object.fromEntries(
           ["size", "material", "finish", "colorMode", "colourMode", "sides", "bleed", "layout", "binding", "instructions", "notes", "specialInstructions"]

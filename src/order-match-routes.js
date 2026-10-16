@@ -1,3 +1,5 @@
+import { parseQuantityMode } from './colour-pricing.js';
+import { colourQuoteFor, queueLineColour } from './colour-analysis.js';
 import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId, assertArtworkAttachmentLimit, validateArtworkAttachments, writeArtworkAttachments } from './artwork-attachments.js';
 import { specialInstructions } from './special-instructions.js';
 import { snapshotShopClock } from './shop-hours.js';
@@ -353,6 +355,7 @@ function cartLineSubtotal(store, line) {
     return priceCatalogSelection(store, item, {
       selectedOptions,
       quantity: line.quantity,
+      artworkSelection: line,
       measurement: item.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement || null,
     }).lineSubtotalMinor;
   } catch {
@@ -375,6 +378,10 @@ function cartLineSubtotal(store, line) {
  */
 function assertCartLinePriceable(store, item, line) {
   const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
+  if (item.pricedByColour) {
+    if (item.minimumOrderQuantity != null && line.quantity < item.minimumOrderQuantity) fail(409, "below_minimum_quantity", "This shop does not run an order that small.");
+    return;
+  }
   priceCatalogSelection(store, item, {
     selectedOptions,
     quantity: line.quantity,
@@ -395,6 +402,7 @@ function publicCartListingStub(store, item, optionIds) {
     clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     printLayouts: listingPrintLayouts(item),
+    ...(item.pricedByColour || item.oneColour || item.colourPricing ? {pricedByColour: item.pricedByColour === true, oneColour: item.oneColour === true, colourPricing: structuredClone(item.colourPricing ?? null)} : {}),
     express: listingExpress(item),
     coverSpineForm: coverSpineApplies(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
@@ -466,7 +474,7 @@ function groupFeeSettings(store, cart, lines, at) {
   const saved = lines.find(line => JSON.stringify(line.serviceFeeSnapshot?.groupKey) === key)?.serviceFeeSnapshot;
   return feeSettings(store.settings, saved?.schedule || feeSchedule(store.settings, at));
 }
-function lockCartFeeSchedules(store, cart, at) {
+export function lockCartFeeSchedules(store, cart, at) {
   for (const group of cartGroups(cart, store.cartLines.filter(line => line.cartId === cart.id))) {
     if (group.lines.some(line => cartLineSubtotal(store, line) == null)) continue;
     const schedule = groupFeeSettings(store, cart, group.lines, at).serviceFeeSchedule;
@@ -541,6 +549,7 @@ export function clientCartQuote(store, cart, lines, at) {
   }
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
+    colourPricing: lines.flatMap(line => { const item = store.catalogItems.find(row => row.id === line.catalogItemId); const quote = item && colourQuoteFor(store,item,line); return quote ? [{lineId:line.id,...quote}] : []; }),
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
     voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
     discountKind: voucherPlan?.discountKind || null,
@@ -582,12 +591,16 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     // the client reads `clientLineSubtotalMinor`.
     const lineSubtotalMinor = cartLineSubtotal(store, line);
     const documentPages = item ? documentPagesFor(store, item, line) : null;
+    const colourPricing = item ? colourQuoteFor(store,item,line) : null;
     return {
       id: line.id,
       deadline: lineDeadline(cart, line),
       supplierId: line.supplierId,
       catalogItemId: line.catalogItemId,
       quantity: line.quantity,
+      quantityMode: line.quantityMode ?? null,
+      colourPricing,
+      totalSheets: item?.pricedByColour ? colourPricing?.totalSheets ?? null : (colourPricing?.totalSheets ?? (item?.pricingUnit === "per_page" && documentPages ? documentPages.printed * line.quantity : null)),
       optionIds: [...(line.optionIds || [])],
       measurement: item?.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement ? { ...line.measurement } : null,
       documentPages,
@@ -912,7 +925,12 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     }
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     assertListingArtwork(store, item, line);
-    syncDocumentPages(store, item, line, {}, { required: true });
+    syncDocumentPages(store, item, line, {}, { required: !item.pricedByColour });
+    if (item.pricedByColour) {
+      const colour = colourQuoteFor(store,item,line);
+      if (colour?.status !== 'priced') fail(409, colour?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {lineId:line.id,colourPricing:colour});
+      line.measurement = {pages:colour.pages.length};
+    }
     assertCheckoutPrintLayout(item, line, fail);
     assertCheckoutCoverSpine(store, item, line, fail);
     assertArtworkAttachmentLimit(artworkAttachmentsFor(line));
@@ -954,12 +972,17 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
         optionIds: line.optionIds || [],
         measurement: line.measurement || null,
         quantity: line.quantity,
+        quantityMode: line.quantityMode,
+        artworkFileId: line.artworkFileId, artworkAttachments: line.artworkAttachments,
+        documentPages: line.documentPages, printLayout: line.printLayout,
         structuredSpec: line.structuredSpec || {},
         createdAt: at,
         sortOrder: line.sortOrder,
       }, createId);
       snapshot.lineItem.jobId = jobId;
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
+      if (line.quantityMode) snapshot.lineItem.quantityMode = line.quantityMode;
+      if (!snapshot.lineItem.colourPricing) { const colour = colourQuoteFor(store,item,line); if (colour) snapshot.lineItem.colourPricing = structuredClone(colour); }
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
       if (line.artworkAttachments) snapshot.lineItem.artworkAttachments = artworkAttachmentsFor(line);
       // The layout is part of the agreed spec, with the fit the client saw.
@@ -1135,6 +1158,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       artworkPreviewFileId: artworkPreviewFileId(store, lineItem),
       specialInstructions: lineItem.specialInstructions || "",
       documentPages: structuredClone(lineItem.documentPages ?? null),
+      quantityMode: lineItem.quantityMode ?? null,
+      colourPricing: structuredClone(lineItem.colourPricing ?? null),
       printLayout: lineItem.printLayout?.code ?? null,
       coverSpine: publicOrderCoverSpine(lineItem.coverSpine ?? null),
       mockupFileId: cartLine.mockupFileId ?? null,
@@ -1377,14 +1402,38 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const structuredSpec = body.structuredSpec == null ? {} : record(body.structuredSpec, "structuredSpec");
     assertPrinterCap(store, item, { optionIds, measurement, structuredSpec });
     const { selectedOptions } = selectedCatalogPrice(store, item, optionIds);
+    let colourPricing = null;
+    if (item.pricedByColour || item.oneColour) {
+      const line = {quantity,optionIds,printLayout:body.printLayout ?? null,documentPages:body.pageRange ? {range:body.pageRange} : null,
+        quantityMode:parseQuantityMode(body.quantityMode)};
+      writeArtworkAttachments(line,body,publicCatalogItem(store,item)?.acceptedFormats);
+      for (const fileId of artworkFileIdsFor(line)) fileFor(store,user,fileId,'artwork','artworkFileId');
+      colourPricing = colourQuoteFor(store,item,line);
+      if (item.pricedByColour) return {status:200,body:{quote:{catalogItemId:item.id,quantity,colourPricing,
+        clientLineSubtotalMinor:clientMoneyMinor(store,colourPricing.lineSubtotalMinor)}},mutated:false};
+    }
     const priced = priceCatalogSelection(store, item, { selectedOptions, quantity, measurement });
     const service = store.supplierServices.find((row) => row.id === item.supplierServiceId);
     return { status: 200, body: { quote: {
       catalogItemId: item.id, version: item.version, serviceVersion: service.version || 1, quantity: priced.quantity,
+      ...(colourPricing ? {colourPricing} : {}),
       clientUnitRateMinor: clientMoneyMinor(store, priced.unitRateMinor),
       clientLineSubtotalMinor: clientMoneyMinor(store, priced.lineSubtotalMinor),
       billableMilliUnits: priced.billableMilliUnits, minimumMeasurementApplied: priced.minimumMeasurementApplied,
     } }, mutated: false };
+  }
+  const colourMatch = /^\/me\/carts\/([^/]+)\/colour-analysis$/.exec(pathname);
+  if (colourMatch && req.method === 'POST') {
+    const cart = ownCart(store,user,decodeURIComponent(colourMatch[1]),{draft:true});
+    const body = record(await readBody(req));
+    const lines = store.cartLines.filter(line => line.cartId === cart.id);
+    let queued = false;
+    for (const line of lines) {
+      const item = store.catalogItems.find(row => row.id === line.catalogItemId);
+      for (const fileId of artworkFileIdsFor(line)) fileFor(store,user,fileId,'artwork','artworkFileId');
+      if (item) queued = queueLineColour(store,item,line,now(),{retry:body.retry === true}) || queued;
+    }
+    return {status:202,body:{quote:clientCartQuote(store,cart,lines,now())},mutated:queued};
   }
   const quoteMatch = /^\/me\/carts\/([^/]+)\/quote$/.exec(pathname);
   if (quoteMatch && ["GET", "POST"].includes(req.method)) {
@@ -1706,6 +1755,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       line.coverSpine = parseCoverSpine(item, body.coverSpine, fail);
       assertCoverFileAttached(line, fail);
     }
+    if (Object.hasOwn(body,"quantityMode")) line.quantityMode = parseQuantityMode(body.quantityMode);
+    queueLineColour(store,item,line,at);
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
@@ -1793,6 +1844,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
         throw error;
       }
     }
+    if (Object.hasOwn(body,"quantityMode")) line.quantityMode = parseQuantityMode(body.quantityMode);
+    if (patchedItem) queueLineColour(store,patchedItem,line,at);
     line.updatedAt = at;
     Object.assign(storedLine, line);
     lockCartFeeSchedules(store, cart, at);

@@ -1,3 +1,4 @@
+import { colourQuoteFor } from './colour-analysis.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
@@ -412,10 +413,14 @@ export function selectedCatalogPrice(store, item, selectedOptionIds = []) {
     total += checkedMinor(option.priceModifierMinor, "priceModifierMinor");
   }
   if (total < 0n) total = 0n;
-  return { effectiveUnitPriceMinor: checkedNumber(total, "effectiveUnitPriceMinor"), selectedOptions };
+  return { effectiveUnitPriceMinor: item.pricedByColour ? null : checkedNumber(total, "effectiveUnitPriceMinor"), selectedOptions };
 }
 
 export function minimumCatalogPrice(store, item) {
+  if (item.pricedByColour) {
+    const prices = (item.colourPricing?.sizes || []).flatMap(size => Object.values(size.prices));
+    return prices.length ? Math.min(...prices) : null;
+  }
   const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false });
   let total = checkedMinor(item.basePriceMinor, "basePriceMinor");
   for (const group of groups) {
@@ -535,6 +540,10 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     // Layouts the client must choose from; empty means the product asks nothing.
     printLayouts: listingPrintLayouts(item),
+    pricedByColour: item.pricedByColour === true,
+    oneColour: item.oneColour === true,
+    colourPricing: structuredClone(item.colourPricing ?? null),
+    ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     // Same-day availability the shop switched on (docs/EXPRESS_API.md).
     express: listingExpress(item),
     // Hardbound and binding products ask for a cover choice and the spine text.
@@ -874,6 +883,7 @@ export function createOrderLineSnapshot(store, selection, createId) {
     quantity,
     measurement: selection.measurement ?? null,
     speedTier: selection.speedTier ?? null,
+    artworkSelection: selection,
   });
   const subtotal = priced.lineSubtotalMinor;
   const lineItemId = selection.lineItemId || createId?.("oli");
@@ -914,8 +924,9 @@ export function createOrderLineSnapshot(store, selection, createId) {
       turnaroundHoursSnapshot: itemTurnaroundHours(item, service),
       turnaroundMinutesSnapshot: Math.round(itemTurnaroundHours(item, service) * 60),
       baseUnitPriceMinor: item.basePriceMinor,
-      effectiveUnitPriceMinor,
+      effectiveUnitPriceMinor: item.pricedByColour ? 0 : effectiveUnitPriceMinor,
       quantity,
+      ...(priced.colourPricing ? { colourPricing: structuredClone(priced.colourPricing), quantityMode: selection.quantityMode } : {}),
       // The size the client agreed to, kept with the price it produced. An
       // order that cannot say what was measured cannot be re-priced, disputed,
       // or reprinted to the same size a year later.
@@ -942,9 +953,15 @@ export function createOrderLineSnapshot(store, selection, createId) {
  * None of that fits in a single effective unit price, so a client adding a
  * 3x5 tarpaulin saw one number in the basket and paid another at checkout.
  */
-export function priceCatalogSelection(store, item, { selectedOptions, quantity, measurement = null, speedTier = null }) {
+export function priceCatalogSelection(store, item, { selectedOptions, quantity, measurement = null, speedTier = null, artworkSelection = null }) {
   store = approvedCatalogView(store);
   item = (store.catalogItems || []).find(row => row.id === item.id) || item;
+  if (item.pricedByColour) {
+    if (item.minimumOrderQuantity != null && quantity < item.minimumOrderQuantity) throw new CatalogError(409, 'below_minimum_quantity', 'This shop does not run an order that small.');
+    const colourPricing = artworkSelection && colourQuoteFor(store,item,{...artworkSelection,quantity});
+    if (colourPricing?.status !== 'priced') throw new CatalogError(409, colourPricing?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {colourPricing});
+    return {unit:'per_page',quantity,unitRateMinor:0,billableMilliUnits:checkedNumber(BigInt(colourPricing.totalSheets)*1000n, 'billableMilliUnits'),lineSubtotalMinor:colourPricing.lineSubtotalMinor,colourPricing};
+  }
   return priceLine({
     basePriceMinor: item.basePriceMinor,
     unit: item.pricingUnit || "per_unit",
@@ -1259,6 +1276,10 @@ export function privateCatalogItem(store, item) {
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     printLayouts: listingPrintLayouts(item),
+    pricedByColour: item.pricedByColour === true,
+    oneColour: item.oneColour === true,
+    colourPricing: structuredClone(item.colourPricing ?? null),
+    ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     express: listingExpress(item),
     coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id),

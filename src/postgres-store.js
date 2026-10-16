@@ -1,3 +1,4 @@
+import { parsePaperSize } from './print-layout.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
@@ -69,7 +70,9 @@ const TABLES = [
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "express", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
+  { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
+  { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
   { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_price_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "min_quantity", "unit_price_minor", "created_at", "updated_at"] },
@@ -83,9 +86,9 @@ const TABLES = [
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   ...staffTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "print_layout", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
   { name: "order_baskets", keys: ["id"], columns: ["id", "client_id", "receipt_order_id", "total_minor", "pickup_fee_minor", "deadline", "fulfillment_mode", "payment", "created_at", "updated_at"] },
@@ -418,6 +421,7 @@ function rowsFromStore(store) {
       minimum_order_quantity: item.minimumOrderQuantity ?? null,
       printer_max_width_feet: item.printerMaxWidthFeet ?? null,
       print_layouts: listingPrintLayouts(item),
+      priced_by_colour: item.pricedByColour === true, one_colour: item.oneColour === true,
       express: item.express === true,
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       turnaround_days: item.turnaroundDays ?? null,
@@ -432,6 +436,13 @@ function rowsFromStore(store) {
       sort_order: item.sortOrder, version: item.version || 1,
       created_at: item.createdAt, updated_at: item.updatedAt,
     });
+  }
+  for (const item of store.catalogItems || []) {
+    for (const size of item.colourPricing?.sizes || []) {
+      const key = `${size.widthMilli}:${size.heightMilli}`;
+      rows.supplier_catalog_colour_sizes.push({catalog_item_id:item.id,size_key:key,paper_size:size.paperSize,width_milli:size.widthMilli,height_milli:size.heightMilli,tier_set:size.tierSet});
+      for (const [tier,price] of Object.entries(size.prices)) rows.supplier_catalog_colour_prices.push({catalog_item_id:item.id,size_key:key,tier_code:tier,price_minor:money(price,'colour.sheetPriceMinor')});
+    }
   }
   for (const group of (store.catalogOptionGroups || [])) {
     rows.supplier_catalog_option_groups.push({
@@ -600,6 +611,7 @@ function rowsFromStore(store) {
       artwork_links: JSON.stringify(line.artworkLinks || []),
       artwork_attachments: line.artworkAttachments == null ? null : JSON.stringify(line.artworkAttachments),
       print_layout: line.printLayout ?? null,
+      quantity_mode: line.quantityMode ?? null,
       color_targets: line.colorTargets?.length ? JSON.stringify(line.colorTargets) : null,
       cover_spine: line.coverSpine == null ? null : JSON.stringify(line.coverSpine),
       artwork_warning_acceptances: line.artworkWarningAcceptances == null ? null : JSON.stringify(line.artworkWarningAcceptances),
@@ -673,6 +685,7 @@ function rowsFromStore(store) {
       artwork_links: JSON.stringify(line.artworkLinks || []),
       artwork_attachments: line.artworkAttachments == null ? null : JSON.stringify(line.artworkAttachments),
       print_layout: line.printLayout == null ? null : JSON.stringify(line.printLayout),
+      quantity_mode: line.quantityMode ?? null, colour_pricing: line.colourPricing ?? null,
       color_targets: line.colorTargets == null ? null : JSON.stringify(line.colorTargets),
       cover_spine: line.coverSpine == null ? null : JSON.stringify(line.coverSpine),
       artwork_guidance: line.artworkGuidance ?? null,
@@ -977,6 +990,8 @@ export async function loadStore(database) {
       minimumLengthMilli: row.minimum_length_milli, minimumOrderQuantity: row.minimum_order_quantity,
       printerMaxWidthFeet: row.printer_max_width_feet,
       printLayouts: row.print_layouts || [],
+      pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
+      colourPricing: colourPricingFromRows(loaded,row.id),
       express: row.express === true,
       turnaroundMode: row.turnaround_mode, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
       minimumTurnaroundDays: row.minimum_turnaround_days ?? undefined, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
@@ -1066,6 +1081,7 @@ export async function loadStore(database) {
     if (row.artwork_links?.length) item.artworkLinks = row.artwork_links;
     present(item, "artworkAttachments", row.artwork_attachments);
     present(item, "printLayout", row.print_layout);
+    present(item, "quantityMode", row.quantity_mode);
     present(item, "colorTargets", row.color_targets);
     present(item, "coverSpine", row.cover_spine);
     present(item, "artworkWarningAcceptances", row.artwork_warning_acceptances);
@@ -1110,6 +1126,8 @@ export async function loadStore(database) {
     ...(row.artwork_links?.length ? { artworkLinks: row.artwork_links } : {}),
     ...(row.artwork_attachments == null ? {} : { artworkAttachments: row.artwork_attachments }),
     ...(row.print_layout == null ? {} : { printLayout: row.print_layout }),
+    ...(row.quantity_mode == null ? {} : { quantityMode: row.quantity_mode }),
+    ...(row.colour_pricing == null ? {} : { colourPricing: row.colour_pricing }),
     ...(row.color_targets == null ? {} : { colorTargets: row.color_targets }),
     ...(row.cover_spine == null ? {} : { coverSpine: row.cover_spine }),
     ...(row.artwork_guidance == null ? {} : { artworkGuidance: row.artwork_guidance }),
@@ -1524,6 +1542,15 @@ function catalogHitsCte() {
   `;
 }
 
+function colourPricingFromRows(loaded,id) {
+  const sizes = (loaded.supplier_catalog_colour_sizes || []).filter(row => row.catalog_item_id === id).map(size => ({
+    paperSize:size.paper_size,widthMilli:size.width_milli,heightMilli:size.height_milli,
+    pageSize:parsePaperSize(size.paper_size)?.pageSize ?? null,tierSet:size.tier_set,
+    prices:Object.fromEntries((loaded.supplier_catalog_colour_prices || []).filter(row => row.catalog_item_id === id && row.size_key === size.size_key).map(row => [row.tier_code,row.price_minor])),
+  }));
+  return sizes.length ? {sizes} : null;
+}
+
 function catalogItemFromListRow(row) {
   return {
     reviewStatus: row.review_status, reviewReason: row.review_reason, reviewedAt: row.reviewed_at,
@@ -1550,6 +1577,7 @@ function catalogItemFromListRow(row) {
     updatedAt: row.updated_at,
     printerMaxWidthFeet: row.printer_max_width_feet ?? null,
     printLayouts: row.print_layouts || [],
+    pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
     express: row.express === true,
   };
 }
@@ -1607,8 +1635,14 @@ async function queryOwnCatalogItems(database, params) {
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = hasMore ? page[page.length - 1] : null;
+  const ids = page.map(row => row.id);
+  const [sizes,prices] = await Promise.all([
+    database.query('SELECT * FROM supplier_catalog_colour_sizes WHERE catalog_item_id = ANY($1::text[])',[ids]),
+    database.query('SELECT * FROM supplier_catalog_colour_prices WHERE catalog_item_id = ANY($1::text[])',[ids]),
+  ]);
+  const colours = {supplier_catalog_colour_sizes:sizes.rows,supplier_catalog_colour_prices:prices.rows};
   return {
-    items: page.map(catalogItemFromListRow),
+    items: page.map(row => ({...catalogItemFromListRow(row),colourPricing:colourPricingFromRows(colours,row.id)})),
     nextCursor: last
       ? encodeCatalogCursor({
           k: hasQuery ? [last.rank, catalogSecondaryFromRow(last, sort)] : catalogSecondaryFromRow(last, sort),
