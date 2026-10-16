@@ -31,6 +31,7 @@ import crypto from "node:crypto";
 
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { opsPayoutAccountProjection } from "./payout-account.js";
+import { addStageProof, distinctProofIds } from "./payout-proofs.js";
 import {
   CURRENT_PAYOUT_PLAN_VERSION,
   LEGACY_PAYOUT_PLAN_VERSION,
@@ -730,13 +731,15 @@ export function snapshotPayoutPlan(order, money = order) {
  of Fulfilment only leaves the delivered share waiting on a step nobody takes.
  Legacy four-stage orders keep their own rule: the rider files the delivered
  proof and retention inherits it.
+
+ The rider app also files the same capture as the delivered proof before this
+ runs, so the delivery photo is listed only when it is a different picture.
 */
-export function recordDeliveryProof(order, fileId) {
+export function recordDeliveryProof(order, fileId, files = []) {
   if (payoutPlanVersionOf(order) === LEGACY_PAYOUT_PLAN_VERSION || !fileId) return;
   const delivered = (order.payoutMilestones || []).find((item) => item.code === "delivered");
   if (!delivered) return;
-  if (!Array.isArray(delivered.pofFileIds)) delivered.pofFileIds = [];
-  if (!delivered.pofFileIds.includes(fileId)) delivered.pofFileIds.push(fileId);
+  addStageProof(delivered, fileId, files);
   if (delivered.status === "pending_pof") delivered.status = "pof_attached";
 }
 
@@ -1208,6 +1211,9 @@ export function publicOrderFor(order, user, store = null) {
       const stage = payoutStageFor(order, milestone.code);
       return {
         ...milestone,
+        // One entry per picture, including stages stored before uploads
+        // were compared, so a screen can draw every id it is given.
+        pofFileIds: distinctProofIds(milestone.pofFileIds, store?.files),
         label: stage?.label ?? payoutStageLabel(milestone.code),
         releaseRequires: stage?.releaseRequires ?? null,
       };

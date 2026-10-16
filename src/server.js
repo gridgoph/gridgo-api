@@ -3281,7 +3281,7 @@ async function handleAuditedRequest(req, res) {
             approvalCase: approvalCaseSummary(attached.approvalCase),
           });
         }
-        attachFileReference(latestFile, latestTarget);
+        attachFileReference(latestFile, latestTarget, latestStore);
         const attachedAt = now();
         if (latestFile.purpose === 'supplier_invoice') {
           audit(latestStore, { actor: latestUser, action: 'supplier_invoice.scan_attached', entityType: 'supplier_invoice',
@@ -6862,7 +6862,7 @@ async function handleAuditedRequest(req, res) {
         riderId: user.id,
         recordedAt: deliveredAt,
       };
-      recordDeliveryProof(order, evidenceFileId);
+      recordDeliveryProof(order, evidenceFileId, store.files);
       if (carriedToOffice(order)) {
         order.state = "awaiting_collection";
         order.awaitingCollectionAt = deliveredAt;
