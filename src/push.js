@@ -52,21 +52,36 @@ export function pushPresentation(notification) {
 export const DEVICE_PLATFORMS = ["android", "ios", "web"];
 
 /**
+ * Where an install came from: the APK download, Google Play (internal testing
+ * today) or TestFlight. Builds that report nothing are `apk` installs, which is
+ * what every install was before stores existed.
+ */
+export const INSTALL_CHANNELS = ["apk", "play", "ios"];
+
+/** Where a release notice for each channel sends the person. Apps map these to fixed destinations. */
+export const RELEASE_STORE_TARGETS = { apk: "apk_download", play: "play_store", ios: "testflight" };
+
+export function installChannelOf(record) {
+  return record?.installChannel || "apk";
+}
+
+/**
  * The only notification fields that may cross onto a lock screen, as an
  * allowlist rather than a redaction list. A notification record is already
  * owner-scoped, but a future field (a supplier subtotal or payout split)
  * added to those records must not reach a device by default — see the money
  * visibility rules in `operational-model.js`.
  */
-const PUSH_DATA_FIELDS = ["notificationId", "type", "orderId", "at"];
+const PUSH_DATA_FIELDS = ["notificationId", "type", "orderId", "at", "releaseChannel", "storeTarget"];
 
 /**
- * The `data` an *unclaimed* device may receive: the message type and nothing
- * else. No notification ID (there is no notification record behind an
- * announcement), no order ID, no timestamp that could correlate a handset with
- * an order. See `assertStrangerSafeMessage`.
+ * The `data` an *unclaimed* device may receive: the message type, plus the
+ * fixed release channel and store target on an app-release notice. No
+ * notification ID (there is no notification record behind an announcement), no
+ * order ID, no timestamp that could correlate a handset with an order. See
+ * `assertStrangerSafeMessage`.
  */
-const ANONYMOUS_PUSH_DATA_FIELDS = ["type"];
+const ANONYMOUS_PUSH_DATA_FIELDS = ["type", "releaseChannel", "storeTarget"];
 
 /** The one message type an anonymous handset may ever be sent. */
 export const ANNOUNCEMENT_PUSH_TYPE = "announcement";
@@ -173,6 +188,7 @@ export function publicDevice(record) {
     platform: record.platform,
     appRole: record.appRole || null,
     tokenProvider: record.tokenProvider || "fcm",
+    installChannel: record.installChannel || null,
     tokenTail: record.token.slice(-8),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -189,7 +205,7 @@ export function publicDevice(record) {
  *
  * Returns `{ device, created, reassignedFrom, changed }`.
  */
-export function registerDeviceToken(store, { userId, token, platform, at, appRole = null, tokenProvider = "fcm" }) {
+export function registerDeviceToken(store, { userId, token, platform, at, appRole = null, tokenProvider = "fcm", installChannel = null }) {
   ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
 
@@ -199,7 +215,7 @@ export function registerDeviceToken(store, { userId, token, platform, at, appRol
       userId,
       token,
       platform,
-      appRole, tokenProvider,
+      appRole, tokenProvider, installChannel,
       createdAt: at,
       updatedAt: at,
     };
@@ -213,7 +229,7 @@ export function registerDeviceToken(store, { userId, token, platform, at, appRol
   const claimedFromUnclaimed = !isClaimedDevice(existing);
   existing.userId = userId;
   existing.platform = platform;
-  existing.appRole = appRole; existing.tokenProvider = tokenProvider;
+  existing.appRole = appRole; existing.tokenProvider = tokenProvider; existing.installChannel = installChannel;
   // `updatedAt` moves on every re-registration: the app refreshes its token on
   // a schedule, and that recency is the only staleness signal ops has.
   existing.updatedAt = at;
@@ -281,7 +297,7 @@ function evictOldestUnclaimed(store, keep) {
  *     attacker's fabricated rows first and a real phone only until its next
  *     launch, when the app re-registers. Claimed rows are never evicted.
  */
-export function registerUnclaimedDeviceToken(store, { token, platform, at, tokenProvider = "fcm", limit = UNCLAIMED_DEVICE_LIMIT }) {
+export function registerUnclaimedDeviceToken(store, { token, platform, at, tokenProvider = "fcm", installChannel = null, limit = UNCLAIMED_DEVICE_LIMIT }) {
   ensureDeviceTokens(store);
   const existing = store.deviceTokens.find((record) => record.token === token);
   if (existing) {
@@ -290,12 +306,13 @@ export function registerUnclaimedDeviceToken(store, { token, platform, at, token
     }
     existing.platform = platform;
     existing.tokenProvider = tokenProvider;
+    existing.installChannel = installChannel;
     existing.updatedAt = at;
     return { device: existing, created: false, changed: true, claimedElsewhere: false, evicted: 0 };
   }
 
   const evicted = evictOldestUnclaimed(store, Math.max(limit - 1, 0));
-  const device = { id: deviceId(), userId: null, token, platform, tokenProvider, createdAt: at, updatedAt: at };
+  const device = { id: deviceId(), userId: null, token, platform, tokenProvider, installChannel, createdAt: at, updatedAt: at };
   store.deviceTokens.push(device);
   return { device, created: true, changed: true, claimedElsewhere: false, evicted };
 }
@@ -491,6 +508,8 @@ export function pushMessageFor(notification, env = process.env) {
     type: trimmedString(notification.type),
     orderId: trimmedString(notification.orderId),
     at: trimmedString(notification.at),
+    releaseChannel: trimmedString(notification.releaseChannel),
+    storeTarget: trimmedString(notification.storeTarget),
   };
   for (const key of Object.keys(data)) {
     if (!PUSH_DATA_FIELDS.includes(key) || data[key] === "") delete data[key];
@@ -527,12 +546,15 @@ export function pushMessageFor(notification, env = process.env) {
  * title and body, plus `type: "announcement"` so the app can route it without
  * a notification record to open.
  */
-export function announcementPushMessage({ title, body, imageUrl }, env = process.env) {
+export function announcementPushMessage({ title, body, imageUrl, releaseChannel = null }, env = process.env) {
   const image = resolveFcmImageUrl(imageUrl, env);
   return {
     title: trimmedString(title) || "GRIDGO",
     body: trimmedString(body) || "Open GRIDGO for the latest update.",
-    data: { type: ANNOUNCEMENT_PUSH_TYPE },
+    data: {
+      type: ANNOUNCEMENT_PUSH_TYPE,
+      ...(releaseChannel ? { releaseChannel, storeTarget: RELEASE_STORE_TARGETS[releaseChannel] } : {}),
+    },
     ...(image ? { image } : {}),
   };
 }
@@ -561,6 +583,11 @@ export function assertStrangerSafeMessage(message) {
     throw new PushAudienceError(
       `only ${ANNOUNCEMENT_PUSH_TYPE} messages may reach an unclaimed device (got ${JSON.stringify(data.type ?? null)})`,
     );
+  }
+  // The release fields are fixed values, never free text that could carry something personal.
+  if (("releaseChannel" in data || "storeTarget" in data)
+      && RELEASE_STORE_TARGETS[data.releaseChannel] !== data.storeTarget) {
+    throw new PushAudienceError("refusing an unrecognised release channel or store target for an unclaimed device");
   }
 }
 
