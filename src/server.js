@@ -1,7 +1,29 @@
-import { appendAudit, filterAuditLog, inAuditRequest, runWithAuditRequest } from "./audit-record.js";
+import { signArtworkAttachments } from './artwork-attachments.js';
+import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
+import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique } from './order-change-policy.js';
+import { specialInstructions, acknowledgeInstructions } from './special-instructions.js';
+import { requestDeliveryPin, routeDeliveryPin } from './delivery-pin.js';
+import { deliveryPinPaymentPending, deliveryPinLocked } from './delivery-pin-policy.js';
+import { feeSchedule, feeSettings, nextFeeSettings, serviceFeePreview } from './service-fee.js';
+import { organizationFeeMoney } from './organization-money.js';
+import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
+import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './artwork-preview.js';
+import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
+import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
+import { routeSurveys } from './survey-routes.js';
+import { routePricingFeedback } from './pricing-feedback-routes.js';
+import { syncSurveys } from './surveys.js';
+import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
+import { ACTIVE_TRACKING_STATES, assignmentTime, pickupTime, currentRiderPings, latestPing, trackingSettings, locationFreshness, clientTracking, pingDiagnostics } from './rider-tracking.js';
+import { routeVouchers } from './voucher-routes.js';
+import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
+import { createVoucherEmailWorker } from './voucher-email.js';
+import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
+import { loadVapid, createWebPushDelivery, routeWebPush, unregisterWebSubscription } from "./web-push.js";
+import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
 import { buildFunnelEvent, insertFunnelEvent, pricingDashboard, readFunnelEvents } from "./pricing-dashboard.js";
 import { routeAccountDeletion } from './account-deletion.js';
-import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
+import { productionDuration, shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
 import { routeHubHandover, prepareHandover, sweepHubReminders, completeHandover, checkHandoverAttempt } from './hub-handover.js';
@@ -22,7 +44,7 @@ import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-ga
 import { hubPickupSettings, publicHubPickup } from "./hub-pickup.js";
 import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
-import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionDeadline, latenessTier } from './production-penalties.js';
+import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionTiming, productionLatenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
 import { packingPhotoFiles } from "./packing-progress.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
@@ -174,6 +196,7 @@ import {
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
 import { routeAccountProfile } from "./account-profile-routes.js";
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
+import { publicFeaturedPrints, routeFeaturedPrints } from './featured-prints.js';
 import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
@@ -201,8 +224,10 @@ import {
   publicOrderFor,
   recordDeliveryProof,
   releaseMilestone,
+  OperationalError,
   validateOperationalSettings,
 } from "./operational-model.js";
+import { artworkGuidanceSettings, validateArtworkGuidance } from "./artwork-guidance.js";
 import {
   parseAllowedOrigins,
   validateProductionServerEnvironment,
@@ -221,7 +246,9 @@ import {
   qaRequestFileAudit,
   qaTickAudit,
 } from "./qa-review.js";
+import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
+import { isOrderCallRoute, routeOrderCalls, reconcileCalls, purgeClosedCalls, callParty } from "./order-calls.js";
 import {
   isFirstmateIssueReportsRoute,
   isStaffIssueReportsRoute,
@@ -257,6 +284,7 @@ const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
+const artworkPreviews = createArtworkPreviews({ database, storage: objectStorage, load: () => load(), save: store => save(store), now });
 // Push is optional configuration, not a startup requirement. A hosted pilot
 // without a usable service-account file must still serve every route — the
 // phones simply fall back to in-app and SSE delivery — because the deploy that
@@ -282,6 +310,7 @@ const fileRetention = createFileRetention({ database, storage: objectStorage,
 // Ceiling on registrations nobody has signed in on. See `registerUnclaimedDeviceToken`.
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const organizationMailer = createOrganizationMailer(process.env);
+const drainVoucherEmail = createVoucherEmailWorker({ database, env: process.env });
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
 // under their own advisory lock and can never hold up the domain lock that
@@ -293,7 +322,8 @@ const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS |
 // Longest a single notification stream stays open before the client must reconnect with a fresh token.
 const NOTIFICATION_STREAM_MAX_MS = Number(process.env.NOTIFICATION_STREAM_MAX_MS || 10 * 60_000);
 let storageInitializing = true;
-const drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery});
+let webPushDelivery = createWebPushDelivery();
+let drainPushOutbox;
 
 /**
  * Send freshly committed outbox rows now instead of on the next lifecycle
@@ -307,9 +337,41 @@ function kickPushDrain() {
   });
 }
 
+function notifyMissingJobDetails(store, order) {
+  if (!order?.supplierId) return;
+  const lines = (store.orderLineItems || []).filter(line => line.orderId === order.id)
+    .map(line => ({ structuredSpec: line.structuredSpecSnapshot || {}, options: (store.orderLineItemOptions || [])
+      .filter(option => option.orderLineItemId === line.id)
+      .map(option => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })) }));
+  const details = supplierJobDetails(order, lines, store);
+  const labels = { material: 'material', zone: 'zone', promisedDate: 'promised date' };
+  if (details.missing.length) notifyAdmins(store, 'order_job_details_missing',
+    `Job details need review: ${details.missing.map(key => labels[key]).join(', ')}`, order,
+    `job-details:${order.id}:${details.missing.slice().sort().join(',')}`, { createId: id, at: now() });
+}
+
 async function save(store) {
+  assertSupplementCollectionsUnique(store);
+  syncSupplierInvoiceExpectations(store, originalDomainStore(store), { at: now(), id, audit });
+  await reconcileCalls(database, store, { createId: id, at: now() });
+  cancelVoucherReservations(store, { id, at: now() });
+  syncSurveys(store, { id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
+    if (changePaymentPending(store, order) && (!changeWindowOpen(order)
+        || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted'))) {
+      throw Object.assign(new Error('Resolve the submitted change transfer before closing production or changing shops.'), { status: 409, code: 'change_payment_pending' });
+    }
+    if (before.get(order.id)?.supplierId !== order.supplierId && supplementTotals(store, order).totalMinor > 0) {
+      throw Object.assign(new Error('Reconcile the paid supplement before reassignment.'), { status: 409, code: 'change_payment_reconciliation_required' });
+    }
+    closeUnavailableChanges(store, order, { at: now(), id, audit });
+    if (deliveryPinPaymentPending(order) && deliveryPinLocked(order)) {
+      throw Object.assign(new Error('Verify or reject the submitted delivery transfer before dispatch or closure.'), { status: 409, code: 'delivery_pin_payment_pending' });
+    }
+    if (order.deliveryPin && !before.get(order.id)?.riderId && order.riderId) {
+      order.deliveryPin.dispatchedAt ||= now();
+    }
     // Existing completed/ready orders keep their legacy contract until a new
     // physical readiness transition; unrelated saves never activate the gate.
     if (before.get(order.id)?.state !== order.state && ['ready_for_dispatch', 'awaiting_collection'].includes(order.state)) {
@@ -327,6 +389,7 @@ async function save(store) {
       if (order) queueOrderInvalidate(store, order, ['orders']);
     }
   }
+  deriveMissingAudit(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
@@ -334,7 +397,7 @@ async function save(store) {
   );
   await saveStore(database, store);
   const queuedPushes = await enqueueNotificationPushes(database,store,createdNotifications);
-  if (queuedPushes > 0 && pushDelivery.configured) database.afterCommit(kickPushDrain);
+  if (queuedPushes > 0 && (pushDelivery.configured || webPushDelivery.configured)) database.afterCommit(kickPushDrain);
   await realtimeTransport.enqueue(store,createdNotifications);
 }
 
@@ -347,6 +410,27 @@ async function notifyStaffDesk({ type, title, occurrenceKey, resource, id: resou
     const latest = await load();
     notifyAdmins(latest, type, title, null, occurrenceKey, { createId: id, at: now() });
     queueInvalidate(latest, { resource, ...(resourceId ? { id: resourceId } : {}) });
+    await save(latest);
+  });
+}
+
+/** Staff replies share the message transaction and the normal save/outbox boundary. */
+async function notifySupportParty({ thread, message }) {
+  if (thread.staffPeerUserId || !["client", "supplier", "rider"].includes(thread.partyRole)) return;
+  await enqueueMutation(async () => {
+    await database.query("SELECT pg_advisory_xact_lock(hashtext($1))", [DOMAIN_MUTATION_LOCK]);
+    const latest = await load();
+    const at = message.createdAt;
+    const quiet = latest.notifications.some(n => n.userId === thread.partyUserId
+      && n.appRole === thread.partyRole && n.type === "support_message" && n.threadId === thread.id
+      && !n.read && !n.deletedAt && Date.parse(at) - Date.parse(n.at) < 5 * 60_000);
+    if (quiet) return;
+    latest.notifications.push({
+      id: id("ntf"), userId: thread.partyUserId, appRole: thread.partyRole,
+      type: "support_message", threadId: thread.id,
+      title: "Message from Operations", body: "Operations sent you a message. Open your support chat to read it and reply.",
+      read: false, at,
+    });
     await save(latest);
   });
 }
@@ -367,17 +451,35 @@ function deliverAnnouncementPush(devices, { title, body, imageUrl }) {
   fanOutPush("announcement", announcementPushMessage({ title, body, imageUrl }), devices);
 }
 
+async function legalEvent({ action, id: entityId, actor, detail, before, after, reason }) {
+  const latest = await load();
+  audit(latest, { actor, action, entityType: action.startsWith('privacy.') ? 'privacy_request' : 'legal_document', entityId, detail, before, after, reason });
+  notifyAdmins(latest, action, action.startsWith('privacy.') ? 'Privacy request updated' : 'Legal record updated', null, `${action}:${entityId}:${id('event')}`, { createId: id, at: now() });
+  queueInvalidate(latest, { resource: action.startsWith('privacy.') ? 'privacy-requests' : 'legal' });
+  await save(latest);
+}
+async function legalResponse(req, res, url, user = null) {
+  const result = await routeLegal({ req, url, user, database, readBody, onEvent: legalEvent,
+    signPdf: async fileId => {
+      const file = (await database.query("SELECT object_key FROM files WHERE file_id=$1 AND state='ready' AND purpose='legal_document'", [fileId])).rows[0];
+      if (!file) throw Object.assign(new Error('file_not_found'), {status:404,code:'file_not_found'});
+      return objectStorage.presignGet(file.object_key);
+    } });
+  if (!result) return false;
+  res.setHeader('Cache-Control', 'no-store');
+  if (result.csv != null) {
+    res.writeHead(200, { ...res.gridgoCorsHeaders, 'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="legal-acceptances.csv"',
+      'Access-Control-Expose-Headers': 'X-Next-Offset',
+      ...(result.nextOffset != null ? {'X-Next-Offset':String(result.nextOffset)} : {}) });
+    res.end(result.csv);
+  } else send(res,result.status,result.body);
+  return true;
+}
+
 async function deletionRequestEvent({ action, id: requestId, actor }) {
   const latest = await load();
-  audit(latest, {
-    actor,
-    action,
-    entityType: "account_deletion_request",
-    entityId: requestId,
-    previous: action === "account_deletion_request_completed" ? "pending" : null,
-    current: action === "account_deletion_request_completed" ? "done" : "pending",
-    reason: null,
-  });
+  audit(latest, { actor, action, entityType: 'account_deletion_request', entityId: requestId });
   notifyAdmins(latest, action, action === 'account_deletion_requested' ? 'Account deletion requested' : 'Account deletion completed', null, `${action}:${requestId}`, { createId: id, at: now() });
   queueInvalidate(latest, { resource: 'account-deletion-requests' });
   await save(latest);
@@ -459,7 +561,30 @@ function writeJsonResponse(res, status, body) {
   res.end(payload);
 }
 
+function transitionRefusalMessage(code) {
+  return {
+    forbidden: 'This account cannot update this order. Refresh the job or ask Operations for help.',
+    order_not_found: 'This order is no longer available. Refresh your jobs.',
+    handover_verification_required: 'Complete the verified handover before closing this order.',
+    shop_acceptance_expired: 'The shop acceptance time has expired. Operations must arrange the next step.',
+    shop_cancel_reason_required: 'Explain why the shop cannot take this job, using at most 2,000 characters.',
+    payout_held: 'Operations must resolve the payout hold before releasing payment.',
+    payment_authorization_started: 'Payment review has already started. Operations must review any price change.',
+    quote_supersession_reason_required: 'Explain why the existing quote needs to change.',
+    supplier_payment_terms_required: 'Set the shop payment terms before issuing a quote.',
+    quote_stale: 'The quote has changed. Refresh the order and review the latest quote.',
+    payment_plan_not_offered: 'The shop does not offer this payment plan. Refresh and choose an available plan.',
+    invalid_payment_plan: 'Choose a supported payment plan for this fulfillment method.',
+    pickup_not_available: 'This shop does not offer pickup. Choose an available fulfillment method.',
+  }[code] || 'This step could not be completed. Refresh the order and ask Operations to review what is needed.';
+}
+
 function send(res, status, body, { afterCommit = true } = {}) {
+  if (status >= 400 && status < 500 && res.gridgoTransitionRefusal) {
+    const record = res.gridgoTransitionRefusal;
+    delete res.gridgoTransitionRefusal;
+    return record(status, body);
+  }
   if (afterCommit && database.inWriteTransaction()) {
     database.afterCommit(() => writeJsonResponse(res, status, body));
     return;
@@ -612,28 +737,38 @@ function readyPaymentQrFile(store) {
   return file;
 }
 
-function publicOperationalSettings(settings, store = null) {
+function publicOperationalSettings(settings, store = null, user = null) {
   const {
     paymentQrFileId: _paymentQrFileId,
+    featuredPrints: _featuredPrints,
     pricingFixedCostsMinor: _pricingFixedCostsMinor,
     pricingPaymentFeeBps: _pricingPaymentFeeBps,
     ...rest
   } = settings || {};
+  if (!['ops_admin', 'super_admin'].includes(user?.role)) {
+    delete rest.serviceFeeSchedule;
+    delete rest.scheduledServiceFee;
+  }
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
+    riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
+    riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
+    coverSpineRequired: rest.coverSpineRequired === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
+    artworkGuidance: artworkGuidanceSettings(rest),
     paymentQr,
   };
 }
@@ -751,7 +886,29 @@ async function verifiedClerkClaimsFor(req) {
 
 async function authenticateRequest(req, store) {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
-  return authenticateBearerToken(m?.[1] || null, store, AUTH, await verifiedClerkClaimsFor(req));
+  const verified = await verifiedClerkClaimsFor(req);
+  const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
+  if (auth.user) setAuditActor(auth.user);
+  return auth;
+}
+
+// Clerk owns sign-in. Record the first authenticated app bootstrap for a session;
+// the one-way session fingerprint deduplicates refreshes without storing credentials.
+async function recordStaffSignIn(req, store, user) {
+  const staffRole = ['super_admin', 'ops_admin', 'staff'].find(role => hasRole(store, user.id, role));
+  const session = req.gridgoVerifiedClaims?.claims?.sid;
+  if (!staffRole || !session) return;
+  const actor = { ...user, role: ['super_admin', 'ops_admin', 'staff'].includes(user.role) ? user.role : staffRole };
+  const sessionHash = crypto.createHash('sha256').update(session).digest('hex');
+  if (store.auditLog.some(row => row.action === 'staff.sign_in' && row.actorId === user.id && row.detail?.sessionHash === sessionHash)) return;
+  await enqueueMutation(async () => {
+    const latest = await load();
+    if (latest.auditLog.some(row => row.action === 'staff.sign_in' && row.actorId === user.id && row.detail?.sessionHash === sessionHash)) return;
+    setAuditActor(actor);
+    audit(latest, { actor, action: 'staff.sign_in', entityType: 'user', entityId: actor.id,
+      detail: { sessionHash, observation: 'authenticated_app_bootstrap' }, before: null, after: { authenticated: true } });
+    await saveStore(database, latest);
+  });
 }
 
 /**
@@ -1057,7 +1214,7 @@ function approvalCaseDetail(store, approvalCase) {
   }
   const services = (store.supplierServices || [])
     .filter((service) => service.supplierId === approvalCase.userId)
-    .map(summarizeService);
+    .map(service => summarizeService(service, store));
   return {
     ...base,
     supplierProfile: supplierProfileProjection(store, approvalCase.userId),
@@ -1421,8 +1578,8 @@ function balanceNotRequired(res, order, installmentCode) {
 // Default platform data used by route validation and the explicit reference seed.
 // ---------------------------------------------------------------------------
 
-function audit(store, input) {
-  return appendAudit(store, { ...input, id: id("aud"), at: now() });
+function audit(store, entry) {
+  return appendAudit(store, entry, { id, at: now() });
 }
 
 /**
@@ -1526,6 +1683,24 @@ async function sweepDeliveryChats() {
   }
 }
 
+async function sweepPickupChats() {
+  const candidate = await database.query(`SELECT 1 FROM pickup_chat_messages LIMIT 1`);
+  if (!candidate.rowCount) return;
+  const { fileIds } = await enqueueMutation(() => purgeClosedPickupChats(database, now()));
+  for (const fileId of fileIds) {
+    try { await fileRetention.finishPending(fileId); } catch { /* The file retention pass retries it. */ }
+  }
+}
+
+async function sweepOrderCallHistory() {
+  const candidate = await database.query('SELECT 1 FROM order_calls LIMIT 1');
+  if (!candidate.rowCount) return;
+  await enqueueMutation(async () => {
+    const store = await load();
+    await purgeClosedCalls(database, store, now());
+  });
+}
+
 async function sweepProductionInactivity() {
   try {
     await enqueueMutation(async () => {
@@ -1589,6 +1764,7 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
 
 async function publicOrder(order, user, orderStore) {
   const record = publicOrderFor(order, user, orderStore);
+  if (record.pickupChat) record.pickupChat.unread = await pickupChatUnread(database, order, user.id);
   await signProductionPhotos(record, {
     findFile: (fileId) => findFile(orderStore, fileId),
     authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
@@ -1599,6 +1775,11 @@ async function publicOrder(order, user, orderStore) {
     authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
     presignGet: (key) => objectStorage.presignGet(key),
   }, "packingProgress");
+  await signArtworkAttachments(record, {
+    findFile: (fileId) => findFile(orderStore, fileId),
+    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
+    presignGet: (key) => objectStorage.presignGet(key),
+  });
   return record;
 }
 
@@ -1700,6 +1881,10 @@ function eligibleSuppliersForOrder(store, order) {
   const results = [];
 
   for (const supplier of suppliers) {
+    if ((store.supplierProfiles || []).find(profile => profile.userId === supplier.id)?.isClosed) {
+      results.push({ supplier: publicUser(supplier), eligible: false, reasons: ['shop_closed'], matchingServiceIds: [], services: [] });
+      continue;
+    }
     const reasons = [];
     if (supplier.verificationStatus !== "approved") {
       results.push({
@@ -1719,7 +1904,7 @@ function eligibleSuppliersForOrder(store, order) {
         eligible: false,
         reasons: ["no_live_services"],
         matchingServiceIds: [],
-        services: services.map(summarizeService),
+        services: services.map(service => summarizeService(service, store)),
       });
       continue;
     }
@@ -1736,7 +1921,7 @@ function eligibleSuppliersForOrder(store, order) {
         eligible: false,
         reasons: rejectNotes.length ? rejectNotes : ["no_covering_service"],
         matchingServiceIds: [],
-        services: services.map(summarizeService),
+        services: services.map(service => summarizeService(service, store)),
       });
       continue;
     }
@@ -1745,7 +1930,7 @@ function eligibleSuppliersForOrder(store, order) {
       eligible: true,
       reasons: [],
       matchingServiceIds: matching.map((s) => s.id),
-      services: matching.map(summarizeService),
+      services: matching.map(service => summarizeService(service, store)),
       rankingInputs: {
         liveServiceCount: live.length,
         matchingServiceCount: matching.length,
@@ -1766,7 +1951,7 @@ function eligibleSuppliersForOrder(store, order) {
   return { product, candidates: results };
 }
 
-function summarizeService(s) {
+function summarizeService(s, store) {
   return {
     id: s.id,
     supplierId: s.supplierId,
@@ -1781,8 +1966,10 @@ function summarizeService(s) {
     pricingBasis: s.pricingBasis,
     referenceRateMinor: s.referenceRateMinor,
     turnaroundDays: s.turnaroundDays,
+    turnaroundMinutes: s.turnaroundMinutes ?? s.turnaroundHours * 60,
+    standardTurnaroundMinutes: s.standardTurnaroundMinutes ?? s.turnaroundMinutes,
     standardTurnaroundDays: s.standardTurnaroundDays ?? s.turnaroundDays,
-    productionDayMinutes: s.turnaroundDays ? s.turnaroundHours * 60 / s.turnaroundDays : 600,
+    productionDayMinutes: displayProductionDayMinutes(store, s.supplierId),
     turnaroundHours: s.turnaroundHours,
     capacityDaily: s.capacityDaily,
     capacityWeekly: s.capacityWeekly,
@@ -1846,8 +2033,8 @@ const TRANSITIONS = {
   downpayment_review: {},
   payment_authorized: { production: ["supplier"], cancelled: ["ops_admin", "super_admin"] },
   production: {
-    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // packed; supplier and rider check together at pickup
-    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // compatibility for older clients and portal workflows
+    ready_for_dispatch: ["supplier", "ops_admin", "super_admin"], // versioned photo/QA readiness; joint pickup inspection still required
+    supplier_self_qc: ["supplier", "ops_admin", "super_admin"], // legacy self-QC or version-2 finished-product review
   },
   supplier_self_qc: { ready_for_dispatch: ["supplier", "ops_admin", "super_admin"] },
   ready_for_dispatch: { rider_assigned: ["rider", "ops_admin", "super_admin"] },
@@ -1862,8 +2049,11 @@ const TRANSITIONS = {
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
-async function handleRequest(req, res) {
-  if (!inAuditRequest()) return runWithAuditRequest(req, () => handleRequest(req, res));
+function handleRequest(req, res) {
+  return withAuditRequest(req, () => handleAuditedRequest(req, res));
+}
+
+async function handleAuditedRequest(req, res) {
   try {
     const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
     res.gridgoCorsHeaders = { Vary: "Origin" };
@@ -1877,7 +2067,7 @@ async function handleRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, If-Match",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-App, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -1897,11 +2087,12 @@ async function handleRequest(req, res) {
         builtAt: BUILD_TIME,
         database: databaseHealth,
         storage: objectStorage.health(),
-        push: pushDelivery.health(),
+        push: { ...pushDelivery.health(), webPush: { status: webPushDelivery.configured ? "configured" : "misconfigured" } },
         emailConfigured: emailConfigured(process.env),
         at: now(),
       });
     }
+    if (pathname.startsWith('/legal/') && await legalResponse(req, res, url)) return;
     if (pathname === '/account-deletion-requests' || pathname === '/api/account-deletion-requests') {
       const result = await routeAccountDeletion({ req, url, database, readBody, onEvent: deletionRequestEvent });
       return send(res, result.status, result.body);
@@ -2076,6 +2267,13 @@ async function handleRequest(req, res) {
       return send(res, response.status, response.body);
     }
 
+    if (req.method === 'GET' && pathname === '/featured-prints') {
+      const body = publicFeaturedPrints(store);
+      await decorateCatalogPhotoUrls(store, body);
+      res.setHeader('Cache-Control', 'no-store');
+      return send(res, 200, body);
+    }
+
     if (req.method === 'POST' && pathname === '/auth/staff/redeem') {
       const body = await readBody(req);
       const result = redeemStaffInvite({ store, claims: req.gridgoVerifiedClaims?.claims,
@@ -2119,6 +2317,7 @@ async function handleRequest(req, res) {
         const supplierProfile = (store.supplierProfiles || []).find(p=>p.userId===user.id);
         user = {...user,role:requestedRole,...(['supplier','rider'].includes(requestedRole)?{verificationStatus:approval?.status || 'unverified'}:{}),...(requestedRole==='supplier' && supplierProfile?{supplierName:supplierProfile.shopName,shop:supplierProfile.shop}:{})};
       }
+      await recordStaffSignIn(req, store, user);
       const projected = userWithAccountState(user);
       if ((store.userRoleMemberships || []).some(
         (membership) => membership.userId === user.id && membership.role === "rider",
@@ -2150,6 +2349,7 @@ async function handleRequest(req, res) {
           requiredRole: fixedAuthRole,
         });
       }
+      await recordStaffSignIn(req, store, { ...auth.user, role: fixedAuthRole });
       return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
     }
 
@@ -2159,9 +2359,10 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/activate") {
+      const enrollmentBody = await readBody(req);
+      const consent = await validateEnrollmentConsent(database, enrollmentBody, "client");
       const header = req.headers.authorization || "";
       const match = /^Bearer\s+(.+)$/i.exec(header);
-      const knownUsers = new Set((store.users || []).map((row) => row.id));
       const result = await activateClerkClientProfile({
         token: match?.[1] || null,
         store,
@@ -2172,17 +2373,6 @@ async function handleRequest(req, res) {
         preVerified: req.gridgoVerifiedClaims || null,
         preloadedClerkUser: req.gridgoClerkUser || null,
       });
-      if (result.user && !knownUsers.has(result.user.id)) {
-        audit(store, {
-          actor: result.user,
-          action: "user.account_create",
-          entityType: "user",
-          entityId: result.user.id,
-          previous: null,
-          current: { role: result.user.role, email: result.user.email },
-          reason: null,
-        });
-      }
       if (result.mutated) await save(store);
       if (result.status !== 200) {
         return send(res, result.status, {
@@ -2190,6 +2380,7 @@ async function handleRequest(req, res) {
           message: result.message,
         });
       }
+      await recordEnrollmentConsent(database, result.user, consent);
       return send(res, 200, { user: publicUser(result.user) });
     }
 
@@ -2216,25 +2407,14 @@ async function handleRequest(req, res) {
         now,
       };
       const role = pathname.endsWith("/supplier") ? "supplier" : "rider";
-      const knownUsers = new Set((store.users || []).map((row) => row.id));
+      const consent = await validateEnrollmentConsent(database, body, role);
       const result = role === "supplier" ? enrollSupplier(common) : enrollRider(common);
-      const created = (store.users || []).find((row) => !knownUsers.has(row.id));
-      if (created) {
-        audit(store, {
-          actor: created,
-          action: "user.account_create",
-          entityType: "user",
-          entityId: created.id,
-          previous: null,
-          current: { role: created.role, email: created.email },
-          reason: null,
-        });
-      }
       if (result.status === 201) await save(store);
+      await recordEnrollmentConsent(database, result.user, consent);
       const refreshed = await authenticateRequest(req, store);
       const response = fixedAuthProjection(store, refreshed, role);
       if (role === "supplier") {
-        response.supplierServices = (result.supplierServices || []).map(summarizeService);
+        response.supplierServices = (result.supplierServices || []).map(service => summarizeService(service, store));
       }
       return send(res, result.status, response);
     }
@@ -2285,6 +2465,9 @@ async function handleRequest(req, res) {
           at: now(),
         }).released;
       }
+      if (typeof body?.webPushEndpoint === 'string') {
+        await unregisterWebSubscription(database, auth.user.id, body.webPushEndpoint);
+      }
       if (released) await save(store);
       // `deviceUnregistered` keeps its published meaning — this phone no longer
       // receives the caller's notifications — for app builds already shipped.
@@ -2293,6 +2476,30 @@ async function handleRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    // All authenticated transition refusals, including common work/identity guards,
+    // commit an audit before responding. Reload discards unsaved partial route edits.
+    if (user && req.method === 'POST' && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
+      const transitionBody = await readBody(req);
+      const requestedOrderId = pathname.split('/')[2];
+      res.gridgoTransitionRefusal = async (status, response) => {
+        const latest = await load();
+        const order = latest.orders.find(row => row.id === requestedOrderId);
+        const next = typeof transitionBody.state === 'string' ? transitionBody.state.slice(0, 100) : null;
+        const message = response.message || transitionRefusalMessage(response.error);
+        const visible = order && (isOps(user) || (user.role === 'supplier' && order.supplierId === user.id));
+        const readiness = visible && PACKAGING_STATES.includes(next) && ![401, 403, 404].includes(status)
+          ? productionTransitionReadiness(latest, order, next, { operations: isOps(user), reason: transitionBody.reason, reasonCode: transitionBody.reasonCode }) : null;
+        const missing = readiness?.missing.length ? readiness.missing : [{ code: response.error, message }];
+        const body = { ...response, message, missing };
+        audit(latest, { actor: user, action: 'order.transition_refused', entityType: 'order',
+          entityId: requestedOrderId, orderId: order?.id, reason: message,
+          detail: { from: order?.state || null, to: next, code: response.error, status, missing } });
+        if (visible) notifyMissingJobDetails(latest, order);
+        await save(latest);
+        return send(res, status, body);
+      };
+    }
+    if (!pathname.startsWith("/admin/") && await legalResponse(req, res, url, user)) return;
     if (pathname === '/me/account-deletion-request') {
       const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
       return send(res, result.status, result.body);
@@ -2306,7 +2513,9 @@ async function handleRequest(req, res) {
       const held = accountHoldDenial(user);
       if (held) return send(res, 403, held);
       if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
-      const inferredRole = !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
+      const auditSurface = pathname === '/audit' || /^\/orders\/[^/]+\/audit$/.test(pathname);
+      const inferredRole = !eventRole && auditSurface && isOps(user) ? (isSuper(user) ? 'super_admin' : 'ops_admin')
+        : !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
         : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
       const selectedRole = eventRole || inferredRole;
       // Actor projection is never written into users.role. Other legacy user-field
@@ -2317,6 +2526,8 @@ async function handleRequest(req, res) {
       }
     }
 
+    if (user) setAuditActor(user);
+
     if (!user
         && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
         && isPublicSupplierCatalogRoute(req.method, pathname)) {
@@ -2326,9 +2537,12 @@ async function handleRequest(req, res) {
       });
     }
 
+    if (pathname.startsWith("/admin/") && await legalResponse(req, res, url, user)) return;
+
     const privateCatalogRoute = pathname === "/listing-starters"
       || pathname === "/me/supplier-readiness"
       || pathname === "/me/supplier-profile"
+      || pathname === "/me/shop-hours"
       || pathname === "/me/supplier-payment-terms"
       || pathname.startsWith("/me/supplier-services")
       || pathname.startsWith("/me/catalog-items")
@@ -2343,6 +2557,31 @@ async function handleRequest(req, res) {
     if (pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
+    const surveyResponse = await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id })
+      || await routePricingFeedback({ req, url, store, user, readBody, now, id });
+    if (surveyResponse) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (surveyResponse.mutated) await save(store);
+      if (surveyResponse.bytes) {
+        res.writeHead(surveyResponse.status, { 'Content-Type': surveyResponse.contentType,
+          'Content-Disposition': `attachment; filename="${surveyResponse.filename}"`, 'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(surveyResponse.bytes);
+      }
+      return send(res, surveyResponse.status, surveyResponse.body);
+    }
+
+    const voucherResponse = await routeVouchers({ req, url, store, user, readBody, readRawBody, now, id });
+    if (voucherResponse) {
+      if (voucherResponse.mutated) await save(store);
+      if (voucherResponse.bytes) {
+        res.writeHead(voucherResponse.status, { 'Content-Type': voucherResponse.contentType,
+          'Content-Disposition': `attachment; filename="${voucherResponse.filename}"`, 'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(voucherResponse.bytes);
+      }
+      return send(res, voucherResponse.status, voucherResponse.body);
     }
     const organizationResponse = await routeOrganization({ req, url, store, user, readBody, now, createId: id,
       mailer: organizationMailer, emailSecret: process.env.CLERK_SECRET_KEY });
@@ -2411,6 +2650,14 @@ async function handleRequest(req, res) {
     if (accountProfileResponse) {
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
+    }
+
+    const featuredResponse = await routeFeaturedPrints({ req, url, store, user, readBody, now, id, audit });
+    if (featuredResponse) {
+      if (featuredResponse.mutated) await save(store);
+      await decorateCatalogPhotoUrls(store, featuredResponse.body);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, featuredResponse.status, featuredResponse.body);
     }
 
     const seasonResponse = await routeSeasonWindows({ req, url, store, user, readBody, now, createId: id, audit });
@@ -2487,7 +2734,14 @@ async function handleRequest(req, res) {
         send,
         database,
         notifyStaff: notifyStaffDesk,
+        notifyParty: notifySupportParty,
       });
+    }
+
+    if (await routeOrderCalls({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) return;
+
+    if (await routePickupChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
+      return;
     }
 
     if (await routeDeliveryChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
@@ -2526,8 +2780,16 @@ async function handleRequest(req, res) {
       return send(res, 200, { categories: board.categories, ...table });
     }
 
+    const supplierInvoiceResponse = await routeSupplierInvoices({ req, url, store, user, readBody, now, id, audit, storage: objectStorage });
+    if (supplierInvoiceResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (supplierInvoiceResponse.mutated) await save(store);
+      return send(res, supplierInvoiceResponse.status, supplierInvoiceResponse.body);
+    }
+
     const hubResponse = await routeHubHandover({ req, url, store, user, readBody, now, id, audit });
     if (hubResponse) {
+      if (req.method === 'GET' && pathname === '/staff/me' && hubResponse.status === 200) await recordStaffSignIn(req, store, user);
       res.setHeader('Cache-Control', 'private, no-store');
       if (hubResponse.mutated) await save(store);
       return send(res, hubResponse.status, hubResponse.body);
@@ -2538,6 +2800,12 @@ async function handleRequest(req, res) {
 
     if (pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    }
+    const changeResponse = await routeOrderChanges({ req, url, store, user, readBody, now, id, audit });
+    if (changeResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (changeResponse.mutated) await save(store);
+      return send(res, changeResponse.status, changeResponse.body);
     }
     const rescheduleResponse = await routeOrderReschedule({ req, url, store, user, readBody, now, id, audit });
     if (rescheduleResponse) {
@@ -2574,8 +2842,18 @@ async function handleRequest(req, res) {
         }
         const reconcileBalance = /^payments\/(final_online|balance)\/(confirm|reject)$/.test(refundGuard[2])
           && guardedOrder && refundHold(store, guardedOrder) && !refundSettlementFor(store, guardedOrder);
-        if (guardedOrder && !reconcileBalance) assertRefundWorkAllowed(store, guardedOrder);
+        // Resolve money already sent before an independent work hold; never reopen fulfillment.
+        const reconcilePin = /^delivery-pin\/payment\/(confirm|reject)$/.test(refundGuard[2])
+          && guardedOrder && isOps(user) && deliveryPinPaymentPending(guardedOrder);
+        if (guardedOrder && !reconcileBalance && !reconcilePin) assertRefundWorkAllowed(store, guardedOrder);
       }
+    }
+
+    const pinResponse = await routeDeliveryPin({ req, url, store, user, readBody, now, id, audit });
+    if (pinResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (pinResponse.mutated) await save(store);
+      return send(res, pinResponse.status, pinResponse.body);
     }
 
     const dropoffResponse = await routeDropoffConfirmation({ req, url, store, user, readBody, now, id, audit });
@@ -2598,6 +2876,11 @@ async function handleRequest(req, res) {
     const basketResponse = await routeBaskets({ req, url, store, user, readBody, id, now });
     if (basketResponse) {
       if (basketResponse.mutated) await save(store);
+      await signArtworkAttachments(basketResponse.body, {
+        findFile: (fileId) => findFile(store, fileId),
+        authorizeRead: (file) => authorizeFileRead(user, store, file),
+        presignGet: (key) => objectStorage.presignGet(key),
+      });
       return send(res, basketResponse.status, basketResponse.body);
     }
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\//.test(pathname)) {
@@ -2619,8 +2902,21 @@ async function handleRequest(req, res) {
     });
     if (orderMatchResponse) {
       if (orderMatchResponse.mutated) await save(store);
+      if (isArtworkCheckout(req.method, pathname) && orderMatchResponse.status < 400) {
+        const body = await readBody(req);
+        const result = orderMatchResponse.body;
+        const orders = result.basket
+          ? store.orders.filter(order => order.basketId === result.basket.id)
+          : store.orders.filter(order => order.id === result.order?.id);
+        for (const order of orders) await recordArtworkConsent(database, user, order, body);
+      }
       if (orderMatchResponse.status < 400) {
         await decorateCatalogPhotoUrls(store, orderMatchResponse.body);
+        await signArtworkAttachments(orderMatchResponse.body, {
+          findFile: (fileId) => findFile(store, fileId),
+          authorizeRead: (file) => authorizeFileRead(user, store, file),
+          presignGet: (key) => objectStorage.presignGet(key),
+        });
       }
       return send(res, orderMatchResponse.status, orderMatchResponse.body);
     }
@@ -2791,7 +3087,7 @@ async function handleRequest(req, res) {
             body: fs.createReadStream(file.tempPath),
             contentType: detectedContentType,
             size: file.size,
-            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose),
+            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence", "supplier_invoice"].includes(purpose),
           });
         } catch (error) {
           await compensatePendingFile(fileId, objectKey);
@@ -2817,6 +3113,17 @@ async function handleRequest(req, res) {
             await save(latestStore);
             return latestFile;
           });
+          if (isPreviewDocument(ready)) {
+            try {
+              await artworkPreviews.resolve(fileId, { sourcePath: file.tempPath,
+                authorize: (current, record) => authorizeFileRead(user, current, record) });
+            } catch (error) {
+              // Original upload remains usable even when rendering/storage fails.
+              logPreviewFailure(fileId, 'upload', error);
+            }
+            try { ready.preview = findFile(await load(), fileId)?.preview; }
+            catch (error) { logPreviewFailure(fileId, 'upload_metadata', error); }
+          }
           // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
           return send(res, 201, { file: publicFile(ready) });
         } catch (error) {
@@ -2828,10 +3135,35 @@ async function handleRequest(req, res) {
       }
     }
 
+    if ((req.method === 'GET' && /^\/files\/[^/]+\/preview-url$/.test(pathname))
+        || (req.method === 'POST' && /^\/files\/[^/]+\/(preview|preview-failure)$/.test(pathname))) {
+      const fileId = pathname.split('/')[2];
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      try {
+        const authorize = async (current, file) => {
+          const actor = selectActorRole(current, (await authenticateRequest(req, current)).user, eventRole,
+            { restrictMemberships: Boolean(eventRole) });
+          authorizeFileRead(actor, current, file);
+        };
+        await authorize(store, findFile(store, fileId));
+        if (pathname.endsWith('/preview-failure')) {
+          const body = await readBody(req);
+          if (!['image_load_failed', 'download_failed'].includes(body.reason)) {
+            throw new AttachmentError(400, 'invalid_preview_failure', 'Choose a supported preview failure reason.');
+          }
+          logPreviewFailure(fileId, 'client_read', { code: body.reason });
+          return send(res, 200, { ok: true });
+        }
+        if (storageInitializing) throw new AttachmentError(503, 'storage_initializing', 'File storage is still initializing. Retry shortly.');
+        const preview = await artworkPreviews.resolve(fileId, { authorize, retry: req.method === 'POST' });
+        return send(res, 200, preview);
+      } catch (error) { logPreviewFailure(fileId, 'route', error); throw error; }
+    }
+
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
-      if (file.purpose.startsWith("refund_")) res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      if (file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice") res.setHeader("Cache-Control", "private, no-store, max-age=0");
       return send(res, 200, { file: publicFile(file, user) });
     }
 
@@ -2872,9 +3204,24 @@ async function handleRequest(req, res) {
         stream.pipe(res);
         return;
       }
-      const privateFinancial = file.purpose.startsWith("refund_");
+      const privateFinancial = file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice";
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
+      if (['artwork', 'mockup'].includes(file.purpose)) {
+        res.setHeader('Cache-Control', 'private, no-store');
+        await enqueueMutation(async () => {
+          const latest = await load();
+          const latestUser = selectActorRole(latest, (await authenticateRequest(req, latest)).user, eventRole,
+            { restrictMemberships: Boolean(eventRole) });
+          const latestFile = findFile(latest, file.fileId);
+          authorizeFileRead(latestUser, latest, latestFile);
+          const orderIds = [...new Set((latestFile.references || []).filter(ref => ref.type === 'order').map(ref => ref.id))];
+          audit(latest, { actor: latestUser, action: 'artwork.download_authorized', entityType: 'file', entityId: file.fileId,
+            orderId: orderIds.length === 1 ? orderIds[0] : null,
+            detail: { purpose: file.purpose }, before: null, after: { authorized: true } });
+          await save(latest);
+        });
+      }
       return send(res, 200, { fileId: file.fileId, ...signed });
     }
 
@@ -2884,8 +3231,8 @@ async function handleRequest(req, res) {
       const file = findFile(store, fileId);
       authorizeFileAttachOwner(user, file);
       const target = resolveFileTarget(store, file.purpose, body, user);
-      authorizeFileAttach(user, file, target);
-      if (target.type === "order") assertRefundWorkAllowed(store, target.record);
+      authorizeFileAttach(user, file, target, store);
+      if (target.type === "order" && file.purpose !== "supplier_invoice") assertRefundWorkAllowed(store, target.record);
       const stat = await objectStorage.statObject(file.objectKey);
       if (stat.size !== file.size) {
         throw new AttachmentError(
@@ -2906,8 +3253,11 @@ async function handleRequest(req, res) {
         const latestFile = findFile(latestStore, fileId);
         authorizeFileAttachOwner(latestUser, latestFile);
         const latestTarget = resolveFileTarget(latestStore, latestFile.purpose, body, latestUser);
-        authorizeFileAttach(latestUser, latestFile, latestTarget);
-        if (latestTarget.type === "order") assertRefundWorkAllowed(latestStore, latestTarget.record);
+        authorizeFileAttach(latestUser, latestFile, latestTarget, latestStore);
+        if (latestTarget.type === "order" && latestFile.purpose !== "supplier_invoice") assertRefundWorkAllowed(latestStore, latestTarget.record);
+        if (latestFile.purpose === 'artwork' && latestTarget.type === 'order') {
+          await recordArtworkConsent(database, latestUser, latestTarget.record, body);
+        }
         if (latestTarget.type === "supplier_catalog_item") {
           const priorReviewStatus = latestTarget.record.reviewStatus;
           const attached = attachCatalogItemPhoto(latestStore, latestFile, latestTarget, { at: now() });
@@ -2947,6 +3297,10 @@ async function handleRequest(req, res) {
         }
         attachFileReference(latestFile, latestTarget);
         const attachedAt = now();
+        if (latestFile.purpose === 'supplier_invoice') {
+          audit(latestStore, { actor: latestUser, action: 'supplier_invoice.scan_attached', entityType: 'supplier_invoice',
+            entityId: latestTarget.record.id, orderId: latestTarget.record.id, detail: { fileId, supplierId: latestUser.id } });
+        }
         latestTarget.record.updatedAt = attachedAt;
         if (latestTarget.type === "order") {
           if (latestFile.purpose === "artwork") latestTarget.record.artworkName = latestFile.originalFilename;
@@ -2966,14 +3320,26 @@ async function handleRequest(req, res) {
               id: id("ntf"), userId: order.clientId, appRole: "client",
               type: "order_packed", orderId: order.id, occurrenceKey: `packing:${latestFile.fileId}`,
               title: "Your order is packed",
-              body: "Your order is packed and waiting for the rider. Open the order to see the packing photo.",
+              body: riderPackingFlow(order) ? "Your order was checked and packed in front of the rider. Open the order to see the packing photo." : "Your order is packed and waiting for the rider. Open the order to see the packing photo.",
               read: false, at: attachedAt,
             });
+            if (riderPackingFlow(order)) {
+              const evidence = { at: attachedAt, by: latestUser.id, fileId: latestFile.fileId, inspectionId: order.pickupChecklist.inspectionId };
+              (order.shopHandover ||= {}).packingPhotos ||= [];
+              order.shopHandover.packingPhotos.push(evidence);
+              audit(latestStore, { actor: latestUser, action: 'order.rider_packing_photo', entityType: 'order', entityId: order.id,
+                orderId: order.id, detail: evidence });
+            }
             notifyAdmins(latestStore, "order_packing_photo_received", "Packing photo received", order,
               `packing:${latestFile.fileId}`, { createId: id, at: attachedAt });
           }
           queueOrderInvalidate(latestStore, latestTarget.record, ["orders", "jobs"]);
           await save(latestStore);
+          // A retained invoice obligation grants paperwork access, not access to
+          // the replacement shop's order, artwork or customer details.
+          if (latestFile.purpose === 'supplier_invoice' && latestTarget.record.supplierId !== latestUser.id) {
+            return send(res, 200, { file: publicFile(latestFile, latestUser) });
+          }
           return send(res, 200, { file: publicFile(latestFile, latestUser), order: await publicOrder(latestTarget.record, latestUser, latestStore) });
         }
         if (latestTarget.type === "user") {
@@ -2984,7 +3350,7 @@ async function handleRequest(req, res) {
           });
         }
         await save(latestStore);
-        return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record) });
+        return send(res, 200, { file: publicFile(latestFile), supplierService: summarizeService(latestTarget.record, latestStore) });
       });
     }
 
@@ -3004,6 +3370,13 @@ async function handleRequest(req, res) {
         return latestUser;
       }, body?.reason);
       return send(res, 200, { file: publicFile(deleted, user) });
+    }
+
+    if (pathname.startsWith('/web-push/')) {
+      const result = await routeWebPush({ database, store, user, method: req.method, pathname,
+        body: req.method === 'POST' ? await readBody(req) : null,
+        userAgent: req.headers['user-agent'], delivery: webPushDelivery });
+      return send(res, result.status, result.body);
     }
 
     // ---- push device registrations ----
@@ -3116,6 +3489,8 @@ async function handleRequest(req, res) {
       const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
         if (!invalidateFrameVisible(payload.resource, eventRole)) return;
         if (eventRole && !hasRole(committedStore,user.id,eventRole) && payload.resource !== 'identity') return;
+        if (payload.resource === 'calls' && !['delivery', 'pickup'].some(pair => callParty(
+          { id: user.id, role: eventRole || user.role }, (committedStore.orders || []).find(o => o.id === payload.id), committedStore, pair))) return;
         if (payload.resource === 'location' && payload.id && !canAccessOrder(committedStore,user.id,(committedStore.orders || []).find(o=>o.id===payload.id),{role:eventRole,location:true})) return;
         res.write(formatInvalidateEvent(payload));
       });
@@ -3278,8 +3653,9 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "reason_required" });
-      if (!order.supplierId || order.readyAt || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
-          || !latenessTier(productionDeadline(order), now())) return send(res, 409, { error: "production_deadline_not_missed" });
+      const timing = productionTiming(order, now());
+      if (!order.supplierId || timing.finishedAt || timing.pendingReview || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
+          || !productionLatenessTier(order, now(), false)) return send(res, 409, { error: "production_deadline_not_missed" });
       if (!order.productionNoCommunication) {
         order.productionNoCommunication = { at: now(), by: user.id, reason };
         audit(store, { actor: user, action: "production_lapse.no_communication", entityType: "order", entityId: order.id, orderId: order.id, reason });
@@ -3293,8 +3669,16 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && pathname === "/settings") {
       return send(res, 200, {
         version: store.version,
-        settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store),
+        settings: publicOperationalSettings(store.settings || defaultOperationalSettings(), store, user),
+        operatingStatus: reviewTiming(store.settings, now()),
       });
+    }
+
+    if (req.method === "POST" && pathname === "/settings/service-fee/preview") {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const body = await readBody(req);
+      if (body.expectedVersion !== store.version) return send(res, 409, { error: "settings_version_conflict", version: store.version });
+      return send(res, 200, serviceFeePreview(store.settings, body, store.version, now()));
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
@@ -3311,8 +3695,14 @@ async function handleRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        ...nextFeeSettings(store.settings, body, store.version + 1, now()),
+        operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
+        riderLocationRefreshIntervalSeconds: Object.hasOwn(body, 'riderLocationRefreshIntervalSeconds')
+          ? body.riderLocationRefreshIntervalSeconds : trackingSettings(store.settings).refreshIntervalSeconds,
+        riderLocationStaleAfterSeconds: Object.hasOwn(body, 'riderLocationStaleAfterSeconds')
+          ? body.riderLocationStaleAfterSeconds : trackingSettings(store.settings).staleAfterSeconds,
         handoverOtpEnabled: Object.hasOwn(body, 'handoverOtpEnabled') ? body.handoverOtpEnabled : (store.settings.handoverOtpEnabled ?? false),
         hubPickupEnabled: Object.hasOwn(body, "hubPickupEnabled") ? body.hubPickupEnabled : store.settings.hubPickupEnabled === true,
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
@@ -3328,6 +3718,7 @@ async function handleRequest(req, res) {
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         physicalInvoiceRequestsEnabled:
           body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
+        coverSpineRequired: Object.hasOwn(body, "coverSpineRequired") ? body.coverSpineRequired : store.settings.coverSpineRequired === true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
@@ -3337,6 +3728,10 @@ async function handleRequest(req, res) {
         pricingPaymentFeeBps: Object.hasOwn(body, "pricingPaymentFeeBps")
           ? body.pricingPaymentFeeBps
           : (store.settings.pricingPaymentFeeBps ?? null),
+        artworkGuidance: Object.hasOwn(body, "artworkGuidance")
+          ? validateArtworkGuidance(body.artworkGuidance, store.taxonomy, (status, code, message, details) => {
+            throw new OperationalError(status, code, message, details);
+          }) : artworkGuidanceSettings(store.settings),
       };
       validateOperationalSettings(next);
       next.deliveryFeeBands = next.deliveryFeeBands.map((band) => ({
@@ -3351,16 +3746,21 @@ async function handleRequest(req, res) {
       const previous = structuredClone(store.settings);
       store.settings = structuredClone(next);
       store.version += 1;
+      const reviewDelayedOrderIds = tagDelayedReviews(store, previous, now());
+      for (const orderId of reviewDelayedOrderIds) {
+        const affected = store.orders.find(order => order.id === orderId);
+        queueOrderInvalidate(store, affected, ['orders', 'jobs']);
+      }
       audit(store, {
         actor: user,
         action: "settings.operational_update",
         entityType: "settings",
         entityId: "operational",
-        detail: { previous, current: store.settings },
+        detail: { previous, current: store.settings, reviewDelayedOrderIds },
         reason,
       });
       await save(store);
-      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store) });
+      return send(res, 200, { version: store.version, settings: publicOperationalSettings(store.settings, store, user), operatingStatus: reviewTiming(store.settings, now()) });
     }
 
     if (req.method === "POST" && pathname === "/settings/payment-qr") {
@@ -3388,7 +3788,7 @@ async function handleRequest(req, res) {
       if (previousId === file.fileId) {
         return send(res, 200, {
           version: store.version,
-          settings: publicOperationalSettings(store.settings, store),
+          settings: publicOperationalSettings(store.settings, store, user),
         });
       }
       store.settings = { ...store.settings, paymentQrFileId: file.fileId };
@@ -3404,7 +3804,7 @@ async function handleRequest(req, res) {
       await save(store);
       return send(res, 200, {
         version: store.version,
-        settings: publicOperationalSettings(store.settings, store),
+        settings: publicOperationalSettings(store.settings, store, user),
       });
     }
 
@@ -4082,7 +4482,7 @@ async function handleRequest(req, res) {
         return send(res, 403, { error: "forbidden" });
       }
       if (stateParam) list = list.filter((s) => s.state === stateParam);
-      return send(res, 200, { services: list.map(summarizeService) });
+      return send(res, 200, { services: list.map(service => summarizeService(service, store)) });
     }
 
     if (req.method === "POST" && pathname === "/supplier-services") {
@@ -4116,6 +4516,7 @@ async function handleRequest(req, res) {
         referenceRateMinor,
         ...duration,
         standardTurnaroundDays: duration.turnaroundDays,
+        standardTurnaroundMinutes: duration.turnaroundMinutes,
         standardTurnaroundHours: duration.turnaroundHours,
         capacityDaily: body.capacityDaily != null ? Number(body.capacityDaily) : null,
         capacityWeekly: body.capacityWeekly != null ? Number(body.capacityWeekly) : null,
@@ -4141,7 +4542,7 @@ async function handleRequest(req, res) {
         detail: { categoryCode: service.categoryCode, state: service.state },
       });
       await save(store);
-      return send(res, 201, { service: summarizeService(service) });
+      return send(res, 201, { service: summarizeService(service, store) });
     }
 
     if (req.method === "GET" && /^\/supplier-services\/[^/]+$/.test(pathname)) {
@@ -4154,7 +4555,7 @@ async function handleRequest(req, res) {
       if (user.role !== "supplier" && !isOps(user)) {
         return send(res, 403, { error: "forbidden" });
       }
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "PATCH" && /^\/supplier-services\/[^/]+$/.test(pathname)) {
@@ -4187,7 +4588,7 @@ async function handleRequest(req, res) {
       const bad = validateTaxonomyRefs(store, toValidate);
       if (bad) return send(res, 400, bad);
       const referenceRateMinor = body.referenceRateMinor == null ? null : Number(body.referenceRateMinor);
-      const duration = body.turnaroundDays != null || body.turnaroundHours != null
+      const duration = body.turnaroundMinutes != null || body.turnaroundDays != null || body.turnaroundHours != null
         ? productionDuration(body, service, "turnaround", shopProductionDayMinutes(store, service.supplierId), "invalid_service") : null;
       const turnaroundHours = duration?.turnaroundHours;
       if (
@@ -4232,6 +4633,7 @@ async function handleRequest(req, res) {
         if (duration) {
           Object.assign(service, duration);
           service.standardTurnaroundDays = duration.turnaroundDays;
+          service.standardTurnaroundMinutes = duration.turnaroundMinutes;
           service.standardTurnaroundHours = duration.turnaroundHours;
         }
         // Capability expansion on a live service requires re-verification
@@ -4259,7 +4661,7 @@ async function handleRequest(req, res) {
         detail: { state: service.state },
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/submit$/.test(pathname)) {
@@ -4291,7 +4693,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/verify$/.test(pathname)) {
@@ -4323,7 +4725,7 @@ async function handleRequest(req, res) {
         reason: body.reason || null,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/suspend$/.test(pathname)) {
@@ -4349,7 +4751,7 @@ async function handleRequest(req, res) {
         reason: body.reason,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     if (req.method === "POST" && /^\/supplier-services\/[^/]+\/withdraw$/.test(pathname)) {
@@ -4369,7 +4771,7 @@ async function handleRequest(req, res) {
         entityId: service.id,
       });
       await save(store);
-      return send(res, 200, { service: summarizeService(service) });
+      return send(res, 200, { service: summarizeService(service, store) });
     }
 
     // ---- matching support ----
@@ -4475,7 +4877,6 @@ async function handleRequest(req, res) {
         return send(res, 409, { error: "claim_closed", status: claim.status });
       }
       const ts = now();
-      const previousStatus = claim.status;
       claim.status = "payout_held";
       claim.holdReason = body.reason;
       claim.heldAt = ts;
@@ -4494,8 +4895,6 @@ async function handleRequest(req, res) {
         entityType: "claim",
         entityId: claim.id,
         orderId: claim.orderId,
-        previous: previousStatus,
-        current: "payout_held",
         reason: body.reason,
       });
       if (order) notifyShopPayoutHeld(store, order, { createId: id, at: ts });
@@ -4956,36 +5355,19 @@ async function handleRequest(req, res) {
     }
 
     // ---- audit trail ----
-    if (req.method === "GET" && pathname === "/audit") {
-      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
-      let list = store.auditLog || [];
-      const entityType = url.searchParams.get("entityType");
-      const entityId = url.searchParams.get("entityId");
-      const orderId = url.searchParams.get("orderId");
-      const actorId = url.searchParams.get("actorId");
-      const action = url.searchParams.get("action");
-      // Operations needs correction/deletion bylines in daily workspaces,
-      // while the unrestricted audit log remains Super Admin only.
-      const operationalAction = ["order.production_override", "file.early_delete", "file.retention_delete"].includes(action);
-      const specificFile = entityType === "file" && Boolean(entityId?.trim());
-      const orderScoped = Boolean(orderId?.trim());
-      if (!isSuper(user) && !operationalAction && !specificFile && !orderScoped) {
-        return send(res, 403, { error: "forbidden" });
+    const auditOrderId = /^\/orders\/([^/]+)\/audit$/.exec(pathname)?.[1];
+    if (req.method === 'GET' && (pathname === '/audit' || auditOrderId)) {
+      if (!isOps(user)) return send(res, 403, { error: 'forbidden' });
+      if (auditOrderId && !store.orders.some(order => order.id === auditOrderId)) return send(res, 404, { error: 'order_not_found' });
+      const result = await readAudit(database, user, url.searchParams, auditOrderId);
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (result.csv != null) {
+        res.writeHead(200, { ...res.gridgoCorsHeaders, 'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="gridgo-audit.csv"', 'X-Content-Type-Options': 'nosniff',
+          'Access-Control-Expose-Headers': 'X-Next-Offset', 'X-Next-Offset': result.nextOffset == null ? '' : String(result.nextOffset) });
+        return res.end(result.csv);
       }
-      return send(res, 200, {
-        audit: filterAuditLog(list, {
-          entityType,
-          entityId,
-          orderId,
-          actorId,
-          action,
-          actionQuery: url.searchParams.get("actionQuery"),
-          actor: url.searchParams.get("actor"),
-          from: url.searchParams.get("from"),
-          to: url.searchParams.get("to"),
-          limit: url.searchParams.get("limit") || 100,
-        }),
-      });
+      return send(res, result.status, result.body);
     }
 
     // ---- supplier payout milestones ----
@@ -5002,10 +5384,11 @@ async function handleRequest(req, res) {
       const reference = paymentReferenceValue(body.reference);
       const receipt = resolvePayoutReceipt(store, body.receiptFileId, user);
       const releasedAt = now();
-      const previousStatus = (order.payoutMilestones || []).find((row) => row.code === milestoneCode)?.status ?? null;
       const milestone = releaseMilestone(order, milestoneCode, user, releasedAt, store);
       if (receipt) bindPayoutReceipt(order, milestone, receipt);
       if (reference) milestone.reference = reference;
+      const supplementalAmountMinor = releaseChangePayouts(store, order, milestoneCode,
+        { user, reference, receipt, amountMinor: body.amountMinor, at: releasedAt, id, audit });
       order.updatedAt = releasedAt;
       order.timeline.push({
         at: releasedAt,
@@ -5022,16 +5405,9 @@ async function handleRequest(req, res) {
         entityType: "order",
         entityId: order.id,
         orderId: order.id,
-        previous: { status: previousStatus, milestoneCode },
-        current: {
-          status: milestone.status,
-          milestoneCode,
-          amountMinor: milestone.amountMinor,
-          reference: reference || null,
-          receiptFileId: receipt?.fileId || null,
-        },
         detail: {
           milestoneCode,
+          supplementalAmountMinor,
           amountMinor: milestone.amountMinor,
           reference: reference || null,
           receiptFileId: receipt?.fileId || null,
@@ -5053,7 +5429,7 @@ async function handleRequest(req, res) {
           type: "shop_payout_released",
           appRole: "supplier",
           orderId: order.id,
-          title: `${formatMinorPhp(milestone.amountMinor)} released`,
+          title: `${formatMinorPhp(milestone.amountMinor + supplementalAmountMinor)} released`,
           body: reference
             ? `${payoutStageLabel(milestoneCode)} was sent, reference ${reference}. Open the payout ledger for the receipt.`
             : `${payoutStageLabel(milestoneCode)} was recorded as released. Open the payout ledger for the recorded details.`,
@@ -5272,6 +5648,7 @@ async function handleRequest(req, res) {
       }
       const body = await readBody(req);
       const confirmedAt = now();
+      if (installmentCode === 'initial') confirmVoucher(store, [order], { id, at: confirmedAt, actorId: user.id });
       const previousState = order.state;
       installment.status = "confirmed";
       installment.confirmedAt = confirmedAt;
@@ -5316,20 +5693,27 @@ async function handleRequest(req, res) {
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
+    if (req.method === 'GET' && /^\/ops\/orders\/[^/]+\/location-diagnostics$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(row => row.id === pathname.split('/')[3]);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      const pings = currentRiderPings(store, order);
+      return send(res, 200, { orderId: order.id, riderId: order.riderId ?? null,
+        ...locationFreshness(latestPing(pings), store.settings, Date.now(), assignmentTime(order)),
+        ...pingDiagnostics(pings) });
+    }
+
     // ---- orders list / create ----
-    // Latest ping per rider who is currently sharing location on an active trip.
+    // Include active riders who have never sent a fix, so Operations can contact them.
     if (req.method === "GET" && pathname === "/ops/riders/locations") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
-      const tracking = new Set(["picked_up", "out_for_delivery"]);
+      const tracking = new Set(ACTIVE_TRACKING_STATES);
       const latestByRider = new Map();
       for (const order of store.orders || []) {
         if (!order.riderId || !tracking.has(order.state)) continue;
-        const ping = (store.locationPings || [])
-          .filter((p) => p.orderId === order.id && p.riderId === order.riderId)
-          .sort((a, b) => b.at.localeCompare(a.at))[0];
-        if (!ping) continue;
+        const ping = latestPing(currentRiderPings(store, order));
         const prev = latestByRider.get(order.riderId);
-        if (!prev || ping.at > prev.ping.at) {
+        if (!prev || (ping?.at || '') > (prev.ping?.at || '')) {
           latestByRider.set(order.riderId, { order, ping });
         }
       }
@@ -5348,10 +5732,12 @@ async function handleRequest(req, res) {
           orderId: order.id,
           orderTitle: order.title || null,
           state: order.state,
-          lat: ping.lat,
-          lng: ping.lng,
-          accuracy: ping.accuracy ?? null,
-          at: ping.at,
+          lat: ping?.lat ?? null,
+          lng: ping?.lng ?? null,
+          accuracy: ping?.accuracy ?? null,
+          at: ping?.at ?? null,
+          receivedAt: ping?.receivedAt ?? null,
+          ...locationFreshness(ping, store.settings, Date.now(), assignmentTime(order)),
           pickup: mapPointOrNull(order.pickup),
           dropoff,
         };
@@ -5413,6 +5799,10 @@ async function handleRequest(req, res) {
       const requestedDropoff = dropoffFor(address, zoneCode);
       const order = {
         id: id("ord"),
+        shopClockVersion: 1,
+        operatingClock: operatingClockSnapshot(store.settings, store.version),
+        ...(body.submit ? { fileCheck: { status: 'pending', requestedAt: ts, reviewedAt: null, reviewedBy: null, reason: null },
+          reviewSchedule: reviewTiming(store.settings, ts) } : {}),
         clientId: user.id,
         organizationOfficer: officerSnapshot(store, user.id),
         supplierId: null,
@@ -5420,6 +5810,7 @@ async function handleRequest(req, res) {
         state: body.submit ? "submitted" : "draft",
         productId: product.id,
         title: body.title || product.name,
+        specialInstructions: specialInstructions(body.specialInstructions),
         quantity: qty,
         size: body.size || "",
         material: body.material || "",
@@ -5585,6 +5976,10 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if (order.state === 'supplier_assigned' && ['supplier_accepted', 'payment_authorized'].includes(next)
+          && user.role === 'supplier' && user.id === order.supplierId) {
+        acknowledgeInstructions(store, order, user, body, now(), audit);
+      }
       if (order.handover && ['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(next)
           && !order.handover.consumedAt) return send(res, 409, { error: 'handover_verification_required' });
       if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});
@@ -5720,35 +6115,31 @@ async function handleRequest(req, res) {
           message: "This order is assigned to another account. Open one of your own orders before taking this action.",
         });
       }
-      if (["supplier_self_qc", "ready_for_dispatch"].includes(next)) {
-        if (order.payoutHold || activePayoutHold(store, order.id)) {
-          return send(res, 409, {
-            error: "claim_hold_active",
-            message: "This order cannot be packaged for pickup while a claim holds payouts. Operations must clear the claim first.",
-          });
-        }
-        const photoMissing = productionPhotoFiles(store, order).length === 0;
-        const packingPhotoMissing = next === "ready_for_dispatch" && packingPhotoFiles(store, order).length === 0;
-        if (["ops_admin", "super_admin"].includes(user.role)) {
-          const reason = typeof body.reason === "string" ? body.reason.trim() : "";
-          if (!reason) return send(res, 400, {
-            error: "production_override_reason_required",
-            message: "Explain why Operations is correcting this production step.",
-          });
-          audit(store, {
-            actor: user, action: "order.production_override", entityType: "order", entityId: order.id,
-            orderId: order.id, reason, detail: { from: order.state, to: next, photoMissing, packingPhotoMissing },
-          });
-        } else if (photoMissing) {
-          return send(res, 409, {
-            error: "production_photo_required",
-            message: "Attach at least one production progress photo before marking this job packed or ready for dispatch. A start-of-production photo counts.",
-          });
-        }
+      if (order.operatingClock && (next === 'rider_assigned' || next === 'picked_up'
+        || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
+        requireOperatingHours(store.settings, now(), next === 'rider_assigned' || next === 'picked_up' ? 'Dispatch' : 'Artwork review');
       }
-      if (next === "ready_for_dispatch" && user.role === "supplier" && !packingPhotoFiles(store, order).length) {
-        return send(res, 409, { error: "packing_photo_required",
-          message: "Add a photo of the finished prints packed and ready before marking Ready for dispatch." });
+      if (PACKAGING_STATES.includes(next)) {
+        const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason, reasonCode: body.reasonCode });
+        if (!readiness.allowed) {
+          const first = readiness.missing[0];
+          return send(res, first.code.startsWith('production_override_reason') ? 400 : 409,
+            { error: first.code, message: first.message, missing: readiness.missing });
+        }
+        if (isOps(user)) {
+          const skippedChecks = riderPackingFlow(order) ? handoverRequirements(store, order, next).map(item => item.code)
+            : [!productionPhotoFiles(store, order).length && 'production_photo_required',
+              next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length && 'packing_photo_required'].filter(Boolean);
+          const forced = { at: now(), by: user.id, role: user.role, from: order.state, to: next,
+            reasonCode: body.reasonCode, note: body.reason.trim(), skippedChecks };
+          (order.forcedSteps ||= []).push(forced);
+          audit(store, {
+            actor: user, action: 'order.production_override', entityType: 'order', entityId: order.id,
+            orderId: order.id, reason: body.reason.trim(), detail: { ...forced,
+              photoMissing: productionPhotoFiles(store, order).length === 0,
+              packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0 },
+          });
+        }
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
@@ -5797,7 +6188,7 @@ async function handleRequest(req, res) {
           if (priorQuote) order.quoteHistory.push(structuredClone(priorQuote));
           order.dropoff = order.requestedDropoff ? structuredClone(order.requestedDropoff) : order.dropoff;
           for (const field of [
-            "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor",
+            "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "serviceFeeSchedule", "serviceFeeWorking",
             "deliveryDistanceMeters", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode",
             "paymentPlan", "supplierDownpaymentRateBps", "initialSupplierPrincipalMinor",
             "supplierRemainderMinor", "initialOnlineMinor", "finalOnlineMinor", "onlineDueMinor",
@@ -5839,6 +6230,7 @@ async function handleRequest(req, res) {
         order.pendingQuote = {
           version: quoteVersion,
           supplierSubtotalMinor,
+          ...organizationFeeMoney(supplierSubtotalMinor, feeSettings(store.settings, feeSchedule(store.settings, now())), approvedOrganization(store, order.clientId)),
           promisedDate: order.promisedDate,
           supplierShop: structuredClone(order.pickup),
           paymentTerms: structuredClone(terms),
@@ -5928,7 +6320,8 @@ async function handleRequest(req, res) {
           supplierDownpaymentRateBps,
           pickup: quote.supplierShop,
           dropoff: order.dropoff,
-          settings: store.settings,
+          settings: feeSettings({ ...store.settings, organizationDiscountRateBps: quote.organizationDiscountRateBps ?? store.settings.organizationDiscountRateBps },
+            quote.serviceFeeSchedule || { version: 1, rateBps: quote.serviceFeeRateBps ?? store.settings.serviceFeeRateBps }),
         });
         const schedule = createPaymentSchedule(money);
         const committedAt = now();
@@ -5944,6 +6337,8 @@ async function handleRequest(req, res) {
             acceptedAt: committedAt,
             fulfillmentMode,
             paymentPlan,
+            serviceFeeSchedule: structuredClone(money.serviceFeeSchedule),
+            serviceFeeWorking: structuredClone(money.serviceFeeWorking),
             serviceFeeRateBps: money.serviceFeeRateBps,
             serviceFeeMinor: money.serviceFeeMinor,
             grossServiceFeeMinor: money.grossServiceFeeMinor,
@@ -5983,6 +6378,8 @@ async function handleRequest(req, res) {
             quoteVersion: quote.version,
             fulfillmentMode,
             paymentPlan,
+            serviceFeeSchedule: structuredClone(order.serviceFeeSchedule),
+            serviceFeeWorking: structuredClone(order.serviceFeeWorking),
             serviceFeeRateBps: order.serviceFeeRateBps,
             serviceFeeMinor: order.serviceFeeMinor,
           },
@@ -6016,8 +6413,6 @@ async function handleRequest(req, res) {
           entityType: "order",
           entityId: order.id,
           orderId: order.id,
-          previous: previousSupplierId,
-          current: body.supplierId,
           detail: { supplierId: body.supplierId, matchingServiceIds: order.matchingServiceIds },
           reason: body.note || null,
         });
@@ -6029,20 +6424,9 @@ async function handleRequest(req, res) {
         order.matchingServiceIds = null;
       }
       if (next === "rider_assigned") {
-        const nextRiderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
-        if (nextRiderId !== order.riderId) {
-          audit(store, {
-            actor: user,
-            action: "order.rider_assigned",
-            entityType: "order",
-            entityId: order.id,
-            orderId: order.id,
-            previous: order.riderId,
-            current: nextRiderId,
-            reason: body.note || body.reason || null,
-          });
-        }
-        order.riderId = nextRiderId;
+        order.riderId = user.role === "rider" ? user.id : body.riderId || order.riderId;
+        order.riderAssignedAt = now();
+        delete order.riderProgress;
       }
       // The moment the shop's own work is done. Its on-time record is measured
       // from this against readyBy -- the date its board promised -- and never
@@ -6051,24 +6435,14 @@ async function handleRequest(req, res) {
       if (next === "ready_for_dispatch" && !order.readyAt) {
         order.readyAt = now();
       }
+      notifyMissingJobDetails(store, order);
       const previousState = order.state;
       const previousFileCheck = JSON.stringify(order.fileCheck);
       order.state = next;
-      if (next === "cancelled") {
-        audit(store, {
-          actor: user,
-          action: "order.cancelled",
-          entityType: "order",
-          entityId: order.id,
-          orderId: order.id,
-          previous: previousState,
-          current: "cancelled",
-          reason: order.cancellationReason || null,
-        });
-      }
       order.updatedAt = now();
+      if (['supplier_self_qc', 'ready_for_dispatch'].includes(next)) requestDeliveryPin(store, order, { at: order.updatedAt, id, audit, user });
       if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
-      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist);
+      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist, store.settings);
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {
         audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,
@@ -6094,6 +6468,73 @@ async function handleRequest(req, res) {
         next === "ready_for_dispatch" ? ["orders", "jobs", "dispatch"] : ["orders", "jobs"],
       );
       await save(store);
+      return send(res, 200, { order: await publicOrder(order, user, store) });
+    }
+
+    // Finished-product review is separate from the pre-production artwork check.
+    if (req.method === 'POST' && /^\/orders\/[^/]+\/(production-finished|production-review)$/.test(pathname)) {
+      const order = store.orders.find(row => row.id === pathname.split('/')[2]);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      const review = pathname.endsWith('/production-review');
+      if (review ? !isOps(user) : user.role !== 'supplier' || !approvedRole(store, user.id, 'supplier') || order.supplierId !== user.id) {
+        return send(res, 403, { error: 'forbidden' });
+      }
+      if (!riderPackingFlow(order)) return send(res, 409, { error: 'handover_flow_not_available' });
+      if (claimBlocksHandover(store, order)) return send(res, 409, { error: 'claim_hold_active' });
+      const body = await readBody(req);
+      const at = now();
+      order.shopHandover ||= {};
+      if (!review) {
+        if (order.state !== 'production') return send(res, 409, { error: 'production_finish_not_available' });
+        const photos = finishedProductPhotos(store, order).filter(file => !(order.shopHandover.attempts || [])
+          .some(attempt => attempt.finished.photoFileIds.includes(file.fileId)));
+        if (!photos.length) return send(res, 409, { error: 'finished_product_photo_required' });
+        order.shopHandover.finished = { at, by: user.id, supplierId: order.supplierId, photoFileIds: photos.map(file => file.fileId) };
+        order.shopHandover.review = null;
+        order.state = 'supplier_self_qc';
+        requestDeliveryPin(store, order, { at, id, audit, user });
+        notifyAdmins(store, 'order_finished_review_required', 'Finished products need review', order, `finished:${at}`, { createId: id, at });
+      } else {
+        if (order.state !== 'supplier_self_qc' || !order.shopHandover.finished || order.shopHandover.finished.supplierId !== order.supplierId || order.shopHandover.review) return send(res, 409, { error: 'production_review_not_available' });
+        if (!['approved', 'rejected'].includes(body.decision)) return send(res, 400, { error: 'invalid_production_review' });
+        if (body.decision === 'rejected' && (typeof body.note !== 'string' || !body.note.trim())) return send(res, 400, { error: 'production_review_note_required' });
+        const reviewPhotos = finishedProductPhotos(store, order);
+        if (!order.shopHandover.finished.photoFileIds.every(fileId => reviewPhotos.some(file => file.fileId === fileId))) return send(res, 409, { error: 'finished_product_photo_required' });
+        order.shopHandover.review = { at, by: user.id, decision: body.decision, note: typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '' };
+        (order.shopHandover.attempts ||= []).push({ finished: structuredClone(order.shopHandover.finished), review: structuredClone(order.shopHandover.review) });
+        if (body.decision === 'rejected') { order.state = 'production'; order.shopHandover.finished = null; }
+        store.notifications.push({ id: id('ntf'), userId: order.supplierId, appRole: 'supplier', type: 'order_finished_reviewed',
+          orderId: order.id, title: body.decision === 'approved' ? 'Ready for rider pickup' : 'Finished products need a correction',
+          body: body.decision === 'approved' ? 'Prepare packing materials. Do not pack yet; the rider checks the unpacked items first.' : order.shopHandover.review.note, read: false, at });
+        notifyAdmins(store, 'order_finished_reviewed', 'Finished-product review recorded', order, `review:${at}`, { createId: id, at });
+      }
+      order.updatedAt = at;
+      order.timeline.push({ at, state: order.state, by: user.id, note: review ? `Finished-product review: ${body.decision}` : 'Finished, unpacked products submitted for review' });
+      audit(store, { actor: user, action: review ? 'order.production_review' : 'order.production_finished', entityType: 'order', entityId: order.id,
+        orderId: order.id, detail: { finished: order.shopHandover.finished, review: order.shopHandover.review, attempt: order.shopHandover.attempts?.at(-1) || null } });
+      notifyOrderParties(store, order, { createId: id, at });
+      queueOrderInvalidate(store, order, ['orders', 'jobs']);
+      await save(store);
+      return send(res, 200, { order: await publicOrder(order, user, store) });
+    }
+
+    if (req.method === 'POST' && /^\/dispatch\/[^/]+\/arrived-packed$/.test(pathname)) {
+      if (user.role !== 'rider' || !approvedRole(store, user.id, 'rider')) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(row => row.id === pathname.split('/')[2] && row.riderId === user.id);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      if (!riderPackingFlow(order) || order.state !== 'rider_assigned' || currentInspection(order)) return send(res, 409, { error: 'arrived_packed_not_available' });
+      order.shopHandover ||= {};
+      const events = order.shopHandover.arrivedPacked ||= [];
+      if (!events.some(event => event.riderId === user.id && event.assignedAt === (order.riderAssignedAt || null))) {
+        const at = now();
+        const event = { at, riderId: user.id, supplierId: order.supplierId, assignedAt: order.riderAssignedAt || null };
+        events.push(event);
+        order.updatedAt = at;
+        audit(store, { actor: user, action: 'order.arrived_packed', entityType: 'order', entityId: order.id, orderId: order.id, detail: event });
+        notifyAdmins(store, 'order_arrived_packed', 'Shop presented an already-packed job', order, `arrived-packed:${at}`, { createId: id, at });
+        queueOrderInvalidate(store, order, ['orders', 'jobs']);
+        await save(store);
+      }
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
@@ -6136,7 +6577,10 @@ async function handleRequest(req, res) {
       if (isContainedPickup(order)) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
+      if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       order.riderId = user.id;
+      order.riderAssignedAt = now();
+      delete order.riderProgress;
       order.state = "rider_assigned";
       order.updatedAt = now();
       order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
@@ -6147,7 +6591,7 @@ async function handleRequest(req, res) {
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
-    if (req.method === "POST" && /^\/dispatch\/[^/]+\/pickup-checklist$/.test(pathname)) {
+    if (req.method === "POST" && /^\/dispatch\/[^/]+\/(pickup-checklist|pickup-confirm)$/.test(pathname)) {
       if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       if (user.verificationStatus !== "approved") {
         return send(res, 403, {
@@ -6158,6 +6602,7 @@ async function handleRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       if (order.state !== "rider_assigned") {
         return send(res, 409, {
           error: "pickup_checklist_not_available",
@@ -6176,6 +6621,17 @@ async function handleRequest(req, res) {
         });
       }
       const body = await readBody(req);
+      const confirming = pathname.endsWith('/pickup-confirm');
+      const riderPacks = riderPackingFlow(order);
+      if (confirming && !riderPacks) return send(res, 409, { error: 'handover_flow_not_available' });
+      if (riderPacks && claimBlocksHandover(store, order)) return send(res, 409, { error: 'claim_hold_active' });
+      const inspection = currentInspection(order);
+      if (confirming) {
+        if (!inspection) return send(res, 409, { error: 'unpacked_inspection_required' });
+        if (!inspectedPackingPhotos(store, order).length) return send(res, 409, { error: 'packing_photo_required' });
+        body.checks = inspection.checks;
+        body.counts = inspection.counts;
+      }
       let checks = Array.isArray(body.checks) ? body.checks : [];
       const expected = new Set(PICKUP_CHECK_CODES);
       const received = new Set(checks.map((item) => item?.code));
@@ -6301,6 +6757,20 @@ async function handleRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store), escalation });
       }
 
+      if (riderPacks && !confirming) {
+        order.pickupChecklist = { status: 'inspected', inspectionId: id('inspection'), checks: structuredClone(checks), counts,
+          completedAt: checkedAt, completedBy: user.id, handoffSignature: null, signOffPrompt: PICKUP_SIGN_OFF_PROMPT };
+        (order.shopHandover ||= {}).inspections ||= [];
+        order.shopHandover.inspections.push(structuredClone(order.pickupChecklist));
+        order.updatedAt = checkedAt;
+        audit(store, { actor: user, action: 'pickup_checklist.inspected', entityType: 'order', entityId: order.id, orderId: order.id,
+          detail: { inspectionId: order.pickupChecklist.inspectionId, checks, counts } });
+        notifyAdmins(store, 'order_unpacked_checked', 'Rider checked the unpacked products', order, order.pickupChecklist.inspectionId, { createId: id, at: checkedAt });
+        queueOrderInvalidate(store, order, ['orders', 'jobs']);
+        await save(store);
+        return send(res, 200, { order: await publicOrder(order, user, store) });
+      }
+
       /*
         Six passes move nothing on their own. Custody changes hands only once
         the supplier has signed for the handoff on the rider's phone, so the
@@ -6331,6 +6801,11 @@ async function handleRequest(req, res) {
           fileId: signatureFileId,
         });
       }
+      if (riderPacks && !attachedReadyOrderFile(store, order, signatureFileId, 'handoff_signature', user.id).references
+        .some(ref => ref.type === 'order' && ref.id === order.id && ref.inspectionId === inspection.inspectionId)) {
+        return send(res, 400, { error: 'invalid_handoff_signature' });
+      }
+      const packedFileIds = riderPacks ? inspectedPackingPhotos(store, order).map(file => file.fileId) : [];
       const handoffSignature = {
         fileId: signatureFileId,
         signerName,
@@ -6340,6 +6815,7 @@ async function handleRequest(req, res) {
       };
 
       order.pickupChecklist = {
+        ...(riderPacks ? { inspectionId: inspection.inspectionId, inspectedAt: inspection.completedAt, packedPhotoFileIds: packedFileIds } : {}),
         status: "passed",
         checks: structuredClone(checks),
         counts,
@@ -6366,7 +6842,7 @@ async function handleRequest(req, res) {
         entityType: "order",
         entityId: order.id,
         orderId: order.id,
-        detail: { fileId: signatureFileId, signerName, counts, checklistHash: handoffSignature.checklistHash },
+        detail: { fileId: signatureFileId, signerName, counts, packedPhotoFileIds: packedFileIds, checklistHash: handoffSignature.checklistHash },
       });
       notifyOrderParties(store, order, { createId: id, at: checkedAt });
       queueOrderInvalidate(store, order, ["orders", "jobs"]);
@@ -6378,23 +6854,74 @@ async function handleRequest(req, res) {
       });
     }
 
+    // Rider-reported progress never advances the governed pickup or delivery state.
+    if (req.method === 'POST' && /^\/dispatch\/[^/]+\/milestones$/.test(pathname)) {
+      if (user.role !== 'rider' || !approvedRole(store, user.id, 'rider')) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(row => row.id === pathname.split('/')[2] && row.riderId === user.id);
+      if (!order) return send(res, 404, { error: 'order_not_found' });
+      const { milestone } = await readBody(req);
+      if (!['heading_to_shop', 'at_shop', 'arrived'].includes(milestone)) return send(res, 400, { error: 'invalid_delivery_milestone' });
+      const allowed = milestone === 'arrived' ? ['picked_up', 'out_for_delivery'] : ['rider_assigned'];
+      if (order.fulfillmentMode !== 'delivery' || !allowed.includes(order.state) || order.deliveryEvidence?.recordedAt) {
+        return send(res, 409, { error: 'delivery_milestone_not_available' });
+      }
+      const assignedAt = assignmentTime(order);
+      if (order.riderProgress?.riderId !== user.id || order.riderProgress?.assignedAt !== assignedAt) {
+        order.riderProgress = { riderId: user.id, assignedAt, events: {} };
+      }
+      const events = order.riderProgress.events;
+      if (!events[milestone]) {
+        if (milestone === 'heading_to_shop' && events.at_shop) return send(res, 409, { error: 'delivery_milestone_out_of_order' });
+        const at = now();
+        events[milestone] = at;
+        order.updatedAt = at;
+        const label = { heading_to_shop: 'Heading to the shop', at_shop: 'At the shop', arrived: 'Arrived' }[milestone];
+        const recipients = [{ userId: order.clientId, role: 'client' }, ...privilegedAdminMemberships(store)];
+        for (const membership of recipients) store.notifications.push({
+          id: id('ntf'), userId: membership.userId, appRole: membership.role,
+          type: 'rider_delivery_milestone', orderId: order.id, title: label,
+          body: `Delivery progress: ${label.toLowerCase()}.`, read: false, at,
+        });
+        audit(store, { actor: user, action: 'dispatch.milestone', entityType: 'order', entityId: order.id,
+          orderId: order.id, detail: { milestone } });
+        queueOrderInvalidate(store, order, ['orders', 'dispatch']);
+        await save(store);
+      }
+      return send(res, 200, { order: await publicOrder(order, user, store) });
+    }
+
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/location$/.test(pathname)) {
       if (user.role !== "rider" || !approvedRole(store,user.id,"rider")) return send(res, 403, { error: "forbidden" });
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId && o.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
-      if (!["picked_up", "out_for_delivery"].includes(order.state)) {
+      if (!["rider_assigned", "picked_up", "out_for_delivery"].includes(order.state)) {
         return send(res, 409, { error: "tracking_not_active", state: order.state });
       }
       const body = await readBody(req);
-      const sourceMs = body.recordedAt == null ? Date.now() : Date.parse(body.recordedAt);
-      if (!Number.isFinite(sourceMs)) return send(res,400,{error:"invalid_location_timestamp"});
+      const receivedMs = Date.parse(req.receivedAt);
+      const rejectLocation = (code) => {
+        console.warn(JSON.stringify({ event: 'rider_location_rejected', orderId, riderId: user.id,
+          receivedAt: req.receivedAt, code }));
+        return send(res, 400, { error: code });
+      };
+      const sourceMs = body.recordedAt == null ? receivedMs
+        : typeof body.recordedAt === 'string' ? Date.parse(body.recordedAt) : NaN;
+      if (!Number.isFinite(sourceMs)) return rejectLocation('invalid_location_timestamp');
       const recordedAt = new Date(sourceMs).toISOString();
       const fixMs = Date.parse(recordedAt);
-      if (!Number.isFinite(fixMs) || fixMs > Date.now()+30000 || fixMs < Date.now()-5*60*1000) return send(res,400,{error:'invalid_location_timestamp'});
-      if (!Number.isFinite(body.lat) || Math.abs(body.lat)>90 || !Number.isFinite(body.lng) || Math.abs(body.lng)>180 || (body.accuracy != null && (!Number.isFinite(body.accuracy) || body.accuracy < 0))) return send(res,400,{error:'invalid_location'});
-      const latest = store.locationPings.filter(p=>p.orderId===orderId&&p.riderId===order.riderId).sort((a,b)=>b.at.localeCompare(a.at))[0];
-      if (latest && Date.parse(latest.at)>=fixMs) return send(res,200,{ping:latest,ignored:true});
+      if (fixMs > receivedMs + 30000 || fixMs < receivedMs - 5 * 60 * 1000) return rejectLocation('invalid_location_timestamp');
+      if (!Number.isFinite(body.lat) || Math.abs(body.lat)>90 || !Number.isFinite(body.lng) || Math.abs(body.lng)>180 || (body.accuracy != null && (!Number.isFinite(body.accuracy) || body.accuracy < 0))) return rejectLocation('invalid_location');
+      const latest = latestPing(currentRiderPings(store, order));
+      if (latest && Date.parse(latest.at) >= fixMs) {
+        console.info(JSON.stringify({ event: 'rider_location_ignored', orderId, riderId: user.id,
+          receivedAt: req.receivedAt, code: 'out_of_order_fix' }));
+        return send(res, 200, { ping: latest, ignored: true });
+      }
+      // A delayed handset fix from before the handoff is still a pick-up ping,
+      // even if it arrives after the checklist has moved the order forward.
+      const pickupAt = pickupTime(order);
+      const pickupLeg = order.state === "rider_assigned" || (pickupAt && fixMs < Date.parse(pickupAt));
       const ping = {
         id: id("ping"),
         orderId,
@@ -6403,6 +6930,9 @@ async function handleRequest(req, res) {
         lng: Number(body.lng),
         accuracy: body.accuracy ?? null,
         at: recordedAt,
+        receivedAt: req.receivedAt,
+        processedAt: now(),
+        leg: pickupLeg ? "pickup" : "delivery",
       };
       store.locationPings.push(ping);
       await save(store);
@@ -6415,10 +6945,23 @@ async function handleRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       if (!canViewOrderLocation(user, order, store)) return send(res, 403, { error: "forbidden" });
-      const pings = store.locationPings.filter((p) => p.orderId === orderId && p.riderId === order.riderId);
-      if (!pings.length) return send(res, 200, { ping: null });
-      const ping = pings.reduce((latest, p) => (p.at > latest.at ? p : latest), pings[0]);
-      return send(res, 200, { ping: user.role === "client" ? clientRiderLocationPing(order, ping, store.settings) : ping });
+      if (user.role === "supplier" && order.state !== "rider_assigned") {
+        const pickedUp = Boolean(order.pickupChecklist?.completedAt)
+          || ["picked_up", "out_for_delivery", "awaiting_collection", "delivered", "issue_window_open", "completed", "payout_released"].includes(order.state);
+        return send(res, 200, { ping: null, ...(pickedUp ? { hidden: "picked_up" } : {}) });
+      }
+      const point = mapPointOrNull(order.pickup);
+      const shop = user.role === "supplier" ? { shop: point ? { lat: point.lat, lng: point.lng } : null } : {};
+      const pings = currentRiderPings(store, order).filter(p => user.role !== 'supplier' || p.leg === 'pickup');
+      const ping = latestPing(pings);
+      if (user.role === 'client') {
+        const visible = clientRiderLocationPing(order, ping);
+        // Explicit fields keep server receive/queue diagnostics private to staff and the rider.
+        const publicPing = visible ? { id: visible.id, orderId, riderId: visible.riderId,
+          lat: visible.lat, lng: visible.lng, accuracy: visible.accuracy ?? null, at: visible.at, leg: 'delivery' } : null;
+        return send(res, 200, { ping: publicPing, tracking: clientTracking(order, ping, store.settings, store.version) });
+      }
+      return send(res, 200, { ping, ...shop });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/delivery$/.test(pathname)) {
@@ -6585,6 +7128,9 @@ async function handleRequest(req, res) {
 
     return send(res, 404, { error: "not_found", path: pathname });
   } catch (err) {
+    if (res.gridgoTransitionRefusal && Number.isInteger(err?.status) && err.status >= 400 && err.status < 500 && err.code) {
+      return sendDomainError(res, err);
+    }
     database.markRollback();
     if (res.headersSent) {
       res.destroy(err);
@@ -6620,6 +7166,7 @@ function logHttpRequest(req, res, pathname, started) {
 }
 
 const server = http.createServer((req, res) => {
+  req.receivedAt = now();
   // The same WHATWG normalization handleRequest routes on — a raw string split
   // would let dot-segment paths reach a route the dispatch classified
   // differently.
@@ -6630,11 +7177,12 @@ const server = http.createServer((req, res) => {
     // handleRequest fails the same parse and answers 500 itself.
   }
   logHttpRequest(req, res, pathname, Date.now());
-  const mutatesStore = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = (req.method === "GET" && (isPickupChatRoute(pathname) || isOrderCallRoute(pathname))) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // Upload/attach routes queue their own transactions. Deletion commits intent
   // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
     (req.method === "POST" && pathname === "/files") ||
+    (req.method === 'POST' && /^\/files\/[^/]+\/(preview|preview-failure)$/.test(pathname)) ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
     (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
   // Read-only despite POST: never hold the domain lock during outbound checks.
@@ -6739,7 +7287,7 @@ const server = http.createServer((req, res) => {
         if (!verified?.claims?.sub) return handleRequest(req, res);
         if (isCartArtworkWrite(req.method, pathname)) {
           const body = await readBody(req);
-          if (hasShortArtworkLinks(body?.artworkLinks)) {
+          if (hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) {
             const store = await load();
             const auth = await authenticateRequest(req, store);
             if (auth.user && !accountHoldDenial(auth.user)) {
@@ -6801,6 +7349,21 @@ function runPushTokenValidation() {
     console.warn(`push token validation failed reason=${error?.message || "unknown"}`);
   });
 }
+// A separate short tick keeps the 30s ringing deadline independent of the
+// slower file/production lifecycle. All replicas serialize through the domain lock.
+let callsBusy = false;
+async function sweepCalls() {
+  if (callsBusy) return;
+  callsBusy = true;
+  try {
+    const active = await database.query("SELECT 1 FROM order_calls WHERE state IN ('ringing','accepted') LIMIT 1");
+    if (active.rowCount) await enqueueMutation(async () => {
+      const store = await load();
+      if (await reconcileCalls(database, store, { createId: id, at: now() })) await save(store);
+    });
+  } catch { console.warn("call lifecycle sweep failed"); }
+  finally { callsBusy = false; }
+}
 let lifecycleBusy = false;
 async function runLifecycleWork() {
   if (lifecycleBusy) return;
@@ -6828,20 +7391,68 @@ async function runLifecycleWork() {
           if (sweepHubReminders(store, { at: now(), id })) await save(store);
         });
       },
+      async () => {
+        // Idle wallets must not contend with checkout/provider work. Recheck
+        // the graph under the domain lock only when a release or notice is due.
+        const candidate = await database.query(`SELECT 1 FROM voucher_reservations
+          WHERE status = 'reserved' AND expires_at <= $1
+          UNION ALL
+          SELECT 1 FROM vouchers
+          WHERE status = 'available' AND expires_at > $1
+            AND ((expires_at <= $1::timestamptz + interval '48 hours'
+              AND expires_at > $1::timestamptz + interval '24 hours'
+              AND issued_at < expires_at - interval '48 hours' AND data->>'reminded48At' IS NULL)
+            OR (expires_at <= $1::timestamptz + interval '24 hours'
+              AND issued_at < expires_at - interval '24 hours' AND data->>'reminded24At' IS NULL))
+          LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (sweepVouchers(store, { id, at: now() })) await save(store);
+        });
+      },
+      async () => {
+        const candidate = await database.query(`SELECT 1 FROM orders o CROSS JOIN survey_launch l
+          CROSS JOIN LATERAL (SELECT coalesce(o.issue_window_opened_at,
+            (SELECT (e->>'at')::timestamptz FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.data->'timeline')='array' THEN o.data->'timeline' ELSE '[]'::jsonb END)
+              WITH ORDINALITY AS entry(e,n) WHERE e->>'state'='delivered' ORDER BY n LIMIT 1)) AS completed_at) c
+          WHERE o.state IN ('delivered','issue_window_open','completed','payout_released')
+            AND c.completed_at >= l.launched_at - interval '336 hours'
+            AND greatest(c.completed_at,l.launched_at) <= $1
+            AND greatest(c.completed_at,l.launched_at) + interval '168 hours' > $1
+            AND NOT EXISTS (SELECT 1 FROM order_surveys s WHERE s.order_id=o.id) LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (syncSurveys(store, { id, at: now() })) await save(store);
+        });
+      },
+      drainVoucherEmail,
       sweepOrganizationOfficers,
       sweepDeliveryChats,
+      sweepPickupChats,
+      sweepOrderCallHistory,
       drainPushOutbox,
     ]);
   } finally { lifecycleBusy = false; }
 }
 // Migrations and the reference seed are explicit operator steps. Boot never
-// creates schema or data; it refuses before listening when PostgreSQL is not ready.
+// creates schema; it refuses before listening when PostgreSQL is not ready.
+// The only automatic data initialization here is the durable Web Push key pair.
 await database.assertReady();
+try {
+  webPushDelivery = createWebPushDelivery({ vapid: await loadVapid(database) });
+} catch {
+  console.warn('Web Push unavailable: check VAPID configuration and web_push_vapid migration');
+}
+drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery,webDelivery:webPushDelivery});
 await realtimeTransport.start();
 
 server.listen(PORT, HOST, () => {
   const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));
   lifecycleTimer.unref();
+  const callsTimer = setInterval(sweepCalls, 1000);
+  callsTimer.unref();
   void runLifecycleWork();
   // Off the lifecycle tick: a pass paces itself for seconds and must never
   // hold up issue windows, nudges, or the outbox backstop. `0` disables it.

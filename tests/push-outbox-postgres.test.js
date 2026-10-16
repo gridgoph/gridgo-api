@@ -16,6 +16,9 @@ test(
     const now = new Date().toISOString();
     let deviceId, notificationId;
     try {
+      // The worker drains the whole queue, including notices left by earlier
+      // HTTP suites. Only this fixture may consume its first-send failure.
+      await db.query("TRUNCATE notification_push_outbox RESTART IDENTITY");
       await db.transaction(async () => {
         const s = await loadStore(db);
         for (const suffix of ["a", "b"]) {

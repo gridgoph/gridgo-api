@@ -5,6 +5,7 @@ import {
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { projectShopFinish } from "./order-match.js";
 import { AvailabilityError, fitsDeadline } from "./availability.js";
+import { listingExpress } from "./express.js";
 
 // Stable codes and actions are the app contract; messages are display-ready.
 const STEPS = {
@@ -116,6 +117,7 @@ export function supplierReadinessDetails(store, supplierId, request = null, now 
     try {
       const { projection, queue } = projectShopFinish(store, {
         supplierId, turnaroundHours: itemTurnaroundHours(item, service), units: request.units, now,
+        express: listingExpress(item), deadline: request.deadline ?? null,
       });
       if (!fitsDeadline(projection, request.deadline)) missing.push("deadline_not_met");
       // The client promise includes a platform allowance that is private from the shop.

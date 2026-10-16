@@ -840,6 +840,7 @@ export async function routeSupportChat({
   send,
   database,
   notifyStaff,
+  notifyParty,
 }) {
   if (!isSupportChatRoute(pathname)) return false;
   if (!user) {
@@ -1122,13 +1123,20 @@ export async function routeSupportChat({
     let posted;
     try {
       posted = await database.transaction(
-        () => postMessage(database, {
-          threadId: thread.id,
-          senderUserId: user.id,
-          senderRole: STAFF_ROLES.has(actorRole(user)) ? actorRole(user) : "ops_admin",
-          body: parsed.body,
-          attachmentFileIds: attachments.fileIds,
-        }),
+        async () => {
+          const posted = await postMessage(database, {
+            threadId: thread.id,
+            senderUserId: user.id,
+            senderRole: STAFF_ROLES.has(actorRole(user)) ? actorRole(user) : "ops_admin",
+            body: parsed.body,
+            attachmentFileIds: attachments.fileIds,
+          });
+          if (posted) {
+            if (typeof notifyParty === "function" && !posted.thread.staffPeerUserId) await notifyParty(posted);
+            emitChatEvent(database, { type: "message", thread: posted.thread, message: posted.message });
+          }
+          return posted;
+        },
         { lockKey: CHAT_LOCK },
       );
     } catch (error) {
@@ -1139,7 +1147,6 @@ export async function routeSupportChat({
       notFound(send, res);
       return true;
     }
-    emitChatEvent(database, { type: "message", thread: posted.thread, message: posted.message });
     send(res, 201, posted);
     return true;
   }

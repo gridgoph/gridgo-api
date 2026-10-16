@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -163,6 +164,14 @@ async function startMockGithub() {
         res.end(JSON.stringify(body));
       };
       if (req.headers.authorization !== `Bearer ${GITHUB_TOKEN}`) return reply(401, { message: "Bad credentials" });
+      const labelMatch = /^\/repos\/gridgoph\/([^/]+)\/issues\/(\d+)\/labels(?:\/priority)?$/.exec(url.pathname);
+      if (labelMatch) {
+        const issue = repos[labelMatch[1]]?.find(item => item.number === Number(labelMatch[2]));
+        if (!issue) return reply(404, {});
+        if (req.method === "POST") issue.labels = [...new Set([...issue.labels, ...JSON.parse(raw).labels])];
+        if (req.method === "DELETE") issue.labels = issue.labels.filter(label => label !== "priority");
+        return reply(200, issue.labels.map(name => ({name})));
+      }
       const match = /^\/repos\/gridgoph\/([^/]+)\/issues(?:\/(\d+))?(\/comments)?$/.exec(url.pathname);
       const list = match && repos[match[1]];
       if (!list) return reply(404, { message: "Not Found" });
@@ -231,7 +240,7 @@ async function startMockMinio() {
 }
 
 async function fixture(database) {
-  await database.query(`TRUNCATE tracker_decisions, audit_log, file_references, files, notifications, users RESTART IDENTITY CASCADE`);
+  await resetDatabase(database, `TRUNCATE tracker_decisions, audit_log, file_references, files, notifications, users RESTART IDENTITY CASCADE`);
   await seedReferenceData(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
@@ -315,7 +324,7 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     assert.deepEqual(general, {
       key: "gridgo-api#2", repo: "gridgo-api", number: 2, url: "https://github.com/gridgoph/gridgo-api/issues/2",
       section: "general", order: 1, ref: "G.1", module: "General", developer: "Ven", requirement: "One login",
-      category: "Auth", status: "needs-decision", statusSource: "derived", decisions: [],
+      category: "Auth", status: "needs-decision", statusSource: "derived", priority: false, decisions: [],
       decisionQuestions: DECISION_QUESTIONS, decisionMarkdown: DECISION_MARKDOWN,
     });
     assert.equal(supplier.status, "live");
@@ -394,7 +403,8 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     assert.equal(statusAudit.length, 4);
     assert.deepEqual(statusAudit[0], {
       actor_id: "user_super", entity_type: "tracker_item", entity_id: "gridgo-api#1",
-      data: { detail: { from: "open", to: "in-review", note: "PR up" }, reason: null },
+      data: { actorName: "Ria Super", app: "api", device: "node", before: "open", after: "in-review",
+        detail: { from: "open", to: "in-review", note: "PR up" }, reason: null },
     });
     assert.deepEqual(statusAudit[1].data.detail, { from: "in-review", to: "live", note: null });
 
@@ -459,7 +469,8 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     const decisionAudit = (await database.query("SELECT actor_id, entity_id, data FROM audit_log WHERE action = 'tracker.decision'")).rows;
     assert.deepEqual(decisionAudit, [{
       actor_id: "user_super", entity_id: "gridgo-api#2",
-      data: { detail: { decisionId: decision.id, from: "needs-decision", to: "open", attachmentCount: 2 }, reason: null },
+      data: { actorName: "Ria Super", app: "api", device: "node", before: "needs-decision", after: "open",
+        detail: { decisionId: decision.id, from: "needs-decision", to: "open", attachmentCount: 2 }, reason: null },
     }]);
     const pinned = (await database.query("SELECT file_id FROM file_references WHERE reference_type = 'tracker_decision' AND reference_id = $1 ORDER BY file_id", [decision.id])).rows;
     assert.deepEqual(pinned.map((pin) => pin.file_id), [...attachmentIds].sort());
@@ -519,5 +530,53 @@ test("Super Admin reads, steers and decides tracker items; firstmate collects th
     github.server.close();
     minio.server.close();
     await database.close?.();
+  }
+});
+
+
+test("Super Admin pins tracker issues without changing workflow; Operations remains forbidden", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await fixture(database);
+  const github = await startMockGithub();
+  let instance;
+  try {
+    instance = await startApi({ GITHUB_TRACKER_TOKEN: GITHUB_TOKEN,
+      GITHUB_TRACKER_REPOS: "gridgo-api,gridgo-web", GITHUB_TRACKER_API_URL: github.url });
+    const { api } = instance;
+    const endpoint = "/admin/tracker/gridgo-web/5/priority";
+    const pin = (subject, priority) => request(api, endpoint, { method: "PATCH", subject, body: { priority } });
+    assert.equal((await request(api, "/admin/tracker")).status, 401);
+    assert.equal((await pin("clerk_client", true)).status, 403);
+    assert.equal((await pin("clerk_ops", true)).status, 403);
+    assert.equal((await pin("clerk_super", "true")).status, 400);
+    const result = await pin("clerk_super", true);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.priority, true);
+    assert.equal((await pin("clerk_super", true)).body.priority, true);
+    assert.equal(result.body.status, "live");
+    assert.equal(result.body.developer, "Ven");
+    assert.deepEqual(result.body.decisions, []);
+    assert.deepEqual(result.body.decisionQuestions, DECISION_QUESTIONS);
+    assert.equal(result.body.decisionMarkdown, DECISION_MARKDOWN);
+    const board = await request(api, "/admin/tracker?refresh=1", { subject: "clerk_super" });
+    assert.equal(board.status, 200);
+    assert.equal(board.body.items.find(item => item.key === "gridgo-web#5").priority, true);
+    const admin = await request(api, "/admin/tracker/gridgo-web/5", { subject: "clerk_super" });
+    assert.equal(admin.body.priority, true);
+    assert.deepEqual(admin.body.decisionQuestions, DECISION_QUESTIONS);
+    for (const [method, suffix, body] of [["PATCH", "status", {status: "open"}], ["POST", "decisions", {text: "test"}]]) {
+      assert.equal((await request(api, `/admin/tracker/gridgo-api/2/${suffix}`, { method, subject: "clerk_ops", body })).status, 403);
+    }
+    assert.equal((await request(api, "/admin/tracker/decisions/private/attachments/file", { subject: "clerk_ops" })).status, 403);
+    assert.equal((await request(api, "/admin/tracker/gridgo-api/3/priority", { method: "PATCH", subject: "clerk_super", body: {priority:true} })).status, 404);
+    const unpin = await pin("clerk_super", false);
+    assert.equal(unpin.body.priority, false);
+    assert.equal(unpin.body.status, "live");
+    const audits = await database.query("SELECT * FROM audit_log WHERE action = 'tracker.priority'");
+    assert.equal(audits.rows.length, 2);
+  } finally {
+    await stopApi(instance);
+    github.server.close();
+    await database.close();
   }
 });

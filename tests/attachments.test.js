@@ -850,9 +850,10 @@ test("delivery chat photos: the client and the rider it was sent with, while the
   for (const actor of [client, ops]) expectError(() => authorizeFileRead(actor, store, draft), 403, "forbidden");
 });
 
-test('packing photos are supplier images, attach only before dispatch, and exclude rider reads', () => {
+test('legacy packing photos attach only before dispatch and exclude rider reads', () => {
   authorizeFileUpload(supplier, 'packing_photo');
-  for (const actor of [client, rider, ops]) expectError(() => authorizeFileUpload(actor, 'packing_photo'), 403, 'forbidden');
+  authorizeFileUpload(rider, 'packing_photo'); // new-flow attach enforces the assigned rider and inspection
+  for (const actor of [client, ops]) expectError(() => authorizeFileUpload(actor, 'packing_photo'), 403, 'forbidden');
   expectError(() => validateUpload({ originalFilename: 'proof.pdf', declaredContentType: 'application/pdf', sniffBytes: Buffer.from('%PDF-1.7\n'), size: 20 }, 'packing_photo'), 415, 'invalid_file_type');
   const record = order({state:'production'});
   const store = {orders:[record], supplierServices:[]};
@@ -867,4 +868,14 @@ test('packing photos are supplier images, attach only before dispatch, and exclu
   assert.deepEqual(record.packingPhotoFileIds,[file.fileId]);
   for (const actor of [client,supplier,ops,superAdmin]) authorizeFileRead(actor,store,file);
   for (const actor of [rider,otherClient,otherSupplier]) expectError(() => authorizeFileRead(actor,store,file),403,'forbidden');
+});
+
+
+test('unattached rider packing uploads are private to their owner and staff', () => {
+  const file = readyFile('packing_photo', { ownerId: rider.id, references: [] });
+  const store = { orders: [], supplierServices: [] };
+  assert.doesNotThrow(() => authorizeFileRead(rider, store, file));
+  assert.doesNotThrow(() => authorizeFileRead(ops, store, file));
+  expectError(() => authorizeFileRead(client, store, file), 403, 'forbidden');
+  expectError(() => authorizeFileRead({ ...rider, id: 'another-rider' }, store, file), 403, 'forbidden');
 });

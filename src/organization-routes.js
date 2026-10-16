@@ -1,4 +1,3 @@
-import { appendAudit } from "./audit-record.js";
 import { identityHasMembership } from "./authorization-context.js";
 import { applyForBusiness, requireIdempotencyKey } from './enrollment.js';
 import { APPLICATION_DOCUMENTS, applicationError as fail, clientApplicationView, currentApplication, nextQuarter } from './client-applications.js';
@@ -33,7 +32,7 @@ function event(store, { account, type, title, body, at, createId, actorId = null
       domainEventKey: eventKey });
   }
   store.auditLog ||= [];
-  appendAudit(store, { id: createId('aud'), at, actorId, actorRole, action: type, entityType: 'organization',
+  store.auditLog.push({ id: createId('aud'), at, actorId, actorRole, action: type, entityType: 'organization',
     entityId: account.userId, detail });
   queueInvalidate(store, { resource: 'identity', id: account.userId });
 }
@@ -106,7 +105,7 @@ export async function routeOrganization({ req, url, store, user, readBody, now, 
     approvalCase.businessPermitRequired = true;
     approvalCase.version++;
     approvalCase.updatedAt = at;
-    appendAudit(store, { id: createId('aud'), at, actorId: user.id, actorRole: user.role, action: 'client_application.request_business_permit',
+    store.auditLog.push({ id: createId('aud'), at, actorId: user.id, actorRole: user.role, action: 'client_application.request_business_permit',
       entityType: 'approval_case', entityId: approvalCase.id, reason: body.reason.trim() });
     event(store, { account: { userId: approvalCase.userId }, type: 'client_application_document_requested', title: 'Business permit requested',
       body: body.reason.trim(), at, createId, actorId: user.id, actorRole: user.role, eventKey: `business-permit:${approvalCase.id}:${approvalCase.version}` });

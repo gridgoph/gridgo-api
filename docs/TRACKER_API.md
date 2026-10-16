@@ -1,6 +1,6 @@
 # Super Admin Tracker API
 
-The tracker is the set of GitHub issues labelled `tracker` across the GRIDGO repositories. **GitHub stays the source of truth** for every item and its status; the API reads and writes those issues with a server-side token and keeps only what GitHub cannot hold: the decisions a Super Admin records, their attachments, and the audit rows. firstmate collects each decision as soon as it is saved.
+The tracker is the set of GitHub issues labelled `tracker` across the GRIDGO repositories. **GitHub stays the source of truth** for every item and its status and priority; the API reads and writes those issues with a server-side token and keeps only what GitHub cannot hold: the decisions a Super Admin records, their attachments, and the audit rows. firstmate collects each decision as soon as it is saved.
 
 Implementation: `src/tracker.js`. Migration: `migrations/1786989600000_super_admin_tracker_decisions.js`.
 
@@ -36,6 +36,7 @@ The last marker in the body wins; an issue without one still lists, using its ti
 | `developer` | `"Mark"` or `"Ven"` from the `owner:mark` / `owner:ven` label, else from marker `owner`, else `null` |
 | `requirement` | marker `summary`, else the issue title |
 | `category` | marker `category` |
+| `priority` | Whether the issue has the `priority` label (boolean, independent of status) |
 | `status`, `statusSource` | see [Statuses](#statuses) |
 | `decisionQuestions`, `decisionMarkdown` | parsed questions/options and raw fallback from the issue’s decision section; see [Decision panel contract](#decision-panel-contract) |
 | `decisions` | `[{ id, text, attachments: [{ id, name, contentType, size }], decidedBy: { id, name }, decidedAt }]`, oldest first |
@@ -98,7 +99,7 @@ Without an explicit label the status is derived (`statusSource: "derived"`): `li
 
 ## Super Admin routes
 
-All five routes need a Clerk session with a `super_admin` membership. No session gives `401 unauthorized`. Operations and every other role get `403 forbidden`. An unconfigured tracker gives `503 tracker_not_configured`. GitHub being unreachable or refusing the token gives `502 tracker_github_unavailable`. GitHub's own error text and the token are never relayed.
+All tracker routes need a Clerk session with a `super_admin` membership. No session gives `401 unauthorized`. Operations and every other role get `403 forbidden`. An unconfigured tracker gives `503 tracker_not_configured`. GitHub being unreachable or refusing the token gives `502 tracker_github_unavailable`. GitHub's own error text and the token are never relayed.
 
 Writes serialize on a tracker advisory lock while GitHub answers. They take the domain mutation lock only for the final commit, which holds the audit row, the decision's file references, and the decision row, so a slow GitHub never stalls other platform mutations. GitHub is written before that commit, so a GitHub failure leaves no decision behind and the Super Admin can retry.
 
@@ -123,6 +124,14 @@ Body: `{ "status": "<value>", "note": "optional, ≤ 5000 chars" }`.
 This re-reads the issue from GitHub and applies the status as described in [Statuses](#statuses). It writes an audit row with action `tracker.status`, entity `tracker_item` / `<key>`, the actor, and detail `{ from, to, note }`. It returns the updated item.
 
 Errors: `400 invalid_tracker_status`, `400 tracker_field_not_editable`, `404 tracker_item_not_found` (unknown repository, not an issue, or no `tracker` label).
+
+### `PATCH /admin/tracker/:repo/:number/priority`
+
+Super Admin only, like every tracker route. Body: `{ "priority": true }` to pin or `{ "priority": false }` to unpin; no other fields. Invalid values return `400 invalid_request`.
+
+Adds/removes only GitHub's `priority` label using the label endpoints. Status, other labels, state, body and section remain unchanged. Repeating the same value is safe. Writes use the tracker lock and audit `tracker.priority` with `{ from, to }`; the response is the updated tracker item and the cache updates immediately. GitHub failure gives `502 tracker_github_unavailable`; refresh before retrying an uncertain save.
+
+The dashboard repeats pinned items in a top Priorities section and offers a Priorities filter, retaining their original groups. A report's priority is separate from its linked tracker issue's priority.
 
 ### `POST /admin/tracker/:repo/:number/decisions`
 

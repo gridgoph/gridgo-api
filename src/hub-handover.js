@@ -1,4 +1,3 @@
-import { appendAudit } from "./audit-record.js";
 import { assertRefundWorkAllowed } from './refund-policy.js';
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { publicHubPickup } from './hub-pickup.js';
@@ -102,7 +101,7 @@ export function sweepHubReminders(store, { at, id }) {
       if (h.missedDays >= 3 && !h.operationsRequired) {
         h.operationsRequired = true;
         notifyAdmins(store, 'hub_unclaimed_escalated', 'Unclaimed pickup needs Operations', order, `hub-unclaimed:${order.id}`, { createId: id, at });
-        appendAudit(store, { id: id('aud'), at, actor: { role: 'system' }, action: 'hub.unclaimed_escalated', entityType: 'order', entityId: order.id, orderId: order.id, detail: { missedDays: h.missedDays } });
+        store.auditLog.push({ id: id('aud'), at, actorId: null, actorRole: 'system', action: 'hub.unclaimed_escalated', entityType: 'order', entityId: order.id, orderId: order.id, detail: { missedDays: h.missedDays } });
       }
       changed = true;
     }

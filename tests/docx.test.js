@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { inspectDocx } from '../src/docx.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateUpload } from '../src/attachments.js';
@@ -92,4 +94,23 @@ test('DOCX cannot impersonate another MIME or upload purpose, or use only ZIP ma
   assert.throws(() => validateUpload({ ...file, originalFilename: 'file.pdf' }), { code: 'invalid_file_type' });
   assert.throws(() => validateUpload({ ...file, sniffBytes: bytes.subarray(0, 32) }), { code: 'invalid_file_type' });
   assert.equal(validateUpload({ ...file, declaredContentType: '' }), MIME);
+});
+
+test('preview validation refuses disguised active parts and SVG graphics without changing upload acceptance', () => {
+  for (const [name, content] of [
+    ['word/hidden.dat', '<w:instrText>INCLUDEPICTURE file:///private</w:instrText>'],
+    ['word/media/image.svg', '<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///private"/></svg>'],
+    ['word/media/image.xml', '<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///private"/></svg>'],
+    ['word/media/image.png', '<svg xmlns="http://www.w3.org/2000/svg"/>'],
+  ]) {
+    const bytes = zip([...docxEntries(), [name, content]]);
+    assert.ok(inspectDocx(bytes));
+    assert.equal(inspectDocx(bytes, { forPreview: true }), null, name);
+  }
+});
+
+
+test('preview validation still accepts embedded raster artwork', () => {
+  const photo = readFileSync(new URL('./fixtures/artwork-check/pixel.jpg', import.meta.url));
+  assert.ok(inspectDocx(zip([...docxEntries(), ['word/media/photo.jpeg', photo]]), { forPreview: true }));
 });

@@ -1,4 +1,4 @@
-import { appendAudit } from "./audit-record.js";
+import { changesFor, supplementTotals } from './order-change-policy.js';
 import { recoveryHeld, startShopAcceptance } from './shop-recovery.js';
 import { approvedRole, hasRole, privilegedAdminMemberships, queueOrderInvalidate, queueInvalidate } from './notifications.js';
 import { writeDraft } from './client-order-notifications.js';
@@ -28,13 +28,13 @@ function archiveWarning(store, order) {
   order.rescheduleRequest.priorLapse = structuredClone(lapse);
   store.productionLapses = store.productionLapses.filter((row) => row.id !== lapse.id);
 }
-const hasReleasedShare = (store, order) => (order.payoutMilestones || []).some((stage) => stage.status === 'released')
+const hasReleasedShare = (store, order) => supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
   || (store.refundSupplierPayouts || []).some((row) => row.orderId === order.id && row.status === 'released');
 
 function event(store, order, kind, actor, at, id) {
   const request = order.rescheduleRequest;
   store.auditLog ||= [];
-  appendAudit(store, { id: id('aud'), at, actorId: actor?.id || null, actorRole: actor?.role || 'system',
+  store.auditLog.push({ id: id('aud'), at, actorId: actor?.id || null, actorRole: actor?.role || 'system',
     action: `order.reschedule_${kind}`, entityType: 'order', entityId: order.id, orderId: order.id,
     detail: { requestId: request.id, status: request.status, resolution: request.resolution || null }, reason: kind === 'resolved' ? request.resolutionReason : request.reason });
   const copy = {
@@ -102,6 +102,7 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
   const at = now();
   let request = order.rescheduleRequest;
   if (!action) {
+    if (changesFor(store, order).some(row => ['pending','pending_payment','pending_confirmation'].includes(row.status))) fail(409, 'change_request_pending', 'Resolve the general change first.');
     if (request) fail(409, 'reschedule_already_requested', 'Only one deadline request is allowed for this order.');
     assertRefundWorkAllowed(store, order);
     if (!active(order)) fail(409, 'reschedule_not_available', 'Request a new deadline during production, before quality sign-off.');

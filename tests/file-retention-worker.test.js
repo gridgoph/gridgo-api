@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createFileRetention } from '../src/file-retention.js';
+import { DOCX_CONTENT_TYPE } from '../src/docx.js';
 
 function fixture({ enabled = false, failDelete = false } = {}) {
   let saved = { files: ['artwork', 'payment_proof', 'catalog_item_photo'].map((purpose) => ({
@@ -101,4 +102,20 @@ test('a restored active account cancels eligibility of a queued verification cle
   f.store.users = [{ id: 'client', accountStatus: 'active' }];
   assert.equal(await f.worker.finishPending('artwork'), false);
   assert.equal(f.store.files[0].state, 'delete_pending'); assert.equal(f.objects.size, 3);
+});
+
+
+for (const type of ['application/pdf', DOCX_CONTENT_TYPE]) test(`derived previews (${type}) share holds and are removed even without a committed preview descriptor`, async () => {
+  const f = fixture({ enabled: true });
+  f.store.files[0].detectedContentType = type;
+  const derived = `${f.store.files[0].objectKey}.preview-v1.png`;
+  f.objects.add(derived);
+  f.hold();
+  await assert.rejects(f.worker.deleteEarly('artwork', { id: 'admin', role: 'super_admin' }, 'Reason'), { code: 'file_retention_hold' });
+  await f.worker.run({ dryRun: false });
+  assert.ok(f.objects.has(derived));
+  f.store.issues = [];
+  await f.worker.deleteEarly('artwork', { id: 'admin', role: 'super_admin' }, 'Reason');
+  assert.ok(!f.objects.has(derived));
+  assert.equal(f.store.files[0].state, 'deleted');
 });

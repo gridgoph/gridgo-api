@@ -36,10 +36,10 @@ Supplier service states are `draft | pending_verification | live | suspended | w
 ## Orders, money, and fulfilment
 
 - Orders snapshot client dropoff, assigned supplier pickup, distance band, delivery fee, and accepted price.
-- The service fee is seeded at 1,000 bps on the supplier subtotal and snapshotted with the accepted quote; delivery is a separate charge split between the rider and GRIDGO at the snapshotted rider rate.
+- The service fee uses progressive 45%/25%/15% brackets at PHP 2,000/20,000 of shop principal, snapshotted per shop/deadline group (legacy quotes retain their flat rate; see `docs/SERVICE_FEE_API.md`); delivery is a separate charge split between the rider and GRIDGO at the snapshotted rider rate.
 - Generalized online installments, component allocations, and supplier payout milestones have independent relational records.
 - Supplier payout never exceeds confirmed supplier-principal collection and is paid across proof-gated stages of the shop's own cost, snapshotted per order: start of production 40%, delivered 35%, issue window closed 25% (orders placed before 25 Sep 2026 keep printing 50%, packaging 15%, delivered 25%, retention 10%). Only Operations or Super Admin release a stage, after reviewing its proof; nothing releases on a state change, the window timer, or the client's confirmation.
-- Packaging readiness requires an attached supplier progress image (the start-of-production image counts). The supplier marks the job packed, riders are offered it, and the supplier and rider run the six pickup checks together at the counter before the package leaves. Operations corrections require an audited reason. See the production-progress contract in `docs/OPERATIONAL_MODEL_V2_API.md`.
+- Version-2 handovers require finished, unpacked product photos and GRIDGO QA before rider readiness. The rider checks the unpacked products, photographs packing at the counter, and records the supplier signature before pickup. Legacy payout-plan-1 and already-ready jobs keep their handover. Staff corrections require a listed reason plus a note and append-only audit. See `docs/SHOP_HANDOVER_API.md`.
 - Claims hold payout. Client issues during the global issue window create an automatic claim hold.
 - Rider pickup requires exact counter counts against ordered pieces and all six checks; failures create an Operations escalation and tell the shop what to fix.
 - Delivery requires file-backed photo or signature evidence and opens the issue window.

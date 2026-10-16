@@ -119,6 +119,15 @@ export function validateShopSchedule(schedule) {
       fail(400, "invalid_schedule", "A closure cannot end before it starts.", { field: `closures[${index}]` });
     }
   }
+  if (schedule.extension != null) {
+    const { day, opensMinute, closesMinute } = schedule.extension;
+    if (typeof day !== 'string' || !DAY_KEY.test(day) || !Number.isFinite(Date.parse(day))
+      || new Date(day).toISOString().slice(0, 10) !== day
+      || !Number.isInteger(opensMinute) || opensMinute < 0
+      || !Number.isInteger(closesMinute) || closesMinute >= MINUTES_PER_DAY || closesMinute <= opensMinute) {
+      fail(400, 'invalid_schedule', 'An extension needs a valid date and an increasing same-day minute window.', { field: 'extension' });
+    }
+  }
   return true;
 }
 
@@ -158,9 +167,18 @@ function isClosed(schedule, dayKey) {
 /** Opening hours for one calendar day, earliest first. Empty when shut. */
 function windowsOn(schedule, dayKey, weekday) {
   if (isClosed(schedule, dayKey)) return [];
-  return (schedule.week || [])
+  const windows = (schedule.week || [])
     .filter((window) => window.weekday === weekday)
+    .map(window => ({ ...window }))
     .sort((left, right) => left.opensMinute - right.opensMinute);
+  const extension = schedule.extension;
+  if (extension?.day === dayKey && windows.length) {
+    const last = windows.at(-1);
+    // A declaration made after normal closing must not invent earlier open time.
+    if (extension.opensMinute <= last.closesMinute) last.closesMinute = Math.max(last.closesMinute, extension.closesMinute);
+    else windows.push({ opensMinute: extension.opensMinute, closesMinute: extension.closesMinute });
+  }
+  return windows;
 }
 
 /**
@@ -257,6 +275,24 @@ export function workingMinutesBetween(schedule, from, to) {
   return total;
 }
 
+/** Exact duration for SLA thresholds; closing/opening boundaries retain milliseconds. */
+export function openingMillisecondsBetween(schedule, from, to) {
+  validateShopSchedule(schedule);
+  const start = instantOf(from, "from"), end = instantOf(to, "to");
+  if (end <= start) return 0;
+  let { dayKey, weekday } = localOf(start, schedule.utcOffsetMinutes);
+  let total = 0;
+  while (instantAt(dayKey, 0, schedule.utcOffsetMinutes) < end) {
+    for (const window of windowsOn(schedule, dayKey, weekday)) {
+      total += Math.max(0, Math.min(end, instantAt(dayKey, window.closesMinute, schedule.utcOffsetMinutes))
+        - Math.max(start, instantAt(dayKey, window.opensMinute, schedule.utcOffsetMinutes)));
+    }
+    dayKey = nextDayKey(dayKey);
+    weekday = (weekday + 1) % 7;
+  }
+  return total;
+}
+
 /** The end of the nth open day at or after `from`. Day 0 is the day work starts. */
 export function addWorkingDays(schedule, from, days) {
   const fromMs = instantOf(from, "from");
@@ -296,6 +332,7 @@ export function projectFinish({
   units = null,
   capacityDaily = null,
   allowanceMinutes = 0,
+  preserveSeconds = false,
 }) {
   if (!Number.isFinite(turnaroundMinutes) || turnaroundMinutes <= 0) {
     fail(400, "invalid_duration", "A listing needs a positive turnaround before it can be scheduled.", {
@@ -306,8 +343,9 @@ export function projectFinish({
     fail(400, "invalid_duration", "Queue time must be zero or more.", { field: "queueMinutes" });
   }
 
-  const startsAt = addWorkingMinutes(schedule, now, queueMinutes);
-  const byTurnaround = addWorkingMinutes(schedule, startsAt, turnaroundMinutes);
+  const add = preserveSeconds ? (schedule, at, minutes) => addOpeningMilliseconds(schedule, at, Math.ceil(minutes * 60000)) : addWorkingMinutes;
+  const startsAt = add(schedule, now, queueMinutes);
+  const byTurnaround = add(schedule, startsAt, turnaroundMinutes);
 
   let capacityDays = 0;
   if (Number.isSafeInteger(units) && units > 0 && Number.isSafeInteger(capacityDaily) && capacityDaily > 0) {
@@ -342,5 +380,9 @@ export function projectFinish({
  */
 export function fitsDeadline(projection, deadline) {
   if (deadline == null) return true;
-  return Date.parse(projection.promiseBy) <= instantOf(deadline, "deadline");
+  const deadlineMs = instantOf(deadline, "deadline");
+  // An Express promise was made for its deadline (src/express.js), including a
+  // same-day one whose clock time had passed; it meets that and anything later.
+  if (projection.express === true && deadlineMs >= Date.parse(projection.expressDeadline)) return true;
+  return Date.parse(projection.promiseBy) <= deadlineMs;
 }

@@ -1,4 +1,3 @@
-import { appendAudit } from "./audit-record.js";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -74,7 +73,7 @@ export async function bootstrapAdministrator({
         createdBy: administrator.id,
       });
     }
-    appendAudit(store, {
+    store.auditLog.push({
       id: createId("aud"),
       at,
       actorId: administrator.id,

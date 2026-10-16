@@ -1,8 +1,13 @@
+import { shopHoursStatus } from './shop-hours.js';
+import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
+import { listingPrintLayouts } from "./print-layout.js";
+import { listingExpress } from "./express.js";
+import { coverSpineApplies } from "./hardbound-cover.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
-import { gridgoAmountMinor, measurementKindFor, priceLine } from "./pricing.js";
+import { measurementKindFor, priceLine } from "./pricing.js";
 
 /** Volume breaks and speeds a listing sells, ordered as the client reads them. */
 function priceTiersFor(store, itemId) {
@@ -462,8 +467,7 @@ export function itemTurnaroundHours(item, service) {
  */
 export function clientMoneyMinor(store, supplierMinor) {
   if (!Number.isSafeInteger(supplierMinor)) return null;
-  const rate = store.settings?.serviceFeeRateBps ?? 0;
-  return gridgoAmountMinor(supplierMinor, rate);
+  return supplierMinor == null ? null : supplierMinor + serviceFeeMoney(supplierMinor, feeSchedule(store.settings)).grossServiceFeeMinor;
 }
 
 // Option discounts round the magnitude, then restore the sign, like the client UI.
@@ -472,7 +476,7 @@ function clientModifierMinor(store, amount) {
   return amount < 0 ? -clientMoneyMinor(store, -amount) : clientMoneyMinor(store, amount);
 }
 
-export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
+export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
   store = approvedCatalogView(store);
   item = (store.catalogItems || []).find(row => row.id === item.id) || item;
   if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
@@ -503,6 +507,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
   const fromPriceMinor = minimumCatalogPrice(store, item);
   const rating = publicShopRating(store, item.supplierId);
   return {
+    shopHours: shopHoursStatus((store.supplierProfiles || []).find(row => row.userId === item.supplierId), store.settings, at),
     distanceZone: null,
     ...(rating ? { rating } : {}),
     id: item.id,
@@ -528,6 +533,12 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
+    // Layouts the client must choose from; empty means the product asks nothing.
+    printLayouts: listingPrintLayouts(item),
+    // Same-day availability the shop switched on (docs/EXPRESS_API.md).
+    express: listingExpress(item),
+    // Hardbound and binding products ask for a cover choice and the spine text.
+    coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id).map((tier) => ({
       ...tier, clientUnitPriceMinor: clientMoneyMinor(store, tier.unitPriceMinor),
     })),
@@ -538,11 +549,11 @@ export function publicCatalogItem(store, item, { selectedOptionIds } = {}) {
     })),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
-    ...productionProjection({ ...item, turnaroundDays: item.turnaroundMode === "override" ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays, turnaroundHours: itemTurnaroundHours(item, service) }, displayProductionDayMinutes(store, item.supplierId)),
+    ...productionProjection({ ...item, turnaroundDays: item.turnaroundMode === "override" ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays), turnaroundMinutes: item.turnaroundMode === "override" ? item.turnaroundMinutes : (service.standardTurnaroundHours != null ? service.standardTurnaroundMinutes : service.turnaroundMinutes), turnaroundHours: itemTurnaroundHours(item, service) }, displayProductionDayMinutes(store, item.supplierId)),
     turnaroundHours: itemTurnaroundHours(item, service),
     minimumTurnaroundHours: item.minimumTurnaroundHours ?? null,
     rush: service.rushEnabled ? {
-      ...productionProjection({ turnaroundDays: service.rushTurnaroundDays, turnaroundHours: service.rushTurnaroundHours }, displayProductionDayMinutes(store, service.supplierId), ["turnaround"]),
+      ...productionProjection({ turnaroundDays: service.rushTurnaroundDays, turnaroundMinutes: service.rushTurnaroundMinutes, turnaroundHours: service.rushTurnaroundHours }, displayProductionDayMinutes(store, service.supplierId), ["turnaround"]),
       turnaroundHours: service.rushTurnaroundHours,
       priceMinor: service.rushPriceMinor,
       clientPriceMinor: clientMoneyMinor(store, service.rushPriceMinor),
@@ -597,6 +608,7 @@ export function publicSupplierShop(store, supplierId) {
   return {
     supplierId,
     shopName: profile.shopName,
+    hours: shopHoursStatus(profile, store.settings),
     shop: profile.shop,
     media: publicShopMedia(store, supplierId),
     categories: [...new Set(services.map((service) => service.categoryCode))],
@@ -620,6 +632,7 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
     shops.push({
       supplierId: shop.supplierId,
       shopName: shop.shopName,
+      hours: shop.hours,
       shop: shop.shop,
       media: shop.media,
       categories: shop.categories,
@@ -641,8 +654,7 @@ export function listingStartersFor(store, subcategoryCode) {
       name: starter.name,
       defaultPricingUnit: starter.defaultPricingUnit,
       defaultPackageQty: starter.defaultPackageQty ?? null,
-      defaultTurnaroundDays: starter.defaultTurnaroundDays ?? null,
-      defaultTurnaroundHours: starter.defaultTurnaroundHours ?? null,
+      ...productionProjection(starter, 600, ["defaultTurnaround"]),
       defaultFormatCodes: [...(starter.defaultFormatCodes || [])],
       groups: (store.listingStarterGroups || [])
         .filter((group) => group.starterId === starter.id)
@@ -895,11 +907,12 @@ export function createOrderLineSnapshot(store, selection, createId) {
       pricingBasisSnapshot: service.pricingBasis || item.pricingUnit || "per_unit",
       pricingUnitSnapshot: item.pricingUnit || "per_unit",
       packageQtySnapshot: item.packageQty ?? null,
-      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays) == null ? {} : {
-        turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : service.standardTurnaroundDays ?? service.turnaroundDays,
+      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays)) == null ? {} : {
+        turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays),
         productionDayMinutesSnapshot: displayProductionDayMinutes(store, item.supplierId),
       }),
       turnaroundHoursSnapshot: itemTurnaroundHours(item, service),
+      turnaroundMinutesSnapshot: Math.round(itemTurnaroundHours(item, service) * 60),
       baseUnitPriceMinor: item.basePriceMinor,
       effectiveUnitPriceMinor,
       quantity,
@@ -1245,6 +1258,9 @@ export function privateCatalogItem(store, item) {
     minimumLengthMilli: item.minimumLengthMilli ?? null,
     minimumOrderQuantity: item.minimumOrderQuantity ?? null,
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
+    printLayouts: listingPrintLayouts(item),
+    express: listingExpress(item),
+    coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),
     turnaroundMode: item.turnaroundMode || "inherit",

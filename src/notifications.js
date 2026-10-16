@@ -5,10 +5,11 @@ export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
 /** Refetch pings that only Operations and Super Admin may receive. */
-export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "chat", "account-deletion-requests"]);
+export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "chat", "account-deletion-requests", "legal", "privacy-requests"]);
 
 export const INVALIDATE_RESOURCES = Object.freeze([
   "orders",
+  "calls",
   "jobs",
   "approvals",
   "escalations",
@@ -76,6 +77,8 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.type === "support_message" && notification.threadId) item.threadId = notification.threadId;
+  if (notification.voucherId) item.voucherId = notification.voucherId;
   if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
   if (notification.type === "organization_officer_confirmation") {
     item.officerId = notification.officerId;
@@ -227,7 +230,7 @@ export function invalidateAudienceIds(store, event) {
   if (STAFF_INVALIDATE_RESOURCES.includes(event?.resource)) return opsAdminRecipientIds(store);
   const ids = new Set(event.userIds || []);
   const order = (store.orders || []).find(row => row.id === event.id);
-  if (["notifications", "identity", "credits"].includes(event.resource)) return [...ids];
+  if (["notifications", "identity", "credits", "calls"].includes(event.resource)) return [...ids];
   if (event.resource === "location") {
     const order = (store.orders || []).find(o => o.id === event.id);
     return (store.users || []).filter(u => canAccessOrder(store,u.id,order,{location:true})).map(u => u.id);

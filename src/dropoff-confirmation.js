@@ -16,7 +16,7 @@ function samePoint(a, b) {
 
 /** Start once, only on the physical delivery transition; older trips stay compatible. */
 export function requestDropoffConfirmation(store, order, at) {
-  if (order.fulfillmentMode !== 'delivery' || order.dropoffConfirmation || !validPoint(order.dropoff)) return;
+  if (order.fulfillmentMode !== 'delivery' || order.dropoffConfirmation || order.deliveryPin || !validPoint(order.dropoff)) return;
   order.dropoffConfirmation = { status: 'pending', requestedAt: at, original: { ...order.dropoff } };
   // Compare both points with one fixed table, never rewrite the paid price.
   order.dropoffConfirmationPricing = structuredClone(store.settings);
@@ -31,6 +31,7 @@ export function publicDropoffConfirmation(order, role) {
 }
 
 export function deliveryDestination(order) {
+  if (order.deliveryPin) return order.deliveryPin.point || order.deliveryPin.original;
   return order.fulfillmentMode === 'delivery' && order.dropoffConfirmation?.status === 'confirmed'
     ? order.dropoffConfirmation.point : order.dropoff;
 }
@@ -52,7 +53,7 @@ export async function routeDropoffConfirmation({ req, url, store, user, readBody
   const order = store.orders.find(row => row.id === match[1]);
   if (!order) fail(404, 'order_not_found', 'That order no longer exists.');
   if (user.role !== 'client' || order.clientId !== user.id) fail(403, 'forbidden', 'Only the client can confirm this drop-off.');
-  if (order.state !== 'out_for_delivery' || order.fulfillmentMode !== 'delivery' || !order.dropoffConfirmation) {
+  if (order.deliveryPin || order.state !== 'out_for_delivery' || order.fulfillmentMode !== 'delivery' || !order.dropoffConfirmation) {
     fail(409, 'dropoff_confirmation_unavailable', 'This delivery is no longer waiting for a drop-off confirmation.');
   }
   const body = await readBody(req);
@@ -78,7 +79,7 @@ export async function routeDropoffConfirmation({ req, url, store, user, readBody
     ...(allowed ? { point } : { requestedPoint: point }) };
   order.updatedAt = at;
   audit(store, { actor: user, action: allowed ? 'order.dropoff_confirmed' : 'order.dropoff_review_requested',
-    entityType: 'order', entityId: order.id, orderId: order.id, detail: { point, original: previous.original } });
+    entityType: 'order', entityId: order.id, orderId: order.id, detail: { point, original: previous.original }, before: previous, after: order.dropoffConfirmation });
   const recipients = privilegedAdminMemberships(store).map(({ userId, role }) => ({ userId, appRole: role }));
   if (allowed && order.riderId) recipients.push({ userId: order.riderId, appRole: 'rider' });
   for (const recipient of recipients) {

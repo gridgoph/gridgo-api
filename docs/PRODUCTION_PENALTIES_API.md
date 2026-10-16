@@ -7,10 +7,19 @@ to warnings only and performs no deployment or settings enablement.
 
 ## Deadline and tiers
 
+For version-2 shop handovers, the [QA timing rule](SHOP_HANDOVER_API.md#production-timing-while-gridgo-reviews)
+excludes GRIDGO review waits: freeze at submission, finalize that finish on
+approval, resume after rejection excluding the review interval. No new deduction
+applies while review is pending. All lateness consumers share this clock; legacy
+handovers and already-applied deductions retain their existing behavior.
+
 The lifecycle sweep evaluates committed orders in `payment_authorized`,
 `production`, or `supplier_self_qc`, plus orders with a recorded `readyAt`.
 Lateness is measured from the shop's `readyBy`, not the padded client `promiseBy`
-or delivery time. Once present, `readyAt` fixes the finish time.
+or delivery time. For legacy handovers, `readyAt` fixes the finish time; version 2 uses the approved submission with rejected review waits excluded. Orders created
+after the [operating-hours rollout](OPERATING_HOURS_API.md) measure the thresholds
+below in their snapshotted platform operating hours. Older orders retain wall-clock
+hours. Applied penalties are never recalculated.
 
 - Minor: more than zero and at most six hours late.
 - Moderate: more than six and at most 24 hours, with a formal warning.

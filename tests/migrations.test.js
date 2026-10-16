@@ -37,9 +37,46 @@ async function withMigrationSchema(t, fn) {
   await fn({ schema, client });
 }
 
-test("fresh PostgreSQL migrates through onboarding, enrollment, and money additions and reverses them in order", { skip: !DATABASE_URL }, async (t) => {
+// Legal history is deliberately forward-only. Exercise the historical rollback
+// chain only up to the last migration preceding that boundary.
+const HISTORICAL_ROLLBACK_TIMESTAMP = 1791975600000;
+
+test("fresh PostgreSQL orders operating hours after legal evidence and preserves both rollback guards", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
-    await runner(migrationOptions(schema, "up", undefined, client));
+    await runner({ ...migrationOptions(schema, "up", 1791975800000, client), timestamp: true });
+    const tables = new Set((await client.query(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = $1", [schema],
+    )).rows.map((row) => row.table_name));
+    for (const table of ["legal_documents", "legal_versions", "legal_acceptances", "privacy_requests"]) {
+      assert.ok(tables.has(table), `${table} should exist after up`);
+    }
+    assert.deepEqual((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 5")).rows.map(row => row.name), [
+      "1791975800000_operating_hours",
+      "1791975700000_legal_privacy",
+      "1791975600000_gridgo_vouchers",
+      "1791972000000_order_calls",
+      "1791968400000_pickup_chat",
+    ]);
+    await client.query(`
+      INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
+        VALUES ('clock_client', 'clerk_clock_client', 'clock@test.invalid', 'Client', 'client', 'individual', now(), 0);
+      INSERT INTO orders (id, client_id, state, created_at, updated_at, position, data)
+        VALUES ('clock_order', 'clock_client', 'draft', now(), now(), 0, '{"operatingClock":{"version":1}}');
+    `);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /Operating-clock orders exist/);
+    await client.query("ROLLBACK");
+    await client.query("UPDATE orders SET data = data - 'operatingClock' WHERE id = 'clock_order'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name,
+      "1791975700000_legal_privacy");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /legal evidence must be retained/);
+  });
+});
+
+test("historical PostgreSQL migrations through onboarding, enrollment, and money additions reverse in order", { skip: !DATABASE_URL }, async (t) => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner({ ...migrationOptions(schema, "up", HISTORICAL_ROLLBACK_TIMESTAMP, client), timestamp: true });
 
     const tables = new Set((await client.query(
       "SELECT table_name FROM information_schema.tables WHERE table_schema = $1",
@@ -54,7 +91,8 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
       "client_match_selections", "client_match_preferences", "client_saved_addresses", "client_carts", "client_cart_lines",
       "order_jobs", "order_invoices", "order_baskets", "order_basket_groups", "support_admins", "support_tickets",
       "support_chat_threads", "support_chat_messages", "support_chat_reads",
-      "delivery_chat_messages", "delivery_chat_reads",
+      "delivery_chat_messages", "delivery_chat_reads", "pickup_chat_messages", "pickup_chat_reads",
+      "order_calls", "order_call_signals",
       "supplier_payout_accounts", "device_token_checks", "tracker_decisions", "season_windows", "production_lapses",
       "refund_requests", "refund_settlements", "refund_supplier_payouts", "refund_attempts", "refund_payments", "refund_events", "refund_commands",
     ]) assert.equal(tables.has(table), true, `${table} should exist after up`);
@@ -140,8 +178,9 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
         "1791957600000_delivery_chat_images",
         "1791961200000_order_qa_checklist",
         "1791964800000_docx_artwork",
-        "1792041000000_audit_log_is_permanent",
-        "1792044600000_funnel_events",
+        "1791968400000_pickup_chat",
+        "1791972000000_order_calls",
+        "1791975600000_gridgo_vouchers",
       ],
     );
 
@@ -324,15 +363,31 @@ test("fresh PostgreSQL migrates through onboarding, enrollment, and money additi
     assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
       WHERE table_schema=$1 AND table_name='delivery_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
 
+    // Empty installations can reverse; campaign history must never be discarded.
+    await client.query(`INSERT INTO voucher_campaigns
+      (id, name, code, mode, status, value_minor, total_limit, per_account_limit, validity_days, created_at, updated_at)
+      VALUES ('rollback_guard', 'Rollback guard', 'ROLLBACK', 'assigned', 'draft', 1500, 1, 1, 7, now(), now())`);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /Vouchers require a forward migration/);
+    await client.query("ROLLBACK");
+    await client.query("DELETE FROM voucher_campaigns WHERE id='rollback_guard'");
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('voucher_campaigns') AS t")).rows[0].t, null);
+
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('order_calls') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('order_call_signals') AS t")).rows[0].t, null);
+
+
+    assert.equal((await client.query(`SELECT 1 FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='pickup_chat_messages' AND column_name='attachment_file_ids'`, [schema])).rowCount, 1);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('pickup_chat_messages') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT to_regclass('pickup_chat_reads') AS t")).rows[0].t, null);
+
     assert.deepEqual((await client.query("SELECT extensions, mime_types FROM accepted_file_formats WHERE code='docx'")).rows[0], {
       extensions: ['docx'], mime_types: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
     });
-
-    // Reverse checkout-funnel events, then the append-only audit lock.
-    await runner(migrationOptions(schema, "down", 1, client));
-    assert.equal((await client.query("SELECT to_regclass('funnel_events') AS t")).rows[0].t, null);
-    await runner(migrationOptions(schema, "down", 1, client));
-
     await client.query(`INSERT INTO files
       (file_id, owner_id, purpose, original_filename, declared_content_type, detected_content_type,
         size_bytes, state, object_key, created_at, position)
@@ -1085,7 +1140,7 @@ test("cutover-shaped users backfill memberships, profiles, cases, events, and co
 
 test("rider split migration preserves old delivery fees and SQL computes exact new shares", { skip: !DATABASE_URL }, async (t) => {
   await withMigrationSchema(t, async ({ schema, client }) => {
-    await runner(migrationOptions(schema, "up", undefined, client));
+    await runner({ ...migrationOptions(schema, "up", HISTORICAL_ROLLBACK_TIMESTAMP, client), timestamp: true });
     const { count } = (await client.query(`SELECT count(*)::integer AS count FROM pgmigrations
       WHERE name >= '1786978800000_rider_delivery_commission'`)).rows[0];
     await runner(migrationOptions(schema, "down", count, client));
@@ -1166,13 +1221,21 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     ]);
     await runner(migrationOptions(schema, "up", undefined, client));
     const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
-    assert.equal(migrated.version, 14);
+    // Zone pricing, operating hours, rider tracking, bracket activation and artwork guidance advance the handshake.
+    assert.equal(migrated.version, 18);
+    assert.equal(migrated.settings.artworkGuidance.subcategories.custom_apparel.minimumDpi, 150);
+    assert.equal(migrated.settings.riderLocationRefreshIntervalSeconds, 20);
+    assert.equal(migrated.settings.riderLocationStaleAfterSeconds, 120);
+    assert.equal(migrated.settings.operatingHours.artworkReviewMinutes, 60);
+    assert.equal(migrated.settings.operatingHours.priorityDispatchCutoffMinute, 960);
+    assert.deepEqual(migrated.settings.operatingHours.schedule.week.map(row => row.weekday), [1, 2, 3, 4, 5, 6]);
     assert.deepEqual(migrated.settings.deliveryFeeBands.slice(0, 3), settings.deliveryFeeBands.slice(0, 3));
     assert.deepEqual(migrated.settings.deliveryFeeBands[3], {
       zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,
     });
     for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows,
-      table === "order_jobs" ? before[table].map(row => ({ ...row, deadline: null, estimated_production_minutes: null })) : before[table]);
+      table === "order_jobs" ? before[table].map(row => ({ ...row, deadline: null, estimated_production_minutes: null }))
+        : before[table].map(row => ({ ...row, data: { ...row.data, shopHandoverVersion: 1 } })));
   });
 });
 
@@ -1256,5 +1319,72 @@ test("listing review migration grandfathers live listings and defaults new recor
     await client.query("BEGIN");
     await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /listing reviews exist/);
     await client.query("ROLLBACK");
+  });
+});
+
+
+test("issue-report priority migration defaults existing reports to unpinned and preserves workflow", { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({schema,client}) => {
+    await runner({...migrationOptions(schema,"up",1791975800000,client), timestamp:true});
+    await client.query(`INSERT INTO issue_reports(id,issue,status,published_in,tracker_issue_url)
+      VALUES ('11111111-1111-4111-8111-111111111111','Keep existing metadata','published','10-13-2026','https://github.com/gridgoph/gridgo-web/issues/1')`);
+    // Exercise this migration's rollback without crossing later forward-only boundaries.
+    await runner({...migrationOptions(schema,"up",1791976000000,client), timestamp:true});
+    const row = (await client.query("SELECT priority,status,published_in,tracker_issue_url FROM issue_reports")).rows[0];
+    assert.deepEqual(row,{priority:false,status:'published',published_in:'10-13-2026',tracker_issue_url:'https://github.com/gridgoph/gridgo-web/issues/1'});
+    await client.query("UPDATE issue_reports SET priority=true");
+    await runner(migrationOptions(schema,"down",1,client));
+    assert.equal((await client.query("SELECT status FROM issue_reports")).rows[0].status,'published');
+    assert.equal((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name='issue_reports' AND column_name='priority'", [schema])).rowCount, 0);
+  });
+});
+
+test('bracket migration freezes legacy carts and open quotes before an audited settings activation', { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t,async ({schema,client})=>{
+    await runner({...migrationOptions(schema,'up',1792029000000,client),timestamp:true});
+    const { defaultOperationalSettings } = await import('../src/operational-model.js');
+    await client.query('INSERT INTO platform_settings(singleton,version,settings) VALUES(true,42,$1)',[defaultOperationalSettings()]);
+    await client.query(`
+      INSERT INTO users(id,clerk_user_id,email,name,role,account_type,verification_status,created_at,position) VALUES
+        ('fee_client','fee_c','fee_c@test.invalid','Client','client','individual',NULL,now(),0),
+        ('fee_shop','fee_s','fee_s@test.invalid','Shop','supplier',NULL,'approved',now(),1);
+      INSERT INTO taxonomy_categories(id,code,name,active,sort_order,position) VALUES('fee_cat','fee_cat','Category',true,0,0);
+      INSERT INTO taxonomy_subcategories(id,code,category_code,name,active,sort_order,position) VALUES('fee_sub','fee_sub','fee_cat','Subcategory',true,0,0);
+      INSERT INTO supplier_services(id,supplier_id,category_code,state,reference_rate_minor,turnaround_hours,created_at,updated_at,position)
+        VALUES('fee_service','fee_shop','fee_cat','live',200000,24,now(),now(),0);
+      INSERT INTO supplier_catalog_items(id,supplier_id,supplier_service_id,subcategory_code,name,base_price_minor,sort_order,created_at,updated_at)
+        VALUES('fee_item','fee_shop','fee_service','fee_sub','Item',200000,0,now(),now());
+      INSERT INTO client_carts(id,client_id,created_at,updated_at,deadline) VALUES('fee_cart','fee_client',now(),now(),'2026-12-01T00:00:00Z');
+      INSERT INTO client_cart_lines(id,cart_id,supplier_id,catalog_item_id,quantity,sort_order,created_at,updated_at)
+        VALUES('fee_line','fee_cart','fee_shop','fee_item',1,0,now(),now());
+      INSERT INTO orders(id,client_id,state,created_at,updated_at,position,data)
+        VALUES('fee_quote','fee_client','awaiting_checkout',now(),now(),0,'{"pendingQuote":{"version":1,"supplierSubtotalMinor":200000}}');
+    `);
+    await runner({...migrationOptions(schema,'up',1792037400000,client),timestamp:true});
+    const settings=(await client.query('SELECT * FROM platform_settings')).rows[0];
+    assert.equal(settings.version,43);
+    assert.equal(settings.settings.serviceFeeSchedule.version,2);
+    const cart=(await client.query('SELECT service_fee_snapshot FROM client_cart_lines')).rows[0].service_fee_snapshot;
+    assert.deepEqual(cart,{groupKey:['fee_shop','2026-12-01T00:00:00.000Z'],schedule:{version:1,rateBps:1000}});
+    const quote=(await client.query('SELECT data FROM orders')).rows[0].data.pendingQuote;
+    assert.deepEqual(quote.serviceFeeSchedule,{version:1,rateBps:1000});
+    const audit=(await client.query("SELECT data FROM audit_log WHERE id='aud_service_fee_brackets_1792037400000'")).rows[0].data;
+    assert.equal(audit.detail.previous.serviceFeeRateBps,1000);
+    assert.equal(audit.detail.current.serviceFeeSchedule.version,2);
+    const fees=await client.query('SELECT gridgo_service_fee(n,$1) AS fee FROM unnest(ARRAY[0,1,199900,200000,500000,2000000,5000000]::numeric[]) n',[settings.settings.serviceFeeSchedule]);
+    assert.deepEqual(fees.rows.map(row=>Number(row.fee)),[0,0,89955,90000,165000,540000,990000]);
+    await assert.rejects(client.query("UPDATE platform_settings SET settings=jsonb_set(settings,'{serviceFeeSchedule,brackets,0,rateBps}','10001')"),{code:'23514'});
+  });
+});
+
+test("checkout-funnel events migration adds and removes its own table only", { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner({ ...migrationOptions(schema, "up", 1792130000000, client), timestamp: true });
+    assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name, "1792130000000_funnel_events");
+    await client.query(`INSERT INTO funnel_events (id, at, client_id, kind) VALUES ('fun_1', now(), 'client_1', 'paid')`);
+    await assert.rejects(client.query(`INSERT INTO funnel_events (id, at, client_id, kind) VALUES ('fun_2', now(), 'client_1', 'unknown')`), { code: "23514" });
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query("SELECT to_regclass('funnel_events') AS t")).rows[0].t, null);
+    assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name, "1792120000000_listing_express");
   });
 });

@@ -2,7 +2,11 @@
 
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
 
-Staff invitations, QR/OTP handovers, hub reminders and receipt scans are documented in [Hub handovers](docs/HUB_HANDOVER_API.md). OTP rollout defaults off until the companion app updates are ready.
+Per-item special instructions, shop acknowledgement and paid specification changes are documented in [Order changes](docs/ORDER_CHANGES_API.md).
+
+Delivery pin confirmation, one change before dispatch, QR surcharges and non-cancelling credits are documented in [Delivery pins](docs/DELIVERY_PIN_API.md).
+
+Staff invitations, QR/OTP handovers, hub reminders and receipt scans are documented in [Hub handovers](docs/HUB_HANDOVER_API.md). Monthly supplier invoice details and paper collection are documented in [Supplier invoices](docs/SUPPLIER_INVOICES_API.md). OTP rollout defaults off until the companion app updates are ready.
 
 The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_MODEL_V2_API.md), [Client refunds](docs/REFUNDS_API.md), [Storage API](docs/STORAGE_API.md), and [Taxonomy API](docs/TAXONOMY_API.md). Production setup, cutover, backup, and recovery are in [Deployment](docs/DEPLOYMENT.md).
 
@@ -105,7 +109,7 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 ## Main route groups
 
-All routes except `/health`, `/catalog`, `/season-windows`, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.
+All routes except `/health`, `/catalog`, `/season-windows`, public `/legal/documents` and effective `/legal/versions/*` reads, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
@@ -115,6 +119,7 @@ All routes except `/health`, `/catalog`, `/season-windows`, public support-ticke
 - Client matching/cart: `/me/preferences`, `/me/addresses`, `/me/matches`, `/me/carts`, checkout, and invoice; see [Client order match API](docs/ORDER_MATCH_API.md)
 - Organization discount and statements: [Organization money API](docs/ORGANIZATION_MONEY_API.md)
 - Dispatch: `/dispatch/offers`, pickup checks, delivery, rider location
+- Private audio calls: `/orders/:id/calls`, party-scoped WebRTC signalling and ICE; [Calls API](docs/CALLS_API.md)
 - Files: `/files` metadata/control plane with private MinIO bytes
 - Notifications: `/notifications`, SSE stream, `/devices`, `/announcements`; machine release broadcasts and rollout: [Release announcements](docs/RELEASE_ANNOUNCEMENTS_API.md)
 - Public support tickets: `POST /support-tickets` and `POST /api/support-tickets`; Clerk desk `GET /admin/me` (returns `{ email }`), list/get/reply/delete under `/support-tickets` and the same paths under `/api`
@@ -126,3 +131,5 @@ See the authoritative contract documents for exact methods, roles, bodies, state
 - Business and organization application documents, shared-login email codes, officer handover/history, and quarterly notices: [Organization accounts API](docs/ORGANIZATION_ACCOUNTS_API.md).
 
 Account deletion requests and the manual Operations queue: [Account deletion API](docs/ACCOUNT_DELETION_API.md).
+
+Legal documents, versioned enrollment/order consent, acceptance CSV and the manual Privacy Requests queue: [Legal & Privacy API](docs/LEGAL_API.md).

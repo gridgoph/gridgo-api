@@ -1,4 +1,4 @@
-import { appendAudit } from "./audit-record.js";
+import { organizationFeeMoney } from './organization-money.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -1583,6 +1583,7 @@ async function clearDevelopmentOrders(database) {
     await database.query("SET LOCAL session_replication_role = replica");
     await database.query("TRUNCATE TABLE orders CASCADE");
     await database.query("TRUNCATE TABLE notifications CASCADE");
+    // Permanent audit evidence survives rebuilding the local demonstration queue.
   });
 }
 
@@ -1627,9 +1628,8 @@ async function seedDevelopmentQueue(database, clientId, now) {
       });
 
       const itemSubtotalMinor = priced.lineSubtotalMinor;
-      const serviceFeeMinor = Math.round(
-        (itemSubtotalMinor * (store.settings?.serviceFeeRateBps ?? 1_000)) / 10_000,
-      );
+      const fee = organizationFeeMoney(itemSubtotalMinor, store.settings);
+      const { serviceFeeMinor } = fee;
       const deliveryFeeMinor = 5_000;
       const totalMinor = itemSubtotalMinor + serviceFeeMinor + deliveryFeeMinor;
       const downpaymentMinor = Math.round((totalMinor * 7_500) / 10_000);
@@ -1657,6 +1657,8 @@ async function seedDevelopmentQueue(database, clientId, now) {
         fulfillmentMode: entry.fulfillmentMode ?? (index % 3 === 0 ? "pickup" : "delivery"),
         supplierSubtotalMinor: itemSubtotalMinor,
         subtotalMinor: itemSubtotalMinor,
+        ...fee,
+        serviceFeeRateBps: fee.serviceFeeSchedule.version === 1 ? fee.serviceFeeSchedule.rateBps : null,
         serviceFeeMinor,
         deliveryFeeMinor,
         totalMinor,
@@ -1751,7 +1753,7 @@ async function seedDevelopmentQueue(database, clientId, now) {
  * that reads a trail has nothing to draw.
  */
 function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
-  store.auditLog = (store.auditLog || []).filter((row) => row.orderId !== orderId);
+  store.auditLog ||= [];
 
   // Looked up rather than named: an audit row points at a real person, and a
   // guessed id fails at the foreign key rather than quietly.
@@ -1790,7 +1792,8 @@ function seedQueueAudit(store, { orderId, clientId, entry, stage, at, index }) {
     // Spaced backwards from now, so the trail reads in the order it happened
     // rather than arriving in one instant.
     const when = new Date(Date.parse(at) - (trail.length - step) * 3_600_000).toISOString();
-    appendAudit(store, {
+    if (store.auditLog.some(row => row.id === `aud_dev_queue_${index}_${step}`)) continue;
+    store.auditLog.push({
       id: `aud_dev_queue_${index}_${step}`,
       at: when,
       actorId,

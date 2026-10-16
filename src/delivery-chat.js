@@ -9,9 +9,8 @@ import { tooManyRequests } from "./support-rate-limit.js";
  keyed by order *and* rider, so a reassigned job never shows the new rider
  what the client said to the old one.
 
- Neither side ever sees the other's phone number or email. Calls are out of
- scope until GRIDGO has a masked-call provider; the issue's stop rule forbids
- handing out personal numbers.
+ Neither side ever sees the other's phone number or email. Audio calls use
+ the separate private WebRTC contract in docs/CALLS_API.md.
 
  A job collected at GRIDGO Office has no conversation: its rider drives to our
  counter, not to the client.
@@ -199,13 +198,13 @@ async function markRead(database, order, userId) {
 function counterpartNotice(order, party, createId, at) {
   return party === "client"
     ? {
-      id: createId("ntf"), userId: order.riderId, appRole: "rider", orderId: order.id,
+      id: createId("ntf"), userId: order.riderId, appRole: "rider", orderId: order.id, chatRiderId: order.riderId,
       type: "delivery_message", title: "Message from the client",
       body: "The client sent you a message about this delivery. Open the trip to read it and reply.",
       read: false, at,
     }
     : {
-      id: createId("ntf"), userId: order.clientId, appRole: "client", orderId: order.id,
+      id: createId("ntf"), userId: order.clientId, appRole: "client", orderId: order.id, chatRiderId: order.riderId,
       type: "delivery_message", title: "Message from your rider",
       body: "Your rider sent you a message about this delivery. Open the order to read it and reply.",
       read: false, at,
@@ -220,6 +219,7 @@ function notifyCounterpart(store, order, party, { createId, at }) {
   const notice = counterpartNotice(order, party, createId, at);
   const quiet = (store.notifications || []).some((row) => row.userId === notice.userId
     && row.orderId === order.id
+    && row.chatRiderId === order.riderId
     && row.type === "delivery_message"
     && !row.read
     && !row.deletedAt

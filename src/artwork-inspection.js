@@ -103,12 +103,16 @@ function inspectPdf(bytes) {
 
   let mediaBox = null;
   let pageCount = null;
+  const leafBoxes = [];
+  const inheritedBoxes = [];
+  const spaces = new Set();
   for (const text of texts) {
     mediaBox = mediaBox || firstMediaBox(text);
     const counted = pageTreeCount(text);
     if (counted != null && (pageCount == null || counted > pageCount)) pageCount = counted;
+    collectPageBoxes(text, leafBoxes, inheritedBoxes);
+    for (const space of declaredColorSpaces(text)) spaces.add(space);
   }
-  const colorMode = colorModeFromTexts(texts);
   const fonts = fontsFromTexts(texts);
   const bleedMilli = bleedMilliFromTexts(texts);
 
@@ -128,13 +132,13 @@ function inspectPdf(bytes) {
     kind: "pdf",
     pageCount,
     ...dimensions,
+    pageBoxes: pageBoxesOf(leafBoxes, inheritedBoxes, pageCount, mediaBox),
     // A PDF's page box is a physical size already, so there is no density to
     // report and nothing downstream should ask for one.
     dpi: null,
     pixelWidth: null,
     pixelHeight: null,
-    // Null when the bytes never said. A missing colour space is not "RGB".
-    colorMode,
+    colorMode: pdfColorMode(spaces),
     fonts,
     bleedMilli,
     hasAlpha: null,
@@ -142,32 +146,28 @@ function inspectPdf(bytes) {
 }
 
 /**
- * Device colour spaces a page resource actually names.
- *
- * Read from the same text the page box is read from, including inflated
- * streams. Content operators (`rg`, `k`) are too easy to mistake for ordinary
- * words, so only PDF names count. More than one device space is mixed: a
- * CMYK page with an RGB image is not "CMYK".
+ * The colour spaces a PDF names: device spaces, and ICC profiles by their
+ * component count. Paint operators are not read, so a text-only file that
+ * names no colour space reports nothing rather than a guess.
  */
-function colorModeFromTexts(texts) {
+function declaredColorSpaces(text) {
   const found = new Set();
-  const names = [
-    ["cmyk", /\/DeviceCMYK\b/],
-    ["rgb", /\/DeviceRGB\b/],
-    ["gray", /\/DeviceGray\b/],
-    ["icc", /\/ICCBased\b/],
-    ["spot", /\/Separation\b|\/DeviceN\b/],
-  ];
-  for (const text of texts) {
-    for (const [name, pattern] of names) {
-      if (pattern.test(text)) found.add(name);
+  if (/\/DeviceCMYK\b/.test(text)) found.add("cmyk");
+  if (/\/(?:DeviceRGB|CalRGB)\b/.test(text)) found.add("rgb");
+  if (/\/(?:DeviceGray|CalGray)\b/.test(text)) found.add("grayscale");
+  if (/\/ICCBased\b/.test(text) || /\/Alternate\b/.test(text)) {
+    for (const match of text.matchAll(/\/N\s+([134])(?![\d.]|\s+\d+\s+R)/g)) {
+      found.add({ 1: "grayscale", 3: "rgb", 4: "cmyk" }[match[1]]);
     }
   }
-  const device = ["cmyk", "rgb", "gray"].filter((name) => found.has(name));
-  if (device.length > 1) return "mixed";
-  if (device.length === 1) return device[0];
-  if (found.has("icc")) return "icc";
-  if (found.has("spot")) return "spot";
+  return found;
+}
+
+function pdfColorMode(spaces) {
+  if (spaces.has("cmyk") && spaces.has("rgb")) return "mixed";
+  if (spaces.has("cmyk")) return "cmyk";
+  if (spaces.has("rgb")) return "rgb";
+  if (spaces.has("grayscale")) return "grayscale";
   return null;
 }
 
@@ -261,6 +261,98 @@ function firstMediaBox(text) {
   const height = Math.abs(y1 - y0);
   if (!width || !height || !Number.isFinite(width) || !Number.isFinite(height)) return null;
   return { width, height };
+}
+
+const MEDIA_BOX = /\/MediaBox\s*\[\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\]/g;
+
+/** Enough page boxes for a long plan set; a file past this keeps the boxes already read. */
+const MAX_PAGE_BOXES = 2000;
+
+/**
+ * Every page box in this text, split by who owns it.
+ *
+ * A leaf page's own `/MediaBox` is its size. A box on a `/Type /Pages` node is
+ * inherited by the pages under it that state none. Keeping them apart is what
+ * stops a root box that every page overrides from being counted as a page.
+ *
+ * One pass over the `<<`/`>>` nesting finds each box's own dictionary, so a
+ * file with thousands of pages costs one scan rather than one per page.
+ */
+function collectPageBoxes(text, leaves, inherited) {
+  const boxes = [];
+  MEDIA_BOX.lastIndex = 0;
+  let match;
+  while (leaves.length + inherited.length + boxes.length < MAX_PAGE_BOXES && (match = MEDIA_BOX.exec(text)) !== null) {
+    const [, x0, y0, x1, y1] = match.map(Number);
+    const width = Math.abs(x1 - x0);
+    const height = Math.abs(y1 - y0);
+    if (width && height && Number.isFinite(width) && Number.isFinite(height)) boxes.push({ at: match.index, width, height });
+  }
+  if (!boxes.length) return;
+
+  // Where each page-tree node says so. Marked on its innermost dictionary in
+  // the same pass, so no dictionary body is ever scanned twice.
+  const pagesTokens = [];
+  const PAGES_TYPE = /\/Type\s*\/Pages\b/g;
+  let token;
+  while (pagesTokens.length < MAX_PAGE_BOXES && (token = PAGES_TYPE.exec(text)) !== null) pagesTokens.push(token.index);
+
+  const open = [];
+  const owned = new Map();
+  const pagesNodes = new Set();
+  let pending = 0;
+  const classify = (start) => {
+    const own = owned.get(start);
+    if (!own) return;
+    owned.delete(start);
+    pending -= 1;
+    const pagesNode = pagesNodes.has(start);
+    for (const box of own) (pagesNode ? inherited : leaves).push({ width: box.width, height: box.height });
+  };
+  const delimiters = /<<|>>/g;
+  let next = 0;
+  let nextToken = 0;
+  let delimiter;
+  // Keep reading until every dictionary that owns a box has closed: a page
+  // object written before its page tree must not be judged by the tree.
+  while ((next < boxes.length || pending > 0) && (delimiter = delimiters.exec(text)) !== null) {
+    const owner = open.length ? open[open.length - 1] : -1;
+    while (nextToken < pagesTokens.length && pagesTokens[nextToken] < delimiter.index) {
+      if (owner >= 0) pagesNodes.add(owner);
+      nextToken += 1;
+    }
+    while (next < boxes.length && boxes[next].at < delimiter.index) {
+      if (!owned.has(owner)) {
+        owned.set(owner, []);
+        if (owner >= 0) pending += 1;
+      }
+      owned.get(owner).push(boxes[next]);
+      next += 1;
+    }
+    if (delimiter[0] === "<<") {
+      if (open.length < 4096) open.push(delimiter.index);
+    } else if (open.length) {
+      classify(open.pop());
+    }
+  }
+  // Boxes past the last delimiter, or in dictionaries the file never closes,
+  // still describe pages; with no dictionary to read they count as leaves.
+  for (; next < boxes.length; next += 1) leaves.push({ width: boxes[next].width, height: boxes[next].height });
+  for (const own of owned.values()) for (const box of own) leaves.push({ width: box.width, height: box.height });
+}
+
+/**
+ * The page boxes that describe the pages, in points.
+ *
+ * Inherited boxes count only when some page has no box of its own -- fewer
+ * leaf boxes than the page tree's count. A file whose tree yielded no boxes at
+ * all keeps its first box, which is what the single-size read always used.
+ */
+function pageBoxesOf(leaves, inherited, pageCount, first) {
+  const boxes = [...leaves];
+  if (!leaves.length || (pageCount != null && leaves.length < pageCount)) boxes.push(...inherited);
+  if (!boxes.length && first) boxes.push(first);
+  return boxes;
 }
 
 /**
@@ -478,26 +570,24 @@ function inspectPng(bytes) {
   const pixelWidth = bytes.readUInt32BE(16);
   const pixelHeight = bytes.readUInt32BE(20);
   if (!pixelWidth || !pixelHeight) return null;
-  return { pixelWidth, pixelHeight, dpi: pngDensity(bytes), ...pngColor(bytes) };
+  const colorRead = pngColorTypeRead(bytes);
+  return {
+    pixelWidth, pixelHeight, dpi: pngDensity(bytes),
+    colorMode: colorRead ? PNG_COLOR_MODES[bytes[25]] : null,
+    hasAlpha: colorRead ? bytes[25] === 4 || bytes[25] === 6 : null,
+  };
 }
 
 /**
- * PNG colour type lives in the IHDR, one byte after the bit depth.
- *
- * A zero bit depth is an unfinished header, not grayscale. Indexed and alpha
- * are reported as themselves so a print check can warn instead of calling
- * a palette "RGB".
+ * The IHDR colour type sits one byte after the bit depth; types 4 and 6 carry
+ * alpha. A zero bit depth is an unfinished header, not grayscale.
  */
-function pngColor(bytes) {
-  if (bytes.length < 26) return { colorMode: null, hasAlpha: null };
-  const bitDepth = bytes[24];
-  const colorType = bytes[25];
-  if (![1, 2, 4, 8, 16].includes(bitDepth)) return { colorMode: null, hasAlpha: null };
-  const modes = { 0: "gray", 2: "rgb", 3: "indexed", 4: "gray", 6: "rgb" };
-  const colorMode = modes[colorType] ?? null;
-  if (!colorMode) return { colorMode: null, hasAlpha: null };
-  return { colorMode, hasAlpha: colorType === 4 || colorType === 6 };
+function pngColorTypeRead(bytes) {
+  return bytes.length >= 26 && [1, 2, 4, 8, 16].includes(bytes[24]) && Object.hasOwn(PNG_COLOR_MODES, bytes[25]);
 }
+
+/** PNG colour types: grey, RGB, palette (RGB entries), grey + alpha, RGBA. PNG has no CMYK. */
+const PNG_COLOR_MODES = { 0: "grayscale", 2: "rgb", 3: "rgb", 4: "grayscale", 6: "rgb" };
 
 /**
  * A PNG's declared density, in dots per inch.
@@ -529,6 +619,8 @@ function isFrameMarker(marker) {
 }
 
 /** JPEG: walk the segment chain for the frame header and the JFIF density. */
+const JPEG_COLOR_MODES = { 1: "grayscale", 3: "rgb", 4: "cmyk" };
+
 function inspectJpeg(bytes) {
   let at = 2;
   let dpi = null;
@@ -548,9 +640,11 @@ function inspectJpeg(bytes) {
     const length = bytes.readUInt16BE(at + 2);
     if (length < 2) break;
 
-    if (isFrameMarker(marker) && at + 9 <= bytes.length) {
+    if (isFrameMarker(marker) && at + 10 <= bytes.length) {
       size = { pixelHeight: bytes.readUInt16BE(at + 5), pixelWidth: bytes.readUInt16BE(at + 7) };
-      if (at + 10 <= bytes.length) colorMode = jpegColorMode(bytes[at + 9]);
+      // One component is grey, three are RGB (stored as YCbCr), four are CMYK
+      // (Adobe's YCCK is CMYK too). The frame says so whatever the header claims.
+      colorMode = JPEG_COLOR_MODES[bytes[at + 9]] ?? null;
     } else if (marker === 0xe0 && dpi == null && at + 16 <= bytes.length) {
       if (bytes.toString("latin1", at + 4, at + 9) === "JFIF\0") {
         const unit = bytes[at + 11];
@@ -569,12 +663,63 @@ function inspectJpeg(bytes) {
   return { ...size, dpi, colorMode, hasAlpha: false };
 }
 
-/** JPEG frame component count: 1 gray, 3 YCbCr/RGB, 4 CMYK. Anything else is unread. */
-function jpegColorMode(components) {
-  if (components === 1) return "gray";
-  if (components === 3) return "rgb";
-  if (components === 4) return "cmyk";
+/** Photoshop header colour modes: bitmap, grey, indexed, RGB, CMYK, duotone. */
+const PSD_COLOR_MODES = { 0: "grayscale", 1: "grayscale", 2: "rgb", 3: "rgb", 4: "cmyk", 8: "grayscale" };
+
+/** PSD: size and colour mode are in the fixed header, the density is image resource 0x03ED. */
+function inspectPsd(bytes) {
+  if (bytes.length < 26 || bytes.toString("latin1", 0, 4) !== "8BPS") return null;
+  const pixelHeight = bytes.readUInt32BE(14);
+  const pixelWidth = bytes.readUInt32BE(18);
+  if (!pixelWidth || !pixelHeight) return null;
+  return { pixelWidth, pixelHeight, dpi: psdDensity(bytes), colorMode: PSD_COLOR_MODES[bytes.readUInt16BE(24)] ?? null };
+}
+
+function psdDensity(bytes) {
+  let at = 26;
+  if (at + 4 > bytes.length) return null;
+  at += 4 + bytes.readUInt32BE(at);
+  if (at + 4 > bytes.length) return null;
+  const end = Math.min(bytes.length, at + 4 + bytes.readUInt32BE(at));
+  at += 4;
+  while (at + 12 <= end && bytes.toString("latin1", at, at + 4) === "8BIM") {
+    const id = bytes.readUInt16BE(at + 4);
+    const nameLength = bytes[at + 6];
+    const nameBytes = (nameLength + 2) & ~1;
+    const sizeAt = at + 6 + nameBytes;
+    if (sizeAt + 4 > end) return null;
+    const size = bytes.readUInt32BE(sizeAt);
+    const data = sizeAt + 4;
+    if (id === 0x03ed && size >= 16 && data + 6 <= end) {
+      const perUnit = bytes.readUInt32BE(data) / 65536;
+      const unit = bytes.readUInt16BE(data + 4);
+      if (!(perUnit > 0)) return null;
+      return round(unit === 2 ? perUnit * 2.54 : perUnit);
+    }
+    at = data + size + (size & 1);
+  }
   return null;
+}
+
+/** WebP: the canvas size from whichever bitstream chunk comes first. WebP is always RGB. */
+function inspectWebp(bytes) {
+  if (bytes.length < 30 || bytes.toString("latin1", 0, 4) !== "RIFF" || bytes.toString("latin1", 8, 12) !== "WEBP") return null;
+  const chunk = bytes.toString("latin1", 12, 16);
+  let pixelWidth = 0;
+  let pixelHeight = 0;
+  if (chunk === "VP8X") {
+    pixelWidth = bytes.readUIntLE(24, 3) + 1;
+    pixelHeight = bytes.readUIntLE(27, 3) + 1;
+  } else if (chunk === "VP8 " && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+    pixelWidth = bytes.readUInt16LE(26) & 0x3fff;
+    pixelHeight = bytes.readUInt16LE(28) & 0x3fff;
+  } else if (chunk === "VP8L" && bytes[20] === 0x2f) {
+    const bits = bytes.readUInt32LE(21);
+    pixelWidth = (bits & 0x3fff) + 1;
+    pixelHeight = ((bits >>> 14) & 0x3fff) + 1;
+  }
+  if (!pixelWidth || !pixelHeight) return null;
+  return { pixelWidth, pixelHeight, dpi: null, colorMode: "rgb" };
 }
 
 /**
@@ -608,7 +753,20 @@ export function inspectArtwork(bytes, contentType) {
   let read = null;
   if (contentType === DOCX_CONTENT_TYPE) {
     const docx = inspectDocx(bytes);
-    if (docx) read = { kind: "document", pageCount: docx.pageCount };
+    if (docx) {
+      // Word states each section's page in twips, a twentieth of a point.
+      const sections = (docx.pageSizes || []).map(size => ({
+        widthMilli: round(size.widthTwips / 20 * MM_PER_POINT * MILLI),
+        heightMilli: round(size.heightTwips / 20 * MM_PER_POINT * MILLI),
+      }));
+      read = {
+        kind: "document",
+        pageCount: docx.pageCount,
+        widthMilli: sections[0]?.widthMilli ?? null,
+        heightMilli: sections[0]?.heightMilli ?? null,
+        sections,
+      };
+    }
   } else if (contentType === "application/pdf") {
     read = inspectPdf(bytes);
   } else if (contentType === "image/png") {
@@ -617,25 +775,53 @@ export function inspectArtwork(bytes, contentType) {
   } else if (contentType === "image/jpeg") {
     const raster = inspectJpeg(bytes);
     if (raster) read = { kind: "raster", pageCount: 1, ...raster, ...rasterPhysicalSize(raster) };
+  } else if (contentType === "image/webp" || contentType === "image/vnd.adobe.photoshop") {
+    const raster = contentType === "image/webp" ? inspectWebp(bytes) : inspectPsd(bytes);
+    if (raster) read = { kind: "raster", pageCount: 1, ...raster, ...rasterPhysicalSize(raster) };
   }
   if (!read) return null;
 
   const { widthMilli, heightMilli } = read;
   const known = Number.isFinite(widthMilli) && Number.isFinite(heightMilli) && widthMilli > 0 && heightMilli > 0;
+  const pages = !known ? []
+    : read.pageBoxes?.length ? read.pageBoxes.map(box => ({
+      widthMilli: round(box.width * MM_PER_POINT * MILLI),
+      heightMilli: round(box.height * MM_PER_POINT * MILLI),
+    }))
+      : read.sections?.length ? read.sections : [{ widthMilli, heightMilli }];
   return {
     kind: read.kind,
     pageCount: read.pageCount ?? null,
     pixelWidth: read.pixelWidth ?? null,
     pixelHeight: read.pixelHeight ?? null,
     dpi: read.dpi ?? null,
+    // rgb | cmyk | grayscale | mixed (a PDF naming both RGB and CMYK) | null when the file does not say.
+    colorMode: read.colorMode ?? null,
     measureUnit: known ? "mm" : null,
     widthMilli: known ? widthMilli : null,
     heightMilli: known ? heightMilli : null,
     pageSize: known ? namePageSize(widthMilli, heightMilli) : null,
     orientation: known ? orientationOf(widthMilli, heightMilli) : null,
-    colorMode: read.colorMode ?? null,
     fonts: read.fonts ?? null,
     bleedMilli: Number.isFinite(read.bleedMilli) ? read.bleedMilli : null,
     hasAlpha: typeof read.hasAlpha === "boolean" ? read.hasAlpha : null,
+    // The page sizes above are the first page's. This covers every page, so a
+    // plan set with one oversized drawing is not judged by its cover.
+    pageEnvelope: known ? pageEnvelope(pages) : null,
+  };
+}
+
+/** The largest short side and long side across pages, either way round, and whether sizes differ. */
+function pageEnvelope(pages) {
+  const sized = pages.filter(page => page.widthMilli > 0 && page.heightMilli > 0);
+  const distinct = new Set(sized.map(page => {
+    const short = Math.round(Math.min(page.widthMilli, page.heightMilli) / MILLI);
+    const long = Math.round(Math.max(page.widthMilli, page.heightMilli) / MILLI);
+    return `${short}x${long}`;
+  }));
+  return {
+    shortSideMilli: Math.max(...sized.map(page => Math.min(page.widthMilli, page.heightMilli))),
+    longSideMilli: Math.max(...sized.map(page => Math.max(page.widthMilli, page.heightMilli))),
+    mixed: distinct.size > 1,
   };
 }

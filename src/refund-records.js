@@ -1,5 +1,9 @@
 // Relational compatibility adapter: JSON is limited to destination/evidence snapshots.
 export const REFUND_TABLES = [
+  ['order_change_requests', 'orderChanges', false, ['id', 'orderId', 'supplierId', 'lineItemId', 'status', 'version', 'extraPrincipalMinor', 'feeMinor', 'totalMinor', 'createdAt', 'data']],
+  ['order_change_payments', 'orderChangePayments', true, ['id', 'orderId', 'changeId', 'principalMinor', 'feeMinor', 'amountMinor', 'reference', 'proofFileId', 'confirmedBy', 'createdAt']],
+  ['order_change_payouts', 'orderChangePayouts', true, ['id', 'orderId', 'changeId', 'supplierId', 'amountMinor', 'reference', 'receiptFileId', 'releasedBy', 'createdAt']],
+  ['delivery_pin_payments', 'deliveryPinPayments', true, ['id', 'orderId', 'changeId', 'amountMinor', 'reference', 'proofFileId', 'confirmedBy', 'createdAt']],
   ['refund_requests', 'refundRequests', false, ['id', 'orderId', 'clientId', 'policyVersion', 'status', 'version', 'kind', 'reason', 'beforeProduction', 'late', 'filingDeadlineAt', 'orderStateAtFiling', 'evidenceFileIds', 'destination', 'createdAt', 'updatedAt']],
   ['refund_settlements', 'refundSettlements', true, ['id', 'requestId', 'orderId', 'sequence', 'createdBy', 'createdAt', 'reason', 'shopAgreement', 'deliveryEvidence', 'disposition', 'shopEntitlementMinor', 'riderEntitlementMinor', 'principalMinor', 'feeMinor', 'deliveryMinor', 'platformDeliveryMinor', 'totalMinor', 'snapshot']],
   ['refund_supplier_payouts', 'refundSupplierPayouts', false, ['id', 'settlementId', 'orderId', 'supplierId', 'amountMinor', 'status', 'reference', 'receiptFileId', 'releasedAt', 'releasedBy', 'createdAt']],

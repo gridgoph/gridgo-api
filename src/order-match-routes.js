@@ -1,7 +1,17 @@
-import { appendAudit } from "./audit-record.js";
+import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId, assertArtworkAttachmentLimit, validateArtworkAttachments, writeArtworkAttachments } from './artwork-attachments.js';
+import { specialInstructions } from './special-instructions.js';
+import { snapshotShopClock } from './shop-hours.js';
+import { feeSchedule, feeSettings } from './service-fee.js';
+import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
+import { selectVoucher, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
+import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './operating-hours.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
+import { assertCheckoutPrintLayout, listingPrintLayouts, parseCartPrintLayout, printLayoutCheck } from "./print-layout.js";
+import { listingExpress } from "./express.js";
+import { assertCheckoutCoverSpine, assertCoverFileAttached, coverSpineApplies, coverSpineRequiredSetting, coverSpineSnapshot, parseCoverSpine, publicCartCoverSpine, publicOrderCoverSpine } from "./hardbound-cover.js";
+import { artworkColorsFor, colorTargetsFor, colorTargetsSnapshot, parseColorTargets } from "./color-targets.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
 import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
@@ -15,6 +25,7 @@ import { publicShopRating } from "./shop-rating.js";
 import { validateArtworkLinks, hasShortArtworkLinks, resolveArtworkLinks, checkArtworkLinkForUser } from "./artwork-links.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { measurementKindFor } from "./pricing.js";
+import { acceptArtworkWarnings, artworkGuidanceSnapshot, evaluateLineArtwork } from "./artwork-guidance.js";
 import {
   identityHasMembership } from "./authorization-context.js";
 import {
@@ -43,6 +54,7 @@ import {
 import { AvailabilityError, fitsDeadline } from "./availability.js";
 import {
   MatchError,
+  cartGroupListings,
   deadlineDays,
   matchShop,
   multiplyMinor,
@@ -253,7 +265,7 @@ function assertMatchDeadline(store, item, line, at) {
   if (!deadline) return;
   const { projection } = projectShopFinish(store, { supplierId: item.supplierId,
     turnaroundHours: itemTurnaroundHours(item, (store.supplierServices || []).find((row) => row.id === item.supplierServiceId)),
-    units: line.quantity, now: at });
+    units: line.quantity, now: at, express: listingExpress(item), deadline });
   if (!fitsDeadline(projection, deadline)) fail(409, "deadline_not_met", "This listing can no longer make the requested deadline.");
 }
 
@@ -296,11 +308,12 @@ function fileFor(store, user, fileId, purpose, field) {
 }
 
 function assertListingArtwork(store, item, line) {
-  if (!line.artworkFileId) return;
-  const file = (store.files || []).find(row => row.fileId === line.artworkFileId);
-  if (!listingAcceptsArtwork(publicCatalogItem(store, item)?.acceptedFormats, file?.detectedContentType)) {
-    fail(409, "artwork_file_format_not_accepted", "Choose an artwork file type accepted by this listing.",
-      { lineId: line.id, fileId: line.artworkFileId, field: "artwork" });
+  for (const fileId of artworkFileIdsFor(line)) {
+    const file = (store.files || []).find(row => row.fileId === fileId);
+    if (!listingAcceptsArtwork(publicCatalogItem(store, item)?.acceptedFormats, file?.detectedContentType)) {
+      fail(409, "artwork_file_format_not_accepted", "Choose an artwork file type accepted by this listing.",
+        { lineId: line.id, fileId, field: "artwork" });
+    }
   }
 }
 
@@ -381,6 +394,9 @@ function publicCartListingStub(store, item, optionIds) {
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
     clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
+    printLayouts: listingPrintLayouts(item),
+    express: listingExpress(item),
+    coverSpineForm: coverSpineApplies(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
 }
@@ -406,7 +422,7 @@ function cartShops(store, lines) {
   });
 }
 
-function cartLinePromiseBy(store, line, item, at) {
+function cartLinePromiseBy(store, cart, line, item, at) {
   const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
   if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
       || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
@@ -417,6 +433,8 @@ function cartLinePromiseBy(store, line, item, at) {
       turnaroundHours: itemTurnaroundHours(item, service),
       units: line.quantity,
       now: at,
+      express: listingExpress(item),
+      deadline: lineDeadline(cart, line),
     }).projection.promiseBy;
   } catch (error) {
     // An unavailable calendar must not prevent the client from repairing a cart.
@@ -441,7 +459,38 @@ function cartDelivery(store, cart, supplierId, lines) {
   return { ...farthest, feeMinor: deliveryFeeForDistance(farthest.distance, store.settings) };
 }
 
-function clientCartQuote(store, cart, lines) {
+// Snapshot the schedule on every priced line, bound to its shop/deadline group.
+// Removing the final line removes the lock; moving a line does not carry it to a new group.
+function groupFeeSettings(store, cart, lines, at) {
+  const key = JSON.stringify([lines[0]?.supplierId, lineDeadline(cart, lines[0] || {})]);
+  const saved = lines.find(line => JSON.stringify(line.serviceFeeSnapshot?.groupKey) === key)?.serviceFeeSnapshot;
+  return feeSettings(store.settings, saved?.schedule || feeSchedule(store.settings, at));
+}
+function lockCartFeeSchedules(store, cart, at) {
+  for (const group of cartGroups(cart, store.cartLines.filter(line => line.cartId === cart.id))) {
+    if (group.lines.some(line => cartLineSubtotal(store, line) == null)) continue;
+    const schedule = groupFeeSettings(store, cart, group.lines, at).serviceFeeSchedule;
+    const groupKey = [group.supplierId, group.deadline];
+    for (const line of group.lines) line.serviceFeeSnapshot = { groupKey, schedule: structuredClone(schedule) };
+  }
+}
+
+function cartVoucherPlan(store, cart, lines, at) {
+  const grouped = cartGroups(cart, lines);
+  const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, grouped.length);
+  const money = grouped.map((group, index) => {
+    const amounts = group.lines.map(line => cartLineSubtotal(store, line));
+    const supplierSubtotalMinor = amounts.some(amount => amount == null) ? null : addMinor(amounts, "voucher.items");
+    const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? pickupShares[index] : cartDelivery(store, cart, group.supplierId, group.lines).feeMinor;
+    if (supplierSubtotalMinor == null || deliveryFeeMinor == null) return null;
+    return { supplierSubtotalMinor, deliveryFeeMinor, ...organizationFeeMoney(supplierSubtotalMinor, groupFeeSettings(store, cart, group.lines, at), approvedOrganization(store, cart.clientId)) };
+  });
+  if (money.some(group => !group)) return null;
+  const voucher = selectVoucher(store, cart, money, at);
+  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0) };
+}
+
+export function clientCartQuote(store, cart, lines, at) {
   const reasons = [];
   if (!lines.length) reasons.push({ code: "cart_empty" });
   const subtotals = lines.map((line) => {
@@ -456,7 +505,7 @@ function clientCartQuote(store, cart, lines) {
 
   const grouped = cartGroups(cart, lines);
   const clientItemSubtotalMinor = subtotals.some((amount) => amount == null) ? null
-    : addMinor(grouped.map(({ lines: entries }) => clientMoneyMinor(store,
+    : addMinor(grouped.map(({ lines: entries }) => clientMoneyMinor({ settings: groupFeeSettings(store, cart, entries, at) },
       addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"))), "quote.items");
   const deliveryLines = cart.fulfillmentMode === "pickup" ? [] : grouped.map(({ supplierId, deadline, lines: entries }) => {
     const delivery = cartDelivery(store, cart, supplierId, entries);
@@ -471,14 +520,35 @@ function clientCartQuote(store, cart, lines) {
   const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
   const deliveryFeeMinor = deliveryLines.some((line) => line.deliveryFeeMinor == null) ? null
     : addMinor([...deliveryLines.map((line) => line.deliveryFeeMinor), hubPickup?.feeMinor ?? 0], "quote.delivery");
-  const organizationDiscountMinor = subtotals.some((amount) => amount == null) ? null : addMinor(grouped.map(({ lines: entries }) => organizationFeeMoney(
-    addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"), store.settings, approvedOrganization(store, cart.clientId)).organizationDiscountMinor), "quote.discount");
-  const totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
+  let organizationDiscountMinor = subtotals.some((amount) => amount == null) ? null : addMinor(grouped.map(({ lines: entries }) => organizationFeeMoney(
+    addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"), groupFeeSettings(store, cart, entries, at), approvedOrganization(store, cart.clientId)).organizationDiscountMinor), "quote.discount");
+  let totalMinor = reasons.length || clientItemSubtotalMinor == null || deliveryFeeMinor == null ? null
     : addMinor([clientItemSubtotalMinor - organizationDiscountMinor, deliveryFeeMinor], "quote.total");
+  const voucherPlan = totalMinor == null ? null : cartVoucherPlan(store, cart, lines, at);
+  if (voucherPlan) {
+    organizationDiscountMinor = voucherPlan.organizationDiscountMinor;
+    totalMinor = addMinor(voucherPlan.groups.map(group => group.totalMinor), 'voucher.total');
+  }
   const downpaymentPercent = grouped.length > 1 ? 100 : downpaymentPercentSetting(store.settings);
-  const downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
+  let downpaymentMinor = totalMinor == null ? null : roundBps(totalMinor, downpaymentPercent * 100);
+  if (voucherPlan?.voucher) {
+    downpaymentMinor = addMinor(voucherPlan.money.map((group, index) => {
+      const allocation = voucherPlan.groups[index], rate = downpaymentPercent * 100;
+      return roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate)
+        - Math.min(allocation.voucherServiceFeeMinor, roundBps(group.grossServiceFeeMinor, rate))
+        - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate));
+    }), 'voucher.downpayment');
+  }
   return {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
+    voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
+    voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
+    discountKind: voucherPlan?.discountKind || null,
+    voucherGroups: voucherPlan?.groups.map((group, index) => ({ groupId: grouped[index].lines[0].id,
+      ...(voucherPlan.money[index].serviceFeeSchedule?.version === 2 ? {
+        organizationDiscountMinor: group.organizationDiscountMinor, voucherDiscountMinor: group.voucherDiscountMinor,
+        totalMinor: group.totalMinor,
+      } : group) })) || [],
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
@@ -524,13 +594,26 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       structuredSpec: structuredClone(line.structuredSpec || {}),
       artworkFileId: line.artworkFileId ?? null,
       artworkLinks: structuredClone(line.artworkLinks || []),
+      artworkAttachments: artworkAttachmentsFor(line),
+      artworkPreviewFileId: artworkPreviewFileId(store, line),
+      // Null on products whose shop marked no layout; those ask nothing.
+      printLayout: line.printLayout ?? null,
+      printLayoutCheck: item ? printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout ?? null }) : null,
+      artworkGuidance: item ? evaluateLineArtwork(store, item, line, artworkFileIdsFor(line)) : null,
+      // Null until given; only hardbound and binding products ask.
+      coverSpine: publicCartCoverSpine(line),
+      coverSpineRequired: Boolean(item && coverSpineApplies(item) && coverSpineRequiredSetting(store.settings)),
+      // The client's exact colours, and what each uploaded file uses beside them.
+      colorTargets: colorTargetsFor(line),
+      artworkColors: artworkColorsFor(store, artworkFileIdsFor(line)),
+      specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
       listing,
-      promiseBy: cartLinePromiseBy(store, line, item, at),
+      promiseBy: cartLinePromiseBy(store, cart, line, item, at),
       lineSubtotalMinor,
-      clientLineSubtotalMinor: clientMoneyMinor(store, lineSubtotalMinor),
+      clientLineSubtotalMinor: clientMoneyMinor({ settings: groupFeeSettings(store, cart, lines.filter(entry => entry.supplierId === line.supplierId && lineDeadline(cart, entry) === lineDeadline(cart, line)), at) }, lineSubtotalMinor),
     };
   });
   const supplierIds = [...new Set(lines.map((line) => line.supplierId))];
@@ -544,13 +627,39 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
         ? deliveryFeeForDistance(Math.max(...dropoffs.map((dropoff) => distanceMetersBetween(profile.shop, dropoff))), store.settings) : null;
     const amounts = groupLines.map((line) => cartLineSubtotal(store, line));
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
-    const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, cart.clientId));
+    const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, groupLines, at), approvedOrganization(store, cart.clientId));
     const serviceFeeMinor = fee?.grossServiceFeeMinor ?? null;
-    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, lineIds: groupLines.map((line) => line.id),
+    if (fee?.serviceFeeSchedule.version === 2) {
+      const shares = splitVoucherMinor(serviceFeeMinor, amounts);
+      groupLines.forEach((line, index) => {
+        publicLines.find(row => row.id === line.id).clientLineSubtotalMinor = amounts[index] + shares[index];
+      });
+    }
+    let readyBy = null;
+    let expressPromise = false;
+    try {
+      const items = groupLines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
+      if (items.every(Boolean) && groupLines.every(line => publicLines.find(row => row.id === line.id)?.promiseBy)) {
+        const { projection } = projectShopFinish(store, { supplierId, now: at,
+          turnaroundHours: Math.max(...items.map(item => itemTurnaroundHours(item, store.supplierServices.find(service => service.id === item.supplierServiceId)))),
+          units: groupLines.reduce((sum, line) => sum + line.quantity, 0),
+          express: items.every(listingExpress), deadline });
+        readyBy = projection.promiseBy;
+        expressPromise = projection.express === true;
+      }
+    } catch (error) { if (!(error instanceof AvailabilityError)) throw error; }
+    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, expressPromise, lineIds: groupLines.map((line) => line.id),
       ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
   });
+  if (cart.state === 'draft') {
+    const plan = cartVoucherPlan(store, cart, lines, at);
+    if (plan) groups.forEach((group, index) => Object.assign(group, {
+      totalMinor: plan.groups[index].totalMinor, organizationDiscountMinor: plan.groups[index].organizationDiscountMinor,
+      voucherDiscountMinor: plan.groups[index].voucherDiscountMinor,
+    }));
+  }
   if (groups.length > 1) {
     for (const line of publicLines) {
       line.groupId = groups.find((group) => group.lineIds.includes(line.id)).id;
@@ -562,8 +671,13 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       }
     }
   }
+  const operatingStatus = reviewTiming(store.settings, at);
+  const readyBy = groups.length && groups.every(group => group.readyBy)
+    ? groups.map(group => group.readyBy).sort().at(-1) : null;
   return {
     id: cart.id,
+    operatingStatus,
+    checkoutNotice: operatingStatus.isOpenNow ? null : { code: 'outside_operating_hours', ...operatingStatus, readyBy },
     state: cart.state,
     version: cart.version,
     serviceLevel: cart.serviceLevel,
@@ -578,7 +692,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     shops: groups.length > 1 ? groups.map(({ id, label }) => ({ id, label })) : cartShops(store, lines),
     groups,
     ...(cart.checkedOutOrderId && basketForOrder(store, cart.checkedOutOrderId) ? { basketId: basketForOrder(store, cart.checkedOutOrderId).id } : {}),
-    clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines) : null,
+    clientQuote: cart.state === "draft" ? clientCartQuote(store, cart, lines, at) : null,
     checkedOutOrderId: cart.checkedOutOrderId ?? null,
     createdAt: cart.createdAt,
     updatedAt: cart.updatedAt,
@@ -660,7 +774,9 @@ function publicMatchedOrder(store, order) {
       deliveryDistanceMeters: job.deliveryDistanceMeters,
       deliveryFeeMinor: job.deliveryFeeMinor,
       estimatedHours: job.estimatedHours,
-      estimatedDays: (store.orderLineItems || []).some(line => line.jobId === job.id && line.turnaroundDaysSnapshot != null)
+      estimatedProductionMinutes: job.estimatedProductionMinutes ?? Math.round(job.estimatedHours * 60),
+      estimatedDays: !order.productionTimeCorrection && (store.orderLineItems || []).some(line => line.jobId === job.id)
+        && store.orderLineItems.filter(line => line.jobId === job.id).every(line => line.turnaroundDaysSnapshot != null)
         ? Math.max(...store.orderLineItems.filter(line => line.jobId === job.id).map(line => line.turnaroundDaysSnapshot || 0)) : null,
       scheduledFor: job.scheduledFor ?? null,
       deadline: job.deadline ?? order.deadline ?? null,
@@ -671,7 +787,7 @@ function publicMatchedOrder(store, order) {
     ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
     state: order.state,
     ...publicOrganizationDiscount(order),
-    ...(order.basketId || order.organizationDiscountRateBps > 0 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
+    ...(order.basketId || order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
       itemSubtotalMinor: order.supplierSubtotalMinor,
       serviceFeeRateBps: order.serviceFeeRateBps,
       serviceFeeMinor: order.serviceFeeMinor,
@@ -686,6 +802,8 @@ function publicMatchedOrder(store, order) {
     // The promised date, never the shop's own. A client who can see both can
     // see the allowance.
     readyBy: order.promiseBy ?? null,
+    express: order.express === true,
+    review: orderReviewTiming(order, store.settings),
     downpaymentPercent: orderDownpaymentPercent(order),
     paymentPlan: {
       method: "qr_manual",
@@ -696,6 +814,7 @@ function publicMatchedOrder(store, order) {
       balanceStatus: order.payments.final_online.status,
     },
     jobs,
+    ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer || null),
     fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
@@ -708,7 +827,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null } = {}) {
   assertRequestFulfillment(cart, body);
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
@@ -726,6 +845,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const downpaymentPercent = basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
+    shopClockVersion: 1,
+    operatingClock: operatingClockSnapshot(store.settings, store.version),
+    reviewSchedule: reviewTiming(store.settings, at),
     clientId: user.id,
     organizationOfficer: officerSnapshot(store, user.id),
     deadline: lineDeadline(cart, cartLines[0]),
@@ -741,7 +863,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     fileCheck: { status: "pending", requestedAt: at, reviewedAt: null, reviewedBy: null, reason: null },
     supplierSubtotalMinor: 0,
     subtotalMinor: 0,
-    serviceFeeRateBps: store.settings.serviceFeeRateBps,
+    serviceFeeRateBps: groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.version === 1
+      ? groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.rateBps : null,
     serviceFeeMinor: 0,
     deliveryFeeMinor: 0,
     totalMinor: 0,
@@ -790,12 +913,15 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, {}, { required: true });
+    assertCheckoutPrintLayout(item, line, fail);
+    assertCheckoutCoverSpine(store, item, line, fail);
+    assertArtworkAttachmentLimit(artworkAttachmentsFor(line));
     validateArtworkLinks(line.artworkLinks || [], listing.acceptedFormats);
     if (!line.artworkFileId && !(line.artworkLinks || []).length) {
       fail(409, "artwork_required", "Upload artwork or add a publicly viewable design link before checkout.", { lineId: line.id, field: "artwork" });
     }
-    if (line.artworkFileId) {
-      const file = fileFor(store, user, line.artworkFileId, "artwork", "artworkFileId");
+    for (const fileId of artworkFileIdsFor(line)) {
+      const file = fileFor(store, user, fileId, "artwork", "artworkFileId");
       if (file.artworkCheck?.status !== "passed") fail(409, "artwork_file_check_failed",
         file.artworkCheck?.message || "This artwork has not passed its file check. Upload the original file again and replace the cart artwork.",
         { lineId: line.id, fileId: file.fileId, field: "artwork", reason: file.artworkCheck?.reason || "file_check_required" });
@@ -835,7 +961,26 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       snapshot.lineItem.jobId = jobId;
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
+      if (line.artworkAttachments) snapshot.lineItem.artworkAttachments = artworkAttachmentsFor(line);
+      // The layout is part of the agreed spec, with the fit the client saw.
+      if (line.printLayout) {
+        snapshot.lineItem.printLayout = {
+          version: 1, code: line.printLayout,
+          check: printLayoutCheck(store, item, { optionIds: line.optionIds || [], fileIds: artworkFileIdsFor(line), layout: line.printLayout }),
+        };
+      }
+      // The cover and spine are part of the agreed spec; "not given" is kept too,
+      // so the shop and the GRIDGO Team know the product asked.
+      const coverSpine = coverSpineSnapshot(item, line);
+      if (coverSpine) snapshot.lineItem.coverSpine = coverSpine;
+      // Exact colours are part of the agreed spec too.
+      const colorTargets = colorTargetsSnapshot(line);
+      if (colorTargets) snapshot.lineItem.colorTargets = colorTargets;
+      snapshot.lineItem.specialInstructions = line.specialInstructions || "";
       if (line.artworkFileId) snapshot.lineItem.artworkFileId = line.artworkFileId;
+      // Warnings never block; accepted or not, the figures travel with the order.
+      const guidance = artworkGuidanceSnapshot(store, item, line, artworkFileIdsFor(line), at);
+      if (guidance) snapshot.lineItem.artworkGuidance = guidance;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
       if (line.dropoff) snapshot.lineItem.dropoff = { ...line.dropoff };
       return { cartLine: line, ...snapshot };
@@ -860,11 +1005,16 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // before adding this order's own jobs to the committed queue.
   const [job] = jobs;
   const orderedUnits = snapshots.reduce((total, row) => total + Number(row.lineItem.quantity || 0), 0);
+  // Express answers the order only when every product in it is Express, and
+  // is made for the soonest deadline any of its lines carries.
+  const expressDeadline = cartLines.map((line) => lineDeadline(cart, line)).filter(Boolean).sort()[0] ?? null;
   const { projection } = projectShopFinish(store, {
     supplierId: job.supplierId,
     turnaroundHours: job.estimatedHours,
     now: at,
     units: orderedUnits,
+    express: [...grouped.values()].flat().every(({ item }) => listingExpress(item)),
+    deadline: expressDeadline,
   });
   for (const line of cartLines) {
     if (lineDeadline(cart, line) && !fitsDeadline(projection, lineDeadline(cart, line))) {
@@ -872,17 +1022,23 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     }
   }
   order.supplierId = job.supplierId;
+  snapshotShopClock(store, order);
   order.pickup = { ...job.pickup };
+  order.distanceZone = job.deliveryDistanceMeters == null ? null
+    : distanceZoneForDistance(job.deliveryDistanceMeters, store.settings);
   // The shop's own date, which it is held to. Never shown to the client.
   order.readyBy = projection.readyBy;
   // The padded date the client was promised. Never shown to the shop.
   order.promiseBy = projection.promiseBy;
+  // Tagged for every party: this order was promised under Express, so the
+  // shop's date is the same-day target rather than its production time.
+  order.express = projection.express === true;
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
   // Pickup is a per-order platform charge. The internal trip to the hub keeps
   // the existing zero-charge job contract and never earns a share of this fee.
   const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
-  const fee = organizationFeeMoney(itemSubtotalMinor, store.settings, approvedOrganization(store, user.id));
+  const fee = organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, cartLines, at), !voucher && approvedOrganization(store, user.id));
   const { serviceFeeMinor } = fee;
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
@@ -943,6 +1099,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // The shop's escrow stages, from its own price and never the client's total.
   snapshotPayoutPlan(order, { supplierPlatformPayoutMinor: itemSubtotalMinor });
 
+  if (voucher && voucherAllocation) applyVoucherMoney(order, voucherAllocation, voucher);
   order.invoiceNumber = invoiceNumber(orderId, at);
 
   store.orderJobs ||= [];
@@ -953,7 +1110,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   for (const snapshot of snapshots) {
     store.orderLineItems.push(snapshot.lineItem);
     store.orderLineItemOptions.push(...snapshot.options);
-    if (snapshot.lineItem.artworkFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.artworkFileId, "artwork", "artworkFileId"), orderId, `line:${snapshot.lineItem.id}:artwork`);
+    for (const fileId of artworkFileIdsFor(snapshot.lineItem)) attachOrderFile(fileFor(store, user, fileId, "artwork", "artworkFileId"), orderId, `line:${snapshot.lineItem.id}:artwork`);
     if (snapshot.lineItem.mockupFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.mockupFileId, "mockup", "mockupFileId"), orderId, `line:${snapshot.lineItem.id}:mockup`);
   }
   attachOrderFile(proof, orderId, "payment:initial:proof");
@@ -974,28 +1131,39 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       amountMinor: lineItem.lineSubtotalMinor,
       artworkFileId: cartLine.artworkFileId ?? null,
       artworkLinks: structuredClone(lineItem.artworkLinks || []),
+      artworkAttachments: artworkAttachmentsFor(lineItem),
+      artworkPreviewFileId: artworkPreviewFileId(store, lineItem),
+      specialInstructions: lineItem.specialInstructions || "",
       documentPages: structuredClone(lineItem.documentPages ?? null),
+      printLayout: lineItem.printLayout?.code ?? null,
+      coverSpine: publicOrderCoverSpine(lineItem.coverSpine ?? null),
       mockupFileId: cartLine.mockupFileId ?? null,
       dropoff: cartLine.dropoff ? { ...cartLine.dropoff } : null,
     })),
     itemSubtotalMinor,
-    serviceFeeRateBps: store.settings.serviceFeeRateBps,
+    serviceFeeRateBps: groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.version === 1
+      ? groupFeeSettings(store, cart, cartLines, at).serviceFeeSchedule.rateBps : null,
     serviceFeeMinor,
     deliveryLines: jobs.map((job) => ({ jobId: job.id, shopName: publicSupplierShop(store, job.supplierId)?.shopName || "Shop", amountMinor: job.deliveryFeeMinor })),
     deliveryFeeMinor: deliveryTotalMinor,
     ...(order.hubPickup ? { hubPickup: structuredClone(order.hubPickup), pickupFeeMinor: order.pickupFeeMinor } : {}),
     ...(order.requestFulfillment ? { requestFulfillment: structuredClone(order.requestFulfillment) } : {}),
-    totalMinor,
-    paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor, balanceMinor },
+    totalMinor: order.totalMinor,
+    ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor,
+      voucherServiceFeeMinor: order.voucherServiceFeeMinor, voucherDeliveryMinor: order.voucherDeliveryMinor,
+      clientServiceFeeMinor: order.clientServiceFeeMinor, clientDeliveryFeeMinor: order.clientDeliveryFeeMinor } : {}),
+    paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor: order.payments.initial.amountMinor, balanceMinor: order.payments.final_online.amountMinor },
   };
   if (!basketId) store.orderInvoices.push({ orderId, invoiceNumber: order.invoiceNumber, issuedAt: at, snapshot: invoice });
   if (!basketId) {
     cart.state = "checked_out";
     cart.checkedOutOrderId = orderId;
     cart.checkedOutAt = at;
+    lockCartFeeSchedules(store, cart, at);
     updateCart(cart, at);
   }
-  appendAudit(store, {
+  store.auditLog ||= [];
+  store.auditLog.push({
     id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "order_match.checkout",
     entityType: "order", entityId: orderId, orderId,
     detail: { jobCount: jobs.length, itemSubtotalMinor, ...fee, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
@@ -1017,7 +1185,14 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
   const groups = cartGroups(cart, lines);
-  if (groups.length < 2) return checkout(store, user, cart, body, createId, at, req);
+  const plan = cartVoucherPlan(store, cart, lines, at);
+  const voucher = plan?.voucher;
+  if (groups.length < 2) {
+    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0] });
+    if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
+    else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
+    return result;
+  }
   if (groups.some(group => !group.deadline)) fail(400, "basket_deadline_required", "Set a deadline for every product before checkout.");
   const basketId = createId("bsk");
   const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
@@ -1029,10 +1204,12 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     .sort((a, b) => Date.parse(a.group.deadline) - Date.parse(b.group.deadline) || a.index - b.index)) {
     results[index] = checkout(store, user, cart, body, createId, at, req, {
       groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)),
-      pickupFeeMinor: hubPickup ? pickupShares[index] : null,
+      pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index],
     });
   }
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
+  if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: orders.map(o => o.id), amountMinor: plan.voucherDiscountMinor });
+  else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
   const first = orders[0];
   const basket = { id: basketId, clientId: user.id, receiptOrderId: first.id,
     orderIds: orders.map((order) => order.id), totalMinor: addMinor(orders.map((order) => order.totalMinor), "basket.totalMinor"),
@@ -1048,6 +1225,8 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     lines: results.flatMap((result) => result.invoice.lines),
     groups: results.map((result, index) => ({ orderId: result.order.id, label: result.order.groupLabel, deadline: groups[index].deadline,
       lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
+      ...(result.invoice.voucher ? { voucher: result.invoice.voucher, voucherDiscountMinor: result.invoice.voucherDiscountMinor } : {}),
+      serviceFeeSchedule: result.invoice.serviceFeeSchedule, serviceFeeWorking: result.invoice.serviceFeeWorking, serviceFeeRateBps: result.invoice.serviceFeeRateBps,
       grossServiceFeeMinor: result.invoice.grossServiceFeeMinor, organizationDiscountMinor: result.invoice.organizationDiscountMinor,
       serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
       ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
@@ -1060,6 +1239,9 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     deliveryLines: results.flatMap((result, index) => result.invoice.deliveryLines.map((line) => ({ jobId: line.jobId, shopName: result.order.groupLabel, deadline: groups[index].deadline, amountMinor: line.amountMinor }))),
     deliveryFeeMinor: addMinor(orders.map((order) => order.deliveryFeeMinor), "basket.deliveryFeeMinor"),
     totalMinor: basket.totalMinor,
+    ...(voucher ? { voucher: { id: voucher.id, campaignId: voucher.campaignId, fundedBy: 'GRIDGO', label: 'GRIDGO-funded voucher', amountMinor: plan.voucherDiscountMinor },
+      voucherDiscountMinor: plan.voucherDiscountMinor, voucherServiceFeeMinor: addMinor(orders.map(o => o.voucherServiceFeeMinor || 0), 'voucher.fee'),
+      voucherDeliveryMinor: addMinor(orders.map(o => o.voucherDeliveryMinor || 0), 'voucher.delivery') } : {}),
     paymentPlan: { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
   };
   for (const order of orders) order.invoiceNumber = first.invoiceNumber;
@@ -1067,8 +1249,9 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   cart.state = "checked_out";
   cart.checkedOutOrderId = first.id;
   cart.checkedOutAt = at;
-  updateCart(cart, at);
-  appendAudit(store, { id: createId("aud"), at, actorId: user.id, actorRole: "client",
+  lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
+  store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
     action: "basket.checkout", entityType: "basket", entityId: basket.id,
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
   notifyOpsPaymentSubmitted(store, first, { createId, at });
@@ -1077,7 +1260,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes"].includes(pathname)) return true;
+  if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
@@ -1091,7 +1274,7 @@ export function isCartArtworkWrite(method, pathname) {
 // Server calls this before opening the mutation transaction. The actual route
 // repeats authorization and format validation against its locked store snapshot.
 export async function prepareCartArtworkLinks({ req, pathname, store, user, body, checker }) {
-  if (!isCartArtworkWrite(req.method, pathname) || !hasShortArtworkLinks(body?.artworkLinks)) return;
+  if (!isCartArtworkWrite(req.method, pathname) || !hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) return;
   requireClient(user);
   const parts = pathname.split("/");
   const cart = ownCart(store, user, decodeURIComponent(parts[3]), { draft: true });
@@ -1102,12 +1285,19 @@ export async function prepareCartArtworkLinks({ req, pathname, store, user, body
     itemId = line.catalogItemId;
   }
   const item = (store.catalogItems || []).find((row) => row.id === itemId);
-  body.artworkLinks = await resolveArtworkLinks(body.artworkLinks, item ? publicCatalogItem(store, item)?.acceptedFormats : [],
+  const formats = item ? publicCatalogItem(store, item)?.acceptedFormats : [];
+  if (Object.hasOwn(body, "artworkAttachments")) {
+    const entries = validateArtworkAttachments(body.artworkAttachments, formats, { allowShortLinks: true });
+    const links = await resolveArtworkLinks(entries.filter(entry => entry.kind === "link"), formats,
+      checker || ((link) => checkArtworkLinkForUser(user.id, link)));
+    let index = 0;
+    body.artworkAttachments = entries.map(entry => entry.kind === "link" ? { kind: "link", ...links[index++] } : entry);
+  } else body.artworkLinks = await resolveArtworkLinks(body.artworkLinks, formats,
     checker || ((link) => checkArtworkLinkForUser(user.id, link)));
 }
 
 const checkoutChecks = Symbol("artworkCheckoutChecks");
-const artworkFingerprint = line => JSON.stringify([line.artworkFileId || null, line.artworkLinks || []]);
+const artworkFingerprint = line => JSON.stringify(artworkAttachmentsFor(line));
 export function isArtworkCheckout(method, pathname) {
   return method === "POST" && /^\/me\/carts\/[^/]+\/checkout$/.test(pathname);
 }
@@ -1162,7 +1352,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId) || invoice.snapshot.organizationDiscountRateBps > 0) && !privileged });
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId) || invoice.snapshot.organizationDiscountRateBps > 0 || invoice.snapshot.serviceFeeSchedule?.version === 2) && !privileged, exposeWorking: privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
@@ -1212,7 +1402,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
         line.dropoff = point(input.dropoff, "dropoff", { required: false });
       }
     }
-    return { status: 200, body: { quote: clientCartQuote(store, preview, lines) }, mutated: false };
+    return { status: 200, body: { quote: clientCartQuote(store, preview, lines, now()) }, mutated: false };
   }
   if (req.method === "GET" && pathname === "/me/preferences") {
     return { status: 200, body: { preferences: publicPreference(store, user.id) }, mutated: false };
@@ -1362,20 +1552,84 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   if (cartMatch && req.method === "PATCH") {
     const cart = ownCart(store, user, decodeURIComponent(cartMatch[1]), { draft: true });
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
+    lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
+  }
+
+  if (pathname === "/me/print-layout-check" && req.method === "GET") {
+    // The warnings and preview figures for a product before it is in a cart:
+    // the same check a cart line carries, for the options and files on screen.
+    requireClient(user);
+    const item = (store.catalogItems || []).find((row) => row.id === text(url.searchParams.get("catalogItemId"), "catalogItemId", 120));
+    if (!item || !publicCatalogItem(store, item)) fail(409, "catalog_item_stale", "That listing changed or is no longer public.");
+    const list = (name) => url.searchParams.getAll(name).flatMap((value) => String(value).split(",")).map((value) => value.trim()).filter(Boolean);
+    const optionIds = list("optionIds");
+    const fileIds = [...new Set(list("fileIds"))];
+    if (fileIds.length > 10) fail(400, "invalid_request", "Check at most ten files at once.", { field: "fileIds" });
+    for (const fileId of fileIds) fileFor(store, user, fileId, "artwork", "fileIds");
+    const layout = parseCartPrintLayout(item, url.searchParams.get("layout") || null, fail);
+    return { status: 200, mutated: false, body: { check: printLayoutCheck(store, item, { optionIds, fileIds, layout }) } };
+  }
+
+  const groupListingsMatch = /^\/me\/carts\/([^/]+)\/groups\/([^/]+)\/listings$/.exec(pathname);
+  if (groupListingsMatch && req.method === "GET") {
+    const cart = ownCart(store, user, decodeURIComponent(groupListingsMatch[1]), { draft: true });
+    const lines = (store.cartLines || []).filter(line => line.cartId === cart.id)
+      .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
+    const groupId = decodeURIComponent(groupListingsMatch[2]);
+    const group = cartGroups(cart, lines).find(row => row.lines[0].id === groupId);
+    if (!group) fail(404, "cart_group_not_found", "That group does not belong to this cart.");
+    const suppliers = [...new Set(lines.map(line => line.supplierId))];
+    return { status: 200, mutated: false, body: {
+      groupId, label: shopLabel(suppliers.indexOf(group.supplierId)), deadline: group.deadline,
+      ...cartGroupListings(store, { supplierId: group.supplierId, deadline: group.deadline,
+        cartLines: lines.map(line => ({ ...line, deadline: lineDeadline(cart, line) })), now: now() }),
+    } };
+  }
+
+  const voucherRoute = /^\/me\/carts\/([^/]+)\/voucher$/.exec(pathname);
+  if (voucherRoute && ['GET', 'POST', 'DELETE'].includes(req.method)) {
+    const cart = ownCart(store, user, voucherRoute[1], { draft: true });
+    const at = now();
+    availableVouchers(store, user.id, at, cart.id);
+    if (req.method !== 'GET') {
+      let voucher = null;
+      if (req.method === 'POST') {
+        const body = record(await readBody(req));
+        if (body.code != null) {
+          const added = addVoucherCode(store, user.id, body.code, { id, at });
+          if (added.status >= 400) return added;
+          body.voucherId = added.body.voucher.id;
+        }
+        voucher = availableVouchers(store, user.id, at, cart.id).find(v => v.id === body.voucherId);
+        if (!voucher) fail(409, 'voucher_unavailable', 'Choose an available voucher.');
+      }
+      let choice = store.voucherCartChoices.find(c => c.id === cart.id);
+      if (!choice) { choice = { id: cart.id }; store.voucherCartChoices.push(choice); }
+      Object.assign(choice, { voucherId: voucher?.id || null, removed: req.method === 'DELETE' });
+      releaseVoucherReservations(store, { id, at }, r => r.cartId === cart.id);
+      if (voucher) {
+        const lines = store.cartLines.filter(line => line.cartId === cart.id).sort((a,b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+        const plan = cartVoucherPlan(store, cart, lines, at);
+        if (!plan?.voucher) fail(409, 'voucher_not_better_than_organization', 'The organization discount is equal or greater.');
+        reserveVoucher(store, voucher, cart, { id, at });
+      }
+    }
+    return { status: 200, body: { cart: publicCart(store, cart, at), serverTime: at }, mutated: req.method !== 'GET' };
   }
 
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
-    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(result.basket || result.invoice.organizationDiscountRateBps > 0) });
+    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(result.basket || result.invoice.organizationDiscountRateBps > 0 || result.invoice.serviceFeeSchedule?.version === 2) });
     return { status: 201, body: result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     Object.assign(cart, fulfillmentInput(record(await readBody(req)), cart));
+    lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
@@ -1394,6 +1648,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
         line.updatedAt = now();
       }
     }
+    lockCartFeeSchedules(store, cart, now());
     updateCart(cart, now());
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
@@ -1436,14 +1691,26 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       createdAt: at, updatedAt: at,
     };
     assertMatchDeadline(store, item, line, at);
-    if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, publicCatalogItem(store, item)?.acceptedFormats);
-    if (body.artworkFileId != null) line.artworkFileId = fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
+    if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
+    writeArtworkAttachments(line, body, publicCatalogItem(store, item)?.acceptedFormats);
+    for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, body);
+    // Optional here so a cart can be filled in steps; checkout requires it.
+    if (Object.hasOwn(body, "printLayout")) line.printLayout = parseCartPrintLayout(item, body.printLayout, fail);
+    if (Object.hasOwn(body, "colorTargets")) {
+      const targets = parseColorTargets(body.colorTargets);
+      if (targets.length) line.colorTargets = targets;
+    }
+    if (Object.hasOwn(body, "coverSpine")) {
+      line.coverSpine = parseCoverSpine(item, body.coverSpine, fail);
+      assertCoverFileAttached(line, fail);
+    }
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
     store.cartLines ||= [];
     store.cartLines.push(line);
+    lockCartFeeSchedules(store, cart, at);
     updateCart(cart, at);
     return { status: 201, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }
@@ -1458,7 +1725,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const at = now();
     if (req.method === "DELETE") {
       store.cartLines = store.cartLines.filter((row) => row !== storedLine);
-      updateCart(cart, at);
+      lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
     const body = record(await readBody(req));
@@ -1487,18 +1755,36 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       if (measured !== undefined) line.measurement = measured;
     }
     if (Object.hasOwn(body, "structuredSpec")) line.structuredSpec = structuredClone(record(body.structuredSpec, "structuredSpec"));
-    if (Object.hasOwn(body, "artworkFileId")) line.artworkFileId = body.artworkFileId == null ? null : fileFor(store, user, text(body.artworkFileId, "artworkFileId", 120), "artwork", "artworkFileId").fileId;
     if (Object.hasOwn(body, "dropoff")) line.dropoff = point(body.dropoff, "dropoff", { required: false });
     const patchedItem = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
-    if (Object.hasOwn(body, "artworkLinks")) line.artworkLinks = validateArtworkLinks(body.artworkLinks, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
-    if (patchedItem && Object.hasOwn(body, "artworkFileId")) assertListingArtwork(store, patchedItem, line);
+    if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
+    // Replaced as a whole; [] or null clears them.
+    if (Object.hasOwn(body, "colorTargets")) {
+      const targets = parseColorTargets(body.colorTargets);
+      line.colorTargets = targets.length ? targets : null;
+    }
+    writeArtworkAttachments(line, body, patchedItem ? publicCatalogItem(store, patchedItem)?.acceptedFormats : []);
+    if (["artworkFileId", "artworkAttachments"].some(key => Object.hasOwn(body, key))) {
+      for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
+      if (patchedItem) assertListingArtwork(store, patchedItem, line);
+    }
     if (patchedItem) syncDocumentPages(store, patchedItem, line, body, { previousFileId: storedLine.artworkFileId });
+    if (Object.hasOwn(body, "printLayout")) {
+      if (!patchedItem) fail(409, "catalog_item_stale", "That listing is no longer available.");
+      line.printLayout = parseCartPrintLayout(patchedItem, body.printLayout, fail);
+    }
+    if (Object.hasOwn(body, "coverSpine")) {
+      if (!patchedItem) fail(409, "catalog_item_stale", "That listing is no longer available.");
+      line.coverSpine = parseCoverSpine(patchedItem, body.coverSpine, fail);
+    }
+    // A separate cover page must stay one of the line's files, whichever side changed.
+    if (["coverSpine", "artworkFileId", "artworkAttachments"].some(key => Object.hasOwn(body, key))) assertCoverFileAttached(line, fail);
     if (patchedItem) assertPrinterCap(store, patchedItem, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach
     // is still allowed; the quantity is fixed through the sheet, not here.
     const repriced = ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field))
-      || (patchedItem?.pricingUnit === "per_page" && ["artworkFileId", "pageRange"].some(field => Object.hasOwn(body, field)));
+      || (patchedItem?.pricingUnit === "per_page" && ["artworkFileId", "artworkAttachments", "pageRange"].some(field => Object.hasOwn(body, field)));
     if (repriced && patchedItem) {
       try {
         assertCartLinePriceable(store, patchedItem, line);
@@ -1509,6 +1795,21 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     }
     line.updatedAt = at;
     Object.assign(storedLine, line);
+    lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
+    return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
+  }
+
+  const warningsMatch = /^\/me\/carts\/([^/]+)\/lines\/([^/]+)\/artwork-warnings$/.exec(pathname);
+  if (warningsMatch && req.method === "PUT") {
+    const cart = ownCart(store, user, decodeURIComponent(warningsMatch[1]), { draft: true });
+    const line = (store.cartLines || []).find((row) => row.id === decodeURIComponent(warningsMatch[2]) && row.cartId === cart.id);
+    if (!line) fail(404, "cart_line_not_found", "That cart line no longer exists.");
+    const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
+    if (!item) fail(409, "catalog_item_stale", "That listing is no longer available.");
+    const at = now();
+    acceptArtworkWarnings(store, item, line, artworkFileIdsFor(line), record(await readBody(req)), at, fail);
+    line.updatedAt = at;
     updateCart(cart, at);
     return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
   }
@@ -1521,6 +1822,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const body = record(await readBody(req));
     line.mockupFileId = fileFor(store, user, text(body.fileId, "fileId", 120), "mockup", "fileId").fileId;
     line.updatedAt = now();
+    lockCartFeeSchedules(store, cart, line.updatedAt);
     updateCart(cart, line.updatedAt);
     return { status: 200, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }

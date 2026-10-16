@@ -521,7 +521,7 @@ test("the deadline calendar says which days GRIDGO could make, and never how man
   assert.equal(body.includes("shopsConsidered"), false);
   assert.equal(body.includes("count"), false);
   for (const day of answer.days) {
-    assert.deepEqual(Object.keys(day).sort(), ["day", "state"]);
+    assert.deepEqual(Object.keys(day).sort(), ["day", "reason", "state"]);
     assert.ok(["cannot", "tight", "open"].includes(day.state), day.state);
   }
 });
@@ -600,7 +600,7 @@ test("speed ties within a UTC promise hour and the next factor decides", () => {
   assert.equal(result.shop.supplierId, "slower", "09:00 and 09:30 are in the same promise-hour bucket");
   assert.deepEqual(result.matchReason, { key: "cost", label: "Matched for Best Value" });
   const calendar = deadlineDays(store, { now: AT, subcategoryCode: "flyers", days: 7 });
-  assert.equal(calendar.earliest, "2026-08-24T01:00:00.000Z");
+  assert.equal(calendar.earliest, "2026-08-24T02:00:00.000Z", "one review hour precedes production");
 });
 
 test("other listings expose established ratings, zone-only distances, and queue position", () => {
@@ -630,4 +630,16 @@ test('recent lapses modestly reduce quality ranking without overriding a higher 
   assert.equal(matchShop(store, { ...input, ranking: ['cost', 'quality', 'speed', 'distance'] }).shop.supplierId, 'shop_a');
   store.productionLapses[0].deadlineAt = '2026-07-01T00:00:00.000Z';
   assert.equal(matchShop(store, input).shop.supplierId, 'shop_a');
+});
+
+test('deadline calendar uses Manila dates and explains a review-delayed impossible day', () => {
+  const store = fixture();
+  store.settings.operatingHours.schedule.closures = [{ startDay: '2026-10-12', endDay: '2026-10-12' }];
+  addShop(store, { id: 'only', ...DROPOFF, turnaroundHours: 1 });
+  const answer = deadlineDays(store, { subcategoryCode: 'flyers', now: '2026-10-10T16:01:00.000Z', days: 4 });
+  assert.equal(answer.days[0].day, '2026-10-11');
+  assert.deepEqual(answer.days.slice(0, 2).map(row => [row.state, row.reason]), [
+    ['cannot', 'review_production_delivery_exceeds_deadline'], ['cannot', 'review_production_delivery_exceeds_deadline']]);
+  assert.equal(answer.operatingStatus.scheduledReviewAt, '2026-10-13T00:00:00.000Z');
+  assert.equal(answer.earliest, '2026-10-13T02:00:00.000Z');
 });

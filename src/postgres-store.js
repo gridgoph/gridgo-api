@@ -1,7 +1,14 @@
+import { finalizeAuditEntries } from './audit.js';
+import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
+import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
+import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
+import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
+import { loadLegalPenaltyGate } from './legal.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
 import { deliverySplit } from "./operational-model.js";
+import { listingPrintLayouts } from "./print-layout.js";
 
 const BASELINE = Symbol("postgresStoreBaseline");
 
@@ -58,27 +65,27 @@ const TABLES = [
   { name: "taxonomy_materials", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "taxonomy_finishes", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "zones", keys: ["id"], columns: ["id", "code", "name", "active", "position", "data"] },
-  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "turnaround_days", "pricing_basis", "standard_turnaround_hours", "standard_turnaround_days", "rush_enabled", "rush_turnaround_hours", "rush_turnaround_days", "rush_price_minor", "version", "created_at", "updated_at", "position", "data"] },
+  { name: "supplier_services", keys: ["id"], columns: ["id", "supplier_id", "category_code", "state", "reference_rate_minor", "turnaround_hours", "turnaround_days", "turnaround_minutes", "pricing_basis", "standard_turnaround_hours", "standard_turnaround_days", "standard_turnaround_minutes", "rush_enabled", "rush_turnaround_hours", "rush_turnaround_days", "rush_turnaround_minutes", "rush_price_minor", "version", "created_at", "updated_at", "position", "data"] },
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "turnaround_mode", "turnaround_hours", "turnaround_days", "minimum_turnaround_hours", "minimum_turnaround_days", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "express", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
   { name: "supplier_catalog_options", keys: ["id"], columns: ["id", "option_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "active", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_price_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "min_quantity", "unit_price_minor", "created_at", "updated_at"] },
-  { name: "supplier_catalog_speed_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "label", "turnaround_hours", "turnaround_days", "price_minor", "surcharge_minor", "sort_order", "created_at", "updated_at"] },
+  { name: "supplier_catalog_speed_tiers", keys: ["id"], columns: ["id", "catalog_item_id", "label", "turnaround_hours", "turnaround_days", "turnaround_minutes", "price_minor", "surcharge_minor", "sort_order", "created_at", "updated_at"] },
   { name: "supplier_catalog_item_file_formats", keys: ["catalog_item_id", "format_code"], columns: ["catalog_item_id", "format_code"] },
   { name: "supplier_catalog_prep_steps", keys: ["id"], columns: ["id", "catalog_item_id", "sort_order", "title", "body", "created_at", "updated_at"] },
-  { name: "listing_starters", keys: ["id"], columns: ["id", "subcategory_code", "name", "default_pricing_unit", "default_package_qty", "default_turnaround_hours", "default_turnaround_days", "default_format_codes"] },
+  { name: "listing_starters", keys: ["id"], columns: ["id", "subcategory_code", "name", "default_pricing_unit", "default_package_qty", "default_turnaround_hours", "default_turnaround_days", "default_turnaround_minutes", "default_format_codes"] },
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
   ...staffTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "structured_spec", "artwork_file_id", "artwork_links", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "turnaround_days_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "print_layout", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
   { name: "order_baskets", keys: ["id"], columns: ["id", "client_id", "receipt_order_id", "total_minor", "pickup_fee_minor", "deadline", "fulfillment_mode", "payment", "created_at", "updated_at"] },
@@ -90,6 +97,10 @@ const TABLES = [
   // Money is relational; policy and bounded warning history are snapshots.
   { name: "production_lapses", keys: ["id"], columns: ["id", "order_id", "supplier_id", "tier", "deadline_at", "detected_at", "rate_bps", "deduction_minor", "remaining_balance_minor", "applied_at", "data"] },
   ...refundTableDefinitions,
+  ...voucherTables,
+  surveyTable,
+  ...checkoutExitTables,
+  supplierInvoiceTable,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
@@ -99,7 +110,7 @@ const TABLES = [
   { name: "credit_ledger", keys: ["id"], columns: ["id", "user_id", "amount_minor", "balance_after_minor", "created_at", "position", "data"] },
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
   { name: "issues", keys: ["id"], columns: ["id", "order_id", "client_id", "claim_id", "kind", "status", "created_at", "updated_at", "position", "data"] },
-  { name: "audit_log", keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"], appendOnly: true },
+  { name: "audit_log", appendOnly: true, keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"] },
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
@@ -109,7 +120,14 @@ const TABLES = [
 export function emptyStore() {
   return {
     ...emptyStaffStore(),
+    ...emptyVoucherStore(),
+    orderSurveys: [],
+    checkoutVisits: [],
+    checkoutExitPrompts: [],
+    supplierInvoices: [],
+    surveyLaunchedAt: null,
     version: 3,
+    legalPenaltyGate: null,
     users: [],
     userRoleMemberships: [],
     clientProfiles: [],
@@ -159,6 +177,8 @@ export function emptyStore() {
     files: [],
     riderDocuments: [],
     credits: {},
+    deliveryPinPayments: [],
+    orderChanges: [], orderChangePayments: [], orderChangePayouts: [],
     refundRequests: [],
     refundSettlements: [],
     refundSupplierPayouts: [],
@@ -179,6 +199,10 @@ export function emptyStore() {
 function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   staffRows(store, rows);
+  voucherRows(store, rows);
+  surveyRows(store, rows);
+  checkoutExitRows(store, rows);
+  supplierInvoiceRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
@@ -339,18 +363,21 @@ function rowsFromStore(store) {
       reference_rate_minor: money(service.referenceRateMinor, "supplierService.referenceRateMinor"),
       turnaround_hours: service.turnaroundHours,
       turnaround_days: service.turnaroundDays ?? null,
+      turnaround_minutes: service.turnaroundMinutes ?? null,
       pricing_basis: String(service.pricingBasis || "").trim() || null,
       standard_turnaround_hours: Object.hasOwn(service, "standardTurnaroundHours")
         ? service.standardTurnaroundHours
         : null,
       standard_turnaround_days: service.standardTurnaroundDays ?? null,
+      standard_turnaround_minutes: service.standardTurnaroundMinutes ?? null,
       rush_enabled: Boolean(service.rushEnabled),
       rush_turnaround_hours: service.rushEnabled ? service.rushTurnaroundHours : null,
       rush_turnaround_days: service.rushTurnaroundDays ?? null,
+      rush_turnaround_minutes: service.rushTurnaroundMinutes ?? null,
       rush_price_minor: service.rushEnabled ? money(service.rushPriceMinor, "supplierService.rushPriceMinor") : null,
       version: service.version || 1,
       created_at: service.createdAt, updated_at: service.updatedAt,
-      position, data: without(service, ["id", "supplierId", "categoryCode", "state", "referenceRateMinor", "turnaroundHours", "turnaroundDays", "pricingBasis", "standardTurnaroundHours", "standardTurnaroundDays", "rushEnabled", "rushTurnaroundHours", "rushTurnaroundDays", "rushPriceMinor", "version", "createdAt", "updatedAt"]),
+      position, data: without(service, ["id", "supplierId", "categoryCode", "state", "referenceRateMinor", "turnaroundHours", "turnaroundDays", "turnaroundMinutes", "pricingBasis", "standardTurnaroundHours", "standardTurnaroundDays", "standardTurnaroundMinutes", "rushEnabled", "rushTurnaroundHours", "rushTurnaroundDays", "rushTurnaroundMinutes", "rushPriceMinor", "version", "createdAt", "updatedAt"]),
     });
   }
   for (const tier of (store.supplierServicePriceTiers || [])) {
@@ -390,10 +417,14 @@ function rowsFromStore(store) {
       minimum_length_milli: item.minimumLengthMilli ?? null,
       minimum_order_quantity: item.minimumOrderQuantity ?? null,
       printer_max_width_feet: item.printerMaxWidthFeet ?? null,
+      print_layouts: listingPrintLayouts(item),
+      express: item.express === true,
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       turnaround_days: item.turnaroundDays ?? null,
+      turnaround_minutes: item.turnaroundMinutes ?? null,
       minimum_turnaround_hours: item.minimumTurnaroundHours ?? null,
       minimum_turnaround_days: item.minimumTurnaroundDays ?? null,
+      minimum_turnaround_minutes: item.minimumTurnaroundMinutes ?? null,
       file_format_mode: item.fileFormatMode || "inherit", active: item.active !== false,
       suspend_reason: item.suspendReason ?? null,
       suspended_at: item.suspendedAt ?? null,
@@ -431,6 +462,7 @@ function rowsFromStore(store) {
       id: tier.id, catalog_item_id: tier.catalogItemId, label: tier.label,
       turnaround_hours: tier.turnaroundHours,
       turnaround_days: tier.turnaroundDays ?? null,
+      turnaround_minutes: tier.turnaroundMinutes ?? null,
       price_minor: tier.priceMinor == null ? null : money(tier.priceMinor, "catalogSpeedTier.priceMinor"),
       surcharge_minor: tier.surchargeMinor == null ? null : money(tier.surchargeMinor, "catalogSpeedTier.surchargeMinor"),
       sort_order: tier.sortOrder, created_at: tier.createdAt, updated_at: tier.updatedAt,
@@ -452,6 +484,7 @@ function rowsFromStore(store) {
       default_package_qty: starter.defaultPackageQty ?? null,
       default_turnaround_hours: starter.defaultTurnaroundHours ?? null,
       default_turnaround_days: starter.defaultTurnaroundDays ?? null,
+      default_turnaround_minutes: starter.defaultTurnaroundMinutes ?? null,
       default_format_codes: starter.defaultFormatCodes || [],
     });
   }
@@ -560,10 +593,17 @@ function rowsFromStore(store) {
       supplier_id: line.supplierId,
       catalog_item_id: line.catalogItemId,
       option_ids: line.optionIds || [],
+      service_fee_snapshot: line.serviceFeeSnapshot ?? null,
       quantity: line.quantity,
       structured_spec: line.structuredSpec || {},
       artwork_file_id: line.artworkFileId ?? null,
       artwork_links: JSON.stringify(line.artworkLinks || []),
+      artwork_attachments: line.artworkAttachments == null ? null : JSON.stringify(line.artworkAttachments),
+      print_layout: line.printLayout ?? null,
+      color_targets: line.colorTargets?.length ? JSON.stringify(line.colorTargets) : null,
+      cover_spine: line.coverSpine == null ? null : JSON.stringify(line.coverSpine),
+      artwork_warning_acceptances: line.artworkWarningAcceptances == null ? null : JSON.stringify(line.artworkWarningAcceptances),
+      special_instructions: line.specialInstructions || "",
       document_pages: line.documentPages ?? null,
       match_deadline: line.matchDeadline ?? null,
       deadline: line.deadline ?? null,
@@ -622,6 +662,7 @@ function rowsFromStore(store) {
       package_qty_snapshot: line.packageQtySnapshot ?? null,
       turnaround_hours_snapshot: line.turnaroundHoursSnapshot == null ? null : Math.ceil(line.turnaroundHoursSnapshot),
       turnaround_days_snapshot: line.turnaroundDaysSnapshot ?? null,
+      turnaround_minutes_snapshot: line.turnaroundMinutesSnapshot ?? null,
       production_day_minutes_snapshot: line.productionDayMinutesSnapshot ?? null,
       base_unit_price_minor: money(line.baseUnitPriceMinor, "orderLine.baseUnitPriceMinor"),
       effective_unit_price_minor: money(line.effectiveUnitPriceMinor, "orderLine.effectiveUnitPriceMinor"),
@@ -630,6 +671,12 @@ function rowsFromStore(store) {
       structured_spec_snapshot: line.structuredSpecSnapshot || {},
       artwork_file_id: line.artworkFileId ?? null,
       artwork_links: JSON.stringify(line.artworkLinks || []),
+      artwork_attachments: line.artworkAttachments == null ? null : JSON.stringify(line.artworkAttachments),
+      print_layout: line.printLayout == null ? null : JSON.stringify(line.printLayout),
+      color_targets: line.colorTargets == null ? null : JSON.stringify(line.colorTargets),
+      cover_spine: line.coverSpine == null ? null : JSON.stringify(line.coverSpine),
+      artwork_guidance: line.artworkGuidance ?? null,
+      special_instructions: line.specialInstructions || "",
       document_pages: line.documentPages ?? null,
       mockup_file_id: line.mockupFileId ?? null,
       dropoff_lat: line.dropoff?.lat ?? null,
@@ -686,12 +733,7 @@ function rowsFromStore(store) {
   }
   for (const [position, claim] of (store.claims || []).entries()) rows.claims.push({ id: claim.id, order_id: claim.orderId, status: claim.status, created_at: claim.createdAt, updated_at: claim.updatedAt, position, data: without(claim, ["id", "orderId", "status", "createdAt", "updatedAt"]) });
   for (const [position, issue] of (store.issues || []).entries()) rows.issues.push({ id: issue.id, order_id: issue.orderId, client_id: issue.clientId, claim_id: issue.claimId ?? null, kind: issue.kind, status: issue.status, created_at: issue.createdAt, updated_at: issue.updatedAt, position, data: without(issue, ["id", "orderId", "clientId", "claimId", "kind", "status", "createdAt", "updatedAt"]) });
-  let auditPosition = 0;
-  for (const entry of store.auditLog || []) {
-    const position = Number.isInteger(entry.position) ? entry.position : auditPosition;
-    auditPosition = Math.max(auditPosition, position + 1);
-    rows.audit_log.push({ id: entry.id, at: entry.at, actor_id: entry.actorId ?? null, actor_role: entry.actorRole ?? null, action: entry.action, entity_type: entry.entityType ?? null, entity_id: entry.entityId ?? null, order_id: entry.orderId ?? null, position, data: without(entry, ["id", "at", "actorId", "actorRole", "action", "entityType", "entityId", "orderId", "position"]) });
-  }
+  for (const [position, entry] of (store.auditLog || []).entries()) rows.audit_log.push({ id: entry.id, at: entry.at, actor_id: entry.actorId ?? null, actor_role: entry.actorRole ?? null, action: entry.action, entity_type: entry.entityType ?? null, entity_id: entry.entityId ?? null, order_id: entry.orderId ?? null, position, data: without(entry, ["id", "at", "actorId", "actorRole", "action", "entityType", "entityId", "orderId"]) });
   for (const [position, item] of (store.notifications || []).entries()) rows.notifications.push({ id: item.id, user_id: item.userId, type: item.type || "general", order_id: item.orderId ?? null, created_at: item.at || item.createdAt, read_at: item.readAt ?? (item.read ? (item.at || item.createdAt) : null), deleted_at: item.deletedAt ?? null, position, data: without(item, ["id", "userId", "type", "orderId", "at", "createdAt", "read", "readAt", "deletedAt"]) });
   for (const [position, ping] of (store.locationPings || []).entries()) rows.location_pings.push({ id: ping.id, order_id: ping.orderId, rider_id: ping.riderId, lat: ping.lat, lng: ping.lng, accuracy_meters: ping.accuracy ?? null, at: ping.at, position, data: without(ping, ["id", "orderId", "riderId", "lat", "lng", "accuracy", "at"]) });
   for (const [position, item] of (store.escalations || []).entries()) rows.escalations.push({ id: item.id, order_id: item.orderId, rider_id: item.riderId ?? null, status: item.status, created_at: item.createdAt, updated_at: item.updatedAt || item.createdAt, position, data: without(item, ["id", "orderId", "riderId", "status", "createdAt", "updatedAt"]) });
@@ -775,7 +817,13 @@ export async function loadStore(database) {
     loaded[table.name] = (await database.query(`SELECT ${table.columns.join(", ")} FROM ${table.name}`)).rows;
   }
   const store = emptyStore();
+  store.legalPenaltyGate = await loadLegalPenaltyGate(database);
   loadStaffRows(store, loaded);
+  loadVoucherRows(store, loaded);
+  loadSurveyRows(store, loaded);
+  loadCheckoutExitRows(store, loaded);
+  loadSupplierInvoiceRows(store, loaded);
+  store.surveyLaunchedAt = (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
   const settings = loaded.platform_settings[0];
@@ -885,16 +933,18 @@ export async function loadStore(database) {
   store.supplierServices = ordered(loaded.supplier_services).map((row) => {
     const item = {
       ...row.data, id: row.id, supplierId: row.supplier_id, categoryCode: row.category_code, state: row.state,
-      referenceRateMinor: row.reference_rate_minor, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), turnaroundHours: row.turnaround_hours,
+      referenceRateMinor: row.reference_rate_minor, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
     present(item, "pricingBasis", row.pricing_basis);
     present(item, "standardTurnaroundHours", row.standard_turnaround_hours);
     present(item, "standardTurnaroundDays", row.standard_turnaround_days);
+    present(item, "standardTurnaroundMinutes", row.standard_turnaround_minutes);
     if (row.rush_enabled) {
       item.rushEnabled = true;
       present(item, "rushTurnaroundHours", row.rush_turnaround_hours);
       present(item, "rushTurnaroundDays", row.rush_turnaround_days);
+      present(item, "rushTurnaroundMinutes", row.rush_turnaround_minutes);
       present(item, "rushPriceMinor", row.rush_price_minor);
     }
     if (row.version != null) item.version = row.version;
@@ -926,8 +976,10 @@ export async function loadStore(database) {
       minimumWidthMilli: row.minimum_width_milli, minimumHeightMilli: row.minimum_height_milli,
       minimumLengthMilli: row.minimum_length_milli, minimumOrderQuantity: row.minimum_order_quantity,
       printerMaxWidthFeet: row.printer_max_width_feet,
-      turnaroundMode: row.turnaround_mode, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), turnaroundHours: row.turnaround_hours,
-      minimumTurnaroundDays: row.minimum_turnaround_days ?? undefined, minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
+      printLayouts: row.print_layouts || [],
+      express: row.express === true,
+      turnaroundMode: row.turnaround_mode, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
+      minimumTurnaroundDays: row.minimum_turnaround_days ?? undefined, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
       fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
       version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -953,7 +1005,7 @@ export async function loadStore(database) {
   }));
   store.catalogSpeedTiers = orderedBy(loaded.supplier_catalog_speed_tiers, "catalog_item_id", "turnaround_hours", "id").map((row) => ({
     id: row.id, catalogItemId: row.catalog_item_id, label: row.label,
-    ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), turnaroundHours: row.turnaround_hours, priceMinor: row.price_minor, surchargeMinor: row.surcharge_minor,
+    ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours, priceMinor: row.price_minor, surchargeMinor: row.surcharge_minor,
     sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.catalogItemFileFormats = orderedBy(loaded.supplier_catalog_item_file_formats, "catalog_item_id", "format_code").map((row) => ({
@@ -966,7 +1018,7 @@ export async function loadStore(database) {
   store.listingStarters = orderedBy(loaded.listing_starters, "subcategory_code", "id").map((row) => ({
     id: row.id, subcategoryCode: row.subcategory_code, name: row.name,
     defaultPricingUnit: row.default_pricing_unit, defaultPackageQty: row.default_package_qty,
-    defaultTurnaroundDays: row.default_turnaround_days ?? undefined, defaultTurnaroundHours: row.default_turnaround_hours, defaultFormatCodes: row.default_format_codes || [],
+    defaultTurnaroundDays: row.default_turnaround_days ?? undefined, ...(row.default_turnaround_minutes == null ? {} : { defaultTurnaroundMinutes: row.default_turnaround_minutes }), defaultTurnaroundHours: row.default_turnaround_hours, defaultFormatCodes: row.default_format_codes || [],
   }));
   store.listingStarterGroups = orderedBy(loaded.listing_starter_groups, "starter_id", "sort_order", "id").map((row) => ({
     id: row.id, starterId: row.starter_id, name: row.name, kind: row.kind, helpText: row.help_text,
@@ -1005,11 +1057,18 @@ export async function loadStore(database) {
       optionIds: row.option_ids || [], quantity: row.quantity, structuredSpec: row.structured_spec || {},
       sortOrder: row.sort_order, createdAt: row.created_at, updatedAt: row.updated_at,
     };
+    present(item, "serviceFeeSnapshot", row.service_fee_snapshot);
+    if (row.special_instructions) item.specialInstructions = row.special_instructions;
     present(item, "matchDeadline", row.match_deadline);
     present(item, "deadline", row.deadline);
     present(item, "artworkFileId", row.artwork_file_id);
     present(item, "documentPages", row.document_pages);
     if (row.artwork_links?.length) item.artworkLinks = row.artwork_links;
+    present(item, "artworkAttachments", row.artwork_attachments);
+    present(item, "printLayout", row.print_layout);
+    present(item, "colorTargets", row.color_targets);
+    present(item, "coverSpine", row.cover_spine);
+    present(item, "artworkWarningAcceptances", row.artwork_warning_acceptances);
     present(item, "mockupFileId", row.mockup_file_id);
     present(item, "measurement", readMeasurement(row));
     if (row.dropoff_lat != null) item.dropoff = { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label };
@@ -1039,15 +1098,21 @@ export async function loadStore(database) {
     descriptionSnapshot: row.description_snapshot, pricingBasisSnapshot: row.pricing_basis_snapshot,
     pricingUnitSnapshot: row.pricing_unit_snapshot, packageQtySnapshot: row.package_qty_snapshot,
     ...(row.turnaround_days_snapshot == null ? {} : { turnaroundDaysSnapshot: row.turnaround_days_snapshot, productionDayMinutesSnapshot: row.production_day_minutes_snapshot }),
-    turnaroundHoursSnapshot: row.turnaround_hours_snapshot, baseUnitPriceMinor: row.base_unit_price_minor,
+    ...(row.turnaround_minutes_snapshot == null ? {} : { turnaroundMinutesSnapshot: row.turnaround_minutes_snapshot }), turnaroundHoursSnapshot: row.turnaround_hours_snapshot, baseUnitPriceMinor: row.base_unit_price_minor,
     effectiveUnitPriceMinor: row.effective_unit_price_minor, quantity: row.quantity,
     lineSubtotalMinor: row.line_subtotal_minor, acceptedFormatCodesSnapshot: row.accepted_format_codes_snapshot,
+    ...(row.special_instructions ? { specialInstructions: row.special_instructions } : {}),
     structuredSpecSnapshot: row.structured_spec_snapshot, sortOrder: row.sort_order,
     ...(readMeasurement(row) ? { measurement: readMeasurement(row) } : {}),
     snapshotFinalized: row.snapshot_finalized, createdAt: row.created_at,
     ...(row.job_id == null ? {} : { jobId: row.job_id }),
     ...(row.artwork_file_id == null ? {} : { artworkFileId: row.artwork_file_id }),
     ...(row.artwork_links?.length ? { artworkLinks: row.artwork_links } : {}),
+    ...(row.artwork_attachments == null ? {} : { artworkAttachments: row.artwork_attachments }),
+    ...(row.print_layout == null ? {} : { printLayout: row.print_layout }),
+    ...(row.color_targets == null ? {} : { colorTargets: row.color_targets }),
+    ...(row.cover_spine == null ? {} : { coverSpine: row.cover_spine }),
+    ...(row.artwork_guidance == null ? {} : { artworkGuidance: row.artwork_guidance }),
     ...(row.document_pages == null ? {} : { documentPages: row.document_pages }),
     ...(row.mockup_file_id == null ? {} : { mockupFileId: row.mockup_file_id }),
     ...(row.dropoff_lat == null ? {} : { dropoff: { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label } }),
@@ -1177,7 +1242,7 @@ export async function loadStore(database) {
   readRefundRows(store, loaded);
   store.claims = ordered(loaded.claims).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.issues = ordered(loaded.issues).map((row) => { const item = { ...row.data, id: row.id, orderId: row.order_id, clientId: row.client_id, kind: row.kind, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }; present(item, "claimId", row.claim_id); return item; });
-  store.auditLog = ordered(loaded.audit_log).map((row) => ({ ...row.data, id: row.id, at: row.at, actorId: row.actor_id, actorRole: row.actor_role, action: row.action, entityType: row.entity_type, entityId: row.entity_id, orderId: row.order_id, position: row.position }));
+  store.auditLog = ordered(loaded.audit_log).map((row) => ({ ...row.data, id: row.id, at: row.at, actorId: row.actor_id, actorRole: row.actor_role, action: row.action, entityType: row.entity_type, entityId: row.entity_id, orderId: row.order_id }));
   store.notifications = ordered(loaded.notifications).map((row) => { const item = { ...row.data, id: row.id, userId: row.user_id, type: row.type, read: row.read_at != null, at: row.created_at }; if (row.order_id != null) item.orderId = row.order_id; if (row.deleted_at != null) item.deletedAt = row.deleted_at; return item; });
   store.locationPings = ordered(loaded.location_pings).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, lat: row.lat, lng: row.lng, accuracy: row.accuracy_meters, at: row.at }));
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
@@ -1286,6 +1351,7 @@ async function upsertChanged(database, table, before, current) {
 
 export async function saveStore(database, store) {
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
+  finalizeAuditEntries(store, originalDomainStore(store));
   const currentRows = rowsFromStore(store);
   const baselineRows = store[BASELINE] || Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   const maps = new Map(TABLES.map((table) => [table.name, { before: rowMap(baselineRows[table.name] || [], table), current: rowMap(currentRows[table.name], table) }]));
@@ -1412,12 +1478,12 @@ function catalogHitsCte() {
     filtered AS (
       SELECT item.id, item.supplier_id, item.supplier_service_id, item.subcategory_code,
              item.name, item.description, item.base_price_minor, item.pricing_unit,
-             item.package_qty, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.minimum_turnaround_days, item.minimum_turnaround_hours,
+             item.package_qty, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.turnaround_minutes, item.minimum_turnaround_minutes, item.minimum_turnaround_days, item.minimum_turnaround_hours,
              item.file_format_mode, item.active, item.sort_order, item.version,
              item.created_at, item.updated_at, item.search_text, item.search_tsv,
-             item.printer_max_width_feet, item.review_status, item.review_reason, item.reviewed_at, item.reviewed_by, item.approved_snapshot,
+             item.printer_max_width_feet, item.print_layouts, item.express, item.review_status, item.review_reason, item.reviewed_at, item.reviewed_by, item.approved_snapshot,
              item.suspend_reason, item.suspended_at,
-             COALESCE(item.turnaround_hours, service.standard_turnaround_hours, service.turnaround_hours)
+             COALESCE(item.turnaround_minutes / 60.0, item.turnaround_hours, service.standard_turnaround_minutes / 60.0, service.standard_turnaround_hours, service.turnaround_minutes / 60.0, service.turnaround_hours)::double precision
                AS effective_hours
         FROM supplier_catalog_items item
         JOIN supplier_services service ON service.id = item.supplier_service_id
@@ -1472,8 +1538,8 @@ function catalogItemFromListRow(row) {
     pricingUnit: row.pricing_unit,
     packageQty: row.package_qty,
     turnaroundMode: row.turnaround_mode,
-    ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), turnaroundHours: row.turnaround_hours,
-    minimumTurnaroundDays: row.minimum_turnaround_days ?? null, minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
+    ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
+    minimumTurnaroundDays: row.minimum_turnaround_days ?? null, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
     fileFormatMode: row.file_format_mode,
     active: row.active,
     suspendReason: row.suspend_reason ?? undefined,
@@ -1483,6 +1549,8 @@ function catalogItemFromListRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     printerMaxWidthFeet: row.printer_max_width_feet ?? null,
+    printLayouts: row.print_layouts || [],
+    express: row.express === true,
   };
 }
 

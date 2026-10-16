@@ -1,4 +1,5 @@
-import { appendAudit } from "./audit-record.js";
+import { supplementTotals, changePaymentPending } from './order-change-policy.js';
+import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
 import { approvedCatalogView } from "./catalog-review-state.js";
 
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -13,13 +14,14 @@ import { refundHold, refundSettlementFor } from './refund-policy.js';
 export const CANCELLABLE_SHOP_STATES = new Set(['supplier_assigned', 'awaiting_checkout', 'awaiting_initial_payment',
   'payment_authorized', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'rider_assigned']);
 export const recoveryHeld = (order) => Boolean(order.shopRecovery && order.shopRecovery.status !== 'accepted');
-export const paidShopShare = (store, order) => (order.payoutMilestones || []).some((stage) => stage.status === 'released')
+export const paidShopShare = (store, order) => supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
   || (store.refundSupplierPayouts || []).some((row) => row.orderId === order.id && row.status === 'released');
 const fail = (code) => { throw Object.assign(new Error(code), { status: 409, code }); };
 const normalized = (value) => String(value || '').trim().toLowerCase();
 
 export function startShopAcceptance(store, order, at) {
-  const schedule = structuredClone(store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
+  snapshotShopClock(store, order);
+  const schedule = structuredClone(shopSlaClock(order)?.schedule || store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
   order.shopAcceptance = { supplierId: order.supplierId, assignedAt: at, deadlineAt: addOpeningMilliseconds(schedule, at, 3600000),
     workingMinutes: 60, schedule, status: 'pending' };
 }
@@ -123,7 +125,7 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
   order.shopRecovery = { id: event.id, status: requiresOps ? 'ops_review' : 'awaiting_client', originalSupplierId: order.supplierId,
     stage: order.state, createdAt: at, originalSnapshot: { pickup: structuredClone(order.pickup || null), readyBy: order.readyBy || null, promiseBy: order.promiseBy || null }, proposal: requiresOps ? null : findReplacementShop(store, order, at) };
   order.updatedAt = at;
-  appendAudit(store, { id: createId('aud'), at, actorId, actorRole: actorId ? 'supplier' : 'system',
+  store.auditLog.push({ id: createId('aud'), at, actorId, actorRole: actorId ? 'supplier' : 'system',
     action: `order.shop_${kind}`, entityType: 'order', entityId: order.id, orderId: order.id, detail: event, reason });
   notifyRecovery(store, order, 'offered', at, createId);
   return event;
@@ -132,7 +134,7 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
 export function expireShopAcceptances(store, { at, createId }) {
   let changed = false;
   for (const order of store.orders || []) {
-    if (!order.supplierId || order.state !== 'supplier_assigned' || recoveryHeld(order) || refundHold(store, order) || refundSettlementFor(store, order)) continue;
+    if (changePaymentPending(store, order) || !order.supplierId || order.state !== 'supplier_assigned' || recoveryHeld(order) || refundHold(store, order) || refundSettlementFor(store, order)) continue;
     // Existing assignments receive a full window on rollout, never a retroactive penalty.
     if (!order.shopAcceptance || order.shopAcceptance.supplierId !== order.supplierId) { startShopAcceptance(store, order, at); changed = true; }
     if (order.shopAcceptance.status === 'pending' && Date.parse(at) >= Date.parse(order.shopAcceptance.deadlineAt)) {

@@ -1,5 +1,7 @@
 # Client order match API
 
+Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
+
 This is the authoritative first-drop contract for client matching and cart checkout. Existing public listing reads remain `GET /catalog/shops` and `GET /catalog/items/:itemId`; this API does not create a second catalog.
 
 All routes require a Clerk bearer mapped to a PostgreSQL `client` membership, except Operations/Super Admin may also read an invoice. Money is integer PHP minor units.
@@ -59,7 +61,7 @@ Send either `addressId` or an inline `dropoff` point (`lat`, `lng`, nonblank `la
 
 `deadline` is optional, a date-time parseable by the API (send ISO 8601 with offset); null means no deadline filter. `units` is an optional positive safe integer quantity used for capacity projection. Existing `measurement`, `structuredSpec`, `optionIds`, and `widthFeet` inputs still filter printer capability. `/next` requires at least one `excludedSupplierIds` entry. Optional `cartId` validates ownership, supplies existing lines for printer-width checks, and binds tokens to that cart. It **does not boost the cart's shop**. To choose a different shop from a nonempty cart, start a new cart and rematch without the old cart ID.
 
-Eligibility is fail-closed: active account, approved supplier membership, live covering service, complete public listing, printer capacity, and `isClosed=false`. Project each listing using its turnaround, shop schedule, current queue, supplied units/capacity, and the platform promise allowance. Remove every listing whose **client promise** exceeds the deadline before ranking. If none can make it, return `409 deadline_not_met` with `earliestAvailable`; if there are no eligible listings, return `404 match_not_found`.
+Eligibility is fail-closed: active account, approved supplier membership, live covering service, complete public listing, printer capacity, and `isClosed=false`. Project each listing using its turnaround, shop schedule, current queue, supplied units/capacity, and the platform promise allowance. Remove every listing whose **client promise** exceeds the deadline before ranking; a listing with Express on can meet any deadline from today on ([Express listings](EXPRESS_API.md)). If none can make it, return `409 deadline_not_met` with `earliestAvailable`; if there are no eligible listings, return `404 match_not_found`.
 
 ### Deterministic Top Pick
 
@@ -114,9 +116,90 @@ Response:
 
 - Card: `id` (listing ID), `name` (product name), `photos`, `fromPriceMinor` (supplier price), `clientFromPriceMinor` (includes GRIDGO service fee), `pricingUnit`, `packageQty`, `distanceZone`, `readyBy`, `placeInLine`, `selectToken`.
 - Conditional: `distanceKm` only Out of Zone; `rating: {average,count}` only with at least five valid reviews.
-- Configuration for the selection sheet: `categoryCode`, `subcategoryCode`, `basePriceMinor`, `effectivePriceMinor`, `clientEffectivePriceMinor`, `measurementKind`, `measureUnit`, `minimumWidthMilli`, `minimumHeightMilli`, `minimumLengthMilli`, `minimumOrderQuantity`, `printerMaxWidthFeet`, `priceTiers`, `speedTiers`, `pricingBasis`, `turnaroundHours`, `minimumTurnaroundHours`, `rush`, `acceptedFormats`, `optionGroups`, `version`. These retain their catalog semantics. Supply chosen `optionIds`, quantity and any required measurement when adding to cart.
+- Configuration for the selection sheet: `categoryCode`, `subcategoryCode`, `basePriceMinor`, `effectivePriceMinor`, `clientEffectivePriceMinor`, `measurementKind`, `measureUnit`, `minimumWidthMilli`, `minimumHeightMilli`, `minimumLengthMilli`, `minimumOrderQuantity`, `printerMaxWidthFeet`, `printLayouts`, `coverSpineForm`, `priceTiers`, `speedTiers`, `pricingBasis`, `turnaroundHours`, `minimumTurnaroundHours`, `rush`, `acceptedFormats`, `optionGroups`, `version`. These retain their catalog semantics. Supply chosen `optionIds`, quantity and any required measurement when adding to cart.
 
 No supplier ID, service ID, shop name, shop point/address, contact, or logo is projected into an alternative. `photos` starts with only `fileId`, `sortOrder`, and metadata `url`; the common catalog decorator adds `downloadUrl` and `downloadUrlExpiresAt` when storage signing succeeds. Photo alt text is omitted. Listing names, option labels and product photos are supplier-authored product content; this projection does not inspect image pixels. Existing Top Pick `shop` and listing supplier fields remain for compatibility as explicitly required by this rollout; the new matching UI must not display those shop fields. Cart and post-order shop projections are unchanged.
+
+### Add more from a cart group
+
+For report C86B13A1, the client checkout's **Add more from Shop A/B** should open
+the group's available GRIDGO listings directly:
+
+```http
+GET /me/carts/:cartId/groups/:groupId/listings
+Authorization: Bearer <Clerk session JWT>
+```
+
+Use `cart.groups[].id` as `groupId`. It is an opaque cart-line reference, not a
+supplier ID. Only a client membership owning that draft cart can read it.
+The server resolves both the shop and the group's effective deadline from the
+cart; the caller cannot override either through this read.
+
+```json
+{
+  "groupId": "cline_...",
+  "label": "Shop A",
+  "deadline": "2026-11-02T10:00:00.000Z",
+  "listings": [
+    {
+      "id": "ci_...",
+      "name": "Tri-fold brochures",
+      "categoryCode": "marketing_collateral",
+      "subcategoryCode": "brochures",
+      "clientFromPriceMinor": 29000,
+      "readyBy": "2026-10-20T10:00:00.000Z",
+      "photos": []
+    }
+  ],
+  "emptyReason": null
+}
+```
+
+The example abbreviates each listing. Listings use the anonymous alternative
+card allowlist above, including configuration fields and signed sample photos,
+but have **no `selectToken`**. No shop object, supplier/service ID, shop name,
+address, coordinates, contact, or logo is returned. `label` is the same anonymous
+Shop A/B label as the cart. Render prices from `client*` fields and images from
+`photos[].downloadUrl`; `photos[].url` is only the metadata route. The retained
+raw price fields follow existing catalogue compatibility rules. Use the existing
+catalogue quote endpoint for a configured price; do not sum marked-up components.
+
+This read includes all active product subcategories at this group's shop, using
+the approved catalogue snapshot, live service and supplier standing gates, and
+the same queue/calendar promise calculation as matching. It accounts for earlier
+draft groups at the same shop and the selected group's existing quantity and
+slowest production time. Each candidate is checked at its minimum order quantity
+(or one when no minimum is set). Existing products may be listed again so another
+configuration can be added. A group without a deadline has no deadline cutoff.
+
+An empty result is `200` with `listings: []` and `emptyReason`:
+
+- `no_orderable_listings`: no eligible listings remain; show “No products are currently available to add from this group.”
+- `deadline_not_met`: eligible products cannot fit the group's date; show “No more products can be added for this date.”
+
+Client follow-up sequence:
+
+1. Open this read instead of the category picker and render the returned cards.
+2. On selection, call `POST /me/matches` with `{cartId, groupId, subcategoryCode}`
+   using the selected card's subcategory. Omit `deadline` to retain the group's
+   date. When configuration changes quantity or dimensions, send `units` and the
+   existing measurement/spec fields to recheck that configuration.
+3. Find the selected card's `id` in that response's `listings`, then send its
+   `selectToken`, the response's `matchRequestId`, and the chosen configuration
+   to `POST /me/carts/:cartId/lines`. Do not substitute the first listing or use a
+   supplier ID. The token carries the group shop/date into the existing add flow.
+4. Refresh the cart after adding. If the card is no longer offered, refresh this
+   list and ask for another choice. Availability is a live estimate, not a
+   reservation; changed quantity, configuration, queues or shop standing still
+   undergo the existing match/add/checkout validation.
+
+The read issues no tokens and changes no cart or selection records. Errors are
+`401 unauthorized` without a valid session, `403 membership_required` without a
+client membership, `403 forbidden` for another client's cart, `404 cart_not_found`
+for a missing cart, `404 cart_group_not_found` for a missing/foreign/stale group
+reference, and `409 cart_checked_out` for a completed cart.
+
+### Adding a selected listing
 
 Choose either the Top Pick listing or an alternative through the existing add-line endpoint:
 
@@ -224,7 +307,13 @@ Add-line body:
 }
 ```
 
-PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+PATCH accepts `quantity`, `optionIds`, `structuredSpec`, `artworkFileId`, `artworkLinks`, `artworkAttachments`, and `dropoff`. The server derives the shop from the public listing and revalidates price/options at checkout.
+
+Add and PATCH also accept `printLayout` for listings whose `printLayouts` is non-empty; checkout requires it there. Lines return `printLayout` and `printLayoutCheck`. Contract: [print layout](PRINT_LAYOUT_API.md#client-the-cart-line).
+
+Add and PATCH also accept optional `colorTargets` (the client's exact colours); lines return `colorTargets` and `artworkColors`. Contract: [exact colours](EXACT_COLOURS_API.md#client-the-cart-line).
+
+Add and PATCH also accept `coverSpine` (cover choice and spine text) for listings whose `coverSpineForm` is true (hardbound and binding products). Lines return `coverSpine` and `coverSpineRequired`. Contract: [hardbound cover](HARDBOUND_COVER_API.md#client-the-cart-line).
 
 ### Artwork design links
 
@@ -239,7 +328,7 @@ Both add-line and patch-line requests accept `artworkLinks`, independently of `a
 }
 ```
 
-The array has at most **3** entries. Each entry has `formatCode: "canva_link" | "google_drive" | "dropbox" | "we_transfer" | "other_link"` and a string `url` of at most **2,000 characters**. Stored URLs must be absolute HTTPS URLs without credentials, whitespace, control characters, or backslashes. Provider codes require the matching domain; lookalike domains do not qualify:
+The array has at most **10** entries, subject to the combined limit of **10 files and links per item** below. Each entry has `formatCode: "canva_link" | "google_drive" | "dropbox" | "we_transfer" | "other_link"` and a string `url` of at most **2,000 characters**. Stored URLs must be absolute HTTPS URLs without credentials, whitespace, control characters, or backslashes. Provider codes require the matching domain; lookalike domains do not qualify:
 
 | Code | Input hosts |
 | --- | --- |
@@ -257,9 +346,81 @@ Omitting `artworkLinks` on PATCH preserves it; `[]` clears it; `null` is invalid
 
 Full and compact cart responses include `cart.lines[].artworkLinks` (an empty array when absent). Checkout copies the links into immutable order-line snapshots and `invoice.lines[].artworkLinks`. Order reads expose `order.productionItems[].artworkLinks` next to `artworkFileId`/`mockupFileId`: owning client and Operations/Super Admin see all lines, assigned suppliers and riders see only their job's lines, as with existing artwork. Top-level `artworkFileIds` and `mockupFileIds` follow the same job scope; metadata and signed downloads enforce it independently. Legacy fallback and combined-delivery rules are in [Storage API](STORAGE_API.md#get-filesfileid--metadata). Changes to a cart, listing, or its format registry cannot rewrite a placed order's links. Provider-hosted content may still change; GRIDGO snapshots the URL, not the remote bytes.
 
+### Multiple artwork attachments
+
+Report C6625C57. Apply migration `1792068000000_artwork_attachments` before
+releasing clients that send the new field. Add-line and patch-line accept:
+
+```json
+{
+  "artworkAttachments": [
+    { "kind": "file", "fileId": "file_front", "label": "Front" },
+    { "kind": "file", "fileId": "file_back", "label": "Back" },
+    { "kind": "link", "formatCode": "canva_link", "url": "https://www.canva.com/design/ABC/view", "label": "Logo design" }
+  ]
+}
+```
+
+Array order is display order; replace the array to reorder. `label` is optional,
+trimmed, and limited to 80 characters on one line. Empty/null labels are omitted.
+Each entry is either `kind: "file"` with `fileId`, or `kind: "link"` with the
+existing `formatCode` and `url`. File bytes still use the existing upload API.
+Every file must belong to the client, be ready artwork, and match the listing's
+accepted formats. Each link follows the provider, HTTPS, short-link resolution,
+and public-access checks above. Client-supplied verdicts/download URLs are ignored.
+
+There are **at most 10 attachments per line, files and links together**.
+Overflow returns `400 artwork_attachment_limit_exceeded`. Malformed arrays,
+entries, labels, or a request mixing `artworkAttachments` with the legacy artwork
+fields return `400 invalid_artwork_attachments`; existing link/file refusal codes
+still identify format/access/check failures. Omit the array on PATCH to preserve
+it; `[]` clears all artwork; `null` is invalid. An empty draft is allowed, but
+checkout returns `409 artwork_required`. Checkout requires every supplied file
+and link to pass, not merely the primary attachment. A changed attachment list,
+including its labels or order, invalidates the pre-lock link-check fingerprint.
+
+Released apps can continue sending `artworkFileId` and/or `artworkLinks`.
+`artworkFileId` is the first **file** in the ordered list; `artworkLinks` contains
+all links in their relative order. A legacy file PATCH replaces/removes only that
+first file, retaining secondary uploads; removing it promotes the next file.
+A legacy links PATCH replaces all links and places them after the retained files;
+`artworkLinks: []` removes links only. A legacy row without the new stored array
+projects its file first, followed by its links. The combined limit also applies
+to legacy writes. Send only the writable fields, not an echoed full response.
+
+Full and compact cart lines, immutable invoice lines, and
+`order.productionItems[]` expose `artworkAttachments`. File entries add
+`downloadUrl` and `downloadUrlExpiresAt` at response time, under the same file
+read authorization as `/files/:id/download-url`. Signed URLs are never persisted.
+If signing/storage is unavailable, the entry remains visible without a URL;
+retry that download endpoint. Link entries retain their provider URL. Top-level
+`order.artworkFileIds` includes all scoped uploaded attachments. Owning clients
+and Operations/Super Admin see every line; shops and riders see only their job's
+lines. Shops remain blocked until the existing GRIDGO Team file-check handoff.
+Secondary files retain the same open-case and active-cart deletion holds.
+
+For the customer, dashboard, and shop follow-ups: render the complete array with
+its optional labels, an open action for each link, and a download action for each
+file. The GRIDGO Team must review **all** entries when passing the existing
+order-level file check; this release does not add a separate staff verdict per
+attachment. Existing single-file screens continue to use the primary field.
+
+**Artwork proof and mockup preview source:** `artworkPreviewFileId` names the first
+ready image/PDF upload in attachment order (or null if there is none). Use this
+as the default proof/mockup canvas source; a one-file image/PDF keeps its current
+behavior. Resolve `/files/:fileId/preview-url` for the image rendition; never use
+the original PDF URL as an image. Design links are opened at their provider, never silently fetched into
+a mockup. The separately uploaded `mockupFileId` still takes precedence when
+showing a saved mockup; adding attachments does not generate or merge mockups.
+The single `pageRange`/`documentPages` pricing contract stays tied to the primary
+`artworkFileId`; secondary reference files do not add billable pages. Put the
+print document first for per-page work and use a separate cart line for another
+independently priced document. Order attachments and their labels/order cannot
+be rewritten after checkout.
+
 ### Artwork checkout gate and Operations handoff
 
-`POST /me/carts/:id/checkout` checks artwork on **every line**. No new client request field or check token is required. Released clients that skip `/artwork/link-check` receive the same explicit checkout errors; a client-supplied verdict never grants permission. The API probes every saved link afresh before taking the domain transaction lock, then verifies the exact line artwork is unchanged in the transaction. All supplied links must pass, even when the line also has an uploaded file. To use an upload instead, clear failed links with `artworkLinks: []`.
+`POST /me/carts/:id/checkout` checks artwork on **every line**. No new client request field or check token is required. Released clients that skip `/artwork/link-check` receive the same explicit checkout errors; a client-supplied verdict never grants permission. The API probes every saved link afresh before taking the domain transaction lock, then verifies the exact line artwork is unchanged in the transaction. All supplied links must pass, even when the line also has an uploaded file. To use uploads instead, remove failed link entries from `artworkAttachments` (or clear legacy links with `artworkLinks: []`).
 
 | Checkout error | HTTP | Client fix |
 | --- | --- | --- |
@@ -546,3 +707,11 @@ the listing's approved effective accepted formats. A mismatch is
 A listing override of exactly `pdf,docx` accepts those uploads and refuses JPEG,
 even though JPEG remains uploadable globally. A pending format revision keeps
 the previous approved acceptance set until Operations approves it.
+
+## Platform operating hours
+
+[Operating hours](OPERATING_HOURS_API.md) defines the review wait included in new
+match/cart promises, the additive `operatingStatus`, listing `review`, cart
+`checkoutNotice` and group `readyBy`, and Manila deadline-calendar reasons.
+Payment and automatic artwork checks remain available outside office hours;
+manual review and dispatch for new orders follow the live platform schedule.

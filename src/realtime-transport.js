@@ -87,6 +87,8 @@ export function createRealtimeTransport({
         const staffIds = new Set(opsAdminRecipientIds(store));
         for (const userId of events.userIds()) {
           for (const resource of INVALIDATE_RESOURCES) {
+            // Calls recover via their authenticated GET; no private pointers in broadcast refreshes.
+            if (resource === "calls") continue;
             if (STAFF_INVALIDATE_RESOURCES.includes(resource) && !staffIds.has(userId)) continue;
             events.publishInvalidate(userId, { resource }, store);
           }

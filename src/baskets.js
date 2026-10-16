@@ -1,4 +1,4 @@
-import { appendAudit } from "./audit-record.js";
+import { confirmVoucher } from './vouchers.js';
 import { groupSummary } from "./cart-groups.js";
 import { publicOrganizationDiscount } from "./organization-money.js";
 import { clientInvoice } from "./invoice-projection.js";
@@ -63,7 +63,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   if (!basket || (!privileged && basket.clientId !== user.id)) fail(404, 'basket_not_found', 'That basket is unavailable.');
   if (req.method === 'GET' && !match[2]) return { status: 200, body: { basket: publicBasket(store, basket, user) } };
   if (req.method === 'GET' && match[2] === 'invoice') {
-    return { status: 200, body: { invoice: clientInvoice(store.orderInvoices.find((row) => row.orderId === basket.receiptOrderId).snapshot, { hideSupplierAmounts: !privileged }) } };
+    return { status: 200, body: { invoice: clientInvoice(store.orderInvoices.find((row) => row.orderId === basket.receiptOrderId).snapshot, { hideSupplierAmounts: !privileged, exposeWorking: privileged }) } };
   }
   if (req.method !== 'POST' || !match[3]) fail(404, 'not_found', 'Route not found.');
   const action = match[3];
@@ -91,6 +91,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   } else {
     if (payment.status !== 'pending_confirmation') fail(409, 'payment_not_pending', 'This basket has no payment waiting for review.');
     if (action === 'reject' && (typeof body.reason !== 'string' || !body.reason.trim())) fail(400, 'payment_rejection_reason_required', 'Explain what the client must correct.');
+    if (action === 'confirm') confirmVoucher(store, basket.orderIds.map(orderId => store.orders.find(o => o.id === orderId)), { id, at: now(), actorId: user.id });
     if (action === 'confirm') Object.assign(payment, { status: 'confirmed', confirmedAt: now(), confirmedBy: user.id, confirmationSource: 'manual_ops' });
     else Object.assign(payment, { status: 'not_submitted', reference: null, proofFileId: null, submittedAt: null,
       rejectedAt: now(), rejectedBy: user.id, rejectionReason: body.reason.trim() });
@@ -114,7 +115,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   const firstOrder = store.orders.find((row) => row.id === basket.receiptOrderId);
   if (action === 'reject') notifyClientPaymentRejected(store, firstOrder, { createId: id, at, reason: payment.rejectionReason });
   if (action === 'submit') notifyOpsPaymentSubmitted(store, firstOrder, { createId: id, at });
-  appendAudit(store, { id: id('aud'), at, actorId: user.id, actorRole: user.role,
+  store.auditLog.push({ id: id('aud'), at, actorId: user.id, actorRole: user.role,
     action: `basket.payment_${action}`, entityType: 'basket', entityId: basket.id,
     detail: { orderIds: basket.orderIds, amountMinor: basket.totalMinor }, reason: body.reason || null });
   return { status: 200, body: { basket: publicBasket(store, basket, user) }, mutated: true };

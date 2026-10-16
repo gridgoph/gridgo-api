@@ -160,6 +160,8 @@ Migrations are ordered files under `migrations/` and run through `node-pg-migrat
 npm run migrate
 ```
 
+`npm run migrate` passes `--no-check-order`. Work merged to `main` ahead of `dev` can apply a later-dated migration first (production applied `1792058200000_web_push` before nine earlier-dated `dev` migrations), and the default order check would then refuse every pending older file. Each migration must therefore stay independent of later-dated migrations that may have been applied before it.
+
 The API never executes DDL at boot. It checks database connectivity and the migrated `platform_settings` table before listening. A missing schema produces a specific instruction to run migrations.
 
 Every deployment runs `migrate` and `seed` before API start through compose dependencies. Forward migrations must be compatible with the image being deployed. Roll back application code by pinning `GRIDGO_API_TAG` to a prior immutable `sha-...` tag only when that image understands the already-forward database schema; database rollback requires a tested backup restore, not a down migration guess.
@@ -248,3 +250,124 @@ Money is `BIGINT` minor units and application writes are checked against JavaScr
 ## Organization email verification
 
 Organization applications require `EMAIL_USER` and `EMAIL_PASSWORD` for one-time email codes. Without them, the request-code endpoint returns `503 organization_email_not_configured`; other API routes remain available. Apply migration `1791504000000` before deploying this API. Roll out the client/dashboard checklist consumers together: old name-only applications can no longer be submitted or newly approved. See [Organization accounts](ORGANIZATION_ACCOUNTS_API.md) for the request bodies and legacy-account upgrade path.
+
+## Optional voice relay (coturn)
+
+[Voice calls](CALLS_API.md) work without a paid calling provider. For reliable
+carrier/NAT traversal, an operator can install a self-hosted TURN relay. This
+repository only supplies the **disabled-by-default** `calls` compose profile;
+normal deploys never start coturn. No production ports or services are changed
+by the API release. Audio is encrypted WebRTC traffic; the API stores no audio.
+
+The optional service uses the upstream
+[coturn 4.18.0-r0 image](https://github.com/coturn/coturn/releases/tag/docker%2F4.18.0-r0).
+It joins only its own `turn-edge` network, never `gridgo-api-storage` or the proxy
+network. The operator must review host capacity/bandwidth and firewall policy,
+choose DNS/public IP, install a TLS certificate and pin the reviewed image digest
+before enabling it. Do not enable the profile as a side effect of migration.
+
+Install a mode-0600 `turnserver.conf` beside production compose, readable by the
+container's service user, and `turn-certs/fullchain.pem` / `turn-certs/privkey.pem`.
+Example configuration (replace every placeholder):
+
+```ini
+listening-port=3478
+tls-listening-port=5349
+min-port=49160
+max-port=49200
+realm=turn.example.test
+server-name=turn.example.test
+external-ip=<public IPv4 address>
+use-auth-secret
+static-auth-secret=<high entropy shared secret>
+fingerprint
+cert=/etc/coturn/certs/fullchain.pem
+pkey=/etc/coturn/certs/privkey.pem
+no-tcp-relay
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+user-quota=4
+total-quota=100
+max-bps=64000
+bps-capacity=6400000
+log-file=stdout
+simple-log
+```
+
+Address exclusions use `denied-peer-ip`; loopback is denied by default. Do not enable `no-auth`,
+loopback peers, `server-relay`, web admin or the CLI. Keep TURN logs restricted;
+they can contain network addresses. The example quotas need capacity review.
+
+API `gridgo-api.env` must contain matching configuration:
+
+```dotenv
+STUN_URLS=stun:turn.example.test:3478
+TURN_URLS=turn:turn.example.test:3478?transport=udp,turn:turn.example.test:3478?transport=tcp,turns:turn.example.test:5349?transport=tcp
+TURN_SHARED_SECRET=<same high entropy shared secret>
+TURN_CREDENTIAL_TTL_SECONDS=600
+```
+
+The profile declares 3478 UDP/TCP, 5349 TCP, and UDP relay range 49160–49200.
+An operator must authorize these exposures explicitly, align firewall/NAT rules
+and the external address, and then use `docker compose --profile calls up -d coturn`.
+Port mappings preserve the relay range. Certificate renewal requires coturn to
+reload/restart as an operator action. Keep API/TURN clocks synchronized for
+expiry checks. Secret rotation must update both sides together; it invalidates
+new uses of previously issued credentials.
+
+Before releasing app call buttons, use two physical phones across Wi-Fi and
+mobile data, force relay transport for one test, and verify audio, expiry,
+authentication refusal, cancellation, timeout/missed push, app background/resume,
+reassignment and hangup at pickup/delivery. Test IPv6/carrier combinations used
+by riders. STUN-only operation is an explicit degraded mode and cannot prove
+carrier connectivity. This backend task does not perform that production rollout.
+
+## Supplier browser Web Push
+
+Apply migration `1792058200000_web_push` before deploying. With **all three** VAPID
+variables absent, the API generates one P-256 VAPID pair under the domain advisory
+lock and persists it in PostgreSQL `web_push_vapid`. Concurrent starts and later
+container replacements reuse that row. The fallback subject is
+`https://gridgo-api.talasora.com`. This needs no new server secret file, compose
+change, Firebase setup, or APNs key. Only data is initialized at boot, never schema.
+
+Operators may instead supply a complete explicit configuration in `gridgo-api.env`:
+
+```dotenv
+VAPID_PUBLIC_KEY=<base64url public key>
+VAPID_PRIVATE_KEY=<base64url private key>
+VAPID_SUBJECT=mailto:<operator-contact-address>
+```
+
+The complete environment triple takes precedence over the database. Partial,
+invalid, or mismatched configuration disables Web Push and makes its registration
+and public-key routes return `503 web_push_unavailable`; it does not rotate or
+replace the database key, disable native push, or prevent API startup. Check
+`/health.push.webPush.status` independently of FCM/APNs. `configured` means keys are
+loaded, not that a browser has received a notification.
+
+The database VAPID private key and browser endpoint/auth keys are secrets: retain
+them in protected encrypted PostgreSQL backups and never expose them to clients,
+logs or analytics. A database restore must retain this key row to keep existing
+subscriptions usable. To move to environment-managed credentials without breaking
+subscriptions, securely transfer the existing key pair and subject through the
+operator's secret-management procedure. Changing the key pair requires browsers
+to unsubscribe and subscribe again with the newly returned public key; switching
+back from environment keys to a different stored pair has the same consequence.
+Do not delete the key row on deploy or seed.
+
+The supplier portal origin must already be in `CLERK_AUTHORIZED_PARTIES` and the
+API CORS allowlist. In production the portal uses HTTPS; the portal release
+supplies its service worker, manifest, explicit permission action, and iPhone
+Home Screen install instructions. Allow outbound HTTPS to Apple, Google, Mozilla
+and Windows browser push services. Browser subscription lifecycle, logout cleanup,
+payload/click contract and endpoint restrictions are in [Web Push API](WEB_PUSH_API.md).

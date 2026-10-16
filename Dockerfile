@@ -22,6 +22,9 @@ RUN npm ci --omit=dev
 FROM node:22-alpine AS runner
 WORKDIR /app
 
+# First-page PDF previews. Word conversion belongs in a separate isolated service.
+RUN apk add --no-cache poppler-utils util-linux
+
 ARG GRIDGO_BUILD_SHA=unknown
 ARG GRIDGO_BUILD_TIME=unknown
 

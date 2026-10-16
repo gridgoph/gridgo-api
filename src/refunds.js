@@ -1,6 +1,9 @@
+import { changePaymentPending } from './order-change-policy.js';
+import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
+import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
-  supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents } from './refund-policy.js';
+  supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents, ACTIVE_REFUND_STATUSES } from './refund-policy.js';
 import { deliverySplit } from './operational-model.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { resolvePayoutReceipt, bindPayoutReceipt, paymentReferenceValue } from './payout-receipt.js';
@@ -64,7 +67,7 @@ export function publicRefund(store, request, user) {
     result.attempt = attempt || null;
     result.payment = payment ? { ...payment, evidenceLabel: 'Wallet transfer evidence' } : null;
     const order = store.orders.find((row) => row.id === request.orderId);
-    result.collections = collectedRefundComponents(order);
+    result.collections = collectedRefundComponents(order, store);
     result.releasedShopMinor = sumMinor([...(order.payoutMilestones || []), ...(store.refundSupplierPayouts || []).filter((row) => row.orderId === order.id)]
       .filter((row) => row.status === 'released').map((row) => row.amountMinor));
     result.previousRefunds = (store.refundSettlements || []).filter((row) => row.orderId === order.id && row.requestId !== request.id);
@@ -91,7 +94,7 @@ function notify(store, request, order, kind, createId, at) {
     seen.add(key);
     store.notifications.push({ id: createId('notif'), userId, appRole: role, orderId: order.id,
       type: `refund_${kind}`, title: 'Client refund',
-      body: role === 'supplier' && kind === 'rejected'
+      body: request.kind === 'delivery_pin' ? 'The delivery-fee credit was updated. Fulfillment and shop entitlements continue unchanged.' : role === 'supplier' && kind === 'rejected'
         ? 'The refund request was rejected. Open the order for its work and payout status.' : copy[kind], read: false, at });
   }
   queueOrderInvalidate(store, order, ['orders', 'payouts', 'claims']);
@@ -127,12 +130,12 @@ function settlementCalculation(store, order, request, body) {
   if (recoveryRefund && (body.shopEntitlementMinor !== 0 || body.riderEntitlementMinor !== 0)) {
     fail(409, 'shop_recovery_full_refund_required', 'This client chose a full refund. Resolve released obligations with Operations first.');
   }
-  const maximum = calculateRefundSettlement(order, input);
-  const amounts = calculateRefundSettlement(order, { ...input, principalMinor: body.principalMinor });
+  const maximum = calculateRefundSettlement(order, { ...input, store });
+  const amounts = calculateRefundSettlement(order, { ...input, store, principalMinor: body.principalMinor });
   if (recoveryRefund && amounts.totalMinor !== sumMinor(Object.values(amounts.collected))) {
     fail(409, 'shop_recovery_full_refund_required', 'Refund every verified collected component.');
   }
-  const split = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10000);
+  const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10000));
   if (deliveryCompleted(order) && amounts.riderEntitlementMinor < split.riderPayoutMinor) {
     fail(409, 'refund_requires_super_admin', 'Earned rider pay must be protected. Refer exceptions to Super Admin.', { escalateTo: 'super_admin' });
   }
@@ -183,11 +186,13 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   let eventReason = action === 'destination' ? 'Client replaced receiving QR.' : text(body.reason, 'reason');
   let eventData = {};
   if (action === 'request') {
-    if (refundHold(store, order)) fail(409, 'refund_already_open', 'This order already has an active refund request.');
+    if (changePaymentPending(store, order)) fail(409, 'change_payment_pending', 'Resolve the submitted change transfer first.');
+    if (deliveryPinPaymentPending(order)) fail(409, 'delivery_pin_payment_pending', 'Resolve the submitted delivery transfer before filing a refund.');
+    if (store.refundRequests.some(row => row.orderId === order.id && ACTIVE_REFUND_STATUSES.includes(row.status))) fail(409, 'refund_already_open', 'This order already has an active refund request.');
     const late = lateFiling(store, order, at);
     if (late && user.role !== 'super_admin') fail(409, 'refund_window_closed', 'The filing window is closed. Contact Super Admin.', { escalateTo: 'super_admin' });
     if (!['cancellation', 'complaint'].includes(body.kind)) fail(400, 'invalid_refund_kind', 'Choose cancellation or complaint.');
-    if (!sumMinor(Object.values(collectedRefundComponents(order)))) fail(409, 'refund_payment_not_verified', 'Operations must verify the payment before a refund can be requested.');
+    if (!sumMinor(Object.values(collectedRefundComponents(order, store)))) fail(409, 'refund_payment_not_verified', 'Operations must verify the payment before a refund can be requested.');
     const evidenceIds = body.evidenceFileIds ?? [];
     if (!Array.isArray(evidenceIds) || evidenceIds.length > 10 || new Set(evidenceIds).size !== evidenceIds.length) fail(400, 'invalid_refund_evidence', 'Attach up to ten distinct evidence files.');
     const evidence = evidenceIds.map((fileId) => readyFile(store, fileId, 'refund_evidence', user.id));
@@ -221,6 +226,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (request.status !== 'reviewed' || settlementFor(store, request)) fail(409, 'refund_state_conflict', 'Review the refund before settling it.');
     if (request.late && user.role !== 'super_admin') fail(403, 'refund_super_admin_required', 'Super Admin must settle a late case.');
     if (body.workStopped !== true) fail(400, 'refund_work_stop_required', 'Confirm production and fulfilment have stopped.');
+    if (order.voucher && typeof body.clientCaused !== 'boolean') fail(400, 'voucher_refund_fault_required', 'Record whether the cancellation/refund was caused by the client.');
     const shopAgreement = text(body.shopAgreement, 'shopAgreement');
     const deliveryEvidence = text(body.deliveryEvidence, 'deliveryEvidence');
     const { amounts, maximum } = settlementCalculation(store, order, request, body);
@@ -231,7 +237,10 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     });
     if (body.totalMinor !== amounts.totalMinor) fail(409, 'refund_amount_mismatch', 'Review the calculated component amounts before approving.', { amounts });
     // Returned delivery is unused service. Attribute only the collected platform share to revenue.
-    const collectedSplit = deliverySplit(amounts.collected.deliveryMinor, order.riderCommissionBps ?? 10000);
+    const extra = deliveryPinCollectedMinor(order);
+    const originalCollectedSplit = deliverySplit(amounts.collected.deliveryMinor - extra, order.riderCommissionBps ?? 10000);
+    const extraCollectedSplit = deliverySplit(extra, order.riderCommissionBps ?? 10000);
+    const collectedSplit = { platformDeliveryShareMinor: sumMinor([originalCollectedSplit.platformDeliveryShareMinor, extraCollectedSplit.platformDeliveryShareMinor]) };
     const previousPlatform = sumMinor(store.refundSettlements.filter((row) => row.orderId === order.id).map((row) => row.platformDeliveryMinor));
     const platformDeliveryMinor = Math.min(amounts.deliveryMinor, Math.max(0, collectedSplit.platformDeliveryShareMinor - previousPlatform));
     const settlement = { id: id('rsettle'), requestId: request.id, orderId: order.id, createdBy: user.id, createdAt: at,
@@ -241,6 +250,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       shopEntitlementMinor: amounts.shopEntitlementMinor, riderEntitlementMinor: amounts.riderEntitlementMinor,
       principalMinor: amounts.principalMinor, feeMinor: amounts.feeMinor, deliveryMinor: amounts.deliveryMinor,
       platformDeliveryMinor, totalMinor: amounts.totalMinor, snapshot: { ...amounts,
+        ...(order.voucher ? { clientCaused: body.clientCaused } : {}),
         ...(order.directStoreDueMinor > 0 ? { directStoreDueMinor: order.directStoreDueMinor, directStoreCollectedMinor: 0 } : {}) } };
     store.refundSettlements.push(settlement);
     const supersededStages = [];
@@ -341,6 +351,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     bind(receipt, request, 'transfer_evidence');
     store.refundPayments.push(payment); attempt.status = 'paid'; attempt.updatedAt = at; request.status = 'paid';
     const settlement = settlementFor(store, request);
+    if (request.kind !== 'delivery_pin') restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
     order.revenueAdjustments ||= [];
     const returnedPlatform = sumMinor([settlement.feeMinor, settlement.platformDeliveryMinor]);
     if (returnedPlatform) order.revenueAdjustments.push({ id: id('rev'), kind: 'refund', amountMinor: -returnedPlatform,
@@ -353,7 +364,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   store.refundEvents.push({ id: id('revent'), requestId: request.id, requestVersion: request.version, actorId: user.id, kind: eventKind,
     reason: eventReason, createdAt: at, data: eventData });
   audit(store, { actor: user, action: `refund.${eventKind}`, entityType: 'refund_request', entityId: request.id,
-    orderId: order.id, detail: { version: request.version, ...eventData } });
+    orderId: order.id, reason: eventReason, detail: { version: request.version, ...eventData } });
   notify(store, request, order, eventKind, id, at);
   const response = { status: action === 'request' ? 201 : 200, body: { refund: publicRefund(store, request, user) } };
   store.refundCommands.push({ id: id('rcmd'), actorId: user.id, requestKey: key, route, bodyHash,

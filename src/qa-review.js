@@ -1,6 +1,7 @@
 import { QA_CHECK_IDS } from "./artwork-gates.js";
+import { artworkFileIdsFor } from "./artwork-attachments.js";
 
-/** Artwork on the order row and on each line, once each, in first-seen order. */
+/** Artwork on the order row and every file attached to each line, once each, in first-seen order. */
 export function orderArtworkFileIds(store, order) {
   const ids = [];
   const push = (id) => {
@@ -8,7 +9,7 @@ export function orderArtworkFileIds(store, order) {
   };
   for (const id of order?.artworkFileIds || []) push(id);
   for (const line of store?.orderLineItems || []) {
-    if (line.orderId === order?.id) push(line.artworkFileId);
+    if (line.orderId === order?.id) for (const id of artworkFileIdsFor(line)) push(id);
   }
   return ids;
 }

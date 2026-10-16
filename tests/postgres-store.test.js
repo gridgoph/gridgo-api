@@ -1,3 +1,4 @@
+import { resetDatabase } from './fixtures/reset-database.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -9,7 +10,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const AT = "2026-08-16T00:00:00.000Z";
 
 async function clear(database) {
-  await database.query(`TRUNCATE
+  await resetDatabase(database, `TRUNCATE
     administrator_bootstrap, device_tokens, escalations, location_pings, notifications, audit_log,
     issues, claims, credit_ledger, credit_accounts, file_references, files,
     order_invoices, client_cart_lines, client_carts, client_saved_addresses,
@@ -21,7 +22,7 @@ async function clear(database) {
     listing_starter_options, listing_starter_groups, listing_starters, accepted_file_formats,
     zones, taxonomy_finishes, taxonomy_materials, taxonomy_subcategories,
     taxonomy_category_aliases, taxonomy_categories, catalog_products, users,
-    platform_settings RESTART IDENTITY CASCADE`);
+    platform_settings, voucher_campaigns RESTART IDENTITY CASCADE`);
 }
 
 test("relational store round-trips client matching, cart, job, line, and invoice records", { skip: !DATABASE_URL }, async (t) => {
@@ -172,7 +173,9 @@ test("relational store round-trips typed money, relationships, and composite rou
   await database.transaction(async () => saveStore(database, store));
   const reloaded = await loadStore(database);
 
-  assert.deepEqual(reloaded, store);
+  // Launch metadata is migration-owned rather than part of the writable graph.
+  const launch = (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0].launched_at;
+  assert.deepEqual(reloaded, { ...store, surveyLaunchedAt: launch });
   assert.equal(typeof reloaded.orders[0].totalMinor, "number");
   assert.equal(reloaded.orders[0].payments.final_online.amountMinor, 28750);
   assert.equal(reloaded.orders[0].payoutMilestones[0].amountMinor, 50000);
@@ -193,6 +196,16 @@ test("relational store round-trips typed money, relationships, and composite rou
   assert.equal(daysReloaded.orderLineItems[0].turnaroundDaysSnapshot, 1);
   assert.equal(daysReloaded.orderLineItems[0].turnaroundHoursSnapshot, 8.5);
   await assert.rejects(database.query("UPDATE order_line_items SET turnaround_days_snapshot=2 WHERE id='day_line'"), /immutable/);
+  Object.assign(daysReloaded.supplierServices[0], { turnaroundDays: null, turnaroundMinutes: 75, turnaroundHours: 1.25 });
+  daysReloaded.orderLineItems.push({ ...daysReloaded.orderLineItems[0], id: 'minute_line', sortOrder: 1,
+    turnaroundDaysSnapshot: null, productionDayMinutesSnapshot: null, turnaroundMinutesSnapshot: 75, turnaroundHoursSnapshot: 1.25 });
+  await database.transaction(async () => saveStore(database, daysReloaded));
+  const minutesReloaded = await loadStore(database);
+  assert.equal(minutesReloaded.supplierServices[0].turnaroundHours, 1.25);
+  assert.equal(minutesReloaded.supplierServices[0].turnaroundMinutes, 75);
+  assert.equal(minutesReloaded.orderLineItems.find(row => row.id === 'minute_line').turnaroundHoursSnapshot, 1.25);
+  await assert.rejects(database.query("UPDATE order_line_items SET turnaround_minutes_snapshot=90 WHERE id='minute_line'"), /immutable/);
+
 
   await clear(database);
   await database.close();

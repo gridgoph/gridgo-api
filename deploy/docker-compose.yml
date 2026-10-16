@@ -299,6 +299,29 @@ services:
     networks:
       - gridgo-storage
 
+  # Optional voice relay. Never started by ordinary compose up/deploy.
+  # Operator installs turnserver.conf/certificates and authorizes network exposure;
+  # see docs/DEPLOYMENT.md. It never joins either datastore network.
+  coturn:
+    image: coturn/coturn:4.18.0-r0
+    profiles: ["calls"]
+    restart: unless-stopped
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./turn-certs:/etc/coturn/certs:ro
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    networks: [turn-edge]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   # Named explicitly so the volume keeps these names regardless of the compose
   # project name — the backup and restore procedures in docs/DEPLOYMENT.md
@@ -309,6 +332,8 @@ volumes:
     name: gridgo_minio_data
 
 networks:
+  turn-edge:
+    driver: bridge
   # Created and owned by ~/gridgo-proxy (Caddy). Declared external so a
   # `docker compose down` here can never delete the network the portal and the
   # landing site also sit on.

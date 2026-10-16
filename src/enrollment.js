@@ -1,4 +1,3 @@
-import { appendAudit } from "./audit-record.js";
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { CLIENT_APPLICATION_FIELDS, validateClientApplication, bindClientApplication } from "./client-applications.js";
 import crypto from "node:crypto";
@@ -243,7 +242,7 @@ function addInitialCase(store, { user, kind, submittedAt, key, body, createId, a
 
 function validateSupplierInput(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["profile", "serviceCategories"]);
+  rejectUnexpected(body, ["profile", "serviceCategories", "legalConsentVersion", "legalConsent"]);
   if (plainObject(body.profile)) {
     rejectUnexpected(body.profile, ["shopName", "contactName", "phone", "location"], "profile.");
     if (plainObject(body.profile.location)) {
@@ -308,7 +307,7 @@ function resolveSupplierCategories(store, validated) {
 
 function validateRider(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["profile"]);
+  rejectUnexpected(body, ["profile", "legalConsentVersion", "legalConsent"]);
   if (plainObject(body.profile)) {
     rejectUnexpected(body.profile, ["phone", "vehicleType", "plateNumber", "licenseNumber"], "profile.");
   }
@@ -496,7 +495,7 @@ export function applyForBusiness({ store, user, body, idempotencyKey, createId, 
       actorKind: "applicant", requestId: enrollmentRequestId("business_client", user.id, idempotencyKey),
       snapshot: { ...application, handover: Boolean(account?.currentOfficer), requestPayloadHash: payloadHash(body) }, createdAt: at });
     bindClientApplication(store, user, existingCase, application, at);
-    appendAudit(store, { id: createId("aud"), at, actorId: user.id, actorRole: "client",
+    store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
       action: account?.currentOfficer ? "organization.officer_handover" : "client_application.resubmit",
       entityType: "approval_case", entityId: existingCase.id,
       detail: { applicationRevision: existingCase.applicationRevision } });
@@ -783,7 +782,7 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
     snapshot: { previous, correctionSummary, requestPayloadHash: payloadHash(body) },
     createdAt: at,
   });
-  appendAudit(store, {
+  store.auditLog.push({
     id: createId("aud"),
     at,
     actorId: user.id,

@@ -1,3 +1,4 @@
+import { riderPackingFlow } from './shop-handover.js';
 import { supplierArtworkReleased } from "./artwork-gates.js";
 import { paymentSettled } from "./operational-model.js";
 import { availableDispatch, riderHasActiveDelivery } from "./dispatch-policy.js";
@@ -61,7 +62,10 @@ const COPY = {
   out_for_delivery: {
     type: "order_out_for_delivery",
     title: "Out for delivery",
-    body: "Your order is on the way. Confirm your drop-off pin or choose a new spot in the app.",
+    body(order) {
+      return order.deliveryPin ? "Your order is on the way to the saved delivery pin. Open the order to see its confirmation status."
+        : "Your order is on the way. Confirm your drop-off pin or choose a new spot in the app.";
+    },
   },
   awaiting_collection: {
     type: "order_ready_for_pickup",
@@ -189,6 +193,14 @@ export function clientNotificationDraft(order) {
     order,
   );
   if (!copy) return null;
+  if (riderPackingFlow(order) && order.state === 'ready_for_dispatch') {
+    copy.title = 'Ready for rider pickup';
+    copy.body = 'The rider will check the unpacked products. The shop will then pack them in front of the rider.';
+  }
+  if (riderPackingFlow(order) && order.state === 'supplier_self_qc') {
+    copy.title = 'GRIDGO is reviewing the finished products';
+    copy.body = 'Printing is finished. GRIDGO is checking the product photos before rider pickup.';
+  }
   const action = finalPaymentAction(order);
   if (action && order.state !== "awaiting_collection") {
     copy.body += action.status === "pending_confirmation"

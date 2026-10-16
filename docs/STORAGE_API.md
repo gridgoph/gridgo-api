@@ -1,5 +1,11 @@
 # GRIDGO Storage API contract
 
+[Shop handover](SHOP_HANDOVER_API.md) adds `finished_product_photo` (supplier,
+JPEG/PNG/WebP, 200 MiB, production only) and permits the assigned rider to upload
+and attach `packing_photo` after a version-2 unpacked inspection. Both follow
+private production-photo retention. Legacy packing-photo permissions remain as
+below; rider packing/signature references bind to the current inspection.
+
 This is the authoritative contract for all three mobile apps. It covers client artwork, milestone Proofs of Fulfilment (POFs), rider delivery/checklist photos, supplier-service images, the platform payment QR, and private supplier and rider verification documents. Field names, states, status codes, and error codes are stable and case-sensitive.
 
 ## Architecture decision
@@ -98,6 +104,7 @@ Parents contain IDs only:
 |---|---|
 | `artwork` | `order.artworkFileIds: string[]` |
 | `production_photo` | `order.productionPhotoFileIds: string[]`; plain progress only |
+| `finished_product_photo` | `order.finishedProductPhotoFileIds: string[]`; submitted snapshots in `order.shopHandover` |
 | `packing_photo` | `order.packingPhotoFileIds: string[]`; packed-work evidence only |
 | `fulfilment_proof` | `order.fulfilmentProofFileIds: string[]` and the selected `payoutMilestone.pofFileIds` |
 | `delivery_photo` | `order.deliveryPhotoFileIds: string[]` |
@@ -129,7 +136,8 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `mockup` | client | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `payment_proof` | client | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `production_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
-| `packing_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
+| `finished_product_photo` | supplier | JPEG, PNG, WebP | 200 MiB (`209715200`) |
+| `packing_photo` | supplier or rider; flow and assignment checked on attach | JPEG, PNG, WebP | 200 MiB (`209715200`) |
 | `fulfilment_proof` | supplier or rider; assignment checked on attach | JPEG, PNG, WebP, PDF | 200 MiB (`209715200`) |
 | `delivery_photo` | rider | JPEG, PNG, WebP | 20 MiB (`20971520`) |
 | `handoff_signature` | rider | PNG | 2 MiB (`2097152`) |
@@ -164,9 +172,19 @@ This is a bounded package check, not a full Word validator or print preview.
 The automatic artwork verdict accepts a structurally valid DOCX even without
 page metadata. `detected` uses `kind: "document"`, `pageCount` from a positive
 safe-integer `docProps/app.xml` `<Pages>` value, or `null` when absent/unusable.
-Dimensions stay unknown. Word's cached page count is advisory and can depend on
+Dimensions come from the first section's declared `<w:pgSz>` page size, and
+`pageEnvelope` covers every section ([print layout](PRINT_LAYOUT_API.md#file-page-size));
+both stay `null` when no section declares one. Word's cached page count is advisory and can depend on
 fonts/layout; Operations still checks print readiness. See [document page
 selection](ORDER_MATCH_API.md#document-page-selection) for manual DOCX counts.
+
+Artwork `detected` also reports `colorMode` (`rgb | cmyk | grayscale | mixed`
+or `null`), and WebP/PSD uploads report their pixel size. Resolution and colour
+are warnings judged at the ordered size, never upload or checkout blocks; see
+[ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md). Artwork `detected.colors`
+lists the colours the file uses (PDF spot and process colours, PNG dominant
+pixel colours, otherwise `status: "unknown"`); see
+[EXACT_COLOURS_API.md](EXACT_COLOURS_API.md#colours-read-from-the-file).
 
 Client file pickers must offer `.docx` and its MIME above (or use the governed
 registry's uploadable types); clients must permit entering `measurement.pages`
@@ -177,7 +195,7 @@ The upload request timeout defaults to 15 minutes. Clients may show transfer pro
 
 ## POST /files — streamed upload
 
-Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, supplier `production_photo`, supplier `packing_photo`, and supplier `fulfilment_proof`; rider for `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
+Auth: `client` for `artwork`; `supplier` for `service_image`, `catalog_item_photo`, `supplier_shop_image`, `verification_document`, supplier `production_photo`, `finished_product_photo`, supplier `packing_photo`, and supplier `fulfilment_proof`; rider for version-2 `packing_photo`, `delivery_photo`, `handoff_signature`, `rider_verification_document`, and rider `fulfilment_proof`. Assignment and domain state are rechecked when a file is attached. Pending applicants may upload their own role-specific evidence; no other identity may upload it on their behalf.
 
 Request: `multipart/form-data` with exactly:
 
@@ -249,10 +267,11 @@ Auth: the caller must be the file owner **and** the relevant parent owner/assign
 |---|---|---|
 | `artwork` | `{ "orderId": "..." }` | caller is `order.clientId`; any current order state |
 | `production_photo` | `{ "orderId": "..." }` | assigned approved supplier, while order is `production` or `supplier_self_qc`; otherwise `409 production_photo_upload_not_allowed` |
-| `packing_photo` | `{ "orderId": "..." }` | assigned approved supplier, while order is `production` or `supplier_self_qc`; otherwise `409 packing_photo_upload_not_allowed` |
+| `finished_product_photo` | `{ "orderId": "..." }` | assigned approved supplier, version-2 handover in `production`; otherwise `409 finished_product_photo_upload_not_allowed` |
+| `packing_photo` | `{ "orderId": "..." }` | legacy: assigned approved supplier in `production` or `supplier_self_qc`; version 2: assigned approved rider in `rider_assigned` after successful inspection, with no hold/escalation. Reference binds to the inspection ID; see [Shop handover](SHOP_HANDOVER_API.md) |
 | `fulfilment_proof` | `{ "orderId": "...", "milestoneCode": "production_started" }` | a stage of the order's own payout plan that takes a file: assigned supplier for `production_started` (plan 2) or `printing`/`packaging_qc` (legacy plan 1); assigned rider for `delivered`. `issue_window` and `retention` take no direct upload |
 | `delivery_photo` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
-| `handoff_signature` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned` only, else `409 handoff_signature_upload_not_allowed`. Named by `signature.fileId` on `POST /dispatch/:id/pickup-checklist` |
+| `handoff_signature` | `{ "orderId": "..." }` | caller is assigned `order.riderId`; state `rider_assigned` only, else `409 handoff_signature_upload_not_allowed`. Version 2 additionally requires the rider packed photo and binds to the current inspection. Named by `signature.fileId` on legacy `/pickup-checklist` or version-2 `/pickup-confirm` |
 | `service_image` | `{ "supplierServiceId": "..." }` | caller is `supplierService.supplierId` |
 | `verification_document` | `{ "documentType": "business_permit" }` or `{ "documentType": "sample_work", "replaceFileId": "..." }` | caller is a supplier; target is always derived from the token and cannot be supplied |
 | `rider_verification_document` | `{ "riderDocumentType": "drivers_license", "expiresOn": "2028-06-30" }` | caller is the rider owner; licence requires a future expiry, while `or_cr` and `selfie` omit it |
@@ -297,13 +316,13 @@ curl -fsS -X POST "$API/files/$RIDER_LICENSE_FILE_ID/attach" -H "Authorization: 
 
 Auth for ordinary purposes: `ops_admin`, `super_admin`, file owner, or a user related to any current reference: the referenced order's client/assigned supplier/assigned rider, the referenced service's owner supplier, or any authenticated user when the referenced service is `live`. Unattached ordinary files are visible only to owner and ops/super. A `handoff_signature` is additionally never readable by the order's client — it is a person's handwriting, and the client has no part in the counter handoff. When acting as supplier/rider, an order-referenced file additionally requires current approval, even for its uploader. Explicit [actor role selection](OPERATIONAL_MODEL_V2_API.md#selecting-an-actor-role) applies to file authorization and returned parent projections throughout upload/attach transactions.
 
-`packing_photo` metadata and signed reads are limited to its supplier owner, the owning client after attachment, and Operations/Super Admin. Riders cannot read it, including an assigned rider. It uses the existing one-year order-photo retention policy and open-case holds.
+`packing_photo` metadata and signed reads on legacy handovers remain supplier/client/staff-only. Version-2 handovers additionally allow the currently assigned approved rider; unrelated riders cannot read them. Unattached uploads are owner-only apart from staff access. Both packing and finished-product photos use the existing one-year order-photo retention policy and open-case holds. See [Shop handover](SHOP_HANDOVER_API.md) for inspection-bound evidence.
 
 `support_chat_image` reads use the conversation boundary (`canViewThread` in `src/support-chat.js`). Photos in a private staff-pair thread are available only to its participants, including against unrelated Operations/Super Admin callers. Photos in a party support thread remain available to that party and the shared staff inbox. Unsent uploads are owner-only. This applies to metadata and signed download URLs.
 
 `delivery_chat_image` reads follow the delivery conversation (`canReadDeliveryChatPhoto` in `src/delivery-chat.js`): the order's client and the rider the photo was sent with, while that rider still has the job and the conversation is open or read-only. Operations, Super Admin, a reassigned rider and, after the conversation closes, the sender too are refused. When the lifecycle sweep deletes the conversation it removes the references, sets the photos `delete_pending` (`deletionSource: "early"`, `deletionReason: "delivery_chat_closed"`) and deletes their objects; the file retention pass retries any that storage refused. Unsent uploads are owner-only and expire as unused files.
 
-Artwork and mockup reads for suppliers/riders follow the reader's assigned job lines, including `line:<lineId>:artwork|mockup` references. A line reference must resolve to that order's line, the requested file, and a job assigned to the reader; a primary order assignment, uploader ownership, or additional order-wide reference cannot bypass that check. Files shared by multiple lines are readable through any assigned line. The same scope filters `artworkFileIds`, `mockupFileIds`, and the artwork filename in order responses. The owning client and Operations/Super Admin retain full access.
+Artwork and mockup reads for suppliers/riders follow the reader's assigned job lines, including `line:<lineId>:artwork|mockup` references. A line reference must resolve to that order's line, the requested file, and a job assigned to the reader; a primary order assignment, uploader ownership, or additional order-wide reference cannot bypass that check. For multi-attachment lines, the reference matches any uploaded file in `artworkAttachments`, including secondary uploads; it is not limited to `artworkFileId`. Files shared by multiple lines are readable through any assigned line. The same scope filters `artworkFileIds`, `mockupFileIds`, `productionItems[].artworkAttachments` (including their signed download URLs), and the artwork filename in order responses. The ordered attachment payload, limit, and proof/mockup source are documented in [Order matching](ORDER_MATCH_API.md#multiple-artwork-attachments). The owning client and Operations/Super Admin retain full access.
 
 Operations supplier reassignment transfers the former supplier's jobs in the same transaction as the order assignment. Line snapshots and file references stay unchanged: the replacement can read those jobs' artwork, mockups, and design links, and the former supplier can no longer request their metadata or new download URLs. Other jobs retain their existing scope. Previously issued signed URLs remain usable until their normal expiry (five minutes by default, at most fifteen minutes); reassignment does not revoke those URLs.
 
@@ -522,3 +541,116 @@ Progress images use the same private read gate as artwork. The client gallery an
 ### Client application documents
 
 `client_verification_document` uploads are client-owned JPEG/PNG/WebP/PDF files up to 20 MiB. Complete application submission attaches them through the existing file-reference mechanism. Only Operations and Super Admin can read metadata or signed bytes, including after submission; the owner receives the opaque file ID at upload. Track checklists, rejected-revision retention and handover rules are in [Organization accounts](ORGANIZATION_ACCOUNTS_API.md). Automatic deletion remains disabled by default.
+
+### Pick-up chat photos
+
+`pickup_chat_image` accepts supplier/rider JPEG, PNG and WebP images up to 15 MiB, using the usual upload verification. Up to four own ready unsent photos bind through `POST /orders/:id/pickup-chat/messages`. Generic attach is refused with `pickup_chat_image_not_attachable`. Sent metadata/downloads are private to the approved assigned supplier and rider while the conversation is readable, including Office transfers; reassignment revokes access. The chat sweep queues byte deletion when the conversation closes; retained opaque order references preserve open-case holds on every retry. See [pick-up messages](OPERATIONAL_MODEL_V2_API.md#pick-up-messages).
+
+## Artwork visual previews
+
+PDF artwork has a **first-page PNG rendition**, generated once
+when the upload becomes ready. Existing ready files are rendered lazily on the
+first preview request. JPEG/PNG/WebP use their original image bytes. Original
+upload/download behavior, inspection measurements, page-count metadata and
+Operations' print-readiness decision are unchanged. A preview is advisory,
+not a print-ready conversion. Word previews are deferred to a separate isolated
+converter; the API does not run an office suite.
+
+`file.preview` on upload, metadata and attach responses is additive:
+
+```json
+{
+  "status": "ready",
+  "downloadUrlPath": "/files/file_abc/preview-url",
+  "retryPath": "/files/file_abc/preview"
+}
+```
+
+Statuses are `pending` (legacy/not yet rendered), `ready`, `failed`, and
+`unsupported`. A stored failure adds `error`, a stable code. DOCX always projects
+`status: "unsupported"` and `error: "preview_word_not_available"`, including files
+with older cached preview metadata. Authorized GET/Retry requests for DOCX return
+`422` with `{error: "preview_word_not_available", message: "Preview not available for Word files yet - open the original"}`.
+The client should show that message and retain **Open original file**. Word
+uploads, page counts, checkout and original downloads are unchanged. No Word
+rendition is generated, read or signed; Retry returns the same reason without
+starting conversion. The existing Retry contract for PDFs and images is unchanged.
+
+`downloadUrlPath` and `retryPath` are resolver paths, **not image URLs**. Order responses add `artworkPreviews`, containing
+`{fileId, ...preview}` entries only for the artwork IDs visible to that reader.
+A supplier still receives no artwork before Operations releases the file check;
+multi-shop and per-line access rules apply unchanged. No preview object key,
+source path, document content, or renderer stderr appears in these projections.
+
+- `GET /files/:fileId/preview-url`: authorize the original ready artwork, lazily
+  render if necessary, check the rendition exists and matches its recorded size,
+  and return `{fileId, contentType, page: 1, url, expiresAt, expiresInSeconds}`.
+  The image URL is independently signed, with the existing storage TTL and
+  `private, no-store` response caching. Refresh it through this route on expiry.
+- `POST /files/:fileId/preview` with `{}`: explicit Retry. Regenerate a PDF
+  rendition and return a fresh signed response. Attempts have a 30-second
+  cooldown (`429 preview_retry_later`, or the last generation error); concurrent
+  conversions of other files receive `503 preview_busy`. Retrying an ordinary
+  image refreshes its signed original URL.
+- `POST /files/:fileId/preview-failure` with
+  `{ "reason": "image_load_failed" }` or `{ "reason": "download_failed" }`:
+  report a device-side read/decode failure after original-file authorization.
+  Returns `{ok:true}`. Arbitrary messages, URLs and document text are not accepted.
+  This is needed because direct signed MinIO reads do not pass through the API.
+
+Client follow-up: resolve `downloadUrlPath` with the Clerk bearer, then use `url`
+as the image source in the visual proof. Display an obvious error with Retry
+for non-2xx responses and image-load failures, keep **Open original file**, and
+report device failures through `preview-failure`. Retry calls `retryPath`; respect
+429/503 backoff. Never render the original PDF or DOCX URL as an image, and do not
+mistake `pending` for a permanently unsupported type.
+
+Generation and API preview-read failures log structured `artwork_preview_failed`
+records with `fileId`, `phase` and a bounded reason code. Examples include
+`preview_rasterization_failed`, `preview_render_timeout`,
+`preview_word_not_available`, `preview_source_too_large`,
+`storage_object_missing` and `minio_unavailable`. Upload success is independent
+of rendition success; a failed preview leaves the original ready and downloadable.
+
+Rendition metadata lives on the parent `files.data.preview`; the private PNG is
+a deterministic derived MinIO object, not an independently attachable upload.
+It inherits every authorization/hold from its parent. Early and scheduled deletion
+remove both objects, including a rendition written just before a metadata-commit
+failure. A post-conversion transaction rechecks the parent under the domain lock
+before writing, so deletion cannot be undone by an in-flight renderer. Rendering
+uses a separate PostgreSQL advisory lock and does not hold the domain lock while
+converting. No migration or boot-time schema change is needed.
+
+The Docker image adds Alpine `poppler-utils` and `util-linux` (`prlimit`).
+LibreOffice, its office libraries and the explicitly installed Liberation fonts
+are not included. Poppler rasterizes only page 1 to at most 1600 pixels on the
+long edge. There is no new npm runtime dependency. Each render has a private
+temporary directory, no inherited API credentials, a 25-second wall-clock
+timeout, 20 CPU seconds, 1 GiB virtual-memory and 8 MiB per-output-file limits.
+PDF source reads are bounded at 64 MiB. One render runs across API replicas at
+a time. Temporary data is removed after success or failure.
+
+The existing DOCX upload/package limits and stricter preview inspection helper
+remain intact, including guards against active content disguised by extension.
+No Word content is sent to a converter in this release. Preview eligibility uses
+the detected content type, so a Word upload named `.pdf` cannot enable conversion.
+Password-protected or malformed PDFs receive an explicit error; PSD visual
+conversion and legacy binary `.doc` are not implemented. CI installs Poppler for
+fixture tests and also renders real small PDFs and verifies Word refusal inside
+the built production image, as uid 1001 with no network.
+
+## Supplier invoice scans
+
+`supplier_invoice` uses the existing supplier-owned multipart upload and order
+attachment flow: JPEG/PNG/WebP/PDF, maximum 15 MiB. `POST /files/:fileId/attach`
+accepts `{orderId}` and writes `supplierInvoiceFileIds`; approved owning shops and
+Operations/Super Admin alone can read metadata and signed bytes. Invoice uploads,
+metadata reads and signed downloads use private/no-store caching. Scans remain
+optional for dispatch and payouts. An invoice obligation snapshots the shop on
+first readiness; subsequent invoice attachments honor that owner after recovery.
+Refund work holds do not block invoice paperwork. Existing financial retention
+and open-case holds still apply.
+
+Use [Supplier invoices](SUPPLIER_INVOICES_API.md) for entered invoice number/date/
+amount, monthly expected/received/missing counts, the shop reminder and audited
+paper collection. Reuse this file purpose; do not introduce another upload flow.
