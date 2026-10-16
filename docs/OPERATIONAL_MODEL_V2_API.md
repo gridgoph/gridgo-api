@@ -1091,7 +1091,7 @@ A shop is paid across proof-gated stages, every one a share of the shop's own co
 | Position | `code` | `label` | `sharePercent` | `releaseRequires` | Releasable when |
 |---:|---|---|---:|---|---|
 | 1 | `production_started` | Start of production | 40 | `shop_proof` | the assigned shop attached its start-of-production Proof of Fulfilment and the order is in `production` or later |
-| 2 | `delivered` | Delivered | 35 | `delivery_proof` | the client has the job (`delivered`, `issue_window_open`, `completed`, `payout_released`) with delivery proof. The rider's `POST /dispatch/:id/delivery` evidence is recorded as this proof automatically; the rider may also attach a `fulfilment_proof` to it |
+| 2 | `delivered` | Delivered | 35 | `delivery_proof` | the client has the job (`delivered`, `issue_window_open`, `completed`, `payout_released`) with delivery proof. The rider's `POST /dispatch/:id/delivery` evidence is recorded as this proof automatically; the rider may also attach a `fulfilment_proof` to it, and [the same picture is listed once](#payout-proofs) |
 | 3 | `issue_window` | Issue window closed | 25 | `issue_window_closed` | the complaint window has closed (`completed` or `payout_released`) -- the timer ended or the client confirmed the job fine -- with no active claim. It has no file of its own |
 
 **Plan 1, legacy four stages** (every order committed earlier, including every row that predates the column): `printing` 50% (`shop_proof`), `packaging_qc` 15% (`shop_proof`, job packed and ready for a rider), `delivered` 25% (`delivery_proof`, a rider-attached `fulfilment_proof`), `retention` 10% (`issue_window_closed`, inherits the delivered proof). These orders release exactly as before, including the system release of `retention` when the window closes with proof attached.
@@ -1120,6 +1120,14 @@ Every order projection that carries stages carries the plan with it, so a screen
 - `releaseRequires`: `shop_proof | delivery_proof | issue_window_closed`, what the release desk is waiting on.
 - `sharePercent` and `amountMinor` are the stored snapshot. On plan 2 the `issue_window` stage stays `pending_pof` until released; it never needs a file.
 - Operations/Super Admin and the assigned shop see the payout plan, amounts, references and receipts. Clients and riders receive neither `payoutMilestones` nor `payoutPlanVersion`; progress is exposed separately through plain history and `productionProgress`.
+
+### Payout proofs
+
+`pofFileIds` lists each proof picture once, in the order it was first filed, by the first copy still stored; draw every id it carries. One picture can reach a stage as several uploads: the rider app sends one delivery capture both as the `delivery_photo` and as the `delivered` `fulfilment_proof`, after which `POST /dispatch/:id/delivery` names the delivery photo as that same stage's proof, and a filing retried after a lost answer is a second upload. Two uploads are the same picture when their bytes hash the same (SHA-256, recorded at upload and never exposed). Two files that were both stored before uploads were hashed fall back to the same uploader, file name, size and type; a hashed upload is only ever compared by its bytes, so a new picture is never hidden behind an old one that shares its name.
+
+- **Writing.** The delivery evidence joins `delivered` only when it is a different picture from what the stage lists. A `fulfilment_proof` whose picture the stage already lists attaches with `200` (the upload is the order's file) but is not listed again.
+- **Reading.** Every projection that carries `payoutMilestones` (the assigned shop and GRIDGO Team: `ops_admin`, `super_admin`) lists each picture once, including stages stored before this rule, which are not rewritten. `productionProgress.photos` shows the same bytes uploaded twice once, comparing bytes only.
+- **Many proofs.** A shop files as many `production_started` (legacy `printing`, `packaging_qc`) pictures as it wants, one attach per upload, before or after the stage is released (a released stage stays `released`; refund work holds still apply), up to 50 distinct pictures per stage; past that the attach is `409 proof_limit_reached` with `details.milestoneCode` and `details.maxProofs`. The rider's `delivered` stage follows the same rule; recording the delivery evidence is never refused for it. Release still needs only one proof.
 
 Release:
 
