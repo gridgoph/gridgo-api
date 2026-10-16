@@ -20,7 +20,7 @@ import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouc
 import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
 import { loadVapid, createWebPushDelivery, routeWebPush, unregisterWebSubscription } from "./web-push.js";
-import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
+import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours, outsideHoursMark } from './operating-hours.js';
 import {
   FUNNEL_BURST, FUNNEL_DAILY_LIMIT, assertFunnelBody, buildFunnelEvent, insertFunnelEvent, readPricingDashboard, recentFunnelState,
 } from "./pricing-dashboard.js";
@@ -6135,9 +6135,9 @@ async function handleAuditedRequest(req, res) {
           message: "This order is assigned to another account. Open one of your own orders before taking this action.",
         });
       }
-      if (order.operatingClock && (next === 'rider_assigned' || next === 'picked_up'
+      if (order.operatingClock && (next === 'rider_assigned'
         || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
-        requireOperatingHours(store.settings, now(), next === 'rider_assigned' || next === 'picked_up' ? 'Dispatch' : 'Artwork review');
+        requireOperatingHours(store.settings, now(), next === 'rider_assigned' ? 'Dispatch' : 'Artwork review');
       }
       if (PACKAGING_STATES.includes(next)) {
         const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason, reasonCode: body.reasonCode });
@@ -6474,7 +6474,8 @@ async function handleAuditedRequest(req, res) {
         audit(store, { actor: user, action: request.action, entityType: "order", entityId: order.id,
           orderId: order.id, reason: request.reason, detail: request.detail });
       }
-      order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
+      order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "",
+        ...(next === "out_for_delivery" ? outsideHoursMark(order, store.settings, order.updatedAt) : {}) });
       if (next === "ready_for_dispatch" || next === "rider_assigned") {
         syncJobsWithOrder(store, order, order.updatedAt);
       }
@@ -6622,7 +6623,7 @@ async function handleAuditedRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
-      if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
+      // The rider is already assigned and at the shop: hours gate new dispatch only, never this handover.
       if (order.state !== "rider_assigned") {
         return send(res, 409, {
           error: "pickup_checklist_not_available",
@@ -6748,6 +6749,7 @@ async function handleAuditedRequest(req, res) {
           by: user.id,
           note: `Pickup blocked and escalated: ${failedCheckCodes.join(", ")}`,
           escalationId: escalation.id,
+          ...outsideHoursMark(order, store.settings, checkedAt),
         });
         for (const membership of privilegedAdminMemberships(store)) {
           store.notifications.push({
@@ -6855,6 +6857,7 @@ async function handleAuditedRequest(req, res) {
         by: user.id,
         note: `All six pickup checks passed; ${signerName} signed the handoff on the rider's phone`,
         fileId: signatureFileId,
+        ...outsideHoursMark(order, store.settings, checkedAt),
       });
       audit(store, {
         actor: user,
@@ -7063,6 +7066,7 @@ async function handleAuditedRequest(req, res) {
           by: user.id,
           note: "Left at GRIDGO Office for the client to collect",
           fileId: evidenceFileId,
+          ...outsideHoursMark(order, store.settings, deliveredAt),
         });
         notifyOrderParties(store, order, { createId: id, at: deliveredAt });
         queueOrderInvalidate(store, order, ["orders", "jobs"]);
@@ -7070,7 +7074,8 @@ async function handleAuditedRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       completeHandover(store, order, { actor: user, at: deliveredAt, id,
-        note: body.evidenceType === 'photo' ? 'Delivery completed with photo evidence' : 'Delivery completed with signature evidence', fileId: evidenceFileId });
+        note: body.evidenceType === 'photo' ? 'Delivery completed with photo evidence' : 'Delivery completed with signature evidence', fileId: evidenceFileId,
+        mark: outsideHoursMark(order, store.settings, deliveredAt) });
       await save(store);
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }

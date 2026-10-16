@@ -1086,6 +1086,7 @@ export function authorizeFileAttach(user, file, target, store = null) {
   }
   if (file.purpose === "handoff_signature") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
+    if (riderPackingFlow(record) && !currentInspection(record)) fail(409, 'unpacked_inspection_required', 'Complete the unpacked item checks before the shop signs.');
     if (riderPackingFlow(record) && !inspectedPackingPhotos(store, record).length) fail(409, 'packing_photo_required', 'Attach the rider packing photo after inspection before signing.');
     if (!HANDOFF_SIGNATURE_STATES.has(record.state)) {
       fail(
