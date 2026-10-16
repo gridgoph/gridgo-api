@@ -18,6 +18,7 @@ import { organizationFeeMoney, validateOrganizationFee } from "./organization-mo
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased, fileCheckProjection } from "./artwork-gates.js";
 import { hubPickupSettings, validateHubPickup } from "./hub-pickup.js";
+import { publicOrderCoverSpine } from "./hardbound-cover.js";
 import { defaultArtworkGuidance, publicArtworkGuidance } from "./artwork-guidance.js";
 import { artworkColorsFor, colorTargetsFor } from "./color-targets.js";
 import { publicRecovery } from './shop-recovery-projection.js';
@@ -254,6 +255,12 @@ export function defaultOperationalSettings() {
      * Off until Super Admin turns it on. A request already on file stays.
      */
     physicalInvoiceRequestsEnabled: false,
+    /**
+     * Whether checkout refuses a hardbound or binding line without its cover
+     * choice and spine. Off until the client release that sends it reaches
+     * coverage; released builds cannot send it.
+     */
+    coverSpineRequired: false,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     productionPenalty: defaultProductionPenalty(),
@@ -327,6 +334,9 @@ export function validateOperationalSettings(settings) {
       "physicalInvoiceRequestsEnabled must be a JSON boolean.",
       { field: "physicalInvoiceRequestsEnabled" },
     );
+  }
+  if (settings?.coverSpineRequired !== undefined && typeof settings.coverSpineRequired !== "boolean") {
+    fail(400, "invalid_cover_spine_required", "coverSpineRequired must be a JSON boolean.", { field: "coverSpineRequired" });
   }
   const riderCommissionBps = settings?.riderCommissionBps;
   if (riderCommissionBps !== undefined && (!Number.isInteger(riderCommissionBps)
@@ -1036,6 +1046,9 @@ function productionItemsFor(store, order, user) {
         // each uploaded file uses. Production parties only; [] for riders.
         colorTargets: production ? colorTargetsFor(line) : [],
         artworkColors: production ? artworkColorsFor(store, artworkFileIdsFor(line)) : [],
+        // The cover choice and spine lettering agreed at checkout. Null for
+        // products that do not ask, older orders and riders.
+        coverSpine: production ? publicOrderCoverSpine(line.coverSpine ?? null) : null,
       };
     });
 }

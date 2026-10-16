@@ -4,6 +4,7 @@ import { productionProjection, displayProductionDayMinutes } from "./production-
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { listingPrintLayouts } from "./print-layout.js";
 import { listingExpress } from "./express.js";
+import { coverSpineApplies } from "./hardbound-cover.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { measurementKindFor, priceLine } from "./pricing.js";
@@ -536,6 +537,8 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     printLayouts: listingPrintLayouts(item),
     // Same-day availability the shop switched on (docs/EXPRESS_API.md).
     express: listingExpress(item),
+    // Hardbound and binding products ask for a cover choice and the spine text.
+    coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id).map((tier) => ({
       ...tier, clientUnitPriceMinor: clientMoneyMinor(store, tier.unitPriceMinor),
     })),
@@ -1257,6 +1260,7 @@ export function privateCatalogItem(store, item) {
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     printLayouts: listingPrintLayouts(item),
     express: listingExpress(item),
+    coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),
     turnaroundMode: item.turnaroundMode || "inherit",
