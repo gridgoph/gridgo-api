@@ -61,6 +61,11 @@ export function slaDueAt(clock, from, durationMs) {
     : new Date(Date.parse(from) + durationMs).toISOString();
 }
 
+/** Hours gate only work that begins; a custody step on an assigned trip is marked in the timeline instead. */
+export function outsideHoursMark(order, settings, at) {
+  return order.operatingClock && !isOpenAt(operatingHours(settings).schedule, at) ? { outsideOperatingHours: true } : {};
+}
+
 export function requireOperatingHours(settings, at, activity) {
   const timing = reviewTiming(settings, at);
   if (!timing.isOpenNow) throw new AvailabilityError(409, 'outside_operating_hours',

@@ -121,9 +121,38 @@ pickup and packing attachment. There is no direct transition to `picked_up`.
 
 New refusals: `409 unpacked_inspection_required`, `409 packing_photo_required`,
 `409 pickup_held`, `409 arrived_packed_not_available`; existing signature,
-count, escalation, operating-hours and hold errors remain. A legacy order cannot
-use `/pickup-confirm`; its existing single checklist-plus-signature endpoint
-still completes pickup.
+count, escalation and hold errors remain. Operating hours never refuse these
+steps once the rider is assigned ([Operating hours](OPERATING_HOURS_API.md#work-gates-and-prospective-sla-clocks)).
+A legacy order cannot use `/pickup-confirm`; its existing single
+checklist-plus-signature endpoint still completes pickup.
+
+Attaching `handoff_signature` reports the first missing step in order: with no
+current inspection by this rider it returns `409 unpacked_inspection_required`;
+with an inspection but no packed photo for it, `409 packing_photo_required`. A
+client that never inspected is therefore sent back to the checks, not to the
+packing photo.
+
+### Rider client refusal codes
+
+Every refusal a rider app can meet on an assigned trip, by route. Show plain
+words for each; never fall back to a generic "not recorded" message.
+
+| Route | Codes |
+|---|---|
+| any of these routes | `403 forbidden`, `403 rider_not_approved`, `404 order_not_found`, `409 reschedule_fulfillment_stopped`, `409 shop_recovery_pending`, `409 refund_fulfillment_stopped` |
+| `POST /dispatch/:id/accept` (new dispatch) | `409 not_offerable`, `409 dispatch_paused`, `409 pickup_fulfillment_not_available`, `409 outside_operating_hours` (with `scheduledReviewAt`) |
+| `POST /dispatch/:id/arrived-packed` | `409 arrived_packed_not_available` |
+| `POST /dispatch/:id/milestones` | `400 invalid_delivery_milestone`, `409 delivery_milestone_not_available` |
+| `POST /dispatch/:id/pickup-checklist` | `409 pickup_checklist_not_available`, `409 pickup_escalation_open`, `409 claim_hold_active`, `409 pickup_count_unavailable`, `400 invalid_pickup_checklist`, `400 invalid_pickup_counts`, `400 checklist_evidence_required`, `400 invalid_checklist_evidence`; legacy flow also `409 handoff_signature_required`, `400 handoff_signer_name_required`, `400 invalid_handoff_signature` |
+| `POST /dispatch/:id/pickup-confirm` | `409 handover_flow_not_available`, `409 pickup_checklist_not_available`, `409 pickup_escalation_open`, `409 claim_hold_active`, `409 unpacked_inspection_required`, `409 packing_photo_required`, `409 handoff_signature_required`, `400 handoff_signer_name_required`, `400 invalid_handoff_signature` |
+| `POST /files/:id/attach` `packing_photo` | `409 unpacked_inspection_required`, `409 pickup_held` |
+| `POST /files/:id/attach` `handoff_signature` | `409 unpacked_inspection_required`, `409 packing_photo_required`, `409 handoff_signature_upload_not_allowed` |
+| `POST /files/:id/attach` `delivery_photo` | `409 delivery_photo_upload_not_allowed` |
+| `POST /orders/:id/transition` `out_for_delivery` | `409 transition_not_allowed` |
+| `POST /dispatch/:id/delivery` | `409 delivery_not_available`, `409 final_payment_not_confirmed`, `409 pof_required`, `400 invalid_delivery_evidence_type`, `400 delivery_evidence_required`, `409 handover_not_ready`, `409 handover_already_completed`, `409 handover_otp_mismatch`, `429 handover_attempts_exceeded` |
+
+General file errors on upload/attach (size, type, state) are in
+[STORAGE_API](STORAGE_API.md).
 
 The `packingProgress` gallery includes signed rider photos for the owning client,
 assigned supplier/rider and staff. Unassigned riders and unrelated users cannot

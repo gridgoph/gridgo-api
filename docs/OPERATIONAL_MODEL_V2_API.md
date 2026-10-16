@@ -1312,6 +1312,10 @@ The rider first uploads the rasterised pad as a `handoff_signature` PNG (rider-o
 | `400 handoff_signer_name_required` | `signerName` missing, or outside 2–120 characters after trimming |
 | `400 invalid_handoff_signature` | `fileId` is not a ready, rider-owned `handoff_signature` file attached to this order |
 | `409 handoff_signature_upload_not_allowed` | (on attach) the order is no longer `rider_assigned` |
+| `409 unpacked_inspection_required` | (on attach, rider-packs) the rider has not recorded the unpacked inspection; checked before the packing photo |
+| `409 packing_photo_required` | (on attach, rider-packs) the inspection is recorded but the rider's packed photo for it is not |
+
+Operating hours never refuse the signature, checklist or confirmation once a rider is assigned; see [Operating hours](OPERATING_HOURS_API.md#work-gates-and-prospective-sla-clocks). Full rider refusal list: [SHOP_HANDOVER_API](SHOP_HANDOVER_API.md#rider-client-refusal-codes).
 
 With a valid signature the order moves to `picked_up` and the checklist records the attestation. The signature is immutable once recorded: the checklist route is closed after `rider_assigned`, and attaching another signature is refused, so re-signing requires Operations to reopen the pickup through an escalation.
 
