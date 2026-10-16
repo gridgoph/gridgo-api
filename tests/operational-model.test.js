@@ -746,7 +746,9 @@ test("production items show every assigned line and options without payment evid
     assert.deepEqual(projected.productionItems[0].measurement, { widthMilli: 2000, heightMilli: 3000, unit: "ft" });
     assert.deepEqual(projected.productionItems[1].options, [{ groupName: "Sides", label: "Both" }]);
     assert.deepEqual(projected.productionItems[1].structuredSpec, { size: "2 × 3 ft", material: "Canvas", finish: "None" });
-    assert.equal(JSON.stringify(projected.productionItems).includes("Minor"), false);
+    // Operations' QA review reads each line's agreed price; no other party receives one.
+    assert.equal(JSON.stringify(projected.productionItems).includes("Minor"), role === "ops_admin");
+    if (role === "ops_admin") assert.deepEqual(Object.keys(projected.productionItems[0]).filter((key) => key.endsWith("Minor")), ["effectiveUnitPriceMinor", "lineSubtotalMinor"]);
     assert.equal(projected.payments.final_online.proofFileId, ["client", "ops_admin"].includes(role) ? "receipt" : undefined);
   }
   assert.deepEqual(publicOrderFor(order, { id: "unassigned", role: "rider" }, store).productionItems, []);

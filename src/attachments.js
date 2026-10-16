@@ -17,6 +17,7 @@ import { ARTWORK_UPLOAD_CONTENT_TYPES } from "./file-formats.js";
 import { inspectArtwork } from "./artwork-inspection.js";
 import { readArtworkColors } from "./artwork-colors.js";
 import { payoutPlanFor, payoutStageFor } from "./payout-plan.js";
+import { MAX_PROOFS_PER_MILESTONE, addStageProof, distinctProofIds, stageListsProof } from "./payout-proofs.js";
 import { publicCatalogMediaFile, publicSupplierShop } from "./supplier-catalog.js";
 
 export const MAX_FILE_SIZE = 200 * 1024 * 1024;
@@ -279,6 +280,9 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
         declaredContentType: String(headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase(),
         size: 0,
         sniffBytes: Buffer.alloc(0),
+        // Hashed while it streams, so finding the same picture uploaded twice
+        // never has to read the file back.
+        hash: crypto.createHash("sha256"),
       };
       return;
     }
@@ -314,6 +318,7 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
       const needed = 32 - current.sniffBytes.length;
       current.sniffBytes = Buffer.concat([current.sniffBytes, bytes.subarray(0, needed)]);
     }
+    current.hash.update(bytes);
     await fileHandle.write(bytes);
   }
 
@@ -331,6 +336,7 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
         declaredContentType: current.declaredContentType,
         size: current.size,
         sniffBytes: current.sniffBytes,
+        sha256: current.hash.digest("hex"),
         tempPath,
       };
     }
@@ -627,6 +633,8 @@ export function createPendingFile({ fileId, objectKey, user, purpose, file, dete
     declaredContentType: file.declaredContentType || null,
     detectedContentType,
     size: file.size,
+    // Internal: the same picture under two uploads is one payout proof.
+    contentSha256: file.sha256 || null,
     state: "pending_upload",
     // What the bytes said about themselves, when they said anything. Advisory:
     // the client may overrule every field of it.
@@ -1052,6 +1060,16 @@ export function authorizeFileAttach(user, file, target, store = null) {
     if (!requiredRole || !hasApprovedWorkRole(user, requiredRole)) forbidden();
     if (requiredRole === "supplier" && record.supplierId !== user.id) forbidden();
     if (requiredRole === "rider" && record.riderId !== user.id) forbidden();
+    // A picture the stage already lists never counts against the limit: the
+    // retry of a filing whose answer was lost must still succeed.
+    const milestone = (record.payoutMilestones || []).find((item) => item.code === target.milestoneCode);
+    const files = store?.files || [file];
+    if (milestone && !stageListsProof(milestone, file, files)
+      && distinctProofIds(milestone.pofFileIds, files).length >= MAX_PROOFS_PER_MILESTONE) {
+      fail(409, "proof_limit_reached",
+        `This payout milestone already has ${MAX_PROOFS_PER_MILESTONE} proof photos. Ask GRIDGO Team if more evidence is needed.`,
+        { milestoneCode: target.milestoneCode, maxProofs: MAX_PROOFS_PER_MILESTONE });
+    }
     return;
   }
   if (file.purpose === "delivery_photo") {
@@ -1171,7 +1189,7 @@ export function attachSupplierShopImage(store, file, target, { at }) {
   return { media: store.supplierShopMedia.find((media) => media.fileId === file.fileId), profile: target.record };
 }
 
-export function attachFileReference(file, target) {
+export function attachFileReference(file, target, store = null) {
   const map = {
     supplier_invoice: "supplierInvoiceFileIds",
     artwork: "artworkFileIds",
@@ -1214,14 +1232,15 @@ export function attachFileReference(file, target) {
   if (file.purpose === "fulfilment_proof") {
     const milestone = (target.record.payoutMilestones || []).find((item) => item.code === target.milestoneCode);
     if (!milestone) fail(409, "milestone_not_found", "That payout milestone no longer exists. Refresh the order and try again.");
-    if (!Array.isArray(milestone.pofFileIds)) milestone.pofFileIds = [];
-    if (!milestone.pofFileIds.includes(file.fileId)) milestone.pofFileIds.push(file.fileId);
+    // A second upload of a picture the stage already lists is still attached
+    // to the order, but the stage keeps listing the picture once.
+    const files = store?.files || [file];
+    addStageProof(milestone, file.fileId, files);
     if (milestone.status === "pending_pof") milestone.status = "pof_attached";
     if (target.milestoneCode === "delivered") {
       const retention = (target.record.payoutMilestones || []).find((item) => item.code === "retention");
       if (retention) {
-        if (!Array.isArray(retention.pofFileIds)) retention.pofFileIds = [];
-        if (!retention.pofFileIds.includes(file.fileId)) retention.pofFileIds.push(file.fileId);
+        addStageProof(retention, file.fileId, files);
         if (retention.status === "pending_pof") retention.status = "pof_attached";
       }
     }

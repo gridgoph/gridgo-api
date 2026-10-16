@@ -110,13 +110,15 @@ function indirectCountPdf() {
   );
 }
 
-function png({ width, height, perMetre = null }) {
+function png({ width, height, perMetre = null, bitDepth = 0, colorType = 0 }) {
   const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const ihdr = Buffer.alloc(25);
   ihdr.writeUInt32BE(13, 0);
   ihdr.write("IHDR", 4, "latin1");
   ihdr.writeUInt32BE(width, 8);
   ihdr.writeUInt32BE(height, 12);
+  ihdr[16] = bitDepth;
+  ihdr[17] = colorType;
   const chunks = [signature, ihdr];
   if (perMetre != null) {
     const phys = Buffer.alloc(21);
@@ -133,7 +135,7 @@ function png({ width, height, perMetre = null }) {
   return Buffer.concat(chunks);
 }
 
-function jpeg({ width, height, unit = 1, density = 300 }) {
+function jpeg({ width, height, unit = 1, density = 300, components = 0 }) {
   const jfif = Buffer.alloc(18);
   jfif.writeUInt16BE(0xffe0, 0);
   jfif.writeUInt16BE(16, 2);
@@ -147,6 +149,7 @@ function jpeg({ width, height, unit = 1, density = 300 }) {
   sof[4] = 8;
   sof.writeUInt16BE(height, 5);
   sof.writeUInt16BE(width, 7);
+  sof[9] = components;
   return Buffer.concat([Buffer.from([0xff, 0xd8]), jfif, sof, Buffer.from([0xff, 0xd9])]);
 }
 
@@ -250,6 +253,67 @@ test("A4 and Letter are not confused for each other", () => {
 test("an unrecognised size is left unnamed rather than rounded to the nearest", () => {
   assert.equal(namePageSize(500000, 700000), null);
   assert.equal(orientationOf(300000, 300000), "square");
+});
+
+test("a PDF stores colour, embedded fonts and bleed only when the bytes say so", () => {
+  const plain = inspectArtwork(pdf(), "application/pdf");
+  assert.equal(plain.colorMode, null);
+  assert.equal(plain.fonts, null);
+  assert.equal(plain.bleedMilli, null);
+
+  // 3 mm is 8.503937 pt. The trim sits that far inside the media box.
+  const marked = Buffer.concat([
+    pdf({ box: "0 0 612.283874 858.897874" }),
+    Buffer.from(
+      "\n5 0 obj<</Type /Page /ColorSpace /DeviceCMYK /TrimBox [8.503937 8.503937 603.779937 850.393937] " +
+        "/Resources <</Font <</F1 6 0 R>>>> >>endobj\n" +
+        "6 0 obj<</Type /Font /Subtype /TrueType /BaseFont /ABCDEF+Arial /FontDescriptor 7 0 R>>endobj\n" +
+        "7 0 obj<</Type /FontDescriptor /FontName /ABCDEF+Arial /FontFile2 8 0 R>>endobj\n",
+      "latin1",
+    ),
+  ]);
+  const read = inspectArtwork(marked, "application/pdf");
+  assert.equal(read.colorMode, "cmyk");
+  assert.deepEqual(read.fonts, [{ name: "Arial", embedded: true }]);
+  assert.equal(read.bleedMilli, 3000);
+});
+
+test("a referenced font without a font file is not called embedded", () => {
+  const marked = Buffer.concat([
+    pdf(),
+    Buffer.from("\n6 0 obj<</Type /Font /BaseFont /Helvetica>>endobj\n", "latin1"),
+  ]);
+  const read = inspectArtwork(marked, "application/pdf");
+  assert.deepEqual(read.fonts, [{ name: "Helvetica", embedded: false }]);
+});
+
+test("RGB and CMYK together are mixed, not silently CMYK", () => {
+  const marked = Buffer.concat([
+    pdf(),
+    Buffer.from("\n<</ColorSpace /DeviceRGB>> <</ColorSpace /DeviceCMYK>>\n", "latin1"),
+  ]);
+  assert.equal(inspectArtwork(marked, "application/pdf").colorMode, "mixed");
+});
+
+test("a PNG colour type is the IHDR byte, and a blank header is not grayscale", () => {
+  const rgb = inspectArtwork(
+    png({ width: 100, height: 80, bitDepth: 8, colorType: 2 }),
+    "image/png",
+  );
+  assert.equal(rgb.colorMode, "rgb");
+  assert.equal(rgb.hasAlpha, false);
+  const blank = inspectArtwork(png({ width: 100, height: 80 }), "image/png");
+  assert.equal(blank.colorMode, null);
+});
+
+test("a JPEG frame's component count is its colour mode", () => {
+  const cmyk = inspectArtwork(
+    jpeg({ width: 400, height: 400, density: 300, components: 4 }),
+    "image/jpeg",
+  );
+  assert.equal(cmyk.colorMode, "cmyk");
+  const unread = inspectArtwork(jpeg({ width: 400, height: 400, density: 300 }), "image/jpeg");
+  assert.equal(unread.colorMode, null);
 });
 
 test("a file that cannot be read is not an upload failure", () => {

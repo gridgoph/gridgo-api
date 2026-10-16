@@ -113,6 +113,8 @@ function inspectPdf(bytes) {
     collectPageBoxes(text, leafBoxes, inheritedBoxes);
     for (const space of declaredColorSpaces(text)) spaces.add(space);
   }
+  const fonts = fontsFromTexts(texts);
+  const bleedMilli = bleedMilliFromTexts(texts);
 
   // A PDF that yielded neither a page box nor a count told us nothing, and an
   // object of nulls reads downstream as "inspected, no measurements" when the
@@ -137,6 +139,9 @@ function inspectPdf(bytes) {
     pixelWidth: null,
     pixelHeight: null,
     colorMode: pdfColorMode(spaces),
+    fonts,
+    bleedMilli,
+    hasAlpha: null,
   };
 }
 
@@ -164,6 +169,80 @@ function pdfColorMode(spaces) {
   if (spaces.has("rgb")) return "rgb";
   if (spaces.has("grayscale")) return "grayscale";
   return null;
+}
+
+/** Subset prefixes (`ABCDEF+Arial`) are the writer's private tag, not the font. */
+function fontFaceName(raw) {
+  return raw.replace(/^[A-Z]{6}\+/, "");
+}
+
+/**
+ * Embedded fonts, from the font descriptor sitting next to the name.
+ *
+ * `/FontFile`, `/FontFile2` and `/FontFile3` are the embedded program. A name
+ * with none of them was referenced and not embedded. No names at all is null:
+ * a scan of a poster often has no fonts, and that is not "zero fonts missing".
+ */
+function fontsFromTexts(texts) {
+  const found = new Map();
+  for (const text of texts) {
+    const names = /\/(?:BaseFont|FontName)\s*\/([^\s[\]<>/]+)/g;
+    let match;
+    while ((match = names.exec(text)) !== null) {
+      const name = fontFaceName(match[1]);
+      if (!name) continue;
+      const window = text.slice(Math.max(0, match.index - 500), match.index + 500);
+      const embedded = /\/FontFile(?:2|3)?\b/.test(window);
+      const previous = found.get(name);
+      found.set(name, { name, embedded: Boolean(previous?.embedded || embedded) });
+    }
+  }
+  return found.size ? [...found.values()] : null;
+}
+
+/** The first page box of this name, in PDF points, or null. */
+function firstNamedBox(text, name) {
+  const match = new RegExp(
+    `\\/${name}\\s*\\[\\s*(-?[\\d.]+)\\s+(-?[\\d.]+)\\s+(-?[\\d.]+)\\s+(-?[\\d.]+)\\s*\\]`,
+  ).exec(text);
+  if (!match) return null;
+  const [x0, y0, x1, y1] = match.slice(1).map(Number);
+  if (![x0, y0, x1, y1].every((value) => Number.isFinite(value))) return null;
+  return {
+    x0: Math.min(x0, x1),
+    y0: Math.min(y0, y1),
+    x1: Math.max(x0, x1),
+    y1: Math.max(y0, y1),
+  };
+}
+
+/**
+ * Smallest bleed margin, in thousandths of a millimetre.
+ *
+ * Bleed is the gap between the trim and the bleed box, or the media box when
+ * the file has a trim and no bleed box. No trim means the file did not say,
+ * and a missing answer stays null rather than "no bleed".
+ */
+function bleedMilliFromTexts(texts) {
+  let trim = null;
+  let bleed = null;
+  let media = null;
+  for (const text of texts) {
+    trim = trim || firstNamedBox(text, "TrimBox");
+    bleed = bleed || firstNamedBox(text, "BleedBox");
+    media = media || firstNamedBox(text, "MediaBox");
+  }
+  const outer = bleed || (trim ? media : null);
+  if (!trim || !outer) return null;
+  const margins = [
+    trim.x0 - outer.x0,
+    trim.y0 - outer.y0,
+    outer.x1 - trim.x1,
+    outer.y1 - trim.y1,
+  ];
+  if (margins.some((margin) => !Number.isFinite(margin) || margin < -1)) return null;
+  const smallest = Math.min(...margins.map((margin) => Math.max(0, margin)));
+  return round(smallest * MM_PER_POINT * MILLI);
 }
 
 /**
@@ -491,7 +570,20 @@ function inspectPng(bytes) {
   const pixelWidth = bytes.readUInt32BE(16);
   const pixelHeight = bytes.readUInt32BE(20);
   if (!pixelWidth || !pixelHeight) return null;
-  return { pixelWidth, pixelHeight, dpi: pngDensity(bytes), colorMode: PNG_COLOR_MODES[bytes[25]] ?? null };
+  const colorRead = pngColorTypeRead(bytes);
+  return {
+    pixelWidth, pixelHeight, dpi: pngDensity(bytes),
+    colorMode: colorRead ? PNG_COLOR_MODES[bytes[25]] : null,
+    hasAlpha: colorRead ? bytes[25] === 4 || bytes[25] === 6 : null,
+  };
+}
+
+/**
+ * The IHDR colour type sits one byte after the bit depth; types 4 and 6 carry
+ * alpha. A zero bit depth is an unfinished header, not grayscale.
+ */
+function pngColorTypeRead(bytes) {
+  return bytes.length >= 26 && [1, 2, 4, 8, 16].includes(bytes[24]) && Object.hasOwn(PNG_COLOR_MODES, bytes[25]);
 }
 
 /** PNG colour types: grey, RGB, palette (RGB entries), grey + alpha, RGBA. PNG has no CMYK. */
@@ -568,7 +660,7 @@ function inspectJpeg(bytes) {
     at += 2 + length;
   }
   if (!size?.pixelWidth || !size?.pixelHeight) return null;
-  return { ...size, dpi, colorMode };
+  return { ...size, dpi, colorMode, hasAlpha: false };
 }
 
 /** Photoshop header colour modes: bitmap, grey, indexed, RGB, CMYK, duotone. */
@@ -710,6 +802,9 @@ export function inspectArtwork(bytes, contentType) {
     heightMilli: known ? heightMilli : null,
     pageSize: known ? namePageSize(widthMilli, heightMilli) : null,
     orientation: known ? orientationOf(widthMilli, heightMilli) : null,
+    fonts: read.fonts ?? null,
+    bleedMilli: Number.isFinite(read.bleedMilli) ? read.bleedMilli : null,
+    hasAlpha: typeof read.hasAlpha === "boolean" ? read.hasAlpha : null,
     // The page sizes above are the first page's. This covers every page, so a
     // plan set with one oversized drawing is not judged by its cover.
     pageEnvelope: known ? pageEnvelope(pages) : null,

@@ -53,10 +53,12 @@ export async function apiForTest(t, env = {}) {
   }
   assert.ok(healthy, output);
   return async (key, method, path, body, opts = {}) => {
+    // A FormData body is an upload: fetch writes its own multipart boundary.
+    const form = body instanceof FormData;
     const res = await fetch(`${origin}${path}`, { method,
       headers: { ...(key ? { Authorization: `Bearer ${token(key, opts.claims)}` } : {}),
-        'Content-Type': 'application/json', 'Idempotency-Key': opts.key || id('httpkey'), ...opts.headers },
-      ...(body ? { body: JSON.stringify(body) } : {}) });
+        ...(form ? {} : { 'Content-Type': 'application/json' }), 'Idempotency-Key': opts.key || id('httpkey'), ...opts.headers },
+      ...(body ? { body: form ? body : JSON.stringify(body) } : {}) });
     return { status: res.status, body: opts.raw ? await res.text() : await res.json(), headers: res.headers };
   };
 }

@@ -21,7 +21,11 @@ import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
 import { loadVapid, createWebPushDelivery, routeWebPush, unregisterWebSubscription } from "./web-push.js";
 import { operatingHours, reviewTiming, operatingClockSnapshot, tagDelayedReviews, requireOperatingHours } from './operating-hours.js';
+import {
+  FUNNEL_BURST, FUNNEL_DAILY_LIMIT, assertFunnelBody, buildFunnelEvent, insertFunnelEvent, readPricingDashboard, recentFunnelState,
+} from "./pricing-dashboard.js";
 import { routeAccountDeletion } from './account-deletion.js';
+import { tooManyRequests } from "./support-rate-limit.js";
 import { productionDuration, shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
 import { ANNOUNCEMENT_AUDIENCES, appendAnnouncement } from "./announcements.js";
 import { isReleaseAnnouncementRoute, routeReleaseAnnouncement } from "./release-announcements.js";
@@ -237,7 +241,15 @@ import {
   isSupportDeskRoute,
   routeSupportDesk,
 } from "./support-desk.js";
-import { isSupportChatRoute, routeSupportChat } from "./support-chat.js";
+import { isSupportChatRoute, postMessage, routeSupportChat } from "./support-chat.js";
+import {
+  artworkDownloadAudits,
+  orderArtworkFileIds,
+  qaCheckState,
+  qaClientActionAudit,
+  qaRequestFileAudit,
+  qaTickAudit,
+} from "./qa-review.js";
 import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
 import { isOrderCallRoute, routeOrderCalls, reconcileCalls, purgeClosedCalls, callParty } from "./order-calls.js";
@@ -730,7 +742,13 @@ function readyPaymentQrFile(store) {
 }
 
 function publicOperationalSettings(settings, store = null, user = null) {
-  const { paymentQrFileId: _paymentQrFileId, featuredPrints: _featuredPrints, ...rest } = settings || {};
+  const {
+    paymentQrFileId: _paymentQrFileId,
+    featuredPrints: _featuredPrints,
+    pricingFixedCostsMinor: _pricingFixedCostsMinor,
+    pricingPaymentFeeBps: _pricingPaymentFeeBps,
+    ...rest
+  } = settings || {};
   if (!['ops_admin', 'super_admin'].includes(user?.role)) {
     delete rest.serviceFeeSchedule;
     delete rest.scheduledServiceFee;
@@ -3281,7 +3299,7 @@ async function handleAuditedRequest(req, res) {
             approvalCase: approvalCaseSummary(attached.approvalCase),
           });
         }
-        attachFileReference(latestFile, latestTarget);
+        attachFileReference(latestFile, latestTarget, latestStore);
         const attachedAt = now();
         if (latestFile.purpose === 'supplier_invoice') {
           audit(latestStore, { actor: latestUser, action: 'supplier_invoice.scan_attached', entityType: 'supplier_invoice',
@@ -3708,6 +3726,12 @@ async function handleAuditedRequest(req, res) {
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
+        pricingFixedCostsMinor: Object.hasOwn(body, "pricingFixedCostsMinor")
+          ? body.pricingFixedCostsMinor
+          : (store.settings.pricingFixedCostsMinor ?? null),
+        pricingPaymentFeeBps: Object.hasOwn(body, "pricingPaymentFeeBps")
+          ? body.pricingPaymentFeeBps
+          : (store.settings.pricingPaymentFeeBps ?? null),
         artworkGuidance: Object.hasOwn(body, "artworkGuidance")
           ? validateArtworkGuidance(body.artworkGuidance, store.taxonomy, (status, code, message, details) => {
             throw new OperationalError(status, code, message, details);
@@ -5296,6 +5320,55 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, { escalation, order: await publicOrder(order, user, store) });
     }
 
+    if (req.method === "POST" && pathname === "/funnel-events") {
+      if (!user || user.role !== "client") return send(res, 403, { error: "forbidden" });
+      if (tooManyRequests(`funnel-event:${user.id}`, FUNNEL_BURST.limit, FUNNEL_BURST.windowMs)) {
+        return send(res, 429, { error: "too_many_funnel_events", message: "Too many funnel events from this account. Wait a few minutes." });
+      }
+      const body = await readBody(req);
+      let event;
+      try {
+        assertFunnelBody(body);
+        event = buildFunnelEvent(body, user, now(), id("fun"));
+      } catch (error) {
+        return send(res, error.status || 400, { error: error.code || "invalid_funnel_event" });
+      }
+      try {
+        // The domain lock serialises this check with the insert, so a twin cannot slip in between.
+        const recent = await recentFunnelState(database, event);
+        if (recent.duplicate) return send(res, 200, { ...recent.duplicate, duplicate: true });
+        if (recent.today >= FUNNEL_DAILY_LIMIT) {
+          return send(res, 429, { error: "funnel_event_daily_limit", message: "This account has sent the most funnel events allowed for one day." });
+        }
+        await insertFunnelEvent(database, event);
+      } catch {
+        return send(res, 500, { error: "funnel_event_not_stored" });
+      }
+      return send(res, 201, { id: event.id, at: event.at });
+    }
+
+    if (req.method === "GET" && pathname === "/admin/pricing") {
+      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      try {
+        return send(res, 200, await readPricingDashboard(database, {
+          orders: store.orders || [],
+          lines: store.orderLineItems || [],
+          catalog: store.catalogItems || [],
+          users: store.users || [],
+          audit: store.auditLog || [],
+          refundRequests: store.refundRequests || [],
+          refunds: store.refundSettlements || [],
+          settings: store.settings || {},
+          version: store.version,
+          query: Object.fromEntries(url.searchParams.entries()),
+          now: now(),
+        }));
+      } catch (error) {
+        if (error?.status === 400 && error.code) return send(res, 400, { error: error.code, message: error.message });
+        throw error;
+      }
+    }
+
     // ---- audit trail ----
     const auditOrderId = /^\/orders\/([^/]+)\/audit$/.exec(pathname)?.[1];
     if (req.method === 'GET' && (pathname === '/audit' || auditOrderId)) {
@@ -5805,6 +5878,118 @@ async function handleAuditedRequest(req, res) {
       return send(res, 201, { order: await publicOrder(order, user, store) });
     }
 
+    if (req.method === "POST" && /^\/orders\/[^/]+\/artwork-downloads$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((row) => row.id === orderId);
+      if (!order || !ordersFor(user, store).some((row) => row.id === orderId)) {
+        return send(res, order ? 403 : 404, { error: order ? "forbidden" : "order_not_found" });
+      }
+      const body = await readBody(req);
+      const known = orderArtworkFileIds(store, order);
+      const all = body?.all === true;
+      const fileIds = all
+        ? known
+        : (typeof body?.fileId === "string" && known.includes(body.fileId) ? [body.fileId] : null);
+      if (!fileIds) {
+        return send(res, 404, { error: "artwork_not_found", message: "That file is not artwork on this order." });
+      }
+      if (!fileIds.length) {
+        return send(res, 409, { error: "artwork_missing", message: "This order has no artwork file to download." });
+      }
+      const files = [];
+      for (const fileId of fileIds) {
+        const file = findFile(store, fileId);
+        if (!file || file.state !== "ready" || !file.objectKey) {
+          return send(res, 409, { error: "artwork_not_ready", message: "That artwork is not ready to download." });
+        }
+        const signed = await objectStorage.presignGet(file.objectKey);
+        files.push({ fileId, filename: file.originalFilename || "artwork", url: signed.url });
+      }
+      for (const entry of artworkDownloadAudits({ fileIds, all })) {
+        audit(store, {
+          actor: user, action: entry.action, entityType: "order", entityId: order.id, orderId: order.id,
+          detail: entry.detail, reason: null,
+        });
+      }
+      await save(store);
+      return send(res, 200, { files });
+    }
+
+    if (req.method === "POST" && /^\/orders\/[^/]+\/qa-checks$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((row) => row.id === orderId);
+      if (!order || !ordersFor(user, store).some((row) => row.id === orderId)) {
+        return send(res, order ? 403 : 404, { error: order ? "forbidden" : "order_not_found" });
+      }
+      if (order.state !== "needs_qa") {
+        return send(res, 409, { error: "qa_not_open", message: "These checks are saved while the file is still waiting on Operations." });
+      }
+      const body = await readBody(req);
+      let tick;
+      try {
+        tick = qaTickAudit(body?.checkId, body?.checked);
+      } catch (error) {
+        return send(res, error.status || 400, { error: error.code || "invalid_qa_check", message: error.message });
+      }
+      // The permanent log records state changes only; re-sending the current state writes nothing.
+      const recorded = qaCheckState(store, order, tick.detail.checkId) !== tick.detail.checked;
+      if (recorded) {
+        audit(store, {
+          actor: user, action: tick.action, entityType: "order", entityId: order.id, orderId: order.id,
+          detail: tick.detail, reason: null,
+        });
+        await save(store);
+      }
+      return send(res, 200, { ok: true, checkId: tick.detail.checkId, checked: tick.detail.checked, recorded });
+    }
+
+    if (req.method === "POST" && /^\/orders\/[^/]+\/qa-actions$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
+      const orderId = pathname.split("/")[2];
+      const order = store.orders.find((row) => row.id === orderId);
+      if (!order || !ordersFor(user, store).some((row) => row.id === orderId)) {
+        return send(res, order ? 403 : 404, { error: order ? "forbidden" : "order_not_found" });
+      }
+      const body = await readBody(req);
+      let planned;
+      try {
+        planned = qaClientActionAudit(body?.action, { note: body?.note, threadId: null });
+      } catch (error) {
+        return send(res, error.status || 400, { error: error.code || "invalid_qa_action", message: error.message });
+      }
+      let posted;
+      try {
+        posted = await database.transaction(() => postMessage(database, {
+          senderUserId: user.id,
+          senderRole: user.role === "super_admin" ? "super_admin" : "ops_admin",
+          body: planned.clientText,
+          createParty: { userId: order.clientId, role: "client" },
+        }));
+      } catch (error) {
+        if (error?.status && error?.code) {
+          return send(res, error.status, { error: error.code, message: error.message });
+        }
+        throw error;
+      }
+      if (!posted?.thread) {
+        return send(res, 502, { error: "qa_message_failed", message: "The client was not told. Try again." });
+      }
+      // qaHold is display-only for Operations and Super Admin: nothing reads it as a gate yet.
+      if (body.action === "hold") {
+        order.qaHold = { at: now(), by: user.id, reason: planned.reason };
+        order.updatedAt = order.qaHold.at;
+      }
+      const recorded = qaClientActionAudit(body.action, { note: planned.reason, threadId: posted.thread.id });
+      audit(store, {
+        actor: user, action: recorded.action, entityType: "order", entityId: order.id, orderId: order.id,
+        detail: recorded.detail, reason: recorded.reason,
+      });
+      await save(store);
+      return send(res, 200, { ok: true, threadId: posted.thread.id, order: await publicOrder(order, user, store) });
+    }
+
     if (req.method === "POST" && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
       const orderId = pathname.split("/")[2];
       const body = await readBody(req);
@@ -6283,6 +6468,11 @@ async function handleAuditedRequest(req, res) {
         audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,
           orderId: order.id, reason: order.fileCheck.reason || null,
           detail: { from: previousState, to: next, fileCheck: { ...order.fileCheck } } });
+      }
+      if (next === "client_correction" && body.qaAction === "request_file") {
+        const request = qaRequestFileAudit(body.note);
+        audit(store, { actor: user, action: request.action, entityType: "order", entityId: order.id,
+          orderId: order.id, reason: request.reason, detail: request.detail });
       }
       order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "" });
       if (next === "ready_for_dispatch" || next === "rider_assigned") {
@@ -6862,7 +7052,7 @@ async function handleAuditedRequest(req, res) {
         riderId: user.id,
         recordedAt: deliveredAt,
       };
-      recordDeliveryProof(order, evidenceFileId);
+      recordDeliveryProof(order, evidenceFileId, store.files);
       if (carriedToOffice(order)) {
         order.state = "awaiting_collection";
         order.awaitingCollectionAt = deliveredAt;

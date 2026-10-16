@@ -142,6 +142,7 @@ function mapThread(row, viewerId) {
     partyRole: row.party_role,
     partyName: row.party_name ?? null,
     partyEmail: row.party_email ?? null,
+    partyImageUrl: row.party_image_url ?? null,
     lastMessageAt: row.last_message_at ? asIso(row.last_message_at) : null,
     lastMessagePreview: row.last_message_preview ?? null,
     lastMessageSenderRole: row.last_message_sender_role ?? null,
@@ -153,6 +154,7 @@ function mapThread(row, viewerId) {
     staffPeerName: row.staff_peer_name || row.staff_peer_email || null,
     staffPeerEmail: row.staff_peer_email ?? null,
     staffPeerRole: row.staff_peer_role ?? null,
+    staffPeerImageUrl: row.staff_peer_image_url ?? null,
   };
 }
 
@@ -283,7 +285,9 @@ function threadSelect(viewerId) {
       t.id, t.party_user_id, t.party_role, t.last_message_at, t.last_message_preview,
       t.last_message_sender_role, t.created_at, t.updated_at, t.staff_peer_user_id,
       u.name AS party_name, u.email AS party_email,
+      NULLIF(btrim(u.data->>'imageUrl'), '') AS party_image_url,
       p.name AS staff_peer_name, p.email AS staff_peer_email, p.role AS staff_peer_role,
+      NULLIF(btrim(p.data->>'imageUrl'), '') AS staff_peer_image_url,
       (
         SELECT count(*)::int
         FROM support_chat_messages m

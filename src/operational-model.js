@@ -31,6 +31,7 @@ import crypto from "node:crypto";
 
 import { gridgoOfficePoint } from "./gridgo-office.js";
 import { opsPayoutAccountProjection } from "./payout-account.js";
+import { addStageProof, distinctProofIds } from "./payout-proofs.js";
 import {
   CURRENT_PAYOUT_PLAN_VERSION,
   LEGACY_PAYOUT_PLAN_VERSION,
@@ -350,6 +351,12 @@ export function validateOperationalSettings(settings) {
     fail(400, "invalid_downpayment_percent",
       "Set the checkout downpayment to 75 or 100 percent.",
       { field: "downpaymentPercent", allowed: [...DOWNPAYMENT_PERCENTS] });
+  }
+  if (settings?.pricingFixedCostsMinor != null && (!Number.isSafeInteger(settings.pricingFixedCostsMinor) || settings.pricingFixedCostsMinor < 0)) {
+    fail(400, "invalid_pricing_fixed_costs", "Set monthly fixed costs to a whole number of centavos, or leave them unset.", { field: "pricingFixedCostsMinor" });
+  }
+  if (settings?.pricingPaymentFeeBps != null && (!Number.isInteger(settings.pricingPaymentFeeBps) || settings.pricingPaymentFeeBps < 0 || settings.pricingPaymentFeeBps > 10_000)) {
+    fail(400, "invalid_pricing_payment_fee", "Set the payment-fee percentage to a whole number from 0 to 10,000 basis points, or leave it unset.", { field: "pricingPaymentFeeBps" });
   }
   const issueWindowHours = settings?.issueWindowHours;
   if (!Number.isInteger(issueWindowHours) || issueWindowHours < 1 || issueWindowHours > 720) {
@@ -730,13 +737,15 @@ export function snapshotPayoutPlan(order, money = order) {
  of Fulfilment only leaves the delivered share waiting on a step nobody takes.
  Legacy four-stage orders keep their own rule: the rider files the delivered
  proof and retention inherits it.
+
+ The rider app also files the same capture as the delivered proof before this
+ runs, so the delivery photo is listed only when it is a different picture.
 */
-export function recordDeliveryProof(order, fileId) {
+export function recordDeliveryProof(order, fileId, files = []) {
   if (payoutPlanVersionOf(order) === LEGACY_PAYOUT_PLAN_VERSION || !fileId) return;
   const delivered = (order.payoutMilestones || []).find((item) => item.code === "delivered");
   if (!delivered) return;
-  if (!Array.isArray(delivered.pofFileIds)) delivered.pofFileIds = [];
-  if (!delivered.pofFileIds.includes(fileId)) delivered.pofFileIds.push(fileId);
+  addStageProof(delivered, fileId, files);
   if (delivered.status === "pending_pof") delivered.status = "pof_attached";
 }
 
@@ -1026,8 +1035,15 @@ function productionItemsFor(store, order, user) {
           ...(() => { const change = changesFor(store, order).filter(r => r.status === 'applied' && r.lineItemId === line.id && r.data.proposedSpec).at(-1);
             return change ? { agreedChange: { id: change.id, proposedSpec: change.data.proposedSpec, appliedAt: change.data.appliedAt } } : {}; })(),
         } : {}),
-        structuredSpec: Object.fromEntries(["size", "material", "finish"].filter((key) =>
-          ["string", "number", "boolean"].includes(typeof spec[key])).map((key) => [key, spec[key]])),
+        structuredSpec: Object.fromEntries(
+          ["size", "material", "finish", "colorMode", "colourMode", "sides", "bleed", "layout", "binding", "instructions", "notes", "specialInstructions"]
+            .filter((key) => ["string", "number", "boolean"].includes(typeof spec[key]))
+            .map((key) => [key, spec[key]]),
+        ),
+        ...(["ops_admin", "super_admin"].includes(user?.role) ? {
+          effectiveUnitPriceMinor: line.effectiveUnitPriceMinor ?? null,
+          lineSubtotalMinor: line.lineSubtotalMinor ?? null,
+        } : {}),
         options: (store.orderLineItemOptions || []).filter((option) => option.orderLineItemId === line.id)
           .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
           .map((option) => ({ groupName: option.groupNameSnapshot, label: option.optionLabelSnapshot })),
@@ -1150,6 +1166,7 @@ export function publicOrderFor(order, user, store = null) {
       delete publicRecord.fileCheck.checklist;
     }
   } else delete publicRecord.fileCheck;
+  if (!["ops_admin", "super_admin"].includes(user?.role)) delete publicRecord.qaHold;
   delete publicRecord.rescheduleRequest;
   const reschedule = publicReschedule(order, user);
   if (reschedule) publicRecord.rescheduleRequest = reschedule;
@@ -1208,6 +1225,9 @@ export function publicOrderFor(order, user, store = null) {
       const stage = payoutStageFor(order, milestone.code);
       return {
         ...milestone,
+        // One entry per picture, including stages stored before uploads
+        // were compared, so a screen can draw every id it is given.
+        pofFileIds: distinctProofIds(milestone.pofFileIds, store?.files),
         label: stage?.label ?? payoutStageLabel(milestone.code),
         releaseRequires: stage?.releaseRequires ?? null,
       };
