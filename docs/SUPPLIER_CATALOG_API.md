@@ -83,6 +83,8 @@ Response (additive):
 
 `POST /me/catalog-items` accepts `starterId?`, `subcategoryCode`, `pricingUnit` (`per_unit` | `per_package`), `packageQty?`, `turnaroundMode` (`inherit` | `override`), `turnaroundHours?`, `minimumTurnaroundHours?`, `printerMaxWidthFeet?`, `printLayouts?` (layouts the shop prints; [print layout](PRINT_LAYOUT_API.md#shop-marking-layouts-on-a-listing)). A starter is copied into catalog rows at create time and is never referenced after. `minimumTurnaroundHours` is the soonest the listing can be ready; `turnaroundHours` is the promised ready-in. On inherit both are null. A soonest later than the promise is `400 invalid_catalog_item`.
 
+Create and PATCH also accept `express` (boolean, default `false`): the shop's same-day switch, applied at once without listing review. Contract: [Express listings](EXPRESS_API.md).
+
 `POST /me/catalog-items/:id/photos/reorder` takes `fileIds` of the samples that stay, in board order. A shorter list drops the missing photos from the draft. Files still used by its approved version stay referenced until replacement approval. Every sent id must already be on the listing; an unknown id is `409 catalog_item_stale`.
 
 ### Printer max width (`printerMaxWidthFeet`)
@@ -203,7 +205,7 @@ reorder, and delete endpoints retain their request and response shapes. Supplier
 can save an incomplete listing incrementally. Creation and changes to price
 (including pricing shape/tiers), product type, specs/variants, artwork formats or
 photos automatically enter review. Name, description, prep text, ordering,
-turnaround, and active/hidden changes apply immediately. A submitted draft cannot
+turnaround, Express, and active/hidden changes apply immediately. A submitted draft cannot
 be approved until it meets the completeness checks below.
 
 For an approved listing, review-sensitive edits retain an approved composite

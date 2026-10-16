@@ -1873,3 +1873,47 @@ test('an exact standard service duration does not inherit the legacy default day
   assert.equal(snapshot.lineItem.turnaroundDaysSnapshot, undefined);
   assert.equal(snapshot.lineItem.turnaroundMinutesSnapshot, 60);
 });
+
+test("Express: a shop switches it per listing with expectedVersion, at once and without review", async () => {
+  const store = fixture();
+  assert.equal(privateCatalogItem(store, store.catalogItems[0]).express, false);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).express, false);
+  const stale = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 2, express: true } })
+    .catch((error) => error);
+  assert.equal(stale.code, "catalog_item_stale");
+  const invalid = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, express: "yes" } })
+    .catch((error) => error);
+  assert.equal(invalid.code, "invalid_catalog_item");
+  assert.equal(invalid.details.field, "express");
+
+  const switched = await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 3, express: true } });
+  assert.equal(switched.status, 200);
+  assert.equal(switched.body.item.express, true);
+  assert.equal(switched.body.item.version, 4);
+  // Not what the client buys or pays: no review, and clients see it straight away.
+  assert.equal(switched.body.item.reviewStatus, "approved");
+  assert.equal(store.catalogItems[0].approvedSnapshot ?? null, null);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).express, true);
+
+  // A price edit opens a review; Express still applies to the approved version clients see.
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 4, basePriceMinor: 500 } });
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 5, express: false } });
+  assert.equal(store.catalogItems[0].reviewStatus, "pending");
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).express, false);
+  assert.equal(publicCatalogItem(store, store.catalogItems[0]).basePriceMinor, 100);
+  // Omitting the field leaves the switch alone.
+  await catalogCall(store, { method: "PATCH", path: "/me/catalog-items/item", body: { expectedVersion: 6, description: "Same day" } });
+  assert.equal(store.catalogItems[0].express, false);
+});
+
+test("Express: a new listing starts with it off unless the shop sends it", async () => {
+  const store = fixture();
+  const plain = await catalogCall(store, { method: "POST", path: "/me/catalog-items", body: {
+    supplierServiceId: "service", subcategoryCode: "tarpaulins_outdoor_banners", name: "Banner", basePriceMinor: 500, printerMaxWidthFeet: 5,
+  } });
+  assert.equal(plain.body.item.express, false);
+  const express = await catalogCall(store, { method: "POST", path: "/me/catalog-items", body: {
+    supplierServiceId: "service", subcategoryCode: "tarpaulins_outdoor_banners", name: "Rush banner", basePriceMinor: 500, printerMaxWidthFeet: 5, express: true,
+  } });
+  assert.equal(express.body.item.express, true);
+});

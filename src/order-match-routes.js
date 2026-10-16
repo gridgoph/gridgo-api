@@ -9,6 +9,7 @@ import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
 import { documentPagesFor } from "./document-pages.js";
 import { assertCheckoutPrintLayout, listingPrintLayouts, parseCartPrintLayout, printLayoutCheck } from "./print-layout.js";
+import { listingExpress } from "./express.js";
 import { artworkColorsFor, colorTargetsFor, colorTargetsSnapshot, parseColorTargets } from "./color-targets.js";
 import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
@@ -263,7 +264,7 @@ function assertMatchDeadline(store, item, line, at) {
   if (!deadline) return;
   const { projection } = projectShopFinish(store, { supplierId: item.supplierId,
     turnaroundHours: itemTurnaroundHours(item, (store.supplierServices || []).find((row) => row.id === item.supplierServiceId)),
-    units: line.quantity, now: at });
+    units: line.quantity, now: at, express: listingExpress(item), deadline });
   if (!fitsDeadline(projection, deadline)) fail(409, "deadline_not_met", "This listing can no longer make the requested deadline.");
 }
 
@@ -393,6 +394,7 @@ function publicCartListingStub(store, item, optionIds) {
     clientEffectivePriceMinor: clientMoneyMinor(store, selected.effectiveUnitPriceMinor),
     printerMaxWidthFeet: projectedPrinterMaxWidthFeet(item),
     printLayouts: listingPrintLayouts(item),
+    express: listingExpress(item),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
 }
@@ -418,7 +420,7 @@ function cartShops(store, lines) {
   });
 }
 
-function cartLinePromiseBy(store, line, item, at) {
+function cartLinePromiseBy(store, cart, line, item, at) {
   const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
   if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
       || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
@@ -429,6 +431,8 @@ function cartLinePromiseBy(store, line, item, at) {
       turnaroundHours: itemTurnaroundHours(item, service),
       units: line.quantity,
       now: at,
+      express: listingExpress(item),
+      deadline: lineDeadline(cart, line),
     }).projection.promiseBy;
   } catch (error) {
     // An unavailable calendar must not prevent the client from repairing a cart.
@@ -602,7 +606,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       dropoff: line.dropoff ? { ...line.dropoff } : null,
       sortOrder: line.sortOrder,
       listing,
-      promiseBy: cartLinePromiseBy(store, line, item, at),
+      promiseBy: cartLinePromiseBy(store, cart, line, item, at),
       lineSubtotalMinor,
       clientLineSubtotalMinor: clientMoneyMinor({ settings: groupFeeSettings(store, cart, lines.filter(entry => entry.supplierId === line.supplierId && lineDeadline(cart, entry) === lineDeadline(cart, line)), at) }, lineSubtotalMinor),
     };
@@ -627,15 +631,19 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       });
     }
     let readyBy = null;
+    let expressPromise = false;
     try {
       const items = groupLines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
       if (items.every(Boolean) && groupLines.every(line => publicLines.find(row => row.id === line.id)?.promiseBy)) {
-        readyBy = projectShopFinish(store, { supplierId, now: at,
+        const { projection } = projectShopFinish(store, { supplierId, now: at,
           turnaroundHours: Math.max(...items.map(item => itemTurnaroundHours(item, store.supplierServices.find(service => service.id === item.supplierServiceId)))),
-          units: groupLines.reduce((sum, line) => sum + line.quantity, 0) }).projection.promiseBy;
+          units: groupLines.reduce((sum, line) => sum + line.quantity, 0),
+          express: items.every(listingExpress), deadline });
+        readyBy = projection.promiseBy;
+        expressPromise = projection.express === true;
       }
     } catch (error) { if (!(error instanceof AvailabilityError)) throw error; }
-    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, lineIds: groupLines.map((line) => line.id),
+    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, expressPromise, lineIds: groupLines.map((line) => line.id),
       ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
@@ -789,6 +797,7 @@ function publicMatchedOrder(store, order) {
     // The promised date, never the shop's own. A client who can see both can
     // see the allowance.
     readyBy: order.promiseBy ?? null,
+    express: order.express === true,
     review: orderReviewTiming(order, store.settings),
     downpaymentPercent: orderDownpaymentPercent(order),
     paymentPlan: {
@@ -986,11 +995,16 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // before adding this order's own jobs to the committed queue.
   const [job] = jobs;
   const orderedUnits = snapshots.reduce((total, row) => total + Number(row.lineItem.quantity || 0), 0);
+  // Express answers the order only when every product in it is Express, and
+  // is made for the soonest deadline any of its lines carries.
+  const expressDeadline = cartLines.map((line) => lineDeadline(cart, line)).filter(Boolean).sort()[0] ?? null;
   const { projection } = projectShopFinish(store, {
     supplierId: job.supplierId,
     turnaroundHours: job.estimatedHours,
     now: at,
     units: orderedUnits,
+    express: [...grouped.values()].flat().every(({ item }) => listingExpress(item)),
+    deadline: expressDeadline,
   });
   for (const line of cartLines) {
     if (lineDeadline(cart, line) && !fitsDeadline(projection, lineDeadline(cart, line))) {
@@ -1006,6 +1020,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   order.readyBy = projection.readyBy;
   // The padded date the client was promised. Never shown to the shop.
   order.promiseBy = projection.promiseBy;
+  // Tagged for every party: this order was promised under Express, so the
+  // shop's date is the same-day target rather than its production time.
+  order.express = projection.express === true;
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
   // Pickup is a per-order platform charge. The internal trip to the hub keeps

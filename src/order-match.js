@@ -9,6 +9,7 @@ import { recentLapseQualityPenalty, productionTiming } from './production-penalt
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
+import { firstExpressDay, endOfLocalDay, listingExpress, withExpress } from "./express.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 export { shopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
@@ -205,8 +206,14 @@ function allowanceMinutesFrom(settings) {
   return Number.isSafeInteger(declared) && declared >= 0 ? declared : DEFAULT_ALLOWANCE_MINUTES;
 }
 
-/** One queue/calendar projection for matching, cart previews, and checkout. */
-export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes, units, now }) {
+/**
+ * One queue/calendar projection for matching, cart previews, and checkout.
+ *
+ * `express` with a `deadline` applies the shop's Express switch
+ * (src/express.js): the ordinary projection stands when it meets the deadline,
+ * otherwise the promise is the Express same-day target.
+ */
+export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes, units, now, express = false, deadline = null }) {
   const hours = Number.isSafeInteger(turnaroundDays) && turnaroundDays > 0
     ? turnaroundDays * shopProductionDayMinutes(store, supplierId) / 60
     : Number.isSafeInteger(turnaroundMinutes) && turnaroundMinutes > 0 ? turnaroundMinutes / 60
@@ -232,7 +239,7 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, turnarou
     projection.promiseBy = addOpeningMilliseconds(operatingHours(store.settings).schedule,
       projection.readyBy, allowanceMinutesFrom(store.settings) * 60000);
   }
-  return { projection, queue };
+  return { projection: withExpress(store, projection, { supplierId, deadline, now, express }), queue };
 }
 
 function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
@@ -280,6 +287,9 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       const service = (store.supplierServices || []).find((row) => row.id === item?.supplierServiceId);
       return item ? itemTurnaroundHours(item, service) : 0;
     });
+    // A group shares one promise, so Express answers it only when every
+    // product already in the group is Express too.
+    const groupExpress = groupLines.every((line) => listingExpress((store.catalogItems || []).find((row) => row.id === line.catalogItemId)));
     const choices = eligibleListings.map((listing) => {
       // Draft lines consume capacity when another product joins their group.
       // Use the same combined quantity and slowest turnaround as checkout.
@@ -288,9 +298,12 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       const { projection, queue } = projectShopFinish(projectionStore, {
         supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours), now,
         units: groupLines.length ? Number(combinedUnits) : units,
+        express: listing.express === true && groupExpress, deadline,
       });
       return {
         supplierId, listing, projection, distance, distanceZone,
+        // The first day Express reaches for this listing, when it is on.
+        expressFrom: listing.express === true && groupExpress ? firstExpressDay(store, supplierId, now) : null,
         queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
           Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
         quality: Math.max(0, capabilityScore(store, supplierId, [listing]) - recentLapseQualityPenalty(store, supplierId, now)),
@@ -362,7 +375,7 @@ function otherListing(row) {
       "categoryCode", "subcategoryCode", "basePriceMinor", "clientBasePriceMinor", "effectivePriceMinor", "clientEffectivePriceMinor",
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "printLayouts", "priceTiers", "speedTiers", "pricingBasis",
-      "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version",
+      "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version", "express",
     ].map((key) => [key, item[key]])),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
     fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,
@@ -371,7 +384,7 @@ function otherListing(row) {
     ...(row.distanceZone?.key === "out_of_zone" ? { distanceKm: Number((row.distance / 1000).toFixed(1)) } : {}),
     ...(item.rating ? { rating: item.rating } : {}),
     review: row.projection.review ?? null,
-    readyBy: row.projection.promiseBy, placeInLine: row.queue.jobsAhead + 1,
+    readyBy: row.projection.promiseBy, expressPromise: row.projection.express === true, placeInLine: row.queue.jobsAhead + 1,
   };
 }
 
@@ -442,6 +455,10 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
       : Date.parse(row.promiseBy))
     .filter((value) => Number.isFinite(value))
     .sort((left, right) => left - right);
+  // Express listings reach every day from their first open day on, whatever
+  // their production time (src/express.js). Day keys sort as dates.
+  const expressFrom = rows.flatMap((row) => row.choices.map((choice) => choice.expressFrom))
+    .filter(Boolean).sort()[0] ?? null;
 
   const manilaDay = new Date(Date.parse(at) + 480 * 60000).toISOString().slice(0, 10);
   const start = Date.parse(`${manilaDay}T00:00:00+08:00`);
@@ -472,19 +489,26 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     if (firstPossible === null && reachable > 0) firstPossible = index;
     const narrowByChoice = reachable > 0 && reachable * 2 <= promises.length;
     const narrowByDate = firstPossible !== null && index - firstPossible < 2;
+    const dayKey = new Date(day.getTime() + 480 * 60000).toISOString().slice(0, 10);
+    // One Express listing is enough: the day is open, never tight.
+    const express = expressFrom !== null && expressFrom <= dayKey;
 
     out.push({
-      day: new Date(day.getTime() + 480 * 60000).toISOString().slice(0, 10),
-      reason: reachable ? null : promises.length ? "review_production_delivery_exceeds_deadline" : "no_eligible_listing",
-      state: reachable === 0 ? "cannot" : narrowByChoice || narrowByDate ? "tight" : "open",
+      day: dayKey,
+      reason: reachable || express ? null : promises.length ? "review_production_delivery_exceeds_deadline" : "no_eligible_listing",
+      state: express ? "open" : reachable === 0 ? "cannot" : narrowByChoice || narrowByDate ? "tight" : "open",
     });
   }
+  const expressEarliest = expressFrom === null ? null : endOfLocalDay(expressFrom, 480);
+  const earliest = [promises[0], expressEarliest].filter((value) => value != null).sort((left, right) => left - right)[0];
 
   return {
     days: out,
     operatingStatus: reviewTiming(store.settings, at),
     /** The first moment anybody could finish, or null when nobody prints this. */
-    earliest: promises.length ? new Date(promises[0]).toISOString() : null,
+    earliest: earliest == null ? null : new Date(earliest).toISOString(),
+    /** Whether an Express listing answers these days. Never a count. */
+    expressAvailable: expressFrom !== null,
   };
 }
 
@@ -556,6 +580,7 @@ export function matchShop(store, input = {}) {
     listings: winner.choices.map((choice) => ({
       ...choice.listing,
       readyBy: choice.projection.promiseBy,
+      expressPromise: choice.projection.express === true,
       review: choice.projection.review ?? null,
       placeInLine: choice.queue.jobsAhead + 1,
       distanceZone,
@@ -568,6 +593,8 @@ export function matchShop(store, input = {}) {
      * spent before the job starts.
      */
     promiseBy: winner.projection.promiseBy,
+    /** Whether `promiseBy` is the Express same-day promise. */
+    expressPromise: winner.projection.express === true,
     operatingStatus: winner.projection.review ?? null,
     /** Not for the client. Persisted when the order is placed, and what the shop is held to. */
     shopReadyBy: winner.projection.readyBy,
