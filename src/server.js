@@ -272,6 +272,7 @@ import {
 } from "./tracker.js";
 import {
   loadDeviceTokenStore,
+  loadNotificationStore,
   loadStore,
   originalNotificationIds,
   saveDeviceTokenStore,
@@ -2262,7 +2263,13 @@ async function handleAuditedRequest(req, res) {
     }
 
     await expireElapsedIssueWindows();
-    const store = await load();
+    const notificationRead = req.method === 'GET' && ['/notifications', '/notifications/stream'].includes(pathname);
+    const notificationClaims = notificationRead ? await verifiedClerkClaimsFor(req) : null;
+    const store = notificationRead
+      ? await loadNotificationStore(database, notificationClaims?.claims?.sub || null, {
+        lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
+      })
+      : await load();
 
     if (
       (req.method === "GET" || req.method === "HEAD")
