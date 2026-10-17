@@ -12,6 +12,7 @@ import { deliverySplit } from "./operational-model.js";
 import { listingPrintLayouts } from "./print-layout.js";
 
 const BASELINE = Symbol("postgresStoreBaseline");
+const notificationReadStores = new WeakSet();
 
 function without(record, keys) {
   const result = { ...record };
@@ -829,14 +830,59 @@ export async function loadStore(database) {
   for (const table of TABLES) {
     loaded[table.name] = (await database.query(`SELECT ${table.columns.join(", ")} FROM ${table.name}`)).rows;
   }
+  const store = storeFromRows(loaded, {
+    legalPenaltyGate: await loadLegalPenaltyGate(database),
+    surveyLaunchedAt: (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null,
+  });
+  Object.defineProperty(store, "listOwnCatalogItems", {
+    value: (params) => listOwnCatalogItems(database, params),
+    enumerable: false,
+    writable: true,
+  });
+  return store;
+}
+
+/** Caller-scoped read graph. Keep visibility policy in notifications.js, not SQL. */
+export async function loadNotificationStore(database, clerkSubject, { lastEventId = null } = {}) {
+  return database.snapshot(async () => {
+    const loaded = Object.fromEntries(TABLES.map(table => [table.name, []]));
+    async function read(name, where = '', values = []) {
+      const table = TABLES.find(table => table.name === name);
+      loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
+    }
+    await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
+    if (loaded.users.length === 1) {
+      const userId = loaded.users[0].id;
+      // Include a foreign resume row solely to preserve the stream's 403 vs 409.
+      await read('notifications', 'WHERE user_id = $1 OR id = $2', [userId, lastEventId]);
+      const orderIds = [...new Set(loaded.notifications.map(row => row.order_id).filter(Boolean))];
+      const caseIds = [...new Set(loaded.notifications.map(row => row.data?.approvalCaseId).filter(Boolean))];
+      await read('user_role_memberships', 'WHERE user_id = $1', [userId]);
+      await read('approval_cases', 'WHERE user_id = $1 OR id = ANY($2::text[])', [userId, caseIds]);
+      if (orderIds.length) {
+        await read('orders', 'WHERE id = ANY($1::text[])', [orderIds]);
+        for (const table of ['order_jobs', 'order_payments', 'refund_requests', 'refund_settlements']) {
+          await read(table, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+        }
+        // Dispatch offer visibility uses the current operating calendar and refund holds.
+        await read('platform_settings');
+      }
+    }
+    const store = storeFromRows(loaded, { writable: false });
+    notificationReadStores.add(store);
+    return store;
+  });
+}
+
+function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, writable = true } = {}) {
   const store = emptyStore();
-  store.legalPenaltyGate = await loadLegalPenaltyGate(database);
+  store.legalPenaltyGate = legalPenaltyGate;
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
   loadSurveyRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
-  store.surveyLaunchedAt = (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null;
+  store.surveyLaunchedAt = surveyLaunchedAt;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
   const settings = loaded.platform_settings[0];
@@ -1265,12 +1311,7 @@ export async function loadStore(database) {
   store.locationPings = ordered(loaded.location_pings).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, lat: row.lat, lng: row.lng, accuracy: row.accuracy_meters, at: row.at }));
   store.escalations = ordered(loaded.escalations).map((row) => ({ ...row.data, id: row.id, orderId: row.order_id, riderId: row.rider_id, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.deviceTokens = ordered(loaded.device_tokens).map(deviceTokenItem);
-  attachBaseline(store, rowsFromStore(store));
-  Object.defineProperty(store, "listOwnCatalogItems", {
-    value: (params) => listOwnCatalogItems(database, params),
-    enumerable: false,
-    writable: true,
-  });
+  if (writable) attachBaseline(store, rowsFromStore(store));
   return synchronizeProductionHours(store);
 }
 
@@ -1368,6 +1409,7 @@ async function upsertChanged(database, table, before, current) {
 }
 
 export async function saveStore(database, store) {
+  if (notificationReadStores.has(store)) throw new Error('Notification stores are read-only');
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
   finalizeAuditEntries(store, originalDomainStore(store));
   const currentRows = rowsFromStore(store);
