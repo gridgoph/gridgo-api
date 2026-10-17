@@ -16,6 +16,7 @@ export { clientRiderLocationPing } from './rider-tracking.js';
 import { defaultOperatingHours, validateOperatingHours, orderReviewTiming } from './operating-hours.js';
 import { publicDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { pickupChatProjection } from "./pickup-chat.js";
+import { clientShopChatProjection } from './client-shop-chat.js';
 import { deliveryChatProjection } from "./delivery-chat.js";
 import { organizationFeeMoney, validateOrganizationFee } from "./organization-money.js";
 import { publicReschedule, rescheduleHold } from './order-reschedule-policy.js';
@@ -265,6 +266,7 @@ export function defaultOperationalSettings() {
      * coverage; released builds cannot send it.
      */
     coverSpineRequired: false,
+    clientShopChatContactThreshold: 3,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     productionPenalty: defaultProductionPenalty(),
@@ -282,6 +284,9 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.clientShopChatContactThreshold !== undefined && (!Number.isSafeInteger(settings.clientShopChatContactThreshold) || settings.clientShopChatContactThreshold < 1 || settings.clientShopChatContactThreshold > 20)) {
+    fail(400, 'invalid_chat_contact_threshold', 'Choose an integer between 1 and 20.');
+  }
   if (settings?.colourDetection !== undefined) validateColourSettings(settings.colourDetection);
   if (settings.serviceFeeSchedule) validateFeeSchedule(settings.serviceFeeSchedule);
   if (settings.scheduledServiceFee) {
@@ -1329,7 +1334,11 @@ export function publicOrderFor(order, user, store = null) {
     publicRecord.artworkName = displayFilename(publicRecord.artworkName);
     publicRecord.timeline = supplierProgressTimeline(order);
   }
-  // Only the two people in the conversation learn it exists (gridgo-client#198).
+  // Masked production chat includes Operations oversight.
+  delete publicRecord.clientShopChat;
+  const clientShopChat = clientShopChatProjection(order, user, store);
+  if (clientShopChat) publicRecord.clientShopChat = clientShopChat;
+  // Only the two people in the pickup conversation learn it exists (#198).
   delete publicRecord.pickupChat;
   const pickupChat = pickupChatProjection(order, user, store);
   if (pickupChat) publicRecord.pickupChat = pickupChat;

@@ -255,6 +255,8 @@ import {
   qaTickAudit,
 } from "./qa-review.js";
 import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
+import { routeClientShopChat, isClientShopChatRoute } from './client-shop-chat-routes.js';
+import { sanitizeChatUpload } from './chat-image-sanitizer.js';
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
 import { isOrderCallRoute, routeOrderCalls, reconcileCalls, purgeClosedCalls, callParty } from "./order-calls.js";
 import {
@@ -772,6 +774,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
+    clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
@@ -2763,6 +2766,7 @@ async function handleAuditedRequest(req, res) {
 
     if (await routeOrderCalls({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) return;
 
+    if (await routeClientShopChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) return;
     if (await routePickupChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
       return;
     }
@@ -3062,7 +3066,8 @@ async function handleAuditedRequest(req, res) {
         }
         const purpose = String(fields.purpose || "");
         authorizeFileUpload(user, purpose);
-        const detectedContentType = await validateUploadFromDisk(file, purpose);
+        let detectedContentType = await validateUploadFromDisk(file, purpose);
+        if (purpose === 'client_shop_chat_attachment') detectedContentType = await sanitizeChatUpload(file, detectedContentType);
         if (storageInitializing) {
           throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
         }
@@ -3087,6 +3092,7 @@ async function handleAuditedRequest(req, res) {
           at: createdAt,
         });
 
+        if (purpose === 'client_shop_chat_attachment' && detectedContentType.startsWith('image/')) pending.metadataSanitizedAt = createdAt;
         if (artworkCheck) pending.artworkCheck = artworkCheck;
 
         await enqueueMutation(async () => {
@@ -3730,6 +3736,7 @@ async function handleAuditedRequest(req, res) {
       const next = {
         ...store.settings,
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
+        clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
@@ -7233,7 +7240,7 @@ const server = http.createServer((req, res) => {
     // handleRequest fails the same parse and answers 500 itself.
   }
   logHttpRequest(req, res, pathname, Date.now());
-  const mutatesStore = (req.method === "GET" && (isPickupChatRoute(pathname) || isOrderCallRoute(pathname))) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = (req.method === "GET" && (isPickupChatRoute(pathname) || isClientShopChatRoute(pathname) || isOrderCallRoute(pathname))) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // Upload/attach routes queue their own transactions. Deletion commits intent
   // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
