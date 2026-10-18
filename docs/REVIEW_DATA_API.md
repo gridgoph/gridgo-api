@@ -1,7 +1,7 @@
 # Review data
 
 Review data supports isolated store-review accounts. It grants no membership,
-approval, authentication bypass, or payment authority. Existing records default
+approval, authentication bypass, or authority to move money. Existing records default
 to ordinary data. Apply migration `1792342000000` before deploying this API.
 
 ## Marking an account
@@ -72,13 +72,12 @@ children. An already assigned party retains access to that historical work.
 Staff must explicitly send `?includeReviewData=1` to include review orders in
 these collection reads:
 
-- `/orders`, `/jobs`, `/claims`, `/issues`, `/escalations`, `/refund-requests`;
+- `/orders`, `/jobs`, `/baskets`, `/claims`, `/issues`, `/escalations`, `/refund-requests`;
 - `/ops/riders/locations`, `/ops/colour-price-checks`, `/ops/shop-failures`,
   `/ops/hub/*`, `/ops/shops[/<id>]/performance`;
-- `/ops/finance/supplier-invoices`, `/admin/shop-rankings`, `/admin/pricing`;
+- `/admin/shop-rankings`;
 - `/admin/survey-responses`, `/admin/pricing-feedback`,
   `/admin/checkout-exit-feedback`, `/admin/voucher-redemptions`;
-- organization statements and their CSV/PDF exports;
 - audit reads and CSV exports.
 
 Filtering happens before counts, pagination and totals. Related jobs, line
@@ -90,8 +89,9 @@ the dashboard. Checkout-exit feedback without an order follows its current clien
 account mark. Ordinary behavior remains the default for unmarked data.
 
 The opt-in is honored only for Operations/Super Admin readers and does not grant
-access to any route. Organization and supplier invoice totals exclude review
-orders for ordinary callers, even if they send the flag. Explicit order detail
+access to any route. Finance, supplier invoice totals, organization statements
+(including CSV/PDF), and pricing revenue, costs, funnel and close totals always
+exclude review orders, even when staff send the flag. Explicit order detail
 and party-owned order history retain existing authorization so review accounts
 can inspect their own work. Review order projections carry `reviewData: true`.
 Audit entries about marking users remain visible by default; order-linked review
@@ -99,17 +99,36 @@ audit entries require the opt-in.
 
 ## Money and notifications
 
-Review orders cannot submit/confirm collections, release supplier milestones,
-close as payout-released, reserve or record refund transfers, settle refund
-money, or record supplemental/delivery payments or supplemental payouts. These
-writes return `409 review_data_money_forbidden`. Credit changes for marked
-accounts, voucher grants, reservations and redemptions are also refused. The guard is shared by HTTP and store writers and
-cannot be bypassed with the reporting opt-in. Legacy issue-window completion
-can close a review order but never automatically releases retention.
+Review orders use the normal client installment and basket payment flow as a
+simulation. Checkout and submit record `pending_confirmation`; Operations can
+reject, accept a resubmission, and confirm it through the existing routes.
+Confirmation reaches `needs_qa` for cart orders, and the usual artwork, production,
+handover, delivery and client completion gates continue unchanged. Required final
+installments use the same simulation; zero balances remain `not_required`.
+Basket confirmation applies atomically to every group.
 
-This is an isolation mechanism, not a simulated payment processor. Normal
-payment confirmations and payout routes remain unavailable to review orders.
-Future sample-record provisioning must preserve this boundary.
+Every review installment and basket payment carries server-owned `simulated: true`;
+confirmed payments use `confirmationSource: "review_data"` instead of
+`manual_ops`. These fields live in the existing payment JSON metadata and require
+no new migration. The shared graph writer derives them from the immutable order
+mark, including CLI writes. Clearing an account mark cannot turn a historical
+simulation into money. Request JSON cannot choose the payment classification.
+Normal unmarked payments retain their existing status and confirmation source.
+
+Simulated amounts remain visible in the client's order/payment plan, but are not
+collections, refundable funds, supplier earnings, rider earnings or platform
+revenue. Per-order financial projections report zero money, and financial
+collections, statements, exports and pricing totals exclude review orders even
+with `includeReviewData=1`. Party order history and order invoices still show the
+sample prices needed to inspect the normal app flow.
+
+Review orders still cannot release supplier milestones, close as payout-released,
+reserve or record refund transfers, settle refund money, or record supplemental/
+delivery payments or supplemental payouts. These writes return
+`409 review_data_money_forbidden`. Credit changes for marked accounts, voucher
+grants, reservations and redemptions remain refused. The shared HTTP/store guard
+cannot be bypassed with the reporting opt-in. Legacy issue-window completion can
+close a review order but never automatically releases retention.
 
 New order notifications, including Operations and Super Admin inbox copies,
 carry `reviewData: true` and a `[Review data]` title prefix. Push data continues

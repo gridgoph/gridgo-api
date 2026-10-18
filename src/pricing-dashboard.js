@@ -547,7 +547,7 @@ function matches(order, index, filters) {
 
 /** Orders kept by the dashboard filters, each indexed once (no per-order scans). */
 function pricingSelection({ orders = [], lines = [], catalog = [], users = [], query = {} }) {
-  if (query.includeReviewData !== '1') orders = orders.filter(order => !isReviewData(order));
+  orders = orders.filter(order => !isReviewData(order));
   const filters = {
     category: query.category || "",
     bracket: query.bracket || "",
@@ -582,7 +582,7 @@ function dashboardContext(input) {
   const ranges = pricingRanges(input.query, input.now);
   const { filters, selected } = pricingSelection(input);
   const scope = funnelScope({ filters, orders: input.orders, users: input.users, selectedOrderIds: selected.map((row) => row.order.id) });
-  scope.excludeReviewData = input.query?.includeReviewData !== '1';
+  scope.excludeReviewData = true;
   scope.reviewOrderIds = (input.orders || []).filter(isReviewData).map(row => row.id);
   const nowMs = Number.isFinite(Date.parse(input.now)) ? Date.parse(input.now) : Date.now();
   return { ranges, filters, selected, scope, nowMs };

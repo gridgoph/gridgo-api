@@ -767,6 +767,7 @@ export function recordDeliveryProof(order, fileId, files = []) {
 }
 
 export function collectedSupplierPrincipalMinor(order) {
+  if (isReviewData(order)) return 0;
   const confirmedPayments = new Set(
     Object.entries(order?.payments || {})
       .filter(([, payment]) => payment?.status === "confirmed")
@@ -813,7 +814,7 @@ export function moneyReportingForOrder(order, store = null) {
     0,
     Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
   );
-  return {
+  const reporting = {
     supplierSettlement: {
       orderPriceMinor: order.supplierSubtotalMinor,
       ...(supplementTotals(store, order).principalMinor ? { supplementalPrincipalMinor: supplementTotals(store, order).principalMinor } : {}),
@@ -850,6 +851,14 @@ export function moneyReportingForOrder(order, store = null) {
       refundedMinor,
     },
   };
+  // Review prices remain on the order for the app flow, but are never earnings,
+  // receivables, collections or revenue, including on staff detail projections.
+  if (isReviewData(order)) {
+    for (const section of Object.values(reporting)) {
+      for (const key of Object.keys(section)) if (key.endsWith('Minor')) section[key] = 0;
+    }
+  }
+  return reporting;
 }
 
 export function activePayoutHold(store, order) {
@@ -1375,6 +1384,7 @@ export function publicOrderFor(order, user, store = null) {
   if (ops || rider) {
     if (order.deliveryFeeMinor != null) Object.assign(publicRecord,
       adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000)));
+    if (isReviewData(order)) Object.assign(publicRecord, { riderPayoutMinor: 0, platformDeliveryShareMinor: 0 });
   } else {
     for (const field of ["riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor"]) {
       delete publicRecord[field];
