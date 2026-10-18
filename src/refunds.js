@@ -1,3 +1,4 @@
+import { cancellationQuote, publicCancellationQuote, acceptedCancellationQuote } from './fault-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
 import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { restoreVoucherForRefund } from './vouchers.js';
@@ -61,6 +62,8 @@ export function publicRefund(store, request, user) {
       reason: settlement.reason, approvedAt: settlement.createdAt } : null,
     payment: payment ? { id: payment.id, reference: payment.reference, receiptFileId: payment.receiptFileId,
       amountMinor: payment.amountMinor, paidAt: payment.paidAt, evidenceLabel: 'Wallet transfer evidence' } : null };
+  const acceptedQuote = acceptedCancellationQuote(store, request);
+  if (acceptedQuote) result.cancellationQuote = ops ? structuredClone(acceptedQuote) : publicCancellationQuote(acceptedQuote);
   if (ops) {
     result.clientId = request.clientId;
     result.settlement = settlement || null;
@@ -111,6 +114,11 @@ function lateFiling(store, order, at) {
 }
 
 function settlementCalculation(store, order, request, body) {
+  const accepted = acceptedCancellationQuote(store, request);
+  if (accepted && (['shopEntitlementMinor', 'riderEntitlementMinor'].some(field => body[field] !== accepted.amounts[field])
+    || (body.principalMinor !== undefined && body.principalMinor !== accepted.amounts.principalMinor))) {
+    fail(409, 'cancellation_quote_mismatch', 'Use the exact client-accepted amounts and entitlements.');
+  }
   if (Object.values(order.payments || {}).some((payment) => payment.status === 'pending_confirmation')) {
     fail(409, 'refund_collection_reconciliation_required', 'Reconcile all submitted payment proofs before settling the refund.');
   }
@@ -139,10 +147,24 @@ function settlementCalculation(store, order, request, body) {
   if (deliveryCompleted(order) && amounts.riderEntitlementMinor < split.riderPayoutMinor) {
     fail(409, 'refund_requires_super_admin', 'Earned rider pay must be protected. Refer exceptions to Super Admin.', { escalateTo: 'super_admin' });
   }
+  if (accepted && ['principalMinor', 'feeMinor', 'deliveryMinor', 'totalMinor', 'shopEntitlementMinor', 'riderEntitlementMinor']
+    .some(field => amounts[field] !== accepted.amounts[field])) {
+    fail(409, 'cancellation_quote_mismatch', 'Settle exactly the client-accepted quote. Withdraw and re-quote if the facts require a different amount.');
+  }
   return { amounts, maximum };
 }
 
 export async function routeRefunds({ req, url, store, user, readBody, now, id, audit }) {
+  const quoteMatch = url.pathname.match(/^\/orders\/([^/]+)\/cancellation-quote$/);
+  if (quoteMatch && req.method === 'GET') {
+    if (!user) fail(401, 'unauthorized', 'Sign in.');
+    if (!privileged(user) && user.role !== 'client') fail(403, 'forbidden', 'Only the owning client or Operations can quote a cancellation.');
+    const order = store.orders.find(row => row.id === quoteMatch[1]);
+    if (!order) fail(404, 'order_not_found', 'Order not found.');
+    if (!privileged(user) && order.clientId !== user.id) fail(403, 'forbidden', 'This is another client’s order.');
+    const quote = cancellationQuote(store, order);
+    return { status: 200, body: { quote: privileged(user) ? quote : publicCancellationQuote(quote) } };
+  }
   const orderMatch = url.pathname.match(/^\/orders\/([^/]+)\/refund-requests$/);
   const match = url.pathname.match(/^\/refund-requests(?:\/([^/]+)(?:\/(destination|review|settlement-preview|settle|reject|withdraw|payment-attempts|reconcile|payments|supplier-payout))?)?$/);
   if (!orderMatch && !match) return null;
@@ -180,6 +202,14 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (replay.route !== route || replay.bodyHash !== bodyHash) fail(409, 'refund_idempotency_conflict', 'That idempotency key was used for another request.');
     return structuredClone(replay.response);
   }
+  if (request?.kind === 'complaint' && ['settle', 'payment-attempts'].includes(action)) {
+    const decisions = (store.issues || []).filter(issue => issue.orderId === order.id && issue.faultDecision)
+      .map(issue => issue.faultDecision);
+    if (decisions.some(decision => decision.status === 'awaiting_approval')) fail(409, 'fault_approval_pending', 'Super Admin must approve the recorded GRIDGO funding first.');
+    if (decisions.some(decision => decision.fault === 'client' || !['partial_refund', 'full_refund'].includes(decision.remedy))) {
+      fail(409, 'fault_refund_not_authorized', 'The recorded case remedy does not authorize a refund.');
+    }
+  }
   if (request && body.expectedVersion !== request.version) fail(409, 'refund_stale', 'Reload this refund before changing it.', { currentVersion: request.version });
   const at = now();
   let eventKind = action;
@@ -189,6 +219,13 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (changePaymentPending(store, order)) fail(409, 'change_payment_pending', 'Resolve the submitted change transfer first.');
     if (deliveryPinPaymentPending(order)) fail(409, 'delivery_pin_payment_pending', 'Resolve the submitted delivery transfer before filing a refund.');
     if (store.refundRequests.some(row => row.orderId === order.id && ACTIVE_REFUND_STATUSES.includes(row.status))) fail(409, 'refund_already_open', 'This order already has an active refund request.');
+    let quotedCancellation = null;
+    if (body.cancellationQuoteToken !== undefined) {
+      if (user.role !== 'client') fail(403, 'forbidden', 'Only the owning client can confirm a cancellation quote.');
+      if (body.kind !== 'cancellation') fail(400, 'invalid_refund_kind', 'A cancellation quote is only for cancellation.');
+      quotedCancellation = cancellationQuote(store, order);
+      if (body.cancellationQuoteToken !== quotedCancellation.quoteToken) fail(409, 'cancellation_quote_stale', 'Refresh the quote and ask the client to confirm again.');
+    }
     const late = lateFiling(store, order, at);
     if (late && user.role !== 'super_admin') fail(409, 'refund_window_closed', 'The filing window is closed. Contact Super Admin.', { escalateTo: 'super_admin' });
     if (!['cancellation', 'complaint'].includes(body.kind)) fail(400, 'invalid_refund_kind', 'Choose cancellation or complaint.');
@@ -208,6 +245,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       order.shopRecovery.status = 'refund_requested';
     }
     eventKind = 'requested';
+    if (quotedCancellation) eventData = { cancellationQuote: structuredClone(quotedCancellation) };
   } else if (action === 'destination') {
     if (!['requested', 'reviewed', 'approved', 'destination_review'].includes(request.status) || activeAttempt(store, request)) fail(409, 'refund_destination_locked', 'Reconcile the active payment before changing its destination.');
     changeDestination(store, request, user, body);
