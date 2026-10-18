@@ -18,7 +18,7 @@ import { firstmateRefusal } from "./tracker.js";
 export const ISSUE_MAX_LENGTH = 5000;
 export const ISSUE_CATEGORIES = Object.freeze(["bug", "feature", "other"]);
 export const ISSUE_STATUSES = Object.freeze(["new", "tracked", "published", "dismissed"]);
-// Statuses that keep the tracker issue link; `new` and `dismissed` clear it.
+// For link managers, `new` and `dismissed` clear the tracker issue link.
 const LINKED_STATUSES = Object.freeze(["tracked", "published"]);
 // The GitHub tracker issue a report became. Firstmate files it; GRIDGO only stores the link.
 export const TRACKER_ISSUE_URL_RE = /^https:\/\/github\.com\/gridgoph\/[A-Za-z0-9._-]+\/issues\/[1-9][0-9]*$/;
@@ -334,13 +334,36 @@ function trackerIssueUrlInput(body) {
   return trimmed;
 }
 
+/** Viewers without tracker link access must not receive GitHub URLs,
+ * including links pasted into report text or publication labels. Stored text is unchanged.
+ */
+function withoutGithubLinks(value) {
+  if (typeof value === "string") {
+    return value.replace(/https?:\/\/[^\s<>"']+/gi, (url) => {
+      try {
+        const host = new URL(url).hostname.toLowerCase();
+        return ["github.com", "githubusercontent.com", "github.io"].some(domain => host === domain || host.endsWith(`.${domain}`))
+          ? "[link hidden]" : url;
+      } catch { return url; }
+    });
+  }
+  if (Array.isArray(value)) return value.map(withoutGithubLinks);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => key !== "trackerIssueUrl")
+      .map(([key, entry]) => [key, withoutGithubLinks(entry)]));
+  }
+  return value;
+}
+
 /**
  * List, read and mark reports under `base`. Shared by the support desk
  * (`/issue-reports`), signed-in Operations / Super Admin (`/ops/issue-reports`)
  * and firstmate's service token (`/firstmate/issue-reports`); the caller has
  * already decided who may reach it.
  */
-async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch, priorityActor = null }) {
+async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch, priorityActor = null, canManageTrackerLink = false }) {
+  const project = report => canManageTrackerLink ? report : withoutGithubLinks(report);
   if (method === "GET" && path === base) {
     const status = url?.searchParams.get("status") || null;
     if (status && !ISSUE_STATUSES.includes(status)) {
@@ -367,7 +390,7 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
       throw new ReportError(400, "invalid_request", "priority must be true or false.");
     }
     const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit, before, priority: priorityRaw === "true" });
-    send(res, 200, { reports, counts: await reportCounts(database) });
+    send(res, 200, { reports: reports.map(project), counts: await reportCounts(database) });
     return true;
   }
 
@@ -378,6 +401,9 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
   if (!UUID_RE.test(id)) throw notFound;
   if (method === "PATCH") {
     const body = await readPatch();
+    if (!canManageTrackerLink && body && Object.hasOwn(body, "trackerIssueUrl")) {
+      throw new ReportError(403, "tracker_issue_url_forbidden", "Only Super Admin or the firstmate service can change the tracker issue link.");
+    }
     if (body && Object.hasOwn(body, "priority")) {
       if (!priorityActor) throw new ReportError(403, "forbidden", "Only Operations and Super Admin can change priority.");
       if (typeof body.priority !== "boolean" || Object.keys(body).some(key => key !== "priority")) {
@@ -389,7 +415,7 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
          WHERE id = $1 RETURNING id`, [id, body.priority, priorityActor.id],
       ), { lockKey: ISSUE_LOCK });
       if (!result.rowCount) throw notFound;
-      send(res, 200, await findIssueReport(database, storage, id));
+      send(res, 200, project(await findIssueReport(database, storage, id)));
       return true;
     }
     const status = asTrimmedString(body?.status);
@@ -402,7 +428,9 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
     }
     // Validated even when the status is about to clear it, so a bad link is never silently dropped.
     const linkInput = trackerIssueUrlInput(body);
-    const trackerIssueUrl = LINKED_STATUSES.includes(status) ? linkInput : null;
+    const trackerIssueUrl = canManageTrackerLink
+      ? (LINKED_STATUSES.includes(status) ? linkInput : null)
+      : undefined;
     const updated = await database.transaction(
       () => updateIssueReport(database, id, {
         status,
@@ -415,7 +443,7 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
   }
   const report = await findIssueReport(database, storage, id);
   if (!report) throw notFound;
-  send(res, 200, report);
+  send(res, 200, project(report));
   return true;
 }
 
@@ -483,6 +511,7 @@ export async function routeStaffIssueReports({ req, res, pathname, url, user, re
     }
     if (await reviewIssueReports({
       method: req.method, path, base: STAFF_BASE, url, res, send, database, storage, priorityActor: user,
+      canManageTrackerLink: identityHasMembership(user, "super_admin"),
       readPatch: () => readBody(req),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
@@ -519,6 +548,7 @@ export async function routeFirstmateIssueReports({ req, res, pathname, url, send
     if (refusal) throw new ReportError(refusal.status, refusal.error, refusal.message);
     if (await reviewIssueReports({
       method: req.method, path, base: FIRSTMATE_BASE, url, res, send, database, storage,
+      canManageTrackerLink: true,
       readPatch: () => readJsonBody(req, 64 * 1024),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
