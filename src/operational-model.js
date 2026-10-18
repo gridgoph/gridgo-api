@@ -1,3 +1,4 @@
+import { approvalProofSummary, canReadApprovalProof } from './approval-proof.js';
 import { orderColourClientAmount, publicColourChange } from './colour-projection.js';
 import { colourSettings, validateColourSettings } from './colour-pricing.js';
 import { publicColourQuote } from './colour-analysis.js';
@@ -267,6 +268,7 @@ export function defaultOperationalSettings() {
      */
     coverSpineRequired: false,
     clientShopChatContactThreshold: 3,
+    approvalProofRequired: false,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
     productionPenalty: defaultProductionPenalty(),
@@ -345,6 +347,9 @@ export function validateOperationalSettings(settings) {
       "physicalInvoiceRequestsEnabled must be a JSON boolean.",
       { field: "physicalInvoiceRequestsEnabled" },
     );
+  }
+  if (settings?.approvalProofRequired !== undefined && typeof settings.approvalProofRequired !== "boolean") {
+    fail(400, "invalid_approval_proof_required", "approvalProofRequired must be a JSON boolean.");
   }
   if (settings?.coverSpineRequired !== undefined && typeof settings.coverSpineRequired !== "boolean") {
     fail(400, "invalid_cover_spine_required", "coverSpineRequired must be a JSON boolean.", { field: "coverSpineRequired" });
@@ -1279,6 +1284,9 @@ export function publicOrderFor(order, user, store = null) {
     delete publicRecord.shopAcceptance.schedule;
     if (!ops && user?.role !== 'supplier') delete publicRecord.shopAcceptance;
   }
+  delete publicRecord.approvalProofs;
+  delete publicRecord.approvalPolicy;
+  if (canReadApprovalProof(store, order, user)) publicRecord.approvalProof = approvalProofSummary(order);
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";

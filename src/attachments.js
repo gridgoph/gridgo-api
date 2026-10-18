@@ -1,3 +1,4 @@
+import { canReadApprovalProof } from './approval-proof.js';
 import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
 import { displayFilename } from './display-filename.js';
@@ -49,6 +50,8 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  approval_signature: { roles: ["client"], maxBytes: 2 * 1024 * 1024, contentTypes: ["image/png"] },
+  approval_sample_photo: { roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   legal_document: { roles: ["super_admin"], maxBytes: 20 * 1024 * 1024, contentTypes: ["application/pdf"] },
   artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...ARTWORK_UPLOAD_CONTENT_TYPES] },
   mockup: {
@@ -1368,6 +1371,13 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (["approval_signature", "approval_sample_photo"].includes(file.purpose)) {
+    const refs = (file.references || []).filter(ref => ref.type === 'order');
+    if (!refs.length && user.role === 'client' && file.ownerId === user.id) return;
+    if (refs.some(ref => canReadApprovalProof(store, store.orders.find(order => order.id === ref.id), user)
+      && (user.role !== 'supplier' || hasApprovedWorkRole(user, 'supplier')))) return;
+    forbidden();
+  }
   if (file.purpose === "client_verification_document") forbidden();
   if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)
     && !(user.role === 'rider' && ((file.ownerId === user.id && !(file.references || []).length)

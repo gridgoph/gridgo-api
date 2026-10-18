@@ -2,6 +2,8 @@
 
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
 
+Immutable checkout/sample approvals, private signature evidence and PDF downloads are documented in [Approval proof](docs/APPROVAL_PROOF_API.md). Enforcement defaults off until the companion apps ship.
+
 Per-page document/construction colour estimates, shop tier prices, copies/sets and price-check gates are documented in [Colour pricing](docs/COLOUR_PRICING_API.md).
 
 Per-item special instructions, shop acknowledgement and paid specification changes are documented in [Order changes](docs/ORDER_CHANGES_API.md).
