@@ -187,6 +187,39 @@ async function request(api, pathname, { method = "GET", subject, body, headers =
   return { status: response.status, body: await response.json() };
 }
 
+for (const standing of ["removed", "suspended"]) {
+  test(`public catalogue hides ${standing} suppliers and restores reactivated accounts`, async () => {
+    const store = fixture();
+    store.catalogItems[0].reviewStatus = "approved";
+    const read = (pathname) => routeSupplierCatalog({
+      req: { method: "GET", headers: {} },
+      url: new URL(pathname, "http://127.0.0.1"), store, user: null,
+    });
+    const details = [
+      ["/catalog/shops/supplier", "catalog_shop_not_found"],
+      ["/catalog/items/item", "catalog_item_not_found"],
+      ["/catalog/media/photo", "catalog_media_not_found"],
+      ["/catalog/media/logo", "catalog_media_not_found"],
+    ];
+    for (const accountStatus of ["active", standing, "active"]) {
+      store.users[0].accountStatus = accountStatus;
+      const visible = accountStatus === "active";
+      const index = await read("/catalog/shops");
+      assert.equal(index.status, 200);
+      assert.deepEqual(index.body.shops.map(shop => shop.supplierId), visible ? ["supplier"] : []);
+      for (const [pathname, error] of details) {
+        const result = await read(pathname);
+        assert.equal(result.status, visible ? 200 : 404, `${accountStatus}: ${pathname}`);
+        if (!visible) assert.deepEqual(result.body, { error });
+      }
+      assert.deepEqual(catalogItemBlockers(store, store.catalogItems[0]), []);
+      assert.equal(store.catalogItems[0].active, true);
+      assert.equal(store.catalogItems[0].reviewStatus, "approved");
+      assert.equal(store.supplierServices[0].state, "live");
+    }
+  });
+}
+
 test("effective accepted formats inherit service defaults and honor item overrides", () => {
   const inherited = fixture();
   assert.deepEqual(effectiveAcceptedFormats(inherited, inherited.catalogItems[0]).map((format) => format.code), ["pdf"]);
