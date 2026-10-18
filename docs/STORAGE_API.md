@@ -396,7 +396,7 @@ The policy decided on 4 October 2026 is implemented in `src/file-retention-polic
 | Client artwork and design files (`artwork`, `mockup`) | 30 days after order completion. Cancelled orders do not qualify as completed. |
 | Money proof (`payment_proof`, `payout_receipt`, `refund_receipt`) | 5 years after the order closes (completed, payout released, or cancelled). |
 | Refund QR revisions and supporting refund evidence (`refund_qr`, `refund_evidence`) | 5 years after order closure, as part of the financial evidence. |
-| Production and delivery photos, legacy fulfilment proofs, handoff signatures | 1 year after order closure. |
+| Production and delivery photos, legacy fulfilment proofs, handoff signatures, client approval signatures and received-sample photos | 1 year after order closure. |
 | Shop, rider, business/organization ID and verification evidence | While the account is active, then 1 year after removal/closure or rejection of the corresponding application. Suspension is not closure. Replaced verification evidence follows this same rule. |
 | Unused uploads and unlinked listing/shop images or receiving QRs | Eligible after a 24-hour upload grace period; each daily pass removes those no longer used. Active cart artwork, current media/settings references, and historical order evidence are not orphans. |
 
@@ -655,3 +655,7 @@ and open-case holds still apply.
 Use [Supplier invoices](SUPPLIER_INVOICES_API.md) for entered invoice number/date/
 amount, monthly expected/received/missing counts, the shop reminder and audited
 paper collection. Reuse this file purpose; do not introduce another upload flow.
+
+## Approval signature and received-sample evidence
+
+`approval_signature` is a client-owned PNG up to 2 MiB; `approval_sample_photo` is a client-owned JPEG/PNG/WebP up to 20 MiB. They upload through `/files` and bind atomically through checkout, final-quote acceptance or sample approval, never generic file attach. Reads are owning-client/Operations/Super Admin or the assigned approved shop after file-check release; riders are denied. Metadata and signed responses use private no-store caching. Both use the existing one-year order-evidence retention and all open-case holds. The contract, immutable record and PDF export are in [Approval proof](APPROVAL_PROOF_API.md).

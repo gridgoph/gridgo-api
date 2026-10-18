@@ -1,3 +1,4 @@
+import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
 import { parseQuantityMode } from './colour-pricing.js';
 import { colourQuoteFor, queueLineColour } from './colour-analysis.js';
@@ -633,6 +634,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       // Null until given; only hardbound and binding products ask.
       coverSpine: publicCartCoverSpine(line),
       coverSpineRequired: Boolean(item && coverSpineApplies(item) && coverSpineRequiredSetting(store.settings)),
+      approvalMethod: approvalPolicy(store.settings, { categories: [store.supplierServices.find(service => service.id === item?.supplierServiceId)?.categoryCode] }).method,
       // The client's exact colours, and what each uploaded file uses beside them.
       colorTargets: colorTargetsFor(line),
       artworkColors: artworkColorsFor(store, artworkFileIdsFor(line)),
@@ -715,6 +717,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     ? groups.map(group => group.readyBy).sort().at(-1) : null;
   return {
     id: cart.id,
+    approvalProofRequired: store.settings.approvalProofRequired === true,
     operatingStatus,
     checkoutNotice: operatingStatus.isOpenNow ? null : { code: 'outside_operating_hours', ...operatingStatus, readyBy },
     state: cart.state,
@@ -1070,6 +1073,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.");
     }
   }
+  order.approvalPolicy = approvalPolicy(store.settings, { categories: [...grouped.values()].flat().map(({ item }) =>
+    store.supplierServices.find(service => service.id === item.supplierServiceId)?.categoryCode) });
   order.supplierId = job.supplierId;
   snapshotShopClock(store, order);
   order.pickup = { ...job.pickup };
@@ -1163,6 +1168,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     if (snapshot.lineItem.mockupFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.mockupFileId, "mockup", "mockupFileId"), orderId, `line:${snapshot.lineItem.id}:mockup`);
   }
   attachOrderFile(proof, orderId, "payment:initial:proof");
+  recordApprovalProof({ store, order, user, approval: body.approval, at, id: createId, req, cartVersion: cart.version });
 
   const invoice = {
     ...fee,

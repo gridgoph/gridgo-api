@@ -82,6 +82,62 @@ function caller(store, user, at = AT) {
   };
 }
 
+test('checkout approval gate is off for released builds; explicit one-tap is bound to the cart version', async () => {
+  for (const enabled of [false, true]) {
+    const { store, client } = fixture(); store.settings.approvalProofRequired = enabled;
+    const call = caller(store, client);
+    const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart.id;
+    await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 1, artworkFileId: 'file_art', specialInstructions: 'Keep the margin' });
+    const before = structuredClone(store);
+    const body = { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'APPROVAL-248' } };
+    if (enabled) {
+      await assert.rejects(call('POST', `/me/carts/${cartId}/checkout`, body), { code: 'approval_proof_required' });
+      Object.assign(store, structuredClone(before));
+      body.approval = { accepted: true, method: 'one_tap', expectedCartVersion: -1, device: { id: 'install', platform: 'android', appVersion: '248' } };
+      await assert.rejects(call('POST', `/me/carts/${cartId}/checkout`, body), { code: 'approval_cart_stale' });
+      Object.assign(store, structuredClone(before));
+      body.approval.expectedCartVersion = store.carts[0].version;
+    }
+    const result = await call('POST', `/me/carts/${cartId}/checkout`, body);
+    assert.equal(result.status, 201);
+    const proof = store.orders[0].approvalProofs[0];
+    assert.equal(proof.status, enabled ? 'approved' : 'legacy_unrecorded');
+    assert.equal(proof.snapshot.items[0].specialInstructions, 'Keep the margin');
+    store.cartLines[0].specialInstructions = 'Edit after checkout';
+    assert.equal(proof.snapshot.items[0].specialInstructions, 'Keep the margin');
+  }
+});
+
+test('custom merchandise checkout requires handwriting and multi-shop checkout writes independent group proofs', async () => {
+  const { store, client } = fixture(); store.settings.approvalProofRequired = true;
+  store.supplierServices.find(service => service.supplierId === 'supplier_a').categoryCode = 'corporate_event_merch';
+  store.catalogItems.find(item => item.id === 'item_a').subcategoryCode = 'custom_apparel';
+  store.files.push({ fileId: 'signature', purpose: 'approval_signature', ownerId: client.id, state: 'ready', objectKey: 'client/signature.png', size: 100 });
+  const call = caller(store, client);
+  const cartId = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: '2026-09-03T10:00:00Z' })).body.cart.id;
+  for (const catalogItemId of ['item_a', 'item_b']) {
+    await call('POST', `/me/carts/${cartId}/lines`, { catalogItemId, optionIds: [], quantity: 1, artworkFileId: 'file_art', deadline: '2026-09-03T10:00:00Z' });
+  }
+  const cart = (await call('GET', `/me/carts/${cartId}`)).body.cart;
+  assert.equal(cart.approvalProofRequired, true);
+  assert.equal(cart.lines[0].approvalMethod, 'drawn');
+  const before = structuredClone(store);
+  const body = { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'BASKET-248' },
+    approval: { accepted: true, method: 'one_tap', expectedCartVersion: cart.version, device: { id: 'install', platform: 'ios', appVersion: '248' } } };
+  await assert.rejects(call('POST', `/me/carts/${cartId}/checkout`, body), { code: 'invalid_approval' });
+  Object.assign(store, before);
+  body.approval.method = 'drawn'; body.approval.signatureFileId = 'signature';
+  const result = await call('POST', `/me/carts/${cartId}/checkout`, body);
+  assert.equal(result.status, 201); assert.equal(store.orders.length, 2);
+  for (const order of store.orders) {
+    assert.equal(order.approvalProofs.length, 1);
+    const snapshot = order.approvalProofs[0].snapshot;
+    assert.equal(snapshot.orderId, order.id); assert.equal(snapshot.items.length, 1);
+    assert.equal(snapshot.basketId, store.baskets[0].id);
+  }
+  assert.equal(store.files.find(file => file.fileId === 'signature').references.length, 2);
+});
+
 test("a removed shop is not matched until its account is restored", async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
@@ -677,9 +733,11 @@ test("checkout writes ops needs-QA, payment-submitted, and the client receipt-re
     [
       "user_admin:ops_job_needs_qa",
       "user_admin:ops_payment_submitted",
+      "user_admin:order_approval_recorded",
       "user_client:order_receipt_ready",
       "user_ops:ops_job_needs_qa",
       "user_ops:ops_payment_submitted",
+      "user_ops:order_approval_recorded",
     ],
   );
   assert.equal(store.notifications.some((row) => row.userId === "supplier_a"), false);

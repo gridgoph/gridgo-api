@@ -536,6 +536,7 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
     "user_ops:ops_job_needs_qa",
     "user_ops:ops_order_progress",
     "user_ops:ops_payment_submitted",
+    "user_ops:order_approval_recorded",
   ]);
   assert.equal(persisted.notifications.find(n=>n.type==="order_submitted").push,false);
 });
@@ -2079,12 +2080,23 @@ test('HTTP short links check and persist canonical artwork outside the domain mu
   assert.equal(checked.body.url, fixtures.public.url);
   const cartId = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart.id;
   hold = true;
-  const adding = call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkLinks: [short] } });
-  await Promise.race([providerReached, adding.then((result) => { throw new Error(`Cart returned before resolving its short link: ${JSON.stringify(result)}`); })]);
-  try {
-    const lock = await database.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', ['gridgo-domain-mutation']);
-    assert.equal(lock.rows[0].acquired, true, 'provider round trip must not hold the domain lock');
-  } finally { releaseProvider(); }
+  let adding;
+  // Health does not wait for the startup lifecycle sweep. A nonblocking lock
+  // probe can therefore observe that unrelated sweep, not this HTTP request.
+  // Hold the lock ourselves: reaching the provider while it is held proves
+  // the request resolves its short link before entering the mutation lock.
+  await database.transaction(async () => {
+    await database.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['gridgo-domain-mutation']);
+    adding = call(`/me/carts/${cartId}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', optionIds: [], quantity: 1, artworkLinks: [short] } });
+    let timer;
+    try {
+      await Promise.race([
+        providerReached,
+        adding.then((result) => { throw new Error(`Cart returned before resolving its short link: ${JSON.stringify(result)}`); }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Provider must be reached while another transaction holds the domain lock')), 5000); }),
+      ]);
+    } finally { clearTimeout(timer); releaseProvider(); }
+  });
   const added = await adding;
   assert.equal(added.status, 201, JSON.stringify(added.body) + instance.output());
   const canonical = [{ formatCode: 'canva_link', url: fixtures.public.url }];
