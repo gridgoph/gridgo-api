@@ -33,7 +33,7 @@ export function fileRelationships(store, file) {
   let unresolved = false;
   for (const ref of file.references || []) {
     if (ref.type === 'order') orderIds.add(ref.id);
-    if (ref.type === 'pickup_chat_message') {
+    if (['pickup_chat_message', 'client_shop_chat_message'].includes(ref.type)) {
       if (ref.orderId) orderIds.add(ref.orderId); else unresolved = true;
     }
     const caseCollection = { refund_request: 'refundRequests', issue: 'issues', claim: 'claims', dispute: 'disputes', escalation: 'escalations' }[ref.type];
@@ -76,6 +76,7 @@ function closedAt(order, artwork) {
 export function retentionDecision(store, file, at) {
   const keep = (reason) => ({ eligible: false, reason });
   if (file.purpose === 'legal_document') return keep('legal_evidence');
+  if (file.purpose === 'client_shop_chat_attachment' && (file.references || []).length) return keep('order_chat_evidence');
   if (!['ready', 'pending_upload', 'delete_pending'].includes(file.state)) return keep('not_live');
   const links = fileRelationships(store, file);
   if (links.held) return keep('open_case');
@@ -121,7 +122,7 @@ export function retentionDecision(store, file, at) {
 export function assertEarlyFileDeletion(store, file, user, reason) {
   if (!user) fail(401, 'unauthorized');
   if (!file) fail(404, 'file_not_found');
-  if (file.purpose === 'legal_document') fail(409, 'file_retention_hold');
+  if (file.purpose === 'legal_document' || (file.purpose === 'client_shop_chat_attachment' && (file.references || []).length)) fail(409, 'file_retention_hold');
   if (!['super_admin', 'client'].includes(user.role)) fail(403, 'forbidden');
   if (user.role === 'super_admin') {
     if (typeof reason !== 'string' || !reason.trim()) fail(400, 'reason_required');

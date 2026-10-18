@@ -6,6 +6,8 @@ import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { canViewThread } from "./support-chat.js";
+import { canReadClientShopChatFile } from './client-shop-chat.js';
+import { CLIENT_SHOP_CHAT_PURPOSE, CLIENT_SHOP_CHAT_MAX_BYTES, CLIENT_SHOP_CHAT_TYPES } from './chat-attachment-policy.js';
 import { canReadPickupChatPhoto } from "./pickup-chat.js";
 import { canReadDeliveryChatPhoto } from "./delivery-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
@@ -140,8 +142,11 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 10 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
   },
-  // A picture on an Operations conversation. JPEG/PNG/WebP only; the
-  // contents must match the filename. Bound when the chat message is posted.
+  // Order evidence: sanitized images or PDF, bound when a message is posted.
+  client_shop_chat_attachment: {
+    roles: ['client', 'supplier', 'ops_admin', 'super_admin'], maxBytes: CLIENT_SHOP_CHAT_MAX_BYTES, contentTypes: CLIENT_SHOP_CHAT_TYPES,
+  },
+  // A picture on an Operations conversation.
   support_chat_image: {
     roles: ["client", "supplier", "rider", "ops_admin", "super_admin"],
     maxBytes: 15 * 1024 * 1024,
@@ -717,6 +722,9 @@ export function markFileDeleted(file, at) {
 
 export function publicFile(file, user = null) {
   if (!file) return null;
+  if (file.purpose === CLIENT_SHOP_CHAT_PURPOSE) return { fileId: file.fileId, purpose: file.purpose,
+    originalFilename: file.detectedContentType === 'application/pdf' ? 'document.pdf' : 'image.png',
+    detectedContentType: file.detectedContentType, size: file.size, state: file.state, createdAt: file.createdAt, readyAt: file.readyAt };
   return {
     fileId: file.fileId,
     ...(publicArtworkPreview(file) ? { preview: publicArtworkPreview(file) } : {}),
@@ -753,6 +761,7 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
+  if (purpose === CLIENT_SHOP_CHAT_PURPOSE) fail(409, 'client_shop_chat_attachment_not_attachable', 'Send attachmentFileIds with the chat message.');
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose)) {
     fail(409, "refund_file_not_attachable", "Bind this file through the refund request routes.");
   }
@@ -1327,6 +1336,12 @@ export function authorizeFileRead(user, store, file) {
   // Tracker evidence is the Super Admin's alone; Operations never reads it.
   if (file.purpose === "tracker_decision") {
     if (hasRole(user, "super_admin")) return;
+    forbidden();
+  }
+  if (file.purpose === CLIENT_SHOP_CHAT_PURPOSE) {
+    const sent = (file.references || []).filter(ref => ref.type === 'client_shop_chat_message');
+    if (!sent.length && file.ownerId === user.id) return;
+    if (sent.some(ref => canReadClientShopChatFile(user, store, ref))) return;
     forbidden();
   }
   if (file.purpose === "support_chat_image") {
