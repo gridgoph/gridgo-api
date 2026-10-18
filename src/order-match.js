@@ -1,3 +1,4 @@
+import { performanceTopPick } from './supplier-performance-policy.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { operatingHours, reviewTiming } from './operating-hours.js';
 import { addOpeningMilliseconds } from './availability.js';
@@ -562,8 +563,14 @@ export function matchShop(store, input = {}) {
   }
 
   const weights = scoreRows(rows, ranking);
-  const winner = rows[0];
-  const reasonKey = decidingFactor(winner, rows[1], ranking) || "vetted";
+  // Performance demotes a shop only when an unhidden candidate can meet the request.
+  // Preserve the ordinary winner when every candidate is hidden.
+  const unhidden = rows.filter(row => !performanceTopPick(store, row.supplierId, now).hidden);
+  const contenders = unhidden.length ? unhidden : rows;
+  const winner = contenders[0];
+  const alternatives = rows.filter(row => row !== winner);
+  const runnerUp = contenders[1];
+  const reasonKey = decidingFactor(winner, runnerUp, ranking) || "vetted";
   const alternativesCount = rows.length - 1;
 
   const distanceZone = winner.distance == null ? null : distanceZoneForDistance(winner.distance, store.settings);
@@ -571,7 +578,7 @@ export function matchShop(store, input = {}) {
   return {
     ranking,
     matchReason: { key: reasonKey, label: REASON_LABELS[reasonKey] },
-    otherListings: rows.slice(1).map(otherListing),
+    otherListings: alternatives.map(otherListing),
     distanceZone,
     ...(rating ? { rating } : {}),
     shop: winner.shop,

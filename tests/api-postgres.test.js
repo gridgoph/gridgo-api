@@ -4627,7 +4627,12 @@ test('production penalties: Operations confirms no communication with a reason; 
     const store = await loadStore(database);
     const order = store.orders.find((row) => row.id === 'ord_payout');
     order.state = 'production';
-    order.readyBy = new Date(Date.now() - 3600000).toISOString();
+    order.readyBy = new Date(Date.now() - 2 * 3600000).toISOString();
+    // Attest beyond the new grace window in an explicitly open shop calendar.
+    order.performanceClock = { version: 1, supplierId: order.supplierId, schedule: {
+      utcOffsetMinutes: 480, closures: [], week: [0, 1, 2, 3, 4, 5, 6]
+        .map(weekday => ({ weekday, opensMinute: 0, closesMinute: 1440 })),
+    } };
     await saveStore(database, store);
   });
   const pathname = '/orders/ord_payout/production-no-communication';

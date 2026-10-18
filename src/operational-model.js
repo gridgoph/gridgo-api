@@ -1,3 +1,4 @@
+import { performanceEnabled } from './supplier-performance-policy.js';
 import { approvalProofSummary, canReadApprovalProof } from './approval-proof.js';
 import { orderColourClientAmount, publicColourChange } from './colour-projection.js';
 import { colourSettings, validateColourSettings } from './colour-pricing.js';
@@ -891,7 +892,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
 
   if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
-  if (!order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+  if (!performanceEnabled(store, at) && !order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && productionLatenessTier(order, at)) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
@@ -1151,6 +1152,7 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.operatingClock;
   delete publicRecord.shopClock;
   delete publicRecord.shopClockVersion;
+  delete publicRecord.performanceClock;
   if (order.shopClockVersion === 1 && (['ops_admin', 'super_admin'].includes(user?.role)
       || (user?.role === 'client' && user.id === order.clientId))) {
     const finishedAt = order.readyAt && productionTiming(order, order.readyAt).finishedAt;

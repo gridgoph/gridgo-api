@@ -1,3 +1,4 @@
+import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
@@ -85,6 +86,7 @@ const TABLES = [
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  performanceTable,
   ...staffTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
@@ -130,6 +132,8 @@ export function emptyStore() {
     checkoutExitPrompts: [],
     supplierInvoices: [],
     surveyLaunchedAt: null,
+    supplierPerformanceLaunchedAt: null,
+    supplierPerformanceEvents: [],
     version: 3,
     legalPenaltyGate: null,
     users: [],
@@ -204,6 +208,7 @@ function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   staffRows(store, rows);
   voucherRows(store, rows);
+  performanceRows(store, rows);
   surveyRows(store, rows);
   checkoutExitRows(store, rows);
   supplierInvoiceRows(store, rows);
@@ -832,6 +837,7 @@ export async function loadStore(database) {
   }
   const store = storeFromRows(loaded, {
     legalPenaltyGate: await loadLegalPenaltyGate(database),
+    supplierPerformanceLaunchedAt: (await database.query("SELECT launched_at FROM supplier_performance_launch WHERE singleton")).rows[0]?.launched_at || null,
     surveyLaunchedAt: (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null,
   });
   Object.defineProperty(store, "listOwnCatalogItems", {
@@ -874,15 +880,17 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
   });
 }
 
-function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, writable = true } = {}) {
+function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supplierPerformanceLaunchedAt = null, writable = true } = {}) {
   const store = emptyStore();
   store.legalPenaltyGate = legalPenaltyGate;
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
+  loadPerformanceRows(store, loaded);
   loadSurveyRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;
+  store.supplierPerformanceLaunchedAt = supplierPerformanceLaunchedAt;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
   const settings = loaded.platform_settings[0];

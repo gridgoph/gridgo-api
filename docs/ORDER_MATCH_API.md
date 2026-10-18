@@ -78,6 +78,12 @@ Quality is unchanged in kind: with five valid reviews, the unrounded average qua
 
 Within each shop choose its best eligible listing by these same comparisons, then listing ID ascending. Rank those representatives with supplier ID ascending as the final tie-break. This avoids combining one listing's price with another's speed. The Top Pick's `listings[]` contains **all its eligible deadline-capable listings**, in the same priority order; index 0 is its recommended listing. Each gains `readyBy` (the padded client promise), `placeInLine` (jobs ahead + 1), and `selectToken`.
 
+[Supplier Performance](SUPPLIER_PERFORMANCE_API.md) can demote a shop from Top
+Pick for seven days. Choose an eligible unhidden shop before any hidden shop;
+hidden shops remain in alternatives. When every eligible shop is hidden, use the
+best-ranked hidden shop as Top Pick. Demotion alone never causes a missing match,
+and the response shape and priority comparisons remain unchanged.
+
 The root `matchReason` names the first factor that separates the winner from the runner-up, i.e. the factor deciding between the final contenders after earlier ties. It is `vetted` if there is one candidate or every factor ties and supplier ID decides. Labels are fixed:
 
 | key | label |

@@ -110,13 +110,13 @@ export function notifyRecovery(store, order, kind, at, createId) {
   queueOrderInvalidate(store, order, ['orders', 'jobs', 'dispatch', 'payouts']);
 }
 
-export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null }) {
+export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null, reasonCode = null }) {
   if (rescheduleHold(order)) fail('reschedule_fulfillment_stopped');
   if (recoveryHeld(order)) fail('shop_recovery_pending');
   if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail('shop_cancel_not_available');
   if (refundHold(store, order) || refundSettlementFor(store, order)) fail('refund_fulfillment_stopped');
   assessProductionLapses(store, { at, createId, orderId: order.id });
-  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, at, actorId };
+  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, reasonCode, at, actorId };
   (order.shopFailureEvents ||= []).push(event);
   order.declinedBy = [...new Set([...(order.declinedBy || []), order.supplierId])];
   if (order.shopAcceptance) order.shopAcceptance.status = kind;
