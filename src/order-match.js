@@ -1,3 +1,4 @@
+import { sameReviewData, reportOrderAllowed } from './review-data.js';
 import { performanceTopPick } from './supplier-performance-policy.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { operatingHours, reviewTiming } from './operating-hours.js';
@@ -122,7 +123,7 @@ function listingCompleteness(item) {
 /** Whether the shop hit the date its own board promised, across finished work. */
 export function onTimeRate(store, supplierId) {
   const finished = (store.orders || []).filter(
-    (order) => order.supplierId === supplierId && order.readyBy && productionTiming(order, null).finishedAt,
+    (order) => reportOrderAllowed(store, order.id) && order.supplierId === supplierId && order.readyBy && productionTiming(order, null).finishedAt,
   );
   if (finished.length === 0) return null;
   const onTime = finished.filter((order) => order.shopClock || riderPackingFlow(order)
@@ -152,11 +153,13 @@ function fromPrice(listings) {
  * its way out, and counting only one of them would understate a real queue.
  */
 function queueMinutesFor(store, supplierId, fallbackHours) {
+  const supplier = store.users?.find(user => user.id === supplierId);
+  const orderScope = orderId => sameReviewData(store.orders?.find(order => order.id === orderId), supplier);
   const jobs = (store.orderJobs || []).filter(
-    (job) => job.supplierId === supplierId && ACTIVE_JOB_STATES.has(job.state),
+    (job) => orderScope(job.orderId) && job.supplierId === supplierId && ACTIVE_JOB_STATES.has(job.state),
   );
   const orders = (store.orders || []).filter(
-    (order) => order.supplierId === supplierId
+    (order) => orderScope(order.id) && order.supplierId === supplierId
       && ACTIVE_JOB_STATES.has(order.state)
       && !jobs.some((job) => job.orderId === order.id),
   );

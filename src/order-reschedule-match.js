@@ -1,3 +1,4 @@
+import { sameReviewData } from './review-data.js';
 import { isDeepStrictEqual } from 'node:util';
 import { approvedCatalogView } from './catalog-review-state.js';
 import { matchShop, MatchError, projectShopFinish } from './order-match.js';
@@ -55,7 +56,7 @@ export function findRescheduleReplacement(store, order, at, onlySupplierId = nul
   const selections = new Map();
   const excluded = new Set([order.supplierId, ...(order.declinedBy || [])]);
   for (const item of store.catalogItems || []) {
-    if (excluded.has(item.supplierId) || (onlySupplierId && item.supplierId !== onlySupplierId)) continue;
+    if (!sameReviewData(order, store.users?.find(u => u.id === item.supplierId)) || excluded.has(item.supplierId) || (onlySupplierId && item.supplierId !== onlySupplierId)) continue;
     if (!selections.has(item.supplierId)) selections.set(item.supplierId, []);
   }
   for (const [supplierId] of selections) {

@@ -1,3 +1,4 @@
+import { isReviewData, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
 import { parseQuantityMode } from './colour-pricing.js';
@@ -891,6 +892,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     operatingClock: operatingClockSnapshot(store.settings, store.version),
     reviewSchedule: reviewTiming(store.settings, at),
     clientId: user.id,
+    reviewData: isReviewData(user),
     organizationOfficer: officerSnapshot(store, user.id),
     deadline: lineDeadline(cart, cartLines[0]),
     ...(basketId ? { basketId, groupLabel, basketDeadline: lineDeadline(cart, cartLines[0]) } : {}),
@@ -1385,11 +1387,11 @@ export async function prepareArtworkCheckout({ req, pathname, store, user, check
 export async function routeOrderMatch(args) {
   if (!isOrderMatchRoute(args.req.method, args.url.pathname)) return null;
   const { store } = args;
-  const view = approvedCatalogView(store);
+  const view = reviewCatalogView(approvedCatalogView(store), args.user);
   if (view === store) return routeOrderMatchApproved(args);
-  const original = Object.fromEntries(CATALOG_REVIEW_TABLES.map(key => [key, store[key]]));
+  const original = Object.fromEntries([...new Set([...CATALOG_REVIEW_TABLES, ...REVIEW_CATALOG_TABLES])].map(key => [key, store[key]]));
   try {
-    for (const key of CATALOG_REVIEW_TABLES) store[key] = view[key];
+    for (const key of Object.keys(original)) store[key] = view[key];
     return await routeOrderMatchApproved(args);
   } finally {
     Object.assign(store, original);

@@ -1,3 +1,4 @@
+import { isReviewData, assertReviewMoneyAllowed } from './review-data.js';
 import { performanceEnabled } from './supplier-performance-policy.js';
 import { approvalProofSummary, canReadApprovalProof } from './approval-proof.js';
 import { orderColourClientAmount, publicColourChange } from './colour-projection.js';
@@ -881,6 +882,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   if (!actor || !["ops_admin", "super_admin", "system"].includes(actor.role)) {
     fail(403, "forbidden", "Only Operations or Super Admin can release a supplier payout milestone.");
   }
+  assertReviewMoneyAllowed(order);
   const milestone = (order?.payoutMilestones || []).find((item) => item.code === code);
   if (!milestone) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
@@ -1609,7 +1611,7 @@ function closeIssueWindow(store, order, at, { by, note }) {
   order.updatedAt = at;
   if (!Array.isArray(order.timeline)) order.timeline = [];
   order.timeline.push({ at, state: "completed", by, note });
-  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
+  if (isReviewData(order) || payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
   const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
   if (retention?.pofFileIds?.length) {
     releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);
