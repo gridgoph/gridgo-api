@@ -29,7 +29,18 @@ Every path is also served under `/api`.
 
 ## Read and mark reports (dashboard: Operations and Super Admin)
 
-The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin` or `super_admin` membership may use `GET /ops/issue-reports`, `GET /ops/issue-reports/:id` and `PATCH /ops/issue-reports/:id`, which behave exactly like the desk routes below; anyone else gets `403 forbidden`.
+The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin` or `super_admin` membership may use `GET /ops/issue-reports`, `GET /ops/issue-reports/:id` and `PATCH /ops/issue-reports/:id`, which follow the desk workflow below with the role restrictions in this section; anyone else gets `403 forbidden`.
+
+Only a `super_admin` membership receives `trackerIssueUrl` in dashboard list, detail,
+status-change, and priority-change responses. Operations responses omit the property
+entirely and redact GitHub URLs pasted into other response text. Stored text is unchanged.
+Operations still receives status, priority, and `publishedIn` (with any GitHub URL redacted).
+
+An Operations PATCH containing `trackerIssueUrl` (including null or an empty string,
+or combined with priority) returns `403 tracker_issue_url_forbidden` without changes.
+Operations status changes always preserve the stored tracker link, including transitions
+to `new` or `dismissed`. Super Admin retains the link behavior described below.
+Support desk callers have the same link restrictions as Operations, regardless of their email allowlist entry. Only Super Admin dashboard callers and firstmate token routes receive and manage tracker links.
 
 ## Read and mark reports (support desk)
 
@@ -40,7 +51,7 @@ Send a Clerk session token as `Authorization: Bearer <token>`. The account's ver
 - `GET /issue-reports/:id` returns one report.
 - `PATCH /issue-reports/:id` with `{ "status": "published", "publishedIn": "09-24-2026" }` marks it handled. `publishedIn` is kept only for `published`.
 
-The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities } }`. Each report is `{ id, issue, category, status, priority, publishedIn, trackerIssueUrl, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
+The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities } }`. Each support desk report is `{ id, issue, category, status, priority, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
 Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL_SECONDS`, default 5 minutes), so download them right after listing.
 
 ## Statuses and the tracker issue link
@@ -50,7 +61,7 @@ Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL
 - `published`: named in a dated report (`publishedIn`).
 - `dismissed`: not acted on.
 
-`trackerIssueUrl` is `null` or `https://github.com/gridgoph/<repo>/issues/<number>`; any other value in a PATCH is `400 invalid_request`
+For Super Admin dashboard callers and firstmate token routes, `trackerIssueUrl` is `null` or `https://github.com/gridgoph/<repo>/issues/<number>`; any other value in a PATCH is `400 invalid_request`
 (also when the status would clear it). In a PATCH, omitting it keeps the stored link and `null` (or `""`) clears it. The link is kept for
 `tracked` and `published` and always cleared on `new` and `dismissed`. These routes never talk to GitHub; firstmate files the issue itself.
 
@@ -58,7 +69,7 @@ Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL
 
 firstmate reads new reports and records the tracker issue each one became with `Authorization: Bearer <FIRSTMATE_TRACKER_TOKEN>`,
 checked in constant time with the tracker's firstmate helper (`firstmateRefusal` in `src/tracker.js`). While the token is unset the
-routes are `404 not_found`; a missing or wrong token is `401 unauthorized`. They behave exactly like the desk routes above:
+routes are `404 not_found`; a missing or wrong token is `401 unauthorized`. They follow the desk workflow above, but retain `trackerIssueUrl` in every report and may manage it:
 
 - `GET /firstmate/issue-reports?status=new[&since=&limit=]` returns `{ reports, counts }` with each screenshot's signed `url`.
 - `GET /firstmate/issue-reports/:id`

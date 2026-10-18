@@ -2006,3 +2006,24 @@ test('ten links can be checked out and every secondary upload is validated', asy
   assert.equal(placed.status, 201);
   assert.deepEqual(store.orderLineItems[0].artworkAttachments, attachments);
 });
+
+test('saved address deletion is owner-only, clears the default and refuses reuse', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const body = { label: 'Destination', addressLine: 'Test destination', point: { lat: 7.07, lng: 125.61 } };
+  const first = (await call('POST', '/me/addresses', { ...body, isDefault: true })).body.address;
+  const second = (await call('POST', '/me/addresses', body)).body.address;
+  const other = caller(store, { id: 'other_client', role: 'client' });
+  await assert.rejects(other('DELETE', `/me/addresses/${first.id}`), { status: 404, code: 'address_not_found' });
+  assert.equal(store.clientAddresses[0].isDefault, true);
+  const result = await call('DELETE', `/me/addresses/${first.id}`);
+  assert.deepEqual(result.body, { ok: true, defaultCleared: true });
+  assert.deepEqual((await call('GET', '/me/addresses')).body.addresses, [second]);
+  assert.ok(store.clientAddresses[0].deletedAt);
+  assert.equal(store.clientAddresses.some(row => row.isDefault), false);
+  assert.equal(store.auditLog.at(-1).action, 'client_address.delete');
+  assert.deepEqual(store.auditLog.at(-1).detail, { defaultCleared: true });
+  await assert.rejects(call('DELETE', `/me/addresses/${first.id}`), { status: 404, code: 'address_not_found' });
+  await assert.rejects(call('POST', '/me/matches', { subcategoryCode: 'flyers', addressId: first.id }), { code: 'address_not_found' });
+  assert.deepEqual((await call('DELETE', `/me/addresses/${second.id}`)).body, { ok: true, defaultCleared: false });
+});

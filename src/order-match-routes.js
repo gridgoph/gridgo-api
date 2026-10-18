@@ -784,7 +784,7 @@ function fulfillmentInput(body, current) {
 
 function addressPoint(store, userId, body) {
   if (body.addressId != null) {
-    const address = (store.clientAddresses || []).find((row) => row.id === String(body.addressId));
+    const address = (store.clientAddresses || []).find((row) => row.id === String(body.addressId) && !row.deletedAt);
     if (!address) fail(404, "address_not_found", "That saved address no longer exists.");
     if (address.clientId !== userId) fail(403, "forbidden", "That saved address belongs to another client.");
     return { ...address.point, label: address.addressLine };
@@ -1320,6 +1320,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
 
 export function isOrderMatchRoute(method, pathname) {
   if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
+  if (method === "DELETE" && /^\/me\/addresses\/[^/]+$/.test(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
@@ -1508,8 +1509,24 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     return { status: 200, body: { preferences: publicPreference(store, user.id) }, mutated: true };
   }
   if (req.method === "GET" && pathname === "/me/addresses") {
-    const addresses = (store.clientAddresses || []).filter((row) => row.clientId === user.id).map(publicAddress);
+    const addresses = (store.clientAddresses || []).filter((row) => row.clientId === user.id && !row.deletedAt).map(publicAddress);
     return { status: 200, body: { addresses }, mutated: false };
+  }
+  if (req.method === "DELETE" && /^\/me\/addresses\/[^/]+$/.test(pathname)) {
+    const addressId = decodeURIComponent(pathname.split("/")[3]);
+    const address = (store.clientAddresses || []).find((row) => row.id === addressId
+      && row.clientId === user.id && !row.deletedAt);
+    if (!address) fail(404, "address_not_found", "That saved address no longer exists.");
+    const at = now();
+    const defaultCleared = address.isDefault;
+    address.isDefault = false;
+    address.deletedAt = at;
+    address.updatedAt = at;
+    address.version += 1;
+    store.auditLog.push({ id: id("aud"), at, actorId: user.id, actorRole: "client",
+      action: "client_address.delete", entityType: "client_address", entityId: address.id,
+      detail: { defaultCleared } });
+    return { status: 200, body: { ok: true, defaultCleared }, mutated: true };
   }
   if (req.method === "POST" && pathname === "/me/addresses") {
     const body = record(await readBody(req));

@@ -54,7 +54,7 @@ const TABLES = [
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
-  { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at"] },
+  { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "schedule", "version", "updated_at"] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
@@ -280,6 +280,7 @@ function rowsFromStore(store) {
       lat: address.point?.lat,
       lng: address.point?.lng,
       is_default: Boolean(address.isDefault),
+      deleted_at: address.deletedAt ?? null,
       version: address.version || 1,
       created_at: address.createdAt,
       updated_at: address.updatedAt,
@@ -941,6 +942,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   store.clientAddresses = orderedBy(loaded.client_saved_addresses, "client_id", "created_at", "id").map((row) => ({
     id: row.id, clientId: row.client_id, label: row.label, addressLine: row.address_line,
     point: { lat: row.lat, lng: row.lng }, isDefault: row.is_default, version: row.version,
+    ...(row.deleted_at ? { deletedAt: row.deleted_at } : {}),
     createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
