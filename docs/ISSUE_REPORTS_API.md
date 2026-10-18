@@ -29,7 +29,18 @@ Every path is also served under `/api`.
 
 ## Read and mark reports (dashboard: Operations and Super Admin)
 
-The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin` or `super_admin` membership may use `GET /ops/issue-reports`, `GET /ops/issue-reports/:id` and `PATCH /ops/issue-reports/:id`, which behave exactly like the desk routes below; anyone else gets `403 forbidden`.
+The dashboard uses the signed-in Clerk session. Any identity with an `ops_admin` or `super_admin` membership may use `GET /ops/issue-reports`, `GET /ops/issue-reports/:id` and `PATCH /ops/issue-reports/:id`, which follow the desk workflow below with the role restrictions in this section; anyone else gets `403 forbidden`.
+
+Only a `super_admin` membership receives `trackerIssueUrl` in dashboard list, detail,
+status-change, and priority-change responses. Operations responses omit the property
+entirely and redact GitHub URLs pasted into other response text. Stored text is unchanged.
+Operations still receives status, priority, and `publishedIn` (with any GitHub URL redacted).
+
+An Operations PATCH containing `trackerIssueUrl` (including null or an empty string,
+or combined with priority) returns `403 tracker_issue_url_forbidden` without changes.
+Operations status changes always preserve the stored tracker link, including transitions
+to `new` or `dismissed`. Super Admin retains the link behavior described below.
+Support desk and firstmate token routes retain their existing projections and link behavior.
 
 ## Read and mark reports (support desk)
 

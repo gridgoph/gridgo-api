@@ -6,6 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+import { resolveAuthorizationContext } from "../src/authorization-context.js";
 import { createDatabase } from "../src/database.js";
 import {
   MAX_SCREENSHOTS,
@@ -278,6 +279,12 @@ test("Operations and Super Admin read and mark reports with their session; other
   const database = createDatabase({ DATABASE_URL });
   const storage = fakeStorage();
   const users = { ops: { id: "u_ops", role: "ops_admin" }, super: { id: "u_super", role: "super_admin" }, client: { id: "u_client", role: "client" } };
+  // Memberships, rather than a stale legacy role, govern link access.
+  for (const user of Object.values(users)) {
+    const role = user.role;
+    resolveAuthorizationContext({ userRoleMemberships: [{ userId: user.id, role }] }, user);
+    user.role = role === "super_admin" ? "ops_admin" : "super_admin";
+  }
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const send = (response, status, body) => {
@@ -318,7 +325,7 @@ test("Operations and Super Admin read and mark reports with their session; other
   assert.equal(listed.status, 200);
   assert.deepEqual(listed.body.counts, { new: 1, tracked: 0, published: 0, dismissed: 0, priorities: 0 });
   assert.equal(listed.body.reports[0].issue, "Rider map is blank");
-  assert.equal(listed.body.reports[0].trackerIssueUrl, null);
+  assert.equal(Object.hasOwn(listed.body.reports[0], "trackerIssueUrl"), false);
 
   const patch = (who, body) => staffCall(who, `/ops/issue-reports/${filed.id}`, { method: "PATCH", body: JSON.stringify(body) });
   const pinned = await patch("ops", { priority: true });
@@ -340,33 +347,64 @@ test("Operations and Super Admin read and mark reports with their session; other
     "https://github.com/gridgoph/gridgo-api/issues/1/extra",
     42,
   ]) {
-    const refused = await patch("ops", { status: "tracked", trackerIssueUrl });
+    const refused = await patch("super", { status: "tracked", trackerIssueUrl });
     assert.equal(refused.status, 400, String(trackerIssueUrl));
     assert.equal(refused.body.error, "invalid_request");
   }
-  const badDismiss = await patch("ops", { status: "dismissed", trackerIssueUrl: "https://example.com/1" });
+  const badDismiss = await patch("super", { status: "dismissed", trackerIssueUrl: "https://example.com/1" });
   assert.equal(badDismiss.status, 400, "a bad link is refused, not silently dropped");
   assert.equal((await staffCall("ops", `/ops/issue-reports/${filed.id}`)).body.status, "new", "a refused PATCH changes nothing");
 
   const link = "https://github.com/gridgoph/gridgo-web/issues/12";
-  const tracked = await patch("ops", { status: "tracked", trackerIssueUrl: ` ${link} ` });
+  const tracked = await patch("super", { status: "tracked", trackerIssueUrl: ` ${link} ` });
   assert.equal(tracked.status, 200);
   assert.equal(tracked.body.status, "tracked");
   assert.equal(tracked.body.trackerIssueUrl, link);
   assert.deepEqual((await staffCall("ops", "/ops/issue-reports")).body.counts, { new: 0, tracked: 1, published: 0, dismissed: 0, priorities: 0 });
-  assert.equal((await staffCall("ops", "/ops/issue-reports?status=tracked")).body.reports[0].trackerIssueUrl, link);
+  assert.equal((await staffCall("super", "/ops/issue-reports?status=tracked")).body.reports[0].trackerIssueUrl, link);
+  assert.equal((await staffCall("super", `/ops/issue-reports/${filed.id}`)).body.trackerIssueUrl, link);
+  for (const trackerIssueUrl of [link, null, "", 42]) {
+    for (const body of [{ status: "tracked", trackerIssueUrl }, { priority: true, trackerIssueUrl }]) {
+      const refused = await patch("ops", body);
+      assert.equal(refused.status, 403);
+      assert.equal(refused.body.error, "tracker_issue_url_forbidden");
+    }
+  }
+  await database.query("UPDATE issue_reports SET issue = $2 WHERE id = $1", [filed.id, `See ${link} and https://api.github.com/repos/gridgoph/gridgo-api`]);
+  for (const response of [
+    await staffCall("ops", "/ops/issue-reports"),
+    await staffCall("ops", `/api/ops/issue-reports/${filed.id}`),
+    await patch("ops", { priority: true }),
+  ]) {
+    assert.equal(response.status, 200);
+    assert.doesNotMatch(JSON.stringify(response.body), /github|trackerIssueUrl/i);
+  }
+  for (const status of ["published", "dismissed", "new", "tracked"]) {
+    const updated = await patch("ops", { status, publishedIn: "2026-10-19" });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.status, status);
+    assert.equal(updated.body.publishedIn, status === "published" ? "2026-10-19" : null);
+    assert.equal(Object.hasOwn(updated.body, "trackerIssueUrl"), false);
+    assert.doesNotMatch(JSON.stringify(updated.body), /github/i);
+    assert.equal((await staffCall("super", `/ops/issue-reports/${filed.id}`)).body.trackerIssueUrl, link);
+    assert.equal((await database.query("SELECT tracker_issue_url FROM issue_reports WHERE id = $1", [filed.id])).rows[0].tracker_issue_url, link);
+  }
+  const labelUpdate = await patch("ops", { status: "published", publishedIn: `Release ${link}` });
+  assert.equal(labelUpdate.body.publishedIn, "Release [link hidden]");
+  assert.equal((await staffCall("super", `/ops/issue-reports/${filed.id}`)).body.publishedIn, `Release ${link}`);
+  await patch("ops", { status: "tracked" });
   const linkedPin = await patch("super", { priority: true });
   assert.equal(linkedPin.body.trackerIssueUrl, link);
   assert.equal(linkedPin.body.status, "tracked");
   await patch("ops", { priority: false });
   const republished = await patch("super", { status: "published", publishedIn: "09-25-2026" });
   assert.equal(republished.body.trackerIssueUrl, link, "omitting the link keeps it");
-  assert.equal((await patch("ops", { status: "tracked", trackerIssueUrl: null })).body.trackerIssueUrl, null, "null clears it");
-  await patch("ops", { status: "tracked", trackerIssueUrl: link });
-  const reopened = await patch("ops", { status: "new", trackerIssueUrl: link });
+  assert.equal((await patch("super", { status: "tracked", trackerIssueUrl: null })).body.trackerIssueUrl, null, "null clears it");
+  await patch("super", { status: "tracked", trackerIssueUrl: link });
+  const reopened = await patch("super", { status: "new", trackerIssueUrl: link });
   assert.equal(reopened.body.status, "new");
   assert.equal(reopened.body.trackerIssueUrl, null, "new clears the link");
-  await patch("ops", { status: "tracked", trackerIssueUrl: link });
+  await patch("super", { status: "tracked", trackerIssueUrl: link });
 
   const dismissed = await staffCall("super", `/ops/issue-reports/${filed.id}`, {
     method: "PATCH", body: JSON.stringify({ status: "dismissed" }),
@@ -469,6 +507,8 @@ test("firstmate reads new reports with signed screenshots and links them with it
   });
   assert.equal(published.body.trackerIssueUrl, link);
   assert.equal(published.body.publishedIn, "09-25-2026");
+  assert.equal((await call(base, "/firstmate/issue-reports?status=published", { token: FIRSTMATE_TOKEN })).body.reports[0].trackerIssueUrl, link);
+  assert.equal((await call(base, `/firstmate/issue-reports/${filed.id}`, { token: FIRSTMATE_TOKEN })).body.trackerIssueUrl, link);
   const dismissed = await call(base, `/firstmate/issue-reports/${older.id}`, {
     method: "PATCH", token: FIRSTMATE_TOKEN, body: { status: "dismissed", trackerIssueUrl: link },
   });
