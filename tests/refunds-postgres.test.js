@@ -759,3 +759,132 @@ test('voucher refund transfers return only paid cash and restore only an unexpir
     assert.equal(store.voucherLedger.filter(row => row.kind === 'restored').length, clientCaused ? 0 : 1);
   }
 });
+
+// Tracker 221: opt-in quote confirmation, existing settlement and manual transfer.
+test('cancellation quote survives PostgreSQL and pays exactly the accepted amount before and after production', { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  for (const [state, releases, expected, entitlement] of [
+    ['payment_authorized', 0, 115000, 0], ['production', 0, 71000, 40000], ['production', 1, 71000, 40000],
+  ]) {
+    await fixture(db, { state, releases });
+    const quote = (await call(db, 'client', 'GET', '/orders/order/cancellation-quote')).body.quote;
+    assert.equal(quote.refund.totalMinor, expected);
+    assert.equal(quote.amounts, undefined);
+    let refund = await request(db, { body: { cancellationQuoteToken: quote.quoteToken } });
+    assert.deepEqual(refund.cancellationQuote, quote);
+    const reloaded = (await call(db, 'client', 'GET', `/refund-requests/${refund.id}`)).body.refund;
+    assert.deepEqual(reloaded.cancellationQuote, quote);
+    refund = await review(db, refund);
+    await assert.rejects(settle(db, refund, { shop: entitlement + 100, total: expected - 100 }), errorCode('cancellation_quote_mismatch'));
+    refund = await settle(db, refund, { shop: entitlement, total: expected });
+    refund = await pay(db, await reserve(db, refund));
+    assert.equal(refund.status, 'paid');
+    assert.equal(refund.payment.amountMinor, quote.refund.totalMinor);
+    const store = await loadStore(db);
+    assert.equal(store.orders[0].state, 'cancelled');
+    assert.equal(store.refundPayments[0].amountMinor, expected);
+    assert.ok(store.refundEvents.find(row => row.kind === 'requested').data.cancellationQuote);
+    assert.ok(store.auditLog.some(row => row.action === 'refund.paid'));
+  }
+});
+
+test('live cancellation quote authorization, no-store and stale acceptance', { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db);
+  const api = await apiForTest(t);
+  for (const who of ['other', 'supplier', 'rider']) assert.equal((await api(who, 'GET', '/orders/order/cancellation-quote')).status, 403);
+  assert.equal((await api(null, 'GET', '/orders/order/cancellation-quote')).status, 401);
+  const result = await api('client', 'GET', '/orders/order/cancellation-quote');
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.match(result.headers.get('cache-control'), /no-store/);
+  const quote = result.body.quote;
+  await db.transaction(async () => {
+    const store = await loadStore(db); store.orders[0].updatedAt = new Date().toISOString(); await saveStore(db, store);
+  });
+  const refused = await api('client', 'POST', '/orders/order/refund-requests', {
+    kind: 'cancellation', reason: 'Cancel the order', cancellationQuoteToken: quote.quoteToken,
+  });
+  assert.equal(refused.status, 409); assert.equal(refused.body.error, 'cancellation_quote_stale');
+  assert.equal((await loadStore(db)).refundRequests.length, 0);
+});
+
+test('live problem intake snapshots evidence privately, preserves legacy reports and audits manual fault approval', { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'issue_window_open' });
+  await db.transaction(async () => {
+    const store = await loadStore(db), order = store.orders[0];
+    order.artworkFileIds = ['art'];
+    order.specialInstructions = 'Use the approved trim';
+    order.fileCheck = { status: 'passed', reviewedAt: AT, checklist: { version: 1, checks: { artwork: true, spec: true, quantity: true, address: true } } };
+    order.shopHandover = { finished: { photoFileIds: ['qa'] }, review: { decision: 'approved' } };
+    order.pickupChecklist = { status: 'passed', packedPhotoFileIds: ['packed'], handoffSignature: { fileId: 'signature' } };
+    order.deliveryEvidence = { fileId: 'delivery', evidenceType: 'photo', recordedAt: AT };
+    for (const [fileId, purpose, ownerId] of [['art', 'artwork', 'client'], ['qa', 'finished_product_photo', 'supplier'],
+      ['packed', 'packing_photo', 'rider'], ['signature', 'handoff_signature', 'rider'], ['delivery', 'delivery_photo', 'rider']]) {
+      const file = readyFile(fileId, purpose, ownerId);
+      file.references = [{ type: 'order', id: order.id, field: purpose }];
+      if (fileId === 'art') file.artworkCheck = { status: 'passed' };
+      store.files.push(file);
+    }
+    await saveStore(db, store);
+  });
+  const api = await apiForTest(t);
+  const body = { problemType: 'damage', description: 'Damage visible after unpacking', photoFileIds: ['evidence'] };
+  for (const who of ['other', 'supplier', 'rider', 'ops']) assert.equal((await api(who, 'POST', '/orders/order/issues', body)).status, 403);
+  assert.equal((await api('client', 'POST', '/orders/order/issues', { ...body, photoFileIds: [] })).body.error, 'problem_photos_required');
+  assert.equal((await api('client', 'POST', '/orders/order/issues', { ...body, photoFileIds: ['qa'] })).body.error, 'invalid_problem_photo');
+  const created = await api('client', 'POST', '/orders/order/issues', body);
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.issue.evidenceSnapshot, undefined);
+  const issueId = created.body.issue.id;
+  const staff = await api('ops', 'GET', `/issues/${issueId}`);
+  assert.equal(staff.status, 200);
+  assert.match(staff.headers.get('cache-control'), /no-store/);
+  const snapshot = staff.body.issue.evidenceSnapshot;
+  assert.deepEqual(snapshot.files.map(row => row.fileId), ['art', 'delivery', 'evidence', 'packed', 'qa', 'signature']);
+  assert.equal(snapshot.files.find(row => row.fileId === 'art').artworkCheck.status, 'passed');
+  assert.ok(!JSON.stringify(snapshot).includes('objectKey'));
+  assert.deepEqual((await api('super', 'GET', `/issues/${issueId}`)).body.issue.evidenceSnapshot, snapshot);
+  for (const who of ['client', 'supplier']) {
+    assert.equal((await api(who, 'GET', `/issues/${issueId}`)).body.issue.evidenceSnapshot, undefined);
+    assert.equal((await api(who, 'GET', '/issues')).body.issues[0].evidenceSnapshot, undefined);
+  }
+  assert.equal((await api('other', 'GET', `/issues/${issueId}`)).status, 403);
+  assert.equal((await api('rider', 'GET', `/issues/${issueId}`)).status, 403);
+  assert.equal((await api('ops', 'GET', '/files/evidence')).status, 200);
+  assert.equal((await api('supplier', 'GET', '/files/evidence')).status, 403);
+  await db.transaction(async () => {
+    const store = await loadStore(db); store.orders[0].specialInstructions = 'Later change'; await saveStore(db, store);
+  });
+  assert.deepEqual((await api('ops', 'GET', `/issues/${issueId}`)).body.issue.evidenceSnapshot, snapshot);
+  const decision = { expectedVersion: 1, fault: 'shop', remedy: 'full_refund', reason: 'Damage shown in the production evidence',
+    alternativesReason: 'Replacement is unavailable; all delivered items are unusable', evidenceIds: ['shop_qa'], costMinor: 115000, gridgoCostMinor: 100001 };
+  assert.equal((await api('client', 'POST', `/issues/${issueId}/decision`, decision)).status, 403);
+  const recorded = await api('ops', 'POST', `/issues/${issueId}/decision`, decision);
+  assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
+  assert.equal(recorded.body.issue.faultDecision.status, 'awaiting_approval');
+  assert.equal((await api('ops', 'POST', `/issues/${issueId}/resolve`, { resolution: 'Complete' })).body.error, 'fault_approval_pending');
+  const approval = { expectedVersion: 2, decisionId: recorded.body.issue.faultDecision.id, reason: 'Funding approved' };
+  assert.equal((await api('ops', 'POST', `/issues/${issueId}/approve-decision`, approval)).status, 403);
+  const approved = await api('super', 'POST', `/issues/${issueId}/approve-decision`, approval);
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal(approved.body.issue.faultDecision.status, 'approved');
+  const store = await loadStore(db);
+  assert.equal(store.issues[0].faultDecisionHistory.length, 2);
+  for (const action of ['issue.report', 'issue.fault_recorded', 'issue.fault_approved']) assert.ok(store.auditLog.some(row => row.action === action), action);
+  assert.equal(store.refundPayments.length, 0);
+});
+
+test('live issue window boundary and old report shape retain their existing behavior', { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await fixture(db, { state: 'issue_window_open' });
+  const api = await apiForTest(t);
+  const created = await api('client', 'POST', '/orders/order/issues', { kind: 'damage', description: 'Legacy report' });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.ok((await loadStore(db)).issues[0].evidenceSnapshot);
+  await db.transaction(async () => {
+    const store = await loadStore(db); store.orders[0].issueWindowExpiresAt = AT; await saveStore(db, store);
+  });
+  const refused = await api('client', 'POST', '/orders/order/issues', { problemType: 'damage', description: 'Late report', photoFileIds: ['evidence'] });
+  assert.equal(refused.status, 409); assert.equal(refused.body.error, 'issue_window_closed');
+});
