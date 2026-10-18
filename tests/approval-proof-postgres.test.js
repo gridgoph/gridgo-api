@@ -61,21 +61,38 @@ test('HTTP sample proof, private PDF and signed evidence reads use client/shop/O
   const body = { approval: { ...approval(store), expectedSnapshotSha256: review.body.review.snapshotSha256 } };
   const missingPhoto = await api('client', 'POST', '/orders/order/approval-proof', { approval: { ...body.approval, samplePhotoFileId: null } });
   assert.equal(missingPhoto.body.error, 'invalid_approval_file');
-  assert.equal((await api('client', 'POST', '/orders/order/approval-proof', body)).status, 200);
+  assert.equal((await api('client', 'POST', '/orders/order/approval-proof', body, { headers: { 'User-Agent': 'approval-http-fixture' } })).status, 200);
   assert.equal((await api('client', 'POST', '/orders/order/transition', { state: 'approved_for_matching' })).status, 200);
+  const storedProof = (await db.transaction(() => loadStore(db))).orders[0].approvalProofs[0];
   for (const user of ['client', 'supplier', 'ops', 'admin']) {
     const read = await api(user, 'GET', '/orders/order/approval-proof'); assert.equal(read.status, 200, user);
     assert.equal(read.body.approvalProofs[0].phase, 'sample');
     const pdf = await api(user, 'GET', '/orders/order/approval-proof/download', null, { raw: true });
     assert.equal(pdf.status, 200); assert.match(pdf.headers.get('content-type'), /application\/pdf/);
     assert.match(pdf.headers.get('cache-control'), /no-store/); assert.ok(pdf.body.startsWith('%PDF'));
+    if (user === 'supplier') {
+      for (const key of ['account', 'device', 'userAgent']) assert.ok(!(key in read.body.approvalProofs[0]), key);
+      for (const value of [storedProof.account.email, device.id, 'approval-http-fixture']) {
+        assert.ok(!JSON.stringify(read.body).includes(value), value);
+        assert.ok(!pdf.body.includes(value), value);
+      }
+      for (const label of ['Account:', 'Device and app:', 'App user agent:']) assert.ok(!pdf.body.includes(label), label);
+    } else {
+      assert.deepEqual(read.body.approvalProofs[0], storedProof);
+      for (const value of [storedProof.account.email, device.id, 'approval-http-fixture']) assert.ok(pdf.body.includes(value), value);
+    }
+    assert.equal(read.body.approvalProofs[0].snapshotSha256, storedProof.snapshotSha256);
+    assert.ok(pdf.body.includes(storedProof.snapshotSha256));
     const file = await api(user, 'GET', '/files/signature/download-url'); assert.equal(file.status, 200, JSON.stringify(file.body));
     assert.match(JSON.stringify(file.body), /X-Amz-Signature/);
   }
   for (const user of ['other', 'replacement', 'rider']) {
     assert.equal((await api(user, 'GET', '/orders/order/approval-proof')).status, 403, user);
+    assert.equal((await api(user, 'GET', '/orders/order/approval-proof/download')).status, 403, user);
     assert.equal((await api(user, 'GET', '/files/signature/download-url')).status, 403, user);
   }
+  assert.equal((await api(null, 'GET', '/orders/order/approval-proof/download')).status, 401);
+  assert.deepEqual((await db.transaction(() => loadStore(db))).orders[0].approvalProofs[0], storedProof);
 });
 
 test('settings handshake is Super Admin only and new production transitions enforce snapshotted gate', { skip: !DATABASE_URL }, async t => {
