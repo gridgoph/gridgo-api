@@ -1,3 +1,4 @@
+import { canReadApprovalProof } from './approval-proof.js';
 import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
 import { displayFilename } from './display-filename.js';
@@ -5,6 +6,8 @@ import { DOCX_CONTENT_TYPE, DOCX_MAX_BYTES, inspectDocx } from "./docx.js";
 import { startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { canViewThread } from "./support-chat.js";
+import { canReadClientShopChatFile } from './client-shop-chat.js';
+import { CLIENT_SHOP_CHAT_PURPOSE, CLIENT_SHOP_CHAT_MAX_BYTES, CLIENT_SHOP_CHAT_TYPES } from './chat-attachment-policy.js';
 import { canReadPickupChatPhoto } from "./pickup-chat.js";
 import { canReadDeliveryChatPhoto } from "./delivery-chat.js";
 import { assertEarlyFileDeletion } from "./file-retention-policy.js";
@@ -47,6 +50,8 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  approval_signature: { roles: ["client"], maxBytes: 2 * 1024 * 1024, contentTypes: ["image/png"] },
+  approval_sample_photo: { roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   legal_document: { roles: ["super_admin"], maxBytes: 20 * 1024 * 1024, contentTypes: ["application/pdf"] },
   artwork: { roles: ["client"], maxBytes: MAX_FILE_SIZE, contentTypes: [...ARTWORK_UPLOAD_CONTENT_TYPES] },
   mockup: {
@@ -137,8 +142,11 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 10 * 1024 * 1024,
     contentTypes: [...CONTENT_TYPES],
   },
-  // A picture on an Operations conversation. JPEG/PNG/WebP only; the
-  // contents must match the filename. Bound when the chat message is posted.
+  // Order evidence: sanitized images or PDF, bound when a message is posted.
+  client_shop_chat_attachment: {
+    roles: ['client', 'supplier', 'ops_admin', 'super_admin'], maxBytes: CLIENT_SHOP_CHAT_MAX_BYTES, contentTypes: CLIENT_SHOP_CHAT_TYPES,
+  },
+  // A picture on an Operations conversation.
   support_chat_image: {
     roles: ["client", "supplier", "rider", "ops_admin", "super_admin"],
     maxBytes: 15 * 1024 * 1024,
@@ -714,6 +722,9 @@ export function markFileDeleted(file, at) {
 
 export function publicFile(file, user = null) {
   if (!file) return null;
+  if (file.purpose === CLIENT_SHOP_CHAT_PURPOSE) return { fileId: file.fileId, purpose: file.purpose,
+    originalFilename: file.detectedContentType === 'application/pdf' ? 'document.pdf' : 'image.png',
+    detectedContentType: file.detectedContentType, size: file.size, state: file.state, createdAt: file.createdAt, readyAt: file.readyAt };
   return {
     fileId: file.fileId,
     ...(publicArtworkPreview(file) ? { preview: publicArtworkPreview(file) } : {}),
@@ -750,6 +761,7 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
+  if (purpose === CLIENT_SHOP_CHAT_PURPOSE) fail(409, 'client_shop_chat_attachment_not_attachable', 'Send attachmentFileIds with the chat message.');
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose)) {
     fail(409, "refund_file_not_attachable", "Bind this file through the refund request routes.");
   }
@@ -1326,6 +1338,12 @@ export function authorizeFileRead(user, store, file) {
     if (hasRole(user, "super_admin")) return;
     forbidden();
   }
+  if (file.purpose === CLIENT_SHOP_CHAT_PURPOSE) {
+    const sent = (file.references || []).filter(ref => ref.type === 'client_shop_chat_message');
+    if (!sent.length && file.ownerId === user.id) return;
+    if (sent.some(ref => canReadClientShopChatFile(user, store, ref))) return;
+    forbidden();
+  }
   if (file.purpose === "support_chat_image") {
     if (file.ownerId === user.id) return;
     // The reference snapshots the thread parties when the message is sent.
@@ -1353,6 +1371,13 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;
+  if (["approval_signature", "approval_sample_photo"].includes(file.purpose)) {
+    const refs = (file.references || []).filter(ref => ref.type === 'order');
+    if (!refs.length && user.role === 'client' && file.ownerId === user.id) return;
+    if (refs.some(ref => canReadApprovalProof(store, store.orders.find(order => order.id === ref.id), user)
+      && (user.role !== 'supplier' || hasApprovedWorkRole(user, 'supplier')))) return;
+    forbidden();
+  }
   if (file.purpose === "client_verification_document") forbidden();
   if (file.purpose === "packing_photo" && !["client", "supplier"].includes(user.role)
     && !(user.role === 'rider' && ((file.ownerId === user.id && !(file.references || []).length)

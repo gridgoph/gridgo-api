@@ -1,3 +1,4 @@
+import { approvalPolicy, recordApprovalProof, assertApprovalBeforeProceeding, approveSample, routeApprovalProof } from './approval-proof.js';
 import { colourSettings } from './colour-pricing.js';
 import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './colour-analysis.js';
 import { createColourWorker } from './colour-worker.js';
@@ -255,6 +256,8 @@ import {
   qaTickAudit,
 } from "./qa-review.js";
 import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
+import { routeClientShopChat, isClientShopChatRoute } from './client-shop-chat-routes.js';
+import { sanitizeChatUpload } from './chat-image-sanitizer.js';
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
 import { isOrderCallRoute, routeOrderCalls, reconcileCalls, purgeClosedCalls, callParty } from "./order-calls.js";
 import {
@@ -369,6 +372,7 @@ async function save(store) {
   syncSurveys(store, { id, at: now() });
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
+    if (before.get(order.id)?.state !== order.state && ["payment_authorized", "production"].includes(order.state)) assertApprovalBeforeProceeding(order);
     if (changePaymentPending(store, order) && (!changeWindowOpen(order)
         || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted'))) {
       throw Object.assign(new Error('Resolve the submitted change transfer before closing production or changing shops.'), { status: 409, code: 'change_payment_pending' });
@@ -772,12 +776,14 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
+    clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     coverSpineRequired: rest.coverSpineRequired === true,
+    approvalProofRequired: rest.approvalProofRequired === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
     artworkGuidance: artworkGuidanceSettings(rest),
@@ -2763,6 +2769,7 @@ async function handleAuditedRequest(req, res) {
 
     if (await routeOrderCalls({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) return;
 
+    if (await routeClientShopChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) return;
     if (await routePickupChat({ req, res, pathname, user, store, database, readBody, send, save, createId: id, now })) {
       return;
     }
@@ -2808,6 +2815,18 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control', 'private, no-store, max-age=0');
       if (supplierInvoiceResponse.mutated) await save(store);
       return send(res, supplierInvoiceResponse.status, supplierInvoiceResponse.body);
+    }
+
+    const approvalResponse = await routeApprovalProof({ req, url, store, user, readBody, now, id });
+    if (approvalResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (approvalResponse.mutated) await save(store);
+      if (approvalResponse.pdf) {
+        res.writeHead(200, { ...res.gridgoCorsHeaders, 'Content-Type': 'application/pdf',
+          'Content-Disposition': 'attachment; filename="gridgo-approval-proof.pdf"' });
+        return res.end(approvalResponse.pdf);
+      }
+      return send(res, approvalResponse.status, approvalResponse.body);
     }
 
     const hubResponse = await routeHubHandover({ req, url, store, user, readBody, now, id, audit });
@@ -3062,7 +3081,8 @@ async function handleAuditedRequest(req, res) {
         }
         const purpose = String(fields.purpose || "");
         authorizeFileUpload(user, purpose);
-        const detectedContentType = await validateUploadFromDisk(file, purpose);
+        let detectedContentType = await validateUploadFromDisk(file, purpose);
+        if (purpose === 'client_shop_chat_attachment') detectedContentType = await sanitizeChatUpload(file, detectedContentType);
         if (storageInitializing) {
           throw new AttachmentError(503, "storage_initializing", "MinIO file recovery is still finishing. Wait a moment, then try the file action again.");
         }
@@ -3087,6 +3107,7 @@ async function handleAuditedRequest(req, res) {
           at: createdAt,
         });
 
+        if (purpose === 'client_shop_chat_attachment' && detectedContentType.startsWith('image/')) pending.metadataSanitizedAt = createdAt;
         if (artworkCheck) pending.artworkCheck = artworkCheck;
 
         await enqueueMutation(async () => {
@@ -3187,7 +3208,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
-      if (file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice") res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      if (file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo"].includes(file.purpose)) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       return send(res, 200, { file: publicFile(file, user) });
     }
 
@@ -3228,7 +3249,7 @@ async function handleAuditedRequest(req, res) {
         stream.pipe(res);
         return;
       }
-      const privateFinancial = file.purpose.startsWith("refund_") || file.purpose === "supplier_invoice";
+      const privateFinancial = file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo"].includes(file.purpose);
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
       if (['artwork', 'mockup'].includes(file.purpose)) {
@@ -3730,6 +3751,7 @@ async function handleAuditedRequest(req, res) {
       const next = {
         ...store.settings,
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
+        clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
@@ -3752,6 +3774,7 @@ async function handleAuditedRequest(req, res) {
           body.serviceFeeVisibleToClient ?? store.settings.serviceFeeVisibleToClient ?? true,
         physicalInvoiceRequestsEnabled:
           body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
+        approvalProofRequired: Object.hasOwn(body, "approvalProofRequired") ? body.approvalProofRequired : store.settings.approvalProofRequired === true,
         coverSpineRequired: Object.hasOwn(body, "coverSpineRequired") ? body.coverSpineRequired : store.settings.coverSpineRequired === true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
@@ -5850,6 +5873,7 @@ async function handleAuditedRequest(req, res) {
         ...(body.submit ? { fileCheck: { status: 'pending', requestedAt: ts, reviewedAt: null, reviewedBy: null, reason: null },
           reviewSchedule: reviewTiming(store.settings, ts) } : {}),
         clientId: user.id,
+        approvalPolicy: approvalPolicy(store.settings, { quoted: true }),
         organizationOfficer: officerSnapshot(store, user.id),
         supplierId: null,
         riderId: null,
@@ -6170,6 +6194,9 @@ async function handleAuditedRequest(req, res) {
         || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
         requireOperatingHours(store.settings, now(), next === 'rider_assigned' ? 'Dispatch' : 'Artwork review');
       }
+      if (order.state === "proof_approval" && next === "approved_for_matching") {
+        approveSample({ store, order, user, approval: body.approval, at: now(), id, req });
+      }
       if (PACKAGING_STATES.includes(next)) {
         const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason, reasonCode: body.reasonCode });
         if (!readiness.allowed) {
@@ -6404,6 +6431,7 @@ async function handleAuditedRequest(req, res) {
             payments: structuredClone(schedule.payments),
           },
         });
+        recordApprovalProof({ store, order, user, approval: body.approval, at: committedAt, id, req });
         delete order.pendingQuote;
         if (fulfillmentMode === "pickup") {
           order.dropoff = null;
@@ -7233,7 +7261,7 @@ const server = http.createServer((req, res) => {
     // handleRequest fails the same parse and answers 500 itself.
   }
   logHttpRequest(req, res, pathname, Date.now());
-  const mutatesStore = (req.method === "GET" && (isPickupChatRoute(pathname) || isOrderCallRoute(pathname))) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
+  const mutatesStore = (req.method === "GET" && (isPickupChatRoute(pathname) || isClientShopChatRoute(pathname) || isOrderCallRoute(pathname))) || req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
   // Upload/attach routes queue their own transactions. Deletion commits intent
   // first, then holds the domain lock through the final case check and storage call.
   const isSelfQueuedFileMutation =
