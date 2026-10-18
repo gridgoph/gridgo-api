@@ -1,3 +1,4 @@
+import { sameReviewData } from './review-data.js';
 import { availableDispatch } from "./dispatch-policy.js";
 import { supplierArtworkReleased } from "./artwork-gates.js";
 import { paymentSettled } from "./operational-model.js";
@@ -74,6 +75,7 @@ export function publicNotification(notification, order) {
     title: notification.title,
     body: notification.body,
     read: Boolean(notification.read),
+    ...(notification.reviewData ? { reviewData: true } : {}),
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
@@ -340,7 +342,7 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
     if (r === 'client') return order.clientId === userId && (!location || order.fulfillmentMode !== 'pickup');
     if (!approvedRole(store,userId,r)) return false;
     if (r === 'supplier') return supplierArtworkReleased(order) && (order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled')));
-    return r === 'rider' && (order.riderId === userId || (!location && offer && availableDispatch(order, store)));
+    return r === 'rider' && (order.riderId === userId || (!location && offer && sameReviewData(order, store.users?.find(u => u.id === userId)) && availableDispatch(order, store)));
   });
 }
 export function notificationVisible(store, notification, userId, role) {

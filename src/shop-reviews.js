@@ -1,3 +1,4 @@
+import { reportOrderAllowed } from './review-data.js';
 /**
  * What clients said about each shop, read back.
  *
@@ -98,7 +99,7 @@ export function shopScoreboard(store) {
   const categories = (store.taxonomy?.categories || [])
     .filter((row) => row.active !== false)
     .map((row) => ({ code: row.code, name: row.name }));
-  const reviews = (store.shopReviews || []).map((row) => ({ ...row, subject: reviewSubject(store, row) }));
+  const reviews = (store.shopReviews || []).filter(row => reportOrderAllowed(store, row.orderId)).map((row) => ({ ...row, subject: reviewSubject(store, row) }));
 
   const shops = supplierIds(store).map((supplierId) => {
     const mine = reviews

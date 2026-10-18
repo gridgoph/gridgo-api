@@ -20,7 +20,7 @@ export function safeAuditValue(value, depth = 0) {
     .map(([key, item]) => [key, safeAuditValue(item, depth + 1)]));
 }
 const pick = (record, fields) => record == null ? null : safeAuditValue(Object.fromEntries(fields.filter(key => Object.hasOwn(record, key)).map(key => [key, record[key]])));
-const COMMON = ['id', 'userId', 'orderId', 'status', 'state', 'version', 'createdAt', 'updatedAt'];
+const COMMON = ['reviewData', 'id', 'userId', 'orderId', 'status', 'state', 'version', 'createdAt', 'updatedAt'];
 const TARGETS = {
   supplier_profile: ['supplierProfiles', [...COMMON, 'schedule', 'isClosed']],
   order: ['orders', [...COMMON, 'clientId', 'supplierId', 'riderId', 'readyBy', 'promiseBy', 'fulfillmentMode', 'pickup', 'dropoff', 'fileCheck', 'pickupChecklist', 'supplierSubtotalMinor', 'serviceFeeMinor', 'deliveryFeeMinor', 'totalMinor', 'payments', 'payoutMilestones', 'payoutHold', 'claimHold', 'rescheduleRequest', 'shopRecovery', 'refund', 'productionDeductionMinor', 'physicalInvoiceRequest', 'dropoffConfirmation', 'deliveryPin']],
@@ -156,6 +156,9 @@ export async function readAudit(database, user, params, scopedOrderId = null) {
   };
   const limit = integer('limit', 100, format === 'csv' ? 5000 : 500), offset = integer('offset', 0, 10000000);
   const clauses = [], values = [];
+  if (params.get('includeReviewData') !== '1') clauses.push(`NOT EXISTS (SELECT 1 FROM orders review_order
+    WHERE review_order.review_data AND (review_order.id = audit_log.order_id
+      OR audit_log.data->'orderIds' @> jsonb_build_array(review_order.id)))`);
   const add = (sql, value) => { values.push(value); clauses.push(sql.replaceAll('?', `$${values.length}`)); };
   for (const [key, column, value] of [['action', 'action', action], ['entityType', 'entity_type', entityType], ['entityId', 'entity_id', entityId],
     ['orderId', 'order_id', scopedOrderId || params.get('orderId')], ['actorId', 'actor_id', params.get('actorId')]]) {

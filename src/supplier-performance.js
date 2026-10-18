@@ -1,3 +1,4 @@
+import { reportOrderAllowed } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
 import { defaultShopSchedule } from './availability.js';
 import { productionTiming } from './production-penalties.js';
@@ -89,7 +90,7 @@ export function syncSupplierPerformance(store, { at, id, clockStore = store }) {
 }
 
 export function supplierPerformance(store, supplierId, at) {
-  const rows = (store.supplierPerformanceEvents || []).filter(row => row.supplierId === supplierId && Date.parse(row.at) <= Date.parse(at))
+  const rows = (store.supplierPerformanceEvents || []).filter(row => row.supplierId === supplierId && reportOrderAllowed(store, row.orderId) && Date.parse(row.at) <= Date.parse(at))
     .sort(chronological).reverse();
   const counts = performanceCounts(store, supplierId, at);
   const recent = rows.filter(row => Date.parse(row.at) > Date.parse(at) - 30 * 86400000);

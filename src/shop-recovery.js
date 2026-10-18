@@ -1,3 +1,4 @@
+import { sameReviewData } from './review-data.js';
 import { supplementTotals, changePaymentPending } from './order-change-policy.js';
 import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
 import { approvedCatalogView } from "./catalog-review-state.js";
@@ -74,7 +75,7 @@ export function findReplacementShop(store, order, at, reserve = true) {
   const lines = (store.orderLineItems || []).filter((line) => line.orderId === order.id);
   const source = store.catalogItems?.find((item) => item.id === lines[0]?.sourceCatalogItemId);
   if (!source?.subcategoryCode) return null;
-  const excluded = [...new Set([order.supplierId, ...(order.declinedBy || [])].filter(Boolean))];
+  const excluded = [...new Set([order.supplierId, ...(order.declinedBy || []), ...(store.users || []).filter(u => !sameReviewData(order, u)).map(u => u.id)].filter(Boolean))];
   const ranking = store.clientPreferences?.find((row) => row.userId === order.clientId)?.ranking || ['quality', 'speed', 'cost', 'distance'];
   for (let attempt = 0; attempt < (store.supplierProfiles || []).length; attempt++) {
     let match;

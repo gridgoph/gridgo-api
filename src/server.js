@@ -1,3 +1,4 @@
+import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed } from './review-data.js';
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
@@ -367,6 +368,7 @@ function notifyMissingJobDetails(store, order) {
 }
 
 async function save(store) {
+  enforceReviewData(store, originalDomainStore(store));
   if ((store.files || []).some(file => file.colourAnalyses?.some(job => job.status === "pending"))) database.afterCommit(() => { void drainColourAnalyses().catch(() => console.warn("colour worker failed")); });
   assertSupplementCollectionsUnique(store);
   syncSupplierInvoiceExpectations(store, originalDomainStore(store), { at: now(), id, audit });
@@ -410,6 +412,7 @@ async function save(store) {
   }
   deriveMissingAudit(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
+  labelReviewNotifications(store, originalDomainStore(store));
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
     (notification) => !previousNotificationIds.has(notification.id),
@@ -1021,7 +1024,7 @@ function accountStateFields(user) {
 function userWithAccountState(user) {
   const projected = publicUser(user);
   if (!projected) return projected;
-  return { ...projected, ...accountStateFields(user) };
+  return { ...projected, ...accountStateFields(user), reviewData: isReviewData(user), version: user.version || 1 };
 }
 
 function accountHoldDenial(user) {
@@ -1439,7 +1442,7 @@ function verificationDocumentsFor(store, supplier) {
 
 function verificationUserResponse(store, target) {
   return {
-    user: publicUser(target),
+    user: { ...publicUser(target), reviewData: isReviewData(target), version: target.version || 1 },
     ...(target.role === "supplier" ? { verificationDocuments: verificationDocumentsFor(store, target) } : {}),
   };
 }
@@ -1900,7 +1903,7 @@ function serviceCoversOrder(service, order, product, taxonomy) {
 function eligibleSuppliersForOrder(store, order) {
   const product = (store.catalog || []).find((p) => p.id === order.productId);
   const suppliers = (store.users || []).filter((u) => hasRole(store, u.id, "supplier")
-    && (u.accountStatus ?? "active") === "active")
+    && (u.accountStatus ?? "active") === "active" && sameReviewData(u, order))
     .map((u) => roleDirectoryUser(store, u, "supplier"));
   const results = [];
 
@@ -2277,7 +2280,7 @@ async function handleAuditedRequest(req, res) {
     await expireElapsedIssueWindows();
     const notificationRead = req.method === 'GET' && ['/notifications', '/notifications/stream'].includes(pathname);
     const notificationClaims = notificationRead ? await verifiedClerkClaimsFor(req) : null;
-    const store = notificationRead
+    let store = notificationRead
       ? await loadNotificationStore(database, notificationClaims?.claims?.sub || null, {
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
       })
@@ -2303,7 +2306,8 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === 'GET' && pathname === '/featured-prints') {
-      const body = publicFeaturedPrints(store);
+      const featuredAuth = await authenticateRequest(req, store);
+      const body = publicFeaturedPrints(store, featuredAuth.user);
       await decorateCatalogPhotoUrls(store, body);
       res.setHeader('Cache-Control', 'no-store');
       return send(res, 200, body);
@@ -2562,6 +2566,24 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (user) setAuditActor(user);
+    if (req.method === 'PATCH' && /^\/users\/[^/]+\/review-data$/.test(pathname)) {
+      if (!user) return send(res, 401, { error: 'unauthorized' });
+      const target = setReviewData(store, user, pathname.split('/')[2], await readBody(req));
+      queueInvalidate(store, { resource: 'identity', userIds: [target.id] });
+      queueInvalidate(store, { resource: 'catalog' });
+      await save(store);
+      return send(res, 200, { user: { id: target.id, reviewData: target.reviewData, version: target.version } });
+    }
+    // Scope only staff collection reads: party order history and explicit order
+    // details retain their historical visibility. The view cannot be saved.
+    if (req.method === 'GET' && isOps(user) && (
+      ['/orders', '/jobs', '/claims', '/issues', '/escalations', '/refund-requests', '/admin/pricing',
+        '/admin/survey-responses', '/admin/pricing-feedback', '/admin/checkout-exit-feedback', '/admin/voucher-redemptions',
+        '/ops/shop-failures', '/admin/shop-rankings', '/ops/riders/locations', '/ops/colour-price-checks'].includes(pathname)
+      || pathname.startsWith('/ops/hub/') || pathname.startsWith('/ops/finance/')
+      || /^\/ops\/shops(?:\/[^/]+)?\/performance$/.test(pathname))) {
+      store = reviewReportView(store, includeReviewData(user, url.searchParams));
+    }
 
     if (!user
         && /^Bearer\s+.+$/i.test(req.headers.authorization || "")
@@ -2589,7 +2611,7 @@ async function handleAuditedRequest(req, res) {
       });
     }
 
-    if (pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
+    if (isPublicSupplierCatalogRoute(req.method, pathname) || pathname.startsWith("/ops/catalog/") || pathname === "/me/catalog-preview"
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
@@ -5477,6 +5499,7 @@ async function handleAuditedRequest(req, res) {
       const milestoneCode = parts[4];
       const order = store.orders.find((candidate) => candidate.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      assertReviewMoneyAllowed(order);
       const body = await readBody(req);
       // The wallet receipt and its reference are read before the share moves,
       // so a refused screenshot never leaves a released share with no proof.
@@ -5897,6 +5920,7 @@ async function handleAuditedRequest(req, res) {
       const address = body.address || "";
       const requestedDropoff = dropoffFor(address, zoneCode);
       const order = {
+        reviewData: isReviewData(user),
         id: id("ord"),
         shopClockVersion: 1,
         operatingClock: operatingClockSnapshot(store.settings, store.version),
@@ -6664,7 +6688,7 @@ async function handleAuditedRequest(req, res) {
       // destination and not a different job. Only the unfinished
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => availableDispatch(o, store) || (!isContainedPickup(o) && !dispatchWorkHeld(store, o)
+        (o) => (sameReviewData(o, user) && availableDispatch(o, store)) || (!isContainedPickup(o) && !dispatchWorkHeld(store, o)
           && o.state === "rider_assigned" && o.riderId === user.id),
       );
       return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });

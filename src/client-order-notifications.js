@@ -1,3 +1,4 @@
+import { sameReviewData } from './review-data.js';
 import { riderPackingFlow } from './shop-handover.js';
 import { supplierArtworkReleased } from "./artwork-gates.js";
 import { paymentSettled } from "./operational-model.js";
@@ -360,7 +361,7 @@ export function riderNotificationDrafts(store, order) {
   }
   if (availableDispatch(order, store)) {
     for (const riderId of eligibleRiderIds(store)) {
-      if (riderHasActiveDelivery(store, riderId)) continue;
+      if (!sameReviewData(order, store.users?.find(u => u.id === riderId)) || riderHasActiveDelivery(store, riderId)) continue;
       drafts.push({
         userId: riderId,
         appRole: "rider",

@@ -1,3 +1,4 @@
+import { reviewCatalogView, includeReviewData } from './review-data.js';
 import { parseColourListing } from './colour-pricing.js';
 import { routeShopHours } from './shop-hours.js';
 import { productionDuration, productionProjection, shopProductionDayMinutes } from "./production-days.js";
@@ -652,7 +653,8 @@ export async function routeSupplierCatalog(args) {
   const before = listingWrite && (store.catalogItems || []).find(item => item.id === itemId);
   const snapshot = before ? listingSnapshot(store, before) : null;
   const priorStatus = before?.reviewStatus || "approved";
-  const response = await routeSupplierCatalogExisting(args);
+  const catalogRead = req.method === 'GET' && (isPublicSupplierCatalogRoute(req.method, url.pathname) || url.pathname.startsWith('/ops/catalog/') || url.pathname === '/me/catalog-preview');
+  const response = await routeSupplierCatalogExisting(catalogRead ? { ...args, store: reviewCatalogView(store, args.user, includeReviewData(args.user, url.searchParams)) } : args);
   const item = snapshot && (store.catalogItems || []).find(row => row.id === itemId);
   if (response?.mutated && item && sensitiveSnapshot(snapshot) !== sensitiveSnapshot(listingSnapshot(store, item))) {
     startListingReview(store, item, snapshot);

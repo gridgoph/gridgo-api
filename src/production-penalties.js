@@ -1,3 +1,4 @@
+import { reportOrderAllowed } from './review-data.js';
 import { performanceEnabled, performanceDeadline, performanceCounts, performanceTier, performanceExemption } from './supplier-performance-policy.js';
 import { shopSlaClock } from './shop-hours.js';
 import { riderPackingFlow } from './shop-handover.js';
@@ -89,7 +90,7 @@ export function recentLapseQualityPenalty(store, supplierId, at) {
   const end = Date.parse(at), start = end - 30 * 86400000;
   // Two quality points per late order in 30 days, capped at ten of 100.
   // Client priority remains lexicographic; this is not a weighted match score.
-  const count = (store.productionLapses || []).filter((lapse) => lapse.supplierId === supplierId
+  const count = (store.productionLapses || []).filter((lapse) => lapse.supplierId === supplierId && reportOrderAllowed(store, lapse.orderId)
     && !lapse.policy?.warningsOnly && !performanceExemption(store, lapse)
     && !(store.supplierPerformanceEvents || []).some(event => ['late_finish', 'on_time_finish'].includes(event.kind) && event.orderId === lapse.orderId && event.supplierId === lapse.supplierId)
     && Date.parse(lapse.deadlineAt) >= start && Date.parse(lapse.deadlineAt) <= end).length;

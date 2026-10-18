@@ -1,3 +1,4 @@
+import { isReviewData, includeReviewData } from './review-data.js';
 import { staffError as fail, hasMembership, activeAccount } from './staff-access.js';
 import { notifyAdmins } from './domain-events.js';
 import { queueOrderInvalidate } from './notifications.js';
@@ -78,7 +79,7 @@ export async function routeSupplierInvoices({ req, url, store, user, readBody, n
     const limitValue = url.searchParams.get('limit') || '50';
     if (!/^\d+$/.test(limitValue) || Number(limitValue) < 1 || Number(limitValue) > 100) fail(400, 'invalid_limit');
     const limit = Number(limitValue), after = url.searchParams.get('after');
-    const invoices = store.supplierInvoices.filter(row => row.month === month && (!supplierId || row.supplierId === supplierId))
+    const invoices = store.supplierInvoices.filter(row => (!isReviewData(store.orders.find(o => o.id === row.orderId)) || includeReviewData(user, url.searchParams)) && row.month === month && (!supplierId || row.supplierId === supplierId))
       .map(row => publicInvoice(store, row)).sort((a, b) => a.orderId < b.orderId ? -1 : a.orderId > b.orderId ? 1 : 0);
     const shops = [...new Set(invoices.map(row => row.supplierId))].sort().map(id => ({ supplierId: id,
       shopName: store.supplierProfiles.find(row => row.userId === id)?.shopName || store.users.find(row => row.id === id)?.name || '',

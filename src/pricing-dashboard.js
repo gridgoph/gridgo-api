@@ -1,3 +1,4 @@
+import { isReviewData } from './review-data.js';
 /**
  * Super Admin pricing figures from GRIDGO's own rows.
  * Funnel events are only the ones the client posted. Nothing here rebuilds
@@ -65,6 +66,7 @@ export function buildFunnelEvent(body, user, at, eventId) {
     id: eventId,
     at,
     clientId: user.id,
+    reviewData: isReviewData(user),
     kind: body.kind,
     orderId: optionalId(body.orderId, "orderId"),
     listingId: optionalId(body.listingId, "listingId"),
@@ -194,6 +196,7 @@ export function funnelScope({ filters, orders = [], users = [], selectedOrderIds
 }
 
 export function funnelScopeMatches(event, scope) {
+  if (scope.excludeReviewData && (isReviewData(event) || scope.reviewOrderIds?.includes(event.orderId))) return false;
   if (scope.accountType) {
     if (scope.accountIds) { if (!scope.accountIds.includes(event.clientId)) return false; }
     else if (scope.nonIndividualIds) { if (scope.nonIndividualIds.includes(event.clientId)) return false; }
@@ -215,6 +218,7 @@ function funnelScopeSql(scope, params) {
   const add = (value) => { params.push(value); return `$${params.length}`; };
   const where = [];
   let join = "";
+  if (scope.excludeReviewData) where.push(`NOT e.review_data AND NOT EXISTS (SELECT 1 FROM orders ro WHERE ro.id = e.order_id AND ro.review_data)`);
   if (scope.accountType) {
     if (scope.accountIds) where.push(`e.client_id = ANY(${add(scope.accountIds)}::text[])`);
     else if (scope.nonIndividualIds) where.push(`NOT (e.client_id = ANY(${add(scope.nonIndividualIds)}::text[]))`);
@@ -543,6 +547,7 @@ function matches(order, index, filters) {
 
 /** Orders kept by the dashboard filters, each indexed once (no per-order scans). */
 function pricingSelection({ orders = [], lines = [], catalog = [], users = [], query = {} }) {
+  if (query.includeReviewData !== '1') orders = orders.filter(order => !isReviewData(order));
   const filters = {
     category: query.category || "",
     bracket: query.bracket || "",
@@ -577,6 +582,8 @@ function dashboardContext(input) {
   const ranges = pricingRanges(input.query, input.now);
   const { filters, selected } = pricingSelection(input);
   const scope = funnelScope({ filters, orders: input.orders, users: input.users, selectedOrderIds: selected.map((row) => row.order.id) });
+  scope.excludeReviewData = input.query?.includeReviewData !== '1';
+  scope.reviewOrderIds = (input.orders || []).filter(isReviewData).map(row => row.id);
   const nowMs = Number.isFinite(Date.parse(input.now)) ? Date.parse(input.now) : Date.now();
   return { ranges, filters, selected, scope, nowMs };
 }

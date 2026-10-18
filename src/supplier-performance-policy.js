@@ -1,3 +1,4 @@
+import { reportOrderAllowed } from './review-data.js';
 const DAY = 86400000;
 export const PERFORMANCE_GRACE_MS = 3600000;
 export const performanceEnabled = (store, at) => Boolean(store?.supplierPerformanceLaunchedAt
@@ -14,7 +15,7 @@ export function performanceCounts(store, supplierId, at) {
   const end = Date.parse(at), start = end - 30 * DAY;
   const counts = emptyCounts();
   for (const event of store.supplierPerformanceEvents || []) {
-    if (event.supplierId !== supplierId || Date.parse(event.at) <= start || Date.parse(event.at) > end
+    if (!reportOrderAllowed(store, event.orderId) || event.supplierId !== supplierId || Date.parse(event.at) <= start || Date.parse(event.at) > end
         || event.exemption || performanceExemption(store, event)) continue;
     const key = COUNT_KEY[event.kind];
     if (key) counts[key]++;
@@ -37,7 +38,7 @@ export function performanceTopPick(store, supplierId, at) {
   const end = Date.parse(at);
   let hiddenUntil = null;
   for (const event of store.supplierPerformanceEvents || []) {
-    if (event.supplierId !== supplierId || !['late_finish', 'timed_out'].includes(event.kind)
+    if (!reportOrderAllowed(store, event.orderId) || event.supplierId !== supplierId || !['late_finish', 'timed_out'].includes(event.kind)
         || event.exemption || performanceExemption(store, event) || Date.parse(event.at) > end
         || Date.parse(event.at) + 7 * DAY <= end) continue;
     if (consequences(event.kind, performanceCounts(store, supplierId, event.at)).hideTopPick) {
