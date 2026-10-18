@@ -1,3 +1,4 @@
+import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
 import { approvalPolicy, recordApprovalProof, assertApprovalBeforeProceeding, approveSample, routeApprovalProof } from './approval-proof.js';
@@ -395,6 +396,7 @@ async function save(store) {
       prepareHandover(store, order, { at: now() });
     }
   }
+  syncSupplierPerformance(store, { at: now(), id, clockStore: originalDomainStore(store) || store });
   sweepHubReminders(store, { at: now(), id });
   const previousFiles = new Map((originalDomainStore(store)?.files || []).map(file => [file.fileId, file]));
   for (const file of store.files || []) {
@@ -1663,7 +1665,9 @@ async function sweepRescheduleRequests() {
 async function sweepProductionPenalties() {
   await enqueueMutation(async () => {
     const store = await load();
-    if (assessProductionLapses(store, { at: now(), createId: id })) await save(store);
+    const at = now();
+    const performanceChanged = syncSupplierPerformance(store, { at, id });
+    if (assessProductionLapses(store, { at, createId: id }) || performanceChanged) await save(store);
   });
 }
 
@@ -2850,6 +2854,12 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control', 'private, no-store');
       if (changeResponse.mutated) await save(store);
       return send(res, changeResponse.status, changeResponse.body);
+    }
+    const performanceResponse = await routeSupplierPerformance({ req, url, store, user, readBody, now, id });
+    if (performanceResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (performanceResponse.mutated) await save(store);
+      return send(res, performanceResponse.status, performanceResponse.body);
     }
     const rescheduleResponse = await routeOrderReschedule({ req, url, store, user, readBody, now, id, audit });
     if (rescheduleResponse) {

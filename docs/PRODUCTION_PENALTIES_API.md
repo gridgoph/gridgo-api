@@ -1,5 +1,14 @@
 # Late-production warnings and deductions
 
+**Current rollout:** [Supplier Performance](SUPPLIER_PERFORMANCE_API.md) implements
+issue 223 decision B. After its migration timestamp, production assessments are
+warnings only, including pending older lapses, regardless of the stored deductions
+switch or agreement consent. The switch stays untouched and must remain off.
+Applied historical deductions remain immutable. The current one-hour shop-time
+grace, completed-work notices, exemptions and Top Pick rules are defined there.
+The deduction mechanics below document the retained historical ledger contract;
+a new money-penalty release is required before any new deduction can be taken.
+
 Backend contract for gridgoph/gridgo-api#123. Supplier-agreement wording and the
 supplier/dashboard screens ship separately. **Do not enable production deductions
 until the captain has checked the warning and policy wording.** This release defaults
@@ -27,9 +36,10 @@ hours. Applied penalties are never recalculated.
   absence of communication. Sets `productionReassignmentEligible: true` on the
   private supplier/Operations order projection. It does not reassign anything.
 
-There is no agreed-reschedule feature yet. `productionDeadline(order)` in
-`src/production-penalties.js` is the explicit integration hook for the approved
-renewed deadline when that feature ships. Do not use unapproved supplier dates.
+Client-approved deadline changes follow [Production deadline requests](ORDER_RESCHEDULE_API.md).
+Do not use unapproved supplier dates. Performance retains the original deadline
+when a request was made at or after it; a timely accepted request uses the renewed
+commitment as described in the current Performance contract.
 
 Communication outside the API cannot be inferred from missing app activity.
 Operations/Super Admin can record their finding with

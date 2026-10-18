@@ -34,7 +34,12 @@ test('PostgreSQL HTTP shop-hours writes persist atomically with audit and inbox;
   assert.equal((await api('ops', 'PATCH', '/ops/shops/supplier/hours', { expectedVersion: 3, schedule, reason: 'No' })).status, 403);
   const after = await loadStore(db);
   assert.equal(after.supplierProfiles.find(row => row.userId === 'supplier').isClosed, true);
-  assert.deepEqual(after.orders[0], before, 'hours changes must not rewrite existing order snapshots or money');
+  const { performanceClock, ...afterOrder } = after.orders[0];
+  const { performanceClock: priorPerformanceClock, ...beforeOrder } = before;
+  assert.deepEqual(afterOrder, beforeOrder, 'hours changes must not rewrite existing order snapshots or money');
+  assert.deepEqual(performanceClock, priorPerformanceClock || {
+    version: 1, supplierId: 'supplier', schedule: defaultShopSchedule(),
+  }, 'first adoption retains the calendar before this hours edit');
   const audits = after.auditLog.filter(row => row.action === 'supplier_hours.update');
   assert.equal(audits.length, 2);
   assert.deepEqual(audits[0].after.schedule, schedule);

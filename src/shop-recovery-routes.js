@@ -37,7 +37,9 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
     if (match[2] === 'decline' && order.state !== 'supplier_assigned') fail(409, 'decline_not_available');
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
     if (!reason || reason.length > 2000) fail(400, 'shop_cancel_reason_required');
-    recordShopFailure(store, order, { kind: match[2] === 'decline' ? 'declined' : 'cancelled', reason, at, createId: id, actorId: user.id });
+    const reasonCode = body.reasonCode ?? null;
+    if (reasonCode !== null && (typeof reasonCode !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(reasonCode))) fail(400, 'invalid_shop_reason_code');
+    recordShopFailure(store, order, { reasonCode, kind: match[2] === 'decline' ? 'declined' : 'cancelled', reason, at, createId: id, actorId: user.id });
   } else {
     if (!ownClient) fail(403, 'forbidden');
     const recovery = order.shopRecovery;
