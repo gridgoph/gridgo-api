@@ -35,7 +35,7 @@ test('matching never offers a shop across the review boundary', async () => {
   }
 });
 
-test('statement totals and CSV exclude review orders; only staff can opt in', () => {
+test('statement totals and CSV exclude review orders even with staff opt-in', () => {
   const store = fixture();
   store.users.find(u => u.id === 'client').accountType = 'organization';
   store.approvalCases.push({ userId: 'client', kind: 'business_client', status: 'approved' });
@@ -44,9 +44,9 @@ test('statement totals and CSV exclude review orders; only staff can opt in', ()
   const run = (user, path) => routeOrganizationStatements({ req: { method: 'GET' }, url: new URL(path, 'http://test'), store, user, now: () => AT });
   const path = '/ops/organizations/client/statements?period=this_month';
   assert.equal(run({ role: 'super_admin' }, path).body.statement.totalSpendMinor, 12000);
-  assert.equal(run({ role: 'super_admin' }, `${path}&includeReviewData=1`).body.statement.totalSpendMinor, 111000);
+  assert.equal(run({ role: 'super_admin' }, `${path}&includeReviewData=1`).body.statement.totalSpendMinor, 12000);
   assert.doesNotMatch(run({ role: 'super_admin' }, `${path}&format=csv`).bytes.toString(), /review_order/);
-  assert.match(run({ role: 'super_admin' }, `${path}&format=csv&includeReviewData=1`).bytes.toString(), /review_order/);
+  assert.doesNotMatch(run({ role: 'super_admin' }, `${path}&format=csv&includeReviewData=1`).bytes.toString(), /review_order/);
   assert.equal(run({ id: 'client', role: 'client' }, '/me/organization/statements?includeReviewData=1').body.statement.orderCount, 1);
 });
 
@@ -89,13 +89,15 @@ test('review mark requires Super Admin, reason and current version and audits sy
   assert.equal(store.users.find(u => u.id === 'client').version, 3);
 });
 
-test('review money cannot be collected, reserved or released through graph writers', () => {
+test('review money cannot be reserved or released through graph writers', () => {
   const before = fixture(); before.orders[0].reviewData = true;
   for (const mutate of [
     s => { s.orders[0].payoutMilestones[0].status = 'released'; },
-    s => { s.orders[0].payments.initial.reference = 'new-transfer'; },
     s => { s.orders[0].state = 'payout_released'; },
     s => { s.refundRequests.push({ id: 'r', orderId: 'order' }); s.refundAttempts.push({ id: 'a', requestId: 'r', status: 'in_progress' }); },
+    s => { s.refundPayments.push({ id: 'p', orderId: 'order' }); },
+    s => { s.refundSettlements.push({ id: 's', orderId: 'order' }); },
+    s => { s.refundSupplierPayouts.push({ id: 'p', orderId: 'order', status: 'released' }); },
     s => { s.orderChangePayments.push({ id: 'p', orderId: 'order' }); },
     s => { s.deliveryPinPayments.push({ id: 'p', orderId: 'order' }); },
     s => { s.orders[0].deliveryPin = { change: { status: 'pending_confirmation' } }; },
@@ -137,13 +139,13 @@ test('legacy issue-window completion never releases review retention', () => {
   assert.throws(() => releaseMilestone(order, 'retention', { role: 'super_admin' }, AT, store), { code: 'review_data_money_forbidden' });
 });
 
-test('pricing month-end totals exclude review orders unless explicitly included', () => {
+test('pricing month-end totals exclude review orders even with explicit opt-in', () => {
   const store = fixture(); store.orders[0].state = 'completed'; store.orders[0].completedAt = AT;
   store.orders[0].timeline.push({ state: 'completed', at: AT });
   store.orders.push({ ...structuredClone(store.orders[0]), id: 'review', reviewData: true });
   const input = { orders: store.orders, users: store.users, now: AT };
   assert.equal(pricingDashboard(input).completedThisMonth, 1);
-  assert.equal(pricingDashboard({ ...input, query: { includeReviewData: '1' } }).completedThisMonth, 2);
+  assert.equal(pricingDashboard({ ...input, query: { includeReviewData: '1' } }).completedThisMonth, 1);
 });
 
 test('rider offer notifications and replacement matching respect the order snapshot', () => {
@@ -211,4 +213,28 @@ test('survey exports, checkout feedback and shop summaries exclude review activi
   assert.equal(surveyReport(reviewReportView(store, true), new URLSearchParams()).total, 1);
   assert.equal(checkoutExitReport(reviewReportView(store, true), new URLSearchParams()).total, 1);
   assert.equal(shopScoreboard(store).shops.find(shop => shop.supplierId === 'supplier').overall.count, 0);
+});
+
+import { collectedSupplierPrincipalMinor, moneyReportingForOrder, publicOrderFor } from '../src/operational-model.js';
+import { collectedRefundComponents } from '../src/refund-policy.js';
+test('graph writers classify every review installment as simulation without funding collections or refunds', () => {
+  const store = fixture();
+  for (const user of store.users) user.reviewData = true;
+  store.orders[0].state = 'completed';
+  store.orders[0].payments.initial.confirmationSource = 'manual_ops';
+  enforceReviewData(store, { orders: [] });
+  const order = store.orders[0];
+  assert.equal(order.payments.initial.simulated, true);
+  assert.equal(order.payments.initial.confirmationSource, 'review_data');
+  assert.equal(order.payments.final_online.simulated, true);
+  assert.equal(collectedSupplierPrincipalMinor(order), 0);
+  assert.equal(publicOrderFor(order, { id: 'rider', role: 'rider' }, store).riderPayoutMinor, 0);
+  assert.deepEqual(collectedRefundComponents(order, store), { principalMinor: 0, feeMinor: 0, deliveryMinor: 0 });
+  for (const section of Object.values(moneyReportingForOrder(order, store))) {
+    for (const [key, value] of Object.entries(section)) if (key.endsWith('Minor')) assert.equal(value, 0, key);
+  }
+  const ordinary = fixture();
+  enforceReviewData(ordinary, { orders: [] });
+  assert.equal(ordinary.orders[0].payments.initial.simulated, undefined);
+  assert.equal(collectedSupplierPrincipalMinor(ordinary.orders[0]), 10000);
 });

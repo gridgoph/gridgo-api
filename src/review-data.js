@@ -59,6 +59,16 @@ export function assertReviewMoneyAllowed(order) {
   if (isReviewData(order)) fail('review_data_money_forbidden');
 }
 
+// Status still drives the normal work gates; these flags never authorize money.
+// Derive them from the immutable order, never from request input or current user.
+export function markReviewPayment(order, payment) {
+  if (isReviewData(order) && payment) {
+    payment.simulated = true;
+    if (payment.status === 'confirmed') payment.confirmationSource = 'review_data';
+  }
+  return payment;
+}
+
 // Called by every graph writer, including CLI writers. A route cannot opt out.
 export function enforceReviewData(store, previous) {
   if (store.reviewDataReadOnly) throw new Error('Review reporting views are read-only');
@@ -75,15 +85,19 @@ export function enforceReviewData(store, previous) {
     if (order.deliveryPin?.change?.status === 'pending_confirmation'
       && JSON.stringify(order.deliveryPin.change) !== JSON.stringify(old?.deliveryPin?.change)) assertReviewMoneyAllowed(order);
     if (order.state === 'payout_released' && old?.state !== order.state) assertReviewMoneyAllowed(order);
-    for (const [code, payment] of Object.entries(order.payments || {})) {
-      if (['confirmed', 'pending_confirmation'].includes(payment.status)
-        && JSON.stringify(payment) !== JSON.stringify(old?.payments?.[code])) assertReviewMoneyAllowed(order);
-    }
+    for (const payment of Object.values(order.payments || {})) markReviewPayment(order, payment);
     for (const stage of order.payoutMilestones || []) {
       if (stage.status === 'released' && JSON.stringify(stage) !== JSON.stringify(old?.payoutMilestones?.find(row => row.code === stage.code))) assertReviewMoneyAllowed(order);
     }
   }
   const orders = new Map((store.orders || []).map(row => [row.id, row]));
+  for (const basket of store.baskets || []) {
+    const members = (basket.orderIds || []).map(id => orders.get(id));
+    if (members.some(isReviewData)) {
+      if (!members.every(isReviewData)) fail('review_data_assignment_mismatch');
+      markReviewPayment(members[0], basket.payment);
+    }
+  }
   for (const job of store.orderJobs || []) {
     const old = previous?.orderJobs?.find(row => row.id === job.id), order = orders.get(job.orderId);
     for (const key of ['supplierId', 'riderId']) if (job[key] && job[key] !== old?.[key] && !sameReviewData(order, users.get(job[key]))) fail('review_data_assignment_mismatch');

@@ -1,3 +1,4 @@
+import { isReviewData } from './review-data.js';
 import { supplementTotals, changePayoutsFor } from './order-change-policy.js';
 import { deliveryPinCollectedMinor } from './delivery-pin-policy.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
@@ -74,6 +75,7 @@ export function assertRefundWorkAllowed(store, order) {
 }
 
 export function collectedRefundComponents(order, store = null) {
+  if (isReviewData(order)) return { principalMinor: 0, feeMinor: 0, deliveryMinor: 0 };
   if (Object.values(order.payments || {}).some((payment) => payment.status === 'confirmed' && payment.method !== 'qr_manual')) {
     refundFail(409, 'refund_collection_reconciliation_required', 'Only verified cash transfers are refundable. Pilot Credits are never cash.');
   }

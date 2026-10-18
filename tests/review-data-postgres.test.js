@@ -1,3 +1,4 @@
+import { alwaysOpenOperatingHours } from './helpers/operating-hours.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
@@ -54,7 +55,7 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
   const finance = await api('ops', 'GET', '/ops/finance/supplier-invoices?month=2026-10');
   assert.equal(finance.body.totals.expected, 1);
   const reviewFinance = await api('ops', 'GET', '/ops/finance/supplier-invoices?month=2026-10&includeReviewData=1');
-  assert.equal(reviewFinance.body.totals.expected, 2);
+  assert.equal(reviewFinance.body.totals.expected, 1);
   assert.equal((await api('replacement', 'GET', '/me/supplier-invoices?month=2026-10&includeReviewData=1')).body.totals.expected, 0);
   const detail = await api('admin', 'GET', '/users/replacement');
   assert.equal(detail.body.user.version, 2);
@@ -74,7 +75,7 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
   const pricing = await api('admin', 'GET', '/admin/pricing');
   assert.equal(pricing.body.period.funnel.counts.product_viewed, 0);
   const included = await api('admin', 'GET', '/admin/pricing?includeReviewData=1');
-  assert.equal(included.body.period.funnel.counts.product_viewed, 1);
+  assert.equal(included.body.period.funnel.counts.product_viewed, 0);
   const audit = await api('admin', 'GET', '/audit?format=csv', undefined, { raw: true });
   assert.doesNotMatch(audit.body, /review_order/);
   const reviewAudit = await api('admin', 'GET', '/audit?format=csv&includeReviewData=1', undefined, { raw: true });
@@ -94,4 +95,160 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
   assert.equal(systemAudit.length, 1);
   assert.equal(systemAudit[0].actorId, null);
   await assert.rejects(db.transaction(() => db.query("UPDATE orders SET review_data=false WHERE id='review_order'")), /review_data_snapshot_immutable/);
+});
+
+import { PICKUP_CHECK_CODES, moneyReportingForOrder } from '../src/operational-model.js';
+const checked = (response, status = 200) => {
+  assert.equal(response.status, status, JSON.stringify(response.body));
+  return response.body;
+};
+async function paymentSetup(t, reviewData, downpaymentPercent = 75) {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats, funnel_events RESTART IDENTITY CASCADE');
+  const store = fixture();
+  store.orders = []; store.orderJobs = []; store.orderLineItems = [];
+  store.settings.downpaymentPercent = downpaymentPercent;
+  store.settings.operatingHours = alwaysOpenOperatingHours();
+  for (const user of store.users) user.reviewData = reviewData;
+  store.approvalCases.push({ id: 'case_rider', userId: 'rider', kind: 'rider', status: 'approved', version: 1,
+    applicationRevision: 1, submittedAt: AT, decidedAt: AT, createdAt: AT, updatedAt: AT });
+  for (const [fileId, purpose, ownerId] of [['artwork', 'artwork', 'client'], ['receipt', 'payment_proof', 'client'],
+    ['finished', 'finished_product_photo', 'supplier'], ['packed', 'packing_photo', 'rider'],
+    ['signature', 'handoff_signature', 'rider'], ['delivered', 'delivery_photo', 'rider']]) {
+    store.files.push({ fileId, purpose, ownerId, state: 'ready', objectKey: `private/${fileId}`, size: 100,
+      originalFilename: fileId === 'artwork' ? 'artwork.pdf' : 'image.png',
+      detectedContentType: fileId === 'artwork' ? 'application/pdf' : 'image/png',
+      declaredContentType: fileId === 'artwork' ? 'application/pdf' : 'image/png',
+      artworkCheck: { status: 'passed', checkedAt: AT }, createdAt: AT, references: [] });
+  }
+  await db.transaction(() => saveStore(db, store));
+  const api = await apiForTest(t);
+  const cart = checked(await api('client', 'POST', '/me/carts', { fulfillmentMode: 'delivery',
+    deadline: new Date(Date.now() + 90 * 86400000).toISOString(),
+    defaultDropoff: { lat: 7.07, lng: 125.61, label: 'Destination' } }), 201).cart;
+  const add = async supplier => checked(await api('client', 'POST', `/me/carts/${cart.id}/lines`, {
+    catalogItemId: `item_${supplier}`, quantity: 2, optionIds: [], artworkFileId: 'artwork',
+  }), 201);
+  const payment = { method: 'qr_manual', proofFileId: 'receipt', reference: 'REVIEW-TEST' };
+  const checkout = () => api('client', 'POST', `/me/carts/${cart.id}/checkout`, { payment });
+  return { db, api, add, payment, checkout };
+}
+
+for (const reviewData of [true, false]) test(`checkout, installments and delivery preserve work flow (review=${reviewData})`, { skip: !DATABASE_URL }, async t => {
+  const { db, api, add, payment, checkout } = await paymentSetup(t, reviewData);
+  await add('supplier');
+  const placed = checked(await checkout(), 201).order;
+  const orderId = placed.id;
+  const post = (actor, path, body = {}) => api(actor, 'POST', `/orders/${orderId}/${path}`, body);
+  const initial = (await loadStore(db)).orders.find(o => o.id === orderId).payments.initial;
+  assert.equal(initial.status, 'pending_confirmation');
+  assert.equal(initial.simulated, reviewData ? true : undefined);
+  assert.equal((await post('client', 'payments/initial/confirm')).status, 403);
+  checked(await post('ops', 'payments/initial/reject', { reason: 'Resubmit receipt' }));
+  checked(await post('client', 'payments/initial/submit', payment));
+  const confirmed = checked(await post('ops', 'payments/initial/confirm')).order;
+  assert.equal(confirmed.state, 'needs_qa');
+  assert.equal((await post('ops', 'payments/initial/confirm')).body.error, 'payment_not_pending');
+  let persisted = (await loadStore(db)).orders.find(o => o.id === orderId);
+  assert.equal(persisted.payments.initial.confirmationSource, reviewData ? 'review_data' : 'manual_ops');
+  // Account changes cannot convert a historical simulation into real money.
+  if (reviewData) checked(await api('admin', 'PATCH', '/users/client/review-data', {
+    reviewData: false, expectedVersion: 1, reason: 'Verify immutable payment scope',
+  }));
+  checked(await post('client', 'payments/final_online/submit', payment));
+  checked(await post('ops', 'payments/final_online/confirm'));
+  checked(await post('ops', 'transition', { state: 'supplier_assigned',
+    qaChecklist: { artwork: true, spec: true, quantity: true, address: true } }));
+  checked(await post('supplier', 'transition', { state: 'payment_authorized' }));
+  checked(await post('supplier', 'transition', { state: 'production' }));
+  const attach = async (fileId, actor) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await api(actor, 'POST', `/files/${fileId}/attach`, { orderId });
+      if (response.body.error !== 'storage_initializing') return checked(response);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.fail('test storage did not initialize');
+  };
+  await attach('finished', 'supplier');
+  checked(await post('supplier', 'production-finished'));
+  checked(await post('ops', 'production-review', { decision: 'approved' }));
+  checked(await post('supplier', 'transition', { state: 'ready_for_dispatch' }));
+  checked(await api('rider', 'POST', `/dispatch/${orderId}/accept`, {}));
+  const lines = (await loadStore(db)).orderLineItems.filter(line => line.orderId === orderId);
+  checked(await api('rider', 'POST', `/dispatch/${orderId}/pickup-checklist`, {
+    checks: PICKUP_CHECK_CODES.map(code => ({ code, passed: true })),
+    counts: lines.map(line => ({ lineItemId: line.id, countedQuantity: line.quantity })),
+  }));
+  await attach('packed', 'rider'); await attach('signature', 'rider');
+  checked(await api('rider', 'POST', `/dispatch/${orderId}/pickup-confirm`, {
+    signature: { fileId: 'signature', signerName: 'Reviewer' },
+  }));
+  checked(await post('rider', 'transition', { state: 'out_for_delivery' }));
+  await attach('delivered', 'rider');
+  const handover = checked(await api('client', 'GET', `/orders/${orderId}/handover`)).handover;
+  const delivered = checked(await api('rider', 'POST', `/dispatch/${orderId}/delivery`, {
+    evidenceType: 'photo', evidenceFileId: 'delivered', otp: handover?.otp,
+  })).order;
+  assert.equal(delivered.state, 'issue_window_open');
+  assert.equal(checked(await post('client', 'confirm')).order.state, 'completed');
+  persisted = (await loadStore(db)).orders.find(o => o.id === orderId);
+  assert.equal(persisted.payments.final_online.confirmationSource, reviewData ? 'review_data' : 'manual_ops');
+  assert.ok(persisted.payoutMilestones.every(stage => stage.status !== 'released'));
+  const report = moneyReportingForOrder(persisted);
+  assert.equal(report.platformRevenue.collectedMinor > 0, !reviewData);
+  for (const suffix of ['', '&includeReviewData=1']) {
+    const finance = checked(await api('ops', 'GET', `/ops/finance/supplier-invoices?month=${new Date().toISOString().slice(0, 7)}${suffix}`));
+    assert.equal(finance.totals.expected, reviewData ? 0 : 1);
+    const pricing = checked(await api('admin', 'GET', `/admin/pricing?period=this_month${suffix}`));
+    assert.equal(pricing.completedThisMonth, reviewData ? 0 : 1);
+  }
+  if (reviewData) {
+    assert.equal(checked(await api('ops', 'GET', '/orders')).orders.length, 0);
+    assert.equal(checked(await api('ops', 'GET', '/orders?includeReviewData=1')).orders.length, 1);
+    const auditCsv = await api('admin', 'GET', '/audit?format=csv', undefined, { raw: true });
+    assert.ok(!auditCsv.body.includes(orderId));
+    const sqlPayment = (await db.query('SELECT data FROM order_payments WHERE order_id=$1 AND code=$2', [orderId, 'initial'])).rows[0].data;
+    assert.equal(sqlPayment.simulated, true); assert.equal(sqlPayment.confirmationSource, 'review_data');
+    assert.equal((await post('ops', 'transition', { state: 'payout_released' })).body.error, 'review_data_money_forbidden');
+    for (const code of ['production_started', 'delivered', 'issue_window']) {
+      assert.equal((await post('ops', `milestones/${code}/release`)).body.error, 'review_data_money_forbidden');
+    }
+    // A request may exist for inspection; all money/reservation actions refuse it.
+    await db.transaction(async () => {
+      const store = await loadStore(db);
+      store.refundRequests.push({ id: 'review_refund', orderId, clientId: 'client', kind: 'complaint', status: 'requested',
+        reason: 'Review test', policyVersion: 'available_funds_v1', beforeProduction: false, late: false,
+        orderStateAtFiling: 'completed', evidenceFileIds: [], version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+      await saveStore(db, store);
+    });
+    for (const action of ['settle', 'payment-attempts', 'payments', 'supplier-payout']) {
+      const refused = await api('ops', 'POST', `/refund-requests/review_refund/${action}`, {});
+      assert.equal(refused.body.error, 'review_data_money_forbidden', JSON.stringify(refused.body));
+    }
+    const saved = await loadStore(db);
+    assert.equal(saved.refundPayments.length, 0); assert.equal(saved.refundAttempts.length, 0);
+    assert.equal(saved.refundSettlements.length, 0);
+  }
+});
+
+for (const reviewData of [true, false]) test(`basket payment simulation is atomic across groups (review=${reviewData})`, { skip: !DATABASE_URL }, async t => {
+  const { db, api, add, payment, checkout } = await paymentSetup(t, reviewData);
+  await add('supplier'); await add('replacement');
+  const basket = checked(await checkout(), 201).basket;
+  assert.ok(basket.id);
+  assert.equal(checked(await api('ops', 'GET', '/baskets')).baskets.length, reviewData ? 0 : 1);
+  assert.equal(checked(await api('ops', 'GET', '/baskets?includeReviewData=1')).baskets.length, 1);
+  assert.equal(checked(await api('client', 'GET', '/baskets')).baskets.length, 1);
+  const path = `/baskets/${basket.id}/payment`;
+  checked(await api('ops', 'POST', `${path}/reject`, { reason: 'Resubmit receipt' }));
+  checked(await api('client', 'POST', `${path}/submit`, payment));
+  const confirmed = checked(await api('ops', 'POST', `${path}/confirm`, {})).basket;
+  assert.ok(confirmed.groups.every(group => group.state === 'needs_qa'));
+  const saved = await loadStore(db);
+  assert.equal(saved.baskets[0].payment.confirmationSource, reviewData ? 'review_data' : 'manual_ops');
+  for (const order of saved.orders) {
+    assert.equal(order.payments.initial.simulated, reviewData ? true : undefined);
+    assert.equal(order.payments.initial.confirmationSource, reviewData ? 'review_data' : 'manual_ops');
+    assert.equal(order.payments.final_online.status, 'not_required');
+  }
 });
