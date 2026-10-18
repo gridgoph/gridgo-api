@@ -23,6 +23,7 @@ PUT /me/preferences
 ```text
 GET /me/addresses
 POST /me/addresses
+DELETE /me/addresses/:id
 ```
 
 Create body:
@@ -35,6 +36,20 @@ Create body:
   "isDefault": true
 }
 ```
+
+`DELETE` requires the owning client session and no body. After the app confirms
+with the client, it returns `200 { "ok": true, "defaultCleared": boolean }`.
+Unknown, already deleted, and another client's address IDs all return
+`404 address_not_found`. Non-client sessions are forbidden.
+
+Deletion retains the row privately, removes it from `GET /me/addresses`, and
+rejects future matching requests using that `addressId`. If it was the default,
+no replacement is selected: `defaultCleared: true` tells the app to ask the client
+to choose another address or continue without a default. Existing carts,
+selection tokens, orders, jobs and invoices retain their independent destination
+snapshots; an open cart can still check out using its copied destination.
+Deletion and its `client_address.delete` audit entry commit atomically. Saving
+the same address later creates a new active row rather than reviving the old ID.
 
 ## Match
 

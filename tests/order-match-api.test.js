@@ -3412,3 +3412,58 @@ test('multiple artwork attachments survive checkout with labels, order, checks a
   assert.equal((await call('/files/file_back/download-url', { subject: 'clerk_supplier_b' })).status, 403);
   await assert.rejects(database.query("UPDATE order_line_items SET artwork_attachments = '[]' WHERE order_id = $1", [orderId]), { code: '23514' });
 });
+
+test('saved address deletion preserves an existing order and an open cart through checkout', { skip: !DATABASE_URL }, async t => {
+  const { call, database, orderId, address } = await placedOrder(t);
+  const client = { subject: 'clerk_client' };
+  const addressId = address.body.address.id;
+  const destination = { ...address.body.address.point, label: address.body.address.addressLine };
+  const orderBefore = await call(`/orders/${orderId}`, client);
+  const invoiceBefore = await call(`/orders/${orderId}/invoice`, client);
+  const cart = await call('/me/carts', { ...client, method: 'POST', body: { fulfillmentMode: 'delivery', defaultDropoff: destination } });
+  assert.equal(cart.status, 201);
+  const cartId = cart.body.cart.id;
+  const added = await call(`/me/carts/${cartId}/lines`, { ...client, method: 'POST', body: {
+    catalogItemId: 'item_supplier_a', quantity: 1, optionIds: [], artworkFileId: 'file_art', dropoff: destination,
+  } });
+  assert.equal(added.status, 201, JSON.stringify(added.body));
+  const cartBefore = await call(`/me/carts/${cartId}`, client);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({ id: 'other_client', clerkUserId: 'clerk_other_client', email: 'other@example.test', name: 'Other client', role: 'client', accountType: 'individual', createdAt: AT });
+    store.userRoleMemberships.push({ userId: 'other_client', role: 'client', createdAt: AT });
+    await saveStore(database, store);
+  });
+  const endpoint = `/me/addresses/${addressId}`;
+  assert.equal((await call(endpoint, { method: 'DELETE' })).status, 401);
+  assert.equal((await call(endpoint, { method: 'DELETE', subject: 'clerk_supplier_a' })).status, 403);
+  const foreign = await call(endpoint, { method: 'DELETE', subject: 'clerk_other_client' });
+  const missing = await call('/me/addresses/missing', { ...client, method: 'DELETE' });
+  assert.equal(foreign.status, 404);
+  assert.deepEqual(foreign.body, missing.body);
+  const deleted = await call(endpoint, { ...client, method: 'DELETE' });
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
+  assert.deepEqual(deleted.body, { ok: true, defaultCleared: true });
+  assert.deepEqual((await call('/me/addresses', client)).body, { addresses: [] });
+  assert.equal((await call(endpoint, { ...client, method: 'DELETE' })).status, 404);
+  const reuse = await call('/me/matches', { ...client, method: 'POST', body: { subcategoryCode: 'flyers', addressId } });
+  assert.equal(reuse.status, 404);
+  assert.equal(reuse.body.error, 'address_not_found');
+  assert.deepEqual((await call(`/orders/${orderId}`, client)).body.order.dropoff, orderBefore.body.order.dropoff);
+  assertSameInvoiceSnapshot((await call(`/orders/${orderId}/invoice`, client)).body.invoice, invoiceBefore.body.invoice);
+  const cartAfter = await call(`/me/carts/${cartId}`, client);
+  assert.deepEqual(cartAfter.body.cart.defaultDropoff, destination);
+  assert.deepEqual(cartAfter.body.cart.lines[0].dropoff, cartBefore.body.cart.lines[0].dropoff);
+  const checkout = await call(`/me/carts/${cartId}/checkout`, { ...client, method: 'POST', body: {
+    payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'ADDRESS-DELETE' },
+  } });
+  assert.equal(checkout.status, 201, JSON.stringify(checkout.body));
+  assert.deepEqual(checkout.body.order.jobs[0].dropoff, destination);
+  const persisted = await loadStore(database);
+  assert.deepEqual(persisted.orders.find(row => row.id === checkout.body.order.id).dropoff, destination);
+  assert.deepEqual(persisted.orders.find(row => row.id === orderId).dropoff, orderBefore.body.order.dropoff);
+  const retained = persisted.clientAddresses.find(row => row.id === addressId);
+  assert.ok(retained.deletedAt);
+  assert.equal(retained.isDefault, false);
+  assert.equal(persisted.auditLog.filter(row => row.action === 'client_address.delete' && row.entityId === addressId).length, 1);
+});
