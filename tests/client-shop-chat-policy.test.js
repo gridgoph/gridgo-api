@@ -13,6 +13,27 @@ for (const contact of ['09171234567', '+63 917 123 4567', '0917.123.4567', '0 9 
     assert.equal(result.text, 'Please use [contact hidden] thanks');
   });
 }
+for (const [contact, afterAt] of [
+  ['facebook.com/sampleprints', '[contact hidden] thanks'],
+  ['https://x.com/abc?y=1', 'page at [contact hidden] thanks'],
+  ['fb.com/x', '[contact hidden] thanks'], ['m.me/x', '[contact hidden] thanks'],
+  ['wa.me/639000000000', '[contact hidden] thanks'],
+  ['facebook.com/sampleprints/photos?ref=chat#profile', '[contact hidden] thanks'],
+  ['example.travel/profile?handle=sampleprints', '[contact hidden] thanks'],
+  ['facebook dot com/sampleprints', '[contact hidden] thanks'],
+  ['facebook.com:8443/sampleprints?ref=chat', '[contact hidden] thanks'],
+  ['@sampleprints/profile?ref=chat', 'page at [contact hidden] thanks'],
+  ['IG: sampleprints/profile#contact', 'page at [contact hidden] thanks'],
+  ['@' + 'fixture'.repeat(20) + '/profile', 'page at [contact hidden] thanks'],
+  ['https://x.com/abc?to=fixture@example.invalid&user=fixture-profile', 'page at [contact hidden] thanks'],
+  ['example.com/path?to=fixture@example.invalid&user=fixture-profile', '[contact hidden] thanks'],
+]) {
+  for (const [prefix, expected] of [['Please use ', 'Please use [contact hidden] thanks'], ['page at ', afterAt]]) {
+    test(`masks the entire contact token after ${prefix.trim()}: ${contact}`, () => {
+      assert.deepEqual(maskChatContacts(`${prefix}${contact} thanks`), { text: expected, contactAttempt: true });
+    });
+  }
+}
 for (const body of ['Please print 1000 copies, size 8.5 x 11 inches.', 'Use 09 sheets for each of the 12 sets.',
   'The price is PHP 2,000.00 for 500 copies.', 'Finish by 2026-10-20 at 09:30.', 'Order 123456 needs 200 A4 sheets.',
   'Use 63 pieces in 9 packs.', 'The dot pattern should be red.', 'print 09 17 12 pieces', 'Thank you GRIDGO', 'The order is ready. Please collect it.', 'Meet at noon. Bring the invoice.']) {

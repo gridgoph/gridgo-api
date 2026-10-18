@@ -39,10 +39,10 @@ test('HTTP: role labels, masked parties, staff-only evidence, inbox coverage and
     }
     await saveStore(db, store);
   });
-  const original = 'Call 0917.123.4567 or hello at example dot com';
+  const original = 'Call 0917.123.4567 or hello at example dot com; page at facebook.com/fixture-profile?ref=chat#contact';
   const sent = await api('client', 'POST', `${PATH}/messages`, { body: original });
   assert.equal(sent.status, 201, JSON.stringify(sent.body));
-  assert.equal(sent.body.message.body, 'Call [contact hidden] or [contact hidden]');
+  assert.equal(sent.body.message.body, 'Call [contact hidden] or [contact hidden]; [contact hidden]');
   assert.equal(sent.body.message.senderLabel, 'Client');
   assert.deepEqual(sent.body.chat.participants, ['Client', 'Print shop', 'GRIDGO']);
   assert.equal(sent.body.message.originalBody, undefined);
@@ -54,6 +54,7 @@ test('HTTP: role labels, masked parties, staff-only evidence, inbox coverage and
   assert.equal(supplier.body.messages[0].mine, false);
   assert.equal(JSON.stringify(supplier.body).includes('senderUserId'), false);
   assert.equal(JSON.stringify(supplier.body).includes('0917'), false);
+  assert.equal(JSON.stringify(supplier.body).includes('fixture-profile'), false);
   assert.equal((await api('supplier', 'POST', `${PATH}/messages`, { body: 'Please use 100 copies, 8.5 x 11.' })).body.message.senderLabel, 'Print shop');
   const staff = await api('ops', 'GET', PATH);
   assert.equal(staff.body.messages[0].originalBody, original);

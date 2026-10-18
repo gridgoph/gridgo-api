@@ -131,6 +131,16 @@ export function approvalProofSummary(order) {
     readUrl: `/orders/${order.id}/approval-proof`, downloadUrl: `/orders/${order.id}/approval-proof/download` };
 }
 
+function approvalProofFor(proof, order, user) {
+  if (['ops_admin', 'super_admin'].includes(user.role) || (user.role === 'client' && user.id === order.clientId)) {
+    return structuredClone(proof);
+  }
+  // Explicit fields keep client identity/device evidence private as the stored
+  // record evolves. Never mutate the immutable proof to build a shop read.
+  return pick(proof, ['id', 'version', 'phase', 'status', 'method', 'at', 'statement', 'signatureFileId',
+    'samplePhotoFileId', 'sampleRoundAt', 'evidence', 'snapshot', 'snapshotSha256']);
+}
+
 function proofDocumentLines(proofs) {
   const label = key => key.replace(/([a-z\d])([A-Z])/g, '$1 $2').replaceAll('_', ' ')
     .replace(/^./, char => char.toUpperCase());
@@ -152,12 +162,14 @@ function proofDocumentLines(proofs) {
     append('approval status', proof.status === 'approved' ? 'Approved by the client' : 'Not recorded');
     append('approval method', proof.method === 'drawn' ? 'Drawn signature' : proof.method === 'one_tap' ? 'One-tap approval' : null);
     append('record reference', proof.id); append('recorded at (UTC)', proof.at);
-    append('account', proof.account); append('device and app', proof.device);
+    if (proof.account !== undefined) append('account', proof.account);
+    if (proof.device !== undefined) append('device and app', proof.device);
     append('statement accepted', proof.statement); append('signature file reference', proof.signatureFileId);
     append('received sample photo reference', proof.samplePhotoFileId);
     append('evidence', proof.evidence); append('agreed specification', proof.snapshot);
     append('specification fingerprint (SHA-256)', proof.snapshotSha256);
-    append('sample round', proof.sampleRoundAt); append('app user agent', proof.userAgent);
+    append('sample round', proof.sampleRoundAt);
+    if (proof.userAgent !== undefined) append('app user agent', proof.userAgent);
     lines.push('');
   }
   lines.push('Evidence files are private. View them through the order in GRIDGO.',
@@ -215,8 +227,9 @@ export async function routeApprovalProof({ req, url, store, user, readBody, now,
   }
   if (req.method !== 'GET') return { status: 404, body: { error: 'not_found' } };
   if (match[2] && !order.approvalProofs?.length) fail(404, 'approval_proof_not_found');
-  if (match[2]) return { status: 200, pdf: approvalProofPdf(order.approvalProofs) };
+  const approvalProofs = (order.approvalProofs || []).map(proof => approvalProofFor(proof, order, user));
+  if (match[2]) return { status: 200, pdf: approvalProofPdf(approvalProofs) };
   const reviewSnapshot = approvalReviewSnapshot(store, order);
-  return { status: 200, body: { approvalProofs: structuredClone(order.approvalProofs || []), requirement: order.approvalPolicy ?? null,
+  return { status: 200, body: { approvalProofs, requirement: order.approvalPolicy ?? null,
     review: { snapshot: reviewSnapshot, snapshotSha256: hash(reviewSnapshot) } } };
 }
