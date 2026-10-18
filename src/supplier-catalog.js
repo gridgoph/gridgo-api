@@ -1,3 +1,4 @@
+import { supplierAccountIsActive } from "./supplier-eligibility.js";
 import { publicColourListing, publicColourQuote } from './colour-projection.js';
 import { colourQuoteFor } from './colour-analysis.js';
 import { shopHoursStatus } from './shop-hours.js';
@@ -368,6 +369,8 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
     }
   }
   if (publicOnly) {
+    const owner = (store.users || []).find(row => row.id === item.supplierId);
+    if (!supplierAccountIsActive(owner?.accountStatus)) blockers.push("account_inactive");
     if (item.reviewStatus && item.reviewStatus !== "approved") blockers.push("listing_not_approved");
     if (item.active === false || item.suspendReason || item.suspendedAt) blockers.push("item_inactive");
     if (service.state !== "live") blockers.push("service_not_live");
@@ -578,6 +581,8 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
 }
 
 export function publicSupplierShop(store, supplierId) {
+  const owner = (store.users || []).find(row => row.id === supplierId);
+  if (!supplierAccountIsActive(owner?.accountStatus)) return null;
   const membership = (store.userRoleMemberships || []).some(
     (row) => row.userId === supplierId && row.role === "supplier",
   );

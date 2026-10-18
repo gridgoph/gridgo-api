@@ -1,4 +1,6 @@
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
+import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
+import { routeIssueDecisions } from './issue-decisions.js';
 import { approvalPolicy, recordApprovalProof, assertApprovalBeforeProceeding, approveSample, routeApprovalProof } from './approval-proof.js';
 import { colourSettings } from './colour-pricing.js';
 import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './colour-analysis.js';
@@ -2844,7 +2846,7 @@ async function handleAuditedRequest(req, res) {
     const artworkLinkResponse = await routeArtworkLinkCheck({ req, url, user, readBody });
     if (artworkLinkResponse) return send(res, artworkLinkResponse.status, artworkLinkResponse.body);
 
-    if (pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
+    if (pathname.startsWith("/issues") || /\/(issues|cancellation-quote)$/.test(pathname) || pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
     const changeResponse = await routeOrderChanges({ req, url, store, user, readBody, now, id, audit });
@@ -2869,6 +2871,11 @@ async function handleAuditedRequest(req, res) {
     if (recoveryResponse) {
       if (recoveryResponse.mutated) await save(store);
       return send(res, recoveryResponse.status, recoveryResponse.body);
+    }
+    const decisionResponse = await routeIssueDecisions({ req, url, store, user, readBody, now, id, audit });
+    if (decisionResponse) {
+      if (decisionResponse.mutated) await save(store);
+      return send(res, decisionResponse.status, decisionResponse.body);
     }
     const refundResponse = await routeRefunds({ req, url, store, user, readBody, now, id, audit });
     if (refundResponse) {
@@ -5027,7 +5034,7 @@ async function handleAuditedRequest(req, res) {
       if (orderId) list = list.filter((i) => i.orderId === orderId);
       if (status) list = list.filter((i) => i.status === status);
       list = [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-      return send(res, 200, { issues: list });
+      return send(res, 200, { issues: list.map(issue => publicIssue(issue, user)) });
     }
 
     /**
@@ -5130,19 +5137,24 @@ async function handleAuditedRequest(req, res) {
         });
       }
       const body = await readBody(req);
-      if (!body.description && !body.reason) {
+      const description = body.description || body.reason;
+      if (typeof description !== 'string' || !description.trim() || description.length > 2000) {
         return send(res, 400, { error: "invalid_issue", need: "description" });
       }
       const existing = openIssueOnOrder(store, order.id);
       if (existing) return send(res, 409, { error: "issue_already_open", issueId: existing.id });
 
+      const photos = problemPhotos(store, user, body);
       const ts = now();
       const issue = {
         id: id("iss"),
         orderId: order.id,
         clientId: user.id,
-        description: body.description || body.reason,
-        kind: body.kind || "material_quality", // material_quality | damage | wrong_item | delivery | other
+        description: description.trim(),
+        kind: body.problemType || body.kind || "material_quality",
+        version: 1,
+        photoFileIds: photos.map(file => file.fileId),
+        evidenceSnapshot: gatherIssueEvidence(store, order, photos, ts),
         status: "open",
         consequence: "payout_hold",
         claimId: null,
@@ -5172,6 +5184,10 @@ async function handleAuditedRequest(req, res) {
         timeline: [{ at: ts, action: "auto_hold_from_issue", by: "system", note: issue.description }],
       };
       issue.claimId = claim.id;
+      for (const file of photos) {
+        file.references ||= [];
+        file.references.push({ type: "order", id: order.id, field: `issue:${issue.id}` });
+      }
       store.issues.push(issue);
       store.claims.push(claim);
       order.payoutHold = true;
@@ -5188,14 +5204,15 @@ async function handleAuditedRequest(req, res) {
         entityType: "issue",
         entityId: issue.id,
         orderId: order.id,
-        detail: { kind: issue.kind, claimId: claim.id },
+        detail: { kind: issue.kind, claimId: claim.id, evidenceVersion: issue.evidenceSnapshot.version,
+          evidenceFileIds: issue.evidenceSnapshot.files.map(file => file.fileId) },
         reason: issue.description,
       });
       notifyShopPayoutHeld(store, order, { createId: id, at: ts });
       notifyOpsIssueReported(store, order, { createId: id, at: ts });
       queueOrderInvalidate(store, order, ["orders", "claims"]);
       await save(store);
-      return send(res, 201, { issue, claim });
+      return send(res, 201, { issue: publicIssue(issue, user), claim });
     }
 
     /*
@@ -5246,7 +5263,7 @@ async function handleAuditedRequest(req, res) {
       } else if (!isOps(user) && user.role !== "client" && user.role !== "supplier") {
         return send(res, 403, { error: "forbidden" });
       }
-      return send(res, 200, { issue });
+      return send(res, 200, { issue: publicIssue(issue, user) });
     }
 
     if (req.method === "POST" && /^\/issues\/[^/]+\/resolve$/.test(pathname)) {
@@ -5259,6 +5276,9 @@ async function handleAuditedRequest(req, res) {
       }
       const body = await readBody(req);
       const ts = now();
+      if (issue.faultDecision?.status === 'awaiting_approval') return send(res, 409, { error: 'fault_approval_pending' });
+      if (issue.faultDecision && body.expectedVersion !== issue.version) return send(res, 409, { error: 'issue_stale', currentVersion: issue.version });
+      issue.version = (issue.version || 1) + 1;
       issue.status = body.status === "dismissed" ? "dismissed" : "resolved";
       issue.resolution = body.resolution || body.reason || "";
       issue.resolvedAt = ts;
@@ -5304,7 +5324,7 @@ async function handleAuditedRequest(req, res) {
       if (order) queueOrderInvalidate(store, order, ["orders", "claims"]);
       else queueInvalidate(store, { resource: "claims", id: issue.orderId });
       await save(store);
-      return send(res, 200, { issue });
+      return send(res, 200, { issue: publicIssue(issue, user) });
     }
 
     // ---- pickup escalations ----
