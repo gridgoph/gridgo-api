@@ -1,4 +1,4 @@
-import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed } from './review-data.js';
+import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed, markReviewPayment } from './review-data.js';
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
@@ -2577,7 +2577,7 @@ async function handleAuditedRequest(req, res) {
     // Scope only staff collection reads: party order history and explicit order
     // details retain their historical visibility. The view cannot be saved.
     if (req.method === 'GET' && isOps(user) && (
-      ['/orders', '/jobs', '/claims', '/issues', '/escalations', '/refund-requests', '/admin/pricing',
+      ['/orders', '/jobs', '/baskets', '/claims', '/issues', '/escalations', '/refund-requests', '/admin/pricing',
         '/admin/survey-responses', '/admin/pricing-feedback', '/admin/checkout-exit-feedback', '/admin/voucher-redemptions',
         '/ops/shop-failures', '/admin/shop-rankings', '/ops/riders/locations', '/ops/colour-price-checks'].includes(pathname)
       || pathname.startsWith('/ops/hub/') || pathname.startsWith('/ops/finance/')
@@ -5776,6 +5776,7 @@ async function handleAuditedRequest(req, res) {
       installment.confirmedAt = confirmedAt;
       installment.confirmedBy = user.id;
       installment.confirmationSource = "manual_ops";
+      markReviewPayment(order, installment);
       if (installmentCode === "initial") {
         // A cart checkout is paid before anything is checked, so confirming the
         // transfer hands the order to quality control rather than to the shop.
@@ -5808,7 +5809,7 @@ async function handleAuditedRequest(req, res) {
         entityType: "order",
         entityId: order.id,
         orderId: order.id,
-        detail: { amountMinor: installment.amountMinor, source: "manual_ops" },
+        detail: { amountMinor: installment.amountMinor, source: installment.confirmationSource },
         reason: body.note || null,
       });
       await save(store);
@@ -6275,6 +6276,7 @@ async function handleAuditedRequest(req, res) {
       }
       // Soft guard: do not release payout while claim hold is active (missing half of completed → payout_released)
       if (next === "payout_released") {
+        assertReviewMoneyAllowed(order);
         const hold = activePayoutHold(store, order.id);
         if (hold || order.payoutHold) {
           return send(res, 409, {

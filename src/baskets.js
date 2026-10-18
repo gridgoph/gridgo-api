@@ -1,3 +1,4 @@
+import { markReviewPayment } from './review-data.js';
 import { confirmVoucher } from './vouchers.js';
 import { groupSummary } from "./cart-groups.js";
 import { publicOrganizationDiscount } from "./organization-money.js";
@@ -96,6 +97,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
     else Object.assign(payment, { status: 'not_submitted', reference: null, proofFileId: null, submittedAt: null,
       rejectedAt: now(), rejectedBy: user.id, rejectionReason: body.reason.trim() });
   }
+  markReviewPayment(store.orders.find(order => order.id === basket.receiptOrderId), payment);
   const at = now();
   basket.updatedAt = at;
   for (const orderId of basket.orderIds) {
@@ -117,6 +119,6 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   if (action === 'submit') notifyOpsPaymentSubmitted(store, firstOrder, { createId: id, at });
   store.auditLog.push({ id: id('aud'), at, actorId: user.id, actorRole: user.role,
     action: `basket.payment_${action}`, entityType: 'basket', entityId: basket.id,
-    detail: { orderIds: basket.orderIds, amountMinor: basket.totalMinor }, reason: body.reason || null });
+    detail: { orderIds: basket.orderIds, amountMinor: basket.totalMinor, ...(payment.simulated ? { simulated: true } : {}) }, reason: body.reason || null });
   return { status: 200, body: { basket: publicBasket(store, basket, user) }, mutated: true };
 }

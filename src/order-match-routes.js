@@ -1,4 +1,4 @@
-import { isReviewData, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
+import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
 import { parseQuantityMode } from './colour-pricing.js';
@@ -1126,6 +1126,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       },
     },
   });
+
+  for (const payment of Object.values(order.payments)) markReviewPayment(order, payment);
 
   /*
    Splitting the two payments across what they are actually paying for.
