@@ -1,3 +1,4 @@
+import { assertReviewMoneyAllowed } from './review-data.js';
 import { cancellationQuote, publicCancellationQuote, acceptedCancellationQuote } from './fault-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
 import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
@@ -186,6 +187,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   const action = orderMatch ? 'request' : match?.[2];
   if ((action === 'destination' ? req.method !== 'PATCH' : req.method !== 'POST') || !action) return null;
   if (!['request', 'destination', 'withdraw'].includes(action)) requireOps(user);
+  if (['settle', 'payment-attempts', 'payments', 'supplier-payout'].includes(action)) assertReviewMoneyAllowed(order);
   const body = await readBody(req);
   if (!body || Array.isArray(body) || typeof body !== 'object') fail(400, 'invalid_refund_request', 'Send a JSON object.');
   if (action === 'settlement-preview') {

@@ -1,3 +1,4 @@
+import { sameReviewData } from './review-data.js';
 import { supplementTotals, changePaymentPending } from './order-change-policy.js';
 import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
 import { approvedCatalogView } from "./catalog-review-state.js";
@@ -74,7 +75,7 @@ export function findReplacementShop(store, order, at, reserve = true) {
   const lines = (store.orderLineItems || []).filter((line) => line.orderId === order.id);
   const source = store.catalogItems?.find((item) => item.id === lines[0]?.sourceCatalogItemId);
   if (!source?.subcategoryCode) return null;
-  const excluded = [...new Set([order.supplierId, ...(order.declinedBy || [])].filter(Boolean))];
+  const excluded = [...new Set([order.supplierId, ...(order.declinedBy || []), ...(store.users || []).filter(u => !sameReviewData(order, u)).map(u => u.id)].filter(Boolean))];
   const ranking = store.clientPreferences?.find((row) => row.userId === order.clientId)?.ranking || ['quality', 'speed', 'cost', 'distance'];
   for (let attempt = 0; attempt < (store.supplierProfiles || []).length; attempt++) {
     let match;
@@ -110,13 +111,13 @@ export function notifyRecovery(store, order, kind, at, createId) {
   queueOrderInvalidate(store, order, ['orders', 'jobs', 'dispatch', 'payouts']);
 }
 
-export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null }) {
+export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null, reasonCode = null }) {
   if (rescheduleHold(order)) fail('reschedule_fulfillment_stopped');
   if (recoveryHeld(order)) fail('shop_recovery_pending');
   if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail('shop_cancel_not_available');
   if (refundHold(store, order) || refundSettlementFor(store, order)) fail('refund_fulfillment_stopped');
   assessProductionLapses(store, { at, createId, orderId: order.id });
-  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, at, actorId };
+  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, reasonCode, at, actorId };
   (order.shopFailureEvents ||= []).push(event);
   order.declinedBy = [...new Set([...(order.declinedBy || []), order.supplierId])];
   if (order.shopAcceptance) order.shopAcceptance.status = kind;

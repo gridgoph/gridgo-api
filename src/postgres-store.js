@@ -1,3 +1,5 @@
+import { enforceReviewData, labelReviewNotifications } from './review-data.js';
+import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
@@ -45,14 +47,14 @@ function rowKey(row, columns) {
 const TABLES = [
   { name: "season_windows", keys: ["id"], columns: ["id", "name", "start_date", "end_date", "demand_level", "message", "version", "notice_queued_at", "created_at", "updated_at"] },
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
-  { name: "users", keys: ["id"], columns: ["id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
+  { name: "users", keys: ["id"], columns: ["review_data", "id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
   { name: "organization_accounts", keys: ["user_id"], columns: ["user_id", "name_key", "school_key", "data"] },
   { name: "organization_email_challenges", keys: ["user_id"], columns: ["user_id", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
   { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
-  { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at"] },
+  { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "schedule", "version", "updated_at"] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
@@ -84,7 +86,8 @@ const TABLES = [
   { name: "listing_starter_groups", keys: ["id"], columns: ["id", "starter_id", "name", "kind", "help_text", "required", "sort_order"] },
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
-  { name: "orders", keys: ["id"], columns: ["id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  { name: "orders", keys: ["id"], columns: ["review_data", "id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  performanceTable,
   ...staffTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
@@ -130,6 +133,8 @@ export function emptyStore() {
     checkoutExitPrompts: [],
     supplierInvoices: [],
     surveyLaunchedAt: null,
+    supplierPerformanceLaunchedAt: null,
+    supplierPerformanceEvents: [],
     version: 3,
     legalPenaltyGate: null,
     users: [],
@@ -204,6 +209,7 @@ function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   staffRows(store, rows);
   voucherRows(store, rows);
+  performanceRows(store, rows);
   surveyRows(store, rows);
   checkoutExitRows(store, rows);
   supplierInvoiceRows(store, rows);
@@ -224,6 +230,7 @@ function rowsFromStore(store) {
   for (const [position, user] of (store.users || []).entries()) {
     const accountHeld = user.accountStatus === "suspended" || user.accountStatus === "removed";
     rows.users.push({
+      review_data: user.reviewData === true,
       id: user.id,
       clerk_user_id: user.clerkUserId,
       email: user.email,
@@ -243,7 +250,7 @@ function rowsFromStore(store) {
       version: user.version || 1,
       created_at: user.createdAt,
       position,
-      data: without(user, ["id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "accountStatus", "accountStatusReason", "accountStatusAt", "accountStatusBy", "shop", "version", "createdAt"]),
+      data: without(user, ["reviewData", "id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "accountStatus", "accountStatusReason", "accountStatusAt", "accountStatusBy", "shop", "version", "createdAt"]),
     });
   }
   for (const membership of (store.userRoleMemberships || [])) {
@@ -273,6 +280,7 @@ function rowsFromStore(store) {
       lat: address.point?.lat,
       lng: address.point?.lng,
       is_default: Boolean(address.isDefault),
+      deleted_at: address.deletedAt ?? null,
       version: address.version || 1,
       created_at: address.createdAt,
       updated_at: address.updatedAt,
@@ -516,6 +524,7 @@ function rowsFromStore(store) {
   }
   for (const [position, order] of (store.orders || []).entries()) {
     rows.orders.push({
+      review_data: order.reviewData === true,
       id: order.id, client_id: order.clientId, supplier_id: order.supplierId ?? null, rider_id: order.riderId ?? null,
       product_id: order.productId ?? null, state: order.state, zone_code: order.zone ?? null,
       supplier_subtotal_minor: money(order.supplierSubtotalMinor, "order.supplierSubtotalMinor"),
@@ -542,7 +551,7 @@ function rowsFromStore(store) {
       cancelled_at: order.cancelledAt ?? null, cancelled_by: order.cancelledBy ?? null,
       cancellation_reason: order.cancellationReason ?? null,
       created_at: order.createdAt, updated_at: order.updatedAt, position,
-      data: without(order, ["readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutPlanVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
+      data: without(order, ["reviewData", "readyBy", "readyAt", "cancelledAt", "cancelledBy", "cancellationReason", "id", "clientId", "supplierId", "riderId", "productId", "state", "zone", "supplierSubtotalMinor", "subtotalMinor", "serviceFeeRateBps", "serviceFeeMinor", "deliveryFeeMinor", "riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor", "totalMinor", "fulfillmentMode", "paymentPlan", "quoteVersion", "supplierDownpaymentRateBps", "onlineDueMinor", "directStoreDueMinor", "supplierPlatformPayoutMinor", "commercialCommittedAt", "moneyModelVersion", "payoutPlanVersion", "payoutHold", "pickup", "dropoff", "issueWindowOpenedAt", "issueWindowExpiresAt", "createdAt", "updatedAt", "payments", "paymentAllocations", "revenueAdjustments", "payoutMilestones"]),
     });
     for (const [paymentPosition, code] of ["initial", "final_online"].entries()) {
       const payment = order.payments?.[code];
@@ -832,6 +841,7 @@ export async function loadStore(database) {
   }
   const store = storeFromRows(loaded, {
     legalPenaltyGate: await loadLegalPenaltyGate(database),
+    supplierPerformanceLaunchedAt: (await database.query("SELECT launched_at FROM supplier_performance_launch WHERE singleton")).rows[0]?.launched_at || null,
     surveyLaunchedAt: (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null,
   });
   Object.defineProperty(store, "listOwnCatalogItems", {
@@ -874,15 +884,17 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
   });
 }
 
-function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, writable = true } = {}) {
+function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supplierPerformanceLaunchedAt = null, writable = true } = {}) {
   const store = emptyStore();
   store.legalPenaltyGate = legalPenaltyGate;
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
+  loadPerformanceRows(store, loaded);
   loadSurveyRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;
+  store.supplierPerformanceLaunchedAt = supplierPerformanceLaunchedAt;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
   store.organizationEmailChallenges = loaded.organization_email_challenges.map((row) => ({ ...row.data, userId: row.user_id }));
   const settings = loaded.platform_settings[0];
@@ -894,7 +906,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, writ
     noticeQueuedAt: row.notice_queued_at, createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.users = ordered(loaded.users).map((row) => {
-    const item = { ...row.data, id: row.id, clerkUserId: row.clerk_user_id, email: row.email, name: row.name, role: row.role, version: row.version || 1, createdAt: row.created_at };
+    const item = { ...row.data, reviewData: row.review_data === true, id: row.id, clerkUserId: row.clerk_user_id, email: row.email, name: row.name, role: row.role, version: row.version || 1, createdAt: row.created_at };
     present(item, "phone", row.phone); present(item, "accountType", row.account_type); present(item, "orgName", row.org_name); present(item, "verificationStatus", row.verification_status);
     const accountStatus = row.account_status === "suspended" || row.account_status === "removed" ? row.account_status : "active";
     delete item.accountStatusReason;
@@ -930,6 +942,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, writ
   store.clientAddresses = orderedBy(loaded.client_saved_addresses, "client_id", "created_at", "id").map((row) => ({
     id: row.id, clientId: row.client_id, label: row.label, addressLine: row.address_line,
     point: { lat: row.lat, lng: row.lng }, isDefault: row.is_default, version: row.version,
+    ...(row.deleted_at ? { deletedAt: row.deleted_at } : {}),
     createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
@@ -1226,6 +1239,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, writ
   store.orders = ordered(loaded.orders).map((row) => {
     const item = {
       ...row.data,
+      reviewData: row.review_data === true,
       id: row.id,
       clientId: row.client_id,
       supplierId: row.supplier_id,
@@ -1411,6 +1425,8 @@ async function upsertChanged(database, table, before, current) {
 export async function saveStore(database, store) {
   if (notificationReadStores.has(store)) throw new Error('Notification stores are read-only');
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
+  enforceReviewData(store, originalDomainStore(store));
+  labelReviewNotifications(store, originalDomainStore(store));
   finalizeAuditEntries(store, originalDomainStore(store));
   const currentRows = rowsFromStore(store);
   const baselineRows = store[BASELINE] || Object.fromEntries(TABLES.map(({ name }) => [name, []]));

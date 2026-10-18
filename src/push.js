@@ -517,22 +517,23 @@ export function pushMessageFor(notification, env = process.env) {
   const image = resolveFcmImageUrl(notification.imageUrl, env);
   const presentation = pushPresentation(notification);
   const publicMessage = ["announcement", "season_window"].includes(notification.type);
+  const reviewPrefix = notification.reviewData === true ? "[Review data] " : "";
   // Fixed offer copy carries no customer, address, or money fields.
   if (notification.type === "dispatch_available") return {
-    title: "New delivery job",
+    title: `${reviewPrefix}New delivery job`,
     body: "A job is ready for pickup. Open GRIDGO to view it.",
     data,
     androidChannelId: presentation.androidChannelId,
     sound: presentation.sound,
   };
   if (["order_call_incoming", "order_call_missed"].includes(notification.type)) return {
-    title: notification.type === "order_call_incoming" ? "Incoming voice call" : "Missed voice call",
+    title: reviewPrefix + (notification.type === "order_call_incoming" ? "Incoming voice call" : "Missed voice call"),
     body: notification.type === "order_call_incoming" ? "Open GRIDGO to answer the call." : "Open the order to call back.",
     data, androidChannelId: presentation.androidChannelId, sound: presentation.sound,
     ...(notification.type === "order_call_incoming" ? { transient: true } : {}),
   };
   return {
-    title: publicMessage ? (trimmedString(notification.title) || "GRIDGO") : "GRIDGO update",
+    title: publicMessage ? (trimmedString(notification.title) || "GRIDGO") : `${reviewPrefix}GRIDGO update`,
     body: publicMessage ? (trimmedString(notification.body) || "Open GRIDGO for the latest update.") : "Open GRIDGO for the latest update.",
     data,
     androidChannelId: presentation.androidChannelId,

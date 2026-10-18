@@ -173,3 +173,18 @@ test("primary client profile edits still respect selected membership isolation",
   assert.equal(persisted.accountType, "individual");
   assert.equal(persisted.role, "client");
 });
+
+test('a business application saves a fresh address when the matching saved row was deleted', async () => {
+  const context = fixture();
+  const address = { label: 'Destination', addressLine: 'Test destination', point: { lat: 7.07, lng: 125.61 }, isDefault: true };
+  context.store.clientAddresses.push({ ...address, id: 'deleted_address', clientId: context.user.id, isDefault: false, deletedAt: AT });
+  const result = await call(context, 'POST', '/me/business-apply', {
+    ...businessApplication(context.store, context.user.id), businessName: "Test business", address,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(context.store.clientAddresses.length, 2);
+  assert.equal(context.store.clientAddresses[0].deletedAt, AT);
+  assert.equal(context.store.clientAddresses[0].isDefault, false);
+  assert.equal(context.store.clientAddresses[1].deletedAt, undefined);
+  assert.equal(context.store.clientAddresses[1].isDefault, true);
+});

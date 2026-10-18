@@ -1,3 +1,4 @@
+import { isReviewData, includeReviewData } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
 import { approvedOrganization, organizationMoneyError } from './organization-money.js';
 import { statementPdf } from './statement-pdf.js';
@@ -73,7 +74,7 @@ export function routeOrganizationStatements({ req, url, store, user, now }) {
   const period = periodFor(url.searchParams, now());
   const format = url.searchParams.get('format') || 'json';
   if (!['json', 'csv', 'pdf'].includes(format)) fail('invalid_statement_format', 'Choose json, pdf or csv.');
-  const orders = (store.orders || []).filter((order) => order.clientId === clientId && ['completed', 'payout_released'].includes(order.state))
+  const orders = (store.orders || []).filter((order) => (!isReviewData(order) || includeReviewData(user, url.searchParams)) && order.clientId === clientId && ['completed', 'payout_released'].includes(order.state))
     .flatMap((order) => {
       const at = closedAt(order), time = Date.parse(at);
       if (!Number.isFinite(time) || time < period.start || time >= period.end) return [];

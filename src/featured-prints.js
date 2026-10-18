@@ -1,3 +1,4 @@
+import { reviewCatalogView } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
 import { approvedCatalogView } from './catalog-review-state.js';
 import { CatalogError, publicCatalogItem } from './supplier-catalog.js';
@@ -39,8 +40,8 @@ function selectedItems(store, ids) {
   });
 }
 
-export function publicFeaturedPrints(store) {
-  const items = selectedItems(store, configuration(store).catalogItemIds).flatMap(row => row.item ? [row.item] : []);
+export function publicFeaturedPrints(store, viewer = null) {
+  const items = selectedItems(reviewCatalogView(store, viewer), configuration(store).catalogItemIds).flatMap(row => row.item ? [row.item] : []);
   return {
     title: 'FEATURED PRINTS',
     items,

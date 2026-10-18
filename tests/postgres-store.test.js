@@ -175,7 +175,9 @@ test("relational store round-trips typed money, relationships, and composite rou
 
   // Launch metadata is migration-owned rather than part of the writable graph.
   const launch = (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0].launched_at;
-  assert.deepEqual(reloaded, { ...store, surveyLaunchedAt: launch });
+  const performanceLaunch = (await database.query("SELECT launched_at FROM supplier_performance_launch WHERE singleton")).rows[0].launched_at;
+  assert.deepEqual(reloaded, { ...store, users: store.users.map(user => ({ ...user, reviewData: false })),
+    surveyLaunchedAt: launch, supplierPerformanceLaunchedAt: performanceLaunch });
   assert.equal(typeof reloaded.orders[0].totalMinor, "number");
   assert.equal(reloaded.orders[0].payments.final_online.amountMinor, 28750);
   assert.equal(reloaded.orders[0].payoutMilestones[0].amountMinor, 50000);

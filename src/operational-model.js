@@ -1,3 +1,5 @@
+import { isReviewData, assertReviewMoneyAllowed } from './review-data.js';
+import { performanceEnabled } from './supplier-performance-policy.js';
 import { approvalProofSummary, canReadApprovalProof } from './approval-proof.js';
 import { orderColourClientAmount, publicColourChange } from './colour-projection.js';
 import { colourSettings, validateColourSettings } from './colour-pricing.js';
@@ -880,6 +882,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   if (!actor || !["ops_admin", "super_admin", "system"].includes(actor.role)) {
     fail(403, "forbidden", "Only Operations or Super Admin can release a supplier payout milestone.");
   }
+  assertReviewMoneyAllowed(order);
   const milestone = (order?.payoutMilestones || []).find((item) => item.code === code);
   if (!milestone) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
@@ -891,7 +894,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
 
   if (rescheduleHold(order)) fail(409, 'payout_held', 'Resolve the deadline request before releasing a payout.');
   const lapse = store?.productionLapses?.find((row) => row.orderId === order.id && row.supplierId === order.supplierId);
-  if (!order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
+  if (!performanceEnabled(store, at) && !order.productionTimeCorrection?.penaltyExempt && supplierPenaltyAllowed(store, order.supplierId) && productionPenaltySettings(store?.settings).deductionsEnabled && !lapse?.appliedAt && !lapse?.closedAt
       && (!lapse || lapse.policy.deductionsEnabled)
       && productionLatenessTier(order, at)) {
     fail(409, "production_penalty_pending", "The late-production warning and assessment must finish before this payout is released.");
@@ -1151,6 +1154,7 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.operatingClock;
   delete publicRecord.shopClock;
   delete publicRecord.shopClockVersion;
+  delete publicRecord.performanceClock;
   if (order.shopClockVersion === 1 && (['ops_admin', 'super_admin'].includes(user?.role)
       || (user?.role === 'client' && user.id === order.clientId))) {
     const finishedAt = order.readyAt && productionTiming(order, order.readyAt).finishedAt;
@@ -1607,7 +1611,7 @@ function closeIssueWindow(store, order, at, { by, note }) {
   order.updatedAt = at;
   if (!Array.isArray(order.timeline)) order.timeline = [];
   order.timeline.push({ at, state: "completed", by, note });
-  if (payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
+  if (isReviewData(order) || payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
   const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
   if (retention?.pofFileIds?.length) {
     releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);

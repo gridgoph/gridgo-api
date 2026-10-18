@@ -152,7 +152,7 @@ function updateName(user, name) {
 function addAddress(store, user, input, createId, at) {
   store.clientAddresses ||= [];
   const existing = store.clientAddresses.find(
-    (candidate) => candidate.clientId === user.id && sameAddress(candidate, input),
+    (candidate) => candidate.clientId === user.id && !candidate.deletedAt && sameAddress(candidate, input),
   );
   if (existing) return { address: existing, created: false };
   if (input.isDefault) {

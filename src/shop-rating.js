@@ -1,3 +1,4 @@
+import { reportOrderAllowed } from './review-data.js';
 /** The same minimum gates both public stars and quality ranking. */
 export const MIN_REVIEWS_FOR_RATING = 5;
 
@@ -10,7 +11,7 @@ export const MIN_REVIEWS_FOR_RATING = 5;
  * mark a shop down twice for being expensive.
  */
 export function shopRating(store, supplierId) {
-  const reviews = (store.shopReviews || []).filter((row) => row.supplierId === supplierId);
+  const reviews = (store.shopReviews || []).filter((row) => row.supplierId === supplierId && reportOrderAllowed(store, row.orderId));
   if (reviews.length === 0) return null;
   const stars = reviews.map((row) => Number(row.qualityStars)).filter((value) => Number.isFinite(value) && value > 0);
   if (stars.length === 0) return null;

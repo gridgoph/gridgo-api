@@ -23,6 +23,7 @@ PUT /me/preferences
 ```text
 GET /me/addresses
 POST /me/addresses
+DELETE /me/addresses/:id
 ```
 
 Create body:
@@ -35,6 +36,20 @@ Create body:
   "isDefault": true
 }
 ```
+
+`DELETE` requires the owning client session and no body. After the app confirms
+with the client, it returns `200 { "ok": true, "defaultCleared": boolean }`.
+Unknown, already deleted, and another client's address IDs all return
+`404 address_not_found`. Non-client sessions are forbidden.
+
+Deletion retains the row privately, removes it from `GET /me/addresses`, and
+rejects future matching requests using that `addressId`. If it was the default,
+no replacement is selected: `defaultCleared: true` tells the app to ask the client
+to choose another address or continue without a default. Existing carts,
+selection tokens, orders, jobs and invoices retain their independent destination
+snapshots; an open cart can still check out using its copied destination.
+Deletion and its `client_address.delete` audit entry commit atomically. Saving
+the same address later creates a new active row rather than reviving the old ID.
 
 ## Match
 
@@ -77,6 +92,12 @@ Compare each factor in the supplied/saved ranking, stopping at the first differe
 Quality is unchanged in kind: with five valid reviews, the unrounded average quality stars × 20; otherwise listing completeness and approved standing (50 standing + 8 name + 10 description + 7 starting price + 7 turnaround + 7 photos + 5 formats + 3 options + 3 preparation steps, capped at 100). Scores in the same whole-point bucket tie; even a small difference crossing its boundary separates. There is no exact-distance boost, same-shop boost, or weighted blend. Missing drop-off ties all distance values (distance-first still requires a pin).
 
 Within each shop choose its best eligible listing by these same comparisons, then listing ID ascending. Rank those representatives with supplier ID ascending as the final tie-break. This avoids combining one listing's price with another's speed. The Top Pick's `listings[]` contains **all its eligible deadline-capable listings**, in the same priority order; index 0 is its recommended listing. Each gains `readyBy` (the padded client promise), `placeInLine` (jobs ahead + 1), and `selectToken`.
+
+[Supplier Performance](SUPPLIER_PERFORMANCE_API.md) can demote a shop from Top
+Pick for seven days. Choose an eligible unhidden shop before any hidden shop;
+hidden shops remain in alternatives. When every eligible shop is hidden, use the
+best-ranked hidden shop as Top Pick. Demotion alone never causes a missing match,
+and the response shape and priority comparisons remain unchanged.
 
 The root `matchReason` names the first factor that separates the winner from the runner-up, i.e. the factor deciding between the final contenders after earlier ties. It is `vetted` if there is one candidate or every factor ties and supplier ID decides. Labels are fixed:
 
