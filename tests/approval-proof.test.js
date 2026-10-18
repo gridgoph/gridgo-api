@@ -129,6 +129,45 @@ test('proof and evidence reads are role scoped, supplier gated by file check, ri
   await assert.rejects(call(store, actors.supplier), { code: 'forbidden' });
 });
 
+for (const actor of ['client', 'supplier', 'ops', 'admin']) {
+  test(`${actor} proof JSON and PDF apply client identity privacy without changing stored evidence`, async () => {
+    const store = proofFixture(), order = store.orders[0];
+    const proof = record(store, approvalFor(store, 'drawn'), {
+      user: { ...actors.client, name: 'Approval fixture', email: 'approval@example.invalid' },
+      req: { headers: { 'user-agent': 'approval-fixture-agent' } },
+    });
+    // Future evidence fields must not silently widen the shop projection.
+    proof.ipAddress = '192.0.2.10';
+    const original = structuredClone(proof);
+    const read = await call(store, actors[actor]);
+    const projected = read.body.approvalProofs[0];
+    const pdf = (await call(store, actors[actor], '/download')).pdf.toString();
+    if (actor === 'supplier') {
+      for (const key of ['account', 'device', 'userAgent', 'ipAddress']) assert.ok(!(key in projected), key);
+      for (const value of ['Approval fixture', 'approval@example.invalid', 'install-test', 'approval-fixture-agent', '192.0.2.10']) {
+        assert.ok(!JSON.stringify(read.body).includes(value), value);
+        assert.ok(!pdf.includes(value), value);
+      }
+      for (const label of ['Account:', 'Device and app:', 'App user agent:']) assert.ok(!pdf.includes(label), label);
+    } else {
+      assert.deepEqual(projected, original);
+      for (const value of ['Approval fixture', 'approval@example.invalid', 'install-test', 'approval-fixture-agent']) assert.ok(pdf.includes(value), value);
+    }
+    assert.deepEqual(projected.snapshot, original.snapshot);
+    assert.equal(projected.snapshotSha256, original.snapshotSha256);
+    assert.equal(projected.signatureFileId, 'signature');
+    assert.ok(pdf.includes(original.snapshotSha256));
+    assert.deepEqual(order.approvalProofs[0], original);
+  });
+}
+
+for (const actor of [actors.other, actors.replacement, actors.rider, { id: 'staff', role: 'staff' }, { id: 'unknown', role: 'unknown' }, null]) {
+  test(`${actor?.role ?? 'anonymous'} unauthorized proof reads deny both JSON and PDF`, async () => {
+    const store = proofFixture(); record(store, approvalFor(store));
+    for (const path of ['', '/download']) await assert.rejects(call(store, actor, path), { code: actor ? 'forbidden' : 'unauthorized' });
+  });
+}
+
 test('PDF is paginated, uses exact immutable records, and signature retention follows evidence policy', async () => {
   const store = proofFixture(), order = store.orders[0];
   const proof = record(store, approvalFor(store, 'drawn'));

@@ -173,6 +173,12 @@ off. A sample approval never substitutes for final quote/checkout approval.
 keys sorted recursively and array order preserved; treat it as an opaque review
 token. It is not a digital-signature certificate.
 
+Only the owning client, Operations and Super Admin receive the full `account`,
+`device` and `userAgent` evidence. Assigned-shop JSON reads and PDF downloads omit
+client identity, contact and device fields. The shop receives approval facts,
+agreed specification, evidence references and the specification fingerprint.
+These role projections never change the immutable stored record.
+
 The immutable snapshot is built from existing agreed order-line and quote
 snapshots. It includes uploaded artwork references and hashes/metadata, external
 design links, item descriptions, quantities, measurements, selected spec labels,
@@ -183,7 +189,7 @@ account or settings values to reconstruct an old proof. It excludes supplier
 principal, tier sheet prices, supplier payout stages and private object keys.
 
 `GET /orders/:id/approval-proof/download` returns a rendered `application/pdf`
-attachment containing the immutable records with page numbers. It lists private
+attachment containing the role-projected immutable records with page numbers. It lists private
 signature/sample/artwork evidence IDs and available byte hashes; it does not embed
 image bytes or expiring URLs. Apps display the corresponding private images using
 `GET /files/:fileId/download-url`, whose signed URL expires under the existing
