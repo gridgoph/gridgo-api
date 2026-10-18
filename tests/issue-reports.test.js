@@ -170,14 +170,22 @@ test("a public report with screenshots is stored and read back by the desk", { s
   assert.deepEqual(report.screenshots.map((shot) => shot.contentType), ["image/png", "image/jpeg"]);
   assert.match(report.screenshots[0].url, /^https:\/\/files\.example\/issue_reports\//);
 
-  assert.equal(report.trackerIssueUrl, null);
+  assert.equal(Object.hasOwn(report, "trackerIssueUrl"), false);
 
   const tracked = await call(base, `/issue-reports/${report.id}`, {
     method: "PATCH", token, body: { status: "tracked", trackerIssueUrl: "https://github.com/gridgoph/gridgo-api/issues/94" },
   });
-  assert.equal(tracked.status, 200);
-  assert.equal(tracked.body.status, "tracked");
-  assert.equal(tracked.body.trackerIssueUrl, "https://github.com/gridgoph/gridgo-api/issues/94");
+  assert.equal(tracked.status, 403);
+  assert.equal(tracked.body.error, "tracker_issue_url_forbidden");
+  const link = "https://github.com/gridgoph/gridgo-api/issues/94";
+  await database.query("UPDATE issue_reports SET status = 'tracked', tracker_issue_url = $2, issue = $3 WHERE id = $1",
+    [report.id, link, `Details: ${link}`]);
+  const deskList = await call(base, "/issue-reports?status=tracked", { token });
+  assert.equal(Object.hasOwn(deskList.body.reports[0], "trackerIssueUrl"), false);
+  assert.doesNotMatch(JSON.stringify(deskList.body), /github/i);
+  const deskDetail = await call(base, `/issue-reports/${report.id}`, { token });
+  assert.equal(Object.hasOwn(deskDetail.body, "trackerIssueUrl"), false);
+  assert.doesNotMatch(JSON.stringify(deskDetail.body), /github/i);
   assert.equal((await call(base, "/issue-reports?status=tracked", { token })).body.reports.length, 1);
 
   const published = await call(base, `/issue-reports/${report.id}`, {
@@ -186,7 +194,14 @@ test("a public report with screenshots is stored and read back by the desk", { s
   assert.equal(published.status, 200);
   assert.equal(published.body.status, "published");
   assert.equal(published.body.publishedIn, "09-24-2026");
-  assert.equal(published.body.trackerIssueUrl, "https://github.com/gridgoph/gridgo-api/issues/94", "published keeps the link");
+  assert.equal(Object.hasOwn(published.body, "trackerIssueUrl"), false);
+  assert.doesNotMatch(JSON.stringify(published.body), /github/i);
+  for (const status of ["dismissed", "new", "tracked"]) {
+    const updated = await call(base, `/issue-reports/${report.id}`, { method: "PATCH", token, body: { status } });
+    assert.equal(updated.status, 200);
+    assert.equal(Object.hasOwn(updated.body, "trackerIssueUrl"), false);
+    assert.equal((await database.query("SELECT tracker_issue_url FROM issue_reports WHERE id = $1", [report.id])).rows[0].tracker_issue_url, link);
+  }
   assert.equal((await call(base, "/issue-reports?status=new", { token })).body.reports.length, 0);
   assert.equal((await call(base, "/issue-reports/00000000-0000-4000-8000-000000000000", { token })).status, 404);
   assert.equal((await call(base, "/issue-reports/not-a-uuid", { token })).status, 404);

@@ -334,7 +334,7 @@ function trackerIssueUrlInput(body) {
   return trimmed;
 }
 
-/** Dashboard viewers without Super Admin membership must not receive GitHub URLs,
+/** Viewers without tracker link access must not receive GitHub URLs,
  * including links pasted into report text or publication labels. Stored text is unchanged.
  */
 function withoutGithubLinks(value) {
@@ -362,7 +362,7 @@ function withoutGithubLinks(value) {
  * and firstmate's service token (`/firstmate/issue-reports`); the caller has
  * already decided who may reach it.
  */
-async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch, priorityActor = null, canManageTrackerLink = true }) {
+async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch, priorityActor = null, canManageTrackerLink = false }) {
   const project = report => canManageTrackerLink ? report : withoutGithubLinks(report);
   if (method === "GET" && path === base) {
     const status = url?.searchParams.get("status") || null;
@@ -402,7 +402,7 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
   if (method === "PATCH") {
     const body = await readPatch();
     if (!canManageTrackerLink && body && Object.hasOwn(body, "trackerIssueUrl")) {
-      throw new ReportError(403, "tracker_issue_url_forbidden", "Only Super Admin can change the tracker issue link in the dashboard.");
+      throw new ReportError(403, "tracker_issue_url_forbidden", "Only Super Admin or the firstmate service can change the tracker issue link.");
     }
     if (body && Object.hasOwn(body, "priority")) {
       if (!priorityActor) throw new ReportError(403, "forbidden", "Only Operations and Super Admin can change priority.");
@@ -548,6 +548,7 @@ export async function routeFirstmateIssueReports({ req, res, pathname, url, send
     if (refusal) throw new ReportError(refusal.status, refusal.error, refusal.message);
     if (await reviewIssueReports({
       method: req.method, path, base: FIRSTMATE_BASE, url, res, send, database, storage,
+      canManageTrackerLink: true,
       readPatch: () => readJsonBody(req, 64 * 1024),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
