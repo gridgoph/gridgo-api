@@ -1210,6 +1210,10 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     const before = {};
     for (const table of ["orders", "order_jobs"]) before[table] = (await client.query(`SELECT * FROM ${table}`)).rows;
     await runner(migrationOptions(schema, "up", 1, client));
+    // The delivery-zone migration itself must preserve every existing column.
+    for (const table of ["orders", "order_jobs"]) {
+      assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows, before[table]);
+    }
     const { version, settings } = (await client.query("SELECT version, settings FROM platform_settings")).rows[0];
     assert.equal(version, 13);
     assert.equal(settings.serviceFeeRateBps, 1000);
@@ -1234,9 +1238,13 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     assert.deepEqual(migrated.settings.deliveryFeeBands[3], {
       zone: 'out_of_zone', label: 'Out of Zone', maxDistanceMeters: null, baseFeeMinor: 4000, perKmMinor: 1500,
     });
-    for (const table of ["orders", "order_jobs"]) assert.deepEqual((await client.query(`SELECT * FROM ${table}`)).rows,
-      table === "order_jobs" ? before[table].map(row => ({ ...row, deadline: null, estimated_production_minutes: null }))
-        : before[table].map(row => ({ ...row, data: { ...row.data, shopHandoverVersion: 1 } })));
+    for (const table of ["orders", "order_jobs"]) {
+      // Later migrations may add columns; retain checks on every original column.
+      const columns = Object.keys(before[table][0]).map(name => `"${name.replaceAll('"', '""')}"`).join(', ');
+      assert.deepEqual((await client.query(`SELECT ${columns} FROM ${table}`)).rows,
+        table === "order_jobs" ? before[table]
+          : before[table].map(row => ({ ...row, data: { ...row.data, shopHandoverVersion: 1 } })));
+    }
   });
 });
 
