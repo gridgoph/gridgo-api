@@ -2593,7 +2593,7 @@ async function handleAuditedRequest(req, res) {
     const testOperations = Boolean(user) && isTestOperationsUser(store, user.id);
     if (testOperations) {
       store = testOperationsView(store, user);
-      const orderId = /^\/(?:orders|dispatch)\/([^/]+)/.exec(pathname)?.[1];
+      const orderId = pathname === '/dispatch/offers' ? null : /^\/(?:orders|dispatch)\/([^/]+)/.exec(pathname)?.[1];
       if (orderId && !store.orders.some(order => order.id === orderId)) return send(res, 404, { error: 'order_not_found' });
     }
     if (req.method === 'PATCH' && /^\/users\/[^/]+\/review-data$/.test(pathname)) {

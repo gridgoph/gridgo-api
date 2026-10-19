@@ -85,8 +85,10 @@ test('view writes merge back into the full store', () => {
 test('the route allowlist denies by default', () => {
   for (const [method, path] of [['GET', '/orders'], ['POST', '/orders/o/payments/initial/confirm'], ['POST', '/orders/o/transition'],
     ['GET', '/support-chat/threads'], ['GET', '/notifications/stream'], ['GET', '/ops/riders/locations'], ['POST', '/baskets/b/payment/confirm'],
-    ['OPTIONS', '/admin/staff'], ['HEAD', '/orders']]) assert.equal(testOperationsRouteAllowed(method, path), true, `${method} ${path}`);
-  for (const [method, path] of [['GET', '/settings'], ['PATCH', '/users/u/review-data'], ['PATCH', '/users/u/role'], ['GET', '/audit'],
+    ['OPTIONS', '/admin/staff'], ['HEAD', '/orders'], ['GET', '/settings'], ['GET', '/ops/hub'], ['GET', '/dispatch/offers'],
+    ['POST', '/orders/o/artwork-downloads']]) assert.equal(testOperationsRouteAllowed(method, path), true, `${method} ${path}`);
+  for (const [method, path] of [['PATCH', '/settings'], ['POST', '/settings/service-fee/preview'], ['GET', '/settings/payment-qr'],
+    ['GET', '/orders/o/artwork-downloads'], ['PATCH', '/users/u/review-data'], ['PATCH', '/users/u/role'], ['GET', '/audit'],
     ['GET', '/ops/finance/supplier-invoices'], ['POST', '/orders/o/milestones/delivered/release'], ['POST', '/refund-requests/r/settle'],
     ['GET', '/admin/staff'], ['GET', '/ops/issue-reports'], ['GET', '/orders/o/audit'], ['DELETE', '/files/f'], ['GET', '/api/support-chat/threads'],
     ['GET', '/orders/o/extra/segment'], ['POST', '/credits/grant'], ['GET', '/ops/organizations']]) {
