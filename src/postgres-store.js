@@ -869,6 +869,12 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
       const caseIds = [...new Set(loaded.notifications.map(row => row.data?.approvalCaseId).filter(Boolean))];
       await read('user_role_memberships', 'WHERE user_id = $1', [userId]);
       await read('approval_cases', 'WHERE user_id = $1 OR id = ANY($2::text[])', [userId, caseIds]);
+      if (loaded.users[0].review_data) {
+        // Test operations inbox visibility checks each case owner's review mark.
+        const owners = loaded.approval_cases.map(row => row.user_id).filter(id => id !== userId);
+        const table = TABLES.find(table => table.name === 'users');
+        loaded.users.push(...(await database.query(`SELECT ${table.columns.join(', ')} FROM users WHERE id = ANY($1::text[])`, [owners])).rows);
+      }
       if (orderIds.length) {
         await read('orders', 'WHERE id = ANY($1::text[])', [orderIds]);
         for (const table of ['order_jobs', 'order_payments', 'refund_requests', 'refund_settlements']) {
