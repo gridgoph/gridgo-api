@@ -146,7 +146,7 @@ export function addVoucherCode(store, clientId, code, { id, at }) {
   if (!attempt) { attempt = { id: clientId, windowAt: at, failures: 0, lockedUntil: null }; store.voucherCodeAttempts.push(attempt); }
   if (Date.parse(at) - Date.parse(attempt.windowAt) >= 3600000) Object.assign(attempt, { windowAt: at, failures: 0, lockedUntil: null });
   const normalized = normalizeVoucherCode(code);
-  const ownReward = store.vouchers.find(v => v.clientId === clientId && campaignFor(store, v)?.purpose === 'survey' && campaignFor(store, v)?.code === normalized);
+  const ownReward = store.vouchers.find(v => v.clientId === clientId && ['survey', 'founding_tester'].includes(campaignFor(store, v)?.purpose) && campaignFor(store, v)?.code === normalized);
   if (ownReward) return { status: 200, body: { voucher: publicVoucher(store, ownReward, at), issued: false }, mutated: true };
   const campaign = store.voucherCampaigns.find(c => c.code === normalized && c.status === 'active' && c.mode === 'shared' && (!c.endsAt || !expired(c.endsAt, at)));
   if (!campaign) {
@@ -165,7 +165,7 @@ export function publicVoucher(store, voucher, at) {
     secondsRemaining: Math.max(0, Math.ceil((Date.parse(voucher.expiresAt) - Date.parse(at)) / 1000)),
     redeemable: status === 'available' && !reservation && campaignFor(store, voucher)?.status === 'active',
     reservation: reservation ? { id: reservation.id, cartId: reservation.cartId, expiresAt: reservation.expiresAt } : null,
-    ...(campaignFor(store, voucher)?.purpose === 'survey' ? { code: campaignFor(store, voucher).code } : {}),
+    ...(['survey', 'founding_tester'].includes(campaignFor(store, voucher)?.purpose) ? { code: campaignFor(store, voucher).code } : {}),
     fundedBy: 'GRIDGO', transferable: false, cashValue: false };
 }
 export const generatedVoucherCode = () => crypto.randomBytes(8).toString('hex').toUpperCase();

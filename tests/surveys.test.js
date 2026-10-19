@@ -11,7 +11,8 @@ const DAY = 86400000;
 const time = days => new Date(Date.parse(AT) + days * DAY).toISOString();
 const answers = { fulfillmentStars: 5, fulfillmentTags: ['on_time'], easeStars: 4, easeTags: ['easy_checkout'], priceFeeling: 3 };
 function setup() {
-  const store = fixture(); store.surveyLaunchedAt = AT;
+  const store = fixture(); store.settings.foundingTesterLaunchAt = '2026-01-01T00:00:00.000Z';
+  store.surveyLaunchedAt = AT;
   const order = store.orders[0];
   Object.assign(order, { state: 'issue_window_open', issueWindowOpenedAt: AT, issueWindowExpiresAt: time(1) });
   return store;

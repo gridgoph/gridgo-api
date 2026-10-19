@@ -315,7 +315,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       shopEntitlementMinor: amounts.shopEntitlementMinor, riderEntitlementMinor: amounts.riderEntitlementMinor,
       principalMinor: amounts.principalMinor, feeMinor: amounts.feeMinor, deliveryMinor: amounts.deliveryMinor,
       platformDeliveryMinor, totalMinor: amounts.totalMinor, snapshot: { ...amounts,
-        ...(order.voucher ? { clientCaused: body.clientCaused } : {}),
+        ...(typeof body.clientCaused === 'boolean' ? { clientCaused: body.clientCaused } : {}),
         ...(order.directStoreDueMinor > 0 ? { directStoreDueMinor: order.directStoreDueMinor, directStoreCollectedMinor: 0 } : {}) } };
     store.refundSettlements.push(settlement);
     const supersededStages = [];

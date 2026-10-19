@@ -1582,3 +1582,14 @@ C2BE8E7A ([tracker](https://github.com/gridgoph/gridgo-supplier/issues/148)) add
 - Errors mirror delivery chat with `pickup_chat_not_available`, `pickup_chat_read_only`, and `pickup_chat_closed`; other validation/auth errors are unchanged.
 
 The existing client–rider delivery chat is unchanged.
+
+
+### Founding Tester launch cutoff
+
+Operational Settings also includes nullable UTC `foundingTesterLaunchAt`, written
+through the existing Super Admin-only audited `PATCH /settings` with
+`expectedVersion`. Accounts created strictly before it qualify; unset means all
+client accounts. It does not change existing order money or revoke already-earned
+labels. The profile/directory/dashboard projections, survey reward replacement,
+counting rules and production backfill preflight are documented with
+[Founding Tester vouchers](VOUCHERS_API.md#founding-tester-missions).

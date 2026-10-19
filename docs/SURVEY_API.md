@@ -128,6 +128,14 @@ submission can consume the account's available reward first.
 
 ## Reward and low-score behavior
 
+**Founding Tester exception:** eligible pre-launch client accounts earn the single
+₱15 reward through the three missions, replacing the repeat survey reward below.
+See [Founding Tester missions](VOUCHERS_API.md#founding-tester-missions) for cutoff,
+failure surveys, progress projections, one-time historical reuse and reminder rules.
+Cards add `rewardProgram`; mission submissions use `rewardStatus:"founding_tester"`
+and resolve `reward` to the single account wallet item. Non-tester clients retain
+the survey cooldown below. Existing submitted survey records are immutable.
+
 Every eligible submission receives the same ₱15 (`1500` centavos) voucher,
 regardless of scores, tags or comments, unless that user already received a
 survey reward within the preceding seven elapsed days. Exact seven-day equality
@@ -181,7 +189,7 @@ order projections, catalog ratings, or matching signals.
 
 Filters combine with AND:
 
-- `clientId`, `orderId`, `fulfillmentKind=delivery|pickup`, `rewardStatus=issued|cooldown`.
+- `clientId`, `orderId`, `fulfillmentKind=delivery|pickup`, `rewardStatus=issued|cooldown|founding_tester`.
 - `needsFollowUp=true|false` (automatic flag, not editable).
 - Exact `fulfillmentStars`, `easeStars`, `qualityStars`, `priceFeeling`, `recommendScore`.
 - `tag` matches either answer's tag set.
