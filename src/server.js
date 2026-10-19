@@ -52,6 +52,7 @@ import { routeBaskets, basketForOrder } from "./baskets.js";
 import { isArtworkCheckout, prepareArtworkCheckout } from "./order-match-routes.js";
 import { checkArtworkUpload } from "./artwork-file-check.js";
 import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-gates.js";
+import { prohibitedItemHold, assertProhibitedItemIntake } from './prohibited-items.js';
 import { hubPickupSettings, publicHubPickup } from "./hub-pickup.js";
 import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
@@ -6137,6 +6138,23 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      const releasingProhibitedItem = prohibitedItemHold(order) && next === 'needs_qa' && isOps(user);
+      const cancellingProhibitedReview = next === 'cancelled' && isReviewData(order)
+        && (body.reasonCode === 'prohibited_item' || prohibitedItemHold(order));
+      if (body.reasonCode === 'prohibited_item' || releasingProhibitedItem || cancellingProhibitedReview) {
+        assertProhibitedItemIntake(order, user);
+        if (next === 'cancelled' && !cancellingProhibitedReview) return send(res, 409, { error: 'prohibited_item_refund_required', message: 'Open a prohibited-item cancellation through the refund request route.' });
+        if (!releasingProhibitedItem && !cancellingProhibitedReview && (order.state !== 'needs_qa' || next !== 'client_correction')) {
+          return send(res, 409, { error: 'prohibited_item_file_check_required' });
+        }
+        if (!cancellingProhibitedReview && (typeof body.note !== 'string' || !body.note.trim() || body.note.length > 2000)) {
+          return send(res, 400, { error: 'file_check_reason_required', message: 'Record a client-visible reason (maximum 2000 characters).' });
+        }
+      }
+      if (prohibitedItemHold(order) && !releasingProhibitedItem && !cancellingProhibitedReview) {
+        return send(res, 409, { error: next === 'cancelled' ? 'prohibited_item_refund_required' : 'prohibited_item_hold',
+          message: 'Operations must release this prohibited-item hold or use the refund workflow to cancel.' });
+      }
       if (order.state === 'supplier_assigned' && ['supplier_accepted', 'payment_authorized'].includes(next)
           && user.role === 'supplier' && user.id === order.supplierId) {
         acknowledgeInstructions(store, order, user, body, now(), audit);
@@ -6256,7 +6274,7 @@ async function handleAuditedRequest(req, res) {
           && (typeof body.note !== "string" || !body.note.trim())) {
         return send(res, 400, { error: "file_check_reason_required", message: "Explain what the client must fix in the artwork." });
       }
-      const allowed = TRANSITIONS[order.state]?.[next];
+      const allowed = releasingProhibitedItem ? ['ops_admin', 'super_admin'] : TRANSITIONS[order.state]?.[next];
       if (!allowed || !allowed.includes(user.role)) {
         return send(res, 409, {
           error: "transition_not_allowed",
@@ -6608,11 +6626,13 @@ async function handleAuditedRequest(req, res) {
       order.updatedAt = now();
       if (['supplier_self_qc', 'ready_for_dispatch'].includes(next)) requestDeliveryPin(store, order, { at: order.updatedAt, id, audit, user });
       if (next === "out_for_delivery") requestDropoffConfirmation(store, order, order.updatedAt);
-      recordFileCheckTransition(order, previousState, next, user, order.updatedAt, body.note || "", body.qaChecklist, store.settings);
+      recordFileCheckTransition(order, previousState, next, user, order.updatedAt,
+        cancellingProhibitedReview ? order.cancellationReason : body.note || "", body.qaChecklist, store.settings,
+        body.reasonCode === 'prohibited_item' ? body.reasonCode : null);
       if (next === "supplier_assigned") startShopAcceptance(store, order, order.updatedAt);
       if (previousFileCheck !== JSON.stringify(order.fileCheck)) {
         audit(store, { actor: user, action: "order.file_check", entityType: "order", entityId: order.id,
-          orderId: order.id, reason: order.fileCheck.reason || null,
+          orderId: order.id, reason: releasingProhibitedItem ? body.note.trim() : order.fileCheck.reason || null,
           detail: { from: previousState, to: next, fileCheck: { ...order.fileCheck } } });
       }
       if (next === "client_correction" && body.qaAction === "request_file") {

@@ -194,6 +194,10 @@ export function clientNotificationDraft(order) {
     order,
   );
   if (!copy) return null;
+  if (order.state === 'client_correction' && order.fileCheck?.reasonCode === 'prohibited_item') {
+    copy.title = 'Your order is on hold';
+    copy.body = `Operations paused your order for a prohibited item. ${order.fileCheck.reason} Contact GRIDGO support if you need help.`;
+  }
   if (riderPackingFlow(order) && order.state === 'ready_for_dispatch') {
     copy.title = 'Ready for rider pickup';
     copy.body = 'The rider will check the unpacked products. The shop will then pack them in front of the rider.';
