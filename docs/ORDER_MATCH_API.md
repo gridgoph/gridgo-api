@@ -492,6 +492,73 @@ The owning client's projection omits `checklist` as well as `reviewedBy`; suppli
 
 Client follow-up: show upload/link-check failure guidance on the Artwork tab and route checkout errors to the indicated line; do not treat an `unknown` check as a warning. Dashboard follow-up: render the pending queue/wait and use the transitions above to pass or request correction. Backend delivery alone does not finish the issue's production + client-release acceptance gate.
 
+### Prohibited-item decisions at file check
+
+Pilot scope (tracker item 276, option B): use the existing Prohibited Items policy;
+this adds no prohibited-category list, legal determination, takedown queue or
+repeat-violation suspension. The client artwork-upload screen links that policy
+in a reminder. Rights-owner complaints continue through existing support email
+and chat for manual handling.
+
+Only `ops_admin` / `super_admin` may impose or release this hold or open its
+cancellation. Use the existing routes below. No new order state is introduced.
+The server refuses decisions after **any** production history or payout release,
+even if the current state was corrected back to QA. A passed file check or an
+order outside `needs_qa` / `client_correction` is also ineligible.
+
+| Action | Route and JSON body | Result |
+|---|---|---|
+| Hold from `needs_qa` | `POST /orders/:id/transition` with `{ "state": "client_correction", "reasonCode": "prohibited_item", "note": "Client-visible explanation" }` | `200 {order}`; state `client_correction`, `fileCheck.status: "failed"`, `reasonCode: "prohibited_item"`, `reason: note`, reviewer and review time. Optional `qaChecklist` follows the existing contract. |
+| Release a prohibited-item hold | `POST /orders/:id/transition` with `{ "state": "needs_qa", "note": "Why Operations lifted the hold" }` | `200 {order}`; file check resets to `pending`. It still needs the usual staff QA pass before the shop can see/start it. |
+| Cancel with full refund | `POST /orders/:id/refund-requests` with `{ "kind": "cancellation", "reasonCode": "prohibited_item", "reason": "Client-visible explanation" }` and `Idempotency-Key` | `201 {refund}`; creates the existing cancellation refund, puts/keeps the order in `client_correction`, records the hold and `fileCheck.refundRequestId` atomically. Follow the existing refund workflow below. |
+
+Hold/release notes and cancellation reasons must be nonblank and at most 2000
+characters. They are client-visible; do not put private complaint details in them.
+The order's `fileCheck.reasonCode`, `reason`, and optional `refundRequestId` are
+visible to the owning client and staff. `reviewedBy` remains staff-only;
+suppliers/riders still omit the entire file check. Hold, release and cancellation
+intake write `order.file_check` audit rows with the authenticated actor, reason,
+and before/after state. Refund settlement/payment retain their existing audit rows.
+The client receives a plain-language inbox notice that the order is paused for a
+prohibited item. Every current Operations/Super Admin membership receives a durable
+inbox event. No supplier job notice or access is released during the hold/refund.
+
+Client resubmission cannot clear this hold. Generic transition approval and
+cancellation cannot bypass it. Release returns to QA only; it does not resolve
+independent refund, claim, recovery or other holds. An active refund must first be
+rejected/withdrawn through its existing rules. Rejecting/withdrawing a refund
+leaves the prohibited-item hold intact until staff explicitly releases it.
+
+Cancellation uses [Client refunds](REFUNDS_API.md): client adds their receiving
+QR, staff verifies it, previews with `shopEntitlementMinor: 0` and
+`riderEntitlementMinor: 0`, and settles with the exact previewed `totalMinor`,
+`workStopped: true`, reason, shop agreement and delivery evidence. The full refund
+includes **all verified cash collected**: printing principal, service fee, and
+unused fulfillment charge. A historical 75% payment refunds that collected 75%,
+not the unpaid installment. Voucher and reconciliation rules are unchanged.
+Settlement sets order/jobs to `cancelled`, sets `fileCheck.status: "cancelled"`,
+preserves the prohibited-item reason/link, cancels unpaid obligations and supersedes
+unreleased payout stages. The refund is **approved**, not paid: Operations must
+reserve a manual payment and record its transfer evidence through the existing
+refund routes. Screens must distinguish “refund requested”, “approved” and “paid”.
+
+Review-data orders retain simulated-money rules: staff may hold/release them and
+use `POST /orders/:id/transition` with `state: "cancelled"`, `reasonCode:
+"prohibited_item"` and a nonblank `reason` to cancel without cash. No refund or
+transfer is created; the money routes remain forbidden for review data/test
+Operations identities.
+
+Refusals: `403 forbidden` for nonstaff prohibited-item decisions;
+`409 prohibited_item_before_production_only` for production history/releases;
+`409 prohibited_item_file_check_required` outside the eligible intake;
+`400 file_check_reason_required` for missing/oversized hold/release notes;
+`409 prohibited_item_hold` for attempted progression/resubmission;
+`409 prohibited_item_refund_required` for direct cash-order cancellation;
+and existing refund reconciliation, active-request, version, idempotency and
+money refusals. A partial settlement is refused; `prohibited_item_full_refund_required`
+also protects against earlier settlements reducing this full refund. There is no
+new override for unavailable or unverified funds.
+
 ### POST `/artwork/link-check`
 
 Requires a Clerk session with a GRIDGO **client membership**. This is a read-only check despite using POST. Request:

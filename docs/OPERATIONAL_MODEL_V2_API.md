@@ -1230,7 +1230,8 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `needs_qa` | `client_correction` | ops/super | correction required |
 | `needs_qa` | `proof_approval` | ops/super | client artwork/QA decision; not supplier proof |
 | `needs_qa` | `approved_for_matching` | ops/super | ready to match |
-| `client_correction` | `submitted` | owning client | resubmit |
+| `client_correction` | `submitted` / `needs_qa` | owning client | resubmit, except a prohibited-item hold |
+| `client_correction` | `needs_qa` | ops/super | release a prohibited-item hold with a required note; ordinary QA pass still required |
 | `proof_approval` | `approved_for_matching` | owning client | approve artwork/QA |
 | `proof_approval` | `client_correction` | owning client | request artwork correction |
 | `approved_for_matching` | `supplier_assigned` | ops/super | supplier must be approved and eligible |
@@ -1244,6 +1245,14 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `ready_for_dispatch` | `rider_assigned` | approved rider/ops/super | normally dispatch accept; rider must be approved |
 | `picked_up` | `out_for_delivery` | assigned rider | checklist already passed |
 | `completed` | `payout_released` | ops/super | only when all milestones released/no hold |
+
+For `reasonCode: "prohibited_item"`, the existing file check can hold an unstarted
+order, staff can release it back to QA, or staff can open a full cancellation refund.
+The hold cannot be cleared by client resubmission or generic cancellation. See
+[exact payloads, projections and refusals](ORDER_MATCH_API.md#prohibited-item-decisions-at-file-check).
+Cancellation uses the existing refund workflow and becomes final at settlement;
+manual transfer recording remains a separate step. Review-data cancellation never
+creates cash refunds.
 
 Endpoint-owned steps:
 

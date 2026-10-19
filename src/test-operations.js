@@ -12,10 +12,10 @@ export function isTestOperationsUser(store, userId) {
 const ID = '[^/]+';
 const route = (methods, pattern) => ({ methods: methods.split(' '), pattern: new RegExp(`^${pattern}$`) });
 // Default deny. Every other route answers 403 test_operations_forbidden before routing:
-// finance, payouts, refund money, settings, privacy, issue reports, tracker, admin, audit,
+// finance, payouts, refund money, settings writes, privacy, issue reports, tracker, admin, audit,
 // exports, role and review-data changes, vouchers, credits and organization accounts.
 export const TEST_OPERATIONS_ROUTES = [
-  // Identity, own devices, legal acceptance, reference data and the viewer-scoped catalogue.
+  // Identity, own devices, legal acceptance, reference data, public settings and the viewer-scoped catalogue.
   route('GET', '/auth/me(?:/ops)?'),
   route('POST', '/auth/logout'),
   route('GET', '/me'),
@@ -28,6 +28,7 @@ export const TEST_OPERATIONS_ROUTES = [
   route('POST', '/me/legal/accept'),
   route('GET', '/taxonomy(?:/(?:categories|subcategories|materials|finishes))?'),
   route('GET', '/zones'),
+  route('GET', '/settings'),
   route('GET', '/accepted-file-formats'),
   route('GET', '/listing-starters'),
   route('GET', '/season-windows'),
@@ -42,11 +43,12 @@ export const TEST_OPERATIONS_ROUTES = [
   // Orders: payment simulation, artwork QA, assignment, production, handover, delivery, issues.
   route('GET', '/orders'),
   route('GET', `/orders/${ID}`),
-  route('GET', `/orders/${ID}/(?:artwork-downloads|eligible-suppliers|issues|invoice|qa-checks|cancellation-quote|refund-requests|dropoff-confirmation|physical-invoice)`),
+  route('GET', `/orders/${ID}/(?:eligible-suppliers|issues|invoice|qa-checks|cancellation-quote|refund-requests|dropoff-confirmation|physical-invoice)`),
   route('GET', `/orders/${ID}/(?:handover|approval-proof(?:/download)?|delivery-pin|reschedule-request|change-requests)`),
   route('GET', `/orders/${ID}/(?:client-shop-chat|pickup-chat|delivery-chat)`),
   route('POST', `/orders/${ID}/client-shop-chat/messages`),
   route('POST', `/orders/${ID}/(?:pickup-chat|delivery-chat)/messages`),
+  route('POST', `/orders/${ID}/artwork-downloads`),
   route('POST', `/orders/${ID}/payments/(?:initial|final_online|downpayment|balance)/(?:confirm|reject)`),
   route('POST', `/orders/${ID}/(?:transition|qa-actions|qa-checks|production-review|production-no-communication|performance-no-fault|collection|issues)`),
   route('POST', `/orders/${ID}/(?:handover/escalate|hub-redelivery|dropoff-confirmation)`),
@@ -63,11 +65,12 @@ export const TEST_OPERATIONS_ROUTES = [
   route('POST', `/escalations/${ID}/resolve`),
   route('GET', `/refund-requests(?:/${ID}(?:/settlement-preview)?)?`),
   route('POST', `/refund-requests/${ID}/(?:review|reject)`),
+  route('GET', '/dispatch/offers'),
   route('GET', `/dispatch/${ID}/location`),
   // Operations queues, already filtered to the review view.
   route('GET', '/ops/riders/locations'),
   route('GET', `/ops/orders/${ID}/location-diagnostics`),
-  route('GET', '/ops/hub/(?:escalations|receipt-scans|unclaimed|handouts)'),
+  route('GET', '/ops/hub(?:/(?:escalations|receipt-scans|unclaimed|handouts))?'),
   route('GET', '/ops/(?:shop-failures|colour-price-checks|special-instructions|reschedule-requests|client-shop-chats)'),
   route('GET', `/ops/shops(?:/${ID})?/(?:hours|performance)`),
   // Shop and rider approval, service lines and listing review.

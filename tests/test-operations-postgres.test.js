@@ -128,9 +128,13 @@ test('a test operations session carries a review order through the operations de
   const queue = checked(await api('ops', 'GET', '/orders'));
   assert.deepEqual(queue.orders.map(order => order.id), [orderId]);
   clean('desk queue', JSON.stringify(queue));
+  // Orders, Dispatch and Riders read the public settings; the Hub page reads the hub record.
+  assert.ok(checked(await api('ops', 'GET', '/settings')).settings);
+  assert.ok(checked(await api('ops', 'GET', '/ops/hub')).hub);
   checked(await post('ops', 'payments/initial/reject', { reason: 'Resubmit receipt' }));
   checked(await post('client', 'payments/initial/submit', payment));
   assert.equal(checked(await post('ops', 'payments/initial/confirm')).order.state, 'needs_qa');
+  assert.deepEqual(checked(await post('ops', 'artwork-downloads', { all: true })).files.map(file => file.fileId), ['artwork']);
   checked(await post('client', 'payments/final_online/submit', payment));
   checked(await post('ops', 'payments/final_online/confirm'));
   checked(await post('ops', 'transition', { state: 'supplier_assigned', qaChecklist: { artwork: true, spec: true, quantity: true, address: true } }));
@@ -148,6 +152,7 @@ test('a test operations session carries a review order through the operations de
   checked(await post('supplier', 'production-finished'));
   checked(await post('ops', 'production-review', { decision: 'approved' }));
   checked(await post('supplier', 'transition', { state: 'ready_for_dispatch' }));
+  assert.deepEqual(checked(await api('ops', 'GET', '/dispatch/offers')).offers.map(order => order.id), [orderId]);
   checked(await api('rider', 'POST', `/dispatch/${orderId}/accept`, {}));
   const lines = (await loadStore(db)).orderLineItems.filter(line => line.orderId === orderId);
   checked(await api('rider', 'POST', `/dispatch/${orderId}/pickup-checklist`, {
@@ -192,8 +197,8 @@ test('a test operations session carries a review order through the operations de
 test('routes off the test operations allowlist answer test_operations_forbidden', { skip: !DATABASE_URL }, async t => {
   const { db, api } = await setup(t);
   for (const [method, path, body] of [
-    ['GET', '/ops/finance/supplier-invoices?month=2026-10'], ['GET', '/audit'], ['GET', '/audit?format=csv'], ['GET', '/settings'],
-    ['PATCH', '/settings', { serviceFeeRateBps: 1 }], ['GET', '/admin/pricing'], ['GET', '/admin/staff'], ['GET', '/admin/privacy-requests'],
+    ['GET', '/ops/finance/supplier-invoices?month=2026-10'], ['GET', '/audit'], ['GET', '/audit?format=csv'],
+    ['PATCH', '/settings', { serviceFeeRateBps: 1 }], ['POST', '/settings/service-fee/preview', {}], ['GET', '/settings/service-fee/preview'], ['GET', '/admin/pricing'], ['GET', '/admin/staff'], ['GET', '/admin/privacy-requests'],
     ['GET', '/ops/issue-reports'], ['GET', '/issue-reports'], ['GET', '/admin/tracker'], ['GET', '/ops/account-deletion-requests'],
     ['PATCH', `/users/${REAL}client/review-data`, { reviewData: true, expectedVersion: 1, reason: 'x' }],
     ['PATCH', `/users/${REAL}client/role`, { role: 'ops_admin' }], ['PATCH', 'users/client/account', {}],
@@ -212,6 +217,7 @@ test('routes off the test operations allowlist answer test_operations_forbidden'
   // Nothing changed for the refused writes.
   const saved = await loadStore(db);
   assert.equal(saved.users.find(row => row.id === `${REAL}client`).reviewData, false);
+  assert.notEqual(saved.settings.serviceFeeRateBps, 1);
 });
 
 // One path per registered GET route; `{x}` placeholders expand to review and unmarked ids.
@@ -230,7 +236,7 @@ const GET_ROUTES = [
   '/escalations', '/escalations?includeReviewData=1', '/refund-requests', '/refund-requests?includeReviewData=1', '/refund-requests/{refund}',
   '/refund-requests/{refund}/settlement-preview', '/dispatch/offers', '/dispatch/{order}/location',
   '/ops/riders/locations', '/ops/riders/locations?includeReviewData=1', '/ops/orders/{order}/location-diagnostics',
-  '/ops/hub/escalations', '/ops/hub/receipt-scans', '/ops/hub/unclaimed', '/ops/hub/handouts', '/ops/shop-failures',
+  '/ops/hub', '/ops/hub/escalations', '/ops/hub/receipt-scans', '/ops/hub/unclaimed', '/ops/hub/handouts', '/ops/shop-failures',
   '/ops/colour-price-checks', '/ops/special-instructions', '/ops/reschedule-requests', '/ops/client-shop-chats',
   '/ops/shops/hours', '/ops/shops/{shop}/hours', '/ops/shops/performance', '/ops/shops/{shop}/performance', '/ops/push/stats',
   '/ops/finance/supplier-invoices', '/ops/organizations', '/ops/organizations/{user}', '/ops/organizations/{user}/statements',

@@ -181,15 +181,17 @@ including unknown paths, returns `403 {"error":"test_operations_forbidden"}`:
 - identity and own device: `GET /auth/me`, `GET /auth/me/ops`, `POST /auth/logout`,
   `GET /me`, `POST /devices[/unregister]`, `/web-push/*`, `GET /me/legal/pending`,
   `POST /me/legal/accept`, public legal documents;
-- reference data and the viewer-scoped catalogue: `/taxonomy*`, `/zones`,
-  `/accepted-file-formats`, `/listing-starters`, `/season-windows`, `/featured-prints`,
+- reference data, public settings and the viewer-scoped catalogue: `/taxonomy*`, `/zones`,
+  `GET /settings` (the same public operational settings and operating status every
+  signed-in user reads), `/accepted-file-formats`, `/listing-starters`, `/season-windows`, `/featured-prints`,
   `/catalog`, `/catalog/shops[/:id]`, `/catalog/items/:id`, `/catalog/media/:id`;
 - inbox and desk stream: `GET /notifications`, `GET /notifications/stream`,
   `PATCH /notifications/read-all`, `PATCH|DELETE /notifications/:id`;
-- orders: `GET /orders`, `GET /orders/:id` and its artwork downloads, eligible suppliers,
+- orders: `GET /orders`, `GET /orders/:id` and its eligible suppliers,
   issues, invoice, QA checks, cancellation quote, refund requests, drop-off confirmation,
   physical invoice, handover, approval proof, delivery pin, reschedule request, change
-  requests and the client-shop, pickup and delivery chats; `POST` payment
+  requests and the client-shop, pickup and delivery chats; `POST` `artwork-downloads`
+  (signed artwork links for QA, audited on the review order), payment
   `confirm`/`reject`, `transition`, `qa-actions`, `qa-checks`, `production-review`,
   `production-no-communication`, `performance-no-fault`, `collection`, `issues`,
   `handover/escalate`, `hub-redelivery`, `dropoff-confirmation`, `shop-recovery[/accept|/refund]`,
@@ -198,8 +200,8 @@ including unknown paths, returns `403 {"error":"test_operations_forbidden"}`:
 - `GET /claims[/:id]`, `POST /claims/:id/hold|release`; `GET /issues[/:id]`,
   `POST /issues/:id/resolve|decision`; `GET /escalations`, `POST /escalations/:id/resolve`;
   `GET /refund-requests[/:id[/settlement-preview]]`, `POST /refund-requests/:id/review|reject`;
-- dispatch and queues: `GET /dispatch/:id/location`, `GET /ops/riders/locations`,
-  `GET /ops/orders/:id/location-diagnostics`, `GET /ops/hub/*`, `GET /ops/shop-failures`,
+- dispatch and queues: `GET /dispatch/offers`, `GET /dispatch/:id/location`, `GET /ops/riders/locations`,
+  `GET /ops/orders/:id/location-diagnostics`, `GET /ops/hub` (hub record and SOP), `GET /ops/hub/*`, `GET /ops/shop-failures`,
   `/ops/colour-price-checks`, `/ops/special-instructions`, `/ops/reschedule-requests`,
   `/ops/client-shop-chats`, `GET /ops/shops[/:id]/hours|performance`;
 - accounts and listings: `GET /users[/:id[/verification-documents|/production-lapses]]`,
@@ -217,8 +219,8 @@ including unknown paths, returns `403 {"error":"test_operations_forbidden"}`:
 The allowlist grants no role. Each route keeps its own authorization, so Super
 Admin-only work such as approval-case decisions and listing take-downs still returns
 `403 forbidden`; the Super Admin approves the testers' shop and rider. Finance,
-payouts, milestone releases, refund money, credits, vouchers, settings reads and writes,
-pricing and fee previews, announcements, privacy and account-deletion requests, issue
+payouts, milestone releases, refund money, credits, vouchers, settings writes (`PATCH /settings`), the payment
+QR, pricing and fee previews (`/settings/service-fee/preview`), announcements, privacy and account-deletion requests, issue
 reports, the tracker, every `/admin/*` route, audit reads and exports, role, account
 standing and review-data changes, organization accounts and staff directories stay
 forbidden.
