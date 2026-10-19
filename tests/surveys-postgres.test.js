@@ -12,16 +12,38 @@ import { publicOrderFor } from '../src/operational-model.js';
 const DB = process.env.DATABASE_URL;
 const answers = { fulfillmentStars: 2, fulfillmentTags: ['late'], easeStars: 4, easeTags: ['easy_checkout'], priceFeeling: 3,
   expectedPriceMinor: 10000, qualityStars: 5, recommendScore: 6, improvementNote: '=Fix the delay, please\nThank you' };
-async function setup(db, state = 'issue_window_open') {
+async function setup(db, state = 'issue_window_open', reviewData = false) {
   assert.match(new URL(DB).pathname, /(?:_|-)test(?:_|$)/);
   await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
   const store = fixture(), at = new Date().toISOString();
+  if (reviewData) for (const user of store.users) user.reviewData = true;
   store.surveyLaunchedAt = (await db.query('SELECT launched_at FROM survey_launch')).rows[0].launched_at;
   Object.assign(store.orders[0], { state, ...(state === 'awaiting_collection' ? { fulfillmentMode: 'pickup' } : {}), issueWindowOpenedAt: state === 'issue_window_open' ? at : undefined,
     issueWindowExpiresAt: state === 'issue_window_open' ? new Date(Date.parse(at) + 86400000).toISOString() : undefined });
   await db.transaction(() => saveStore(db, store));
   return at;
 }
+
+test('HTTP review survey saves answers in PostgreSQL without promising or issuing money', { skip: !DB }, async t => {
+  const db = createDatabase({ DATABASE_URL: DB }); t.after(() => db.close());
+  await setup(db, 'issue_window_open', true);
+  const api = await apiForTest(t);
+  const before = await api('client', 'GET', '/orders/order/survey');
+  assert.equal(before.status, 200);
+  assert.equal(before.body.survey.status, 'open');
+  assert.equal(before.body.survey.rewardEligible, false);
+  assert.equal(before.body.survey.reward, null);
+  const posted = await api('client', 'POST', '/orders/order/survey', answers);
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  assert.equal(posted.body.survey.status, 'submitted');
+  assert.equal(posted.body.survey.reward, null);
+  const stored = await loadStore(db);
+  assert.equal(stored.orderSurveys[0].fulfillmentStars, answers.fulfillmentStars);
+  assert.ok(stored.orderSurveys[0].submittedAt);
+  for (const key of ['vouchers', 'voucherCampaigns', 'voucherLedger', 'voucherReservations', 'voucherRedemptions']) {
+    assert.equal(stored[key].length, 0, key);
+  }
+});
 
 test('PostgreSQL serializes same-order retries and simultaneous orders; constraints and rollback protect rewards', { skip: !DB }, async t => {
   const db = createDatabase({ DATABASE_URL: DB }); t.after(() => db.close());

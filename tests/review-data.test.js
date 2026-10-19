@@ -228,7 +228,7 @@ test('graph writers classify every review installment as simulation without fund
   assert.equal(order.payments.initial.confirmationSource, 'review_data');
   assert.equal(order.payments.final_online.simulated, true);
   assert.equal(collectedSupplierPrincipalMinor(order), 0);
-  assert.equal(publicOrderFor(order, { id: 'rider', role: 'rider' }, store).riderPayoutMinor, 0);
+  assert.equal(publicOrderFor(order, { id: 'rider', role: 'rider' }, store).riderPayoutMinor, 850);
   assert.deepEqual(collectedRefundComponents(order, store), { principalMinor: 0, feeMinor: 0, deliveryMinor: 0 });
   for (const section of Object.values(moneyReportingForOrder(order, store))) {
     for (const [key, value] of Object.entries(section)) if (key.endsWith('Minor')) assert.equal(value, 0, key);
@@ -237,4 +237,27 @@ test('graph writers classify every review installment as simulation without fund
   enforceReviewData(ordinary, { orders: [] });
   assert.equal(ordinary.orders[0].payments.initial.simulated, undefined);
   assert.equal(collectedSupplierPrincipalMinor(ordinary.orders[0]), 10000);
+});
+
+test('review rider offers, active and past jobs display the normal split without funding finance', () => {
+  for (const state of ['ready_for_dispatch', 'rider_assigned', 'in_transit', 'completed']) {
+    const store = fixture(), order = store.orders[0];
+    Object.assign(order, { state, deliveryFeeMinor: 8900, riderCommissionBps: 8000,
+      riderId: state === 'ready_for_dispatch' ? null : 'rider' });
+    const rider = { id: 'rider', role: 'rider' };
+    const ordinary = publicOrderFor(order, rider, store);
+    order.reviewData = true;
+    const review = publicOrderFor(order, rider, store);
+    for (const [key, value] of Object.entries({ deliveryFeeMinor: 8900, riderCommissionBps: 8000,
+      riderPayoutMinor: 7120, platformDeliveryShareMinor: 1780 })) {
+      assert.equal(review[key], value, `${state}: ${key}`);
+      assert.equal(review[key], ordinary[key], key);
+    }
+    const staff = publicOrderFor(order, { id: 'ops', role: 'ops_admin' }, store);
+    assert.equal(staff.riderPayoutMinor, 0);
+    assert.equal(staff.platformDeliveryShareMinor, 0);
+    for (const section of Object.values(moneyReportingForOrder(order, store))) {
+      for (const [key, value] of Object.entries(section)) if (key.endsWith('Minor')) assert.equal(value, 0, key);
+    }
+  }
 });

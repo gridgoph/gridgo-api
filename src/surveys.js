@@ -3,6 +3,7 @@ import { notifyAdmins } from './domain-events.js';
 import { queueOrderInvalidate } from './notifications.js';
 import { issueVoucher, publicVoucher, generatedVoucherCode, voucherFail as fail } from './vouchers.js';
 import { PRICING_OPTIONS, csvCell, pricingFilter, surveyResponseRow } from './pricing-feedback.js';
+import { isReviewData } from './review-data.js';
 
 const DAY = 86400000;
 const iso = ms => new Date(ms).toISOString();
@@ -57,14 +58,15 @@ export function publicSurvey(store, order, at) {
   const s = store.orderSurveys?.find(s => s.orderId === order.id) || invitation(store, order);
   if (!s || Date.parse(at) < Date.parse(s.openedAt)) return null;
   const status = s.submittedAt ? 'submitted' : Date.parse(at) >= Date.parse(s.expiresAt) ? 'expired' : 'open';
-  const nextRewardAt = rewardNextAt(store, order.clientId);
+  const rewardsAllowed = !isReviewData(order) && !isReviewData(store.users.find(u => u.id === order.clientId));
+  const nextRewardAt = rewardsAllowed ? rewardNextAt(store, order.clientId) : null;
   const voucher = s.rewardVoucherId && store.vouchers.find(v => v.id === s.rewardVoucherId);
   return { orderId: order.id, status, fulfillmentKind: s.fulfillmentKind, openedAt: s.openedAt, expiresAt: s.expiresAt,
     dismissedAt: s.dismissedAt || null, submittedAt: s.submittedAt || null,
     answers: s.submittedAt ? Object.fromEntries(ANSWER_KEYS.map(key => [key, s[key] ?? (key === 'priceWorthTags' ? [] : null)])) : null,
     needsFollowUp: s.needsFollowUp || false,
     rewardStatus: s.rewardStatus || null, reward: voucher ? publicVoucher(store, voucher, at) : null,
-    rewardEligible: status === 'open' && (!nextRewardAt || Date.parse(at) >= Date.parse(nextRewardAt)), nextRewardAt,
+    rewardEligible: rewardsAllowed && status === 'open' && (!nextRewardAt || Date.parse(at) >= Date.parse(nextRewardAt)), nextRewardAt,
     reportProblem: s.submittedAt && lowStars(s) && order.state === 'issue_window_open' && Date.parse(order.issueWindowExpiresAt) > Date.parse(at)
       ? { label: 'Report a problem with this order', path: `/orders/${order.id}/issues`, method: 'POST' } : null };
 }
@@ -106,10 +108,9 @@ export function submitSurvey(store, order, body, { id, at }) {
   const answers = validateAnswers(body, view.fulfillmentKind);
   syncSurveys(store, { id, at });
   record = store.orderSurveys.find(s => s.orderId === order.id);
-  const nextAt = rewardNextAt(store, order.clientId);
   Object.assign(record, answers, { submittedAt: at, needsFollowUp: lowStars(answers) || answers.recommendScore != null && answers.recommendScore <= 6,
     rewardStatus: 'cooldown' });
-  if (!nextAt || Date.parse(at) >= Date.parse(nextAt)) {
+  if (view.rewardEligible) {
     // A private assigned campaign per entitlement preserves the wallet's one-per-campaign
     // rule without calendar-week loopholes or changes to published campaign terms.
     const campaign = { id: id('vcamp'), name: 'Thank you for your order feedback', purpose: 'survey', code: generatedVoucherCode(),

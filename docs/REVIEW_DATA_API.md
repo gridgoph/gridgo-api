@@ -117,7 +117,11 @@ Normal unmarked payments retain their existing status and confirmation source.
 
 Simulated amounts remain visible in the client's order/payment plan, but are not
 collections, refundable funds, supplier earnings, rider earnings or platform
-revenue. Per-order financial projections report zero money, and financial
+revenue. Rider-facing offers, active jobs, earnings and past-job displays show
+the normal snapshotted delivery split (`deliveryFeeMinor`, `riderCommissionBps`,
+`riderPayoutMinor`, `platformDeliveryShareMinor`) for review orders. These are
+display-only simulated amounts, not payable earnings. Staff per-order financial
+projections report zero money, and financial
 collections, statements, exports and pricing totals exclude review orders even
 with `includeReviewData=1`. Party order history and order invoices still show the
 sample prices needed to inspect the normal app flow.
@@ -129,6 +133,14 @@ delivery payments or supplemental payouts. These writes return
 grants, reservations and redemptions remain refused. The shared HTTP/store guard
 cannot be bypassed with the reporting opt-in. Legacy issue-window completion can
 close a review order but never automatically releases retention.
+
+Post-delivery surveys remain available for review orders and marked clients.
+If either the order snapshot or the current client is review data, survey reads
+return `rewardEligible: false`, `reward: null` (when no reward was previously
+issued), and `nextRewardAt: null`. Submitting saves the answers without creating
+a voucher or campaign, using the existing no-reward `rewardStatus: "cooldown"`.
+Clients must use `rewardEligible` to suppress the voucher promise. Ordinary
+clients on ordinary orders retain the existing reward eligibility and issuance.
 
 New order notifications, including Operations and Super Admin inbox copies,
 carry `reviewData: true` and a `[Review data]` title prefix. Push data continues
