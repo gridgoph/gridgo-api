@@ -119,7 +119,8 @@ async function paymentSetup(t, reviewData, downpaymentPercent = 75) {
   store.orders = []; store.orderJobs = []; store.orderLineItems = [];
   store.settings.downpaymentPercent = downpaymentPercent;
   store.settings.operatingHours = alwaysOpenOperatingHours();
-  for (const user of store.users) user.reviewData = reviewData;
+  // Staff stay unmarked: a marked ops_admin is a test operations account.
+  for (const user of store.users) if (!['ops', 'admin'].includes(user.id)) user.reviewData = reviewData;
   store.approvalCases.push({ id: 'case_rider', userId: 'rider', kind: 'rider', status: 'approved', version: 1,
     applicationRevision: 1, submittedAt: AT, decidedAt: AT, createdAt: AT, updatedAt: AT });
   for (const [fileId, purpose, ownerId] of [['artwork', 'artwork', 'client'], ['receipt', 'payment_proof', 'client'],

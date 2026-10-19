@@ -2,6 +2,7 @@ import { sameReviewData } from './review-data.js';
 import { availableDispatch } from "./dispatch-policy.js";
 import { supplierArtworkReleased } from "./artwork-gates.js";
 import { paymentSettled } from "./operational-model.js";
+import { isTestOperationsUser, reviewSubject } from "./test-operations.js";
 export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
@@ -308,6 +309,11 @@ export function takeQueuedInvalidates(store) {
   return list;
 }
 
+/** Hands refetch pings queued on a request view to the store that commits them. */
+export function moveQueuedInvalidates(from, to) {
+  for (const event of takeQueuedInvalidates(from)) queueInvalidate(to, event);
+}
+
 export function publishQueuedInvalidates(events, store) {
   for (const event of takeQueuedInvalidates(store)) {
     const frame = { resource: event.resource, ...(event.id ? { id: event.id } : {}) };
@@ -347,6 +353,8 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
 }
 export function notificationVisible(store, notification, userId, role) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
+  // Test operations receive staff inbox rows only about review orders and accounts.
+  if (isTestOperationsUser(store, userId) && !reviewSubject(store, notification)) return false;
   if (role && !hasRole(store,userId,role)) return false;
   const requiredRole = notification.appRole || (notification.type?.startsWith('shop_') ? 'supplier' : notification.type?.startsWith('ops_') ? 'ops_admin' : null);
   const legacySuperSeesOps = requiredRole === "ops_admin"

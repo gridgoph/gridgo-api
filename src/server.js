@@ -69,6 +69,7 @@ import { createTokenValidator } from "./push-token-validation.js";
 import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
+import { TEST_OPERATIONS_FORBIDDEN, isTestOperationsUser, mergeTestOperationsView, reviewSubject, testOperationsRouteAllowed, testOperationsView } from "./test-operations.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
 import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
 import http from "node:http";
@@ -178,6 +179,7 @@ import {
   orderFromNotification,
   privilegedAdminMemberships,
   publicNotification,
+  moveQueuedInvalidates,
   publishQueuedInvalidates,
   queueInvalidate,
   queueOrderInvalidate,
@@ -367,7 +369,10 @@ function notifyMissingJobDetails(store, order) {
     `job-details:${order.id}:${details.missing.slice().sort().join(',')}`, { createId: id, at: now() });
 }
 
-async function save(store) {
+async function save(view) {
+  // A test operations view commits through its underlying full store.
+  const store = mergeTestOperationsView(view);
+  if (store !== view) moveQueuedInvalidates(view, store);
   enforceReviewData(store, originalDomainStore(store));
   if ((store.files || []).some(file => file.colourAnalyses?.some(job => job.status === "pending"))) database.afterCommit(() => { void drainColourAnalyses().catch(() => console.warn("colour worker failed")); });
   assertSupplementCollectionsUnique(store);
@@ -909,6 +914,17 @@ async function verifiedClerkClaimsFor(req) {
   return req.gridgoVerifiedClaims;
 }
 
+/** Whether the bearer belongs to a test operations identity; see test-operations.js. */
+async function testOperationsSession(req) {
+  if (!hasBearerToken(req)) return false;
+  const subject = (await verifiedClerkClaimsFor(req))?.claims?.sub;
+  if (!subject) return false;
+  const { rows } = await database.query(`SELECT 1 FROM users u WHERE u.clerk_user_id = $1 AND u.review_data
+    AND EXISTS (SELECT 1 FROM user_role_memberships m WHERE m.user_id = u.id AND m.role = 'ops_admin')
+    AND NOT EXISTS (SELECT 1 FROM user_role_memberships m WHERE m.user_id = u.id AND m.role = 'super_admin')`, [subject]);
+  return rows.length > 0;
+}
+
 async function authenticateRequest(req, store) {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
   const verified = await verifiedClerkClaimsFor(req);
@@ -1372,6 +1388,7 @@ function fixedAuthProjection(store, auth, role) {
   if (role === "ops_admin") {
     return {
       ...base,
+      testOperations: isTestOperationsUser(store, auth.user.id),
       capabilities: {
         manageApprovalCases: false,
         manageOperations: true,
@@ -2119,6 +2136,9 @@ async function handleAuditedRequest(req, res) {
         at: now(),
       });
     }
+    if (await testOperationsSession(req) && !testOperationsRouteAllowed(req.method, pathname)) {
+      return send(res, 403, TEST_OPERATIONS_FORBIDDEN);
+    }
     if (pathname.startsWith('/legal/') && await legalResponse(req, res, url)) return;
     if (pathname === '/account-deletion-requests' || pathname === '/api/account-deletion-requests') {
       const result = await routeAccountDeletion({ req, url, database, readBody, onEvent: deletionRequestEvent });
@@ -2364,10 +2384,12 @@ async function handleAuditedRequest(req, res) {
         const profile = riderProfileProjection(store, user.id);
         if (profile) projected.riderProfile = profile;
       }
+      const staff = ["ops_admin", "super_admin"].some((role) => hasRole(store, user.id, role));
       return send(res, 200, {
         user: projected,
         memberships: auth.authorization.memberships.map(membershipSummary),
         approvalCases: auth.authorization.approvalCases.map(approvalCaseSummary),
+        ...(staff ? { testOperations: isTestOperationsUser(store, user.id) } : {}),
       });
     }
 
@@ -2566,6 +2588,13 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (user) setAuditActor(user);
+    // Test operations read and write through a review-only view of the store.
+    const testOperations = Boolean(user) && isTestOperationsUser(store, user.id);
+    if (testOperations) {
+      store = testOperationsView(store, user);
+      const orderId = /^\/(?:orders|dispatch)\/([^/]+)/.exec(pathname)?.[1];
+      if (orderId && !store.orders.some(order => order.id === orderId)) return send(res, 404, { error: 'order_not_found' });
+    }
     if (req.method === 'PATCH' && /^\/users\/[^/]+\/review-data$/.test(pathname)) {
       if (!user) return send(res, 401, { error: 'unauthorized' });
       const target = setReviewData(store, user, pathname.split('/')[2], await readBody(req));
@@ -2576,7 +2605,7 @@ async function handleAuditedRequest(req, res) {
     }
     // Scope only staff collection reads: party order history and explicit order
     // details retain their historical visibility. The view cannot be saved.
-    if (req.method === 'GET' && isOps(user) && (
+    if (req.method === 'GET' && isOps(user) && !testOperations && (
       ['/orders', '/jobs', '/baskets', '/claims', '/issues', '/escalations', '/refund-requests', '/admin/pricing',
         '/admin/survey-responses', '/admin/pricing-feedback', '/admin/checkout-exit-feedback', '/admin/voucher-redemptions',
         '/ops/shop-failures', '/admin/shop-rankings', '/ops/riders/locations', '/ops/colour-price-checks'].includes(pathname)
@@ -2787,6 +2816,7 @@ async function handleAuditedRequest(req, res) {
         pathname,
         url,
         user,
+        reviewOnly: testOperations,
         readBody,
         send,
         database,
@@ -3577,6 +3607,7 @@ async function handleAuditedRequest(req, res) {
       const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
       const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
         if (!invalidateFrameVisible(payload.resource, eventRole)) return;
+        if (testOperations && !reviewSubject(committedStore, payload)) return;
         if (eventRole && !hasRole(committedStore,user.id,eventRole) && payload.resource !== 'identity') return;
         if (payload.resource === 'calls' && !['delivery', 'pickup'].some(pair => callParty(
           { id: user.id, role: eventRole || user.role }, (committedStore.orders || []).find(o => o.id === payload.id), committedStore, pair))) return;
