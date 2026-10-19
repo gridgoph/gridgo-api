@@ -91,7 +91,7 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
       return result({ campaign: created }, true, 201);
     }
     if (!campaign) fail(404, 'voucher_campaign_not_found');
-    if (campaign.purpose === 'survey') fail(409, 'survey_campaign_managed');
+    if (['survey', 'founding_tester'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
     if (req.method === 'PATCH' && !campaigns[2]) {
       if (campaign.status !== 'draft' || store.vouchers.some(v => v.campaignId === campaign.id)) fail(409, 'voucher_campaign_immutable');
       const input = campaignInput({ ...campaign, ...object(await readBody(req)) }, at);

@@ -1,3 +1,4 @@
+import { foundingTesterEligible, testerOrderFacts, reconcileFoundingTester, publicFoundingTester } from './founding-testers.js';
 import { carriedToOffice } from './operational-model.js';
 import { notifyAdmins } from './domain-events.js';
 import { queueOrderInvalidate } from './notifications.js';
@@ -22,10 +23,11 @@ const ANSWER_KEYS = ['fulfillmentStars', 'fulfillmentTags', 'easeStars', 'easeTa
   'directShopComparison', 'priceWorthTags', 'orderAgainAtPrice', 'qualityStars', 'recommendScore', 'improvementNote'];
 function invitation(store, order) {
   const launch = Date.parse(store.surveyLaunchedAt);
-  const completedAt = order.issueWindowOpenedAt || order.timeline?.find(e => e.state === 'delivered')?.at;
+  const failureAt = foundingTesterEligible(store, order.clientId) ? testerOrderFacts(store, order).failureAt : null;
+  const completedAt = failureAt || order.issueWindowOpenedAt || order.timeline?.find(e => e.state === 'delivered')?.at;
   const completed = Date.parse(completedAt);
   if (!Number.isFinite(launch) || !Number.isFinite(completed) || completed < launch - 14 * DAY
-    || !['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(order.state)) return null;
+    || (!failureAt && !['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(order.state))) return null;
   const opened = Math.max(launch, completed);
   return { orderId: order.id, clientId: order.clientId, completedAt, openedAt: iso(opened), expiresAt: iso(opened + 7 * DAY),
     fulfillmentKind: carriedToOffice(order) || order.fulfillmentMode !== 'delivery' ? 'pickup' : 'delivery' };
@@ -59,14 +61,17 @@ export function publicSurvey(store, order, at) {
   if (!s || Date.parse(at) < Date.parse(s.openedAt)) return null;
   const status = s.submittedAt ? 'submitted' : Date.parse(at) >= Date.parse(s.expiresAt) ? 'expired' : 'open';
   const rewardsAllowed = !isReviewData(order) && !isReviewData(store.users.find(u => u.id === order.clientId));
-  const nextRewardAt = rewardsAllowed ? rewardNextAt(store, order.clientId) : null;
+  const tester = rewardsAllowed && foundingTesterEligible(store, order.clientId);
+  const testerView = tester ? publicFoundingTester(store, order.clientId, at) : null;
+  const nextRewardAt = rewardsAllowed && !tester ? rewardNextAt(store, order.clientId) : null;
   const voucher = s.rewardVoucherId && store.vouchers.find(v => v.id === s.rewardVoucherId);
   return { orderId: order.id, status, fulfillmentKind: s.fulfillmentKind, openedAt: s.openedAt, expiresAt: s.expiresAt,
     dismissedAt: s.dismissedAt || null, submittedAt: s.submittedAt || null,
     answers: s.submittedAt ? Object.fromEntries(ANSWER_KEYS.map(key => [key, s[key] ?? (key === 'priceWorthTags' ? [] : null)])) : null,
     needsFollowUp: s.needsFollowUp || false,
-    rewardStatus: s.rewardStatus || null, reward: voucher ? publicVoucher(store, voucher, at) : null,
-    rewardEligible: rewardsAllowed && status === 'open' && (!nextRewardAt || Date.parse(at) >= Date.parse(nextRewardAt)), nextRewardAt,
+    rewardStatus: s.rewardStatus || null, reward: voucher ? publicVoucher(store, voucher, at) : s.rewardStatus === 'founding_tester' ? testerView?.reward || null : null,
+    rewardEligible: rewardsAllowed && status === 'open' && (tester ? !testerView.awardedAt && !store.orderSurveys?.some(s => s.clientId === order.clientId && s.rewardVoucherId) && testerOrderFacts(store, order).received : (!nextRewardAt || Date.parse(at) >= Date.parse(nextRewardAt))), nextRewardAt,
+    rewardProgram: tester ? 'founding_tester' : 'survey',
     reportProblem: s.submittedAt && lowStars(s) && order.state === 'issue_window_open' && Date.parse(order.issueWindowExpiresAt) > Date.parse(at)
       ? { label: 'Report a problem with this order', path: `/orders/${order.id}/issues`, method: 'POST' } : null };
 }
@@ -110,7 +115,10 @@ export function submitSurvey(store, order, body, { id, at }) {
   record = store.orderSurveys.find(s => s.orderId === order.id);
   Object.assign(record, answers, { submittedAt: at, needsFollowUp: lowStars(answers) || answers.recommendScore != null && answers.recommendScore <= 6,
     rewardStatus: 'cooldown' });
-  if (view.rewardEligible) {
+  if (!isReviewData(order) && foundingTesterEligible(store, order.clientId)) {
+    record.rewardStatus = 'founding_tester';
+    reconcileFoundingTester(store, order.clientId, { id, at });
+  } else if (view.rewardEligible) {
     // A private assigned campaign per entitlement preserves the wallet's one-per-campaign
     // rule without calendar-week loopholes or changes to published campaign terms.
     const campaign = { id: id('vcamp'), name: 'Thank you for your order feedback', purpose: 'survey', code: generatedVoucherCode(),
@@ -132,7 +140,7 @@ export function surveyReport(store, params) {
   if (params.has('from') && params.has('to') && Date.parse(params.get('from')) > Date.parse(params.get('to'))) fail(400, 'invalid_survey_filter');
   if (params.has('needsFollowUp') && !['true', 'false'].includes(params.get('needsFollowUp'))
     || params.has('fulfillmentKind') && !['delivery', 'pickup'].includes(params.get('fulfillmentKind'))
-    || params.has('rewardStatus') && !['issued', 'cooldown'].includes(params.get('rewardStatus'))
+    || params.has('rewardStatus') && !['issued', 'cooldown', 'founding_tester'].includes(params.get('rewardStatus'))
     || params.has('format') && !['json', 'csv'].includes(params.get('format'))) fail(400, 'invalid_survey_filter');
   for (const [key, max, min] of [['fulfillmentStars', 5, 1], ['easeStars', 5, 1], ['qualityStars', 5, 1], ['priceFeeling', 5, 1], ['recommendScore', 10, 0]]) {
     if (params.has(key) && (!/^\d+$/.test(params.get(key)) || Number(params.get(key)) < min || Number(params.get(key)) > max)) fail(400, 'invalid_survey_filter');

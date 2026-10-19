@@ -12,7 +12,8 @@ const time = ms => new Date(Date.parse(AT) + ms).toISOString();
 const answers = { fulfillmentStars: 5, easeStars: 4, priceFeeling: 4 };
 const pricing = { directShopComparison: 'more_expensive', priceWorthTags: ['door_delivery', 'no_shop_visits'], orderAgainAtPrice: 'maybe' };
 function setup() {
-  const store = fixture(); store.surveyLaunchedAt = AT;
+  const store = fixture(); store.settings.foundingTesterLaunchAt = '2026-01-01T00:00:00.000Z';
+  store.surveyLaunchedAt = AT;
   Object.assign(store.orders[0], { state: 'issue_window_open', issueWindowOpenedAt: AT, issueWindowExpiresAt: time(DAY) });
   return store;
 }

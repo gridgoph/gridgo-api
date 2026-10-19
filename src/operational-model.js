@@ -245,6 +245,7 @@ export function defaultProductionNudge() {
 
 export function defaultOperationalSettings() {
   return {
+    foundingTesterLaunchAt: null,
     operatingHours: defaultOperatingHours(),
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
@@ -362,6 +363,12 @@ export function validateOperationalSettings(settings) {
     fail(400, "invalid_rider_commission_rate",
       "Set the rider share to a whole number from 0 to 10,000 basis points.",
       { field: "riderCommissionBps" });
+  }
+  if (settings?.foundingTesterLaunchAt != null && (typeof settings.foundingTesterLaunchAt !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(settings.foundingTesterLaunchAt)
+    || !Number.isFinite(Date.parse(settings.foundingTesterLaunchAt))
+    || new Date(settings.foundingTesterLaunchAt).toISOString() !== settings.foundingTesterLaunchAt.replace(/(?<=:\d{2})Z$/, '.000Z'))) {
+    fail(400, 'invalid_founding_tester_launch_at', 'Use a UTC ISO timestamp or null.');
   }
   const downpaymentPercent = settings?.downpaymentPercent;
   if (downpaymentPercent !== undefined && !DOWNPAYMENT_PERCENTS.includes(downpaymentPercent)) {
