@@ -146,3 +146,7 @@ public review average. The four client factors remain strictly ordered, with
 quality adjusted at its selected position; an earlier cost/speed/distance
 preference still wins. Deadline feasibility filtering remains unchanged. This
 is a modest quality adjustment, not a return to weighted total-score matching.
+
+## Scheduling pilot exemptions
+
+[Scheduling release 1](SCHEDULING_API.md) makes Tight and same-day production orders, including previously placed Express orders, warning-only even when deductions are enabled. Pending deductions cannot apply; historical applied rows remain immutable. Reasoned Tight declines are exempt from performance consequences.

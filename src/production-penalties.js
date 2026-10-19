@@ -1,3 +1,4 @@
+import { schedulingWarningOnly } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 import { performanceEnabled, performanceDeadline, performanceCounts, performanceTier, performanceExemption } from './supplier-performance-policy.js';
 import { shopSlaClock } from './shop-hours.js';
@@ -91,6 +92,7 @@ export function recentLapseQualityPenalty(store, supplierId, at) {
   // Two quality points per late order in 30 days, capped at ten of 100.
   // Client priority remains lexicographic; this is not a weighted match score.
   const count = (store.productionLapses || []).filter((lapse) => lapse.supplierId === supplierId && reportOrderAllowed(store, lapse.orderId)
+    && !schedulingWarningOnly((store.orders || []).find(order => order.id === lapse.orderId) || {}, store)
     && !lapse.policy?.warningsOnly && !performanceExemption(store, lapse)
     && !(store.supplierPerformanceEvents || []).some(event => ['late_finish', 'on_time_finish'].includes(event.kind) && event.orderId === lapse.orderId && event.supplierId === lapse.supplierId)
     && Date.parse(lapse.deadlineAt) >= start && Date.parse(lapse.deadlineAt) <= end).length;
@@ -98,7 +100,7 @@ export function recentLapseQualityPenalty(store, supplierId, at) {
 }
 
 function warningText(lapse) {
-  if (lapse.policy.warningsOnly) return `This order missed its ready-by deadline of ${lapse.deadlineAt} beyond the one-hour shop-time grace window. This is ${lapse.tier} lateness. Warning only; no money is deducted. Contact Operations if the circumstances need review.`;
+  if (lapse.policy.warningsOnly) return `This order missed its ready-by deadline of ${lapse.deadlineAt} during the warning-only pilot. This is ${lapse.tier} lateness. Warning only; no money is deducted. Contact Operations if the circumstances need review.`;
   return `This order missed its ready-by deadline of ${lapse.deadlineAt}. This is ${lapse.tier} lateness. `
     + `The penalty is ${lapse.rateBps / 100}% of what GRIDGO still owes your shop on this order, capped at that balance. Nothing carries over to another order. `
     + (lapse.tier === 'moderate' ? 'A formal warning has been added to your shop record. ' : '')
@@ -109,7 +111,7 @@ function warningText(lapse) {
 }
 
 function recordEvent(store, order, lapse, kind, at, createId) {
-  const body = kind === 'warning' ? warningText(performanceEnabled(store, at) ? { ...lapse, policy: { ...lapse.policy, warningsOnly: true, deductionsEnabled: false } } : order.productionTimeCorrection?.penaltyExempt
+  const body = kind === 'warning' ? warningText((performanceEnabled(store, at) || schedulingWarningOnly(order, store)) ? { ...lapse, policy: { ...lapse.policy, warningsOnly: true, deductionsEnabled: false } } : order.productionTimeCorrection?.penaltyExempt
     ? { ...lapse, policy: { ...lapse.policy, deductionsEnabled: false } } : lapse)
     : `A late-production deduction of ${formatMinorPhp(lapse.deductionMinor)} was applied to this order's unpaid shop payout. Nothing carries over to another order.`;
   if (kind === 'warning') lapse.warnings.push({ tier: lapse.tier, at, message: body, formal: lapse.tier !== 'minor' });
@@ -144,13 +146,14 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
     }
     if (!order.readyAt && !WATCHED.has(order.state)) continue;
     if (warningsOnly && performanceExemption(store, { orderId: order.id, supplierId: order.supplierId })) continue;
+    const pilotWarning = schedulingWarningOnly(order, store);
     const measuredOrder = warningsOnly && order.performanceClock ? { ...order, readyBy: performanceDeadline(order), shopClock: order.performanceClock } : order;
     const timing = productionTiming(measuredOrder, at);
     const tier = warningsOnly ? (performanceTier(timing.elapsedMs) && (order.productionNoCommunication ? 'severe' : performanceTier(timing.elapsedMs))) : productionLatenessTier(order, at);
     if (!tier) continue;
     if (!lapse) {
       const policy = productionPenaltySettings(store.settings);
-      if (warningsOnly) { policy.deductionsEnabled = false; policy.warningsOnly = true; }
+      if (warningsOnly || pilotWarning) { policy.deductionsEnabled = false; policy.warningsOnly = true; }
       if (order.productionTimeCorrection?.penaltyExempt) policy.deductionsEnabled = false;
       lapse = { id: createId('lapse'), orderId: order.id, supplierId: order.supplierId,
         deadlineAt: productionDeadline(measuredOrder), detectedAt: at, tier, rateBps: policy[`${tier}Bps`],
@@ -162,13 +165,13 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
     const needsWarning = lapse.warnings.length === 0 || nextTier !== lapse.tier;
     lapse.tier = nextTier;
     lapse.rateBps = lapse.policy[`${nextTier}Bps`];
-    if (nextTier === 'severe') order.productionReassignmentEligible = true;
+    if (nextTier === 'severe' && !pilotWarning) order.productionReassignmentEligible = true;
     if (needsWarning) {
       recordEvent(store, order, lapse, 'warning', at, createId);
       changed = true;
       continue; // A warning must commit before this tier can deduct.
     }
-    if (warningsOnly || order.productionTimeCorrection?.penaltyExempt || !lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
+    if (warningsOnly || pilotWarning || order.productionTimeCorrection?.penaltyExempt || !lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
     if (timing.pendingReview || (!timing.finishedAt && lapse.tier !== 'severe')) continue;
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
     if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id
@@ -199,7 +202,7 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
 export function supplierLapses(store, supplierId) {
   return (store.productionLapses || []).filter((lapse) => lapse.supplierId === supplierId)
     .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map((lapse) => ({ ...lapse,
-      reassignmentEligible: lapse.tier === 'severe',
-      status: lapse.appliedAt ? 'applied' : lapse.closedAt ? 'closed' : !performanceEnabled(store, new Date().toISOString()) && lapse.policy.deductionsEnabled && !(store.orders || []).find(order => order.id === lapse.orderId)?.productionTimeCorrection?.penaltyExempt ? 'warned' : 'warning_only',
+      reassignmentEligible: lapse.tier === 'severe' && !schedulingWarningOnly((store.orders || []).find(order => order.id === lapse.orderId) || {}, store),
+      status: lapse.appliedAt ? 'applied' : lapse.closedAt ? 'closed' : schedulingWarningOnly((store.orders || []).find(order => order.id === lapse.orderId) || {}, store) ? 'warning_only' : !performanceEnabled(store, new Date().toISOString()) && lapse.policy.deductionsEnabled && !(store.orders || []).find(order => order.id === lapse.orderId)?.productionTimeCorrection?.penaltyExempt ? 'warned' : 'warning_only',
     }));
 }

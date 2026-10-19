@@ -14,6 +14,7 @@ const later = (at, ms) => new Date(Date.parse(at) + ms).toISOString();
 const day = 86400000;
 function setup() {
   const store = fixture(), order = store.orders[0];
+  for (const line of store.orderLineItems) { line.turnaroundHoursSnapshot = 20; line.turnaroundMinutesSnapshot = 1200; }
   store.supplierPerformanceLaunchedAt = START;
   order.readyBy = DEADLINE;
   order.shopClock = { supplierId: order.supplierId, schedule: defaultShopSchedule() };
@@ -289,4 +290,16 @@ test('repeated arrived-packed reports for one order count once', () => {
   sync(store, later(START, 3));
   assert.equal(view(store, later(START, 3)).counts.arrivedPacked, 1);
   assert.equal(view(store, later(START, 3)).warnings.length, 0);
+});
+
+test('Tight reasoned declines and pilot late finishes keep notices without performance penalties', () => {
+  const {store,order}=setup();
+  order.scheduling={tightDeadline:true};
+  order.shopFailureEvents=[{id:'decline',supplierId:'supplier',kind:'declined',stage:'supplier_assigned',reason:'Cannot meet the short date',at:START}];
+  finish(store,order,25);
+  assert.equal(view(store,order.readyAt).counts.declines,0);
+  assert.equal(view(store,order.readyAt).counts.lateFinishes,0);
+  assert.equal(view(store,order.readyAt).topPick.hidden,false);
+  assert.equal(view(store,order.readyAt).notices.length,1);
+  assert.equal(view(store,order.readyAt).notices[0].exempt,true);
 });

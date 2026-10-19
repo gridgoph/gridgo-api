@@ -30,11 +30,11 @@ Server contract for [issue 203](https://github.com/gridgoph/gridgo-api/issues/20
 }
 ```
 
-Launch defaults: Monday–Saturday 08:00–17:00, no closures, 60 operating minutes for artwork review, and the separate 16:00 Priority dispatch cutoff. Sunday is weekday 0. Omit a weekday to close it. Times are integer minutes after Manila midnight. One daytime window per open day is supported; opening is inclusive and closing exclusive. A closing minute of 1440 means the end of that day. At least one weekday must open. Overnight and multiple daily windows are not supported.
+Launch defaults: Monday–Saturday 08:00–17:00, no closures, 60 operating minutes for ordinary artwork review, 30 for same-day production, and the enforced 16:00 dispatch cutoff. Sunday is weekday 0. Omit a weekday to close it. Times are integer minutes after Manila midnight. One daytime window per open day is supported; opening is inclusive and closing exclusive. A closing minute of 1440 means the end of that day. At least one weekday must open. Overnight and multiple daily windows are not supported.
 
 Closure ranges include both dates and must be real `YYYY-MM-DD` dates. Each range and their combined distinct dates are limited to 90 days, with at most 100 ranges. This keeps the calendar walk bounded and allows every valid schedule to find an opening within a year. Review time is an integer from 1 through 540 minutes; cutoff is an integer from 0 through 1439. Zone and offset are fixed to Asia/Manila and 480. Bad values return `400 invalid_operating_hours`; stale/missing versions return `409 settings_version_conflict`; a missing reason returns `400 settings_reason_required`.
 
-**Priority Delivery is not offered yet.** The cutoff is persisted and audited but unused. Do not introduce a `priority` or `express` service level or infer an offer from this setting. Cart service levels remain `standard | scheduled`.
+The dispatch cutoff applies to all new estimates, including Express. See [Scheduling release 1](SCHEDULING_API.md) for same-day review, Tight/Secured/Rush dates and the pilot policy.
 
 Each successful edit increments the existing settings version and writes `settings.operational_update`, including `previous`, `current`, `reviewDelayedOrderIds`, actor and reason. Settings, delay tags, audit and realtime invalidations commit in the existing domain transaction. Migration `1791975800000` installs defaults only when absent and increments the settings version; it does not rewrite orders or penalties. Fresh reference seeding also supplies the defaults.
 
@@ -70,7 +70,7 @@ This object is exposed as `operatingStatus` on `GET /settings`, `POST /me/matche
 
 Cart groups carry `readyBy`, computed using the group's combined quantity and longest production duration, matching checkout's group projection. An unavailable group has `readyBy: null`. Cart responses contain `checkoutNotice: null` while open, otherwise `{code:"outside_operating_hours", ...timing, readyBy}`. Its ready-by is the latest group promise, or null if any group cannot be estimated. Show the review time and estimate; do not disable payment or automatic checks. Checkout recomputes feasibility, so a stale cart preview is not a reservation.
 
-`GET /me/deadline-days?subcategoryCode=...&days=120` keeps `{days, earliest}` and adds `operatingStatus`. Days use Manila midnight boundaries independently of the server timezone. Each day has `day`, `state: "cannot" | "tight" | "open"`, and `reason`: null when reachable, `review_production_delivery_exceeds_deadline` before the earliest feasible promise, or `no_eligible_listing` when no eligible shop exists. Disable `cannot` dates and explain the reason. With an Express listing every day from today is `open` and the read adds `expressAvailable` ([Express listings](EXPRESS_API.md)). This remains a subcategory-level advisory calendar; final quantities, options, queue and deadline are checked again on match and checkout. A closed date can still be reachable if delivery can finish before it.
+`GET /me/deadline-days` retains the legacy `state` field and adds explicit `status`, reason, ready time and rush tier. Closed dates cannot be selected. The shortest/longest calculation and full app projection are defined in [Scheduling release 1](SCHEDULING_API.md). Express uses exactly the same calculation.
 
 Related client/Operations/Super Admin order projections and checkout summaries expose `review` while the new order's file check is pending:
 
@@ -110,7 +110,7 @@ For new orders, manual QA decisions from `needs_qa` and new dispatch (a rider ac
 
 Operating hours control only when new work begins. Once a rider is assigned, every custody step completes at any hour: arrived-packed, the pickup checklist or unpacked inspection, the rider packing photo, the handoff signature, `pickup-confirm`, `out_for_delivery`, delivery milestones, delivery proof and the drop at GRIDGO Office. All other gates (role, assignment, order state, inspection, photos, signatures, counts, holds and escalations) are unchanged. A rider client never receives `outside_operating_hours` from these routes. When one of them runs while GRIDGO is closed on an order with the platform clock, its timeline entry carries `outsideOperatingHours: true` (pickup or pickup escalation, `out_for_delivery`, `delivered`, `awaiting_collection`); nothing is refused and no money or promise changes.
 
-Payment submission/confirmation, automatic artwork structure checks, link probes and automatic specification validation remain available at any hour. The client's issue window, consent/offer expiries, and selection-token expiry remain wall-clock durations. Priority cutoff does not gate any current order.
+Payment submission/confirmation, automatic artwork structure checks, link probes and automatic specification validation remain available at any hour. The client's issue window, consent/offer expiries, and selection-token expiry remain wall-clock durations. The cutoff gates new scheduling estimates; existing order promises remain immutable.
 
 ## Verification
 

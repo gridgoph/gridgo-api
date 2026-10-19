@@ -1430,6 +1430,10 @@ export function publicOrderFor(order, user, store = null) {
    spent before the job even starts.
   */
   if (!ops && !owningClient && !rider) delete publicRecord.promiseBy;
+  if (publicRecord.scheduling && !ops && !owningClient) {
+    const { status, sameDay, tightDeadline, label } = publicRecord.scheduling;
+    publicRecord.scheduling = { status, sameDay, tightDeadline, label };
+  }
   // And the shop's own date is not the client's to see. Told it, a client
   // expects the job two days before the date they agreed to, and every
   // on-time order arrives late.

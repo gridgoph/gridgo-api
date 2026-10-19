@@ -181,7 +181,7 @@ for (const queued of [false, true]) {
     const match = await call("POST", "/me/matches", {
       subcategoryCode: "flyers", excludedSupplierIds: ["supplier_b"],
     });
-    const expected = queued ? "2026-09-28T07:00:00.000Z" : "2026-09-28T03:00:00.000Z";
+    const expected = queued ? "2026-09-28T06:30:00.000Z" : "2026-09-28T02:30:00.000Z";
     assert.equal(match.body.promiseBy, expected);
     assert.equal(match.body.queue.jobsAhead, queued ? 2 : 0);
     const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
@@ -1252,7 +1252,7 @@ test('a later shop missing the basket deadline rejects checkout, and matching us
   }
   const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers' })).body;
   assert.ok([...match.listings, ...match.otherListings].every((item) => item.id !== 'item_b'));
-  assert.equal((await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-09-20T00:00:00Z' })).status, 200);
+  assert.equal((await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-09-21T00:00:00Z' })).status, 200);
   await assert.rejects(call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', proofFileId: 'file_qr', reference: 'LATE' } }), { code: 'deadline_not_met' });
 });
 
@@ -1329,8 +1329,8 @@ test('cart group listings count combined capacity and each product minimum quant
 test('cart group listings use the selected group date and count earlier draft groups at that shop', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
-  delete store.settings.operatingHours;
-  Object.assign(store.supplierServices[0], { capacityDaily: 100, turnaroundHours: 8, standardTurnaroundHours: 8 });
+  store.settings.operatingHours.priorityDispatchCutoffMinute = 1020;
+  Object.assign(store.supplierServices[0], { capacityDaily: 100, turnaroundHours: 7, standardTurnaroundHours: 7 });
   const call = caller(store, client);
   const early = '2026-08-24T10:00:00.000Z', later = '2026-08-25T10:00:00.000Z';
   const cart = (await call('POST', '/me/carts', { deadline: early })).body.cart;
@@ -1340,7 +1340,7 @@ test('cart group listings use the selected group date and count earlier draft gr
   const available = await read();
   assert.equal(available.body.deadline, later);
   assert.equal(available.body.listings.length, 2);
-  // Eight earlier hours + eight for this group need two working days.
+  // Seven earlier hours + seven for this group need two working days.
   store.cartLines[1].deadline = '2026-08-25T04:00:00.000Z';
   const tight = await read();
   assert.deepEqual(tight.body.listings, []);
@@ -1486,7 +1486,7 @@ test("listing quotes enforce options, quantity tiers, multipliers, minimums and 
     [{ quantity: 9 }, "below_minimum_quantity"],
     [{ optionIds: [] }, "invalid_catalog_options"],
     [{ optionIds: ["unknown"] }, "invalid_catalog_options"],
-    [{ speedTierId: "arbitrary" }, "invalid_service_level"],
+    [{ speedTierId: "arbitrary" }, "speed_tier_unavailable"],
   ]) {
     await assert.rejects(() => call("POST", "/me/catalog-quotes", { ...input, ...patch }), (error) => error.code === code);
   }

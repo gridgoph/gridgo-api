@@ -491,28 +491,24 @@ test("the deadline calendar says which days GRIDGO could make, and never how man
   assert.match(answer.days[0].day, /^\d{4}-\d{2}-\d{2}$/);
 
   // Nothing can be finished before the first shop could finish it, and every
-  // day from there on can be.
+  // open day from there on can be.
   const earliestKey = answer.earliest.slice(0, 10);
   for (const day of answer.days) {
-    if (day.day < earliestKey) assert.equal(day.state, "cannot", day.day);
+    if (day.day < earliestKey || new Date(day.day).getUTCDay() === 0) assert.equal(day.state, "cannot", day.day);
     else assert.notEqual(day.state, "cannot", day.day);
   }
 
-  // The first days anything is possible are narrow, and say so. On the day a
-  // job first becomes makeable the shop goes straight from the order in front
-  // to this one; there is no slack in it, whoever is behind it.
+  // One shop meeting its maximum is secured regardless of slower alternatives.
   const possible = answer.days.filter((day) => day.state !== "cannot");
-  assert.equal(possible[0].state, "tight");
-  assert.equal(possible[1].state, "tight");
-  // It does not stay narrow forever. Judged on a shop of its own, because
-  // with a slow second shop in the fixture every day in the window is narrow
-  // by choice as well -- which is itself correct, and would hide this.
+  assert.equal(possible[0].state, "open");
+  assert.equal(possible[1].state, "open");
+  // A single exact-duration listing also starts secured.
   const alone = fixture();
   addShop(alone, { id: "shop_only", lat: 7.07, lng: 125.61, turnaroundHours: 24 });
   const solo = deadlineDays(alone, { subcategoryCode: "flyers", now, days: 21 })
     .days.filter((day) => day.state !== "cannot");
-  assert.equal(solo[0].state, "tight");
-  assert.equal(solo[1].state, "tight");
+  assert.equal(solo[0].state, "open");
+  assert.equal(solo[1].state, "open");
   assert.equal(solo[2].state, "open");
 
   // A count of shops is the one thing this must not leak: a client is never
@@ -521,7 +517,7 @@ test("the deadline calendar says which days GRIDGO could make, and never how man
   assert.equal(body.includes("shopsConsidered"), false);
   assert.equal(body.includes("count"), false);
   for (const day of answer.days) {
-    assert.deepEqual(Object.keys(day).sort(), ["day", "reason", "state"]);
+    assert.deepEqual(Object.keys(day).sort(), ["day", "readyBy", "reason", "rushTier", "state", "status"]);
     assert.ok(["cannot", "tight", "open"].includes(day.state), day.state);
   }
 });
@@ -600,7 +596,7 @@ test("speed ties within a UTC promise hour and the next factor decides", () => {
   assert.equal(result.shop.supplierId, "slower", "09:00 and 09:30 are in the same promise-hour bucket");
   assert.deepEqual(result.matchReason, { key: "cost", label: "Matched for Best Value" });
   const calendar = deadlineDays(store, { now: AT, subcategoryCode: "flyers", days: 7 });
-  assert.equal(calendar.earliest, "2026-08-24T02:00:00.000Z", "one review hour precedes production");
+  assert.equal(calendar.earliest, "2026-08-24T01:30:00.000Z", "half an hour of same-day review precedes production");
 });
 
 test("other listings expose established ratings, zone-only distances, and queue position", () => {
@@ -639,7 +635,7 @@ test('deadline calendar uses Manila dates and explains a review-delayed impossib
   const answer = deadlineDays(store, { subcategoryCode: 'flyers', now: '2026-10-10T16:01:00.000Z', days: 4 });
   assert.equal(answer.days[0].day, '2026-10-11');
   assert.deepEqual(answer.days.slice(0, 2).map(row => [row.state, row.reason]), [
-    ['cannot', 'review_production_delivery_exceeds_deadline'], ['cannot', 'review_production_delivery_exceeds_deadline']]);
+    ['cannot', 'gridgo_closed_sunday'], ['cannot', 'gridgo_closed']]);
   assert.equal(answer.operatingStatus.scheduledReviewAt, '2026-10-13T00:00:00.000Z');
-  assert.equal(answer.earliest, '2026-10-13T02:00:00.000Z');
+  assert.equal(answer.earliest, '2026-10-13T01:30:00.000Z');
 });

@@ -63,7 +63,7 @@ import {
   deadlineDays,
   matchShop,
   multiplyMinor,
-  projectShopFinish,
+  projectListingGroup, listingTiming,
   validatePreferenceRanking,
 } from "./order-match.js";
 import {
@@ -268,9 +268,7 @@ function resolveMatchSelection(store, user, cart, body, at) {
 function assertMatchDeadline(store, item, line, at) {
   const deadline = line.deadline ?? line.matchDeadline;
   if (!deadline) return;
-  const { projection } = projectShopFinish(store, { supplierId: item.supplierId,
-    turnaroundHours: itemTurnaroundHours(item, (store.supplierServices || []).find((row) => row.id === item.supplierServiceId)),
-    units: line.quantity, now: at, express: listingExpress(item), deadline });
+  const { projection } = projectListingGroup(store, [{ ...line, catalogItemId: item.id }], { now: at, deadline });
   if (!fitsDeadline(projection, deadline)) fail(409, "deadline_not_met", "This listing can no longer make the requested deadline.");
 }
 
@@ -359,6 +357,7 @@ function cartLineSubtotal(store, line) {
       selectedOptions,
       quantity: line.quantity,
       artworkSelection: line,
+      speedTier: listingTiming(store, item, line).tier,
       measurement: item.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement || null,
     }).lineSubtotalMinor;
   } catch {
@@ -388,6 +387,7 @@ function assertCartLinePriceable(store, item, line) {
   priceCatalogSelection(store, item, {
     selectedOptions,
     quantity: line.quantity,
+    speedTier: listingTiming(store, item, line).tier,
     measurement: item.pricingUnit === "per_page" && !line.measurement ? { pages: 1 } : line.measurement || null,
   });
 }
@@ -437,19 +437,11 @@ function cartLinePromiseBy(store, cart, line, item, at) {
   const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
   if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
       || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
-  const service = (store.supplierServices || []).find((row) => row.id === item.supplierServiceId);
   try {
-    return projectShopFinish(store, {
-      supplierId: line.supplierId,
-      turnaroundHours: itemTurnaroundHours(item, service),
-      units: line.quantity,
-      now: at,
-      express: listingExpress(item),
-      deadline: lineDeadline(cart, line),
-    }).projection.promiseBy;
+    return projectListingGroup(store, [line], { now: at, deadline: lineDeadline(cart, line) }).projection.promiseBy;
   } catch (error) {
     // An unavailable calendar must not prevent the client from repairing a cart.
-    if (error instanceof AvailabilityError) return null;
+    if (error instanceof AvailabilityError || error.code === 'speed_tier_unavailable') return null;
     throw error;
   }
 }
@@ -621,6 +613,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       colourPricing,
       totalSheets: item?.pricedByColour ? colourPricing?.totalSheets ?? null : (colourPricing?.totalSheets ?? (item?.pricingUnit === "per_page" && documentPages ? documentPages.printed * line.quantity : null)),
       optionIds: [...(line.optionIds || [])],
+      speedTierId: line.speedTierId ?? null,
       measurement: item?.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement ? { ...line.measurement } : null,
       documentPages,
       structuredSpec: structuredClone(line.structuredSpec || {}),
@@ -670,18 +663,17 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     }
     let readyBy = null;
     let expressPromise = false;
+    let scheduling = null;
     try {
       const items = groupLines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
       if (items.every(Boolean) && groupLines.every(line => publicLines.find(row => row.id === line.id)?.promiseBy)) {
-        const { projection } = projectShopFinish(store, { supplierId, now: at,
-          turnaroundHours: Math.max(...items.map(item => itemTurnaroundHours(item, store.supplierServices.find(service => service.id === item.supplierServiceId)))),
-          units: groupLines.reduce((sum, line) => sum + line.quantity, 0),
-          express: items.every(listingExpress), deadline });
+        const { projection } = projectListingGroup(store, groupLines, { now: at, deadline });
+        scheduling = projection.scheduling;
         readyBy = projection.promiseBy;
         expressPromise = projection.express === true;
       }
-    } catch (error) { if (!(error instanceof AvailabilityError)) throw error; }
-    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, expressPromise, lineIds: groupLines.map((line) => line.id),
+    } catch (error) { if (!(error instanceof AvailabilityError) && error.code !== 'speed_tier_unavailable') throw error; }
+    return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, expressPromise, scheduling, lineIds: groupLines.map((line) => line.id),
       ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
@@ -846,6 +838,7 @@ function publicMatchedOrder(store, order) {
     // see the allowance.
     readyBy: order.promiseBy ?? null,
     express: order.express === true,
+    scheduling: order.scheduling ?? null,
     review: orderReviewTiming(order, store.settings),
     downpaymentPercent: orderDownpaymentPercent(order),
     paymentPlan: {
@@ -1003,6 +996,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
         optionIds: line.optionIds || [],
         measurement: line.measurement || null,
         quantity: line.quantity,
+        speedTier: listingTiming(store, item, line).tier,
         quantityMode: line.quantityMode,
         artworkFileId: line.artworkFileId, artworkAttachments: line.artworkAttachments,
         documentPages: line.documentPages, printLayout: line.printLayout,
@@ -1058,18 +1052,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Snapshot the same queue/calendar projection used by matching and the cart,
   // before adding this order's own jobs to the committed queue.
   const [job] = jobs;
-  const orderedUnits = snapshots.reduce((total, row) => total + Number(row.lineItem.quantity || 0), 0);
-  // Express answers the order only when every product in it is Express, and
-  // is made for the soonest deadline any of its lines carries.
-  const expressDeadline = cartLines.map((line) => lineDeadline(cart, line)).filter(Boolean).sort()[0] ?? null;
-  const { projection } = projectShopFinish(store, {
-    supplierId: job.supplierId,
-    turnaroundHours: job.estimatedHours,
-    now: at,
-    units: orderedUnits,
-    express: [...grouped.values()].flat().every(({ item }) => listingExpress(item)),
-    deadline: expressDeadline,
-  });
+  const requestedDeadline = cartLines.map(line => lineDeadline(cart, line)).filter(Boolean).sort()[0] ?? null;
+  const { projection } = projectListingGroup(store, cartLines, { now: at, deadline: requestedDeadline });
   for (const line of cartLines) {
     if (lineDeadline(cart, line) && !fitsDeadline(projection, lineDeadline(cart, line))) {
       fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.");
@@ -1086,9 +1070,21 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   order.readyBy = projection.readyBy;
   // The padded date the client was promised. Never shown to the shop.
   order.promiseBy = projection.promiseBy;
-  // Tagged for every party: this order was promised under Express, so the
-  // shop's date is the same-day target rather than its production time.
+  // Compatibility tag: new orders never use the retired Express override.
   order.express = projection.express === true;
+  order.scheduling = structuredClone(projection.scheduling);
+  order.reviewSchedule = structuredClone(projection.review);
+  if (projection.scheduling.tightDeadline) {
+    for (const row of snapshots) {
+      const item = store.catalogItems.find(item => item.id === row.cartLine.catalogItemId);
+      const hours = listingTiming(store, item, row.cartLine).minimum;
+      row.lineItem.turnaroundHoursSnapshot = hours;
+      row.lineItem.turnaroundMinutesSnapshot = Math.round(hours * 60);
+      delete row.lineItem.turnaroundDaysSnapshot;
+    }
+    job.estimatedHours = Math.max(...snapshots.map(row => row.lineItem.turnaroundHoursSnapshot));
+    job.estimatedProductionMinutes = Math.round(job.estimatedHours * 60);
+  }
 
   const itemSubtotalMinor = addMinor(jobs.map((job) => job.supplierSubtotalMinor), "order.itemSubtotalMinor");
   // Pickup is a per-order platform charge. The internal trip to the hub keeps
@@ -1429,8 +1425,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
       fail(404, "catalog_item_not_found", "That listing is no longer available.");
     }
-    // Speed selection is not part of the current cart/checkout contract.
-    if (body.speedTier != null || body.speedTierId != null) fail(400, "invalid_service_level", "Speed selection is not supported by checkout.");
+    if (body.speedTier != null) fail(400, 'invalid_service_level', 'Send a listed speedTierId, never a price object.');
+    const speedTier = listingTiming(store, item, { speedTierId: body.speedTierId }).tier;
     const optionIds = body.optionIds ?? [];
     if (!Array.isArray(optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.");
     const quantity = positiveInteger(body.quantity, "quantity");
@@ -1452,7 +1448,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
           clientLineSubtotalMinor}},mutated:false};
       }
     }
-    const priced = priceCatalogSelection(store, item, { selectedOptions, quantity, measurement });
+    const priced = priceCatalogSelection(store, item, { selectedOptions, quantity, measurement, speedTier });
     const service = store.supplierServices.find((row) => row.id === item.supplierServiceId);
     return { status: 200, body: { quote: {
       catalogItemId: item.id, version: item.version, serviceVersion: service.version || 1, quantity: priced.quantity,
@@ -1617,7 +1613,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       const token = randomBytes(32).toString("base64url");
       store.matchSelections.push({ tokenHash: selectionHash(token), clientId: user.id, requestId, expiresAt,
         selection: { catalogItemId: listing.id, supplierId: store.catalogItems.find((row) => row.id === listing.id).supplierId,
-          cartId, deadline: input.deadline, dropoff: input.dropoff,
+          cartId, speedTierId: listing.scheduling?.rushTier?.id ?? null, deadline: input.deadline, dropoff: input.dropoff,
           ...(requestFulfillment ? { requestFulfillment } : {}),
           subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
       listing.selectToken = token;
@@ -1792,9 +1788,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       ...((explicitDeadline || selection?.deadline) ? { deadline: explicitDeadline || parseDeadline(selection.deadline) } : {}),
       ...((selection?.deadline || cart.deadline) ? { matchDeadline: selection?.deadline || cart.deadline } : {}),
       structuredSpec,
+      speedTierId: selection?.speedTierId ?? body.speedTierId ?? null,
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
     };
+    if (selection && body.speedTierId != null && body.speedTierId !== selection.speedTierId) fail(409, 'select_token_tier_mismatch', 'Use the selected speed tier.');
+    listingTiming(store, item, line);
     assertMatchDeadline(store, item, line, at);
     if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
     writeArtworkAttachments(line, body, publicCatalogItem(store, item)?.acceptedFormats);
@@ -1838,6 +1837,11 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     }
     const body = record(await readBody(req));
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
+    if (Object.hasOwn(body, 'speedTierId')) {
+      const item = store.catalogItems.find(item => item.id === line.catalogItemId);
+      listingTiming(store, item, body);
+      line.speedTierId = body.speedTierId;
+    }
     if (Object.hasOwn(body, "deadline")) {
       const deadline = parseDeadline(body.deadline);
       const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);

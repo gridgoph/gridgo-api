@@ -3823,7 +3823,9 @@ async function handleAuditedRequest(req, res) {
         ...store.settings,
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
         clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
-        operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours : operatingHours(store.settings),
+        operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours && {
+          sameDayReviewMinutes: operatingHours(store.settings).sameDayReviewMinutes, ...body.operatingHours,
+        } : operatingHours(store.settings),
         clientRiderLocationRevealDistanceMeters: Object.hasOwn(body, "clientRiderLocationRevealDistanceMeters")
           ? body.clientRiderLocationRevealDistanceMeters : (store.settings.clientRiderLocationRevealDistanceMeters ?? 1_000),
         riderLocationRefreshIntervalSeconds: Object.hasOwn(body, 'riderLocationRefreshIntervalSeconds')

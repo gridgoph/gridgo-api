@@ -20,6 +20,8 @@ test('new settings supply launch hours; invalid and impossible calendars are rej
   assert.ok(settings.operatingHours, 'operating schedule is part of seeded settings');
   for (const bad of [null, { ...hours(), timeZone: 'UTC' }, { ...hours(), artworkReviewMinutes: 0 },
     { ...hours(), priorityDispatchCutoffMinute: 1440 },
+    { ...hours(), sameDayReviewMinutes: null }, { ...hours(), sameDayReviewMinutes: 0 },
+    { ...hours(), sameDayReviewMinutes: 541 }, { ...hours(), priorityDispatchCutoffMinute: 0 },
     { ...hours(), schedule: { ...hours().schedule, closures: [{ startDay: '2026-02-30', endDay: '2026-03-01' }] } },
     { ...hours(), schedule: { ...hours().schedule, week: [] } }]) {
     assert.throws(() => validateOperationalSettings({ ...settings, operatingHours: bad }), { code: 'invalid_operating_hours' });
@@ -31,9 +33,9 @@ test('match promise waits for review across Saturday close, Sunday and closure b
     supplierProfiles: [{ userId: 'shop', schedule: defaultShopSchedule() }], supplierServices: [], orderJobs: [] };
   const { projection } = projectShopFinish(store, { supplierId: 'shop', turnaroundHours: 1, now: at });
   assert.equal(projection.review.scheduledReviewAt, at);
-  assert.equal(projection.review.reviewCompletesAt, '2026-10-13T00:30:15.000Z');
-  assert.equal(projection.readyBy, '2026-10-13T01:30:15.000Z');
-  assert.equal(projection.promiseBy, '2026-10-13T02:30:15.000Z');
+  assert.equal(projection.review.reviewCompletesAt, '2026-10-13T00:00:15.000Z');
+  assert.equal(projection.readyBy, '2026-10-13T01:00:15.000Z');
+  assert.equal(projection.promiseBy, '2026-10-13T02:00:15.000Z');
 });
 
 test('new-order acceptance uses platform hours while legacy acceptance retains shop hours', () => {
