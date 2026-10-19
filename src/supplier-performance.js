@@ -1,3 +1,4 @@
+import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
 import { defaultShopSchedule } from './availability.js';
@@ -69,7 +70,7 @@ export function syncSupplierPerformance(store, { at, id, clockStore = store }) {
             kind: tier ? 'late_finish' : 'on_time_finish', at: timing.finishedAt, tier,
             deadlineAt, workingLateMs: Math.max(0, timing.elapsedMs), reviewWaitMs: timing.reviewWaitMs,
             graceMinutes: 60, reason: tier ? 'Finished after the committed ready-by and one-hour grace window.' : 'Finished within the committed ready-by and grace window.',
-            exemption: order.productionTimeCorrection?.penaltyExempt ? 'reviewed_time_correction' : null });
+            exemption: tier && schedulingWarningOnly(order, store) ? 'scheduling_pilot' : order.productionTimeCorrection?.penaltyExempt ? 'reviewed_time_correction' : null });
         }
       }
     }
@@ -77,7 +78,8 @@ export function syncSupplierPerformance(store, { at, id, clockStore = store }) {
       // Cancellation before acceptance is a decline, never an accepted-order cancellation.
       const kind = failure.kind === 'cancelled' && failure.stage === 'supplier_assigned' ? 'declined' : failure.kind;
       collect({ orderId: order.id, supplierId: failure.supplierId, sourceKey: `failure:${failure.id}`, kind,
-        at: failure.at, reason: failure.reason, reasonCode: failure.reasonCode || null });
+        at: failure.at, reason: failure.reason, reasonCode: failure.reasonCode || null,
+        exemption: failure.exemption || tightDeclineExemption(order, kind, failure.reason) });
     }
     for (const packed of order.shopHandover?.arrivedPacked || []) {
       collect({ orderId: order.id, supplierId: packed.supplierId, sourceKey: 'arrived_packed', kind: 'arrived_packed',

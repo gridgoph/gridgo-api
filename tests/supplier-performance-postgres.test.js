@@ -13,6 +13,7 @@ test('Performance HTTP roles, durable warnings, no-fault, replay, money safety a
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
   await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const initial = fixture(), order = initial.orders[0];
+  for (const line of initial.orderLineItems) { line.turnaroundHoursSnapshot = 20; line.turnaroundMinutesSnapshot = 1200; }
   const at = new Date().toISOString();
   order.readyBy = new Date(Date.parse(at) - 2 * 3600000).toISOString();
   order.readyAt = at; order.state = 'ready_for_dispatch';

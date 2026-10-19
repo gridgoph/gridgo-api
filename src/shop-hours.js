@@ -51,7 +51,7 @@ function validateBase(schedule) {
   if (!schedule || Object.keys(schedule).some(key => !['utcOffsetMinutes', 'week', 'closures'].includes(key))) {
     fail(400, 'invalid_shop_hours', 'Send only the base weekly hours and closure dates; declare extensions separately.');
   }
-  try { validateOperatingHours({ timeZone: 'Asia/Manila', schedule, artworkReviewMinutes: 1, priorityDispatchCutoffMinute: 0 }); }
+  try { validateOperatingHours({ timeZone: 'Asia/Manila', schedule, artworkReviewMinutes: 1, priorityDispatchCutoffMinute: 0 }, { requireDispatchWindow: false }); }
   catch { fail(400, 'invalid_shop_hours', 'Use one daytime window per open day in Asia/Manila and valid closure dates (at most 90 days).'); }
   productionDayMinutes(schedule);
 }

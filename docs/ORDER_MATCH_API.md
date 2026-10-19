@@ -76,7 +76,7 @@ Send either `addressId` or an inline `dropoff` point (`lat`, `lng`, nonblank `la
 
 `deadline` is optional, a date-time parseable by the API (send ISO 8601 with offset); null means no deadline filter. `units` is an optional positive safe integer quantity used for capacity projection. Existing `measurement`, `structuredSpec`, `optionIds`, and `widthFeet` inputs still filter printer capability. `/next` requires at least one `excludedSupplierIds` entry. Optional `cartId` validates ownership, supplies existing lines for printer-width checks, and binds tokens to that cart. It **does not boost the cart's shop**. To choose a different shop from a nonempty cart, start a new cart and rematch without the old cart ID.
 
-Eligibility is fail-closed: active account, approved supplier membership, live covering service, complete public listing, printer capacity, and `isClosed=false`. Project each listing using its turnaround, shop schedule, current queue, supplied units/capacity, and the platform promise allowance. Remove every listing whose **client promise** exceeds the deadline before ranking; a listing with Express on can meet any deadline from today on ([Express listings](EXPRESS_API.md)). If none can make it, return `409 deadline_not_met` with `earliestAvailable`; if there are no eligible listings, return `404 match_not_found`.
+Eligibility is fail-closed: active account, approved supplier membership, live covering service, complete public listing, printer capacity, and `isClosed=false`. Project each listing using its turnaround, shop schedule, current queue, supplied units/capacity, and the platform promise allowance. Remove every listing whose **client promise** exceeds the deadline before ranking; Express follows the same hours/production/cutoff rule; shortest/longest and listed rush tiers determine availability ([Scheduling release 1](SCHEDULING_API.md)). If none can make it, return `409 deadline_not_met` with `earliestAvailable`; if there are no eligible listings, return `404 match_not_found`.
 
 ### Deterministic Top Pick
 
@@ -803,3 +803,7 @@ match/cart promises, the additive `operatingStatus`, listing `review`, cart
 `checkoutNotice` and group `readyBy`, and Manila deadline-calendar reasons.
 Payment and automatic artwork checks remain available outside office hours;
 manual review and dispatch for new orders follow the live platform schedule.
+
+## Scheduling release 1
+
+The additive calendar/match/cart/order `scheduling` contract, listed speed-tier selection, same-day ready times and Tight pilot warnings are defined in [Scheduling](SCHEDULING_API.md).

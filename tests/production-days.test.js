@@ -11,9 +11,9 @@ test('two production days ordered Friday evening finish Tuesday at closing', () 
   assert.equal(projection.readyBy, '2026-09-08T10:00:00.000Z');
 });
 
-test('two production days starting Friday morning finish Monday at closing', () => {
+test('two production days ordered Friday morning include review and finish Tuesday morning', () => {
   const { projection } = projectShopFinish(store, { supplierId: 'shop', turnaroundDays: 2, now: '2026-09-04T00:00:00.000Z' });
-  assert.equal(projection.readyBy, '2026-09-07T10:00:00.000Z');
+  assert.equal(projection.readyBy, '2026-09-08T01:00:00.000Z');
 });
 
 import { hoursToDays, productionDayMinutes, productionDuration } from '../src/production-days.js';
@@ -59,7 +59,7 @@ test('legacy one-hour and fractional-hour writes retain exact working minutes', 
 test('same-day minutes schedule across closing without becoming a full working day', () => {
   const duration = productionDuration({ turnaroundMinutes: 90 }, {}, 'turnaround', 600);
   const { projection } = projectShopFinish(store, { supplierId: 'shop', ...duration, now: '2026-09-04T09:30:00.000Z' });
-  assert.equal(projection.readyBy, '2026-09-07T01:00:00.000Z');
+  assert.equal(projection.readyBy, '2026-09-07T01:30:00.000Z');
   for (const value of [0, -1, 1.5, '60', 600, 601]) {
     assert.throws(() => productionDuration({ turnaroundMinutes: value }, {}, 'turnaround', 600));
   }

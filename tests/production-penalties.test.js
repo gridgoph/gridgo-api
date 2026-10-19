@@ -299,3 +299,17 @@ test('rejected review credits use snapshotted operating hours, including closed 
   assert.equal(productionTiming(order, '2026-10-12T03:00:00.000Z').elapsedMs, 3600000);
   assert.equal(productionTiming(order, null).finishedAt, null);
 });
+
+test('pilot Tight, same-day and legacy Express lapses warn but never deduct, including pending lapses', () => {
+  for (const flags of [{ scheduling: { tightDeadline: true } }, { scheduling: { sameDay: true } }, { express: true }]) {
+    const store = fixture(true), order = store.orders[0];
+    assess(store, 25); // A pre-release warning must not enable a later deduction.
+    Object.assign(order, flags);
+    const before = structuredClone(order.payoutMilestones), promised = order.readyBy;
+    assess(store, 26);
+    assert.deepEqual(order.payoutMilestones, before);
+    assert.equal(order.readyBy, promised);
+    assert.equal(store.productionLapses[0].deductionMinor, 0);
+    assert.equal(supplierLapses(store, 'shop')[0].status, 'warning_only');
+  }
+});

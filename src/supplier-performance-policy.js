@@ -1,3 +1,4 @@
+import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 const DAY = 86400000;
 export const PERFORMANCE_GRACE_MS = 3600000;
@@ -7,8 +8,15 @@ export function performanceTier(elapsedMs) {
   if (!Number.isFinite(elapsedMs) || elapsedMs <= PERFORMANCE_GRACE_MS) return null;
   return elapsedMs > 24 * 3600000 ? 'severe' : elapsedMs > 6 * 3600000 ? 'moderate' : 'minor';
 }
-export const performanceExemption = (store, row) => (store.supplierPerformanceEvents || []).find(event =>
-  event.kind === 'no_fault' && event.orderId === row.orderId && event.supplierId === row.supplierId) || null;
+export function performanceExemption(store, row) {
+  const noFault = (store.supplierPerformanceEvents || []).find(event =>
+    event.kind === 'no_fault' && event.orderId === row.orderId && event.supplierId === row.supplierId);
+  if (noFault) return noFault;
+  const order = (store.orders || []).find(order => order.id === row.orderId);
+  if (order && ((row.kind === 'late_finish' && schedulingWarningOnly(order, store))
+    || tightDeclineExemption(order, row.kind, row.reason))) return { reason: 'scheduling_pilot' };
+  return null;
+}
 const emptyCounts = () => ({ declines: 0, timeouts: 0, lateFinishes: 0, cancellations: 0, arrivedPacked: 0 });
 const COUNT_KEY = { declined: 'declines', timed_out: 'timeouts', late_finish: 'lateFinishes', cancelled: 'cancellations', arrived_packed: 'arrivedPacked' };
 export function performanceCounts(store, supplierId, at) {
