@@ -1,4 +1,6 @@
 import { assertReviewMoneyAllowed } from './review-data.js';
+import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedItemHold } from './prohibited-items.js';
+import { recordFileCheckTransition, supplierArtworkReleased } from './artwork-gates.js';
 import { cancellationQuote, publicCancellationQuote, acceptedCancellationQuote } from './fault-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
 import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
@@ -83,7 +85,7 @@ export function publicRefund(store, request, user) {
 
 function notify(store, request, order, kind, createId, at) {
   const recipients = [...(kind === 'supplier_paid' ? [] : [{ userId: request.clientId, role: 'client' }]),
-    ...(order.supplierId ? [{ userId: order.supplierId, role: 'supplier' }] : []), ...privilegedAdminMemberships(store)];
+    ...(order.supplierId && supplierArtworkReleased(order) ? [{ userId: order.supplierId, role: 'supplier' }] : []), ...privilegedAdminMemberships(store)];
   const copy = { requested: 'A refund was requested. Work and payouts are paused.', reviewed: 'Operations reviewed the refund request.',
     settled: 'A refund settlement was approved. No client transfer has been recorded yet.', paid: 'The client refund transfer was recorded.',
     rejected: 'The refund request was rejected. Open the request for the reason.', withdrawn: 'The refund request was withdrawn.',
@@ -98,7 +100,9 @@ function notify(store, request, order, kind, createId, at) {
     seen.add(key);
     store.notifications.push({ id: createId('notif'), userId, appRole: role, orderId: order.id,
       type: `refund_${kind}`, title: 'Client refund',
-      body: request.kind === 'delivery_pin' ? 'The delivery-fee credit was updated. Fulfillment and shop entitlements continue unchanged.' : role === 'supplier' && kind === 'rejected'
+      body: order.fileCheck?.refundRequestId === request.id && kind === 'requested'
+        ? `Your order is on hold for a prohibited item. ${request.reason} Operations has opened a full refund request. No refund transfer has been recorded yet.`
+        : request.kind === 'delivery_pin' ? 'The delivery-fee credit was updated. Fulfillment and shop entitlements continue unchanged.' : role === 'supplier' && kind === 'rejected'
         ? 'The refund request was rejected. Open the order for its work and payout status.' : copy[kind], read: false, at });
   }
   queueOrderInvalidate(store, order, ['orders', 'payouts', 'claims']);
@@ -115,6 +119,8 @@ function lateFiling(store, order, at) {
 }
 
 function settlementCalculation(store, order, request, body) {
+  const prohibitedRefund = order.fileCheck?.refundRequestId === request.id && order.fileCheck.reasonCode === 'prohibited_item';
+  if (prohibitedRefund) assertProhibitedItemFileCheck(order);
   const accepted = acceptedCancellationQuote(store, request);
   if (accepted && (['shopEntitlementMinor', 'riderEntitlementMinor'].some(field => body[field] !== accepted.amounts[field])
     || (body.principalMinor !== undefined && body.principalMinor !== accepted.amounts.principalMinor))) {
@@ -141,6 +147,10 @@ function settlementCalculation(store, order, request, body) {
   }
   const maximum = calculateRefundSettlement(order, { ...input, store });
   const amounts = calculateRefundSettlement(order, { ...input, store, principalMinor: body.principalMinor });
+  if (prohibitedRefund && (body.shopEntitlementMinor !== 0 || body.riderEntitlementMinor !== 0
+      || amounts.totalMinor !== sumMinor(Object.values(amounts.collected)))) {
+    fail(409, 'prohibited_item_full_refund_required', 'Refund every verified collected component before production.');
+  }
   if (recoveryRefund && amounts.totalMinor !== sumMinor(Object.values(amounts.collected))) {
     fail(409, 'shop_recovery_full_refund_required', 'Refund every verified collected component.');
   }
@@ -218,6 +228,12 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   let eventReason = action === 'destination' ? 'Client replaced receiving QR.' : text(body.reason, 'reason');
   let eventData = {};
   if (action === 'request') {
+    const prohibited = body.reasonCode === 'prohibited_item' || prohibitedItemHold(order);
+    if (prohibited) {
+      assertProhibitedItemIntake(order, user);
+      assertReviewMoneyAllowed(order);
+      if (body.kind !== 'cancellation') fail(400, 'invalid_refund_kind', 'A prohibited-item decision requires cancellation.');
+    }
     if (changePaymentPending(store, order)) fail(409, 'change_payment_pending', 'Resolve the submitted change transfer first.');
     if (deliveryPinPaymentPending(order)) fail(409, 'delivery_pin_payment_pending', 'Resolve the submitted delivery transfer before filing a refund.');
     if (store.refundRequests.some(row => row.orderId === order.id && ACTIVE_REFUND_STATUSES.includes(row.status))) fail(409, 'refund_already_open', 'This order already has an active refund request.');
@@ -242,6 +258,15 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (body.destination) changeDestination(store, request, user, body.destination);
     for (const file of evidence) bind(file, request, 'evidence');
     store.refundRequests.push(request);
+    if (prohibited) {
+      const from = order.state;
+      recordFileCheckTransition(order, 'needs_qa', 'client_correction', user, at, eventReason, undefined, store.settings, 'prohibited_item');
+      order.fileCheck.refundRequestId = request.id;
+      order.state = 'client_correction'; order.updatedAt = at;
+      (order.timeline ||= []).push({ at, state: order.state, by: user.id, note: eventReason });
+      audit(store, { actor: user, action: 'order.file_check', entityType: 'order', entityId: order.id, orderId: order.id,
+        reason: eventReason, detail: { from, to: order.state, fileCheck: { ...order.fileCheck } } });
+    }
     if (order.shopRecovery && ['awaiting_client', 'ops_review'].includes(order.shopRecovery.status)) {
       order.shopRecovery.refundRequestId = request.id;
       order.shopRecovery.status = 'refund_requested';
@@ -313,7 +338,9 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     }
     request.status = 'approved';
     if (settlement.disposition === 'cancelled') {
+      const from = order.state;
       order.state = 'cancelled';
+      recordFileCheckTransition(order, from, 'cancelled', user, at, eventReason);
       order.cancelledAt = at; order.cancelledBy = user.id; order.cancellationReason = eventReason;
       for (const job of store.orderJobs || []) if (job.orderId === order.id) { job.state = 'cancelled'; job.updatedAt = at; }
     } else {

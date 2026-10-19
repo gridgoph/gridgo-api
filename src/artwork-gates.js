@@ -34,23 +34,25 @@ export function qaChecklistSnapshot(checks, passing) {
   return { version: 1, checks: Object.fromEntries(QA_CHECK_IDS.map(id => [id, checks[id]])) };
 }
 
-export function recordFileCheckTransition(order, from, next, actor, at, note, checks, settings = null) {
+export function recordFileCheckTransition(order, from, next, actor, at, note, checks, settings = null, reasonCode = null) {
   const passing = from === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval'].includes(next);
   const rejecting = from === 'needs_qa' && next === 'client_correction';
   if (passing || rejecting) {
     const checklist = qaChecklistSnapshot(checks, passing);
-    if (!order.fileCheck && !checklist) return;
+    if (!order.fileCheck && !checklist && !reasonCode) return;
     order.fileCheck = {
       ...(order.fileCheck || { requestedAt: at }),
       status: passing ? 'passed' : 'failed', reviewedAt: at, reviewedBy: actor.id,
       reason: passing ? null : note.trim(), checklist,
+      ...(reasonCode ? { reasonCode } : {}),
     };
   } else if (['submitted', 'needs_qa'].includes(next) && ((order.fileCheck && from === 'client_correction')
     || (order.operatingClock && !order.fileCheck))) {
     order.fileCheck = { status: 'pending', requestedAt: at, reviewedAt: null, reviewedBy: null, reason: null, checklist: null };
     if (order.operatingClock) order.reviewSchedule = reviewTiming(settings, at);
     delete order.reviewDelayed;
-  } else if (order.fileCheck && next === 'cancelled' && order.fileCheck.status !== 'passed') {
-    order.fileCheck = { ...order.fileCheck, status: 'cancelled' };
+  } else if ((order.fileCheck || reasonCode) && next === 'cancelled' && order.fileCheck?.status !== 'passed') {
+    order.fileCheck = { ...(order.fileCheck || { requestedAt: at }), status: 'cancelled',
+      ...(reasonCode ? { reasonCode, reason: note.trim(), reviewedBy: actor.id, reviewedAt: at } : {}) };
   }
 }

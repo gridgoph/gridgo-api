@@ -94,6 +94,17 @@ Request (`destination` optional until review; `evidenceFileIds` optional, at mos
 
 `kind`: `cancellation | complaint`. Destination `provider`: `gcash | maya | bank | other`. The client attests account ownership; uploading a QR alone is not verification. Operations creating a request on the client's behalf omits `destination`; only the client can set it.
 
+For a prohibited item at artwork file check, Operations/Super Admin sends
+`kind: "cancellation", reasonCode: "prohibited_item"` with a client-visible
+`reason`. This records the file-check hold and links the request atomically;
+an existing prohibited-item hold also enforces this path if `reasonCode` is omitted.
+Only pre-production, unpassed `needs_qa` / `client_correction` orders qualify.
+All collected cash components must be refunded with zero shop/rider entitlement.
+The ordinary destination, review, settlement and reserved-transfer sequence remains
+mandatory; cancellation becomes final at settlement, payment only at recorded
+transfer. Reject/withdraw does not lift the file-check hold. See the exact
+[hold/release/cancellation contract](ORDER_MATCH_API.md#prohibited-item-decisions-at-file-check).
+
 Destination replacement:
 
 ```json
