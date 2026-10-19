@@ -296,6 +296,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       .map((item) => publicCatalogItem(store, item, { at: now }))
       .filter(Boolean)
       .filter((listing) => listingFitsPrinterCap(listing, widthRequest, store));
+    if (!eligibleListings.length) continue;
     const profile = shops.get(supplierId);
     const distance = dropoff ? distanceMetersBetween(profile.shop, dropoff) : null;
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
@@ -304,23 +305,28 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
     const draftGroups = cartGroups(null, (widthRequest?.cartLines || []).filter(line => line.supplierId === supplierId));
     const requestedDate = deadline == null ? null : new Date(deadline).toISOString();
     const groupLines = draftGroups.find(group => group.deadline === requestedDate)?.lines || [];
+    const draftTiming = new Map();
+    try {
+      for (const group of draftGroups.filter(group => group.deadline === requestedDate || (group.deadline != null
+        && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))))) {
+        for (const line of group.lines) {
+          const item = store.catalogItems.find(item => item.id === line.catalogItemId);
+          if (!item) throw new MatchError(409, 'catalog_item_stale', 'Repair unavailable draft work before adding another listing.');
+          draftTiming.set(line, listingTiming(store, item, line));
+        }
+      }
+    } catch (error) {
+      if (error instanceof MatchError) continue;
+      throw error;
+    }
     const earlierJobs = draftGroups.filter(group => group.deadline != null
       && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))).map(group => ({
-      supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => {
-        const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
-        const service = (store.supplierServices || []).find(row => row.id === item?.supplierServiceId);
-        return item ? listingTiming(store, item, line).maximum : 24;
-      })),
+      supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => draftTiming.get(line).maximum)),
     }));
     const projectionStore = earlierJobs.length ? { ...store, orderJobs: [...(store.orderJobs || []), ...earlierJobs] } : store;
     const groupUnits = groupLines.reduce((total, line) => total + BigInt(line.quantity), 0n);
-    const groupHours = groupLines.map((line) => {
-      const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
-      const service = (store.supplierServices || []).find((row) => row.id === item?.supplierServiceId);
-      return item ? listingTiming(store, item, line).maximum : 0;
-    });
-    const groupMinimumHours = groupLines.map(line => listingTiming(store,
-      store.catalogItems.find(item => item.id === line.catalogItemId), line).minimum);
+    const groupHours = groupLines.map(line => draftTiming.get(line).maximum);
+    const groupMinimumHours = groupLines.map(line => draftTiming.get(line).minimum);
     // Preserve listing metadata; Express uses the same scheduling calculation.
     const groupExpress = groupLines.every((line) => listingExpress((store.catalogItems || []).find((row) => row.id === line.catalogItemId)));
     const choices = eligibleListings.map((listing) => {
@@ -331,14 +337,14 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       let { projection, queue } = projectShopFinish(projectionStore, {
         supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours),
         minimumTurnaroundHours: Math.max(listing.minimumTurnaroundHours ?? listing.turnaroundHours, ...groupMinimumHours), now,
-        units: groupLines.length ? Number(combinedUnits) : units,
+        units: Number(combinedUnits),
         express: listing.express === true && groupExpress, deadline,
       });
       const rushChoices = listing.pricedByColour ? [] : listing.speedTiers.filter(tier => tier.turnaroundHours < (listing.minimumTurnaroundHours ?? listing.turnaroundHours)).map(tier => {
         const fast = projectShopFinish(projectionStore, { supplierId, now, deadline,
           turnaroundHours: Math.max(tier.turnaroundHours, ...groupHours),
           minimumTurnaroundHours: Math.max(tier.turnaroundHours, ...groupMinimumHours),
-          units: groupLines.length ? Number(combinedUnits) : units }).projection;
+          units: Number(combinedUnits) }).projection;
         fast.scheduling.rushTier = tier;
         if (!fast.scheduling.reason) fast.scheduling.status = 'rush';
         return fast;
@@ -491,7 +497,8 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     const status = closed ? 'not_possible' : secured.length ? 'secured' : ordinary.length ? 'tight' : rush.length ? 'rush' : 'not_possible';
     const reason = closed || (status === 'not_possible' ? choices.length ? 'before_shortest_time' : 'no_eligible_listing' : null);
     const readyBy = status === 'not_possible' ? null : status === 'rush' ? rush[0].promiseBy
-      : ordinary.map(row => row.projection.scheduling.earliestReadyBy).sort()[0];
+      : status === 'secured' ? secured.map(row => row.projection.scheduling.securedReadyBy).sort()[0]
+        : ordinary.map(row => row.projection.scheduling.earliestReadyBy).sort()[0];
     out.push({ day, state: status === 'not_possible' ? 'cannot' : status === 'tight' || status === 'rush' ? 'tight' : 'open',
       status, reason, readyBy, rushTier: status === 'rush' ? rush[0].scheduling.rushTier : null });
   }

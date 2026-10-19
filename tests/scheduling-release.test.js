@@ -110,3 +110,12 @@ test('dispatch cutoff is exclusive to the millisecond and closed-now today is ne
   assert.equal(deadlineDays(store,{subcategoryCode:'flyers',now:'2026-10-19T08:00:00Z',days:1}).days[0].reason,'after_dispatch_cutoff');
   assert.equal(deadlineDays(store,{subcategoryCode:'flyers',now:'2026-10-18T23:00:00Z',days:1}).days[0].reason,'outside_operating_hours');
 });
+
+test('a secured same-day calendar time agrees with the match maximum, while earliest keeps the minimum', () => {
+  const {store}=fixture();listing(store,1,2);
+  const result=deadlineDays(store,{subcategoryCode:'flyers',now,days:1});
+  assert.equal(result.earliest,'2026-10-19T03:30:00.000Z');
+  assert.equal(result.days[0].readyBy,'2026-10-19T04:30:00.000Z');
+  const match=matchShop(store,{subcategoryCode:'flyers',now,deadline:'2026-10-19T10:00:00Z',ranking:['speed','quality','cost','distance']});
+  assert.equal(match.listings[0].readyBy,result.days[0].readyBy);
+});

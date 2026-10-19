@@ -69,8 +69,9 @@ at checkout can refuse a stale selection; a match is not a reservation.
 
 Reasons: `gridgo_closed_sunday`, `gridgo_closed`, `outside_operating_hours`,
 `after_dispatch_cutoff`, `before_shortest_time`, `no_eligible_listing`.
-`readyBy` is null for impossible dates, otherwise the earliest achievable
-client ready time as of the query. It may precede a later selected date; it is
+`readyBy` is null for impossible dates. Secured dates show the earliest qualifying
+maximum; Tight dates show the earliest qualifying minimum; Rush shows the selected
+tier estimate. It may precede a later selected date; it is
 not a delivery appointment. `earliest` is independent of the display horizon.
 The calendar is advisory at minimum/default quantity; match and checkout use
 actual quantities, options and draft group work.
