@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { fixture, id } from './fixtures/reschedule.js';
 import { syncSurveys, publicSurvey, submitSurvey, surveyReport } from '../src/surveys.js';
 import { addVoucherCode } from '../src/vouchers.js';
+import { enforceReviewData } from '../src/review-data.js';
+import { routeSurveys } from '../src/survey-routes.js';
 
 const AT = '2026-10-14T00:00:00.000Z';
 const DAY = 86400000;
@@ -16,6 +18,34 @@ function setup() {
 }
 const sync = (store, at = AT) => syncSurveys(store, { id, at });
 const submit = (store, orderId = 'order', body = answers, at = AT) => submitSurvey(store, store.orders.find(o => o.id === orderId), body, { id, at });
+
+for (const [orderMarked, clientMarked] of [[true, true], [true, false], [false, true]]) {
+  test(`review survey saves without reward (order=${orderMarked}, client=${clientMarked})`, async () => {
+    const store = setup(), order = store.orders[0];
+    const user = store.users.find(u => u.id === order.clientId);
+    order.reviewData = orderMarked; user.reviewData = clientMarked;
+    const previous = structuredClone(store);
+    const call = method => routeSurveys({ store, user, req: { method },
+      url: new URL('http://test/orders/order/survey'), readBody: async () => answers, id, now: () => AT });
+    const before = (await call('GET')).body.survey;
+    assert.equal(before.status, 'open');
+    assert.equal(before.rewardEligible, false);
+    assert.equal(before.reward, null);
+    assert.equal(before.nextRewardAt, null);
+    const result = await call('POST');
+    assert.equal(result.status, 200);
+    assert.equal(result.body.survey.status, 'submitted');
+    assert.equal(result.body.survey.answers.fulfillmentStars, 5);
+    assert.equal(result.body.survey.reward, null);
+    assert.equal(result.body.survey.rewardEligible, false);
+    assert.equal(store.orderSurveys[0].submittedAt, AT);
+    for (const key of ['vouchers', 'voucherCampaigns', 'voucherLedger', 'voucherReservations', 'voucherRedemptions']) {
+      assert.deepEqual(store[key], previous[key]);
+    }
+    assert.doesNotThrow(() => enforceReviewData(store, previous));
+    assert.deepEqual((await call('POST')).body, result.body);
+  });
+}
 
 test('launch includes the preceding 14 days; survey expiry is exclusive and notices are once per order', () => {
   const store = setup();
@@ -32,6 +62,7 @@ test('launch includes the preceding 14 days; survey expiry is exclusive and noti
 
 test('three answers issue a fixed in-app reward; retries and cooldown never mint again', () => {
   const store = setup(); sync(store);
+  assert.equal(publicSurvey(store, store.orders[0], AT).rewardEligible, true);
   const response = submit(store);
   assert.equal(response.reward.valueMinor, 1500); assert.equal(response.reward.expiresAt, time(30));
   assert.match(response.reward.code, /^[A-Z0-9-]+$/);

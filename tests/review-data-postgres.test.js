@@ -67,8 +67,17 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
   assert.equal((await mark('rider', true)).status, 200);
   response = await api('rider', 'GET', '/dispatch/offers');
   assert.deepEqual(response.body.offers.map(o => o.id), ['review_order']);
+  const assertDisplaySplit = order => {
+    assert.equal(order.deliveryFeeMinor, 1000);
+    assert.equal(order.riderCommissionBps, 8500);
+    assert.equal(order.riderPayoutMinor, 850);
+    assert.equal(order.platformDeliveryShareMinor, 150);
+  };
+  assertDisplaySplit(response.body.offers[0]);
   assert.equal((await api('rider', 'POST', '/dispatch/order/accept', {})).body.error, 'review_data_assignment_mismatch');
   assert.equal((await api('rider', 'POST', '/dispatch/review_order/accept', {})).status, 200);
+  assertDisplaySplit((await api('rider', 'GET', '/orders/review_order')).body.order);
+  assertDisplaySplit((await api('rider', 'GET', '/orders')).body.orders.find(o => o.id === 'review_order'));
   assert.equal((await api('admin', 'POST', '/orders/review_order/milestones/production_started/release', {})).body.error, 'review_data_money_forbidden');
   assert.equal((await api('client', 'POST', '/funnel-events', { kind: 'product_viewed', productCode: 'review-product' })).status, 201);
   assert.equal((await mark('client', false, 2)).status, 200);
@@ -87,6 +96,7 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
   const saved = await loadStore(db);
   assert.equal(saved.orders.find(o => o.id === 'review_order').reviewData, true);
   assert.equal(saved.orders.find(o => o.id === 'order').reviewData, false);
+  assert.ok(saved.orders.find(o => o.id === 'review_order').payoutMilestones.every(stage => stage.status !== 'released'));
   assert.equal(saved.auditLog.filter(a => a.action === 'user.review_data_change').length, 4);
   assert.ok(saved.notifications.filter(n => n.orderId === 'review_order').every(n => n.title.startsWith('[Review data]')));
   const command = await runReviewDataCommand(['rider', '--off', '--reason', 'End isolated review fixture'], db);
@@ -194,6 +204,14 @@ for (const reviewData of [true, false]) test(`checkout, installments and deliver
   persisted = (await loadStore(db)).orders.find(o => o.id === orderId);
   assert.equal(persisted.payments.final_online.confirmationSource, reviewData ? 'review_data' : 'manual_ops');
   assert.ok(persisted.payoutMilestones.every(stage => stage.status !== 'released'));
+  // Earnings and past jobs both read the rider's /orders collection.
+  const riderHistory = checked(await api('rider', 'GET', '/orders')).orders.find(o => o.id === orderId);
+  const riderDetail = checked(await api('rider', 'GET', `/orders/${orderId}`)).order;
+  for (const view of [riderHistory, riderDetail]) {
+    assert.equal(view.riderPayoutMinor, Math.round(persisted.deliveryFeeMinor * persisted.riderCommissionBps / 10000));
+    assert.equal(view.platformDeliveryShareMinor, persisted.deliveryFeeMinor - view.riderPayoutMinor);
+    assert.ok(view.riderPayoutMinor > 0);
+  }
   const report = moneyReportingForOrder(persisted);
   assert.equal(report.platformRevenue.collectedMinor > 0, !reviewData);
   for (const suffix of ['', '&includeReviewData=1']) {

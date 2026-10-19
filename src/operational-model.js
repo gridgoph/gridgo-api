@@ -1384,7 +1384,8 @@ export function publicOrderFor(order, user, store = null) {
   if (ops || rider) {
     if (order.deliveryFeeMinor != null) Object.assign(publicRecord,
       adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor, order.riderCommissionBps ?? 10_000)));
-    if (isReviewData(order)) Object.assign(publicRecord, { riderPayoutMinor: 0, platformDeliveryShareMinor: 0 });
+    // Rider screens display the simulated split; staff finance projections stay zero.
+    if (isReviewData(order) && !rider) Object.assign(publicRecord, { riderPayoutMinor: 0, platformDeliveryShareMinor: 0 });
   } else {
     for (const field of ["riderCommissionBps", "riderPayoutMinor", "platformDeliveryShareMinor"]) {
       delete publicRecord[field];
