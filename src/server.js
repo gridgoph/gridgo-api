@@ -1,3 +1,4 @@
+import { foundingTesterEligible, testerProgress, publicFoundingTester, reconcileFoundingTester, remindFoundingTesters } from './founding-testers.js';
 import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed, markReviewPayment } from './review-data.js';
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
@@ -370,6 +371,16 @@ function notifyMissingJobDetails(store, order) {
     `job-details:${order.id}:${details.missing.slice().sort().join(',')}`, { createId: id, at: now() });
 }
 
+async function refreshFoundingTester(store, clientId) {
+  if (!foundingTesterEligible(store, clientId) || store.foundingTesters.some(row => row.clientId === clientId && row.awardedAt)
+    || testerProgress(store, clientId).completedCount !== 3) return store;
+  return enqueueMutation(async () => {
+    const latest = await load();
+    if (reconcileFoundingTester(latest, clientId, { id, at: now() })) await save(latest);
+    return latest;
+  });
+}
+
 async function save(view) {
   // A test operations view commits through its underlying full store.
   const store = mergeTestOperationsView(view);
@@ -381,6 +392,18 @@ async function save(view) {
   await reconcileCalls(database, store, { createId: id, at: now() });
   cancelVoucherReservations(store, { id, at: now() });
   syncSurveys(store, { id, at: now() });
+  const previousStore = originalDomainStore(store);
+  if (previousStore) {
+    const touched = new Set();
+    for (const key of ['orders', 'issues', 'refundSettlements']) {
+      const previous = new Map((previousStore[key] || []).map(row => [row.id, row]));
+      for (const row of store[key] || []) if (JSON.stringify(row) !== JSON.stringify(previous.get(row.id))) {
+        const order = key === 'orders' ? row : store.orders.find(o => o.id === row.orderId);
+        if (order) touched.add(order.clientId);
+      }
+    }
+    for (const clientId of touched) reconcileFoundingTester(store, clientId, { id, at: now() });
+  }
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
     if (before.get(order.id)?.state !== order.state && ["payment_authorized", "production"].includes(order.state)) assertApprovalBeforeProceeding(order);
@@ -782,6 +805,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    foundingTesterLaunchAt: rest.foundingTesterLaunchAt ?? null,
     colourDetection: colourSettings(settings),
     operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
@@ -1339,7 +1363,7 @@ function fixedAuthProjection(store, auth, role) {
     const approved = approvalCase?.status === "approved" || (Boolean(officerSnapshot(store, auth.user.id)) && approvalCase?.status !== "suspended");
     return {
       ...base,
-      clientProfile: clientProfileProjection(store, auth.user.id),
+      clientProfile: { ...clientProfileProjection(store, auth.user.id), foundingTester: publicFoundingTester(store, auth.user.id, now()) },
       organization: organizationProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       capabilities: {
@@ -1460,7 +1484,7 @@ function verificationDocumentsFor(store, supplier) {
 
 function verificationUserResponse(store, target) {
   return {
-    user: { ...publicUser(target), reviewData: isReviewData(target), version: target.version || 1 },
+    user: { ...publicUser(target), ...(target.role === 'client' ? { foundingTester: publicFoundingTester(store, target.id, now()) } : {}), reviewData: isReviewData(target), version: target.version || 1 },
     ...(target.role === "supplier" ? { verificationDocuments: verificationDocumentsFor(store, target) } : {}),
   };
 }
@@ -2350,6 +2374,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      res.setHeader('Cache-Control', 'private, no-store');
       let clerkUser = null;
       try {
         clerkUser = await clerkBackend.users.getUser(auth.user.clerkUserId);
@@ -2378,7 +2403,9 @@ async function handleAuditedRequest(req, res) {
         user = {...user,role:requestedRole,...(['supplier','rider'].includes(requestedRole)?{verificationStatus:approval?.status || 'unverified'}:{}),...(requestedRole==='supplier' && supplierProfile?{supplierName:supplierProfile.shopName,shop:supplierProfile.shop}:{})};
       }
       await recordStaffSignIn(req, store, user);
+      if (user.role === 'client') store = await refreshFoundingTester(store, user.id);
       const projected = userWithAccountState(user);
+      if (user.role === 'client') projected.foundingTester = publicFoundingTester(store, user.id, now());
       if ((store.userRoleMemberships || []).some(
         (membership) => membership.userId === user.id && membership.role === "rider",
       )) {
@@ -2412,6 +2439,8 @@ async function handleAuditedRequest(req, res) {
         });
       }
       await recordStaffSignIn(req, store, { ...auth.user, role: fixedAuthRole });
+      if (fixedAuthRole === 'client') store = await refreshFoundingTester(store, auth.user.id);
+      res.setHeader('Cache-Control', 'private, no-store');
       return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
     }
 
@@ -2723,6 +2752,7 @@ async function handleAuditedRequest(req, res) {
       return send(res, payoutAccountResponse.status, payoutAccountResponse.body);
     }
 
+    if (req.method === 'GET' && pathname === '/me' && user?.role === 'client') store = await refreshFoundingTester(store, user.id);
     const accountProfileResponse = await routeAccountProfile({
       req,
       url,
@@ -2732,9 +2762,10 @@ async function handleAuditedRequest(req, res) {
       createId: id,
       now,
       audit,
-      publicUser,
+      publicUser: u => ({ ...publicUser(u), ...(u.role === 'client' ? { foundingTester: publicFoundingTester(store, u.id, now()) } : {}) }),
     });
     if (accountProfileResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
     }
@@ -3821,6 +3852,7 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        foundingTesterLaunchAt: Object.hasOwn(body, 'foundingTesterLaunchAt') ? body.foundingTesterLaunchAt : (store.settings.foundingTesterLaunchAt ?? null),
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
         clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours && {
@@ -4046,13 +4078,28 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, { clientId, balanceMinor: acct.balanceMinor, entry, ledger: acct.ledger });
     }
 
+    if (req.method === 'GET' && pathname === '/ops/founding-testers') {
+      if (!isOps(user)) return send(res, 403, { error: 'forbidden' });
+      const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 100);
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) return send(res, 400, { error: 'invalid_pagination' });
+      const clients = store.users.filter(u => hasRole(store, u.id, 'client')).map(u => ({ clientId: u.id, name: u.name,
+        foundingTester: publicFoundingTester(store, u.id, now()) }));
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, 200, { serverTime: now(), total: clients.length, clients: clients.slice(offset, offset + limit) });
+    }
+
     // ---- users directory ----
     if (req.method === "GET" && pathname === "/users") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const role = url.searchParams.get("role");
-      const list = role
+      const testerFilter = url.searchParams.get('foundingTester');
+      if (testerFilter != null && !['true', 'false'].includes(testerFilter)) return send(res, 400, { error: 'invalid_founding_tester_filter' });
+      let list = role
         ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => userWithAccountState(roleDirectoryUser(store, u, role)))
         : store.users.map(userWithAccountState);
+      list = list.map(u => u.role === 'client' ? { ...u, foundingTester: publicFoundingTester(store, u.id, now()).label !== null } : u);
+      if (testerFilter != null) list = list.filter(u => u.role === 'client' && u.foundingTester === (testerFilter === 'true'));
+      res.setHeader('Cache-Control', 'private, no-store');
       return send(res, 200, { users: list });
     }
 
@@ -4061,6 +4108,7 @@ async function handleAuditedRequest(req, res) {
       const uid = pathname.split("/")[2];
       const target = store.users.find((u) => u.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
+      res.setHeader('Cache-Control', 'private, no-store');
       return send(res, 200, verificationUserResponse(store, target));
     }
 
@@ -7618,6 +7666,21 @@ async function runLifecycleWork() {
         await enqueueMutation(async () => {
           const store = await load();
           if (syncSurveys(store, { id, at: now() })) await save(store);
+        });
+      },
+      async () => {
+        const candidate = await database.query(`SELECT 1 FROM users u
+          JOIN user_role_memberships m ON m.user_id=u.id AND m.role='client'
+          LEFT JOIN founding_testers f ON f.client_id=u.id
+          WHERE NOT u.review_data AND u.created_at <= $1::timestamptz - interval '48 hours'
+          AND u.created_at > $1::timestamptz - interval '144 hours'
+          AND f.awarded_at IS NULL AND f.reminded_5_at IS NULL
+          AND (f.reminded_2_at IS NULL OR u.created_at <= $1::timestamptz - interval '120 hours')
+          AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.client_id=u.id) LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (remindFoundingTesters(store, { id, at: now() })) await save(store);
         });
       },
       drainColourAnalyses,

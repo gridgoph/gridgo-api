@@ -203,7 +203,7 @@ test('routes off the test operations allowlist answer test_operations_forbidden'
     ['PATCH', `/users/${REAL}client/review-data`, { reviewData: true, expectedVersion: 1, reason: 'x' }],
     ['PATCH', `/users/${REAL}client/role`, { role: 'ops_admin' }], ['PATCH', 'users/client/account', {}],
     ['POST', '/orders/order/milestones/production_started/release', {}], ['POST', '/refund-requests/reviewrefund/settle', {}],
-    ['POST', '/credits/grant', { userId: 'client', amountMinor: 100 }], ['GET', '/ops/vouchers'], ['GET', '/ops/organizations'],
+    ['POST', '/credits/grant', { userId: 'client', amountMinor: 100 }], ['GET', '/ops/vouchers'], ['GET', '/ops/founding-testers'], ['GET', '/ops/organizations'],
     ['GET', `/orders/order/audit`], ['GET', '/ops/push/stats'], ['DELETE', '/support-chat/threads/00000000-0000-4000-8000-000000000000'],
     ['GET', '/support-chat/me'], ['POST', '/announcements', { title: 'x', body: 'y', audience: 'everyone' }],
   ]) {
@@ -240,7 +240,7 @@ const GET_ROUTES = [
   '/ops/colour-price-checks', '/ops/special-instructions', '/ops/reschedule-requests', '/ops/client-shop-chats',
   '/ops/shops/hours', '/ops/shops/{shop}/hours', '/ops/shops/performance', '/ops/shops/{shop}/performance', '/ops/push/stats',
   '/ops/finance/supplier-invoices', '/ops/organizations', '/ops/organizations/{user}', '/ops/organizations/{user}/statements',
-  '/ops/account-deletion-requests', '/ops/issue-reports', '/ops/vouchers', '/ops/catalog-items', '/ops/catalog-items/{item}',
+  '/ops/account-deletion-requests', '/ops/issue-reports', '/ops/vouchers', '/ops/founding-testers', '/ops/catalog-items', '/ops/catalog-items/{item}',
   '/ops/catalog/shops', '/ops/catalog/shops/{shop}', '/ops/catalog/items/{item}', '/ops/catalog-reviews', '/ops/product-type-requests',
   '/approval-cases', '/approval-cases/{case}', '/users', '/users?role=client', '/users/{user}', '/users/{user}/verification-documents',
   '/users/{user}/production-lapses', '/users/{user}/payout-account', '/supplier-services', '/supplier-services/{service}',

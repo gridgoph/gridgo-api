@@ -14,9 +14,10 @@ const answers = { fulfillmentStars: 2, fulfillmentTags: ['late'], easeStars: 4, 
   expectedPriceMinor: 10000, qualityStars: 5, recommendScore: 6, improvementNote: '=Fix the delay, please\nThank you' };
 async function setup(db, state = 'issue_window_open', reviewData = false) {
   assert.match(new URL(DB).pathname, /(?:_|-)test(?:_|$)/);
-  await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns RESTART IDENTITY CASCADE');
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture(), at = new Date().toISOString();
   if (reviewData) for (const user of store.users) user.reviewData = true;
+  store.settings.foundingTesterLaunchAt = '2026-01-01T00:00:00.000Z';
   store.surveyLaunchedAt = (await db.query('SELECT launched_at FROM survey_launch')).rows[0].launched_at;
   Object.assign(store.orders[0], { state, ...(state === 'awaiting_collection' ? { fulfillmentMode: 'pickup' } : {}), issueWindowOpenedAt: state === 'issue_window_open' ? at : undefined,
     issueWindowExpiresAt: state === 'issue_window_open' ? new Date(Date.parse(at) + 86400000).toISOString() : undefined });
