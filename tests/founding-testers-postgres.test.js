@@ -59,7 +59,11 @@ test('HTTP profiles, staff directory/filter, dashboard, settings gates and walle
   assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
   const reward = submitted.body.survey.reward;
   assert.equal((await api('client', 'GET', '/auth/me/client')).body.clientProfile.foundingTester.reward.id, reward.id);
-  assert.equal((await api('client', 'GET', '/me')).body.user.foundingTester.label, 'Founding Tester');
+  const account = await api('client', 'GET', '/me');
+  assert.equal(account.body.user.foundingTester.label, 'Founding Tester');
+  assert.match(account.headers.get('cache-control'), /private, no-store/);
+  const detail = await api('ops', 'GET', '/users/client');
+  assert.match(detail.headers.get('cache-control'), /private, no-store/);
   const filtered = await api('ops', 'GET', '/users?role=client&foundingTester=true');
   assert.deepEqual(filtered.body.users.map(u => u.id), ['client']); assert.equal(filtered.body.users[0].foundingTester, true);
   assert.equal((await api('ops', 'GET', '/users?foundingTester=maybe')).status, 400);

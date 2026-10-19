@@ -2374,6 +2374,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      res.setHeader('Cache-Control', 'private, no-store');
       let clerkUser = null;
       try {
         clerkUser = await clerkBackend.users.getUser(auth.user.clerkUserId);
@@ -2764,6 +2765,7 @@ async function handleAuditedRequest(req, res) {
       publicUser: u => ({ ...publicUser(u), ...(u.role === 'client' ? { foundingTester: publicFoundingTester(store, u.id, now()) } : {}) }),
     });
     if (accountProfileResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
       if (accountProfileResponse.mutated) await save(store);
       return send(res, accountProfileResponse.status, accountProfileResponse.body);
     }
@@ -4106,6 +4108,7 @@ async function handleAuditedRequest(req, res) {
       const uid = pathname.split("/")[2];
       const target = store.users.find((u) => u.id === uid);
       if (!target) return send(res, 404, { error: "user_not_found" });
+      res.setHeader('Cache-Control', 'private, no-store');
       return send(res, 200, verificationUserResponse(store, target));
     }
 
