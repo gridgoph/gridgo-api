@@ -135,8 +135,11 @@ function likePattern(value) {
   return `%${String(value).replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
 }
 
+// Review marks scope test operations desks. Not enumerable, so never serialized.
+const reviewMark = (value, key, mark) => Object.defineProperty(value, key, { value: mark === true });
+
 function mapThread(row, viewerId) {
-  return {
+  return reviewMark({
     id: row.id,
     partyUserId: row.party_user_id,
     partyRole: row.party_role,
@@ -155,7 +158,17 @@ function mapThread(row, viewerId) {
     staffPeerEmail: row.staff_peer_email ?? null,
     staffPeerRole: row.staff_peer_role ?? null,
     staffPeerImageUrl: row.staff_peer_image_url ?? null,
-  };
+  }, "partyReviewData", row.party_review_data);
+}
+
+/** Test operations see party threads with review accounts and no other staff identity. */
+function reviewThread(thread) {
+  return Boolean(thread && !thread.staffPeerUserId && thread.partyReviewData);
+}
+
+function reviewMessage(message, viewerId) {
+  if (message.senderReviewData || message.senderUserId === viewerId) return message;
+  return { ...message, senderUserId: null, senderName: "GRIDGO", senderImageUrl: null };
 }
 
 function mapPerson(row) {
@@ -178,7 +191,7 @@ function mapAttachment(row) {
 
 function mapMessage(row, viewerId, filesById = {}) {
   const ids = Array.isArray(row.attachment_file_ids) ? row.attachment_file_ids : [];
-  return {
+  return reviewMark({
     id: row.id,
     threadId: row.thread_id,
     senderUserId: row.sender_user_id,
@@ -189,7 +202,7 @@ function mapMessage(row, viewerId, filesById = {}) {
     attachments: ids.map((fileId) => filesById[fileId]).filter(Boolean),
     createdAt: asIso(row.created_at),
     mine: row.sender_user_id === viewerId,
-  };
+  }, "senderReviewData", row.sender_review_data);
 }
 
 async function loadAttachmentMeta(database, fileIds) {
@@ -284,7 +297,7 @@ function threadSelect(viewerId) {
     SELECT
       t.id, t.party_user_id, t.party_role, t.last_message_at, t.last_message_preview,
       t.last_message_sender_role, t.created_at, t.updated_at, t.staff_peer_user_id,
-      u.name AS party_name, u.email AS party_email,
+      u.name AS party_name, u.email AS party_email, u.review_data AS party_review_data,
       NULLIF(btrim(u.data->>'imageUrl'), '') AS party_image_url,
       p.name AS staff_peer_name, p.email AS staff_peer_email, p.role AS staff_peer_role,
       NULLIF(btrim(p.data->>'imageUrl'), '') AS staff_peer_image_url,
@@ -351,7 +364,7 @@ export async function listPartyThreads(database, userId, role, viewerId, { inclu
   return result.rows.map((row) => mapThread(row, viewerId));
 }
 
-export async function listThreads(database, viewerId, { role, q, limit } = {}) {
+export async function listThreads(database, viewerId, { role, q, limit, reviewOnly = false } = {}) {
   const values = [viewerId];
   const clauses = [
     `(
@@ -364,6 +377,7 @@ export async function listThreads(database, viewerId, { role, q, limit } = {}) {
       OR t.staff_peer_user_id = $1
     )`,
   ];
+  if (reviewOnly) clauses.push("u.review_data AND t.staff_peer_user_id IS NULL");
   if (role === "staff") {
     clauses.push("t.staff_peer_user_id IS NOT NULL");
   } else if (role && PARTY_ROLES.has(role)) {
@@ -397,12 +411,13 @@ function peopleRoles(role) {
   return [...CHAT_ROLES];
 }
 
-export async function listPeople(database, viewerId, { q, role, limit } = {}) {
-  const values = [viewerId, peopleRoles(role)];
+export async function listPeople(database, viewerId, { q, role, limit, reviewOnly = false } = {}) {
+  const values = [viewerId, peopleRoles(role).filter((value) => !reviewOnly || PARTY_ROLES.has(value))];
   const clauses = [
     "u.id <> $1",
     "u.role = ANY($2::text[])",
     "coalesce(u.account_status, 'active') <> 'removed'",
+    ...(reviewOnly ? ["u.review_data"] : []),
   ];
   if (q && String(q).trim()) {
     values.push(likePattern(String(q).trim()));
@@ -467,7 +482,7 @@ export async function openStaffThread(database, viewer, target) {
   }
 }
 
-export async function openThreadForStaff(database, viewer, { userId, role }) {
+export async function openThreadForStaff(database, viewer, { userId, role, reviewOnly = false }) {
   if (!userId) {
     return { error: "role", message: "Choose who to write to." };
   }
@@ -478,13 +493,14 @@ export async function openThreadForStaff(database, viewer, { userId, role }) {
     return { error: "role", message: "Choose a client, shop, rider, or desk account." };
   }
   const found = await database.query(
-    `SELECT id, name, email, role, coalesce(account_status, 'active') AS account_status
+    `SELECT id, name, email, role, review_data, coalesce(account_status, 'active') AS account_status
        FROM users
       WHERE id = $1`,
     [userId],
   );
   const target = found.rows[0];
-  if (!target || target.role !== role || target.account_status === "removed") {
+  if (!target || target.role !== role || target.account_status === "removed"
+      || (reviewOnly && (!target.review_data || STAFF_ROLES.has(role)))) {
     return { error: "not_found", message: "That account is not on this desk." };
   }
   if (STAFF_ROLES.has(role)) {
@@ -515,7 +531,7 @@ export async function listMessages(database, threadId, viewerId, { after, limit,
   const result = await database.query(
     `SELECT m.id, m.thread_id, m.sender_user_id, m.sender_role, m.body, m.created_at,
             m.attachment_file_ids,
-            u.name AS sender_name,
+            u.name AS sender_name, u.review_data AS sender_review_data,
             NULLIF(btrim(u.data->>'imageUrl'), '') AS sender_image_url
      FROM support_chat_messages m
      JOIN users u ON u.id = m.sender_user_id
@@ -621,7 +637,7 @@ export async function postMessage(database, {
   );
   await markThreadRead(database, id, senderUserId);
   const sender = await database.query(
-    `SELECT name, NULLIF(btrim(data->>'imageUrl'), '') AS image_url FROM users WHERE id = $1`,
+    `SELECT name, review_data, NULLIF(btrim(data->>'imageUrl'), '') AS image_url FROM users WHERE id = $1`,
     [senderUserId],
   );
   const thread = await findThread(database, id, senderUserId);
@@ -632,6 +648,7 @@ export async function postMessage(database, {
   const message = mapMessage({
     ...messageRow,
     sender_name: sender.rows[0]?.name ?? null,
+    sender_review_data: sender.rows[0]?.review_data,
     sender_image_url: sender.rows[0]?.image_url ?? null,
   }, senderUserId, filesById);
   return { thread, message };
@@ -717,7 +734,7 @@ async function partySnapshot(database, user, { markRead = false } = {}) {
   return { threads, thread: fresh, messages, unreadCount };
 }
 
-function openChatStream(req, res, { user, database, lastEventId }) {
+function openChatStream(req, res, { user, database, lastEventId, reviewOnly }) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -735,11 +752,12 @@ function openChatStream(req, res, { user, database, lastEventId }) {
     // Unread is per viewer. The publisher has the sender's count, so refetch.
     void findThread(database, event.thread.id, user.id)
       .then((thread) => {
-        if (closed || !thread || !canViewThread(user, thread)) return;
+        if (closed || !thread || !canViewThread(user, thread) || (reviewOnly && !reviewThread(thread))) return;
+        const message = { ...event.message, mine: event.message.senderUserId === user.id };
         res.write(formatChatEvent({
           type: "message",
           thread,
-          message: { ...event.message, mine: event.message.senderUserId === user.id },
+          message: reviewOnly ? reviewMessage(reviewMark(message, "senderReviewData", event.message.senderReviewData), user.id) : message,
         }));
       })
       .catch(() => {});
@@ -788,10 +806,10 @@ async function replayMissed(database, user, lastEventId, writeEvent) {
     `SELECT
         t.id AS thread_id, t.party_user_id, t.party_role, t.last_message_at,
         t.last_message_preview, t.last_message_sender_role, t.created_at AS thread_created_at,
-        t.updated_at, t.staff_peer_user_id, u.name AS party_name, u.email AS party_email,
+        t.updated_at, t.staff_peer_user_id, u.name AS party_name, u.email AS party_email, u.review_data AS party_review_data,
         p.name AS staff_peer_name, p.email AS staff_peer_email, p.role AS staff_peer_role,
         m.id, m.sender_user_id, m.sender_role, m.body, m.attachment_file_ids, m.created_at,
-        s.name AS sender_name,
+        s.name AS sender_name, s.review_data AS sender_review_data,
         NULLIF(btrim(s.data->>'imageUrl'), '') AS sender_image_url
      FROM support_chat_messages m
      JOIN support_chat_threads t ON t.id = m.thread_id
@@ -819,6 +837,7 @@ async function replayMissed(database, user, lastEventId, writeEvent) {
         updated_at: row.updated_at,
         party_name: row.party_name,
         party_email: row.party_email,
+        party_review_data: row.party_review_data,
         staff_peer_user_id: row.staff_peer_user_id,
         staff_peer_name: row.staff_peer_name,
         staff_peer_email: row.staff_peer_email,
@@ -841,6 +860,7 @@ export async function routeSupportChat({
   database,
   notifyStaff,
   notifyParty,
+  reviewOnly = false,
 }) {
   if (!isSupportChatRoute(pathname)) return false;
   if (!user) {
@@ -853,12 +873,23 @@ export async function routeSupportChat({
   const threadMatch = /^\/support-chat\/threads\/([^/]+)$/.exec(path);
   const threadMessagesMatch = /^\/support-chat\/threads\/([^/]+)\/messages$/.exec(path);
   const threadReadMatch = /^\/support-chat\/threads\/([^/]+)\/read$/.exec(path);
+  const visible = (thread) => Boolean(thread && canViewThread(user, thread) && (!reviewOnly || reviewThread(thread)));
+  const messagesFor = async (threadId) => {
+    const messages = await listMessages(database, threadId, user.id, {
+      after: url.searchParams.get("after"),
+      limit: url.searchParams.get("limit"),
+      q: url.searchParams.get("q"),
+      media: url.searchParams.get("media") === "1" || url.searchParams.get("media") === "true",
+    });
+    return reviewOnly ? messages.map((message) => reviewMessage(message, user.id)) : messages;
+  };
 
   if (method === "GET" && path === "/support-chat/stream") {
     return openChatStream(req, res, {
       user,
       database,
       lastEventId: String(req.headers["last-event-id"] || "").trim(),
+      reviewOnly,
     });
   }
 
@@ -998,6 +1029,7 @@ export async function routeSupportChat({
         role: url.searchParams.get("role"),
         q: url.searchParams.get("q"),
         limit: url.searchParams.get("limit"),
+        reviewOnly,
       }),
     });
     return true;
@@ -1013,6 +1045,7 @@ export async function routeSupportChat({
         q: url.searchParams.get("q"),
         role: url.searchParams.get("role"),
         limit: url.searchParams.get("limit"),
+        reviewOnly,
       }),
     });
     return true;
@@ -1027,7 +1060,7 @@ export async function routeSupportChat({
     const userId = typeof payload.userId === "string" ? payload.userId.trim() : "";
     const role = typeof payload.role === "string" ? payload.role.trim() : "";
     const opened = await database.transaction(
-      () => openThreadForStaff(database, user, { userId, role }),
+      () => openThreadForStaff(database, user, { userId, role, reviewOnly }),
       { lockKey: CHAT_LOCK },
     );
     if (opened.error === "self" || opened.error === "role") {
@@ -1044,7 +1077,7 @@ export async function routeSupportChat({
 
   if (method === "GET" && threadMatch) {
     const thread = await findThread(database, threadMatch[1], user.id);
-    if (!thread || !canViewThread(user, thread)) {
+    if (!visible(thread)) {
       notFound(send, res);
       return true;
     }
@@ -1052,21 +1085,13 @@ export async function routeSupportChat({
       await markThreadRead(database, thread.id, user.id);
     }
     const fresh = await findThread(database, thread.id, user.id);
-    send(res, 200, {
-      thread: fresh,
-      messages: await listMessages(database, thread.id, user.id, {
-        after: url.searchParams.get("after"),
-        limit: url.searchParams.get("limit"),
-        q: url.searchParams.get("q"),
-        media: url.searchParams.get("media") === "1" || url.searchParams.get("media") === "true",
-      }),
-    });
+    send(res, 200, { thread: fresh, messages: await messagesFor(thread.id) });
     return true;
   }
 
   if (method === "DELETE" && threadMatch) {
     const thread = await findThread(database, threadMatch[1], user.id);
-    if (!thread || !canViewThread(user, thread)) {
+    if (!visible(thread)) {
       notFound(send, res);
       return true;
     }
@@ -1080,18 +1105,11 @@ export async function routeSupportChat({
 
   if (method === "GET" && threadMessagesMatch) {
     const thread = await findThread(database, threadMessagesMatch[1], user.id);
-    if (!thread || !canViewThread(user, thread)) {
+    if (!visible(thread)) {
       notFound(send, res);
       return true;
     }
-    send(res, 200, {
-      messages: await listMessages(database, thread.id, user.id, {
-        after: url.searchParams.get("after"),
-        limit: url.searchParams.get("limit"),
-        q: url.searchParams.get("q"),
-        media: url.searchParams.get("media") === "1" || url.searchParams.get("media") === "true",
-      }),
-    });
+    send(res, 200, { messages: await messagesFor(thread.id) });
     return true;
   }
 
@@ -1105,7 +1123,7 @@ export async function routeSupportChat({
       return true;
     }
     const thread = await findThread(database, threadMessagesMatch[1], user.id);
-    if (!thread || !canViewThread(user, thread)) {
+    if (!visible(thread)) {
       notFound(send, res);
       return true;
     }
@@ -1153,7 +1171,7 @@ export async function routeSupportChat({
 
   if (method === "PATCH" && threadReadMatch) {
     const thread = await findThread(database, threadReadMatch[1], user.id);
-    if (!thread || !canViewThread(user, thread)) {
+    if (!visible(thread)) {
       notFound(send, res);
       return true;
     }
