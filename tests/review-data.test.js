@@ -163,6 +163,8 @@ import { performanceCounts } from '../src/supplier-performance-policy.js';
 
 test('featured catalogue respects the viewer and review history never changes ordinary quality totals', () => {
   const store = fixture();
+  // Isolate review-data filtering from the same-day scheduling exemption.
+  for (const line of store.orderLineItems) { line.turnaroundHoursSnapshot = 20; line.turnaroundMinutesSnapshot = 1200; }
   store.users.find(u => u.id === 'supplier').reviewData = true;
   store.settings.featuredPrints = { catalogItemIds: ['item_supplier', 'item_replacement'] };
   assert.deepEqual(publicFeaturedPrints(store, { reviewData: true }).items.map(row => row.id), ['item_supplier']);
