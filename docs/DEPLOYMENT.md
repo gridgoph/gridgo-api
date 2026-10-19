@@ -371,3 +371,7 @@ supplies its service worker, manifest, explicit permission action, and iPhone
 Home Screen install instructions. Allow outbound HTTPS to Apple, Google, Mozilla
 and Windows browser push services. Browser subscription lifecycle, logout cleanup,
 payload/click contract and endpoint restrictions are in [Web Push API](WEB_PUSH_API.md).
+
+## Scheduling release 1
+
+Apply `1792417000000_scheduling_tiers` before deploying the API. It adds optional cart tier selection and immutable order tier snapshots; no live promise or fee is rewritten. [Scheduling](SCHEDULING_API.md) documents the additive app contract and existing Super Admin settings path.

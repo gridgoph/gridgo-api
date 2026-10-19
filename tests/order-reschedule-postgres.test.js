@@ -135,6 +135,8 @@ test('applied penalty ledger remains immutable when request or consent is routed
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
   for (const alreadyRequested of [false, true]) {
     const store = fixture(); store.orders[0].readyBy = '2026-10-03T00:00:00.000Z';
+    // Exercise ordinary long-production penalties; same-day work is pilot-exempt.
+    for (const line of store.orderLineItems) { line.turnaroundHoursSnapshot = 20; line.turnaroundMinutesSnapshot = 1200; }
     store.settings.productionPenalty.deductionsEnabled = true;
     await setup(db, store);
     if (alreadyRequested) await mutate(db, request);

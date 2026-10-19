@@ -120,7 +120,7 @@ cart previews, checkout and recovery proposals:
    declared extension, retaining existing capacity-day constraints.
 3. Consume the existing delivery/promise allowance in GRIDGO operating hours,
    which remain the delivery calendar at launch. Zero allowance still waits
-   for a dispatch opening. Separate rider shifts and hub days remain off.
+   for a dispatch opening before the configured cutoff. A result at/after cutoff rolls to the next eligible opening. Separate rider shifts and hub days remain off.
 
 No fee, delivery duration, payout share or money policy changes. The order's
 internal `readyBy` is its shop deadline; `promiseBy` is the client commitment.
@@ -160,3 +160,5 @@ together. Recipients are the owning supplier plus every current Operations and
 Super Admin membership. Catalog/notification invalidations are queued before
 `save()`; push/outbox delivery happens after commit. No direct delivery occurs
 inside the hours handler. Historical audit rows cannot be edited or deleted.
+
+Tight/Secured/Rush dates and same-day review are defined in [Scheduling release 1](SCHEDULING_API.md). Express cannot bypass these hours.

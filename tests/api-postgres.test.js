@@ -5424,7 +5424,7 @@ test('operating hours settings require Super Admin/version/reason, persist with 
     assert.equal(current.operatingStatus.isOpenNow, true);
     const today = new Date(Date.now() + 480 * 60000).toISOString().slice(0, 10);
     const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
-    const closed = { ...open, priorityDispatchCutoffMinute: 900,
+    const closed = { ...open, sameDayReviewMinutes: 45, priorityDispatchCutoffMinute: 900,
       schedule: { ...open.schedule, closures: [{ startDay: today, endDay: tomorrow }] } };
     const patch = (body, subject = 'clerk_super') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
     const input = { expectedVersion: current.version, reason: 'Temporary office closure', operatingHours: closed };
@@ -5457,6 +5457,10 @@ test('operating hours settings require Super Admin/version/reason, persist with 
     await database.query("UPDATE orders SET state = 'ready_for_dispatch' WHERE id = 'ord_payout'");
     const dispatch = await request(instance.api, '/dispatch/ord_payout/accept', { method: 'POST', subject: 'clerk_rider', body: {} });
     assert.equal(dispatch.body.error, 'outside_operating_hours');
+    const {sameDayReviewMinutes, ...oldEditorHours} = closed;
+    const preserved = await patch({expectedVersion: current.version + 1, reason: 'Older editor saves hours', operatingHours: oldEditorHours});
+    assert.equal(preserved.status, 200);
+    assert.equal(preserved.body.settings.operatingHours.sameDayReviewMinutes, 45);
   } finally {
     instance.child.kill('SIGTERM');
     await new Promise(resolve => instance.child.once('exit', resolve));

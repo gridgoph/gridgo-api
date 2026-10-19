@@ -923,14 +923,15 @@ export function createOrderLineSnapshot(store, selection, createId) {
       pricingBasisSnapshot: service.pricingBasis || item.pricingUnit || "per_unit",
       pricingUnitSnapshot: item.pricingUnit || "per_unit",
       packageQtySnapshot: item.packageQty ?? null,
-      ...((item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays)) == null ? {} : {
+      ...((selection.speedTier ? null : item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays)) == null ? {} : {
         turnaroundDaysSnapshot: item.turnaroundMode === 'override' ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays),
         productionDayMinutesSnapshot: displayProductionDayMinutes(store, item.supplierId),
       }),
-      turnaroundHoursSnapshot: itemTurnaroundHours(item, service),
-      turnaroundMinutesSnapshot: Math.round(itemTurnaroundHours(item, service) * 60),
+      turnaroundHoursSnapshot: selection.speedTier?.turnaroundHours ?? itemTurnaroundHours(item, service),
+      turnaroundMinutesSnapshot: Math.round((selection.speedTier?.turnaroundHours ?? itemTurnaroundHours(item, service)) * 60),
+      ...(selection.speedTier ? { speedTierSnapshot: structuredClone(selection.speedTier) } : {}),
       baseUnitPriceMinor: item.basePriceMinor,
-      effectiveUnitPriceMinor: item.pricedByColour ? 0 : effectiveUnitPriceMinor,
+      effectiveUnitPriceMinor: item.pricedByColour ? 0 : selection.speedTier ? priced.unitRateMinor : effectiveUnitPriceMinor,
       quantity,
       ...(priced.colourPricing ? { colourPricing: structuredClone(priced.colourPricing), quantityMode: selection.quantityMode } : {}),
       // The size the client agreed to, kept with the price it produced. An

@@ -1,3 +1,4 @@
+import { tightDeclineExemption } from './scheduling-policy.js';
 import { sameReviewData } from './review-data.js';
 import { supplementTotals, changePaymentPending } from './order-change-policy.js';
 import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
@@ -117,7 +118,8 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
   if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail('shop_cancel_not_available');
   if (refundHold(store, order) || refundSettlementFor(store, order)) fail('refund_fulfillment_stopped');
   assessProductionLapses(store, { at, createId, orderId: order.id });
-  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, reasonCode, at, actorId };
+  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, reasonCode, at, actorId,
+    exemption: tightDeclineExemption(order, kind, reason) };
   (order.shopFailureEvents ||= []).push(event);
   order.declinedBy = [...new Set([...(order.declinedBy || []), order.supplierId])];
   if (order.shopAcceptance) order.shopAcceptance.status = kind;

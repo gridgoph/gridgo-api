@@ -1,9 +1,9 @@
 import { sameReviewData, reportOrderAllowed } from './review-data.js';
 import { performanceTopPick } from './supplier-performance-policy.js';
 import { shopHoursStatus } from './shop-hours.js';
-import { operatingHours, reviewTiming } from './operating-hours.js';
+import { operatingHours, reviewTiming, schedulingDay, deadlineDayReason, dispatchReadyAt } from './operating-hours.js';
 import { addOpeningMilliseconds } from './availability.js';
-import { shopProductionDayMinutes } from "./production-days.js";
+import { shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
 import { cartGroups } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { riderPackingFlow } from './shop-handover.js';
@@ -11,7 +11,7 @@ import { recentLapseQualityPenalty, productionTiming } from './production-penalt
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
 import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
-import { firstExpressDay, endOfLocalDay, listingExpress, withExpress } from "./express.js";
+import { listingExpress } from "./express.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 export { shopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
@@ -210,40 +210,68 @@ function allowanceMinutesFrom(settings) {
   return Number.isSafeInteger(declared) && declared >= 0 ? declared : DEFAULT_ALLOWANCE_MINUTES;
 }
 
-/**
- * One queue/calendar projection for matching, cart previews, and checkout.
- *
- * `express` with a `deadline` applies the shop's Express switch
- * (src/express.js): the ordinary projection stands when it meets the deadline,
- * otherwise the promise is the Express same-day target.
- */
-export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes, units, now, express = false, deadline = null }) {
+/** One ready-by rule for every new quote, including Express and listed tiers. */
+export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes,
+  minimumTurnaroundHours = null, units, now, express = false, deadline = null }) {
   const hours = Number.isSafeInteger(turnaroundDays) && turnaroundDays > 0
     ? turnaroundDays * shopProductionDayMinutes(store, supplierId) / 60
     : Number.isSafeInteger(turnaroundMinutes) && turnaroundMinutes > 0 ? turnaroundMinutes / 60
     : Number.isFinite(turnaroundHours) && turnaroundHours > 0 ? turnaroundHours : 24;
-  const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
+  const shortest = minimumTurnaroundHours > 0 ? Math.min(hours, minimumTurnaroundHours) : hours;
+  const profile = (store.supplierProfiles || []).find(row => row.userId === supplierId);
   const queue = queueMinutesFor(store, supplierId, hours);
-  const capacityDaily = (store.supplierServices || [])
-    .filter((row) => row.supplierId === supplierId && row.state === "live")
-    .reduce((best, row) => (Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best), 0);
-  const review = store.settings?.operatingHours ? reviewTiming(store.settings, now) : null;
-  const projection = projectFinish({
-    schedule: scheduleFor(profile),
-    now: review?.reviewCompletesAt || now,
-    preserveSeconds: Boolean(review),
-    queueMinutes: queue.minutes,
-    turnaroundMinutes: hours * 60,
-    units: Number.isSafeInteger(units) && units > 0 ? units : null,
-    capacityDaily: capacityDaily > 0 ? capacityDaily : null,
-    allowanceMinutes: review ? 0 : allowanceMinutesFrom(store.settings),
-  });
-  if (review) {
+  const capacityDaily = (store.supplierServices || []).filter(row => row.supplierId === supplierId && row.state === 'live')
+    .reduce((best, row) => Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best, 0);
+  const project = duration => {
+    const sameDay = duration * 60 < (displayProductionDayMinutes(store, supplierId) ?? 600);
+    const review = reviewTiming(store.settings, now, { sameDay });
+    const projection = projectFinish({ schedule: scheduleFor(profile), now: review.reviewCompletesAt,
+      preserveSeconds: true, queueMinutes: queue.minutes, turnaroundMinutes: duration * 60,
+      units: Number.isSafeInteger(units) && units > 0 ? units : null, capacityDaily: capacityDaily || null });
     projection.review = review;
-    projection.promiseBy = addOpeningMilliseconds(operatingHours(store.settings).schedule,
-      projection.readyBy, allowanceMinutesFrom(store.settings) * 60000);
+    projection.promiseBy = dispatchReadyAt(store.settings, addOpeningMilliseconds(operatingHours(store.settings).schedule,
+      projection.readyBy, allowanceMinutesFrom(store.settings) * 60000));
+    if (schedulingDay(projection.promiseBy) === schedulingDay(now) && deadlineDayReason(store.settings, projection.promiseBy, now)) {
+      const tomorrow = new Date(Date.parse(`${schedulingDay(now)}T00:00:00+08:00`) + 86400000).toISOString();
+      projection.promiseBy = dispatchReadyAt(store.settings, tomorrow);
+    }
+    return { ...projection, sameDay };
+  };
+  const earliest = project(shortest), secured = shortest === hours ? earliest : project(hours);
+  const reason = deadline ? deadlineDayReason(store.settings, deadline, now)
+    || (Date.parse(earliest.promiseBy) > Date.parse(deadline) ? 'before_shortest_time' : null) : null;
+  const tight = !reason && Date.parse(secured.promiseBy) > Date.parse(deadline ?? earliest.promiseBy);
+  const projection = deadline && !tight ? secured : earliest;
+  return { queue, projection: { ...projection, express: false,
+    scheduling: { version: 1, status: reason ? 'not_possible' : tight ? 'tight' : 'secured', reason,
+      earliestReadyBy: earliest.promiseBy, securedReadyBy: secured.promiseBy, readyBy: projection.promiseBy,
+      sameDay: projection.sameDay, tightDeadline: tight, label: tight ? 'Tight deadline' : null,
+      rushTier: null, expressListing: express } } };
+}
+
+/** Selected tiers are resolved from the approved catalogue, never request money. */
+export function listingTiming(store, item, line = {}) {
+  const listing = publicCatalogItem(store, item);
+  if (!listing) throw new MatchError(409, 'catalog_item_stale', 'This listing is no longer available.');
+  const tier = line.speedTierId == null ? null : listing.speedTiers.find(row => row.id === line.speedTierId);
+  if (line.speedTierId != null && !tier) throw new MatchError(409, 'speed_tier_unavailable', 'Choose a current listed speed tier.');
+  if (tier && item.pricedByColour) throw new MatchError(409, 'speed_tier_unavailable', 'This price-check listing does not support a speed tier.');
+  return { maximum: tier?.turnaroundHours ?? listing.turnaroundHours,
+    minimum: tier?.turnaroundHours ?? listing.minimumTurnaroundHours ?? listing.turnaroundHours, tier };
+}
+
+export function projectListingGroup(store, lines, { now, deadline = null } = {}) {
+  const items = lines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
+  const timing = items.map((item, index) => listingTiming(store, item, lines[index]));
+  const result = projectShopFinish(store, { supplierId: items[0].supplierId, now, deadline,
+    turnaroundHours: Math.max(...timing.map(row => row.maximum)), minimumTurnaroundHours: Math.max(...timing.map(row => row.minimum)),
+    units: lines.reduce((sum, line) => sum + line.quantity, 0), express: items.every(listingExpress) });
+  const tiers = timing.map(row => row.tier).filter(Boolean);
+  if (tiers.length) {
+    result.projection.scheduling.rushTier = tiers[0];
+    if (!result.projection.scheduling.reason) result.projection.scheduling.status = 'rush';
   }
-  return { projection: withExpress(store, projection, { supplierId, deadline, now, express }), queue };
+  return result;
 }
 
 function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
@@ -268,6 +296,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       .map((item) => publicCatalogItem(store, item, { at: now }))
       .filter(Boolean)
       .filter((listing) => listingFitsPrinterCap(listing, widthRequest, store));
+    if (!eligibleListings.length) continue;
     const profile = shops.get(supplierId);
     const distance = dropoff ? distanceMetersBetween(profile.shop, dropoff) : null;
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
@@ -276,38 +305,56 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
     const draftGroups = cartGroups(null, (widthRequest?.cartLines || []).filter(line => line.supplierId === supplierId));
     const requestedDate = deadline == null ? null : new Date(deadline).toISOString();
     const groupLines = draftGroups.find(group => group.deadline === requestedDate)?.lines || [];
+    const draftTiming = new Map();
+    try {
+      for (const group of draftGroups.filter(group => group.deadline === requestedDate || (group.deadline != null
+        && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))))) {
+        for (const line of group.lines) {
+          const item = store.catalogItems.find(item => item.id === line.catalogItemId);
+          if (!item) throw new MatchError(409, 'catalog_item_stale', 'Repair unavailable draft work before adding another listing.');
+          draftTiming.set(line, listingTiming(store, item, line));
+        }
+      }
+    } catch (error) {
+      if (error instanceof MatchError) continue;
+      throw error;
+    }
     const earlierJobs = draftGroups.filter(group => group.deadline != null
       && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))).map(group => ({
-      supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => {
-        const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
-        const service = (store.supplierServices || []).find(row => row.id === item?.supplierServiceId);
-        return item ? itemTurnaroundHours(item, service) : 24;
-      })),
+      supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => draftTiming.get(line).maximum)),
     }));
     const projectionStore = earlierJobs.length ? { ...store, orderJobs: [...(store.orderJobs || []), ...earlierJobs] } : store;
     const groupUnits = groupLines.reduce((total, line) => total + BigInt(line.quantity), 0n);
-    const groupHours = groupLines.map((line) => {
-      const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
-      const service = (store.supplierServices || []).find((row) => row.id === item?.supplierServiceId);
-      return item ? itemTurnaroundHours(item, service) : 0;
-    });
-    // A group shares one promise, so Express answers it only when every
-    // product already in the group is Express too.
+    const groupHours = groupLines.map(line => draftTiming.get(line).maximum);
+    const groupMinimumHours = groupLines.map(line => draftTiming.get(line).minimum);
+    // Preserve listing metadata; Express uses the same scheduling calculation.
     const groupExpress = groupLines.every((line) => listingExpress((store.catalogItems || []).find((row) => row.id === line.catalogItemId)));
     const choices = eligibleListings.map((listing) => {
       // Draft lines consume capacity when another product joins their group.
       // Use the same combined quantity and slowest turnaround as checkout.
       const combinedUnits = groupUnits + BigInt(units ?? listing.minimumOrderQuantity ?? 1);
       if (combinedUnits > MAX_SAFE_MINOR) fail(400, "invalid_quantity", "The group's quantity exceeds the supported range.");
-      const { projection, queue } = projectShopFinish(projectionStore, {
-        supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours), now,
-        units: groupLines.length ? Number(combinedUnits) : units,
+      let { projection, queue } = projectShopFinish(projectionStore, {
+        supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours),
+        minimumTurnaroundHours: Math.max(listing.minimumTurnaroundHours ?? listing.turnaroundHours, ...groupMinimumHours), now,
+        units: Number(combinedUnits),
         express: listing.express === true && groupExpress, deadline,
       });
+      const rushChoices = listing.pricedByColour ? [] : listing.speedTiers.filter(tier => tier.turnaroundHours < (listing.minimumTurnaroundHours ?? listing.turnaroundHours)).map(tier => {
+        const fast = projectShopFinish(projectionStore, { supplierId, now, deadline,
+          turnaroundHours: Math.max(tier.turnaroundHours, ...groupHours),
+          minimumTurnaroundHours: Math.max(tier.turnaroundHours, ...groupMinimumHours),
+          units: Number(combinedUnits) }).projection;
+        fast.scheduling.rushTier = tier;
+        if (!fast.scheduling.reason) fast.scheduling.status = 'rush';
+        return fast;
+      });
+      if (deadline && !fitsDeadline(projection, deadline)) {
+        const fast = rushChoices.find(row => fitsDeadline(row, deadline));
+        if (fast) projection = fast;
+      }
       return {
-        supplierId, listing, projection, distance, distanceZone,
-        // The first day Express reaches for this listing, when it is on.
-        expressFrom: listing.express === true && groupExpress ? firstExpressDay(store, supplierId, now) : null,
+        supplierId, listing, projection, rushChoices, distance, distanceZone,
         queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
           Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
         quality: Math.max(0, capabilityScore(store, supplierId, [listing]) - recentLapseQualityPenalty(store, supplierId, now)),
@@ -388,6 +435,7 @@ function otherListing(row) {
     ...(row.distanceZone?.key === "out_of_zone" ? { distanceKm: Number((row.distance / 1000).toFixed(1)) } : {}),
     ...(item.rating ? { rating: item.rating } : {}),
     review: row.projection.review ?? null,
+    scheduling: row.projection.scheduling,
     readyBy: row.projection.promiseBy, expressPromise: row.projection.express === true, placeInLine: row.queue.jobsAhead + 1,
   };
 }
@@ -420,25 +468,11 @@ function reasonsFor(row, ranking, distanceZone) {
   return reasons;
 }
 
-/**
- * Which days GRIDGO could actually make, for one kind of work.
- *
- * The client's version of the shop's schedule. A shop's calendar asks "how
- * full am I"; this asks "can anybody finish by then", which is the only form
- * of the question a client is allowed to see — the queues and capacities that
- * decide it belong to the shops.
- *
- * One candidate pass answers the whole month. Every shop that could take this
- * work already carries the date it would be ready, so a day is simply a
- * threshold: how many of those dates fall on or before the end of it.
- *
- * Deliberately returns no count. A client is never told how many shops print
- * something, here or anywhere -- `tight` says choice is narrow without saying
- * how narrow, which is the honest half of the same fact.
- */
+/** One candidate pass supplies shortest/longest and listed-tier bounds for every date.
+ * Never expose shop counts; Secured means at least one ordinary maximum is met. */
 export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days = 120 } = {}) {
   const at = now || new Date().toISOString();
-  const { rows, missedDeadline } = candidateRows(store, {
+  const { rows } = candidateRows(store, {
     subcategoryCode,
     dropoff,
     excludedSupplierIds: [],
@@ -450,70 +484,28 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
     ranking: ["speed", "quality", "cost", "distance"],
   });
 
-  const promises = [...rows, ...missedDeadline]
-    // A candidate that passed carries its date on its projection; one that was
-    // filtered out carries it directly. Reading only one of the two shapes is
-    // how this quietly answered "nobody can" for every day.
-    .map((row) => row.choices
-      ? Math.min(...row.choices.map((choice) => Date.parse(choice.projection.promiseBy)))
-      : Date.parse(row.promiseBy))
-    .filter((value) => Number.isFinite(value))
-    .sort((left, right) => left - right);
-  // Express listings reach every day from their first open day on, whatever
-  // their production time (src/express.js). Day keys sort as dates.
-  const expressFrom = rows.flatMap((row) => row.choices.map((choice) => choice.expressFrom))
-    .filter(Boolean).sort()[0] ?? null;
-
-  const manilaDay = new Date(Date.parse(at) + 480 * 60000).toISOString().slice(0, 10);
-  const start = Date.parse(`${manilaDay}T00:00:00+08:00`);
-
+  const choices = rows.flatMap(row => row.choices);
+  const manilaDay = schedulingDay(at), start = Date.parse(`${manilaDay}T00:00:00+08:00`);
   const out = [];
-  /** Where the run of possible days starts, so its first two can be called tight. */
-  let firstPossible = null;
-  for (let index = 0; index < days; index += 1) {
-    const day = new Date(start + index * 86400000);
-    const endOfDay = new Date(day.getTime() + 86400000 - 1);
-
-    const reachable = promises.filter((value) => value <= endOfDay.getTime()).length;
-
-    /*
-      Two ways a day is narrow, and a client feels both.
-
-      Half the shops or fewer can make it -- with two shops, one available is
-      exactly the day this is for, so the test is half or fewer rather than
-      strictly fewer than half.
-
-      Or it is among the first days anything is possible at all. On the day a
-      job first becomes makeable there is no slack in it: the shop goes
-      straight from the order in front to this one, and a client choosing it is
-      choosing the tightest date on offer. Work only one shop prints would
-      otherwise jump from impossible to comfortable overnight, which is not
-      what it is like to order that way.
-    */
-    if (firstPossible === null && reachable > 0) firstPossible = index;
-    const narrowByChoice = reachable > 0 && reachable * 2 <= promises.length;
-    const narrowByDate = firstPossible !== null && index - firstPossible < 2;
-    const dayKey = new Date(day.getTime() + 480 * 60000).toISOString().slice(0, 10);
-    // One Express listing is enough: the day is open, never tight.
-    const express = expressFrom !== null && expressFrom <= dayKey;
-
-    out.push({
-      day: dayKey,
-      reason: reachable || express ? null : promises.length ? "review_production_delivery_exceeds_deadline" : "no_eligible_listing",
-      state: express ? "open" : reachable === 0 ? "cannot" : narrowByChoice || narrowByDate ? "tight" : "open",
-    });
+  for (let index = 0; index < days; index++) {
+    const end = new Date(start + (index + 1) * 86400000 - 1).toISOString();
+    const day = schedulingDay(end), closed = deadlineDayReason(store.settings, end, at);
+    const ordinary = choices.filter(row => Date.parse(row.projection.scheduling.earliestReadyBy) <= Date.parse(end));
+    const secured = ordinary.filter(row => Date.parse(row.projection.scheduling.securedReadyBy) <= Date.parse(end));
+    const rush = choices.flatMap(row => row.rushChoices).filter(row => Date.parse(row.promiseBy) <= Date.parse(end))
+      .sort((a,b) => a.promiseBy.localeCompare(b.promiseBy));
+    const status = closed ? 'not_possible' : secured.length ? 'secured' : ordinary.length ? 'tight' : rush.length ? 'rush' : 'not_possible';
+    const reason = closed || (status === 'not_possible' ? choices.length ? 'before_shortest_time' : 'no_eligible_listing' : null);
+    const readyBy = status === 'not_possible' ? null : status === 'rush' ? rush[0].promiseBy
+      : status === 'secured' ? secured.map(row => row.projection.scheduling.securedReadyBy).sort()[0]
+        : ordinary.map(row => row.projection.scheduling.earliestReadyBy).sort()[0];
+    out.push({ day, state: status === 'not_possible' ? 'cannot' : status === 'tight' || status === 'rush' ? 'tight' : 'open',
+      status, reason, readyBy, rushTier: status === 'rush' ? rush[0].scheduling.rushTier : null });
   }
-  const expressEarliest = expressFrom === null ? null : endOfLocalDay(expressFrom, 480);
-  const earliest = [promises[0], expressEarliest].filter((value) => value != null).sort((left, right) => left - right)[0];
+  return { days: out, operatingStatus: reviewTiming(store.settings, at),
+    earliest: choices.flatMap(row => [row.projection.scheduling.earliestReadyBy, ...row.rushChoices.map(fast => fast.promiseBy)]).sort()[0] ?? null,
+    expressAvailable: choices.some(row => row.listing.express === true) };
 
-  return {
-    days: out,
-    operatingStatus: reviewTiming(store.settings, at),
-    /** The first moment anybody could finish, or null when nobody prints this. */
-    earliest: earliest == null ? null : new Date(earliest).toISOString(),
-    /** Whether an Express listing answers these days. Never a count. */
-    expressAvailable: expressFrom !== null,
-  };
 }
 
 export function matchShop(store, input = {}) {
@@ -590,6 +582,7 @@ export function matchShop(store, input = {}) {
     listings: winner.choices.map((choice) => ({
       ...choice.listing,
       readyBy: choice.projection.promiseBy,
+      scheduling: choice.projection.scheduling,
       expressPromise: choice.projection.express === true,
       review: choice.projection.review ?? null,
       placeInLine: choice.queue.jobsAhead + 1,
@@ -603,6 +596,7 @@ export function matchShop(store, input = {}) {
      * spent before the job starts.
      */
     promiseBy: winner.projection.promiseBy,
+    scheduling: winner.projection.scheduling,
     /** Whether `promiseBy` is the Express same-day promise. */
     expressPromise: winner.projection.express === true,
     operatingStatus: winner.projection.review ?? null,
