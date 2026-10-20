@@ -265,6 +265,52 @@ function resolveMatchSelection(store, user, cart, body, at) {
   return selection;
 }
 
+// The selection JSON owns this short-lived guarantee; no caller-supplied timing
+// is trusted and no token secret needs to be stored on a cart line.
+function schedulingWork(cart, lines) {
+  return JSON.stringify(lines.map(line => ({ id: line.id, catalogItemId: line.catalogItemId,
+    supplierId: line.supplierId, quantity: line.quantity, speedTierId: line.speedTierId ?? null,
+    deadline: lineDeadline(cart, line), optionIds: [...(line.optionIds || [])].sort(),
+    measurement: line.measurement ?? null, structuredSpec: line.structuredSpec ?? {},
+  })).sort((a, b) => a.id.localeCompare(b.id)), (_key, value) =>
+    // JSONB normalizes object key order; compare values, never insertion order.
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+}
+
+function relevantSchedulingWork(cart, lines, supplierId, deadline) {
+  return lines.filter(line => line.supplierId === supplierId && (deadline == null
+    || (lineDeadline(cart, line) != null && Date.parse(lineDeadline(cart, line)) <= Date.parse(deadline))));
+}
+
+function offeredGroupProjection(store, cart, lines, at) {
+  const fingerprint = schedulingWork(cart, lines);
+  const workload = schedulingWork(cart, relevantSchedulingWork(cart,
+    (store.cartLines || []).filter(line => line.cartId === cart.id), lines[0].supplierId, lineDeadline(cart, lines[0])));
+  const saved = (store.matchSelections || []).find(row => row.clientId === cart.clientId
+    && Date.parse(row.expiresAt) > Date.parse(at) && row.selection.cartId === cart.id
+    && row.selection.groupFingerprint === fingerprint && row.selection.workloadFingerprint === workload
+    && row.selection.offeredProjection);
+  return saved ? structuredClone(saved.selection.offeredProjection) : null;
+}
+
+function cartGroupProjection(store, cart, lines, at) {
+  return offeredGroupProjection(store, cart, lines, at)
+    ?? projectListingGroup(store, lines, { now: at, deadline: lineDeadline(cart, lines[0]) }).projection;
+}
+
+function bindOfferedGroup(store, cart, line, selection) {
+  if (!selection?.offeredProjection || line.quantity !== selection.units) return false;
+  const workload = relevantSchedulingWork(cart, (store.cartLines || []).filter(row => row.cartId === cart.id),
+    line.supplierId, lineDeadline(cart, line));
+  const group = workload.filter(row => lineDeadline(cart, row) === lineDeadline(cart, line));
+  if (schedulingWork(cart, workload) !== selection.draftFingerprint) return false;
+  selection.cartId = cart.id;
+  selection.groupFingerprint = schedulingWork(cart, [...group, line]);
+  selection.workloadFingerprint = schedulingWork(cart, [...workload, line]);
+  return true;
+}
+
 function assertMatchDeadline(store, item, line, at) {
   const deadline = line.deadline ?? line.matchDeadline;
   if (!deadline) return;
@@ -438,7 +484,9 @@ function cartLinePromiseBy(store, cart, line, item, at) {
   if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
       || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   try {
-    return projectListingGroup(store, [line], { now: at, deadline: lineDeadline(cart, line) }).projection.promiseBy;
+    const group = (store.cartLines || []).filter(row => row.cartId === cart.id
+      && row.supplierId === line.supplierId && lineDeadline(cart, row) === lineDeadline(cart, line));
+    return cartGroupProjection(store, cart, group.length ? group : [line], at).promiseBy;
   } catch (error) {
     // An unavailable calendar must not prevent the client from repairing a cart.
     if (error instanceof AvailabilityError || error.code === 'speed_tier_unavailable') return null;
@@ -667,7 +715,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     try {
       const items = groupLines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
       if (items.every(Boolean) && groupLines.every(line => publicLines.find(row => row.id === line.id)?.promiseBy)) {
-        const { projection } = projectListingGroup(store, groupLines, { now: at, deadline });
+        const projection = cartGroupProjection(store, cart, groupLines, at);
         scheduling = projection.scheduling;
         readyBy = projection.promiseBy;
         expressPromise = projection.express === true;
@@ -863,7 +911,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, offeredProjection = null } = {}) {
   assertRequestFulfillment(cart, body);
   const payment = record(body.payment, "payment");
   if (payment.method !== "qr_manual") {
@@ -1052,8 +1100,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Snapshot the same queue/calendar projection used by matching and the cart,
   // before adding this order's own jobs to the committed queue.
   const [job] = jobs;
-  const requestedDeadline = cartLines.map(line => lineDeadline(cart, line)).filter(Boolean).sort()[0] ?? null;
-  const { projection } = projectListingGroup(store, cartLines, { now: at, deadline: requestedDeadline });
+  const projection = offeredProjection && offeredGroupProjection(store, cart, cartLines, at)
+    ? offeredProjection : projectListingGroup(store, cartLines, { now: at, deadline: lineDeadline(cart, cartLines[0]) }).projection;
   for (const line of cartLines) {
     if (lineDeadline(cart, line) && !fitsDeadline(projection, lineDeadline(cart, line))) {
       fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.");
@@ -1242,10 +1290,13 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
   const groups = cartGroups(cart, lines);
+  // Validate the complete relevant draft before materializing any group orders.
+  // Unchanged earlier groups remain in the cart and keep their later offers valid.
+  const honouredOffers = groups.map(group => offeredGroupProjection(store, cart, group.lines, at));
   const plan = cartVoucherPlan(store, cart, lines, at);
   const voucher = plan?.voucher;
   if (groups.length < 2) {
-    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0] });
+    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0], offeredProjection: honouredOffers[0] });
     if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
     else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
     return result;
@@ -1262,6 +1313,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     results[index] = checkout(store, user, cart, body, createId, at, req, {
       groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)),
       pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index],
+      offeredProjection: honouredOffers[index],
     });
   }
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
@@ -1593,7 +1645,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       now: at, measurement: body.measurement, structuredSpec: body.structuredSpec,
       optionIds: body.optionIds, widthFeet: body.widthFeet, cartLines: cartLines.map(line => ({ ...line, deadline: lineDeadline(matchCart, line) })),
     };
-    const match = clientFacingMatch(matchShop(store, input));
+    const offered = new Map();
+    const match = clientFacingMatch(matchShop(store, { ...input, onOffer: (id, projection) => offered.set(id, projection) }));
     if (requestFulfillment) {
       match.requestFulfillment = structuredClone(requestFulfillment);
       if (requestFulfillment.fulfillmentMode === "pickup") match.hubPickup = publicHubPickup(store.settings);
@@ -1614,6 +1667,10 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       store.matchSelections.push({ tokenHash: selectionHash(token), clientId: user.id, requestId, expiresAt,
         selection: { catalogItemId: listing.id, supplierId: store.catalogItems.find((row) => row.id === listing.id).supplierId,
           cartId, speedTierId: listing.scheduling?.rushTier?.id ?? null, deadline: input.deadline, dropoff: input.dropoff,
+          offeredProjection: structuredClone(offered.get(listing.id)),
+          units: input.units ?? listing.minimumOrderQuantity ?? 1,
+          draftFingerprint: schedulingWork(matchCart, relevantSchedulingWork(matchCart, cartLines,
+            store.catalogItems.find(row => row.id === listing.id).supplierId, input.deadline ?? null)),
           ...(requestFulfillment ? { requestFulfillment } : {}),
           subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
       listing.selectToken = token;
@@ -1794,7 +1851,6 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     };
     if (selection && body.speedTierId != null && body.speedTierId !== selection.speedTierId) fail(409, 'select_token_tier_mismatch', 'Use the selected speed tier.');
     listingTiming(store, item, line);
-    assertMatchDeadline(store, item, line, at);
     if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
     writeArtworkAttachments(line, body, publicCatalogItem(store, item)?.acceptedFormats);
     for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
@@ -1814,6 +1870,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     queueLineColour(store,item,line,at);
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
+    if (!bindOfferedGroup(store, cart, line, selection)) assertMatchDeadline(store, item, line, at);
     store.cartLines ||= [];
     store.cartLines.push(line);
     lockCartFeeSchedules(store, cart, at);

@@ -1090,7 +1090,7 @@ test("anonymous alternatives select the right shop with request-bound tokens and
   assert.equal((await call("POST", `/me/carts/${cart.id}/lines`, { ...selection, selectToken: match.listings[0].selectToken })).status, 201);
 });
 
-test("token selection rechecks changed listing availability and deadline", async () => {
+test("token selection honours the offered deadline despite new queue work and rechecks listing availability", async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
   const deadline = "2026-08-29T00:00:00.000Z";
@@ -1098,7 +1098,9 @@ test("token selection rechecks changed listing availability and deadline", async
   const cart = (await call("POST", "/me/carts", {})).body.cart;
   const body = { selectToken: match.otherListings[0].selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [] };
   store.orderJobs.push({ id: "new_queue", supplierId: "supplier_b", state: "production", estimatedHours: 300 });
-  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, body), (e) => e.code === "deadline_not_met");
+  const added = await call("POST", `/me/carts/${cart.id}/lines`, body);
+  assert.equal(added.status, 201);
+  assert.equal(added.body.cart.groups[0].readyBy, match.otherListings[0].readyBy);
   store.catalogItems.find((row) => row.id === "item_b").active = false;
   await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, body), (e) => e.code === "catalog_item_stale");
 });

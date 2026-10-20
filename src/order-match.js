@@ -590,6 +590,8 @@ export function matchShop(store, input = {}) {
   const reasonKey = decidingFactor(winner, runnerUp, ranking) || "vetted";
   const alternativesCount = rows.length - 1;
 
+  // Internal capture keeps supplier production timing out of client projections.
+  for (const row of rows) for (const choice of row.choices) input.onOffer?.(choice.listing.id, choice.projection);
   const distanceZone = winner.distance == null ? null : distanceZoneForDistance(winner.distance, store.settings);
   const rating = publicShopRating(store, winner.supplierId);
   return {

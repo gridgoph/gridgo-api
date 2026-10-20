@@ -288,3 +288,29 @@ Migration `1792502000000_order_job_queue_backfill` brings stale nonterminal jobs
 forward to their order's pickup/delivery/terminal state. Already completed or
 cancelled jobs stay closed. Repeating the backfill changes nothing further.
 It never changes orders, promised dates, prices, fees or duration snapshots.
+
+## Selection-token promise window
+
+The match selection token guarantees that listing's offered production ready-by
+and client promise for its existing **15-minute** lifetime. Cart add, cart reads
+(line `promiseBy` and group `readyBy`/`scheduling`) and checkout use the stored
+offer for unchanged selected work, including a Tight offer that would cross the
+16:00 dispatch cutoff if recalculated minutes later. Checkout/order client
+`readyBy` and `scheduling.readyBy` carry the honoured client promise; the shop
+retains the original internal production ready-by.
+
+The guarantee is server-owned, persisted with the selection, and bound to the
+client, cart, shop/deadline group, selected quantity/tier, and all same-shop draft
+work that influenced the offer: its own group plus earlier-deadline groups (all
+dated groups for an undated offer). This workload is checked when adding the
+selection and again before checkout materializes any group orders. Adding,
+editing or deleting relevant earlier work invalidates affected later offers and
+uses the current recheck. Unchanged groups keep their offered dates even while
+checkout reserves earlier groups, and external customers' intervening queue work
+does not invalidate a still-valid offer. Changing selected work requires a fresh
+estimate. It does not reserve prices or
+bypass listing availability, artwork, payment or authorization checks. At or
+after `selectTokenExpiresAt`, checkout uses the current queue/calendar recheck
+and can return `409 deadline_not_met`. Adding an expired token still returns
+`410 select_token_expired`. Older selections without an offer snapshot keep the
+current recheck. No existing order promise is recalculated.
