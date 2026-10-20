@@ -130,6 +130,9 @@ test('rider arrival mints hub credentials and does not start issue window; deliv
     const delivery = { ...store.orders[0], id: 'delivery', fulfillmentMode: 'delivery', state: 'out_for_delivery', timeline: [], handover: undefined };
     prepareHandover(store, delivery, { at: AT });
     store.orders.push(delivery);
+    // The independent delivery also owns its checkout item facts for its receipt.
+    store.orderLineItems.push(...store.orderLineItems.filter(line => line.orderId === 'order')
+      .map(line => ({ ...structuredClone(line), id: `delivery_${line.id}`, orderId: 'delivery', jobId: null })));
     store.files.find(f => f.fileId === 'drop_photo').references.push({ type: 'order', id: 'delivery', field: 'deliveryPhotoFileIds' });
     await saveStore(db, store);
   });
@@ -143,6 +146,8 @@ test('rider arrival mints hub credentials and does not start issue window; deliv
   assert.equal(delivered.status, 200, JSON.stringify(delivered.body));
   assert.equal(delivered.body.order.state, 'issue_window_open');
   assert.equal(delivered.body.order.handover, undefined);
+  assert.equal((await api('client', 'GET', '/orders/order/acknowledgement-receipt')).status, 404);
+  assert.equal((await api('client', 'GET', '/orders/delivery/acknowledgement-receipt')).body.receipt.grandTotalMinor, waiting.totalMinor);
   const saved = await loadStore(db);
   assert.ok(saved.orders.find(o => o.id === 'delivery').handover.consumedAt);
   const attempts = saved.auditLog.filter(a => a.action.startsWith('delivery.handover_otp_'));

@@ -187,6 +187,20 @@ Supplier order projections strip structured client/customer identity, phone/emai
 
 Companion screens should put short purpose notices beside address/phone fields and photo capture, for example: “We use this address to route your delivery”, “We use this number for delivery coordination”, and “This photo records the handover or verifies the requested document”. Tailor these to the actual capture purpose; legal-document content remains editable by Super Admin. Do not put names/phones into supplier-visible free-text order instructions as a substitute for private contact fields.
 
+The sole rider billing exception is the dedicated [acknowledgement receipt view](ACKNOWLEDGEMENT_RECEIPTS_API.md)
+for the currently assigned approved rider's active handover at the client's door.
+It includes the full client receipt (AR number, items, delivery fee, grand total
+and recorded payment facts). The rider must have recorded `arrived` for that
+assignment, the order must still be in `picked_up` or `out_for_delivery`, and
+neither delivery evidence nor consumed handover may mark completion. Before
+arrival, after delivery/cancellation, on pickup orders, and after reassignment,
+rider receipt reads and preparation return `403 forbidden`. This exception does
+not add billing to ordinary order details, lists, dispatch/history responses,
+notifications or downloads; owning-client and Operations/Super Admin receipt
+access retains its separate scope. Rider apps must discard the receipt view on
+leaving the handover or learning completion, cancellation or reassignment, and
+must not persist it into history.
+
 ## Release checks
 
 The server tests cover anonymous reads, role audiences, immutable SQL evidence, first-real/material/editorial requirements, consent metadata and retries, versioned enrollment and guardian/marketing choices, order rights compatibility, queue ownership and staff permissions, CSV escaping, audit/inbox rows, penalty eligibility and role-safe projections. Use an isolated named test database. Full PostgreSQL 17 suite and image-volume checks run in PR CI.
