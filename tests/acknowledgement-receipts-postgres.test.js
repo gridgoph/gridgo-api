@@ -7,6 +7,7 @@ import { resetDatabase } from './fixtures/reset-database.js';
 import { fixture, AT, id, audit } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { PICKUP_CHECK_CODES, calculateOrderMoney, createPaymentSchedule } from '../src/operational-model.js';
+import { defaultCatalog, defaultZones } from '../src/reference-data.js';
 import { issueAcknowledgement } from '../src/acknowledgement-receipts.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -204,9 +205,12 @@ test('HTTP multi-shop basket receipts contain only their delivered group, includ
   assert.deepEqual(ok(await api('client', 'GET', '/orders/second/acknowledgement-receipt')).receipt, second);
 });
 
-test('HTTP model-2 quoted checkout money stays absent from rider details, lists and terminal history in every handover state', { skip: !DATABASE_URL }, async t => {
+test('HTTP model-2 quoted checkout money stays absent from rider details, lists/history and offers, including nested request estimates', { skip: !DATABASE_URL }, async t => {
   let money;
   const { db, api } = await setup(t, store => {
+    store.catalog = defaultCatalog();
+    store.zones = defaultZones();
+    for (const service of store.supplierServices) service.productFamilyIds = ['flyer'];
     const order = store.orders[0];
     money = calculateOrderMoney({ supplierSubtotalMinor: 10000, fulfillmentMode: 'delivery',
       paymentPlan: 'delivery_online', supplierDownpaymentRateBps: 2500,
@@ -215,26 +219,63 @@ test('HTTP model-2 quoted checkout money stays absent from rider details, lists 
     for (const payment of Object.values(order.payments)) payment.status = 'confirmed';
     delete order.riderProgress;
   });
-  // Exercise the actual quoted-order persisted shape, not only match checkout.
-  const saved = (await loadStore(db)).orders[0];
+  // Obtain the estimate through the real client request route. Quote acceptance
+  // retains it alongside the calculated money on the committed order.
+  const request = ok(await api('client', 'POST', '/orders', { productId: 'prod_flyer', quantity: 10 }), 201).order;
+  assert.equal(request.priceRange.supplierSubtotalMinMinor, 10000);
+  assert.equal(request.priceRange.supplierSubtotalMaxMinor, 25000);
+  await db.transaction(async () => {
+    const store = await loadStore(db);
+    const original = store.orders.find(order => order.id === 'order');
+    original.priceRange = store.orders.find(order => order.id === request.id).priceRange;
+    Object.assign(original, { riderId: null, state: 'ready_for_dispatch' });
+    await saveStore(db, store);
+  });
+  const saved = (await loadStore(db)).orders.find(order => order.id === 'order');
+  assert.deepEqual(saved.priceRange, request.priceRange);
   assert.equal(saved.initialOnlineMinor + saved.finalOnlineMinor, money.totalMinor);
   // These are the pre-existing rider delivery/earnings contract, not checkout billing.
   const deliveryMoney = new Set(['deliveryFeeMinor', 'riderPayoutMinor', 'platformDeliveryShareMinor']);
   const privateMoney = Object.keys(money).filter(key => key.endsWith('Minor') && !deliveryMoney.has(key));
   const assertNoBilling = object => {
     for (const key of ['totalMinor', 'clientItemSubtotalMinor', 'grandTotalMinor', 'invoice', 'acknowledgementReceipt',
-      'serviceFeeMinor', 'acceptedQuote', 'organizationDiscountMinor', 'voucherDiscountMinor', 'paymentAllocations', ...privateMoney]) assert.equal(object[key], undefined, key);
+      'priceRange', 'serviceFeeMinor', 'acceptedQuote', 'organizationDiscountMinor', 'voucherDiscountMinor', 'paymentAllocations', ...privateMoney]) assert.equal(object[key], undefined, key);
     for (const payment of Object.values(object.payments || {})) assert.deepEqual(Object.keys(payment), ['status']);
+    // Allow exact paths, not names at any depth: a nested quote/estimate must
+    // not escape this assertion simply because top-level billing was removed.
+    const inspectMoney = (value, path = []) => {
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        const childPath = [...path, key];
+        if (key.endsWith('Minor')) assert.ok(deliveryMoney.has(childPath.join('.')), `Unexpected rider money: ${childPath.join('.')}`);
+        inspectMoney(child, childPath);
+      }
+    };
+    inspectMoney(object);
   };
   const ordinaryReads = async () => {
     assertNoBilling(ok(await api('rider', 'GET', '/orders/order')).order);
-    const listed = ok(await api('rider', 'GET', '/orders')).orders.find(order => order.id === 'order');
-    assert.ok(listed); assertNoBilling(listed);
+    const listed = ok(await api('rider', 'GET', '/orders')).orders;
+    assert.ok(listed.some(order => order.id === 'order'));
+    listed.forEach(assertNoBilling);
+    ok(await api('rider', 'GET', '/dispatch/offers')).offers.forEach(assertNoBilling);
   };
-  for (const state of ['rider_assigned', 'picked_up', 'out_for_delivery']) {
+  // Before assignment, the actual offer must be present, not an empty-list pass.
+  const offers = ok(await api('rider', 'GET', '/dispatch/offers')).offers;
+  assert.ok(offers.some(order => order.id === 'order'));
+  offers.forEach(assertNoBilling);
+  // Synthetic state assignment tests projections, not lifecycle transitions.
+  // Cover all 25 persisted states, then enter the real arrival/receipt window.
+  const preArrivalStates = ['draft', 'submitted', 'needs_qa', 'client_correction', 'proof_approval',
+    'approved_for_matching', 'supplier_assigned', 'awaiting_checkout', 'awaiting_initial_payment',
+    'initial_payment_review', 'awaiting_downpayment', 'downpayment_review', 'payment_authorized',
+    'production', 'supplier_self_qc', 'ready_for_dispatch', 'awaiting_collection',
+    'rider_assigned', 'picked_up', 'out_for_delivery'];
+  for (const state of preArrivalStates) {
     await db.transaction(async () => {
       const store = await loadStore(db);
-      store.orders[0].state = state;
+      const order = store.orders.find(order => order.id === 'order');
+      Object.assign(order, { state, riderId: 'rider' });
       await saveStore(db, store);
     });
     await ordinaryReads();
@@ -245,11 +286,12 @@ test('HTTP model-2 quoted checkout money stays absent from rider details, lists 
   assert.equal(receipt.grandTotalMinor, money.totalMinor);
   assert.deepEqual(ok(await api('rider', 'GET', path)).receipt, receipt);
   await ordinaryReads();
-  for (const state of ['delivered', 'issue_window_open', 'completed', 'cancelled']) {
+  for (const state of ['delivered', 'issue_window_open', 'completed', 'payout_released', 'cancelled']) {
     await db.transaction(async () => {
       const store = await loadStore(db);
-      store.orders[0].state = state;
-      if (state === 'cancelled') Object.assign(store.orders[0], { cancelledAt: AT, cancelledBy: 'ops', cancellationReason: 'Cancellation fixture' });
+      const order = store.orders.find(order => order.id === 'order');
+      Object.assign(order, { state, riderId: 'rider' });
+      if (state === 'cancelled') Object.assign(order, { cancelledAt: AT, cancelledBy: 'ops', cancellationReason: 'Cancellation fixture' });
       await saveStore(db, store);
     });
     assert.equal((await api('rider', 'GET', path)).status, 403, state);

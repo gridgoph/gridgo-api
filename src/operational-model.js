@@ -1624,7 +1624,7 @@ export function publicOrderFor(order, user, store = null) {
       // receipt endpoint during the assigned rider's active, arrived door handover;
       // acknowledgement-receipts.js closes that access at completion/cancellation.
       // Never inline that receipt here, even while its dedicated read is allowed.
-      for (const key of ['acceptedQuote','pendingQuote','quoteHistory','invoice','billing',
+      for (const key of ['acceptedQuote','pendingQuote','quoteHistory','priceRange','invoice','billing',
         'acknowledgementReceipt','clientItemSubtotalMinor','grandTotalMinor','supplementalTotalMinor','totalIncludingSupplementsMinor',
         'credit','credits','organizationDiscountMinor','organizationDiscountRateBps','serviceFeeMinor',
         'serviceFeeRateBps','grossServiceFeeMinor','supplierSubtotalMinor','subtotalMinor','totalMinor',
