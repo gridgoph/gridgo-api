@@ -4,7 +4,9 @@ export async function resetDatabase(database, sql) {
   if (/\busers\b/.test(sql) && !/\baudit_log\b/.test(sql)) sql = sql.replace(/TRUNCATE\s+/i, 'TRUNCATE audit_log, ');
   await database.transaction(async () => {
     await database.query('ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_truncate');
+    await database.query('ALTER TABLE acknowledgement_receipts DISABLE TRIGGER acknowledgement_receipts_no_truncate');
     await database.query(sql);
+    await database.query('ALTER TABLE acknowledgement_receipts ENABLE ALWAYS TRIGGER acknowledgement_receipts_no_truncate');
     await database.query('ALTER TABLE audit_log ENABLE ALWAYS TRIGGER audit_log_no_truncate');
   });
 }
