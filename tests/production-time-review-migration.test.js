@@ -119,7 +119,7 @@ async function assertRepairOnly(db, expectedFlagged) {
 }
 
 test('old SQL then repair recovers inherited Express evidence and respects known pre-conversion modes', enabled, async () => fixture(async (db, add) => {
-  for (const id of ['lost_mode', 'known_inherit', 'known_override', 'stale_mode', 'different_minutes', 'unused_rush']) {
+  for (const id of ['lost_mode', 'lost_mode_toggled', 'known_inherit', 'known_override', 'stale_mode', 'different_minutes', 'unused_rush']) {
     await add(id, { mode: id === 'known_override' ? 'override' : 'inherit', express: true,
       kind: 'supplierServices', prefix: id === 'unused_rush' ? 'rushTurnaround' : 'standardTurnaround' });
     await db.query(`UPDATE supplier_services SET standard_turnaround_days=NULL, standard_turnaround_minutes=120,
@@ -135,17 +135,18 @@ test('old SQL then repair recovers inherited Express evidence and respects known
   await oldRelease(db);
   assert.ok((await db.query('SELECT * FROM supplier_catalog_items')).rows.every(row => row.turnaround_mode === 'override' && !row.express && !row.production_time_review_reasons.length));
   await db.query(`UPDATE supplier_catalog_items SET turnaround_minutes=180,turnaround_hours=3 WHERE id='different_minutes'`);
-  await assertRepairOnly(db, ['known_inherit', 'lost_mode', 'stale_mode']);
+  await patchAudit(db, 'lost_mode_toggled', { express: true }, { minimumTurnaroundMinutes: 120, minimumTurnaroundHours: 2, version: 2 });
+  await assertRepairOnly(db, ['known_inherit', 'lost_mode', 'lost_mode_toggled', 'stale_mode']);
 }));
 
-async function patchAudit(db, id, body) {
+async function patchAudit(db, id, body, current = {}) {
   const { store } = schedulingFixture();
   const item = store.catalogItems[0];
   Object.assign(item, { id, turnaroundMode: 'override', turnaroundHours: 2, turnaroundMinutes: 120,
     turnaroundDays: null, minimumTurnaroundDays: null, minimumTurnaroundMinutes: null,
-    minimumTurnaroundHours: null, productionTimeReviewReasons: [], version: 1 });
+    minimumTurnaroundHours: null, productionTimeReviewReasons: [], version: 1, ...current });
   await routeSupplierCatalog({ req: { method: 'PATCH' }, url: new URL(`/me/catalog-items/${id}`, 'http://gridgo.test'),
-    store, user: store.users.find(user => user.id === 'shop_a'), readBody: async () => ({ expectedVersion: 1, ...body }),
+    store, user: store.users.find(user => user.id === 'shop_a'), readBody: async () => ({ expectedVersion: item.version, ...body }),
     now: () => '2026-10-20T02:00:00Z', audit: (graph, event) => graph.auditLog.push(event) });
   const event = store.auditLog[0];
   await db.query(`INSERT INTO audit_log VALUES ($1,$2,$3,$4,'2026-10-20T02:00Z')`,

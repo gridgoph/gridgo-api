@@ -319,7 +319,8 @@ edit's timing snapshot when available. Without that provenance, an exact overrid
 with the conversion's populated bounds/hour mirrors and a matching relevant
 service correction is conservatively flagged. A known prior override, a different
 corrected duration, or an unused/rush service prefix does not qualify through this
-fallback. Ambiguous existing reminders are retained.
+fallback. A later Express-only toggle does not disqualify a plausible converted
+row. Ambiguous existing reminders are retained.
 
 Successful explicit duration PATCHes (including unchanged legacy-field saves)
 and bulk apply record `detail.productionTimeConfirmed: true`. Express-only edits

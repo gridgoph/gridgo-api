@@ -25,7 +25,9 @@ export async function up(pgm) {
         source.turnaround_mode = 'override' AND a.at < source.choice_at AND (
           source.pre_conversion_mode = 'inherit' OR (
             source.pre_conversion_mode IS NULL
-            AND source.express = false AND source.version > 1
+            -- Express can have been toggled again after conversion without
+            -- confirming the duration. Its current value is not provenance.
+            AND source.version > 1
             AND source.turnaround_days IS NULL AND source.minimum_turnaround_days IS NULL
             AND source.minimum_turnaround_minutes > 0
             AND source.minimum_turnaround_minutes <= source.turnaround_minutes
