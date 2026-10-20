@@ -314,3 +314,25 @@ after `selectTokenExpiresAt`, checkout uses the current queue/calendar recheck
 and can return `409 deadline_not_met`. Adding an expired token still returns
 `410 select_token_expired`. Older selections without an offer snapshot keep the
 current recheck. No existing order promise is recalculated.
+
+## Same-day promise margin control
+
+`GET /settings` returns `settings.operatingHours.sameDayPromiseAllowanceMinutes`,
+default **120 working minutes** even for older settings rows. Super Admin can
+change it through the existing `PATCH /settings` by sending the full
+`operatingHours` object plus `expectedVersion` and a nonempty `reason`.
+Allowed values are integers **0–600**, inclusive; null, strings, fractions and
+out-of-range values return `400 invalid_operating_hours`. Operations, suppliers,
+riders and clients receive `403 forbidden` on PATCH. A stale version returns
+`409 settings_version_conflict`.
+
+This margin is added after production using GRIDGO's working calendar, before
+the existing dispatch cutoff is applied. Same-day production is the scheduler's
+existing duration shorter than one shop working day, including exact-hour
+listings and shorter listed tiers. The usual review, shop queue and closure
+rules still apply. Days-based production keeps its existing promise margin
+(default 600 working minutes); no price or fee changes. Older editors that omit
+the field preserve the current value. Settings changes use the existing
+`settings.operational_update` audit with previous/current settings and affect
+future estimates only; accepted order promises and unexpired selection-token
+offers stay fixed.

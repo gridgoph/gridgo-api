@@ -247,7 +247,7 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, turnarou
       units: Number.isSafeInteger(units) && units > 0 ? units : null, capacityDaily: capacityDaily || null });
     projection.review = review;
     projection.promiseBy = dispatchReadyAt(store.settings, addOpeningMilliseconds(operatingHours(store.settings).schedule,
-      projection.readyBy, allowanceMinutesFrom(store.settings) * 60000));
+      projection.readyBy, (sameDay ? operatingHours(store.settings).sameDayPromiseAllowanceMinutes : allowanceMinutesFrom(store.settings)) * 60000));
     if (schedulingDay(projection.promiseBy) === schedulingDay(now) && deadlineDayReason(store.settings, projection.promiseBy, now)) {
       const tomorrow = new Date(Date.parse(`${schedulingDay(now)}T00:00:00+08:00`) + 86400000).toISOString();
       projection.promiseBy = dispatchReadyAt(store.settings, tomorrow);

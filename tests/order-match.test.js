@@ -596,7 +596,7 @@ test("speed ties within a UTC promise hour and the next factor decides", () => {
   assert.equal(result.shop.supplierId, "slower", "09:00 and 09:30 are in the same promise-hour bucket");
   assert.deepEqual(result.matchReason, { key: "cost", label: "Matched for Best Value" });
   const calendar = deadlineDays(store, { now: AT, subcategoryCode: "flyers", days: 7 });
-  assert.equal(calendar.earliest, "2026-08-24T01:30:00.000Z", "half an hour of same-day review precedes production");
+  assert.equal(calendar.earliest, "2026-08-24T03:30:00.000Z", "same-day review and the two-hour promise margin surround production");
 });
 
 test("other listings expose established ratings, zone-only distances, and queue position", () => {
@@ -637,5 +637,5 @@ test('deadline calendar uses Manila dates and explains a review-delayed impossib
   assert.deepEqual(answer.days.slice(0, 2).map(row => [row.state, row.reason]), [
     ['cannot', 'gridgo_closed_sunday'], ['cannot', 'gridgo_closed']]);
   assert.equal(answer.operatingStatus.scheduledReviewAt, '2026-10-13T00:00:00.000Z');
-  assert.equal(answer.earliest, '2026-10-13T01:30:00.000Z');
+  assert.equal(answer.earliest, '2026-10-13T03:30:00.000Z');
 });

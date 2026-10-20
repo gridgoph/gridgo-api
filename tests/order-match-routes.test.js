@@ -161,6 +161,7 @@ for (const queued of [false, true]) {
     const at = "2026-09-25T08:00:00.000Z"; // Friday 16:00 in Davao.
     const call = caller(store, client, at);
     store.settings.promiseAllowanceMinutes = 60;
+    store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 60;
     Object.assign(store.supplierServices[0], { turnaroundHours: 3, standardTurnaroundHours: 3 });
     store.supplierProfiles[0].schedule = {
       utcOffsetMinutes: 480,
@@ -208,6 +209,7 @@ test("cart promise uses quantity capacity, closures, and the current request tim
   const { store, client } = fixture();
   const call = caller(store, client, "2026-09-25T08:00:00.000Z");
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   Object.assign(store.supplierServices[0], { standardTurnaroundHours: 3, capacityDaily: 100 });
   store.supplierProfiles[0].schedule = {
     utcOffsetMinutes: 480,
@@ -1297,6 +1299,7 @@ test('basket payment reconciliation never restarts a cancelled group', async () 
 test('add-more matching filters capacity already consumed by the same draft group', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   const service = store.supplierServices.find((row) => row.supplierId === 'supplier_a');
   Object.assign(service, { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
   const call = caller(store, client);
@@ -1311,6 +1314,7 @@ test('add-more matching filters capacity already consumed by the same draft grou
 test('cart group listings count combined capacity and each product minimum quantity', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   Object.assign(store.supplierServices[0], { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
   store.catalogItems.find(row => row.id === 'item_a2').minimumOrderQuantity = 10;
   const call = caller(store, client);
@@ -1331,6 +1335,7 @@ test('cart group listings count combined capacity and each product minimum quant
 test('cart group listings use the selected group date and count earlier draft groups at that shop', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   store.settings.operatingHours.priorityDispatchCutoffMinute = 1020;
   Object.assign(store.supplierServices[0], { capacityDaily: 100, turnaroundHours: 7, standardTurnaroundHours: 7 });
   const call = caller(store, client);
