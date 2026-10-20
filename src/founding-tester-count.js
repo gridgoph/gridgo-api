@@ -8,7 +8,8 @@ try {
   const store = await loadStore(database);
   const candidates = store.users.filter(u => foundingTesterEligible(store, u.id)
     && !store.foundingTesters.some(f => f.clientId === u.id && f.awardedAt)
-    && testerProgress(store, u.id).completedCount === 3);
+    && !store.testerRewards.some(r => r.kind === 'mission' && r.clientId === u.id)
+    && testerProgress(store, u.id).completedCount === 5);
   const reuse = candidates.filter(u => store.orderSurveys.some(s => s.clientId === u.id && s.rewardVoucherId)).length;
   console.log(JSON.stringify({ eligibleCompletedUnawarded: candidates.length, reuseSurveyVoucher: reuse,
     newVouchers: candidates.length - reuse, newFaceValueMinor: (BigInt(candidates.length - reuse) * 1500n).toString(),

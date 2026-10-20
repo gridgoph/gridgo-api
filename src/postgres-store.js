@@ -1,3 +1,4 @@
+import { testerProgramTables, emptyTesterProgram, testerProgramRows, loadTesterProgramRows } from './tester-program-store.js';
 import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from './founding-tester-store.js';
 import { enforceReviewData, labelReviewNotifications } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
@@ -108,6 +109,7 @@ const TABLES = [
   ...voucherTables,
   surveyTable,
   foundingTesterTable,
+  ...testerProgramTables,
   ...checkoutExitTables,
   supplierInvoiceTable,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
@@ -136,6 +138,7 @@ export function emptyStore() {
     supplierInvoices: [],
     surveyLaunchedAt: null,
     foundingTesters: [],
+    ...emptyTesterProgram(),
     supplierPerformanceLaunchedAt: null,
     supplierPerformanceEvents: [],
     version: 3,
@@ -215,6 +218,7 @@ function rowsFromStore(store) {
   performanceRows(store, rows);
   surveyRows(store, rows);
   foundingTesterRows(store, rows);
+  testerProgramRows(store, rows);
   checkoutExitRows(store, rows);
   supplierInvoiceRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
@@ -905,6 +909,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadPerformanceRows(store, loaded);
   loadSurveyRows(store, loaded);
   loadFoundingTesterRows(store, loaded);
+  loadTesterProgramRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;

@@ -4,7 +4,7 @@ Server contract for report **63AFAA4A**, tracked in [gridgo-api#204](https://git
 
 ## Identity and storage
 
-All routes require a Clerk session and database membership. `/admin/*` below requires Super Admin; Operations has only the explicit read-only lookup. Clients can read and redeem only their own vouchers. Email matching finds existing client memberships; it never provisions users, links identities, or changes roles. No transfer, cash conversion, minimum-order rule, percentage voucher, free-delivery type, or referral mechanic exists.
+All routes require a Clerk session and database membership. `/admin/*` below requires Super Admin; Operations has only the explicit read-only lookup. Clients can read and redeem only their own vouchers. Email matching finds existing client memberships; it never provisions users, links identities, or changes roles. No transfer, cash conversion, minimum-order rule, percentage voucher or free-delivery type exists. The Founding Tester referral programme below is the only automatic invite reward.
 
 Migration `1791975600000` creates `voucher_campaigns`, `vouchers`, `voucher_reservations`, `voucher_redemptions`, append-only `voucher_ledger`, `voucher_code_attempts`, `voucher_cart_choices`, and `voucher_email_outbox`. Identity, lifecycle, limits, and money are relational columns. Bounded reservation order IDs, refund decisions and reminder timestamps are JSONB snapshots. The existing domain transaction/advisory lock serializes every mutation, including campaign caps and code claims. Unique constraints enforce one wallet item per account/campaign, one live reservation per voucher/cart, and one current consumption per voucher. Money, ledger, audit and notifications commit together.
 
@@ -195,7 +195,7 @@ version conflicts and audit behavior are unchanged. Invalid timestamps return
 `400 invalid_founding_tester_launch_at`. Review-data accounts cannot earn rewards;
 review-data orders never count, even after their owner is unmarked.
 
-Three account missions, in order, with no minimum order size:
+The current five-step contract is [Founding Tester path and invites](FOUNDING_TESTER_API.md). It adds `added` (observed cart/checkout line) before placement and `tracked` (owned tracking-screen acknowledgement) after placement to these existing qualifying-order facts, with no minimum order size:
 
 1. `placed`: initial order payment confirmed, including a basket group's shared
    payment confirmation. An unconfirmed submission does not count.
@@ -224,7 +224,7 @@ existing settlement body; when supplied it is preserved in the immutable snapsho
 It remains required for voucher refunds. Unknown historical fault is never inferred
 from free text, the refund requester, or a staff cancellation actor.
 
-Once awarded, progress remains 3/3 and the label stays earned. Later changes cannot
+Once awarded, progress remains 5/5 and the label stays earned. Later changes cannot
 mint another entitlement. Existing reason-required staff voucher voiding remains
 the way to revoke an unused reward; it does not reset the missions.
 
@@ -243,8 +243,7 @@ shared `publicUser`, order, shop, supplier or rider projections.
 | `GET /ops/founding-testers?offset=0&limit=100` | Operations/Super Admin dashboard; `{serverTime,total,clients:[{clientId,name,foundingTester}]}` |
 
 The dashboard is read-only and includes eligible and ineligible client memberships.
-Pagination defaults to 100, maximum 500. It includes no invite or spending/export
-features. A supplier/rider directory row never contains the field, even when the
+Pagination defaults to 100, maximum 500. Invite counts, reward states and the monthly budget are added by [the current contract](FOUNDING_TESTER_API.md); tester CSV export remains deferred. A supplier/rider directory row never contains the field, even when the
 same identity also has a client membership; request `role=client` for that membership.
 `foundingTester` filter values other than true/false return
 `400 invalid_founding_tester_filter`; invalid dashboard pagination returns
@@ -258,17 +257,17 @@ private owner code, expiry and current availability):
   "eligible": true,
   "label": "Founding Tester",
   "awardedAt": "2026-10-20T08:00:00.000Z",
-  "missions": {"placed":true,"received":true,"rated":true},
-  "completedCount": 3,
+  "missions": {"added":true,"placed":true,"tracked":true,"received":true,"rated":true},
+  "completedCount": 5,
   "rewardStatus": "issued",
   "reward": {"id":"vch_...","valueMinor":1500,"expiresAt":"2026-11-19T08:00:00.000Z"}
 }
 ```
 
 Before completion, label/awardedAt/reward are null and rewardStatus is `pending`
-or `ineligible`. `existing_survey_reward` means the existing survey voucher was
+or `ineligible`; budget holds add `paused` and staff voiding adds `voided`. See the current contract for these states. `existing_survey_reward` means the existing survey voucher was
 reused; no new money or expiry was promised. A completed historical account can
-briefly appear 3/3 with no label in a staff read before its own profile reconciliation.
+briefly appear 5/5 with no label in a staff read before its own profile reconciliation.
 Use `awardedAt` as the stable celebration identifier; repeated profile loads and
 survey retries must not replay a reward animation. Refetch the profile and wallet
 after submission or an `identity` invalidation. Profile reconciliation is automatic
@@ -276,7 +275,7 @@ and limited to the signed-in client; staff list reads never award in bulk.
 
 ### One entitlement and survey compatibility
 
-For eligible clients, the ₱15 survey reward is earned **only through the three
+For eligible clients, the ₱15 survey reward is earned **only through the five
 missions**, once per account. Subsequent surveys remain available but never issue
 another survey or tester voucher, even after seven days, expiry, use or voiding.
 Clients outside the cutoff retain the existing survey reward and seven-day cooldown.

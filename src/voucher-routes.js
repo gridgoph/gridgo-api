@@ -1,3 +1,4 @@
+import { voidTesterReward } from './tester-rewards.js';
 import { identityHasMembership } from './authorization-context.js';
 import { initVouchers, voucherFail as fail, normalizeVoucherCode, generatedVoucherCode, issueVoucher, addVoucherCode,
   publicVoucher, voucherEvent, releaseVoucherReservations } from './vouchers.js';
@@ -91,7 +92,7 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
       return result({ campaign: created }, true, 201);
     }
     if (!campaign) fail(404, 'voucher_campaign_not_found');
-    if (['survey', 'founding_tester'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
+    if (['survey', 'founding_tester', 'tester_referral'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
     if (req.method === 'PATCH' && !campaigns[2]) {
       if (campaign.status !== 'draft' || store.vouchers.some(v => v.campaignId === campaign.id)) fail(409, 'voucher_campaign_immutable');
       const input = campaignInput({ ...campaign, ...object(await readBody(req)) }, at);
@@ -136,6 +137,12 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
     const voucher = store.vouchers.find(v => v.id === item[1]);
     if (!voucher) fail(404, 'voucher_not_found');
     const body = object(await readBody(req)), why = reason(body);
+    const testerReward = store.testerRewards?.find(r => [r.voucherId, r.inviterVoucherId].includes(voucher.id));
+    if (testerReward && item[2] === 'reissue') fail(409, 'tester_reward_managed');
+    if (testerReward && item[2] === 'void') {
+      voidTesterReward(store, testerReward, why, { id, at, actorId: user.id });
+      return result({ voucher: publicVoucher(store, voucher, at) }, true);
+    }
     if (item[2] === 'void') {
       if (voucher.status !== 'available') fail(409, 'voucher_not_voidable');
       if (store.voucherReservations.some(r => r.voucherId === voucher.id && r.status === 'reserved' && r.data.orderIds?.length)) fail(409, 'voucher_payment_reconciliation_required');
