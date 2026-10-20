@@ -5422,14 +5422,18 @@ test('operating hours settings require Super Admin/version/reason, persist with 
   try {
     const current = (await request(instance.api, '/settings', { subject: 'clerk_super' })).body;
     assert.equal(current.operatingStatus.isOpenNow, true);
+    assert.equal(current.settings.operatingHours.sameDayPromiseAllowanceMinutes, 120);
     const today = new Date(Date.now() + 480 * 60000).toISOString().slice(0, 10);
     const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
-    const closed = { ...open, sameDayReviewMinutes: 45, priorityDispatchCutoffMinute: 900,
+    const closed = { ...open, sameDayReviewMinutes: 45, sameDayPromiseAllowanceMinutes: 180, priorityDispatchCutoffMinute: 900,
       schedule: { ...open.schedule, closures: [{ startDay: today, endDay: tomorrow }] } };
     const patch = (body, subject = 'clerk_super') => request(instance.api, '/settings', { method: 'PATCH', subject, body });
     const input = { expectedVersion: current.version, reason: 'Temporary office closure', operatingHours: closed };
     assert.equal((await patch(input, 'clerk_ops')).status, 403);
     assert.equal((await patch(input, 'clerk_client')).status, 403);
+    for (const subject of ['clerk_supplier', 'clerk_rider']) assert.equal((await patch(input, subject)).status, 403);
+    for (const margin of [-1, 601, 1.5, null, '120']) assert.equal((await patch({ ...input,
+      operatingHours: { ...closed, sameDayPromiseAllowanceMinutes: margin } })).body.error, 'invalid_operating_hours');
     assert.equal((await patch({ ...input, reason: '' })).body.error, 'settings_reason_required');
     assert.equal((await patch({ ...input, operatingHours: null })).body.error, 'invalid_operating_hours');
     const updated = await patch(input);
@@ -5457,10 +5461,11 @@ test('operating hours settings require Super Admin/version/reason, persist with 
     await database.query("UPDATE orders SET state = 'ready_for_dispatch' WHERE id = 'ord_payout'");
     const dispatch = await request(instance.api, '/dispatch/ord_payout/accept', { method: 'POST', subject: 'clerk_rider', body: {} });
     assert.equal(dispatch.body.error, 'outside_operating_hours');
-    const {sameDayReviewMinutes, ...oldEditorHours} = closed;
+    const {sameDayReviewMinutes, sameDayPromiseAllowanceMinutes, ...oldEditorHours} = closed;
     const preserved = await patch({expectedVersion: current.version + 1, reason: 'Older editor saves hours', operatingHours: oldEditorHours});
     assert.equal(preserved.status, 200);
     assert.equal(preserved.body.settings.operatingHours.sameDayReviewMinutes, 45);
+    assert.equal(preserved.body.settings.operatingHours.sameDayPromiseAllowanceMinutes, 180);
   } finally {
     instance.child.kill('SIGTERM');
     await new Promise(resolve => instance.child.once('exit', resolve));

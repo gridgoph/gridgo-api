@@ -35,6 +35,7 @@ export function fixture({ express = false } = {}) {
     files: [], orders: [], orderJobs: [], orderLineItems: [], orderLineItemOptions: [], jobQaChecklist: [], orderInvoices: [],
     notifications: [], auditLog: [], shopReviews: [],
   };
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 60;
   addShop(store, "shop_a", { express });
   addShop(store, "shop_b", { lat: 7.09, lng: 125.63 });
   store.files.push(

@@ -41,6 +41,8 @@ const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
 /** One working day, until Operations sets its own. See `projectFinish`. */
 const DEFAULT_ALLOWANCE_MINUTES = 600;
 
+const FINISHED_ORDER_STATES = new Set(['picked_up', 'out_for_delivery', 'delivered', 'issue_window_open', 'completed', 'cancelled', 'payout_released']);
+
 const ACTIVE_JOB_STATES = new Set([
   "needs_qa",
   "client_correction",
@@ -49,8 +51,6 @@ const ACTIVE_JOB_STATES = new Set([
   "supplier_self_qc",
   "ready_for_dispatch",
   "rider_assigned",
-  "picked_up",
-  "out_for_delivery",
 ]);
 
 export class MatchError extends Error {
@@ -152,16 +152,33 @@ function fromPrice(listings) {
  * checkout writes, and orders assigned to the shop directly. One of those is on
  * its way out, and counting only one of them would understate a real queue.
  */
+function productionQueueEligible(order, supplierId) {
+  if (!order) return true; // Synthetic draft reservations have no parent yet.
+  if (FINISHED_ORDER_STATES.has(order.state)) return false;
+  const recovery = order.shopRecovery;
+  // Recovery withdraws work from the failed shop even while payment/refund or
+  // client consent keeps the order's ordinary lifecycle state unchanged.
+  return !recovery || recovery.originalSupplierId !== supplierId
+    || (recovery.status === 'accepted' && order.supplierId === supplierId);
+}
+
 function queueMinutesFor(store, supplierId, fallbackHours) {
   const supplier = store.users?.find(user => user.id === supplierId);
-  const orderScope = orderId => sameReviewData(store.orders?.find(order => order.id === orderId), supplier);
-  const jobs = (store.orderJobs || []).filter(
-    (job) => orderScope(job.orderId) && job.supplierId === supplierId && ACTIVE_JOB_STATES.has(job.state),
+  const ordersById = new Map((store.orders || []).map(order => [order.id, order]));
+  const orderScope = orderId => sameReviewData(ordersById.get(orderId), supplier);
+  const relatedJobs = (store.orderJobs || []).filter(job => job.supplierId === supplierId && orderScope(job.orderId));
+  const jobs = relatedJobs.filter(
+    (job) => ACTIVE_JOB_STATES.has(job.state)
+      // Parent state is authoritative even when an older transition left a stale job.
+      // Synthetic draft jobs have no parent yet and still reserve queue capacity.
+      && productionQueueEligible(ordersById.get(job.orderId), supplierId),
   );
   const orders = (store.orders || []).filter(
     (order) => orderScope(order.id) && order.supplierId === supplierId
-      && ACTIVE_JOB_STATES.has(order.state)
-      && !jobs.some((job) => job.orderId === order.id),
+      && (ACTIVE_JOB_STATES.has(order.state)
+        || (order.state === 'supplier_assigned' && order.shopRecovery?.status === 'accepted'))
+      && productionQueueEligible(order, supplierId)
+      && !relatedJobs.some((job) => job.orderId === order.id),
   );
   const hours = [...jobs, ...orders].reduce((total, row) => {
     const estimate = Number.isFinite(row.estimatedHours) && row.estimatedHours > 0
@@ -230,7 +247,7 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, turnarou
       units: Number.isSafeInteger(units) && units > 0 ? units : null, capacityDaily: capacityDaily || null });
     projection.review = review;
     projection.promiseBy = dispatchReadyAt(store.settings, addOpeningMilliseconds(operatingHours(store.settings).schedule,
-      projection.readyBy, allowanceMinutesFrom(store.settings) * 60000));
+      projection.readyBy, (sameDay ? operatingHours(store.settings).sameDayPromiseAllowanceMinutes : allowanceMinutesFrom(store.settings)) * 60000));
     if (schedulingDay(projection.promiseBy) === schedulingDay(now) && deadlineDayReason(store.settings, projection.promiseBy, now)) {
       const tomorrow = new Date(Date.parse(`${schedulingDay(now)}T00:00:00+08:00`) + 86400000).toISOString();
       projection.promiseBy = dispatchReadyAt(store.settings, tomorrow);
@@ -573,6 +590,8 @@ export function matchShop(store, input = {}) {
   const reasonKey = decidingFactor(winner, runnerUp, ranking) || "vetted";
   const alternativesCount = rows.length - 1;
 
+  // Internal capture keeps supplier production timing out of client projections.
+  for (const row of rows) for (const choice of row.choices) input.onOffer?.(choice.listing.id, choice.projection);
   const distanceZone = winner.distance == null ? null : distanceZoneForDistance(winner.distance, store.settings);
   const rating = publicShopRating(store, winner.supplierId);
   return {

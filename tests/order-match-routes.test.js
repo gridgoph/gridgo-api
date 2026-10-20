@@ -161,6 +161,7 @@ for (const queued of [false, true]) {
     const at = "2026-09-25T08:00:00.000Z"; // Friday 16:00 in Davao.
     const call = caller(store, client, at);
     store.settings.promiseAllowanceMinutes = 60;
+    store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 60;
     Object.assign(store.supplierServices[0], { turnaroundHours: 3, standardTurnaroundHours: 3 });
     store.supplierProfiles[0].schedule = {
       utcOffsetMinutes: 480,
@@ -208,6 +209,7 @@ test("cart promise uses quantity capacity, closures, and the current request tim
   const { store, client } = fixture();
   const call = caller(store, client, "2026-09-25T08:00:00.000Z");
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   Object.assign(store.supplierServices[0], { standardTurnaroundHours: 3, capacityDaily: 100 });
   store.supplierProfiles[0].schedule = {
     utcOffsetMinutes: 480,
@@ -1090,7 +1092,7 @@ test("anonymous alternatives select the right shop with request-bound tokens and
   assert.equal((await call("POST", `/me/carts/${cart.id}/lines`, { ...selection, selectToken: match.listings[0].selectToken })).status, 201);
 });
 
-test("token selection rechecks changed listing availability and deadline", async () => {
+test("token selection honours the offered deadline despite new queue work and rechecks listing availability", async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
   const deadline = "2026-08-29T00:00:00.000Z";
@@ -1098,7 +1100,9 @@ test("token selection rechecks changed listing availability and deadline", async
   const cart = (await call("POST", "/me/carts", {})).body.cart;
   const body = { selectToken: match.otherListings[0].selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [] };
   store.orderJobs.push({ id: "new_queue", supplierId: "supplier_b", state: "production", estimatedHours: 300 });
-  await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, body), (e) => e.code === "deadline_not_met");
+  const added = await call("POST", `/me/carts/${cart.id}/lines`, body);
+  assert.equal(added.status, 201);
+  assert.equal(added.body.cart.groups[0].readyBy, match.otherListings[0].readyBy);
   store.catalogItems.find((row) => row.id === "item_b").active = false;
   await assert.rejects(call("POST", `/me/carts/${cart.id}/lines`, body), (e) => e.code === "catalog_item_stale");
 });
@@ -1295,6 +1299,7 @@ test('basket payment reconciliation never restarts a cancelled group', async () 
 test('add-more matching filters capacity already consumed by the same draft group', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   const service = store.supplierServices.find((row) => row.supplierId === 'supplier_a');
   Object.assign(service, { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
   const call = caller(store, client);
@@ -1309,6 +1314,7 @@ test('add-more matching filters capacity already consumed by the same draft grou
 test('cart group listings count combined capacity and each product minimum quantity', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   Object.assign(store.supplierServices[0], { capacityDaily: 10, turnaroundHours: 1, standardTurnaroundHours: 1 });
   store.catalogItems.find(row => row.id === 'item_a2').minimumOrderQuantity = 10;
   const call = caller(store, client);
@@ -1329,6 +1335,7 @@ test('cart group listings count combined capacity and each product minimum quant
 test('cart group listings use the selected group date and count earlier draft groups at that shop', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
   store.settings.operatingHours.priorityDispatchCutoffMinute = 1020;
   Object.assign(store.supplierServices[0], { capacityDaily: 100, turnaroundHours: 7, standardTurnaroundHours: 7 });
   const call = caller(store, client);

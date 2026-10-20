@@ -13,6 +13,7 @@ export const actors = { client: { id: 'client', role: 'client' }, supplier: { id
 export function fixture() {
   const store = emptyStore();
   store.settings = { ...defaultOperationalSettings(), promiseAllowanceMinutes: 60 };
+  store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 60;
   store.taxonomy.categories = [{ id: 'category', code: 'marketing_collateral', name: 'Marketing', active: true }];
   store.taxonomy.subcategories = [{ id: 'family', code: 'flyers', categoryCode: 'marketing_collateral', name: 'Flyers', active: true }];
   store.acceptedFileFormats = [{ code: 'pdf', displayName: 'PDF', inputKind: 'file', extensions: ['pdf'], mimeTypes: ['application/pdf'], active: true }];

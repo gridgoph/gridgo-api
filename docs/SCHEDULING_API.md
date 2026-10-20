@@ -265,3 +265,74 @@ an original duration. Legitimate old one-day settings can also need confirmation
 This migration and all production-time edits write listing metadata only.
 Placed/live order promises, duration snapshots, shop clocks, fees and speed-tier
 prices are untouched. Changing a listing affects future estimates only.
+
+## Queue lifecycle repair
+
+Queue estimates check both the per-shop job and its parent order. Picked-up,
+in-transit, delivered, issue-window, completed and cancelled work cannot consume
+queue minutes or a queue position even when an older transition left an active
+job row. Shop cancellation, decline and timeout withdraw work from the original
+shop throughout recovery and pending refunds; accepted replacement work counts
+at its replacement shop. The same rule applies to direct orders, and a closed
+job cannot return through the direct-order fallback. Active payment/QA work is
+counted once; draft group work still consumes capacity. The parent
+check is the scheduling boundary, so new lifecycle routes cannot reintroduce
+finished work by missing a compatibility-job update.
+
+Follow-up migration `1792503000000_withdrawn_production_queue_backfill` closes
+original-shop recovery jobs (including refund-pending and stale accepted
+recovery rows), preserves replacement jobs, and completes legacy payout-released
+jobs. It is repeatable and changes only job state/update timestamps.
+
+Migration `1792502000000_order_job_queue_backfill` brings stale nonterminal jobs
+forward to their order's pickup/delivery/terminal state. Already completed or
+cancelled jobs stay closed. Repeating the backfill changes nothing further.
+It never changes orders, promised dates, prices, fees or duration snapshots.
+
+## Selection-token promise window
+
+The match selection token guarantees that listing's offered production ready-by
+and client promise for its existing **15-minute** lifetime. Cart add, cart reads
+(line `promiseBy` and group `readyBy`/`scheduling`) and checkout use the stored
+offer for unchanged selected work, including a Tight offer that would cross the
+16:00 dispatch cutoff if recalculated minutes later. Checkout/order client
+`readyBy` and `scheduling.readyBy` carry the honoured client promise; the shop
+retains the original internal production ready-by.
+
+The guarantee is server-owned, persisted with the selection, and bound to the
+client, cart, shop/deadline group, selected quantity/tier, and all same-shop draft
+work that influenced the offer: its own group plus earlier-deadline groups (all
+dated groups for an undated offer). This workload is checked when adding the
+selection and again before checkout materializes any group orders. Adding,
+editing or deleting relevant earlier work invalidates affected later offers and
+uses the current recheck. Unchanged groups keep their offered dates even while
+checkout reserves earlier groups, and external customers' intervening queue work
+does not invalidate a still-valid offer. Changing selected work requires a fresh
+estimate. It does not reserve prices or
+bypass listing availability, artwork, payment or authorization checks. At or
+after `selectTokenExpiresAt`, checkout uses the current queue/calendar recheck
+and can return `409 deadline_not_met`. Adding an expired token still returns
+`410 select_token_expired`. Older selections without an offer snapshot keep the
+current recheck. No existing order promise is recalculated.
+
+## Same-day promise margin control
+
+`GET /settings` returns `settings.operatingHours.sameDayPromiseAllowanceMinutes`,
+default **120 working minutes** even for older settings rows. Super Admin can
+change it through the existing `PATCH /settings` by sending the full
+`operatingHours` object plus `expectedVersion` and a nonempty `reason`.
+Allowed values are integers **0–600**, inclusive; null, strings, fractions and
+out-of-range values return `400 invalid_operating_hours`. Operations, suppliers,
+riders and clients receive `403 forbidden` on PATCH. A stale version returns
+`409 settings_version_conflict`.
+
+This margin is added after production using GRIDGO's working calendar, before
+the existing dispatch cutoff is applied. Same-day production is the scheduler's
+existing duration shorter than one shop working day, including exact-hour
+listings and shorter listed tiers. The usual review, shop queue and closure
+rules still apply. Days-based production keeps its existing promise margin
+(default 600 working minutes); no price or fee changes. Older editors that omit
+the field preserve the current value. Settings changes use the existing
+`settings.operational_update` audit with previous/current settings and affect
+future estimates only; accepted order promises and unexpired selection-token
+offers stay fixed.
