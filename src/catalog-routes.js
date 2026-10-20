@@ -411,20 +411,24 @@ function pricingFields(body, current = {}, minutes = 600) {
   if (!["inherit", "override"].includes(turnaroundMode)) {
     fail(400, "invalid_catalog_item", "turnaroundMode must be inherit or override.", { field: "turnaroundMode" });
   }
-  const maximum = productionDuration(body, current, "turnaround", minutes);
-  const minimum = productionDuration(body, current, "minimumTurnaround", minutes);
+  // A validated choice may represent long legacy exact hours. Do not run its
+  // canonical minutes back through the legacy sub-day minute-picker validator.
+  const duration = Object.hasOwn(body, "productionTime") ? productionTimeFields(body.productionTime, minutes) : {
+    ...productionDuration(body, current, "turnaround", minutes),
+    ...productionDuration(body, current, "minimumTurnaround", minutes),
+  };
   if (turnaroundMode === "inherit") {
-    maximum.turnaroundDays = maximum.turnaroundMinutes = maximum.turnaroundHours = null;
-    minimum.minimumTurnaroundDays = minimum.minimumTurnaroundMinutes = minimum.minimumTurnaroundHours = null;
-  } else if (maximum.turnaroundMinutes == null) {
+    duration.turnaroundDays = duration.turnaroundMinutes = duration.turnaroundHours = null;
+    duration.minimumTurnaroundDays = duration.minimumTurnaroundMinutes = duration.minimumTurnaroundHours = null;
+  } else if (duration.turnaroundMinutes == null) {
     fail(400, "invalid_catalog_item", "A production duration is required when overriding production time.", { field: "turnaroundDays" });
-  } else if (minimum.minimumTurnaroundMinutes != null && minimum.minimumTurnaroundMinutes > maximum.turnaroundMinutes) {
+  } else if (duration.minimumTurnaroundMinutes != null && duration.minimumTurnaroundMinutes > duration.turnaroundMinutes) {
     fail(400, "invalid_catalog_item", "Minimum production time cannot exceed the maximum.", { field: "minimumTurnaroundDays" });
   }
   return {
     pricingUnit, packageQty, measureUnit,
     minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
-    turnaroundMode, ...maximum, ...minimum,
+    turnaroundMode, ...duration,
   };
 }
 

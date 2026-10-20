@@ -385,3 +385,8 @@ prices are unchanged. Check the reminder queue through
 `GET /ops/catalog-items?productionTimeReview=required`. The additive editor,
 shared-calendar preview and shop-scoped bulk contract are in
 [Scheduling](SCHEDULING_API.md#release-2-one-production-time-question).
+Also apply `1792501100000_production_time_review_evidence`. It repairs reminder
+classification on databases that already applied the initial conversion,
+without replaying that conversion or changing orders/prices. Older correction
+audits without historical day-length evidence are conservatively flagged;
+the scheduling contract documents those cases and confirmed-reminder preservation.

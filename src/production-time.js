@@ -11,7 +11,11 @@ export function productionTimeFields(choice, dayMinutes) {
   let minimum, maximum, minDays = null, maxDays = null;
   if (choice.mode === 'same_day') {
     if (Object.keys(choice).some(key => !['mode', 'hours'].includes(key)) || typeof choice.hours !== 'number') invalid();
-    minimum = maximum = choice.hours * 60;
+    // API reads divide canonical integer minutes by 60. Multiplying a returned
+    // value (e.g. 31 / 60) can introduce a fractional floating-point residue.
+    // Accept exactly that round trip, without rounding actual fractional minutes.
+    minimum = maximum = Math.round(choice.hours * 60);
+    if (choice.hours !== maximum / 60) invalid();
   } else if (choice.mode === 'days') {
     if (Object.keys(choice).some(key => !['mode', 'minDays', 'maxDays'].includes(key))
       || !Number.isSafeInteger(choice.minDays) || !Number.isSafeInteger(choice.maxDays)

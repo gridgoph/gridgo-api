@@ -1,3 +1,5 @@
+import { productionTimeCorrectionEvidence } from './helpers/production-time-review-evidence.js';
+
 /** Listing-only release 2 adapter. Never update orders, jobs or immutable line snapshots. */
 export async function up(pgm) {
   pgm.sql(`
@@ -28,10 +30,7 @@ export async function up(pgm) {
             (turnaround_mode = 'override' AND (turnaround_days = 1 OR minimum_turnaround_days = 1))
             OR (turnaround_mode = 'inherit' AND CASE WHEN standard_turnaround_hours IS NOT NULL
                 THEN standard_turnaround_days ELSE service_days END = 1)
-            OR EXISTS (SELECT 1 FROM audit_log a WHERE a.action = 'production_time.correct_39853344'
-              AND a.data #>> '{detail,duration,oldMinutes}' = production_day_minutes(source.shop_schedule)::text
-              AND ((a.entity_type IN ('catalogItems', 'approvedCatalogItems') AND a.entity_id = source.id)
-                OR (source.turnaround_mode = 'inherit' AND a.entity_type = 'supplierServices' AND a.entity_id = source.supplier_service_id)))
+            OR ${productionTimeCorrectionEvidence}
           ) THEN 'legacy_one_working_day' END,
           CASE WHEN express AND (maximum_minutes IS NULL OR maximum_minutes <= 0) THEN 'express_missing_hours' END
         ]::text[], NULL) AS reasons

@@ -168,10 +168,14 @@ Shop app and shop web use the same additive `productionTime` object on
 { "productionTime": { "mode": "days", "minDays": 1, "maxDays": 3 } }
 ```
 
-Hours must be positive and resolve to whole minutes (e.g. 1.5); days are
-positive whole shop working days, minimum no greater than maximum. Invalid or
+Hours must be JSON numbers, positive and resolve to whole minutes (e.g. 1.5);
+days are positive whole shop working days, minimum no greater than maximum.
+Each resulting duration must be at most 2,147,483,647 minutes. Exact hours,
+including legacy or converted Express durations of one working day or more,
+are accepted identically by create, PATCH, preview and bulk apply. Do not round
+these returned choices to whole days. Invalid or
 mixed choices return `400 invalid_production_time`. Do not send legacy duration
-fields or `express` alongside `productionTime`. Same day uses exact hours;
+fields or `express` alongside `productionTime`. The `same_day` editor mode uses exact hours;
 it does not bypass queue, shop closures, GRIDGO review, dispatch or delivery.
 The preview can therefore show a later date. The legacy duration fields remain
 accepted and returned. The new choice sets `turnaroundMode: "override"` and
@@ -208,7 +212,11 @@ also clear it when they explicitly save a usable production duration.
 Operations/Super Admin membership gate and returns the existing paginated
 `{ items: [{ shop, item }], shops, total, nextCursor? }` shape, including each
 item's review reasons. Existing supplier, category, search and price filters
-still apply. Supplier/client calls are forbidden.
+still apply. Supplier/client calls are forbidden. Any other
+`productionTimeReview` value returns `400 invalid_catalog_query`.
+`total` counts filtered listings; `shops` remains the full shop selector,
+including shops without reminders. Filter names, page sizes and opaque cursor
+rules are in [Staff listing index](SUPPLIER_CATALOG_API.md#staff-listing-index-and-take-down).
 
 ### Preview before saving
 
@@ -221,9 +229,30 @@ choice in query parameters and a display horizon `days` from 1 through 120
 closed-day reasons and ISO `readyBy` clock times for Asia/Manila display.
 `scheduling` supplies the proposed listing's earliest and secured estimates.
 Preview uses only this listing, current queue/hours/settings and existing
-listed faster tiers at default quantity. It also works for drafts and hidden
+listed faster tiers at quantity `minimumOrderQuantity ?? 1` from the approved
+listing (or the draft if there is no approved version). It also works for drafts and hidden
 listings; it is advisory and grants no matching eligibility or reservation.
 No request-supplied clock, price or additional fee is supported.
+The proposed choice clears Express, so `calendar.expressAvailable` is always
+false. `scheduling.sameDay` describes effort shorter than a shop working day;
+it is not inferred from the editor mode's name. A long legacy exact-hours
+choice can therefore have `mode: "same_day"` and `scheduling.sameDay: false`.
+
+Preview failures are HTTP errors, not an empty successful calendar:
+
+| Status / error | Meaning |
+| --- | --- |
+| `400 invalid_production_time` | Missing/invalid choice, mixed mode fields, unknown or repeated query keys, or non-integer/out-of-range `days`. |
+| `401 unauthorized` | No authenticated API identity; invalid/unmapped Clerk sessions follow the existing authentication contract. |
+| `403 forbidden` | No supplier membership or the listing belongs to another shop; account holds can also deny access through the existing identity gate. |
+| `404 catalog_item_not_found` | The listing no longer exists. |
+| `409 production_day_length_unavailable` | Shop hours do not have a consistent working-day length; repair hours before previewing or saving a choice. |
+| `409 shop_never_open` | The bounded availability calendar cannot fit the work/queue or find an opening; this is not a reservation or a successful date estimate. |
+
+Both valid same-day and day-range choices require usable shop hours. Stored
+malformed schedules can also return the existing `400 invalid_schedule`.
+Ordinary impossible dates inside a successful calendar retain the release-1
+`not_possible` statuses and reasons above.
 
 ### Use for all my listings
 
@@ -237,7 +266,10 @@ No request-supplied clock, price or additional fee is supported.
 ```
 
 Include every own listing ID/version from the shop's list, including hidden
-and draft listings. A missing/extra ID or stale version returns
+and draft listings. Fetch **all pages** of `GET /me/catalog-items` without `q`,
+`active`, or `subcategoryCode` filters; the currently visible board page is not
+the complete version set. See [Own listing search and pagination](SUPPLIER_CATALOG_API.md#shop-self-service).
+Version values are JSON numbers, not strings. A missing/extra ID or stale version returns
 `409 catalog_items_stale` and applies nothing; refresh the list and retry.
 Returns `{ items, total }` with the updated private projections and versions.
 The transaction updates only the caller's listings, clears their reminders,
@@ -245,10 +277,17 @@ and audits each edit as `catalog_item.update` with previous/current production
 fields and `bulk: true`. It does not alter services, review/visibility holds,
 listed tiers or prices. New production-time edits apply immediately like the
 existing duration edits, including listings with pending price revisions.
+A shop with no listings can send `expectedVersions: {}` and a valid choice;
+the result is `{ "items": [], "total": 0 }`. There is no separate idempotency
+key: after a successful apply, retrying the old versions returns
+`409 catalog_items_stale`; refresh all pages before retrying. Bulk choice
+validation uses `400 invalid_production_time`, as do create, PATCH and preview.
+Existing create/PATCH errors for unrelated listing fields remain unchanged.
 
 ### Migration and historical promises
 
-Apply `1792501000000_production_time_choice` before this API. Express listings
+Apply `1792501000000_production_time_choice` and
+`1792501100000_production_time_review_evidence` before this API. Express listings
 with a usable effective duration become exact-hour Same day listings and keep
 their production duration; the retired boolean becomes false. Express listings
 without a usable duration retain the boolean and receive
@@ -258,9 +297,29 @@ Migration `1791936000000_production_days` recorded canonical day values but
 no original-hour or per-row rounding marker. The new migration conservatively
 flags one-day rows that existed at that migration's recorded `pgmigrations`
 run time and still carry one-day values;
-inherited one-day service durations and audited historical corrections are
-included. This reminder asks the shop to confirm; it never guesses or restores
-an original duration. Legitimate old one-day settings can also need confirmation.
+inherited one-day service durations and relevant audited historical corrections
+are included. Service correction evidence must name the actual inherited prefix:
+`standardTurnaround` when selected, otherwise `turnaround`. An unused fallback,
+unused standard, or `rushTurnaround` correction does not classify the listing.
+
+New correction audits retain `detail.duration.oldDays` and
+`detail.duration.productionDayMinutes` from correction time. Classification
+uses that old day count, or the recorded divisor when only that is available,
+never today's schedule. Older correction audits lack both; relevant corrections
+are conservatively flagged even when they might originally have spanned more
+than one day. This reminder asks the shop to confirm; it never guesses or
+restores an original duration. Legitimate old one-day settings can also need confirmation.
+
+The initial conversion's evidence predicate is corrected for first deployment.
+The forward repair handles databases that already ran the earlier version:
+it adds missed evidence-based reminders, removes provably unrelated inherited
+service reminders, and preserves confirmations audited after the initial release.
+Already-converted Express rows lost their prior mode/day count, so an ambiguous
+existing reminder is retained conservatively. The repair changes only reminder
+metadata and listing versions, never replays the Express/duration conversion,
+and changes no rows on a second manual data-repair run. Normal migration-runner
+retries skip completed migrations. Neither migration has a destructive `down`;
+further corrections must use a forward migration.
 
 This migration and all production-time edits write listing metadata only.
 Placed/live order promises, duration snapshots, shop clocks, fees and speed-tier

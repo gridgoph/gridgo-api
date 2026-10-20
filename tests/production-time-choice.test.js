@@ -150,6 +150,7 @@ test('PostgreSQL forward conversion preserves every order/job/line, flags histor
     // A second Express listing inherits its effective hours from the service.
     store.catalogItems.push({ ...original, id: 'inherited', turnaroundMode: 'inherit', turnaroundHours: null, turnaroundMinutes: null });
     store.catalogItems.push({ ...original, id: 'rounded', express: false, turnaroundDays: 1, turnaroundMinutes: 600, turnaroundHours: 10 });
+    store.catalogItems.push({ ...original, id: 'express_day', turnaroundDays: 1, turnaroundMinutes: 600, turnaroundHours: 10 });
     store.catalogItems.push({ ...original, id: 'new_one_day', express: false, createdAt: '2099-01-01T00:00:00Z', turnaroundDays: 1, turnaroundMinutes: 600, turnaroundHours: 10 });
     store.supplierServices.push({ ...store.supplierServices[0], id: 'service_legacy', turnaroundDays: 1, turnaroundMinutes: 600, turnaroundHours: 10,
       standardTurnaroundDays: 1, standardTurnaroundMinutes: 600, standardTurnaroundHours: 10 });
@@ -170,11 +171,21 @@ test('PostgreSQL forward conversion preserves every order/job/line, flags histor
     const { up } = await import('../migrations/1792501000000_production_time_choice.js');
     const statements = []; await up({ sql: sql => statements.push(sql) });
     for (const sql of statements) await db.query(sql);
+    const { up: repair } = await import('../migrations/1792501100000_production_time_review_evidence.js');
+    const repairs = []; await repair({ sql: sql => repairs.push(sql) });
+    for (const sql of repairs) await db.query(sql);
     for (const table of Object.keys(before)) assert.deepEqual((await db.query(`SELECT * FROM ${table} ORDER BY id`)).rows, before[table], table);
     const loaded = await loadStore(db);
     const converted = loaded.catalogItems.find(row => row.id === original.id);
     assert.equal(converted.express, false);
     assert.equal(converted.minimumTurnaroundMinutes, 60);
+    const expressDay = loaded.catalogItems.find(row => row.id === 'express_day');
+    assert.deepEqual(privateCatalogItem(loaded, expressDay).productionTime, { mode: 'same_day', hours: 10 });
+    await routeSupplierCatalog({ req: { method: 'PATCH', headers: {} }, url: new URL('http://gridgo.test/me/catalog-items/express_day'),
+      store: loaded, user: { id: original.supplierId, role: 'supplier' },
+      readBody: async () => ({ expectedVersion: expressDay.version, productionTime: privateCatalogItem(loaded, expressDay).productionTime }), now: () => AT });
+    assert.equal(expressDay.turnaroundMinutes, 600);
+    assert.equal(expressDay.minimumTurnaroundMinutes, 600);
     assert.deepEqual(privateCatalogItem(loaded, converted).productionTime, { mode: 'same_day', hours: 1.5 });
     assert.equal(privateCatalogItem(loaded, loaded.catalogItems.find(row => row.id === 'inherited')).productionTime.hours, 2);
     assert.equal(loaded.catalogItems.find(row => row.id === other.id).express, true);
@@ -222,4 +233,46 @@ test('preview matches client scheduling for quantity capacity, queue, closures, 
   store.catalogSpeedTiers = [{ id: 'fast', catalogItemId: item.id, label: 'Draft price', turnaroundHours: 1, priceMinor: 9999 }];
   const preview = await call('GET', `/me/catalog-items/${item.id}/production-time-preview?mode=same_day&hours=2&days=14`);
   assert.deepEqual(preview.body.calendar, deadlineDays(store, { subcategoryCode: 'flyers', now: AT, days: 14 }));
+});
+
+for (const [hours, minutes] of [[31 / 60, 31], [2, 120], [10, 600], [30, 1800]]) test(`exact ${minutes}-minute choice has create/edit/preview/bulk parity and round trips`, async () => {
+  const productionTime = { mode: 'same_day', hours };
+  const { store, item, call } = setup();
+  Object.assign(item, { turnaroundMode: 'override', turnaroundHours: hours, turnaroundMinutes: minutes });
+  const returned = privateCatalogItem(store, item).productionTime;
+  assert.deepEqual(returned, productionTime);
+  const preview = await call('GET', `/me/catalog-items/${item.id}/production-time-preview?mode=same_day&hours=${hours}`);
+  assert.deepEqual(preview.body.productionTime, productionTime);
+  const edited = await call('PATCH', `/me/catalog-items/${item.id}`, { expectedVersion: 1, productionTime: returned });
+  assert.deepEqual(edited.body.item.productionTime, productionTime);
+  const created = await call('POST', '/me/catalog-items', { supplierServiceId: item.supplierServiceId,
+    subcategoryCode: 'flyers', name: 'Exact hours', productionTime });
+  assert.deepEqual(created.body.item.productionTime, productionTime);
+  const expectedVersions = Object.fromEntries(store.catalogItems.filter(row => row.supplierId === supplier.id).map(row => [row.id, row.version]));
+  const bulk = await call('POST', '/me/catalog-items/production-time', { productionTime, expectedVersions });
+  assert.ok(bulk.body.items.every(row => row.turnaroundMinutes === minutes && row.minimumTurnaroundMinutes === minutes && row.turnaroundDays === null));
+  assert.deepEqual(bulk.body.items.map(row => row.productionTime), [productionTime, productionTime]);
+  assert.deepEqual((await call('GET', `/me/catalog-items/${item.id}/production-time-preview?mode=same_day&hours=${hours}`)).body.calendar, preview.body.calendar);
+});
+
+test('all four choice paths reject invalid durations with the published error, without mutation', async () => {
+  for (const productionTime of [{ mode: 'same_day', hours: 0 }, { mode: 'same_day', hours: 1.001 },
+    { mode: 'same_day', hours: 40_000_000 }, { mode: 'days', minDays: 3, maxDays: 2 }, { mode: 'days', minDays: 1, maxDays: 4_000_000 }]) {
+    for (const path of ['create', 'edit', 'preview', 'bulk']) {
+      const { store, item, call } = setup(), before = structuredClone(store);
+      const url = path === 'create' ? '/me/catalog-items' : path === 'edit' ? `/me/catalog-items/${item.id}`
+        : path === 'bulk' ? '/me/catalog-items/production-time' : `/me/catalog-items/${item.id}/production-time-preview?${new URLSearchParams(productionTime)}`;
+      await assert.rejects(call(path === 'edit' ? 'PATCH' : path === 'preview' ? 'GET' : 'POST', url,
+        { productionTime, expectedVersion: 1, expectedVersions: { [item.id]: 1 }, supplierServiceId: item.supplierServiceId, name: 'Invalid' }),
+      error => error.status === 400 && error.code === 'invalid_production_time', path);
+      assert.deepEqual(store, before);
+    }
+  }
+});
+
+test('legacy minute-picker validation remains narrower than legacy exact-hour writes', async () => {
+  const { item, call } = setup();
+  await assert.rejects(call('PATCH', `/me/catalog-items/${item.id}`, { expectedVersion: 1, turnaroundMode: 'override', turnaroundMinutes: 600 }), e => e.code === 'invalid_catalog_item');
+  const result = await call('PATCH', `/me/catalog-items/${item.id}`, { expectedVersion: 1, turnaroundMode: 'override', turnaroundHours: 30 });
+  assert.deepEqual(result.body.item.productionTime, { mode: 'same_day', hours: 30 });
 });
