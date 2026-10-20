@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { acknowledgementSnapshot, acknowledgementPdf, ACKNOWLEDGEMENT_NOTE } from '../src/acknowledgement-receipts.js';
+import { acknowledgementSnapshot, acknowledgementPdf, activeAcknowledgementHandover, ACKNOWLEDGEMENT_NOTE } from '../src/acknowledgement-receipts.js';
+import { publicOrderFor } from '../src/operational-model.js';
 
 function fixture(lines = [5005, 5005]) {
   const principal = lines.reduce((a, b) => a + b, 0);
@@ -15,6 +16,33 @@ function fixture(lines = [5005, 5005]) {
   return { order, store: { users: [{ id: 'client', name: 'Client name' }], orderInvoices: [{ orderId: order.id, snapshot }] } };
 }
 const at = '2026-10-21T01:00:00.000Z';
+test('receipt access requires current-assignment arrival and an unfinished door handover', () => {
+  const rider = { id: 'rider', role: 'rider' };
+  const order = { id: 'order', riderId: 'rider', fulfillmentMode: 'delivery', state: 'out_for_delivery', riderAssignedAt: at,
+    riderProgress: { riderId: 'rider', assignedAt: at, events: { arrived: at } } };
+  assert.equal(activeAcknowledgementHandover(order, rider), true);
+  for (const patch of [
+    { fulfillmentMode: 'pickup' }, { state: 'rider_assigned' }, { state: 'completed' }, { state: 'cancelled' },
+    { state: 'issue_window_open' }, { riderId: 'other' }, { riderAssignedAt: '2026-10-21T02:00:00.000Z' },
+    { riderProgress: null }, { deliveryEvidence: { recordedAt: at } }, { handover: { consumedAt: at } },
+    { riderProgress: { riderId: 'rider', assignedAt: at, events: {} } },
+  ]) assert.equal(Boolean(activeAcknowledgementHandover({ ...order, ...patch }, rider)), false);
+  assert.equal(activeAcknowledgementHandover(order, { id: 'other', role: 'rider' }), false);
+  assert.equal(activeAcknowledgementHandover(order, { id: 'rider', role: 'client' }), false);
+});
+test('ordinary rider projections never inline receipt or billing even inside the authorized handover window', () => {
+  const { store, order } = fixture();
+  Object.assign(order, { riderId: 'rider', acknowledgementReceipt: { grandTotalMinor: 16011 },
+    clientItemSubtotalMinor: 11011, grandTotalMinor: 16011, supplementalTotalMinor: 50, totalIncludingSupplementsMinor: 16061,
+    riderProgress: { riderId: 'rider', assignedAt: null, events: { arrived: at } } });
+  for (const state of ['rider_assigned', 'out_for_delivery', 'issue_window_open', 'completed', 'cancelled']) {
+    const view = publicOrderFor({ ...order, state }, { id: 'rider', role: 'rider' }, store);
+    for (const key of ['acknowledgementReceipt', 'clientItemSubtotalMinor', 'grandTotalMinor', 'totalMinor', 'supplementalTotalMinor', 'totalIncludingSupplementsMinor']) {
+      assert.equal(view[key], undefined, `${state}.${key}`);
+    }
+    assert.deepEqual(view.payments, { initial: { status: 'confirmed' }, final_online: { status: 'not_required' } });
+  }
+});
 test('receipt preserves client line amounts, original total and bounded signed rounding adjustment', () => {
   const { store, order } = fixture();
   const receipt = acknowledgementSnapshot(store, order, at);

@@ -17,7 +17,8 @@ async function setup(t, change = () => {}) {
   const store = fixture();
   store.users.push({ ...store.users.find(u => u.id === 'rider'), id: 'rider2', email: 'rider2@example.invalid', clerkUserId: 'clerk_rider2' });
   store.userRoleMemberships.push({ userId: 'rider2', role: 'rider', createdAt: AT });
-  Object.assign(store.orders[0], { state: 'out_for_delivery', riderId: 'rider' });
+  Object.assign(store.orders[0], { state: 'out_for_delivery', riderId: 'rider', riderAssignedAt: AT,
+    riderProgress: { riderId: 'rider', assignedAt: AT, events: { arrived: AT } } });
   store.approvalCases.push({ id: 'case_rider', userId: 'rider', kind: 'rider', status: 'approved',
     version: 1, applicationRevision: 1, submittedAt: AT, decidedAt: AT, createdAt: AT, updatedAt: AT });
   store.approvalCases.push({ ...store.approvalCases.at(-1), id: 'case_rider2', userId: 'rider2' });
@@ -46,12 +47,15 @@ test('HTTP door delivery from assignment through signed pickup, receipt preparat
     return result;
   };
   ok(await call('rider', 'POST', '/dispatch/order/accept', {}));
-  assert.equal((await call('rider', 'POST', path, {})).body.error, 'acknowledgement_not_available');
+  assert.equal((await call('rider', 'POST', path, {})).status, 403);
   ok(await call('rider', 'POST', '/dispatch/order/pickup-checklist', {
     checks: PICKUP_CHECK_CODES.map(code => ({ code, passed: true })),
     counts: [{ lineItemId: 'line', countedQuantity: 10 }], signature: { fileId: 'signature', signerName: 'Shop Person' },
   }));
   ok(await call('rider', 'POST', '/orders/order/transition', { state: 'out_for_delivery' }));
+  assert.equal((await call('rider', 'POST', path, {})).status, 403);
+  assert.equal((await call('rider', 'GET', path)).status, 403);
+  ok(await call('rider', 'POST', '/dispatch/order/milestones', { milestone: 'arrived' }));
   const receipt = ok(await call('rider', 'POST', path, {}), 201).receipt;
   assert.match(receipt.arNumber, /^AR-\d{10,}$/);
   assert.equal(receipt.grandTotalMinor, 12000);
@@ -62,6 +66,8 @@ test('HTTP door delivery from assignment through signed pickup, receipt preparat
   assert.deepEqual(ok(await call('rider', 'POST', path, {})).receipt, receipt);
   ok(await call('rider', 'POST', '/dispatch/order/delivery', { evidenceType: 'photo', evidenceFileId: 'drop' }));
   assert.equal((await loadStore(db)).orders[0].state, 'issue_window_open');
+  assert.equal((await call('rider', 'GET', path)).status, 403);
+  assert.equal((await call('rider', 'POST', path, {})).status, 403);
   assert.deepEqual(ok(await call('client', 'GET', path)).receipt, receipt);
   const pdf = await api('client', 'GET', `${path}/download`, null, { stream: true });
   assert.equal(pdf.status, 200);
@@ -82,6 +88,7 @@ test('HTTP concurrent creation is idempotent; global numbers are contiguous acro
   const { db, api } = await setup(t, store => {
     for (let n = 2; n <= 4; n++) {
       store.orders.push({ ...structuredClone(store.orders[0]), id: `order${n}`, riderId: n === 2 ? 'rider2' : 'rider' });
+      store.orders.at(-1).riderProgress.riderId = store.orders.at(-1).riderId;
       store.orderLineItems.push({ ...structuredClone(store.orderLineItems[0]), id: `line${n}`, orderId: `order${n}`, jobId: null });
     }
   });
@@ -128,7 +135,7 @@ test('HTTP ownership, assigned approved rider and staff boundaries; immutable sn
 });
 
 test('HTTP older builds issue at delivery; hub pickup and historical unissued orders create no numbers', { skip: !DATABASE_URL }, async t => {
-  const { db, api } = await setup(t);
+  const { db, api } = await setup(t, store => { delete store.orders[0].riderProgress; });
   assert.equal((await api('client', 'GET', path)).body.error, 'acknowledgement_receipt_not_found');
   ok(await api('rider', 'POST', '/dispatch/order/delivery', { evidenceType: 'photo', evidenceFileId: 'drop' }));
   ok(await api('client', 'GET', path));
@@ -168,6 +175,7 @@ test('HTTP multi-shop basket receipts contain only their delivered group, includ
     Object.assign(first, { basketId: 'basket', groupLabel: 'Shop A', invoiceNumber: 'BASKET-TEST' });
     first.payments.initial.reference = 'SHARED-QR';
     const second = { ...structuredClone(first), id: 'second', groupLabel: 'Shop B', riderId: 'rider2' };
+    second.riderProgress.riderId = 'rider2';
     store.orders.push(second);
     store.baskets.push({ id: 'basket', clientId: 'client', receiptOrderId: first.id, orderIds: [first.id, second.id],
       totalMinor: 24000, fulfillmentMode: 'delivery', payment: { method: 'qr_manual', reference: 'SHARED-QR', status: 'confirmed' }, createdAt: AT, updatedAt: AT });
@@ -194,4 +202,34 @@ test('HTTP multi-shop basket receipts contain only their delivered group, includ
   assert.notEqual(first.arNumber, second.arNumber);
   assert.equal((await api('rider2', 'GET', path)).status, 403);
   assert.deepEqual(ok(await api('client', 'GET', '/orders/second/acknowledgement-receipt')).receipt, second);
+});
+
+test('HTTP rider billing exists only in the active-handover receipt and disappears after completion or cancellation', { skip: !DATABASE_URL }, async t => {
+  const { db, api } = await setup(t);
+  const receipt = ok(await api('rider', 'POST', path, {}), 201).receipt;
+  assert.equal(receipt.grandTotalMinor, 12000);
+  const assertNoBilling = object => {
+    for (const key of ['totalMinor', 'clientItemSubtotalMinor', 'grandTotalMinor', 'invoice', 'acknowledgementReceipt',
+      'serviceFeeMinor', 'acceptedQuote', 'organizationDiscountMinor', 'voucherDiscountMinor']) assert.equal(object[key], undefined, key);
+    for (const payment of Object.values(object.payments || {})) assert.deepEqual(Object.keys(payment), ['status']);
+  };
+  const ordinaryReads = async () => {
+    assertNoBilling(ok(await api('rider', 'GET', '/orders/order')).order);
+    const listed = ok(await api('rider', 'GET', '/orders')).orders.find(order => order.id === 'order');
+    assert.ok(listed); assertNoBilling(listed);
+  };
+  await ordinaryReads();
+  for (const state of ['delivered', 'issue_window_open', 'completed', 'cancelled']) {
+    await db.transaction(async () => {
+      const store = await loadStore(db);
+      store.orders[0].state = state;
+      if (state === 'cancelled') Object.assign(store.orders[0], { cancelledAt: AT, cancelledBy: 'ops', cancellationReason: 'Cancellation fixture' });
+      await saveStore(db, store);
+    });
+    assert.equal((await api('rider', 'GET', path)).status, 403, state);
+    assert.equal((await api('rider', 'POST', path, {})).status, 403, state);
+    assert.equal((await api('rider', 'GET', `${path}/download`)).status, 403, state);
+    assert.deepEqual(ok(await api('client', 'GET', path)).receipt, receipt);
+    await ordinaryReads();
+  }
 });

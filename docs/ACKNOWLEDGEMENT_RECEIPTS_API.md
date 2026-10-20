@@ -15,10 +15,14 @@ receipt never contains another group's lines or total.
 The rider prepares the receipt at the door, **before** asking for the paper
 signature or confirming handover:
 
-1. Complete pickup and begin transport as usual.
+1. Complete pickup and begin transport as usual. At the client's door, record
+   `POST /dispatch/:id/milestones` with `{"milestone":"arrived"}`. That existing
+   endpoint binds arrival to the current rider assignment.
 2. `POST /orders/:id/acknowledgement-receipt` with `{}`. Render the returned AR
    number, contents and grand total on the paper-copy guide. Issue is allowed in
    `picked_up` or `out_for_delivery`, after the order's checkout payments settle.
+   Rider preparation and reads additionally require the current assignment's
+   recorded arrival and an unfinished handover.
 3. Hand the client the paper acknowledgement receipt and collect the signatures
    on paper. The existing rider receipt tick remains an app interaction; this API
    neither uploads nor certifies those signatures.
@@ -35,7 +39,9 @@ There are two receipt states: absent (`404`) and issued (immutable snapshot).
 Read the ordinary order state for delivery progress: issuance is **not proof of
 delivery**. Cancellation or failed handover after issuance retains the original
 receipt and number. Reassignment never changes the receipt; only the currently
-assigned approved rider can read it. No receipt is issued merely by reading.
+assigned approved rider during their active, arrived door handover can read it.
+Delivery, cancellation, reassignment or consumption of the handover closes that
+rider access, including retries of POST. No receipt is issued merely by reading.
 No bulk historical backfill runs during migration. Completed historical orders
 without a receipt remain `404`; POST cannot backdate one. Existing active
 deliveries receive one through preparation or delivery confirmation.
@@ -47,8 +53,8 @@ All routes require the normal Clerk bearer and database role authorization
 
 | Method | Route | Readers / writers | Result |
 | --- | --- | --- | --- |
-| POST | `/orders/:id/acknowledgement-receipt` | assigned approved rider; Operations/Super Admin | `201 {receipt}` when issued; `200 {receipt}` on retry |
-| GET | `/orders/:id/acknowledgement-receipt` | owning client; assigned approved rider; Operations/Super Admin | `200 {receipt}` |
+| POST | `/orders/:id/acknowledgement-receipt` | assigned approved rider at active arrived door handover; Operations/Super Admin | `201 {receipt}` when issued; `200 {receipt}` on authorized retry |
+| GET | `/orders/:id/acknowledgement-receipt` | owning client; assigned approved rider at active arrived door handover; Operations/Super Admin | `200 {receipt}` |
 | GET | `/orders/:id/acknowledgement-receipt/download` | owning client; Operations/Super Admin | private `application/pdf` attachment, filename `<arNumber>.pdf` |
 
 Ordinary invited hub staff, suppliers, unrelated clients and unassigned/former
@@ -57,14 +63,28 @@ allowlisted client receipt snapshot, not supplier principal, service-fee working
 platform shares, payout milestones, payment proofs, artwork or another group's
 invoice. Riders cannot use the PDF download endpoint.
 
+This is the explicit, receipt-only exception to the [rider billing privacy
+rule](LEGAL_API.md#supplier-penalties-and-data-minimisation). Neither ordinary
+order details nor lists, dispatch/history responses or notifications inline the
+receipt or its client billing amounts. The rider window requires
+`fulfillmentMode: "delivery"`, `picked_up | out_for_delivery`, no recorded
+delivery evidence or consumed handover, and `riderProgress.events.arrived` bound
+to the current rider and assignment timestamp. It is the rider's recorded
+arrival, not a new GPS geofence. Stale arrival from an earlier assignment cannot
+open access. Before arrival or after the window closes, GET and POST return
+`403 forbidden` without receipt data; client and Operations/Super Admin reads
+continue. Rider apps must discard this view when leaving the handover and on
+completion, cancellation or reassignment, and must not cache it into history.
+
 All successful reads use `Cache-Control: private, no-store, max-age=0`. Downloads
 require an authenticated fetch; there is no public URL or permanent signed link.
 The server renders PDF bytes on demand using the same paginated text PDF format
 as approval proofs. No file blob is stored in PostgreSQL or made public in MinIO.
 
 The order ID itself is the idempotency key. A new HTTP idempotency header or a
-lost response cannot allocate another number. A POST retry returns the originally
-issued snapshot even after delivery. No request-supplied prices, customer names,
+lost response cannot allocate another number. An authorized POST retry returns the originally
+issued snapshot; after delivery only Operations/Super Admin can make that POST
+retry, while the client can continue GET. No request-supplied prices, customer names,
 AR numbers, payment facts or dates are accepted.
 
 ## Receipt fields
@@ -195,7 +215,7 @@ from the order screen and refresh it on the inbox event.
 | Status | Error | Meaning |
 | --- | --- | --- |
 | 401 | `unauthorized` | Missing/invalid Clerk session |
-| 403 | `forbidden` | Wrong party/role, unapproved rider, or rider PDF request |
+| 403 | `forbidden` | Wrong party/role, unapproved rider, rider outside the active arrived handover, or rider PDF request |
 | 404 | `order_not_found` | Unknown order |
 | 404 | `acknowledgement_receipt_not_found` | No receipt issued, including excluded pickup and historical work |
 | 409 | `acknowledgement_not_available` | First issuance outside active door transport or without an assigned rider |

@@ -3,6 +3,7 @@ import { basketForOrder } from './baskets.js';
 import { approvedRole, privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { paymentSettled } from './operational-model.js';
 import { textDocumentPdf } from './text-document-pdf.js';
+import { assignmentTime } from './rider-tracking.js';
 
 export const ACKNOWLEDGEMENT_NOTE = 'This temporary receipt acknowledges initial receipt pending final processing. It does not replace an Official Receipt or final invoice.';
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { code, status }); };
@@ -13,6 +14,18 @@ const money = value => {
 const sum = values => money(Number(values.reduce((total, value) => total + BigInt(money(value)), 0n)));
 const staff = user => ['ops_admin', 'super_admin'].includes(user?.role);
 const digitalMethods = new Set(['qr_manual', 'gcash', 'maya', 'bank_transfer', 'qr_ph']);
+
+/** Receipt-only billing exception: recorded arrival in the current, unfinished door handover. */
+export function activeAcknowledgementHandover(order, user) {
+  const assignedAt = assignmentTime(order);
+  const progress = order.riderProgress;
+  return user?.role === 'rider' && order.riderId === user.id && order.fulfillmentMode === 'delivery'
+    && ['picked_up', 'out_for_delivery'].includes(order.state)
+    && !order.deliveryEvidence?.recordedAt && !order.handover?.consumedAt
+    && progress?.riderId === user.id && progress.assignedAt === assignedAt
+    && Number.isFinite(Date.parse(progress.events?.arrived))
+    && (!assignedAt || Date.parse(progress.events.arrived) >= Date.parse(assignedAt));
+}
 
 /** No catalog/settings lookups: only the checkout snapshot and recorded payments. */
 export function acknowledgementSnapshot(store, order, at) {
@@ -138,7 +151,7 @@ export async function routeAcknowledgement(args) {
   if (!user) fail('unauthorized', 401);
   const order = store.orders.find(row => row.id === match[1]);
   if (!order) fail('order_not_found', 404);
-  const rider = user.role === 'rider' && order.riderId === user.id && approvedRole(store, user.id, 'rider');
+  const rider = activeAcknowledgementHandover(order, user) && approvedRole(store, user.id, 'rider');
   const owner = user.role === 'client' && order.clientId === user.id;
   if (!staff(user) && !owner && !rider) fail('forbidden', 403);
   if (req.method === 'POST' && !match[2]) {
