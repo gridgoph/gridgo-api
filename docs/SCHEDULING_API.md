@@ -314,9 +314,23 @@ The initial conversion's evidence predicate is corrected for first deployment.
 The forward repair handles databases that already ran the earlier version:
 it adds missed evidence-based reminders, removes provably unrelated inherited
 service reminders, and preserves confirmations audited after the initial release.
-Already-converted Express rows lost their prior mode/day count, so an ambiguous
-existing reminder is retained conservatively. The repair changes only reminder
-metadata and listing versions, never replays the Express/duration conversion,
+For already-converted Express rows, the repair uses the last pre-release listing
+edit's timing snapshot when available. Without that provenance, an exact override
+with the conversion's populated bounds/hour mirrors and a matching relevant
+service correction is conservatively flagged. A known prior override, a different
+corrected duration, or an unused/rush service prefix does not qualify through this
+fallback. Ambiguous existing reminders are retained.
+
+Successful explicit duration PATCHes (including unchanged legacy-field saves)
+and bulk apply record `detail.productionTimeConfirmed: true`. Express-only edits
+are not duration confirmations. For older audits without the marker, the repair
+requires cleared review reasons or changed duration fields with empty current
+reasons. A historical empty audit detail cannot establish an unchanged save's
+intent; those rows may conservatively need confirmation again. Proven previously
+cleared reminders stay cleared. No request/response field is added for this audit
+marker.
+
+The repair changes only reminder metadata and listing versions, never replays the Express/duration conversion,
 and changes no rows on a second manual data-repair run. Normal migration-runner
 retries skip completed migrations. Neither migration has a destructive `down`;
 further corrections must use a forward migration.

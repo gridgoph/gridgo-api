@@ -90,7 +90,7 @@ test('bulk apply is shop scoped, audited per listing and refuses the entire stal
   assert.deepEqual(store.catalogItems[1], other);
   assert.deepEqual(store.orders, orders);
   assert.equal(store.auditLog.length, 2);
-  assert.ok(store.auditLog.every(row => row.action === 'catalog_item.update' && row.detail.bulk === true && row.detail.previous && row.detail.current));
+  assert.ok(store.auditLog.every(row => row.action === 'catalog_item.update' && row.detail.bulk === true && row.detail.productionTimeConfirmed === true && row.detail.previous && row.detail.current));
   assert.equal(store.catalogItems[2].active, false);
   assert.equal(store.catalogItems[2].reviewStatus, 'pending');
 });

@@ -62,7 +62,11 @@ export function productionTimeReview(store, item) {
 
 export function clearProductionTimeReview(store, item, body) {
   if ((Object.hasOwn(body, 'productionTime') || PRODUCTION_TIME_FIELDS.some(key => Object.hasOwn(body, key)))
-      && effectiveProductionTime(store, item).maximum > 0) item.productionTimeReviewReasons = [];
+      && effectiveProductionTime(store, item).maximum > 0) {
+    item.productionTimeReviewReasons = [];
+    return true;
+  }
+  return false;
 }
 
 export function productionTimeAudit(item) {

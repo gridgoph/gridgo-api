@@ -390,3 +390,11 @@ classification on databases that already applied the initial conversion,
 without replaying that conversion or changing orders/prices. Older correction
 audits without historical day-length evidence are conservatively flagged;
 the scheduling contract documents those cases and confirmed-reminder preservation.
+
+The repair also covers inherited Express listings whose original mode was lost:
+pre-release listing audit provenance is preferred; otherwise matching service
+correction evidence plus the converted row shape triggers conservative review.
+Duration confirmations now carry an explicit audit marker even for unchanged
+legacy saves. Older Express-only audit differences are not confirmations; proven
+reason clearing remains protected. Historical empty audit details cannot prove
+an unchanged save's intent (see `docs/SCHEDULING_API.md`).

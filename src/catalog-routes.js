@@ -986,7 +986,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       Object.assign(item, fields, { express: false, productionTimeReviewReasons: [] });
       bumpVersion(item, at);
       auditChange(audit, store, user, 'catalog_item.update', 'supplier_catalog_item', item.id,
-        { bulk: true, previous, current: productionTimeAudit(item) });
+        { bulk: true, productionTimeConfirmed: true, previous, current: productionTimeAudit(item) });
     }
     return { status: 200, body: { items: items.map(item => privateCatalogItem(store, item)), total: items.length }, mutated: true };
   }
@@ -1133,10 +1133,11 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     // about time, not what the client buys or pays (docs/EXPRESS_API.md).
     const expressBefore = item.express === true;
     if (body.express != null) item.express = booleanValue(body.express, "express");
-    clearProductionTimeReview(store, item, body);
+    const productionTimeConfirmed = clearProductionTimeReview(store, item, body);
     bumpVersion(item, now());
     auditChange(audit, store, user, "catalog_item.update", "supplier_catalog_item", item.id,
-      { ...((item.express === true) !== expressBefore ? { express: item.express === true } : {}),
+      { ...(productionTimeConfirmed ? { productionTimeConfirmed: true } : {}),
+        ...((item.express === true) !== expressBefore ? { express: item.express === true } : {}),
         ...(JSON.stringify(productionBefore) !== JSON.stringify(productionTimeAudit(item))
           ? { previous: productionBefore, current: productionTimeAudit(item) } : {}) });
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };

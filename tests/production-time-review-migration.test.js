@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import { up as originalChoiceUp } from './fixtures/production-time-choice-original.js';
+import { up as repairUp } from '../migrations/1792501100000_production_time_review_evidence.js';
+import { fixture as schedulingFixture } from './fixtures/scheduling.js';
+import { routeSupplierCatalog } from '../src/catalog-routes.js';
 import { up as choiceUp } from '../migrations/1792501000000_production_time_choice.js';
 
 async function migrate(db, up) {
@@ -76,7 +80,7 @@ test('forward repair fixes already-applied flags without replaying conversions o
       WHEN id IN ('wrong_rush','old_one_day','ambiguous_converted_express') THEN ARRAY['legacy_one_working_day']
       ELSE '{}'::text[] END;
     INSERT INTO pgmigrations VALUES ('1792501000000_production_time_choice','2026-10-20T01:00Z');
-    INSERT INTO audit_log VALUES ('catalog_item.update', '{"detail":{"current":{"productionTimeReviewReasons":[]}}}',
+    INSERT INTO audit_log VALUES ('catalog_item.update', '{"detail":{"productionTimeConfirmed":true}}',
       'supplier_catalog_item','confirmed_after_release','2026-10-20T02:00Z');`);
   const before = (await db.query('SELECT * FROM supplier_catalog_items ORDER BY id')).rows;
   const { up } = await import('../migrations/1792501100000_production_time_review_evidence.js');
@@ -92,4 +96,86 @@ test('forward repair fixes already-applied flags without replaying conversions o
   }
   await migrate(db, up);
   assert.deepEqual((await db.query('SELECT * FROM supplier_catalog_items ORDER BY id')).rows, rows, 'repair is data-idempotent');
+}));
+
+// Execute the shipped SQL verbatim: revised-initial output cannot stand in for an upgrade.
+async function oldRelease(db) {
+  await migrate(db, originalChoiceUp);
+  await db.query(`INSERT INTO pgmigrations VALUES ('1792501000000_production_time_choice','2026-10-20T01:00Z')`);
+}
+async function assertRepairOnly(db, expectedFlagged) {
+  const before = (await db.query('SELECT * FROM supplier_catalog_items ORDER BY id')).rows;
+  await migrate(db, repairUp);
+  const after = (await db.query('SELECT * FROM supplier_catalog_items ORDER BY id')).rows;
+  assert.deepEqual(after.filter(row => row.production_time_review_reasons.length).map(row => row.id), expectedFlagged);
+  for (const [index, row] of after.entries()) {
+    const { production_time_review_reasons, version, ...facts } = row;
+    const { production_time_review_reasons: oldReasons, version: oldVersion, ...oldFacts } = before[index];
+    assert.deepEqual(facts, oldFacts, `${row.id}: repair changes no duration/Express facts`);
+    assert.equal(version, oldVersion + (JSON.stringify(oldReasons) === JSON.stringify(production_time_review_reasons) ? 0 : 1));
+  }
+  await migrate(db, repairUp);
+  assert.deepEqual((await db.query('SELECT * FROM supplier_catalog_items ORDER BY id')).rows, after);
+}
+
+test('old SQL then repair recovers inherited Express evidence and respects known pre-conversion modes', enabled, async () => fixture(async (db, add) => {
+  for (const id of ['lost_mode', 'known_inherit', 'known_override', 'stale_mode', 'different_minutes', 'unused_rush']) {
+    await add(id, { mode: id === 'known_override' ? 'override' : 'inherit', express: true,
+      kind: 'supplierServices', prefix: id === 'unused_rush' ? 'rushTurnaround' : 'standardTurnaround' });
+    await db.query(`UPDATE supplier_services SET standard_turnaround_days=NULL, standard_turnaround_minutes=120,
+      standard_turnaround_hours=2 WHERE id=$1`, [id]);
+  }
+  for (const [id, mode] of [['known_inherit', 'inherit'], ['known_override', 'override'], ['stale_mode', 'override']]) {
+    await db.query(`INSERT INTO audit_log VALUES ('catalog_item.update',$1,'supplier_catalog_item',$2,'2026-10-19')`,
+      [JSON.stringify({ detail: { current: { turnaroundMode: mode } } }), id]);
+  }
+  // A later edit without timing provenance makes an older snapshot unreliable.
+  await db.query(`INSERT INTO audit_log VALUES ('catalog_item.update','{"detail":{}}',
+    'supplier_catalog_item','stale_mode','2026-10-19T12:00Z')`);
+  await oldRelease(db);
+  assert.ok((await db.query('SELECT * FROM supplier_catalog_items')).rows.every(row => row.turnaround_mode === 'override' && !row.express && !row.production_time_review_reasons.length));
+  await db.query(`UPDATE supplier_catalog_items SET turnaround_minutes=180,turnaround_hours=3 WHERE id='different_minutes'`);
+  await assertRepairOnly(db, ['known_inherit', 'lost_mode', 'stale_mode']);
+}));
+
+async function patchAudit(db, id, body) {
+  const { store } = schedulingFixture();
+  const item = store.catalogItems[0];
+  Object.assign(item, { id, turnaroundMode: 'override', turnaroundHours: 2, turnaroundMinutes: 120,
+    turnaroundDays: null, minimumTurnaroundDays: null, minimumTurnaroundMinutes: null,
+    minimumTurnaroundHours: null, productionTimeReviewReasons: [], version: 1 });
+  await routeSupplierCatalog({ req: { method: 'PATCH' }, url: new URL(`/me/catalog-items/${id}`, 'http://gridgo.test'),
+    store, user: store.users.find(user => user.id === 'shop_a'), readBody: async () => ({ expectedVersion: 1, ...body }),
+    now: () => '2026-10-20T02:00:00Z', audit: (graph, event) => graph.auditLog.push(event) });
+  const event = store.auditLog[0];
+  await db.query(`INSERT INTO audit_log VALUES ($1,$2,$3,$4,'2026-10-20T02:00Z')`,
+    [event.action, JSON.stringify({ detail: event.detail }), event.entityType, event.entityId]);
+  await db.query(`UPDATE supplier_catalog_items SET express=$2,version=$3 WHERE id=$1`, [id, item.express, item.version]);
+  return event.detail;
+}
+
+test('old SQL then repair ignores a real Express-only PATCH audit', enabled, async () => fixture(async (db, add) => {
+  await add('express_only');
+  await oldRelease(db);
+  const detail = await patchAudit(db, 'express_only', { express: true });
+  assert.equal(detail.productionTimeConfirmed, undefined);
+  assert.deepEqual(detail.current.productionTimeReviewReasons, []);
+  await assertRepairOnly(db, ['express_only']);
+}));
+
+test('old SQL then repair preserves an unchanged explicit legacy save and historical reason clearing', enabled, async () => fixture(async (db, add) => {
+  await add('unchanged_legacy');
+  await add('old_cleared');
+  await add('old_duration_edit');
+  await add('ambiguous_empty_audit');
+  await oldRelease(db);
+  const detail = await patchAudit(db, 'unchanged_legacy', { turnaroundHours: 2 });
+  assert.equal(detail.productionTimeConfirmed, true);
+  await db.query(`INSERT INTO audit_log VALUES
+    ('catalog_item.update','{"detail":{}}','supplier_catalog_item','ambiguous_empty_audit','2026-10-20T02:00Z'),
+    ('catalog_item.update','{"detail":{"previous":{"productionTimeReviewReasons":["legacy_one_working_day"]},"current":{"productionTimeReviewReasons":[]}}}',
+      'supplier_catalog_item','old_cleared','2026-10-20T02:00Z'),
+    ('catalog_item.update','{"detail":{"previous":{"turnaroundHours":3,"productionTimeReviewReasons":[]},"current":{"turnaroundHours":2,"productionTimeReviewReasons":[]}}}',
+      'supplier_catalog_item','old_duration_edit','2026-10-20T02:00Z');`);
+  await assertRepairOnly(db, ['ambiguous_empty_audit']);
 }));
