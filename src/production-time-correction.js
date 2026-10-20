@@ -64,14 +64,14 @@ export function planProductionTimeCorrection(store, { deployedAt, backup = null,
     }
     // New minute/hour records and post-deploy creations are not migration casualties.
     if (record[`${prefix}Days`] == null || (owner.createdAt && Date.parse(owner.createdAt) >= Date.parse(deployedAt))) continue;
+    const dayMinutes = kind === 'listingStarters' ? 600 : displayProductionDayMinutes(store, supplierId);
     const row = { kind, id, prefix, supplierId, key, name: record.name || record.label || owner.name || id,
       shop: (store.supplierProfiles || []).find(profile => profile.userId === supplierId)?.shopName ?? null,
-      oldMinutes, status: 'missing_evidence' };
+      oldMinutes, oldDays: record[`${prefix}Days`], productionDayMinutes: dayMinutes, status: 'missing_evidence' };
     const source = original.get(key) || (['catalogItems', 'approvedCatalogItems'].includes(kind) && prefix === 'turnaround' ? historic.get(id) : null);
     if (source) {
       row.correctedMinutes = source.hours * 60;
       row.evidence = source.evidence;
-      const dayMinutes = kind === 'listingStarters' ? 600 : displayProductionDayMinutes(store, supplierId);
       if (!validMinutes(row.correctedMinutes)) row.status = 'invalid_evidence';
       else if (row.correctedMinutes === oldMinutes) row.status = 'unchanged';
       else if (row.correctedMinutes > oldMinutes || dayMinutes == null

@@ -296,7 +296,15 @@ Schedules without a positive, consistent daily length refuse duration writes
 working day of effort, **not a guarantee of calendar-day completion**: queue,
 review, capacity and closing time still govern the server's ready/promise dates.
 
-Supplier app and web pickers offer **Hours / Working days**:
+The release-2 single-choice editor uses
+[`productionTime`](SCHEDULING_API.md#release-2-one-production-time-question):
+exact hours or a minimum/maximum working-day range. Its `same_day` mode also
+accepts longer legacy exact-hour values so a returned choice can be saved
+without rounding. This mode name does not override scheduling's definition of
+same-day effort or guarantee today's completion.
+
+The earlier **Hours / Working days** picker and its legacy fields remain supported
+with their existing validation:
 
 - Hours sends integer `turnaroundMinutes` (for example 1 hour = 60, 1¼ hours =
   75), between 1 and `productionDayMinutes - 1`. Working days sends whole

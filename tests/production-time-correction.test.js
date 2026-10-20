@@ -132,6 +132,9 @@ test('PostgreSQL correction dry-run, audited apply, reload and rerun preserve im
     assert.equal(reloaded.orders.find(row => row.id === 'order').productionTimeCorrection.penaltyExempt, true);
     assert.deepEqual((await database.query('SELECT * FROM order_line_items ORDER BY id')).rows, snapshots);
     assert.equal(reloaded.auditLog.length, 2);
+    const duration = reloaded.auditLog.find(row => row.entityType === 'catalogItems').detail.duration;
+    assert.equal(duration.oldDays, 1);
+    assert.equal(duration.productionDayMinutes, 600);
     assert.equal(reloaded.notifications.length, 4, 'each correction reaches Operations and Super Admin');
     await runProductionTimeCorrection(database, { deployedAt, manifest, apply: true, at });
     assert.equal((await database.query('SELECT count(*)::integer AS n FROM audit_log')).rows[0].n, 2);
@@ -188,4 +191,17 @@ test('a manifest needs a boolean conflict attestation and a deployment instant w
   const manifest = manifestFor(preview);
   manifest[0].noScheduledOrStartedConflict = 'false';
   assert.equal(planProductionTimeCorrection(store, { deployedAt, manifest }).orders[0].status, 'invalid_manifest');
+});
+
+test('correction audit retains its original day count and day length after shop hours change', () => {
+  const store = fixture();
+  const plan = planProductionTimeCorrection(store, { deployedAt });
+  applyProductionTimeCorrection(store, plan, { at });
+  store.supplierProfiles[0].schedule = { utcOffsetMinutes: 480, week: [{ weekday: 1, opensMinute: 480, closesMinute: 960 }] };
+  const duration = store.auditLog.find(row => row.entityType === 'catalogItems').detail.duration;
+  assert.equal(duration.oldDays, 1);
+  assert.equal(duration.productionDayMinutes, 600);
+  assert.equal(duration.oldMinutes, 600);
+  assert.equal(duration.correctedMinutes, 60);
+  assert.equal(planProductionTimeCorrection(store, { deployedAt }).durations[0].productionDayMinutes, 600);
 });
