@@ -78,6 +78,12 @@ completion, cancellation or reassignment, and must not cache it into history.
 
 All successful reads use `Cache-Control: private, no-store, max-age=0`. Downloads
 require an authenticated fetch; there is no public URL or permanent signed link.
+The receipt PDF uses WinAnsi text encoding for accented Latin names (such as
+José Muñoz), typographic quotes and dashes. Controls and characters outside that
+encoding remain explicit Unicode escapes; the JSON snapshot retains the original
+text. Backslashes and parentheses are escaped as PDF literals. Approval-proof
+documents retain their existing ASCII format.
+
 The server renders PDF bytes on demand using the same paginated text PDF format
 as approval proofs. No file blob is stored in PostgreSQL or made public in MinIO.
 

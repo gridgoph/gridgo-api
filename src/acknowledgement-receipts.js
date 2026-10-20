@@ -141,7 +141,7 @@ export function acknowledgementPdf(receipt) {
   lines.push('', 'Collected by (paper signature): __________________________',
     'Received by (paper signature): __________________________', '',
     'Signatures remain on the paper copy; this download does not certify a signature.', '', receipt.note);
-  return textDocumentPdf(lines, 'GRIDGO Acknowledgement Receipt');
+  return textDocumentPdf(lines, 'GRIDGO Acknowledgement Receipt', { winAnsi: true });
 }
 
 export async function routeAcknowledgement(args) {

@@ -6,7 +6,7 @@ import { loadStore, saveStore } from '../src/postgres-store.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { fixture, AT, id, audit } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
-import { PICKUP_CHECK_CODES } from '../src/operational-model.js';
+import { PICKUP_CHECK_CODES, calculateOrderMoney, createPaymentSchedule } from '../src/operational-model.js';
 import { issueAcknowledgement } from '../src/acknowledgement-receipts.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -204,13 +204,26 @@ test('HTTP multi-shop basket receipts contain only their delivered group, includ
   assert.deepEqual(ok(await api('client', 'GET', '/orders/second/acknowledgement-receipt')).receipt, second);
 });
 
-test('HTTP rider billing exists only in the active-handover receipt and disappears after completion or cancellation', { skip: !DATABASE_URL }, async t => {
-  const { db, api } = await setup(t);
-  const receipt = ok(await api('rider', 'POST', path, {}), 201).receipt;
-  assert.equal(receipt.grandTotalMinor, 12000);
+test('HTTP model-2 quoted checkout money stays absent from rider details, lists and terminal history in every handover state', { skip: !DATABASE_URL }, async t => {
+  let money;
+  const { db, api } = await setup(t, store => {
+    const order = store.orders[0];
+    money = calculateOrderMoney({ supplierSubtotalMinor: 10000, fulfillmentMode: 'delivery',
+      paymentPlan: 'delivery_online', supplierDownpaymentRateBps: 2500,
+      pickup: order.pickup, dropoff: order.dropoff, settings: store.settings });
+    Object.assign(order, money, createPaymentSchedule(money), { moneyModelVersion: 2 });
+    for (const payment of Object.values(order.payments)) payment.status = 'confirmed';
+    delete order.riderProgress;
+  });
+  // Exercise the actual quoted-order persisted shape, not only match checkout.
+  const saved = (await loadStore(db)).orders[0];
+  assert.equal(saved.initialOnlineMinor + saved.finalOnlineMinor, money.totalMinor);
+  // These are the pre-existing rider delivery/earnings contract, not checkout billing.
+  const deliveryMoney = new Set(['deliveryFeeMinor', 'riderPayoutMinor', 'platformDeliveryShareMinor']);
+  const privateMoney = Object.keys(money).filter(key => key.endsWith('Minor') && !deliveryMoney.has(key));
   const assertNoBilling = object => {
     for (const key of ['totalMinor', 'clientItemSubtotalMinor', 'grandTotalMinor', 'invoice', 'acknowledgementReceipt',
-      'serviceFeeMinor', 'acceptedQuote', 'organizationDiscountMinor', 'voucherDiscountMinor']) assert.equal(object[key], undefined, key);
+      'serviceFeeMinor', 'acceptedQuote', 'organizationDiscountMinor', 'voucherDiscountMinor', 'paymentAllocations', ...privateMoney]) assert.equal(object[key], undefined, key);
     for (const payment of Object.values(object.payments || {})) assert.deepEqual(Object.keys(payment), ['status']);
   };
   const ordinaryReads = async () => {
@@ -218,6 +231,19 @@ test('HTTP rider billing exists only in the active-handover receipt and disappea
     const listed = ok(await api('rider', 'GET', '/orders')).orders.find(order => order.id === 'order');
     assert.ok(listed); assertNoBilling(listed);
   };
+  for (const state of ['rider_assigned', 'picked_up', 'out_for_delivery']) {
+    await db.transaction(async () => {
+      const store = await loadStore(db);
+      store.orders[0].state = state;
+      await saveStore(db, store);
+    });
+    await ordinaryReads();
+    assert.equal((await api('rider', 'GET', path)).status, 403, state);
+  }
+  ok(await api('rider', 'POST', '/dispatch/order/milestones', { milestone: 'arrived' }));
+  const receipt = ok(await api('rider', 'POST', path, {}), 201).receipt;
+  assert.equal(receipt.grandTotalMinor, money.totalMinor);
+  assert.deepEqual(ok(await api('rider', 'GET', path)).receipt, receipt);
   await ordinaryReads();
   for (const state of ['delivered', 'issue_window_open', 'completed', 'cancelled']) {
     await db.transaction(async () => {

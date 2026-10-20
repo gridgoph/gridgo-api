@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { acknowledgementSnapshot, acknowledgementPdf, activeAcknowledgementHandover, ACKNOWLEDGEMENT_NOTE } from '../src/acknowledgement-receipts.js';
 import { publicOrderFor } from '../src/operational-model.js';
 
@@ -129,4 +133,23 @@ test('download has the disclaimer, exact money, signatures and nonzero adjustmen
   assert.match(pdf, /Official Receipt or final invoice/);
   receipt.roundingAdjustmentMinor = 0;
   assert.doesNotMatch(acknowledgementPdf(receipt).toString(), /Rounding adjustment/);
+});
+
+test('receipt PDF extracts accented Filipino names and punctuation with safe literal/control escaping', t => {
+  const { store, order } = fixture();
+  store.users[0].name = 'José Muñoz – María Peña';
+  store.orderInvoices[0].snapshot.lines[0].itemName = 'Niño’s invitations – “résumé” (A\\B)';
+  const receipt = { ...acknowledgementSnapshot(store, order, at), arNumber: 'AR-0000000001' };
+  receipt.payments[0].reference = 'QR (test)\\ref\n\r\t\0';
+  const pdf = acknowledgementPdf(receipt);
+  const scratch = mkdtempSync(join(tmpdir(), 'gg152-pdf-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const path = join(scratch, 'receipt.pdf');
+  writeFileSync(path, pdf);
+  const text = execFileSync('pdftotext', ['-layout', path, '-'], { encoding: 'utf8' });
+  assert.ok(text.includes(receipt.issuedTo), text);
+  assert.ok(text.includes(receipt.lines[0].description), text);
+  assert.ok(text.includes('QR (test)\\ref\\u000a\\u000d\\u0009\\u0000'), text);
+  assert.doesNotMatch(text, /\\u00e9|\\u00f1|\\u201[389cd]/);
+  if (process.env.RECEIPT_PROOF_DIR) writeFileSync(join(process.env.RECEIPT_PROOF_DIR, 'accented-receipt.pdf'), pdf);
 });

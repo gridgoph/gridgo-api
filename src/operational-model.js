@@ -1628,7 +1628,7 @@ export function publicOrderFor(order, user, store = null) {
         'acknowledgementReceipt','clientItemSubtotalMinor','grandTotalMinor','supplementalTotalMinor','totalIncludingSupplementsMinor',
         'credit','credits','organizationDiscountMinor','organizationDiscountRateBps','serviceFeeMinor',
         'serviceFeeRateBps','grossServiceFeeMinor','supplierSubtotalMinor','subtotalMinor','totalMinor',
-        'supplierPlatformPayoutMinor','onlineDueMinor','directStoreDueMinor','paymentPlan','effectiveTotalMinor']) delete publicRecord[key];
+        'supplierPlatformPayoutMinor','onlineDueMinor','initialOnlineMinor','finalOnlineMinor','directStoreDueMinor','paymentPlan','effectiveTotalMinor']) delete publicRecord[key];
     }
   }
   return publicRecord;
