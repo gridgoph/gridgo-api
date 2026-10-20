@@ -1,3 +1,5 @@
+import { expandProductionTimeBody, clearProductionTimeReview, productionTimeFields, productionTimeAudit } from './production-time.js';
+import { previewProductionTime } from './production-time-preview.js';
 import { reviewCatalogView, includeReviewData } from './review-data.js';
 import { parseColourListing } from './colour-pricing.js';
 import { routeShopHours } from './shop-hours.js';
@@ -186,6 +188,11 @@ function parseStaffCatalogQuery(url) {
 
   return {
     q,
+    productionTimeReview: (() => {
+      const value = url.searchParams.get('productionTimeReview');
+      if (value != null && value !== 'required') fail(400, 'invalid_catalog_query', 'Use productionTimeReview=required.');
+      return value;
+    })(),
     limit,
     cursor: parseStaffCatalogCursor(url.searchParams.get("cursor")),
     subcategoryCode: optionalQueryText(url, "subcategoryCode", 120),
@@ -404,20 +411,24 @@ function pricingFields(body, current = {}, minutes = 600) {
   if (!["inherit", "override"].includes(turnaroundMode)) {
     fail(400, "invalid_catalog_item", "turnaroundMode must be inherit or override.", { field: "turnaroundMode" });
   }
-  const maximum = productionDuration(body, current, "turnaround", minutes);
-  const minimum = productionDuration(body, current, "minimumTurnaround", minutes);
+  // A validated choice may represent long legacy exact hours. Do not run its
+  // canonical minutes back through the legacy sub-day minute-picker validator.
+  const duration = Object.hasOwn(body, "productionTime") ? productionTimeFields(body.productionTime, minutes) : {
+    ...productionDuration(body, current, "turnaround", minutes),
+    ...productionDuration(body, current, "minimumTurnaround", minutes),
+  };
   if (turnaroundMode === "inherit") {
-    maximum.turnaroundDays = maximum.turnaroundMinutes = maximum.turnaroundHours = null;
-    minimum.minimumTurnaroundDays = minimum.minimumTurnaroundMinutes = minimum.minimumTurnaroundHours = null;
-  } else if (maximum.turnaroundMinutes == null) {
+    duration.turnaroundDays = duration.turnaroundMinutes = duration.turnaroundHours = null;
+    duration.minimumTurnaroundDays = duration.minimumTurnaroundMinutes = duration.minimumTurnaroundHours = null;
+  } else if (duration.turnaroundMinutes == null) {
     fail(400, "invalid_catalog_item", "A production duration is required when overriding production time.", { field: "turnaroundDays" });
-  } else if (minimum.minimumTurnaroundMinutes != null && minimum.minimumTurnaroundMinutes > maximum.turnaroundMinutes) {
+  } else if (duration.minimumTurnaroundMinutes != null && duration.minimumTurnaroundMinutes > duration.turnaroundMinutes) {
     fail(400, "invalid_catalog_item", "Minimum production time cannot exceed the maximum.", { field: "minimumTurnaroundDays" });
   }
   return {
     pricingUnit, packageQty, measureUnit,
     minimumWidthMilli, minimumHeightMilli, minimumLengthMilli, minimumOrderQuantity,
-    turnaroundMode, ...maximum, ...minimum,
+    turnaroundMode, ...duration,
   };
 }
 
@@ -958,6 +969,40 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     return { status: 200, body: staffCatalogListing(store, item) };
   }
 
+  if (pathname === '/me/catalog-items/production-time' && req.method === 'POST') {
+    requireSupplier(user);
+    const body = expandProductionTimeBody(catalogRecord(await readBody(req)), shopProductionDayMinutes(store, user.id));
+    const fields = productionTimeFields(body.productionTime, shopProductionDayMinutes(store, user.id));
+    const items = (store.catalogItems || []).filter(item => item.supplierId === user.id);
+    const versions = body.expectedVersions;
+    if (!versions || typeof versions !== 'object' || Array.isArray(versions)
+      || Object.keys(versions).length !== items.length
+      || items.some(item => !Object.hasOwn(versions, item.id) || versions[item.id] !== item.version)) {
+      fail(409, 'catalog_items_stale', 'Refresh all your listings before applying production time.');
+    }
+    const at = now();
+    for (const item of items) {
+      const previous = productionTimeAudit(item);
+      Object.assign(item, fields, { express: false, productionTimeReviewReasons: [] });
+      bumpVersion(item, at);
+      auditChange(audit, store, user, 'catalog_item.update', 'supplier_catalog_item', item.id,
+        { bulk: true, productionTimeConfirmed: true, previous, current: productionTimeAudit(item) });
+    }
+    return { status: 200, body: { items: items.map(item => privateCatalogItem(store, item)), total: items.length }, mutated: true };
+  }
+
+  if (/^\/me\/catalog-items\/[^/]+\/production-time-preview$/.test(pathname) && req.method === 'GET') {
+    const item = ownItem(store, user, pathIdentifier(pathname.split('/')[3]));
+    const parameters = url.searchParams;
+    if ([...parameters.keys()].some(key => !['mode', 'hours', 'minDays', 'maxDays', 'days'].includes(key) || parameters.getAll(key).length !== 1)) {
+      fail(400, 'invalid_production_time', 'Send a production-time choice and optional calendar horizon.');
+    }
+    const choice = Object.fromEntries([...parameters].filter(([key]) => key !== 'days').map(([key, value]) => [key, key === 'mode' ? value : Number(value)]));
+    const days = parameters.has('days') ? Number(parameters.get('days')) : 14;
+    if (!Number.isSafeInteger(days) || days < 1 || days > 120) fail(400, 'invalid_production_time', 'days must be 1 through 120.');
+    return { status: 200, body: previewProductionTime(store, item, choice, { now: now(), days }) };
+  }
+
   if (req.method === "GET" && pathname === "/me/catalog-items") {
     requireSupplier(user);
     const listed = await ownCatalogList(store, { supplierId: user.id, ...parseCatalogListQuery(url) });
@@ -971,7 +1016,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
 
   if (req.method === "POST" && pathname === "/me/catalog-items") {
     requireSupplier(user);
-    const body = catalogRecord(await readBody(req));
+    const body = expandProductionTimeBody(catalogRecord(await readBody(req)), shopProductionDayMinutes(store, user.id));
     const service = ownService(store, user, requiredText(body.supplierServiceId, "supplierServiceId", 80));
     const starter = body.starterId
       ? (store.listingStarters || []).find((candidate) => candidate.id === body.starterId)
@@ -1038,7 +1083,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     const parsed = await readBody(req);
     const body = req.method === "DELETE"
       ? (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {})
-      : catalogRecord(parsed);
+      : expandProductionTimeBody(catalogRecord(parsed), shopProductionDayMinutes(store, item.supplierId));
     assertExpectedVersion(req, body, "catalog_item_stale", item.version, url);
     if (req.method === "DELETE") {
       if (itemReferenced(store, item.id)) {
@@ -1058,6 +1103,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       return { status: 200, body: { ok: true }, mutated: true };
     }
     if (req.method !== "PATCH") return null;
+    const productionBefore = productionTimeAudit(item);
     const service = ownService(store, user, item.supplierServiceId);
     if (body.name != null) item.name = requiredText(body.name, "name", 120);
     if (body.description != null) item.description = optionalText(body.description, "description", 4000);
@@ -1087,9 +1133,13 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     // about time, not what the client buys or pays (docs/EXPRESS_API.md).
     const expressBefore = item.express === true;
     if (body.express != null) item.express = booleanValue(body.express, "express");
+    const productionTimeConfirmed = clearProductionTimeReview(store, item, body);
     bumpVersion(item, now());
     auditChange(audit, store, user, "catalog_item.update", "supplier_catalog_item", item.id,
-      (item.express === true) !== expressBefore ? { express: item.express === true } : undefined);
+      { ...(productionTimeConfirmed ? { productionTimeConfirmed: true } : {}),
+        ...((item.express === true) !== expressBefore ? { express: item.express === true } : {}),
+        ...(JSON.stringify(productionBefore) !== JSON.stringify(productionTimeAudit(item))
+          ? { previous: productionBefore, current: productionTimeAudit(item) } : {}) });
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }
 

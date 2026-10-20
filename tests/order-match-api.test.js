@@ -3467,3 +3467,41 @@ test('saved address deletion preserves an existing order and an open cart throug
   assert.equal(retained.isDefault, false);
   assert.equal(persisted.auditLog.filter(row => row.action === 'client_address.delete' && row.entityId === addressId).length, 1);
 });
+
+test('Founding Tester five-step invite path through real checkout, payment, handover and survey HTTP', { skip: !DATABASE_URL }, async t => {
+  const { call, database, orderId } = await placedOrder(t);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.users.push({ id: 'tester_inviter', clerkUserId: 'clerk_inviter', email: 'inviter@gridgo.test', name: 'Inviter', role: 'client', accountType: 'individual', createdAt: AT });
+    store.userRoleMemberships.push({ userId: 'tester_inviter', role: 'client', createdAt: AT });
+    await saveStore(database, store);
+  });
+  const post = async (path, subject, body = {}) => {
+    const response = await call(path, { method: 'POST', subject, body });
+    assert.equal(response.status, 200, `${path}: ${JSON.stringify(response.body)}`); return response.body;
+  };
+  const progress = async () => (await call('/me/founding-tester', { subject: 'clerk_client' })).body.foundingTester;
+  const code = (await post('/me/founding-tester/invite', 'clerk_inviter', { installationId: '00000000-0000-4000-8000-000000000001' })).invites.code;
+  await post('/ops/tester-invites', 'clerk_ops', { code, email: 'client@gridgo.test' });
+  assert.deepEqual((await progress()).missions, { added: true, placed: false, tracked: false, received: false, rated: false });
+  await post(`/orders/${orderId}/payments/initial/confirm`, 'clerk_ops');
+  assert.equal((await progress()).completedCount, 2);
+  await post(`/orders/${orderId}/tester-tracking`, 'clerk_client', { installationId: '00000000-0000-4000-8000-000000000002' });
+  assert.equal((await progress()).completedCount, 3);
+  for (const [state, subject] of [['supplier_assigned', 'clerk_ops'], ['payment_authorized', 'clerk_supplier_a'], ['production', 'clerk_supplier_a']]) {
+    await post(`/orders/${orderId}/transition`, subject, { state });
+  }
+  await finishProductionAndReview(database, orderId, call);
+  await post(`/orders/${orderId}/transition`, 'clerk_supplier_a', { state: 'ready_for_dispatch' });
+  await dispatchAndDeliver({ call, database, orderId });
+  assert.equal((await progress()).completedCount, 4);
+  await post(`/orders/${orderId}/survey`, 'clerk_client', { fulfillmentStars: 5, easeStars: 4, priceFeeling: 3 });
+  const complete = await progress();
+  assert.equal(complete.completedCount, 5); assert.equal(complete.label, 'Founding Tester');
+  assert.equal(complete.reward.valueMinor, 1500);
+  await post(`/orders/${orderId}/survey`, 'clerk_client', { fulfillmentStars: 5, easeStars: 4, priceFeeling: 3 });
+  const stored = await loadStore(database);
+  assert.equal(stored.vouchers.length, 3, 'one mission voucher and both referral vouchers, once');
+  assert.equal(stored.testerRewards.filter(r => r.kind === 'referral' && r.status === 'issued').length, 1);
+  assert.equal((await call('/me/vouchers?tab=all', { subject: 'clerk_inviter' })).body.vouchers.length, 1);
+});

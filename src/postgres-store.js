@@ -1,3 +1,4 @@
+import { testerProgramTables, emptyTesterProgram, testerProgramRows, loadTesterProgramRows } from './tester-program-store.js';
 import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from './founding-tester-store.js';
 import { enforceReviewData, labelReviewNotifications } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
@@ -74,7 +75,7 @@ const TABLES = [
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
@@ -108,6 +109,7 @@ const TABLES = [
   ...voucherTables,
   surveyTable,
   foundingTesterTable,
+  ...testerProgramTables,
   ...checkoutExitTables,
   supplierInvoiceTable,
   { name: "supplier_catalog_item_photos", keys: ["catalog_item_id", "file_id"], columns: ["catalog_item_id", "file_id", "sort_order", "alt_text", "created_at"] },
@@ -136,6 +138,7 @@ export function emptyStore() {
     supplierInvoices: [],
     surveyLaunchedAt: null,
     foundingTesters: [],
+    ...emptyTesterProgram(),
     supplierPerformanceLaunchedAt: null,
     supplierPerformanceEvents: [],
     version: 3,
@@ -215,6 +218,7 @@ function rowsFromStore(store) {
   performanceRows(store, rows);
   surveyRows(store, rows);
   foundingTesterRows(store, rows);
+  testerProgramRows(store, rows);
   checkoutExitRows(store, rows);
   supplierInvoiceRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
@@ -436,6 +440,7 @@ function rowsFromStore(store) {
       print_layouts: listingPrintLayouts(item),
       priced_by_colour: item.pricedByColour === true, one_colour: item.oneColour === true,
       express: item.express === true,
+      production_time_review_reasons: item.productionTimeReviewReasons || [],
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       turnaround_days: item.turnaroundDays ?? null,
       turnaround_minutes: item.turnaroundMinutes ?? null,
@@ -904,6 +909,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadPerformanceRows(store, loaded);
   loadSurveyRows(store, loaded);
   loadFoundingTesterRows(store, loaded);
+  loadTesterProgramRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;
@@ -1065,6 +1071,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
       colourPricing: colourPricingFromRows(loaded,row.id),
       express: row.express === true,
+      productionTimeReviewReasons: row.production_time_review_reasons || [],
       turnaroundMode: row.turnaround_mode, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
       minimumTurnaroundDays: row.minimum_turnaround_days ?? undefined, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
       fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
@@ -1572,7 +1579,7 @@ function catalogHitsCte() {
              item.package_qty, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.turnaround_minutes, item.minimum_turnaround_minutes, item.minimum_turnaround_days, item.minimum_turnaround_hours,
              item.file_format_mode, item.active, item.sort_order, item.version,
              item.created_at, item.updated_at, item.search_text, item.search_tsv,
-             item.printer_max_width_feet, item.print_layouts, item.express, item.review_status, item.review_reason, item.reviewed_at, item.reviewed_by, item.approved_snapshot,
+             item.printer_max_width_feet, item.print_layouts, item.express, item.production_time_review_reasons, item.review_status, item.review_reason, item.reviewed_at, item.reviewed_by, item.approved_snapshot,
              item.suspend_reason, item.suspended_at,
              COALESCE(item.turnaround_minutes / 60.0, item.turnaround_hours, service.standard_turnaround_minutes / 60.0, service.standard_turnaround_hours, service.turnaround_minutes / 60.0, service.turnaround_hours)::double precision
                AS effective_hours
@@ -1652,6 +1659,7 @@ function catalogItemFromListRow(row) {
     printLayouts: row.print_layouts || [],
     pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
     express: row.express === true,
+    productionTimeReviewReasons: row.production_time_review_reasons || [],
   };
 }
 

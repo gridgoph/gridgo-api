@@ -1,3 +1,4 @@
+import { effectiveProductionTime, productionTimeReview } from './production-time.js';
 import { supplierAccountIsActive } from "./supplier-eligibility.js";
 import { publicColourListing, publicColourQuote } from './colour-projection.js';
 import { colourQuoteFor } from './colour-analysis.js';
@@ -32,6 +33,13 @@ function speedTiersFor(store, itemId) {
       priceMinor: row.priceMinor ?? null,
       surchargeMinor: row.surchargeMinor ?? null,
     }));
+}
+
+export function clientSpeedTiersFor(store, itemId) {
+  return speedTiersFor(store, itemId).map(tier => ({ ...tier,
+    clientPriceMinor: clientMoneyMinor(store, tier.priceMinor),
+    clientSurchargeMinor: clientMoneyMinor(store, tier.surchargeMinor),
+  }));
 }
 
 const MAX_SAFE_MINOR = BigInt(Number.MAX_SAFE_INTEGER);
@@ -555,11 +563,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     priceTiers: priceTiersFor(store, item.id).map((tier) => ({
       ...tier, clientUnitPriceMinor: clientMoneyMinor(store, tier.unitPriceMinor),
     })),
-    speedTiers: speedTiersFor(store, item.id).map((tier) => ({
-      ...tier,
-      clientPriceMinor: clientMoneyMinor(store, tier.priceMinor),
-      clientSurchargeMinor: clientMoneyMinor(store, tier.surchargeMinor),
-    })),
+    speedTiers: clientSpeedTiersFor(store, item.id),
     pricingBasis: service.pricingBasis,
     turnaroundMode: item.turnaroundMode || "inherit",
     ...productionProjection({ ...item, turnaroundDays: item.turnaroundMode === "override" ? item.turnaroundDays : (service.standardTurnaroundHours != null ? service.standardTurnaroundDays : service.turnaroundDays), turnaroundMinutes: item.turnaroundMode === "override" ? item.turnaroundMinutes : (service.standardTurnaroundHours != null ? service.standardTurnaroundMinutes : service.turnaroundMinutes), turnaroundHours: itemTurnaroundHours(item, service) }, displayProductionDayMinutes(store, item.supplierId)),
@@ -1184,6 +1188,7 @@ export function listStaffCatalogItemsFromGraph(store, params) {
   } = params;
 
   let items = [...(store.catalogItems || [])];
+  if (params.productionTimeReview === 'required') items = items.filter(item => productionTimeReview(store, item).required);
   if (supplierId) items = items.filter((item) => item.supplierId === supplierId);
   if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
   if (minPriceMinor != null) items = items.filter((item) => item.basePriceMinor >= minPriceMinor);
@@ -1264,6 +1269,8 @@ export function privateCatalogItem(store, item) {
   const groups = catalogGroupsForItem(store, item.id);
   return {
     id: item.id,
+    productionTime: effectiveProductionTime(store, item).choice,
+    productionTimeReview: productionTimeReview(store, item),
     reviewStatus: item.reviewStatus || "approved",
     reviewReason: item.reviewReason ?? null,
     reviewedAt: item.reviewedAt ?? null,

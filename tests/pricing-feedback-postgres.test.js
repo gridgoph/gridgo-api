@@ -28,6 +28,8 @@ test('HTTP pricing survey answers, the weekly checkout exit question and Admin r
   await setup(db);
   const api = await apiForTest(t);
 
+  // Tester rewards now require opening tracking as well as the existing order facts.
+  assert.equal((await api('client', 'POST', '/orders/order/tester-tracking', {})).status, 200);
   const survey = await api('client', 'POST', '/orders/order/survey', answers);
   assert.equal(survey.status, 200, JSON.stringify(survey.body));
   assert.equal(survey.body.survey.reward.valueMinor, 1500);

@@ -35,7 +35,7 @@ test('match promise waits for review across Saturday close, Sunday and closure b
   assert.equal(projection.review.scheduledReviewAt, at);
   assert.equal(projection.review.reviewCompletesAt, '2026-10-13T00:00:15.000Z');
   assert.equal(projection.readyBy, '2026-10-13T01:00:15.000Z');
-  assert.equal(projection.promiseBy, '2026-10-13T02:00:15.000Z');
+  assert.equal(projection.promiseBy, '2026-10-13T03:00:15.000Z');
 });
 
 test('new-order acceptance uses platform hours while legacy acceptance retains shop hours', () => {

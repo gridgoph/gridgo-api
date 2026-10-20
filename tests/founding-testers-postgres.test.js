@@ -13,6 +13,7 @@ const answers = { fulfillmentStars: 5, easeStars: 4, priceFeeling: 3 };
 async function setup(db) {
   await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture(), at = new Date().toISOString();
+  store.testerTracking = [{ clientId: 'client', orderId: 'order', createdAt: at }];
   store.surveyLaunchedAt = (await db.query('SELECT launched_at FROM survey_launch')).rows[0].launched_at;
   Object.assign(store.orders[0], { state: 'issue_window_open', issueWindowOpenedAt: at });
   await db.transaction(() => saveStore(db, store));
@@ -54,7 +55,7 @@ test('HTTP profiles, staff directory/filter, dashboard, settings gates and walle
   const api = await apiForTest(t);
   assert.equal((await api(null, 'GET', '/me')).status, 401);
   const first = await api('client', 'GET', '/auth/me/client');
-  assert.equal(first.status, 200); assert.equal(first.body.clientProfile.foundingTester.completedCount, 2);
+  assert.equal(first.status, 200); assert.equal(first.body.clientProfile.foundingTester.completedCount, 4);
   const submitted = await api('client', 'POST', '/orders/order/survey', answers);
   assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
   const reward = submitted.body.survey.reward;

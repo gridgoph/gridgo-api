@@ -1593,3 +1593,9 @@ client accounts. It does not change existing order money or revoke already-earne
 labels. The profile/directory/dashboard projections, survey reward replacement,
 counting rules and production backfill preflight are documented with
 [Founding Tester vouchers](VOUCHERS_API.md#founding-tester-missions).
+
+The same versioned settings handshake also accepts nullable `testerMonthlyBudgetMinor`
+(integer centavos; null means no limit) and `testerSignupFormUrlTemplate` (HTTPS form
+prefill URL). The Manila-month budget, five-step path, invite evidence, staff reads,
+and individual Super Admin resume/void routes are defined in
+[Founding Tester path and invites](FOUNDING_TESTER_API.md).

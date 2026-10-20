@@ -82,7 +82,7 @@ test('one formula consumes review, extended shop hours, then next platform deliv
   store.supplierProfiles[0].schedule.extension = { day: '2026-10-15', opensMinute: 1080, closesMinute: 1200 };
   const { projection } = projectShopFinish(store, { supplierId: 'shop', turnaroundHours: 3, now: '2026-10-15T07:00:00.000Z' });
   assert.equal(projection.readyBy, '2026-10-15T10:30:00.000Z');
-  assert.equal(projection.promiseBy, '2026-10-16T01:00:00.000Z');
+  assert.equal(projection.promiseBy, '2026-10-16T02:00:00.000Z');
 });
 
 import { fixture as catalogFixture } from './fixtures/reschedule.js';

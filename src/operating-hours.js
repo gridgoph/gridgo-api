@@ -3,12 +3,12 @@ import { AvailabilityError, validateShopSchedule, isOpenAt, addOpeningMillisecon
 export function defaultOperatingHours() {
   return { timeZone: 'Asia/Manila', schedule: { utcOffsetMinutes: 480,
     week: [1, 2, 3, 4, 5, 6].map(weekday => ({ weekday, opensMinute: 480, closesMinute: 1020 })),
-    closures: [] }, artworkReviewMinutes: 60, sameDayReviewMinutes: 30, priorityDispatchCutoffMinute: 960 };
+    closures: [] }, artworkReviewMinutes: 60, sameDayReviewMinutes: 30, sameDayPromiseAllowanceMinutes: 120, priorityDispatchCutoffMinute: 960 };
 }
 export const operatingHours = settings => ({ ...defaultOperatingHours(), ...settings?.operatingHours });
 
 function invalid() {
-  throw new AvailabilityError(400, 'invalid_operating_hours', 'Use an Asia/Manila calendar with one daytime window per open day, valid closure dates, a review duration of 1–540 minutes, and a cutoff from 00:00 to 23:59.');
+  throw new AvailabilityError(400, 'invalid_operating_hours', 'Use an Asia/Manila calendar with one daytime window per open day, valid closure dates, a review duration of 1–540 minutes, a same-day promise margin of 0–600 whole working minutes, and a cutoff from 00:00 to 23:59.');
 }
 const dayValid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
   && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
@@ -17,6 +17,7 @@ export function validateOperatingHours(value, { requireDispatchWindow = true } =
     || Object.hasOwn(value.schedule, 'extension')
     || !Number.isSafeInteger(value.artworkReviewMinutes) || value.artworkReviewMinutes < 1 || value.artworkReviewMinutes > 540
     || (Object.hasOwn(value, 'sameDayReviewMinutes') && (!Number.isSafeInteger(value.sameDayReviewMinutes) || value.sameDayReviewMinutes < 1 || value.sameDayReviewMinutes > 540))
+    || (Object.hasOwn(value, 'sameDayPromiseAllowanceMinutes') && (!Number.isSafeInteger(value.sameDayPromiseAllowanceMinutes) || value.sameDayPromiseAllowanceMinutes < 0 || value.sameDayPromiseAllowanceMinutes > 600))
     || !Number.isSafeInteger(value.priorityDispatchCutoffMinute) || value.priorityDispatchCutoffMinute < 0 || value.priorityDispatchCutoffMinute > 1439
     || !Array.isArray(value.schedule?.week) || value.schedule.week.length > 7
     || new Set(value.schedule.week.map(row => row?.weekday)).size !== value.schedule.week.length
