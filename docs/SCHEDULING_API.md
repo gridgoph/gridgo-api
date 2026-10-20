@@ -265,3 +265,26 @@ an original duration. Legitimate old one-day settings can also need confirmation
 This migration and all production-time edits write listing metadata only.
 Placed/live order promises, duration snapshots, shop clocks, fees and speed-tier
 prices are untouched. Changing a listing affects future estimates only.
+
+## Queue lifecycle repair
+
+Queue estimates check both the per-shop job and its parent order. Picked-up,
+in-transit, delivered, issue-window, completed and cancelled work cannot consume
+queue minutes or a queue position even when an older transition left an active
+job row. Shop cancellation, decline and timeout withdraw work from the original
+shop throughout recovery and pending refunds; accepted replacement work counts
+at its replacement shop. The same rule applies to direct orders, and a closed
+job cannot return through the direct-order fallback. Active payment/QA work is
+counted once; draft group work still consumes capacity. The parent
+check is the scheduling boundary, so new lifecycle routes cannot reintroduce
+finished work by missing a compatibility-job update.
+
+Follow-up migration `1792503000000_withdrawn_production_queue_backfill` closes
+original-shop recovery jobs (including refund-pending and stale accepted
+recovery rows), preserves replacement jobs, and completes legacy payout-released
+jobs. It is repeatable and changes only job state/update timestamps.
+
+Migration `1792502000000_order_job_queue_backfill` brings stale nonterminal jobs
+forward to their order's pickup/delivery/terminal state. Already completed or
+cancelled jobs stay closed. Repeating the backfill changes nothing further.
+It never changes orders, promised dates, prices, fees or duration snapshots.
