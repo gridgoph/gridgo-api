@@ -1,3 +1,4 @@
+import { textDocumentPdf } from './text-document-pdf.js';
 import { createHash } from 'node:crypto';
 import { artworkFileIdsFor } from './artwork-attachments.js';
 import { supplierArtworkReleased } from './artwork-gates.js';
@@ -190,23 +191,7 @@ function proofDocumentLines(proofs) {
 
 /** Dependency-free PDF of the frozen record; file bytes remain private. */
 export function approvalProofPdf(proofs) {
-  const lines = proofDocumentLines(proofs);
-  const pages = Array.from({ length: Math.ceil(lines.length / 60) }, (_, index) => lines.slice(index * 60, (index + 1) * 60));
-  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '', '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>'];
-  const kids = [];
-  for (const [pageIndex, page] of pages.entries()) {
-    const number = objects.length + 1;
-    kids.push(`${number} 0 R`);
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${number + 1} 0 R >>`);
-    const content = `BT /F1 9 Tf 12 TL 30 810 Td\n${page.map(line => `(${line.replace(/[\\()]/g, char => `\\${char}`)}) Tj T*`).join('\n')}\nET\nBT /F1 8 Tf 30 30 Td (GRIDGO Approval Proof - Page ${pageIndex + 1} of ${pages.length}) Tj ET`;
-    objects.push(`<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`);
-  }
-  objects[1] = `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${kids.length} >>`;
-  let pdf = '%PDF-1.4\n'; const offsets = [0];
-  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
-  const xref = Buffer.byteLength(pdf);
-  pdf += `xref\n0 ${offsets.length}\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return Buffer.from(pdf);
+  return textDocumentPdf(proofDocumentLines(proofs), 'GRIDGO Approval Proof');
 }
 
 export async function routeApprovalProof({ req, url, store, user, readBody, now, id }) {

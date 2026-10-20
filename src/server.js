@@ -7,6 +7,7 @@ import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-pe
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
 import { approvalPolicy, recordApprovalProof, assertApprovalBeforeProceeding, approveSample, routeApprovalProof } from './approval-proof.js';
+import { routeAcknowledgement, issueAcknowledgement } from './acknowledgement-receipts.js';
 import { colourSettings } from './colour-pricing.js';
 import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './colour-analysis.js';
 import { createColourWorker } from './colour-worker.js';
@@ -2931,6 +2932,18 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control', 'private, no-store, max-age=0');
       if (supplierInvoiceResponse.mutated) await save(store);
       return send(res, supplierInvoiceResponse.status, supplierInvoiceResponse.body);
+    }
+
+    const acknowledgementResponse = await routeAcknowledgement({ req, url, store, user, database, now, id, audit });
+    if (acknowledgementResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (acknowledgementResponse.mutated) await save(store);
+      if (acknowledgementResponse.pdf) {
+        res.writeHead(200, { ...res.gridgoCorsHeaders, 'Content-Type': 'application/pdf',
+          'Content-Disposition': `attachment; filename="${acknowledgementResponse.filename}"` });
+        return res.end(acknowledgementResponse.pdf);
+      }
+      return send(res, acknowledgementResponse.status, acknowledgementResponse.body);
     }
 
     const approvalResponse = await routeApprovalProof({ req, url, store, user, readBody, now, id });
@@ -7318,6 +7331,8 @@ async function handleAuditedRequest(req, res) {
         await save(store);
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
+      // Older rider builds have no preparation call; still issue atomically before handover.
+      await issueAcknowledgement({ database, store, order, user, now: () => deliveredAt, id, audit });
       completeHandover(store, order, { actor: user, at: deliveredAt, id,
         note: body.evidenceType === 'photo' ? 'Delivery completed with photo evidence' : 'Delivery completed with signature evidence', fileId: evidenceFileId,
         mark: outsideHoursMark(order, store.settings, deliveredAt) });

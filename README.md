@@ -6,6 +6,8 @@ Exact cancellation quotes, gathered problem evidence and manual fault decisions 
 
 Immutable checkout/sample approvals, private signature evidence and PDF downloads are documented in [Approval proof](docs/APPROVAL_PROOF_API.md). Enforcement defaults off until the companion apps ship.
 
+Pilot door-delivery acknowledgement receipts, automatic AR numbering, rider reads and client PDF downloads are documented in [Acknowledgement receipts](docs/ACKNOWLEDGEMENT_RECEIPTS_API.md).
+
 Per-page document/construction colour estimates, shop tier prices, copies/sets and price-check gates are documented in [Colour pricing](docs/COLOUR_PRICING_API.md).
 
 Per-item special instructions, shop acknowledgement and paid specification changes are documented in [Order changes](docs/ORDER_CHANGES_API.md).
