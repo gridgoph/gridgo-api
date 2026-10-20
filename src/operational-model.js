@@ -379,9 +379,9 @@ export function validateOperationalSettings(settings) {
     const template = settings.testerSignupFormUrlTemplate;
     let valid = typeof template === 'string' && template.length <= 2048 && template.split('{code}').length === 2;
     try {
-      const parsed = new URL(valid ? template.replace('{code}', 'TESTERCODE') : '');
+      const parsed = new URL(valid ? template : '');
       valid = valid && parsed.protocol === 'https:' && !parsed.username && !parsed.password
-        && parsed.search.includes('TESTERCODE') && !parsed.hostname.includes('TESTERCODE');
+        && parsed.search.includes('{code}');
     } catch { valid = false; }
     if (!valid) fail(400, 'invalid_tester_signup_form_url', 'Use an HTTPS form URL with one {code} query placeholder, or null.');
   }

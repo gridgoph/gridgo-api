@@ -38,8 +38,15 @@ test('real HTTP: client isolation, attribution, tracking, two referral vouchers,
   assert.equal((await api('client', 'POST', '/me/founding-tester/installation', { installationId: 'bad' })).status, 400);
   assert.equal((await setting(api, { testerMonthlyBudgetMinor: 15000 }, 'ops')).status, 403);
   for (const value of [-1, 1.5, '1500', Number.MAX_SAFE_INTEGER + 1]) assert.equal((await setting(api, { testerMonthlyBudgetMinor: value })).status, 400);
-  for (const value of ['http://form.test/?code={code}', 'https://form.test/', 'https://{code}.test/', 'https://user:pass@form.test/?code={code}']) {
-    assert.equal((await setting(api, { testerSignupFormUrlTemplate: value })).status, 400);
+  for (const value of [
+    'http://form.test/?code={code}', 'https://form.test/', 'https://{code}.test/', 'https://user:pass@form.test/?code={code}',
+    'https://forms.example.test/?probe=TESTERCODE#entry.123={code}',
+    'https://forms.example.test/{code}?probe=TESTERCODE',
+    'https://{code}.example.test/?probe=TESTERCODE',
+  ]) {
+    const response = await setting(api, { testerSignupFormUrlTemplate: value });
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error, 'invalid_tester_signup_form_url');
   }
   assert.equal((await setting(api, { testerSignupFormUrlTemplate: 'https://forms.example.test/join?entry.123={code}', testerMonthlyBudgetMinor: null })).status, 200);
   const invite = await ok(api, 'client', 'POST', '/me/founding-tester/invite', { installationId: '00000000-0000-4000-8000-000000000001' });

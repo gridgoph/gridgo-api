@@ -2,6 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, id, AT } from './fixtures/reschedule.js';
 import { testerProgress, reconcileFoundingTester } from '../src/founding-testers.js';
+import { validateOperationalSettings } from '../src/operational-model.js';
+
+test('signup form requires the actual code placeholder in the query', () => {
+  const settings = fixture().settings;
+  for (const template of [
+    'https://forms.example.test/?probe=TESTERCODE#entry.123={code}',
+    'https://forms.example.test/{code}?probe=TESTERCODE',
+    'https://{code}.example.test/?probe=TESTERCODE',
+    'https://forms.example.test/?first={code}&second={code}',
+  ]) {
+    assert.throws(() => validateOperationalSettings({ ...settings, testerSignupFormUrlTemplate: template }),
+      { status: 400, code: 'invalid_tester_signup_form_url' });
+  }
+  assert.doesNotThrow(() => validateOperationalSettings({
+    ...settings, testerSignupFormUrlTemplate: 'https://forms.example.test/?probe=TESTERCODE&entry.123={code}#form',
+  }));
+});
 
 test('five-step path requires an explicit tracking event before the mission reward', () => {
   const store = fixture();
