@@ -485,6 +485,11 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
   });
 
   const choices = rows.flatMap(row => row.choices);
+  return schedulingCalendar(store, choices, { now: at, days });
+}
+
+/** Shared calendar projection for client search and the shop editor preview. */
+export function schedulingCalendar(store, choices, { now: at, days }) {
   const manilaDay = schedulingDay(at), start = Date.parse(`${manilaDay}T00:00:00+08:00`);
   const out = [];
   for (let index = 0; index < days; index++) {

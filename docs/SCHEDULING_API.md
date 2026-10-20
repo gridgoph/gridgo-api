@@ -153,3 +153,115 @@ editors preserves its current setting. `GET /settings` supplies its default even
 for pre-release settings rows. The existing Super Admin membership gate,
 `expectedVersion`, required `reason`, transaction and `settings.operational_update`
 audit (previous/current values) apply. Settings edits affect new estimates only.
+
+## Release 2: one production-time question
+
+Shop app and shop web use the same additive `productionTime` object on
+`POST /me/catalog-items` and `PATCH /me/catalog-items/:id` (PATCH retains
+`expectedVersion`). Choose exactly one shape:
+
+```json
+{ "productionTime": { "mode": "same_day", "hours": 2 } }
+```
+
+```json
+{ "productionTime": { "mode": "days", "minDays": 1, "maxDays": 3 } }
+```
+
+Hours must be positive and resolve to whole minutes (e.g. 1.5); days are
+positive whole shop working days, minimum no greater than maximum. Invalid or
+mixed choices return `400 invalid_production_time`. Do not send legacy duration
+fields or `express` alongside `productionTime`. Same day uses exact hours;
+it does not bypass queue, shop closures, GRIDGO review, dispatch or delivery.
+The preview can therefore show a later date. The legacy duration fields remain
+accepted and returned. The new choice sets `turnaroundMode: "override"` and
+maps to the existing `turnaround*` and `minimumTurnaround*` fields; no new
+scheduler or fee is introduced. Faster listed tiers and their prices are
+unchanged and can move under the UI's More options.
+
+Shop listing reads (own list/detail and staff listing reads) add:
+
+```json
+{
+  "productionTime": { "mode": "days", "minDays": 1, "maxDays": 3 },
+  "productionTimeReview": {
+    "required": true,
+    "reasons": ["legacy_one_working_day"],
+    "message": "Check your production time"
+  }
+}
+```
+
+Inherited time is resolved from the service; missing duration produces
+`productionTime: null`. Exact legacy hour durations retain their exact hours. An existing hour range
+projects its longest duration; the legacy minimum remains unchanged until saved.
+Legacy mixed day/hour ranges that cannot fit either choice also return null;
+the old duration fields remain available to explain the current setting.
+The review object is always present; when clear it is
+`{ "required": false, "reasons": [], "message": null }`.
+Reasons are `legacy_one_working_day` and `express_missing_hours`.
+Saving a valid production-time choice clears the reminder. An unrelated price,
+name, photo or visibility edit does not clear it. Existing app duration edits
+also clear it when they explicitly save a usable production duration.
+
+`GET /ops/catalog-items?productionTimeReview=required` uses the existing
+Operations/Super Admin membership gate and returns the existing paginated
+`{ items: [{ shop, item }], shops, total, nextCursor? }` shape, including each
+item's review reasons. Existing supplier, category, search and price filters
+still apply. Supplier/client calls are forbidden.
+
+### Preview before saving
+
+`GET /me/catalog-items/:id/production-time-preview?mode=days&minDays=1&maxDays=3&days=14`
+(or `mode=same_day&hours=2`) is a supplier-owned read. It accepts a proposed
+choice in query parameters and a display horizon `days` from 1 through 120
+(default 14). It returns `{ productionTime, scheduling, calendar }`.
+`calendar` has exactly the release-1 deadline calendar shape (`days`, `earliest`,
+`operatingStatus`, `expressAvailable`); its days include Tight/Secured/Rush,
+closed-day reasons and ISO `readyBy` clock times for Asia/Manila display.
+`scheduling` supplies the proposed listing's earliest and secured estimates.
+Preview uses only this listing, current queue/hours/settings and existing
+listed faster tiers at default quantity. It also works for drafts and hidden
+listings; it is advisory and grants no matching eligibility or reservation.
+No request-supplied clock, price or additional fee is supported.
+
+### Use for all my listings
+
+`POST /me/catalog-items/production-time` accepts:
+
+```json
+{
+  "productionTime": { "mode": "days", "minDays": 1, "maxDays": 3 },
+  "expectedVersions": { "listing_a": 4, "listing_b": 2 }
+}
+```
+
+Include every own listing ID/version from the shop's list, including hidden
+and draft listings. A missing/extra ID or stale version returns
+`409 catalog_items_stale` and applies nothing; refresh the list and retry.
+Returns `{ items, total }` with the updated private projections and versions.
+The transaction updates only the caller's listings, clears their reminders,
+and audits each edit as `catalog_item.update` with previous/current production
+fields and `bulk: true`. It does not alter services, review/visibility holds,
+listed tiers or prices. New production-time edits apply immediately like the
+existing duration edits, including listings with pending price revisions.
+
+### Migration and historical promises
+
+Apply `1792501000000_production_time_choice` before this API. Express listings
+with a usable effective duration become exact-hour Same day listings and keep
+their production duration; the retired boolean becomes false. Express listings
+without a usable duration retain the boolean and receive
+`express_missing_hours` until the shop supplies a duration.
+
+Migration `1791936000000_production_days` recorded canonical day values but
+no original-hour or per-row rounding marker. The new migration conservatively
+flags one-day rows that existed at that migration's recorded `pgmigrations`
+run time and still carry one-day values;
+inherited one-day service durations and audited historical corrections are
+included. This reminder asks the shop to confirm; it never guesses or restores
+an original duration. Legitimate old one-day settings can also need confirmation.
+
+This migration and all production-time edits write listing metadata only.
+Placed/live order promises, duration snapshots, shop clocks, fees and speed-tier
+prices are untouched. Changing a listing affects future estimates only.

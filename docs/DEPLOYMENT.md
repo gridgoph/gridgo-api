@@ -375,3 +375,13 @@ payload/click contract and endpoint restrictions are in [Web Push API](WEB_PUSH_
 ## Scheduling release 1
 
 Apply `1792417000000_scheduling_tiers` before deploying the API. It adds optional cart tier selection and immutable order tier snapshots; no live promise or fee is rewritten. [Scheduling](SCHEDULING_API.md) documents the additive app contract and existing Super Admin settings path.
+
+## Scheduling release 2
+
+Apply `1792501000000_production_time_choice` before the companion shop editors.
+It converts usable Express listing durations to exact hours and adds persisted
+production-time confirmation reasons; orders, jobs, snapshots and listed tier
+prices are unchanged. Check the reminder queue through
+`GET /ops/catalog-items?productionTimeReview=required`. The additive editor,
+shared-calendar preview and shop-scoped bulk contract are in
+[Scheduling](SCHEDULING_API.md#release-2-one-production-time-question).
