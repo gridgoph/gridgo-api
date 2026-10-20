@@ -81,6 +81,34 @@ MINIO_SECRET_KEY=<same bucket secret as gridgo-api.env>
 
 Native APNs is optional and separate from the Firebase credential. To enable it, install a private `.p8` file readable by uid 1001, mount it read-only into the API container, and set `GRIDGO_APNS_KEY_FILE` to that container path in `gridgo-api.env`. Set `GRIDGO_APNS_KEY_ID` and `GRIDGO_APNS_TEAM_ID`, plus the bundle topics `GRIDGO_APNS_CLIENT_TOPIC`, `GRIDGO_APNS_SUPPLIER_TOPIC`, and `GRIDGO_APNS_RIDER_TOPIC` for the apps being served. `GRIDGO_APNS_TOPIC` is the fallback for registrations without a matching app role; a fresh anonymous registration has no app role. Without a matching/fallback topic, delivery reports `apns_topic_missing`. Set `GRIDGO_APNS_SANDBOX=true` only for development APNs tokens; the default is production. The committed compose file does not mount an APNs key automatically. Device provider selection is defined in [Operational Model v2](OPERATIONAL_MODEL_V2_API.md#device-registration-model).
 
+Sign in with Apple account-deletion revocation requires a separate **Sign in with
+Apple** P-256 `.p8` key from Apple Developer (an APNs key is insufficient). Set
+these server-only variables in `gridgo-api.env`; never commit or print the key:
+
+```dotenv
+GRIDGO_APPLE_TEAM_ID=<Apple Developer Team ID>
+GRIDGO_APPLE_KEY_ID=<Sign in with Apple key ID>
+GRIDGO_APPLE_PRIVATE_KEY=<PEM private key with literal \n separators>
+GRIDGO_APPLE_CLIENT_IDS=<client bundle ID>,<supplier bundle ID>,<rider bundle ID>
+```
+
+Use the exact native iOS bundle IDs configured in Apple Developer and Clerk,
+without a Team ID prefix or web Services ID. The key must authorize all three
+App IDs (configure the primary/grouped Sign in with Apple App IDs in Apple
+Developer). Validate that the native subjects match the Clerk Apple external
+accounts in the intended instance. Changing app grouping or developer teams
+needs an Apple identity migration, not an email-based fallback.
+
+Migration `1792539400000` must run before serving this release. Missing/invalid
+configuration leaves startup and deletion-request filing available; revocation
+returns `503 apple_revocation_not_configured`. Existing completed revocation
+retries can still return their stored result. No Apple token values are persisted.
+Allow outbound HTTPS to `appleid.apple.com` for keys, token exchange and revocation.
+`GRIDGO_APPLE_API_URL` is exclusively a `NODE_ENV=test` loopback mock override;
+leave it unset in real deployments. Apps must implement the follow-up flow in
+[Apple revocation API](APPLE_REVOCATION_API.md) before App Store submission;
+deploying this API alone does not update their deletion screens.
+
 `/health` keeps the FCM report at `push` and adds the separate APNs report at `push.apns`. Each may report `configured`, `disabled`, or `misconfigured`; FCM also reports `available` after successful delivery or `unavailable` after provider/transport failures. `configured` therefore means "credential parsed, nothing sent by this process yet"; FCM spells that out with `sentSinceBoot: false`, `bootedAt`, per-process `sinceBoot: {accepted, pruned, failed}` counters, `lastAcceptedAt`, `lastFailureAt`/`lastFailureCode`, and `lastValidatedAt` (the stale-token sweep's last accepted dry run, which proves the credential before any real push). These reset on every deploy; the durable history is [`GET /ops/push/stats`](OPERATIONAL_MODEL_V2_API.md#get-opspushstats). The top-level push status is not an aggregate: FCM can be disabled while APNs is configured. APNs `configured` confirms key parsing, not topic validity or physical delivery. Runtime topic/provider errors are recorded on claimed-device outbox attempts; see [Realtime events](REALTIME_EVENTS.md#delivery-durability-and-scope) for retry and expiry behavior.
 
 Configuration fixed in compose includes `NODE_ENV`, `HOST`, `PORT`, exact dashboard CORS origin, private/public MinIO origins, bucket, region, TTL, and upload timeout. Optional runtime tuning variables belong in `gridgo-api.env` only when needed:

@@ -547,10 +547,12 @@ async function legalResponse(req, res, url, user = null) {
   return true;
 }
 
-async function deletionRequestEvent({ action, id: requestId, actor }) {
+async function deletionRequestEvent({ action, id: requestId, eventId, actor, detail }) {
   const latest = await load();
-  audit(latest, { actor, action, entityType: 'account_deletion_request', entityId: requestId });
-  notifyAdmins(latest, action, action === 'account_deletion_requested' ? 'Account deletion requested' : 'Account deletion completed', null, `${action}:${requestId}`, { createId: id, at: now() });
+  audit(latest, { actor, action, entityType: 'account_deletion_request', entityId: requestId, detail });
+  const title = action === 'account_deletion_requested' ? 'Account deletion requested'
+    : action === 'account_deletion_request_completed' ? 'Account deletion completed' : 'Apple revocation updated';
+  notifyAdmins(latest, action, title, null, `${action}:${requestId}:${eventId || ''}`, { createId: id, at: now() });
   queueInvalidate(latest, { resource: 'account-deletion-requests' });
   await save(latest);
 }
@@ -2612,8 +2614,10 @@ async function handleAuditedRequest(req, res) {
       };
     }
     if (!pathname.startsWith("/admin/") && await legalResponse(req, res, url, user)) return;
-    if (pathname === '/me/account-deletion-request') {
-      const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
+    if (pathname === '/me/account-deletion-request' || pathname === '/me/account-deletion-request/apple-revocation') {
+      res.setHeader('Cache-Control', 'private, no-store');
+      const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent,
+        loadClerkUser: clerkUserId => clerkBackend.users.getUser(clerkUserId) });
       return send(res, result.status, result.body);
     }
     // Other routes already use ?role as a directory filter. Only the inbox
@@ -2839,6 +2843,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (pathname === '/ops/account-deletion-requests' || pathname.startsWith('/ops/account-deletion-requests/')) {
+      res.setHeader('Cache-Control', 'private, no-store');
       const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent });
       return send(res, result.status, result.body);
     }
@@ -7515,11 +7520,12 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (mutatesStore && (isSupportChatRoute(pathname) || isStaffIssueReportsRoute(pathname) || isAdminTrackerRoute(pathname))) {
+  if (mutatesStore && (isSupportChatRoute(pathname) || isStaffIssueReportsRoute(pathname) || isAdminTrackerRoute(pathname)
+    || pathname === '/me/account-deletion-request/apple-revocation')) {
     // Clerk-authenticated, but its own tables and lock — do not hold the
     // domain mutation lock while someone is typing to Operations (or marking
-    // an issue report, or while GitHub answers a tracker write; the tracker
-    // takes the domain lock itself only for its final audit commit).
+    // an issue report, or while GitHub/Apple answers a request; tracker and
+    // Apple revocation take the domain lock only for the final audit commit).
     void readBody(req)
       .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(() => handleRequest(req, res))
