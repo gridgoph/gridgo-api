@@ -246,6 +246,8 @@ export function defaultProductionNudge() {
 export function defaultOperationalSettings() {
   return {
     foundingTesterLaunchAt: null,
+    testerMonthlyBudgetMinor: null,
+    testerSignupFormUrlTemplate: null,
     operatingHours: defaultOperatingHours(),
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
@@ -369,6 +371,19 @@ export function validateOperationalSettings(settings) {
     || !Number.isFinite(Date.parse(settings.foundingTesterLaunchAt))
     || new Date(settings.foundingTesterLaunchAt).toISOString() !== settings.foundingTesterLaunchAt.replace(/(?<=:\d{2})Z$/, '.000Z'))) {
     fail(400, 'invalid_founding_tester_launch_at', 'Use a UTC ISO timestamp or null.');
+  }
+  if (settings?.testerMonthlyBudgetMinor != null && (!Number.isSafeInteger(settings.testerMonthlyBudgetMinor) || settings.testerMonthlyBudgetMinor < 0)) {
+    fail(400, 'invalid_tester_monthly_budget', 'Use nonnegative integer centavos or null.');
+  }
+  if (settings?.testerSignupFormUrlTemplate != null) {
+    const template = settings.testerSignupFormUrlTemplate;
+    let valid = typeof template === 'string' && template.length <= 2048 && template.split('{code}').length === 2;
+    try {
+      const parsed = new URL(valid ? template.replace('{code}', 'TESTERCODE') : '');
+      valid = valid && parsed.protocol === 'https:' && !parsed.username && !parsed.password
+        && parsed.search.includes('TESTERCODE') && !parsed.hostname.includes('TESTERCODE');
+    } catch { valid = false; }
+    if (!valid) fail(400, 'invalid_tester_signup_form_url', 'Use an HTTPS form URL with one {code} query placeholder, or null.');
   }
   const downpaymentPercent = settings?.downpaymentPercent;
   if (downpaymentPercent !== undefined && !DOWNPAYMENT_PERCENTS.includes(downpaymentPercent)) {

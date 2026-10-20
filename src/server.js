@@ -1,4 +1,7 @@
-import { foundingTesterEligible, testerProgress, publicFoundingTester, reconcileFoundingTester, remindFoundingTesters } from './founding-testers.js';
+import { routeTesterProgram } from './tester-program-routes.js';
+import { matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from './tester-invites.js';
+import { testerBudget } from './tester-rewards.js';
+import { testerProgress, publicFoundingTester, reconcileFoundingTester, recordTesterCartStep, remindFoundingTesters } from './founding-testers.js';
 import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed, markReviewPayment } from './review-data.js';
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
@@ -372,11 +375,13 @@ function notifyMissingJobDetails(store, order) {
 }
 
 async function refreshFoundingTester(store, clientId) {
-  if (!foundingTesterEligible(store, clientId) || store.foundingTesters.some(row => row.clientId === clientId && row.awardedAt)
-    || testerProgress(store, clientId).completedCount !== 3) return store;
   return enqueueMutation(async () => {
-    const latest = await load();
-    if (reconcileFoundingTester(latest, clientId, { id, at: now() })) await save(latest);
+    const latest = await load(), ctx = { id, at: now() };
+    let changed = matchTesterInvites(latest, ctx);
+    changed = recordTesterCartStep(latest, clientId, ctx.at) || changed;
+    changed = reconcileFoundingTester(latest, clientId, ctx) || changed;
+    changed = reconcileTesterInvite(latest, clientId, ctx) || changed;
+    if (changed) await save(latest);
     return latest;
   });
 }
@@ -395,14 +400,27 @@ async function save(view) {
   const previousStore = originalDomainStore(store);
   if (previousStore) {
     const touched = new Set();
-    for (const key of ['orders', 'issues', 'refundSettlements']) {
-      const previous = new Map((previousStore[key] || []).map(row => [row.id, row]));
-      for (const row of store[key] || []) if (JSON.stringify(row) !== JSON.stringify(previous.get(row.id))) {
+    for (const key of ['orders', 'issues', 'refundSettlements', 'orderSurveys', 'carts', 'cartLines', 'users']) {
+      const rowKey = row => key === 'orderSurveys' ? row.orderId : row.id;
+      const previous = new Map((previousStore[key] || []).map(row => [rowKey(row), row]));
+      for (const row of store[key] || []) if (JSON.stringify(row) !== JSON.stringify(previous.get(rowKey(row)))) {
         const order = key === 'orders' ? row : store.orders.find(o => o.id === row.orderId);
-        if (order) touched.add(order.clientId);
+        const clientId = order?.clientId || row.clientId || (key === 'users' ? row.id : key === 'cartLines' ? store.carts.find(c => c.id === row.cartId)?.clientId : null);
+        if (clientId) touched.add(clientId);
       }
     }
-    for (const clientId of touched) reconcileFoundingTester(store, clientId, { id, at: now() });
+    matchTesterInvites(store, { id, at: now() });
+    for (const clientId of touched) {
+      // Incidental order maintenance (invoice expectations, lifecycle metadata)
+      // must not turn save() into a historical/bulk award sweep.
+      const progressChanged = JSON.stringify(testerProgress(previousStore, clientId).missions)
+        !== JSON.stringify(testerProgress(store, clientId).missions);
+      recordTesterCartStep(store, clientId, now());
+      if (progressChanged) {
+        reconcileFoundingTester(store, clientId, { id, at: now() });
+        reconcileTesterInvite(store, clientId, { id, at: now() });
+      }
+    }
   }
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
@@ -806,6 +824,8 @@ function publicOperationalSettings(settings, store = null, user = null) {
   return {
     ...rest,
     foundingTesterLaunchAt: rest.foundingTesterLaunchAt ?? null,
+    testerMonthlyBudgetMinor: rest.testerMonthlyBudgetMinor ?? null,
+    testerSignupFormUrlTemplate: rest.testerSignupFormUrlTemplate ?? null,
     colourDetection: colourSettings(settings),
     operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
@@ -2674,6 +2694,12 @@ async function handleAuditedRequest(req, res) {
         || pathname === "/me/catalog-quotes" || /^\/me\/carts\/[^/]+\/quote$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
+    const testerResponse = await routeTesterProgram({ req, url, store, user, readBody, now, id });
+    if (testerResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (testerResponse.mutated) await save(store);
+      return send(res, testerResponse.status, testerResponse.body);
+    }
     const surveyResponse = await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id })
       || await routePricingFeedback({ req, url, store, user, readBody, now, id });
     if (surveyResponse) {
@@ -3852,6 +3878,8 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        testerMonthlyBudgetMinor: Object.hasOwn(body, 'testerMonthlyBudgetMinor') ? body.testerMonthlyBudgetMinor : (store.settings.testerMonthlyBudgetMinor ?? null),
+        testerSignupFormUrlTemplate: Object.hasOwn(body, 'testerSignupFormUrlTemplate') ? body.testerSignupFormUrlTemplate : (store.settings.testerSignupFormUrlTemplate ?? null),
         foundingTesterLaunchAt: Object.hasOwn(body, 'foundingTesterLaunchAt') ? body.foundingTesterLaunchAt : (store.settings.foundingTesterLaunchAt ?? null),
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
         clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
@@ -4084,9 +4112,9 @@ async function handleAuditedRequest(req, res) {
       const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 100);
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) return send(res, 400, { error: 'invalid_pagination' });
       const clients = store.users.filter(u => hasRole(store, u.id, 'client')).map(u => ({ clientId: u.id, name: u.name,
-        foundingTester: publicFoundingTester(store, u.id, now()) }));
+        foundingTester: publicFoundingTester(store, u.id, now()), invites: publicTesterInvites(store, u.id) }));
       res.setHeader('Cache-Control', 'private, no-store');
-      return send(res, 200, { serverTime: now(), total: clients.length, clients: clients.slice(offset, offset + limit) });
+      return send(res, 200, { serverTime: now(), total: clients.length, clients: clients.slice(offset, offset + limit), budget: testerBudget(store, now()) });
     }
 
     // ---- users directory ----

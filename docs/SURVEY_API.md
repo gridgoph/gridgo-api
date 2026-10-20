@@ -129,8 +129,8 @@ submission can consume the account's available reward first.
 ## Reward and low-score behavior
 
 **Founding Tester exception:** eligible pre-launch client accounts earn the single
-₱15 reward through the three missions, replacing the repeat survey reward below.
-See [Founding Tester missions](VOUCHERS_API.md#founding-tester-missions) for cutoff,
+₱15 reward through the five missions, replacing the repeat survey reward below.
+See [Founding Tester path and invites](FOUNDING_TESTER_API.md) for the five-step reward gate, budget pauses and referral rewards; see [Founding Tester missions](VOUCHERS_API.md#founding-tester-missions) for cutoff,
 failure surveys, progress projections, one-time historical reuse and reminder rules.
 Cards add `rewardProgram`; mission submissions use `rewardStatus:"founding_tester"`
 and resolve `reward` to the single account wallet item. Non-tester clients retain

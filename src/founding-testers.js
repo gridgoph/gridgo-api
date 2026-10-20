@@ -1,4 +1,5 @@
-import { issueVoucher, publicVoucher, generatedVoucherCode } from './vouchers.js';
+import { publicVoucher } from './vouchers.js';
+import { createTesterReward, issueTesterReward } from './tester-rewards.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
 import { isReviewData } from './review-data.js';
 
@@ -26,18 +27,31 @@ export function testerOrderFacts(store, order) {
   const rated = received && (store.orderSurveys || []).some(s => s.orderId === order.id && s.submittedAt);
   return { placed, received, rated, failureAt: excluded ? null : failureAt };
 }
-export function testerProgress(store, clientId) {
+export function testerProgress(store, clientId, { preserveAward = true } = {}) {
+  const awarded = Boolean(account(store, clientId)?.awardedAt);
+  if (preserveAward && awarded) return { missions: { added: true, placed: true, tracked: true, received: true, rated: true }, completedCount: 5 };
   const orders = store.orders.filter(o => o.clientId === clientId);
   const facts = orders.map(o => ({ orderId: o.id, ...testerOrderFacts(store, o) }));
-  const missions = Object.fromEntries(['placed', 'received', 'rated'].map(key => [key, facts.some(f => f[key])]));
+  const carts = new Set((store.carts || []).filter(c => c.clientId === clientId).map(c => c.id));
+  const orderIds = new Set(orders.filter(o => !isReviewData(o)).map(o => o.id));
+  const missions = {
+    added: awarded || Boolean(account(store, clientId)?.addedAt) || (store.cartLines || []).some(l => carts.has(l.cartId))
+      || (store.orderLineItems || []).some(l => orderIds.has(l.orderId)),
+    placed: facts.some(f => f.placed),
+    tracked: facts.some(f => f.placed && (awarded || (store.testerTracking || []).some(t => t.clientId === clientId && t.orderId === f.orderId))),
+    received: facts.some(f => f.received),
+    rated: facts.some(f => f.rated),
+  };
   return { missions, completedCount: Object.values(missions).filter(Boolean).length };
 }
 export function publicFoundingTester(store, clientId, at) {
   const row = account(store, clientId), eligible = foundingTesterEligible(store, clientId);
   const reward = row?.rewardVoucherId && store.vouchers.find(v => v.id === row.rewardVoucherId);
   return { eligible, label: row?.awardedAt ? 'Founding Tester' : null, awardedAt: row?.awardedAt || null,
-    ...(row?.awardedAt ? { missions: { placed: true, received: true, rated: true }, completedCount: 3 } : testerProgress(store, clientId)), reward: reward ? publicVoucher(store, reward, at) : null,
-    rewardStatus: row?.awardedAt ? (row.rewardReused ? 'existing_survey_reward' : 'issued') : eligible ? 'pending' : 'ineligible' };
+    ...(row?.awardedAt ? { missions: { added: true, placed: true, tracked: true, received: true, rated: true }, completedCount: 5 } : testerProgress(store, clientId)), reward: reward ? publicVoucher(store, reward, at) : null,
+    rewardStatus: store.testerRewards?.find(r => r.kind === 'mission' && r.clientId === clientId)?.status === 'voided' ? 'voided'
+      : row?.awardedAt ? (row.rewardReused ? 'existing_survey_reward' : 'issued')
+      : store.testerRewards?.find(r => r.kind === 'mission' && r.clientId === clientId)?.status === 'paused' ? 'paused' : eligible ? 'pending' : 'ineligible' };
 }
 function rowFor(store, clientId) {
   store.foundingTesters ||= [];
@@ -54,24 +68,22 @@ function notify(store, clientId, type, title, body, { id, at }, push = true) {
   queueInvalidate(store, { resource: 'notifications', userIds: [clientId] });
 }
 /** One account at a time inside the domain transaction. No background bulk award. */
-export function reconcileFoundingTester(store, clientId, { id, at }) {
-  if (!foundingTesterEligible(store, clientId) || account(store, clientId)?.awardedAt || testerProgress(store, clientId).completedCount !== 3) return false;
+export function reconcileFoundingTester(store, clientId, { id, at, resume = false, actorId = null }) {
+  if (!foundingTesterEligible(store, clientId) || account(store, clientId)?.awardedAt || testerProgress(store, clientId).completedCount !== 5) return false;
+  const previous = store.testerRewards?.find(r => r.kind === 'mission' && r.clientId === clientId);
+  if (previous && (!resume || previous.status !== 'paused')) return false;
   const row = rowFor(store, clientId);
   const prior = (store.orderSurveys || []).filter(s => s.clientId === clientId && s.rewardVoucherId).sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))[0];
-  let voucher = prior && store.vouchers.find(v => v.id === prior.rewardVoucherId);
-  row.rewardReused = Boolean(voucher);
-  if (!voucher) {
-    const campaign = { id: id('vcamp'), name: 'Thank you, Founding Tester', purpose: 'founding_tester', code: generatedVoucherCode(),
-      mode: 'assigned', status: 'active', valueMinor: 1500, totalLimit: 1, perAccountLimit: 1,
-      validityDays: 30, endsAt: null, createdAt: at, updatedAt: at };
-    store.voucherCampaigns.push(campaign);
-    voucher = issueVoucher(store, campaign, clientId, { id, at, actorId: clientId, adultConfirmed: false }).voucher;
-  }
+  const reusedVoucher = prior && store.vouchers.find(v => v.id === prior.rewardVoucherId);
+  const reward = createTesterReward(store, { kind: 'mission', clientId, inviterId: null, inviteId: null, amountMinor: reusedVoucher ? 0 : 1500 }, { id, at });
+  if (!issueTesterReward(store, reward, { id, at, actorId }, { reusedVoucher })) return !previous;
+  const voucher = store.vouchers.find(v => v.id === reward.voucherId);
+  row.rewardReused = Boolean(reusedVoucher);
   Object.assign(row, { awardedAt: at, rewardVoucherId: voucher.id });
   store.auditLog.push({ id: id('aud'), at, actorId: null, actorRole: 'system', action: 'founding_tester.awarded',
     entityType: 'user', entityId: clientId, detail: { voucherId: voucher.id, rewardReused: row.rewardReused } });
   notify(store, clientId, 'founding_tester_awarded', 'You are a Founding Tester',
-    'You completed all three missions. View your label and reward in your account.', { id, at }, false);
+    'You completed all five missions. View your label and reward in your account.', { id, at }, false);
   return true;
 }
 export function remindFoundingTesters(store, { id, at }) {
@@ -90,4 +102,11 @@ export function remindFoundingTesters(store, { id, at }) {
     changed = true;
   }
   return changed;
+}
+
+// Preserve an observed cart step even if the client later removes the line.
+export function recordTesterCartStep(store, clientId, at) {
+  if (account(store, clientId)?.addedAt || !testerProgress(store, clientId).missions.added) return false;
+  rowFor(store, clientId).addedAt = at;
+  return true;
 }

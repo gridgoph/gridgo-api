@@ -11,6 +11,7 @@ const time = days => new Date(Date.parse(AT) + days * DAY).toISOString();
 const answers = { fulfillmentStars: 5, easeStars: 4, priceFeeling: 3 };
 function setup() {
   const store = fixture(); store.surveyLaunchedAt = AT;
+  store.testerTracking = [{ clientId: 'client', orderId: 'order', createdAt: AT }];
   store.users.forEach(u => { u.createdAt = AT; });
   return store;
 }
@@ -22,13 +23,13 @@ const submit = (store, at = AT) => submitSurvey(store, store.orders[0], answers,
 test('missions advance only on confirmed payment, actual handover, then survey; any order size counts', () => {
   const store = setup(), order = store.orders[0];
   order.totalMinor = 1; order.payments.initial.status = 'pending_confirmation';
-  assert.equal(view(store).completedCount, 0);
-  order.payments.initial.status = 'confirmed'; assert.equal(view(store).completedCount, 1);
-  order.state = 'awaiting_collection'; assert.equal(view(store).completedCount, 1);
-  deliver(store); assert.equal(view(store).completedCount, 2); assert.equal(reconcile(store), false);
+  assert.equal(view(store).completedCount, 1);
+  order.payments.initial.status = 'confirmed'; assert.equal(view(store).completedCount, 3);
+  order.state = 'awaiting_collection'; assert.equal(view(store).completedCount, 3);
+  deliver(store); assert.equal(view(store).completedCount, 4); assert.equal(reconcile(store), false);
   const response = submit(store);
   assert.equal(response.rewardProgram, 'founding_tester'); assert.equal(response.rewardStatus, 'founding_tester');
-  assert.equal(view(store).label, 'Founding Tester'); assert.equal(view(store).completedCount, 3);
+  assert.equal(view(store).label, 'Founding Tester'); assert.equal(view(store).completedCount, 5);
   assert.equal(response.reward.valueMinor, 1500); assert.equal(response.reward.expiresAt, time(30));
   assert.equal(store.voucherCampaigns[0].purpose, 'founding_tester');
   assert.equal(store.vouchers[0].emailAllowed, false); assert.equal(store.voucherEmailOutbox.length, 0);
@@ -66,7 +67,7 @@ test('client-caused and unattributed cancellations/refunds never complete missio
     if (kind === 'cancel') Object.assign(store.orders[0], { state: 'cancelled', cancelledBy: 'client' });
     if (kind.endsWith('refund')) store.refundSettlements.push({ orderId: 'order', disposition: 'fulfilled_with_refund', snapshot: kind === 'client_refund' ? { clientCaused: true } : {} });
     if (kind === 'client_decision') store.issues.push({ orderId: 'order', faultDecision: { status: 'approved', fault: 'client', recordedAt: AT } });
-    assert.equal(view(store).completedCount, 0, kind); assert.equal(reconcile(store), false);
+    assert.equal(view(store).completedCount, 1, kind); assert.equal(reconcile(store), false);
   }
 });
 
@@ -76,8 +77,8 @@ test('shop and approved GRIDGO failures count first two missions and permit a su
     Object.assign(order, { state: 'cancelled', cancelledBy: 'client' }); order.payments.initial.status = 'pending_confirmation';
     if (kind === 'shop_event') order.shopFailureEvents = [{ at: AT, kind: 'cancelled' }];
     else store.issues.push({ orderId: 'order', faultDecision: { status: 'approved', fault: kind, recordedAt: AT } });
-    assert.equal(view(store).completedCount, 2); assert.equal(publicSurvey(store, order, AT).status, 'open');
-    assert.equal(submit(store).reward.valueMinor, 1500); assert.equal(view(store).completedCount, 3);
+    assert.equal(view(store).completedCount, 4); assert.equal(publicSurvey(store, order, AT).status, 'open');
+    assert.equal(submit(store).reward.valueMinor, 1500); assert.equal(view(store).completedCount, 5);
   }
   const store = setup();
   store.issues.push({ orderId: 'order', faultDecision: { status: 'awaiting_approval', fault: 'gridgo', recordedAt: AT } });
@@ -85,7 +86,7 @@ test('shop and approved GRIDGO failures count first two missions and permit a su
   assert.equal(publicSurvey(store, store.orders[0], AT), null);
   store.orders[0].shopFailureEvents = [{ at: AT }];
   store.refundSettlements.push({ orderId: 'order', snapshot: { clientCaused: true } });
-  assert.equal(view(store).completedCount, 0);
+  assert.equal(view(store).completedCount, 1);
 });
 
 test('existing completed accounts get one label and reuse even an expired survey voucher', () => {
