@@ -196,7 +196,7 @@ test('HTTP requests bypass account holds, audit atomically and notify only staff
   assert.equal((await request(instance.api, '/me/account-deletion-request', { method: 'POST', body: { confirmed: true } })).status, 401);
 });
 
-test('HTTP Apple revocation binds Clerk identity, audits results, retries safely and exposes staff status', { skip: !DATABASE_URL }, async (t) => {
+test('HTTP Apple revocation binds Clerk identity, audits results, retries safely and exposes staff status', { skip: !DATABASE_URL, timeout: 30000 }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const apple = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -208,6 +208,7 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
   let missing;
   let linked = true;
   let clerkAvailable = true;
+  let clerkStall;
   let releaseSlow;
   let slowStarted;
   const slowReady = new Promise(resolve => { slowStarted = resolve; });
@@ -225,6 +226,14 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
     const body = new URLSearchParams(raw);
     const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (req.url.startsWith('/v1/users/')) {
+      if (clerkStall) {
+        const stall = clerkStall;
+        res.once('close', stall.closed.resolve);
+        if (stall.body) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"object":"user",'); }
+        stall.entered.resolve();
+        await stall.release.promise;
+        if (res.destroyed) return;
+      }
       if (!clerkAvailable) return json(503, { errors: [{ code: 'unavailable', message: 'mock unavailable' }] });
       const id = req.url.split('/').at(-1);
       return json(200, { object: 'user', id, email_addresses: [], phone_numbers: [], web3_wallets: [],
@@ -257,8 +266,10 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
     GRIDGO_APPLE_TEAM_ID: 'MOCKTEAM01', GRIDGO_APPLE_KEY_ID: 'MOCKKEY001',
     GRIDGO_APPLE_PRIVATE_KEY: ec.privateKey.export({ type: 'pkcs8', format: 'pem' }),
     GRIDGO_APPLE_CLIENT_IDS: 'ph.gridgo.client,ph.gridgo.supplier,ph.gridgo.rider', GRIDGO_APPLE_API_URL: mockUrl,
+    DATABASE_POOL_MAX: '3', DATABASE_CONNECT_TIMEOUT_MS: '1000',
     GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000', GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: '0' };
   t.after(async () => {
+    clerkStall?.release.resolve();
     releaseSlow();
     await stopApi(instance); await stopApi(missing);
     await new Promise(resolve => mock.close(resolve));
@@ -310,10 +321,68 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
   assert.equal((await post('success', 'client', {}, missing.api)).status, 200, 'lost-response retries still work if configuration is later removed');
   assert.equal(calls.filter(c => c.path === '/auth/token').length, 1);
   assert.equal(calls.filter(c => c.path === '/auth/revoke').length, 1);
-  // Concurrent duplicate requests across calls serialize on the database lock.
+  // Concurrent duplicates are refused promptly; a later replay stays idempotent.
   const concurrent = await Promise.all([post('concurrent'), post('concurrent')]);
-  assert.deepEqual(concurrent[0], concurrent[1]);
+  assert.deepEqual(concurrent.map(row => row.status).sort(), [200, 409]);
+  assert.equal(concurrent.find(row => row.status === 409).body.error, 'apple_revocation_in_progress');
+  assert.deepEqual(await post('concurrent'), concurrent.find(row => row.status === 200));
   assert.equal(calls.filter(c => c.path === '/auth/token' && c.body.get('code') === 'concurrent').length, 1);
+  for (const body of [false, true]) {
+    const stall = { body, entered: Promise.withResolvers(), closed: Promise.withResolvers(), release: Promise.withResolvers() };
+    clerkStall = stall;
+    const before = calls.length;
+    const code = body ? 'clerk-body-stall' : 'clerk-header-stall';
+    const pending = [post(code)];
+    try {
+      await stall.entered.promise;
+      // Mixed same-code/fresh-code duplicates exceed the API process's pool.
+      for (let i = 0; i < 12; i++) pending.push(post(i % 2 ? code : `${code}-${i}`));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const started = Date.now();
+      const health = await request(instance.api, '/health');
+      assert.equal(health.status, 200, 'Clerk stalls and duplicates must not exhaust the API pool');
+      assert.equal(health.body.database.status, 'available');
+      const otherRole = body ? 'super_admin' : 'ops_admin';
+      const mutation = await request(instance.api, '/me/account-deletion-request', {
+        method: 'POST', token: clerkToken(uid(otherRole)), body: { confirmed: true },
+      });
+      assert.equal(mutation.status, 202, 'an unrelated mutation must still commit through the same API pool');
+      assert.ok(Date.now() - started < 1500, 'unrelated requests must not await the Clerk deadline');
+      assert.equal((await database.query("SELECT id FROM account_deletion_requests WHERE user_id=$1 AND status='pending'", [uid(otherRole)])).rowCount, 1);
+      const result = await pending[0];
+      assert.equal(result.status, 502);
+      assert.equal(result.body.error, 'clerk_unavailable');
+      assert.ok(Date.now() - started < 6000, 'stalled Clerk response has a bounded deadline');
+      await Promise.race([stall.closed.promise, new Promise((_, reject) => setTimeout(() => reject(new Error('Clerk socket was not aborted')), 1000))]);
+      const duplicates = await Promise.all(pending.slice(1));
+      assert.ok(duplicates.every(result => result.status === 409 && result.body.error === 'apple_revocation_in_progress'));
+      assert.equal(calls.length, before, 'no Apple call is allowed after a stalled Clerk lookup');
+    } finally {
+      clerkStall = null;
+      stall.release.resolve();
+      await Promise.allSettled(pending);
+    }
+    assert.equal((await post(code)).status, 200, 'the same code can succeed after Clerk recovers');
+  }
+  // Simulate a different API replica owning this user's transaction lock.
+  const replicaEntered = Promise.withResolvers();
+  const replicaRelease = Promise.withResolvers();
+  const replica = database.transaction(async () => { replicaEntered.resolve(); await replicaRelease.promise; }, {
+    lockKey: `gridgo-apple-revocation:${uid('client')}`,
+  });
+  await replicaEntered.promise;
+  const beforeReplica = calls.length;
+  const contended = post('replica-contention');
+  let replicaTimer;
+  try {
+    const result = await Promise.race([contended,
+      new Promise((_, reject) => { replicaTimer = setTimeout(() => reject(new Error('replica lock waiter retained an API connection')), 1500); })]);
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error, 'apple_revocation_in_progress');
+    assert.equal((await request(instance.api, '/health')).status, 200);
+    assert.equal(calls.length, beforeReplica, 'cross-replica conflicts must not call Apple');
+  } finally { clearTimeout(replicaTimer); replicaRelease.resolve(); await replica; await Promise.allSettled([contended]); }
+  assert.equal((await post('replica-contention')).status, 200);
   for (const [code, status, error] of [
     ['invalid-code', 400, 'invalid_apple_authorization_code'], ['wrong-user', 403, 'apple_identity_mismatch'],
     ['wrong-audience', 502, 'apple_identity_invalid'], ['bad-signature', 502, 'apple_identity_invalid'],
@@ -337,6 +406,9 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
   await slowReady;
   let timer;
   try {
+    const duplicates = await Promise.all(Array.from({ length: 12 }, (_, index) => post(index % 2 ? 'slow-response' : `slow-duplicate-${index}`)));
+    assert.ok(duplicates.every(row => row.status === 409 && row.body.error === 'apple_revocation_in_progress'));
+    assert.equal((await request(instance.api, '/health')).status, 200, 'Apple stalls also leave the API pool available');
     await Promise.race([database.transaction(async () => database.query('SELECT 1')),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Apple held the domain lock during token exchange')), 1000); })]);
   } finally { clearTimeout(timer); releaseSlow(); }

@@ -92,6 +92,7 @@ import {
   authenticateBearerToken,
   clientEmailAvailable,
   createClerkBackend,
+  loadClerkAppleAccount,
   verifyClerkClaims,
   authFailureBody,
 } from "./auth.js";
@@ -2617,7 +2618,7 @@ async function handleAuditedRequest(req, res) {
     if (pathname === '/me/account-deletion-request' || pathname === '/me/account-deletion-request/apple-revocation') {
       res.setHeader('Cache-Control', 'private, no-store');
       const result = await routeAccountDeletion({ req, url, user, database, readBody, onEvent: deletionRequestEvent,
-        loadClerkUser: clerkUserId => clerkBackend.users.getUser(clerkUserId) });
+        loadClerkUser: clerkUserId => loadClerkAppleAccount(AUTH, clerkUserId) });
       return send(res, result.status, result.body);
     }
     // Other routes already use ?role as a directory filter. Only the inbox

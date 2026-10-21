@@ -2,6 +2,7 @@ import { generateKeyPairSync, sign, verify, createPublicKey } from 'node:crypto'
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appleConfiguration, appleClientSecret, clerkAppleSubjects, verifyAppleIdentity, revokeAppleAuthorization } from '../src/apple-revocation.js';
+import { loadClerkAppleAccount } from '../src/auth.js';
 
 const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -10,6 +11,25 @@ const env = { GRIDGO_APPLE_TEAM_ID: 'TESTTEAM01', GRIDGO_APPLE_KEY_ID: 'TESTKEY0
   GRIDGO_APPLE_CLIENT_IDS: 'ph.gridgo.client,ph.gridgo.supplier,ph.gridgo.rider' };
 const config = appleConfiguration(env);
 const jwk = { ...rsa.publicKey.export({ format: 'jwk' }), kid: 'apple-test', alg: 'RS256', use: 'sig' };
+
+test('bounded Clerk Apple lookup pins the installed BAPI version, maps provider subjects and suppresses provider failures', async () => {
+  const config = { apiUrl: 'http://127.0.0.1:12345', secretKey: 'private-test-secret' };
+  const account = { provider: 'oauth_apple', provider_user_id: 'apple-owner', verification: { status: 'verified' }, access_token: 'PRIVATE_PROVIDER_TOKEN' };
+  const value = await loadClerkAppleAccount(config, 'user_/encoded', { fetcher: async (url, options) => {
+    assert.equal(url, 'http://127.0.0.1:12345/v1/users/user_%2Fencoded');
+    assert.equal(options.headers.Authorization, 'Bearer private-test-secret');
+    assert.equal(options.headers['Clerk-API-Version'], '2026-05-12');
+    assert.equal(options.redirect, 'error');
+    assert.ok(options.signal instanceof AbortSignal);
+    return Response.json({ id: 'user_/encoded', external_accounts: [account], private_metadata: { token: 'PRIVATE' } });
+  } });
+  assert.deepEqual(value, { id: 'user_/encoded', externalAccounts: [{ provider: 'oauth_apple', providerUserId: 'apple-owner', verification: { status: 'verified' } }] });
+  for (const fetcher of [async () => { throw new Error('PRIVATE_PROVIDER_ERROR'); },
+    async () => Response.json({ error: 'PRIVATE_PROVIDER_ERROR' }, { status: 503 }),
+    async () => new Response('PRIVATE_PROVIDER_ERROR'), async () => Response.json({ id: 'user_wrong_shape' })]) {
+    assert.equal(await loadClerkAppleAccount(config, 'user_test', { fetcher }), null);
+  }
+});
 function identity(claims = {}, header = {}) {
   const now = Math.floor(Date.now() / 1000);
   const input = [ { alg: 'RS256', kid: jwk.kid, ...header },

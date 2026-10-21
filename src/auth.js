@@ -73,6 +73,29 @@ export function createClerkBackend(config) {
   });
 }
 
+/**
+ * Only the Apple-deletion lookup needs this bounded BAPI read. Backend SDK
+ * 3.16.5 cannot pass a per-request AbortSignal; do not alter its global fetch.
+ * Pin its BAPI version and project only the identity fields this flow needs.
+ */
+export async function loadClerkAppleAccount(config, clerkUserId, { fetcher = fetch, timeoutMs = 5_000 } = {}) {
+  try {
+    const response = await fetcher(`${(config.apiUrl || 'https://api.clerk.com').replace(/\/$/, '')}/v1/users/${encodeURIComponent(clerkUserId)}`, {
+      headers: { Authorization: `Bearer ${config.secretKey}`, 'Clerk-API-Version': '2026-05-12', Accept: 'application/json' },
+      redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) { await response.body?.cancel(); return null; }
+    const user = await response.json();
+    if (!user || typeof user.id !== 'string' || !Array.isArray(user.external_accounts)) return null;
+    return { id: user.id, externalAccounts: user.external_accounts.map(account => ({
+      provider: account?.provider, providerUserId: account?.provider_user_id, verification: account?.verification,
+    })) };
+  } catch {
+    // No provider exceptions/bodies escape, including timeouts during JSON read.
+    return null;
+  }
+}
+
 export async function verifyClerkClaims(token, config) {
   let claims;
   try {

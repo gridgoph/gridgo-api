@@ -99,7 +99,8 @@ before the Apple attempt return `{ error }`. No provider error text is returned.
 | 403 | `apple_identity_mismatch` | Apple identity differs from the caller's verified Clerk Apple account. Never revoke it; authenticate with the linked Apple account. |
 | 409 | `account_deletion_request_required` | File the deletion request first. |
 | 409 | `apple_account_not_linked` | Clerk has no verified Apple provider subject for this identity; do not link by email. |
-| 502 | `clerk_unavailable` | Retry the same request; Apple has not been contacted. |
+| 409 | `apple_revocation_in_progress` | Another attempt for this identity is in flight. Retry the same code after a short delay; do not start another Apple sign-in. No code is spent by the refused call. |
+| 502 | `clerk_unavailable` | Retry the same request; Apple has not been contacted. Clerk transport, response-body read and parsing have a five-second abortable deadline. |
 | 502 | `apple_unavailable` | Apple transport/keys unavailable; obtain a fresh code for a recorded failed attempt. |
 | 502 | `apple_token_exchange_failed` | Exchange failed or returned unusable tokens. Retry with fresh Apple authentication after the service recovers. |
 | 502 | `apple_identity_invalid` | Signed token failed issuer/audience/expiry/signature checks. No revoke call was made; investigate configuration and retry with fresh authentication. |
@@ -113,8 +114,11 @@ Completion remains a manual confirmation and is not blocked or automated here.
 
 ## Identity, persistence and retry boundaries
 
-The API loads the authenticated user's Clerk account using the server-only
-Backend SDK, takes verified Apple `externalAccounts[].providerUserId` values
+The API loads the authenticated user's Clerk account through the server-only
+Backend API, pinned to SDK 3.16.5's `2026-05-12` API version. This read uses a
+five-second abort signal covering both headers and body; the installed SDK has
+no per-request signal option. It takes verified Apple `provider_user_id` values,
+projected to `externalAccounts[].providerUserId`
 ([Clerk object contract](https://clerk.com/docs/reference/backend/types/backend-external-account)),
 and compares them to the **verified** Apple token response's `id_token.sub`.
 It validates RS256 against Apple's keys, exact issuer, the requested allowed
@@ -129,7 +133,9 @@ have ten-second timeouts and refuse redirects.
 Each request/client/code SHA-256 digest identifies an attempt. No raw code,
 Apple identity/access/refresh token, client secret, Apple subject, or private key
 is persisted or logged. Replaying the same code returns the exact recorded
-result without another Apple exchange, audit or notification. Failed codes are
+result without another Apple exchange, audit or notification after the active
+attempt completes. Concurrent attempts return `409 apple_revocation_in_progress`
+instead of waiting. Failed codes are
 also replayed; a new attempt needs a fresh sign-in/code. A fresh code always
 triggers a new revoke even after success because that sign-in may reauthorize
 the app. Latest attempts per bundle are shown to Operations; earlier attempts
@@ -139,7 +145,11 @@ Each result emits `account_deletion_apple_revoked` or
 Admin membership, plus the staff-scoped `account-deletion-requests` invalidation.
 Neither push nor invalidation payloads contain codes, tokens or contact details.
 
-Requests serialize on a per-user transaction advisory lock across API replicas.
+Per-process admission rejects duplicate work before outbound Clerk calls, which
+hold no pooled database connection. A per-user **nonblocking** transaction
+advisory lock (`pg_try_advisory_xact_lock`) then admits Apple work across API
+replicas; busy calls promptly roll back and release their pooled connection.
+Recorded results and pending-request ownership are rechecked after admission.
 Result rows, audits and staff inbox notifications commit together, taking the
 domain lock only after the Apple calls; provider latency does not block order or
 payment mutations. An Apple call cannot participate in a

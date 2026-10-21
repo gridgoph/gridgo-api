@@ -2,10 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { authorizationContextFor, contextHasMembership } from './authorization-context.js';
 import { requestClientKey, tooManyRequests } from './support-rate-limit.js';
 import { appleConfiguration, clerkAppleSubjects, revokeAppleAuthorization } from './apple-revocation.js';
-import { DOMAIN_MUTATION_LOCK } from './database.js';
+import { DOMAIN_MUTATION_LOCK, TransactionLockBusyError } from './database.js';
 
 const ACCEPTED = { status: 202, body: { ok: true, message: 'We will delete your account within 30 days' } };
 const failure = (status, error) => ({ status, body: { error } });
+// Admission only, not domain persistence. Avoid duplicate outbound Clerk work
+// before the cross-replica database lock; always release on every exit path.
+const appleRevocationsInFlight = new Set();
 const project = (row) => ({
   id: row.id, userId: row.user_id, contactEmail: row.contact_email, source: row.source,
   status: row.status, requestedAt: row.requested_at, dueAt: row.due_at,
@@ -27,21 +30,24 @@ async function appleRevocation({ req, user, database, readBody, onEvent, loadCle
   if (body?.confirmed !== true) return failure(400, 'confirmation_required');
   if (typeof body.clientId !== 'string' || !body.clientId || body.clientId.length > 255) return failure(400, 'invalid_apple_client_id');
   if (typeof body.authorizationCode !== 'string' || !body.authorizationCode.trim() || body.authorizationCode.length > 4096) return failure(400, 'invalid_apple_authorization_code');
+  if (appleRevocationsInFlight.has(user.id)) return failure(409, 'apple_revocation_in_progress');
+  appleRevocationsInFlight.add(user.id);
   const digest = createHash('sha256').update(body.authorizationCode).digest('hex');
-  return database.transaction(async () => {
-    const previous = (await database.query(`SELECT a.* FROM account_deletion_apple_revocations a
+  const recorded = async () => (await database.query(`SELECT a.* FROM account_deletion_apple_revocations a
       JOIN account_deletion_requests r ON r.id=a.request_id
       WHERE r.user_id=$1 AND a.client_id=$2 AND a.code_digest=$3
       ORDER BY a.attempted_at DESC LIMIT 1`, [user.id, body.clientId, digest])).rows[0];
-    const respond = row => ({ status: row.http_status, body: {
-      ...(row.error_code ? { error: row.error_code } : { ok: true }),
-      requestId: row.request_id, appleRevocation: revocationProjection(row),
-    } });
+  const pending = async () => (await database.query("SELECT id FROM account_deletion_requests WHERE user_id=$1 AND status='pending'", [user.id])).rows[0];
+  const respond = row => ({ status: row.http_status, body: {
+    ...(row.error_code ? { error: row.error_code } : { ok: true }),
+    requestId: row.request_id, appleRevocation: revocationProjection(row),
+  } });
+  try {
     // A lost response can be retried without spending its code again. A NEW
     // Apple sign-in may re-authorize the app, so new codes must always be revoked.
+    const previous = await recorded();
     if (previous) return respond(previous);
-    const request = (await database.query("SELECT id FROM account_deletion_requests WHERE user_id=$1 AND status='pending'", [user.id])).rows[0];
-    if (!request) return failure(409, 'account_deletion_request_required');
+    if (!await pending()) return failure(409, 'account_deletion_request_required');
     let config;
     try { config = appleConfiguration(env); } catch (error) { return failure(error.status, error.code); }
     if (!config.clientIds.includes(body.clientId)) return failure(400, 'invalid_apple_client_id');
@@ -50,29 +56,42 @@ async function appleRevocation({ req, user, database, readBody, onEvent, loadCle
     if (!clerkUser || clerkUser.id !== user.clerkUserId) return failure(502, 'clerk_unavailable');
     const subjects = clerkAppleSubjects(clerkUser);
     if (!subjects.length) return failure(409, 'apple_account_not_linked');
-    let errorCode = null;
-    let httpStatus = 200;
-    try {
-      await revokeAppleAuthorization({ config, clientId: body.clientId, authorizationCode: body.authorizationCode, subjects });
-    } catch (error) {
-      // Never serialize/log a provider exception (which may contain tokens).
-      const allowed = ['apple_unavailable', 'apple_token_exchange_failed', 'invalid_apple_authorization_code',
-        'apple_identity_invalid', 'apple_identity_mismatch', 'apple_revocation_failed'];
-      errorCode = allowed.includes(error.code) ? error.code : 'apple_unavailable';
-      httpStatus = errorCode === 'apple_identity_mismatch' ? 403 : errorCode === 'invalid_apple_authorization_code' ? 400 : 502;
-    }
-    // Apple cannot hold up unrelated order/payment work. Take the domain lock
-    // only when the result, audit and notifications are ready to commit.
-    await database.query('SELECT pg_advisory_xact_lock(hashtext($1))', [DOMAIN_MUTATION_LOCK]);
-    const row = (await database.query(`INSERT INTO account_deletion_apple_revocations
-      (id,request_id,client_id,code_digest,status,error_code,http_status,revoked_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5='revoked' THEN clock_timestamp() END) RETURNING *`,
-    [randomUUID(), request.id, body.clientId, digest, errorCode ? 'retry_required' : 'revoked', errorCode, httpStatus])).rows[0];
-    await onEvent({ action: errorCode ? 'account_deletion_apple_revocation_failed' : 'account_deletion_apple_revoked',
-      id: request.id, eventId: row.id, actor: user,
-      detail: { attemptId: row.id, clientId: row.client_id, status: row.status, error: errorCode } });
-    return respond(row);
-  }, { lockKey: `gridgo-apple-revocation:${user.id}` });
+    // Clerk's abortable lookup above never retains a pooled connection. Recheck
+    // all database facts after acquiring admission across API replicas.
+    return await database.transaction(async () => {
+      const previous = await recorded();
+      if (previous) return respond(previous);
+      const request = await pending();
+      if (!request) return failure(409, 'account_deletion_request_required');
+      let errorCode = null;
+      let httpStatus = 200;
+      try {
+        await revokeAppleAuthorization({ config, clientId: body.clientId, authorizationCode: body.authorizationCode, subjects });
+      } catch (error) {
+        // Never serialize/log a provider exception (which may contain tokens).
+        const allowed = ['apple_unavailable', 'apple_token_exchange_failed', 'invalid_apple_authorization_code',
+          'apple_identity_invalid', 'apple_identity_mismatch', 'apple_revocation_failed'];
+        errorCode = allowed.includes(error.code) ? error.code : 'apple_unavailable';
+        httpStatus = errorCode === 'apple_identity_mismatch' ? 403 : errorCode === 'invalid_apple_authorization_code' ? 400 : 502;
+      }
+      // Apple cannot hold up unrelated order/payment work. Take the domain lock
+      // only when the result, audit and notifications are ready to commit.
+      await database.query('SELECT pg_advisory_xact_lock(hashtext($1))', [DOMAIN_MUTATION_LOCK]);
+      const row = (await database.query(`INSERT INTO account_deletion_apple_revocations
+        (id,request_id,client_id,code_digest,status,error_code,http_status,revoked_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5='revoked' THEN clock_timestamp() END) RETURNING *`,
+      [randomUUID(), request.id, body.clientId, digest, errorCode ? 'retry_required' : 'revoked', errorCode, httpStatus])).rows[0];
+      await onEvent({ action: errorCode ? 'account_deletion_apple_revocation_failed' : 'account_deletion_apple_revoked',
+        id: request.id, eventId: row.id, actor: user,
+        detail: { attemptId: row.id, clientId: row.client_id, status: row.status, error: errorCode } });
+      return respond(row);
+    }, { lockKey: `gridgo-apple-revocation:${user.id}`, tryLock: true });
+  } catch (error) {
+    if (error instanceof TransactionLockBusyError) return failure(409, 'apple_revocation_in_progress');
+    throw error;
+  } finally {
+    appleRevocationsInFlight.delete(user.id);
+  }
 }
 
 // This records a request only. Operations must verify web ownership and complete

@@ -2,9 +2,39 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
-import { createDatabase } from "../src/database.js";
+import { createDatabase, TransactionLockBusyError } from "../src/database.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+
+test('nonblocking transaction admission releases busy clients and also applies inside transactions', { skip: !DATABASE_URL, timeout: 5000 }, async () => {
+  const owner = createDatabase({ DATABASE_URL, DATABASE_POOL_MAX: 1 });
+  const contender = createDatabase({ DATABASE_URL, DATABASE_POOL_MAX: 1 });
+  const lockKey = `test-nonblocking-${process.pid}`;
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const held = owner.transaction(async () => { entered.resolve(); await release.promise; }, { lockKey });
+  let ran = false;
+  try {
+    await entered.promise;
+    const started = Date.now();
+    await assert.rejects(contender.transaction(async () => { ran = true; }, { lockKey, tryLock: true }), TransactionLockBusyError);
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(ran, false);
+    assert.equal((await contender.query('SELECT 1 AS available')).rows[0].available, 1, 'busy admission must release the only pooled client');
+    await contender.transaction(async () => {
+      await assert.rejects(contender.transaction(async () => { ran = true; }, { lockKey, tryLock: true }), TransactionLockBusyError);
+      assert.equal((await contender.query('SELECT 1 AS available')).rows[0].available, 1);
+    });
+    assert.equal(ran, false);
+    release.resolve();
+    await held;
+    assert.equal(await contender.transaction(async () => 'admitted', { lockKey, tryLock: true }), 'admitted');
+  } finally {
+    release.resolve();
+    await held;
+    await Promise.all([owner.close(), contender.close()]);
+  }
+});
 
 test("database transactions rollback and publish after commit only", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
