@@ -18,6 +18,13 @@ types.setTypeParser(1082, (value) => value);
 /** The advisory lock every credentialed platform mutation serializes on. */
 export const DOMAIN_MUTATION_LOCK = "gridgo-domain-mutation";
 
+export class TransactionLockBusyError extends Error {
+  constructor() {
+    super('transaction_lock_busy');
+    this.code = 'transaction_lock_busy';
+  }
+}
+
 function configurationError(message) {
   return new Error(`${message} Set DATABASE_URL to a PostgreSQL connection string and restart.`);
 }
@@ -60,16 +67,28 @@ export function createDatabase(env = process.env) {
     return (active?.client || pool).query(text, values);
   }
 
-  async function transaction(fn, { lockKey = DOMAIN_MUTATION_LOCK } = {}) {
+  async function acquireLock(client, lockKey, tryLock) {
+    if (tryLock) {
+      const result = await client.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [lockKey]);
+      if (!result.rows[0].locked) throw new TransactionLockBusyError();
+    } else {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
+    }
+  }
+
+  async function transaction(fn, { lockKey = DOMAIN_MUTATION_LOCK, tryLock = false } = {}) {
     const active = current();
     if (active?.readOnly) throw new Error("Cannot start a write transaction inside a read-only database snapshot");
-    if (active) return fn();
+    if (active) {
+      if (tryLock) await acquireLock(active.client, lockKey, true);
+      return fn();
+    }
 
     const client = await pool.connect();
     const state = { client, afterCommit: [], rollbackOnly: false, readOnly: false, finished: false };
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
+      await acquireLock(client, lockKey, tryLock);
       const result = await context.run(state, fn);
       if (state.rollbackOnly) {
         await client.query("ROLLBACK");
