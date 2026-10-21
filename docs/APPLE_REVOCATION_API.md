@@ -70,6 +70,17 @@ Available for clients, suppliers and riders even when suspended or removed.
 ```
 
 The deployment allowlist holds the exact client/supplier/rider bundle IDs.
+The API selects the server-side signing key by this `clientId`; apps never send
+keys or key IDs. A default key pair is configured with `GRIDGO_APPLE_KEY_ID` and
+`GRIDGO_APPLE_PRIVATE_KEY`. Optional `GRIDGO_APPLE_SIGNING_KEYS` JSON maps bundle
+IDs to complete `{ "keyId": "...", "privateKey": "<PEM>" }` overrides. The apps
+may belong to separate existing Sign in with Apple primary groups, each using
+its own authorized key. Missing/invalid credentials for one app return the
+existing not-configured error for that app only; configured overrides work even
+with no default pair. An incomplete override never inherits part of the default.
+All pairs share the configured Team ID and remain server-only. Malformed JSON
+or a non-object map is a global configuration error. See deployment examples in
+[Deployment](DEPLOYMENT.md).
 Success is `200`:
 
 ```json
@@ -100,12 +111,12 @@ before the Apple attempt return `{ error }`. No provider error text is returned.
 | 409 | `account_deletion_request_required` | File the deletion request first. |
 | 409 | `apple_account_not_linked` | Clerk has no verified Apple provider subject for this identity; do not link by email. |
 | 409 | `apple_revocation_in_progress` | Another attempt for this identity is in flight. Retry the same code after a short delay; do not start another Apple sign-in. No code is spent by the refused call. |
-| 502 | `clerk_unavailable` | Retry the same request; Apple has not been contacted. Clerk transport, response-body read and parsing have a five-second abortable deadline. |
+| 502 | `clerk_unavailable` | Retry the same request; Apple has not been contacted. Clerk requests have a five-second abortable deadline covering headers and response-body read. |
 | 502 | `apple_unavailable` | Apple transport/keys unavailable; obtain a fresh code for a recorded failed attempt. |
 | 502 | `apple_token_exchange_failed` | Exchange failed or returned unusable tokens. Retry with fresh Apple authentication after the service recovers. |
 | 502 | `apple_identity_invalid` | Signed token failed issuer/audience/expiry/signature checks. No revoke call was made; investigate configuration and retry with fresh authentication. |
 | 502 | `apple_revocation_failed` | Apple did not confirm revocation; retry with fresh Apple authentication. |
-| 503 | `apple_revocation_not_configured` | Server key/team/key ID/allowlist is missing or invalid. Preserve the deletion request; configuration is required. |
+| 503 | `apple_revocation_not_configured` | This bundle's selected key/key ID, or common team/allowlist configuration, is missing or invalid. Preserve the deletion request; other apps with valid key pairs remain available. |
 
 `GET /me/account-deletion-request` lets the owning app resume the pending request.
 Operations/Super Admin queue reads and completion responses include the latest
@@ -125,8 +136,10 @@ It validates RS256 against Apple's keys, exact issuer, the requested allowed
 bundle audience, expiry and issuance time. Caller-supplied subjects or email
 never authorize revocation. Mismatch is recorded and makes no revoke call.
 
-The server signs a five-minute ES256 client-secret JWT with the configured P-256
-key, then sends form-encoded HTTPS requests to Apple. Refresh token is preferred;
+The server signs a five-minute ES256 client-secret JWT with the P-256 key selected
+for this bundle (override, otherwise default), then sends form-encoded HTTPS
+requests to Apple. Separate keys never translate Apple subjects across groups;
+the verified provider subject comparison remains mandatory. Refresh token is preferred;
 access token is used only when no refresh token was returned. Outbound requests
 have ten-second timeouts and refuse redirects.
 

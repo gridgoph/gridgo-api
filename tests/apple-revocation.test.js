@@ -58,6 +58,37 @@ test('Apple client secrets use ES256/P-256, a five-minute lifetime and the selec
   assert.ok(appleConfiguration({ ...env, GRIDGO_APPLE_PRIVATE_KEY: env.GRIDGO_APPLE_PRIVATE_KEY.replace(/\n/g, '\\n') }));
 });
 
+test('Apple signing keys select complete per-bundle overrides and isolate unavailable keys to their app', () => {
+  const supplier = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const rider = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const supplierPair = { keyId: 'SUPPLIER01', privateKey: supplier.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+  const riderPair = { keyId: 'RIDERKEY01', privateKey: rider.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+  const perApp = { ...env, GRIDGO_APPLE_SIGNING_KEYS: JSON.stringify({ 'ph.gridgo.supplier': supplierPair, 'ph.gridgo.rider': riderPair }) };
+  for (const [clientId, keyId, key] of [['ph.gridgo.client', 'TESTKEY001', ec.publicKey],
+    ['ph.gridgo.supplier', supplierPair.keyId, supplier.publicKey], ['ph.gridgo.rider', riderPair.keyId, rider.publicKey]]) {
+    const selected = appleConfiguration(perApp, clientId);
+    const [header, payload, signature] = appleClientSecret(selected, clientId).split('.');
+    assert.equal(JSON.parse(Buffer.from(header, 'base64url')).kid, keyId);
+    assert.equal(JSON.parse(Buffer.from(payload, 'base64url')).sub, clientId);
+    assert.ok(verify('sha256', Buffer.from(`${header}.${payload}`), { key, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url')));
+    if (clientId !== 'ph.gridgo.client') assert.equal(verify('sha256', Buffer.from(`${header}.${payload}`), { key: ec.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url')), false);
+  }
+  const onlySupplier = { ...perApp, GRIDGO_APPLE_KEY_ID: '', GRIDGO_APPLE_PRIVATE_KEY: '',
+    GRIDGO_APPLE_SIGNING_KEYS: JSON.stringify({ 'ph.gridgo.supplier': supplierPair, 'ph.gridgo.rider': { keyId: 'INCOMPLETE' } }) };
+  assert.ok(appleClientSecret(appleConfiguration(onlySupplier, 'ph.gridgo.supplier'), 'ph.gridgo.supplier'));
+  for (const clientId of ['ph.gridgo.client', 'ph.gridgo.rider']) assert.throws(() => appleConfiguration(onlySupplier, clientId), { code: 'apple_revocation_not_configured' });
+  const incompleteOverride = { ...perApp, GRIDGO_APPLE_SIGNING_KEYS: JSON.stringify({ 'ph.gridgo.supplier': { privateKey: supplierPair.privateKey } }) };
+  assert.throws(() => appleConfiguration(incompleteOverride, 'ph.gridgo.supplier'), { code: 'apple_revocation_not_configured' });
+  assert.ok(appleClientSecret(appleConfiguration(incompleteOverride, 'ph.gridgo.client'), 'ph.gridgo.client'), 'invalid unrelated overrides never disable the default');
+  const invalidCurve = { ...perApp, GRIDGO_APPLE_SIGNING_KEYS: JSON.stringify({ 'ph.gridgo.rider': {
+    keyId: 'WRONGCURVE', privateKey: rsa.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  } }) };
+  assert.throws(() => appleConfiguration(invalidCurve, 'ph.gridgo.rider'), { code: 'apple_revocation_not_configured' });
+  assert.ok(appleClientSecret(appleConfiguration(invalidCurve, 'ph.gridgo.client'), 'ph.gridgo.client'));
+  for (const value of ['not-json', 'null', '[]', '"string"']) assert.throws(() => appleConfiguration({ ...perApp, GRIDGO_APPLE_SIGNING_KEYS: value }, 'ph.gridgo.client'), { code: 'apple_revocation_not_configured' });
+  assert.throws(() => appleClientSecret(appleConfiguration(perApp, 'ph.gridgo.supplier'), 'ph.gridgo.rider'), { code: 'apple_revocation_not_configured' }, 'selected keys cannot be reused for another bundle');
+});
+
 test('Apple binding uses verified providerUserId, never email, metadata or Clerk identification IDs', () => {
   assert.deepEqual(clerkAppleSubjects({ externalAccounts: [
     { provider: 'apple', providerUserId: 'subject', externalId: 'idn_wrong', verification: { status: 'verified' } },

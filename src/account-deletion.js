@@ -49,7 +49,7 @@ async function appleRevocation({ req, user, database, readBody, onEvent, loadCle
     if (previous) return respond(previous);
     if (!await pending()) return failure(409, 'account_deletion_request_required');
     let config;
-    try { config = appleConfiguration(env); } catch (error) { return failure(error.status, error.code); }
+    try { config = appleConfiguration(env, body.clientId); } catch (error) { return failure(error.status, error.code); }
     if (!config.clientIds.includes(body.clientId)) return failure(400, 'invalid_apple_client_id');
     let clerkUser;
     try { clerkUser = await loadClerkUser(user.clerkUserId); } catch { return failure(502, 'clerk_unavailable'); }

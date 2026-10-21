@@ -83,21 +83,36 @@ Native APNs is optional and separate from the Firebase credential. To enable it,
 
 Sign in with Apple account-deletion revocation requires a separate **Sign in with
 Apple** P-256 `.p8` key from Apple Developer (an APNs key is insufficient). Set
-these server-only variables in `gridgo-api.env`; never commit or print the key:
+these server-only variables in `gridgo-api.env`; never commit or print keys:
 
 ```dotenv
 GRIDGO_APPLE_TEAM_ID=<Apple Developer Team ID>
 GRIDGO_APPLE_KEY_ID=<Sign in with Apple key ID>
 GRIDGO_APPLE_PRIVATE_KEY=<PEM private key with literal \n separators>
 GRIDGO_APPLE_CLIENT_IDS=<client bundle ID>,<supplier bundle ID>,<rider bundle ID>
+# Optional JSON overrides, keyed by exact bundle ID. Complete key pairs only.
+GRIDGO_APPLE_SIGNING_KEYS={"ph.gridgo.supplier":{"keyId":"<supplier key ID>","privateKey":"<PEM with \n separators>"},"ph.gridgo.rider":{"keyId":"<rider key ID>","privateKey":"<PEM with \n separators>"}}
 ```
 
 Use the exact native iOS bundle IDs configured in Apple Developer and Clerk,
-without a Team ID prefix or web Services ID. The key must authorize all three
-App IDs (configure the primary/grouped Sign in with Apple App IDs in Apple
-Developer). Validate that the native subjects match the Clerk Apple external
-accounts in the intended instance. Changing app grouping or developer teams
-needs an Apple identity migration, not an email-based fallback.
+without a Team ID prefix or web Services ID. The apps do not need to share one
+Sign in with Apple primary group: configure each bundle's key for its existing
+Apple group. `GRIDGO_APPLE_KEY_ID`/`GRIDGO_APPLE_PRIVATE_KEY` are the default
+pair; `GRIDGO_APPLE_SIGNING_KEYS` optionally overrides the **whole pair** for
+each named bundle. An incomplete/invalid override fails for that app rather
+than mixing its fields with the default. The default may be empty when every
+served bundle has its own override. Only the requested app's pair is validated;
+an unavailable pair for one bundle returns `503 apple_revocation_not_configured`
+for that app while other configured apps keep working. Invalid JSON/non-object
+override configuration is a global configuration error. All keys use the same
+`GRIDGO_APPLE_TEAM_ID`. PEM strings may use JSON `\n` escapes or literal `\\n`
+separators. Keep the secret JSON on one line in the env file (single-quote the
+value when needed to preserve JSON escaping), and never place it in app config.
+
+Validate that each app's native subject matches that user's verified Clerk Apple
+external account in the intended instance. Separate signing keys do not translate
+Apple subjects across groups; never fall back to email. Changing developer teams
+requires Apple's identity migration procedure.
 
 Migration `1792539400000` must run before serving this release. Missing/invalid
 configuration leaves startup and deletion-request filing available; revocation

@@ -199,6 +199,13 @@ test('HTTP requests bypass account holds, audit atomically and notify only staff
 test('HTTP Apple revocation binds Clerk identity, audits results, retries safely and exposes staff status', { skip: !DATABASE_URL, timeout: 30000 }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const supplierKey = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const riderKey = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const signingKeys = {
+    'ph.gridgo.client': { keyId: 'MOCKKEY001', ...ec },
+    'ph.gridgo.supplier': { keyId: 'SUPPLIER01', ...supplierKey },
+    'ph.gridgo.rider': { keyId: 'RIDERKEY01', ...riderKey },
+  };
   const apple = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...apple.publicKey.export({ format: 'jwk' }), kid: 'mock-apple', use: 'sig', alg: 'RS256' };
   const users = ['client', 'supplier', 'rider', 'ops_admin', 'super_admin'];
@@ -243,6 +250,15 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
     }
     calls.push({ path: req.url, method: req.method, type: req.headers['content-type'], body });
     if (req.url === '/auth/keys') return json(200, { keys: [jwk] });
+    if (['/auth/token', '/auth/revoke'].includes(req.url)) {
+      try {
+        const [header, payload, signature] = body.get('client_secret').split('.');
+        const selected = signingKeys[body.get('client_id')];
+        if (!selected || JSON.parse(Buffer.from(header, 'base64url')).kid !== selected.keyId
+          || JSON.parse(Buffer.from(payload, 'base64url')).sub !== body.get('client_id')
+          || !crypto.verify('sha256', Buffer.from(`${header}.${payload}`), { key: selected.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url'))) throw new Error();
+      } catch { return json(400, { error: 'invalid_client' }); }
+    }
     if (req.url === '/auth/token') {
       const code = body.get('code');
       if (code === 'slow-response') { slowStarted(); await slowGate; }
@@ -265,6 +281,9 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
   const appleEnv = { NODE_ENV: 'test', CLERK_API_URL: mockUrl,
     GRIDGO_APPLE_TEAM_ID: 'MOCKTEAM01', GRIDGO_APPLE_KEY_ID: 'MOCKKEY001',
     GRIDGO_APPLE_PRIVATE_KEY: ec.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    GRIDGO_APPLE_SIGNING_KEYS: JSON.stringify(Object.fromEntries(['ph.gridgo.supplier', 'ph.gridgo.rider'].map(clientId => [clientId, {
+      keyId: signingKeys[clientId].keyId, privateKey: signingKeys[clientId].privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    }]))),
     GRIDGO_APPLE_CLIENT_IDS: 'ph.gridgo.client,ph.gridgo.supplier,ph.gridgo.rider', GRIDGO_APPLE_API_URL: mockUrl,
     DATABASE_POOL_MAX: '3', DATABASE_CONNECT_TIMEOUT_MS: '1000',
     GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000', GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: '0' };
@@ -323,10 +342,21 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
   assert.equal(calls.filter(c => c.path === '/auth/revoke').length, 1);
   // Concurrent duplicates are refused promptly; a later replay stays idempotent.
   const concurrent = await Promise.all([post('concurrent'), post('concurrent')]);
-  assert.deepEqual(concurrent.map(row => row.status).sort(), [200, 409]);
-  assert.equal(concurrent.find(row => row.status === 409).body.error, 'apple_revocation_in_progress');
-  assert.deepEqual(await post('concurrent'), concurrent.find(row => row.status === 200));
+  const completed = concurrent.find(row => row.status === 200);
+  assert.ok(completed);
+  for (const result of concurrent) {
+    // A request scheduled after completion can legitimately replay immediately.
+    if (result.status === 200) assert.deepEqual(result, completed);
+    else { assert.equal(result.status, 409); assert.equal(result.body.error, 'apple_revocation_in_progress'); }
+  }
+  assert.deepEqual(await post('concurrent'), completed);
   assert.equal(calls.filter(c => c.path === '/auth/token' && c.body.get('code') === 'concurrent').length, 1);
+  // This process has no default private key, but its two separately keyed apps
+  // must remain configured. Client failures cannot disable supplier or rider.
+  for (const role of ['supplier', 'rider']) assert.equal((await post(`${role}-override-no-default`, role, {}, missing.api)).status, 200);
+  const beforeMissing = calls.length;
+  assert.equal((await post('still-missing-client-key', 'client', {}, missing.api)).body.error, 'apple_revocation_not_configured');
+  assert.equal(calls.length, beforeMissing, 'missing bundle keys never call Apple');
   for (const body of [false, true]) {
     const stall = { body, entered: Promise.withResolvers(), closed: Promise.withResolvers(), release: Promise.withResolvers() };
     clerkStall = stall;
@@ -424,12 +454,15 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
   const audit = (await database.query("SELECT * FROM audit_log WHERE entity_id=$1 AND action LIKE 'account_deletion_apple_%'", [first.body.requestId])).rows;
   assert.equal(audit.length, rows.length, 'every result has exactly one durable audit, including failures');
   const notes = (await database.query("SELECT user_id FROM notifications WHERE type LIKE 'account_deletion_apple_%' AND user_id LIKE $1", [`${prefix}%`])).rows;
-  assert.equal(notes.length, (rows.length + 2) * 2, 'each attempt notifies both current staff memberships');
+  const attempts = (await database.query(`SELECT a.id FROM account_deletion_apple_revocations a
+    JOIN account_deletion_requests r ON r.id=a.request_id WHERE r.user_id LIKE $1`, [`${prefix}%`])).rowCount;
+  assert.equal(notes.length, attempts * 2, 'each attempt notifies both current staff memberships');
   assert.ok(notes.every(row => row.user_id.endsWith('_ops_admin') || row.user_id.endsWith('_super_admin')));
   const persisted = JSON.stringify({ rows, audit, queue, logs: instance.output() });
   assert.ok(!/PRIVATE_ACCESS|PRIVATE_REFRESH|DO_NOT_STORE_PROVIDER_DETAILS|authorizationCode|client_secret|id_token/.test(persisted));
   assert.ok(!persisted.includes('eyJ'), 'JWT values never enter persistence, responses or logs');
   assert.ok(!persisted.includes(appleEnv.GRIDGO_APPLE_PRIVATE_KEY));
+  for (const pair of Object.values(JSON.parse(appleEnv.GRIDGO_APPLE_SIGNING_KEYS))) assert.ok(!persisted.includes(pair.privateKey), 'override keys never enter persistence or logs');
   // Force audit failure: the result row and its event must roll back together.
   const user = { id: uid('client'), clerkUserId: uid('client') };
   await assert.rejects(routeAccountDeletion({ req: { method: 'POST' }, url: new URL(endpoint, instance.api),

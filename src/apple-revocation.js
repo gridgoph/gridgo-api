@@ -4,14 +4,22 @@ const ISSUER = 'https://appleid.apple.com';
 const fail = (status, code) => Object.assign(new Error(code), { status, code });
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
-export function appleConfiguration(env = process.env) {
+export function appleConfiguration(env = process.env, clientId = null) {
   try {
     const teamId = String(env.GRIDGO_APPLE_TEAM_ID || '').trim();
-    const keyId = String(env.GRIDGO_APPLE_KEY_ID || '').trim();
     const clientIds = String(env.GRIDGO_APPLE_CLIENT_IDS || '').split(',').map(value => value.trim()).filter(Boolean);
-    const privateKey = createPrivateKey(String(env.GRIDGO_APPLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'));
-    if (!teamId || !keyId || !clientIds.length || clientIds.some(value => !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value))
-      || privateKey.asymmetricKeyType !== 'ec' || privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error();
+    if (!teamId || !clientIds.length || clientIds.some(value => !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value))) throw new Error();
+    if (clientId !== null && !clientIds.includes(clientId)) throw fail(400, 'invalid_apple_client_id');
+    const overrides = String(env.GRIDGO_APPLE_SIGNING_KEYS || '').trim() ? JSON.parse(env.GRIDGO_APPLE_SIGNING_KEYS) : {};
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error();
+    // Each override is a complete pair; never combine one app's key ID with
+    // another app's private key. Parse only the selected app's credentials.
+    const pair = clientId !== null && Object.hasOwn(overrides, clientId) ? overrides[clientId]
+      : { keyId: env.GRIDGO_APPLE_KEY_ID, privateKey: env.GRIDGO_APPLE_PRIVATE_KEY };
+    if (!pair || typeof pair.keyId !== 'string' || !pair.keyId.trim() || typeof pair.privateKey !== 'string') throw new Error();
+    const keyId = pair.keyId.trim();
+    const privateKey = createPrivateKey(pair.privateKey.replace(/\\n/g, '\n'));
+    if (privateKey.asymmetricKeyType !== 'ec' || privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error();
     let baseUrl = ISSUER;
     // Test-only loopback server. Production can never redirect the key or codes.
     if (env.GRIDGO_APPLE_API_URL) {
@@ -20,14 +28,16 @@ export function appleConfiguration(env = process.env) {
         || url.origin !== env.GRIDGO_APPLE_API_URL) throw new Error();
       baseUrl = url.origin;
     }
-    return { teamId, keyId, clientIds, privateKey, baseUrl };
-  } catch {
+    return { teamId, keyId, clientIds, privateKey, baseUrl, selectedClientId: clientId };
+  } catch (error) {
+    if (error?.code === 'invalid_apple_client_id') throw error;
     throw fail(503, 'apple_revocation_not_configured');
   }
 }
 
 export function appleClientSecret(config, clientId, now = Math.floor(Date.now() / 1000)) {
   if (!config.clientIds.includes(clientId)) throw fail(400, 'invalid_apple_client_id');
+  if (config.selectedClientId != null && config.selectedClientId !== clientId) throw fail(503, 'apple_revocation_not_configured');
   const input = `${encode({ alg: 'ES256', kid: config.keyId, typ: 'JWT' })}.${encode({
     iss: config.teamId, iat: now, exp: now + 300, aud: ISSUER, sub: clientId,
   })}`;
