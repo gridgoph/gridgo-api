@@ -1,3 +1,6 @@
+import { artworkFileIdsFor } from './artwork-attachments.js';
+import { notificationVisible, parseNotificationListLimit } from './notifications.js';
+import { isTestOperationsUser } from './test-operations.js';
 import { testerProgramTables, emptyTesterProgram, testerProgramRows, loadTesterProgramRows } from './tester-program-store.js';
 import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from './founding-tester-store.js';
 import { enforceReviewData, labelReviewNotifications } from './review-data.js';
@@ -863,8 +866,211 @@ export async function loadStore(database) {
   return store;
 }
 
+/** Read-only projections share the compatibility decoder, never its write baseline. */
+function readGraph(database) {
+  const loaded = Object.fromEntries(TABLES.map(table => [table.name, []]));
+  async function read(name, where, values = []) {
+    const table = TABLES.find(table => table.name === name);
+    if (!table) throw new Error(`Unknown read graph table: ${name}`);
+    loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
+  }
+  function finish() {
+    const store = storeFromRows(loaded, { writable: false });
+    notificationReadStores.add(store);
+    return store;
+  }
+  return { loaded, read, finish };
+}
+
+async function readIdentity(graph, userIds) {
+  await graph.read('users', 'WHERE id = ANY($1::text[])', [userIds]);
+  await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
+  await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
+}
+
+async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
+  const { loaded, read } = graph;
+  const recipientIds = loaded.users.map(row => row.id);
+  await read('approval_cases', 'WHERE user_id = ANY($1::text[]) OR id = ANY($2::text[])', [recipientIds, caseIds]);
+  // A test-operations recipient needs the case owner's review mark.
+  const owners = loaded.approval_cases.map(row => row.user_id);
+  await read('users', 'WHERE id = ANY($1::text[])', [[...new Set([...recipientIds, ...owners])]]);
+  await read('orders', `WHERE id = ANY($1::text[]) OR (rider_id = ANY($2::text[]) AND state IN ('rider_assigned','picked_up','out_for_delivery'))`, [orderIds, activeRiderIds]);
+  if (loaded.orders.length) {
+    const ids = loaded.orders.map(row => row.id);
+    for (const name of ['order_jobs', 'order_payments', 'refund_requests', 'refund_settlements']) {
+      await read(name, 'WHERE order_id = ANY($1::text[])', [ids]);
+    }
+  }
+  await read('platform_settings', 'WHERE singleton');
+}
+
+/** Only the committed notification, its recipients, and current visibility facts. */
+export async function loadDeliveryStore(database, { userIds = [], notificationIds = [], subjectId = null, activeRiders = false } = {}) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database);
+    const { loaded, read } = graph;
+    await readIdentity(graph, userIds);
+    await read('notifications', 'WHERE id = ANY($1::text[])', [notificationIds]);
+    const orderIds = loaded.notifications.map(row => row.order_id).filter(Boolean);
+    const caseIds = loaded.notifications.map(row => row.data?.approvalCaseId).filter(Boolean);
+    if (subjectId) {
+      // Refetch ids can name any of these governed subjects. Resolve their parent
+      // order/owner for test-operations, call-party and location authorization.
+      for (const name of ['order_jobs', 'claims', 'issues', 'escalations', 'refund_requests', 'approval_cases', 'supplier_catalog_items', 'supplier_services']) {
+        await read(name, 'WHERE id = $1', [subjectId]);
+        orderIds.push(...loaded[name].map(row => row.order_id).filter(Boolean));
+      }
+      caseIds.push(...loaded.approval_cases.map(row => row.id));
+      orderIds.push(subjectId);
+      await read('order_baskets', 'WHERE id = $1', [subjectId]);
+      await read('order_basket_groups', 'WHERE basket_id = $1', [subjectId]);
+      orderIds.push(...loaded.order_basket_groups.map(row => row.order_id));
+    }
+    await readNotificationContext(graph, { orderIds, caseIds, activeRiderIds: activeRiders ? userIds : [] });
+    const ownerIds = [...new Set([...loaded.users.map(row => row.id), ...loaded.supplier_catalog_items.map(row => row.supplier_id), ...loaded.supplier_services.map(row => row.supplier_id)])];
+    await read('users', 'WHERE id = ANY($1::text[])', [ownerIds]);
+    const seasonIds = loaded.notifications.map(row => row.data?.seasonWindowId).filter(Boolean);
+    if (seasonIds.length) await read('season_windows', 'WHERE id = ANY($1::text[])', [seasonIds]);
+    return graph.finish();
+  });
+}
+
+/** Bounded outbox batch; token ownership is rechecked after the lease claim. */
+export async function loadPushDeliveryStore(database, rows) {
+  return database.snapshot(async () => {
+    const store = await loadDeliveryStore(database, {
+      userIds: [...new Set(rows.map(row => row.user_id))],
+      notificationIds: rows.map(row => row.notification_id), activeRiders: true,
+    });
+    const table = DEVICE_TOKENS_TABLE;
+    store.deviceTokens = (await database.query(`SELECT ${table.columns.join(', ')} FROM device_tokens WHERE id = ANY($1::text[])`, [rows.map(row => row.device_id).filter(Boolean)])).rows.map(deviceTokenItem);
+    return store;
+  });
+}
+
+async function readCatalogReviewPage(graph, { ids, after, status }) {
+  const { loaded, read } = graph;
+  const reviewOnly = isTestOperationsUser(graph.finish(), ids[0]);
+  await read('supplier_catalog_items', `WHERE id > $1 COLLATE "C" AND COALESCE(review_status, 'approved') = $2
+    ${reviewOnly ? 'AND supplier_id IN (SELECT id FROM users WHERE review_data)' : ''}
+    ORDER BY id COLLATE "en-x-icu" LIMIT 51`, [after, status || 'pending']);
+  await readCatalogItemContext(graph, ids);
+}
+
+async function readCatalogItemContext(graph, ids) {
+  const { loaded, read } = graph;
+  const items = loaded.supplier_catalog_items.map(row => row.id);
+  const owners = [...new Set([...ids, ...loaded.supplier_catalog_items.map(row => row.supplier_id)])];
+  await read('users', 'WHERE id = ANY($1::text[])', [owners]);
+  await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [owners]);
+  await read('supplier_services', 'WHERE id = ANY($1::text[])', [loaded.supplier_catalog_items.map(row => row.supplier_service_id)]);
+  await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers', 'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+    await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
+  }
+  await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
+  await read('files', 'WHERE file_id = ANY($1::text[])', [loaded.supplier_catalog_item_photos.map(row => row.file_id)]);
+  for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories', 'accepted_file_formats']) await read(name, '');
+  await read('platform_settings', 'WHERE singleton');
+}
+
+const HOT_READ_PATHS = new Set(['/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me']);
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname); }
+
+/** Explicit route graphs. Other routes retain the complete transactional adapter. */
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, selectedRole = null } = {}) {
+  if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
+  return database.snapshot(async () => {
+    const graph = readGraph(database), { loaded, read } = graph;
+    await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
+    const ids = loaded.users.map(row => row.id);
+    await readIdentity(graph, ids);
+    // Client bootstrap reconciles founding/referral rewards under the domain
+    // lock; keep its complete write graph until that reconciliation is scoped.
+    if (pathname === '/auth/me' && (loaded.users[0]?.role === 'client' || selectedRole === 'client')) return loadStore(database);
+    if (pathname.startsWith('/auth/me')) {
+      await read('platform_settings', 'WHERE singleton');
+      for (const name of ['supplier_profiles', 'rider_profiles']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
+      await read('rider_documents', 'WHERE rider_id = ANY($1::text[])', [ids]);
+      if (pathname === '/auth/me/supplier') {
+        await read('supplier_services', 'WHERE supplier_id = ANY($1::text[])', [ids]);
+        await read('supplier_service_price_tiers', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+        await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+        for (const name of ['taxonomy_categories', 'taxonomy_category_aliases']) await read(name, '');
+      }
+      if (sessionHash) await read('audit_log', "WHERE actor_id = ANY($1::text[]) AND action = 'staff.sign_in' AND data->'detail'->>'sessionHash' = $2 LIMIT 1", [ids, sessionHash]);
+    } else if (pathname === '/ops/colour-price-checks') {
+      await read('client_cart_lines', `WHERE cart_id IN (SELECT id FROM client_carts WHERE state = 'draft')
+        AND catalog_item_id IN (SELECT id FROM supplier_catalog_items
+          WHERE priced_by_colour OR approved_snapshot #> '{item,pricedByColour}' = 'true'::jsonb)`);
+      await read('client_carts', 'WHERE id = ANY($1::text[])', [loaded.client_cart_lines.map(row => row.cart_id)]);
+      await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [loaded.client_cart_lines.map(row => row.catalog_item_id)]);
+      await readCatalogItemContext(graph, [...ids, ...loaded.client_carts.map(row => row.client_id)]);
+      const fileIds = graph.finish().cartLines.flatMap(artworkFileIdsFor);
+      await read('files', 'WHERE file_id = ANY($1::text[])', [[...fileIds, ...loaded.supplier_catalog_item_photos.map(row => row.file_id)]]);
+    } else if (pathname === '/ops/catalog-reviews') {
+      await readCatalogReviewPage(graph, { ids, after, status });
+    } else if (pathname === '/ops/shop-failures') {
+      await read('orders', "WHERE jsonb_array_length(CASE WHEN jsonb_typeof(data->'shopFailureEvents') = 'array' THEN data->'shopFailureEvents' ELSE '[]'::jsonb END) > 0");
+      await read('users', 'WHERE id = ANY($1::text[])', [[...new Set([...ids, ...loaded.orders.flatMap(row => [row.client_id, row.supplier_id, row.rider_id]).filter(Boolean)])]]);
+    } else if (pathname === '/settings') {
+      await read('platform_settings', 'WHERE singleton');
+      await read('files', 'WHERE file_id = $1', [loaded.platform_settings[0]?.settings?.paymentQrFileId || null]);
+      await read('file_references', 'WHERE file_id = $1', [loaded.platform_settings[0]?.settings?.paymentQrFileId || null]);
+    } else if (pathname === '/taxonomy') {
+      for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories', 'taxonomy_materials', 'taxonomy_finishes']) await read(name, '');
+    } else if (pathname === '/zones') await read('zones', '');
+    else if (pathname === '/catalog') await read('catalog_products', '');
+    else if (pathname === '/ops/product-type-requests') {
+      // The existing route owns validation and the public cursor contract.
+      // Review-only operators filter out requests from unmarked suppliers.
+      const reviewOnly = isTestOperationsUser(graph.finish(), ids[0]);
+      await read('product_type_requests', `WHERE id > $1 COLLATE "C" AND ($2::text IS NULL OR status = $2) ${reviewOnly ? 'AND supplier_id IN (SELECT id FROM users WHERE review_data)' : ''} ORDER BY id COLLATE "en-x-icu" LIMIT 51`, [after, status]);
+      const owners = [...new Set([...ids, ...loaded.product_type_requests.map(row => row.supplier_id)])];
+      await read('users', 'WHERE id = ANY($1::text[])', [owners]);
+    }
+    return graph.finish();
+  });
+}
+
+/** Fetch candidates in index order until the existing visibility policy fills a page.
+ * Hidden rows never consume a public page slot. The watermark includes deleted
+ * notices just as the complete-store inbox does. No audit/ping/outbox history.
+ */
+export async function loadInboxStore(database, clerkSubject, { limit, role } = {}) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database), { loaded, read } = graph;
+    await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
+    const userId = loaded.users[0]?.id;
+    if (!userId) return graph.finish();
+    await readIdentity(graph, [userId]);
+    if (role && !loaded.user_role_memberships.some(row => row.role === role)) return graph.finish();
+    const watermark = (await database.query('SELECT id FROM notifications WHERE user_id = $1 ORDER BY position DESC LIMIT 1', [userId])).rows[0]?.id || null;
+    const cap = parseNotificationListLimit(limit), candidates = [];
+    let cursor = null, store;
+    do {
+      await read('notifications', `WHERE user_id = $1 AND deleted_at IS NULL
+        ${cursor ? 'AND (created_at < $2 OR (created_at = $2 AND position > $3))' : ''}
+        ORDER BY created_at DESC, position ASC LIMIT 100`, cursor ? [userId, cursor.created_at, cursor.position] : [userId]);
+      const page = loaded.notifications;
+      candidates.push(...page);
+      loaded.notifications = candidates;
+      await readNotificationContext(graph, {
+        orderIds: candidates.map(row => row.order_id).filter(Boolean),
+        caseIds: candidates.map(row => row.data?.approvalCaseId).filter(Boolean),
+      });
+      store = graph.finish();
+      if (store.notifications.filter(row => notificationVisible(store, row, userId, role)).length >= cap || page.length < 100) break;
+      cursor = page.at(-1);
+    } while (true);
+    store.inboxSnapshot = watermark;
+    return store;
+  });
+}
+
 /** Caller-scoped read graph. Keep visibility policy in notifications.js, not SQL. */
-export async function loadNotificationStore(database, clerkSubject, { lastEventId = null } = {}) {
+export async function loadNotificationStore(database, clerkSubject, { lastEventId = null, replay = false } = {}) {
   return database.snapshot(async () => {
     const loaded = Object.fromEntries(TABLES.map(table => [table.name, []]));
     async function read(name, where = '', values = []) {
@@ -875,7 +1081,12 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
     if (loaded.users.length === 1) {
       const userId = loaded.users[0].id;
       // Include a foreign resume row solely to preserve the stream's 403 vs 409.
-      await read('notifications', 'WHERE user_id = $1 OR id = $2', [userId, lastEventId]);
+      if (replay && lastEventId) {
+        const cursor = (await database.query('SELECT user_id, position FROM notifications WHERE id = $1', [lastEventId])).rows[0];
+        await read('notifications', 'WHERE (user_id = $1 AND position >= $3) OR id = $2', [userId, lastEventId, cursor?.user_id === userId ? cursor.position : null]);
+      } else {
+        await read('notifications', 'WHERE user_id = $1 OR id = $2', [userId, lastEventId]);
+      }
       const orderIds = [...new Set(loaded.notifications.map(row => row.order_id).filter(Boolean))];
       const caseIds = [...new Set(loaded.notifications.map(row => row.data?.approvalCaseId).filter(Boolean))];
       await read('user_role_memberships', 'WHERE user_id = $1', [userId]);
@@ -1445,7 +1656,7 @@ async function upsertChanged(database, table, before, current) {
 }
 
 export async function saveStore(database, store) {
-  if (notificationReadStores.has(store)) throw new Error('Notification stores are read-only');
+  if (notificationReadStores.has(store)) throw new Error('Projection stores are read-only');
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
   enforceReviewData(store, originalDomainStore(store));
   labelReviewNotifications(store, originalDomainStore(store));

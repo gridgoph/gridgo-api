@@ -129,7 +129,7 @@ export function listInbox(store, userId, options = {}) {
         notification.orderId ? ordersById.get(notification.orderId) ?? null : null,
       ),
     ),
-    snapshot: notificationSnapshot(store.notifications || [], userId),
+    snapshot: Object.hasOwn(store, 'inboxSnapshot') ? store.inboxSnapshot : notificationSnapshot(store.notifications || [], userId),
   };
 }
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
-import { loadStore, saveStore } from "../src/postgres-store.js";
+import { loadStore, saveStore, loadPushDeliveryStore } from "../src/postgres-store.js";
 import {
   enqueueNotificationPushes,
   createOutboxWorker,
@@ -79,7 +79,7 @@ test(
       let calls = 0;
       const drain = createOutboxWorker({
         database: db,
-        loadStore,
+        loadStore: loadPushDeliveryStore,
         delivery: {
           configured: true,
           send: async (message, devices) => {
@@ -125,7 +125,7 @@ test(
       );
       const restarted = createOutboxWorker({
         database: db,
-        loadStore,
+        loadStore: loadPushDeliveryStore,
         delivery: {
           configured: true,
           send: async () => {
