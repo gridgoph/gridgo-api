@@ -48,8 +48,9 @@ export async function loadVapid(database, env = process.env) {
   });
 }
 
-export async function listWebSubscriptions(database) {
-  return (await database.query('SELECT * FROM web_push_subscriptions')).rows.map(row => ({
+export async function listWebSubscriptions(database, { ids, userIds } = {}) {
+  const where = ids ? ' WHERE id = ANY($1::text[])' : userIds ? ' WHERE user_id = ANY($1::text[])' : '';
+  return (await database.query(`SELECT * FROM web_push_subscriptions${where}`, ids ? [ids] : userIds ? [userIds] : [])).rows.map(row => ({
     id: row.id, userId: row.user_id, appRole: row.app_role,
     endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth },
   }));

@@ -37,7 +37,11 @@ export function createRealtimeTransport({
     )
       return;
     if (!events.userIds().includes(message.userId)) return;
-    const store = await loadStore(database);
+    const store = await loadStore(database, {
+      userIds: [message.userId],
+      notificationIds: message.kind === 'notification' ? [message.notificationId] : [],
+      subjectId: message.kind === 'invalidate' ? message.payload?.id : null,
+    });
     if (message.kind === "notification") {
       const n = store.notifications.find(
         (n) => n.id === message.notificationId,
@@ -83,7 +87,7 @@ export function createRealtimeTransport({
       await next.connect();
       await next.query(`LISTEN ${CHANNEL}`);
       if (connectedBefore) {
-        const store = await loadStore(database);
+        const store = await loadStore(database, { userIds: events.userIds() });
         const staffIds = new Set(opsAdminRecipientIds(store));
         for (const userId of events.userIds()) {
           for (const resource of INVALIDATE_RESOURCES) {

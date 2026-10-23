@@ -54,7 +54,7 @@ export async function enqueueNotificationPushes(
   notifications,
 ) {
   let queued = 0;
-  const webSubscriptions = notifications.length ? await listWebSubscriptions(database) : [];
+  const webSubscriptions = notifications.length ? await listWebSubscriptions(database, { userIds: [...new Set(notifications.map(row => row.userId))] }) : [];
   for (const n of notifications) {
     if (n.push === false || !notificationVisible(store, n, n.userId)) continue;
     for (const d of webSubscriptions)
@@ -191,8 +191,8 @@ export function createOutboxWorker({
       // One snapshot per claimed batch, read after the claim so ownership,
       // membership and deletion rechecks still see every commit that
       // preceded this attempt.
-      const store = await loadStore(database);
-      const webSubscriptions = claimed.rows.some(row => row.web_subscription_id) ? await listWebSubscriptions(database) : [];
+      const store = await loadStore(database, claimed.rows);
+      const webSubscriptions = claimed.rows.some(row => row.web_subscription_id) ? await listWebSubscriptions(database, { ids: claimed.rows.map(row => row.web_subscription_id).filter(Boolean) }) : [];
       let next = 0;
       async function worker() {
         while (next < claimed.rows.length) {

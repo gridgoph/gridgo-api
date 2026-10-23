@@ -289,6 +289,11 @@ import {
 import {
   loadDeviceTokenStore,
   loadNotificationStore,
+  loadInboxStore,
+  loadDeliveryStore,
+  loadPushDeliveryStore,
+  isHotReadPath,
+  loadHotReadStore,
   loadStore,
   originalNotificationIds,
   saveDeviceTokenStore,
@@ -343,7 +348,7 @@ const enqueueMutation = (mutation) => database.transaction(mutation);
 // serializes every credentialed platform mutation.
 const enqueueDeviceMutation = (mutation) => database.transaction(mutation, { lockKey: "gridgo-device-tokens" });
 const notificationEvents = createNotificationEvents();
-const realtimeTransport = createRealtimeTransport({database,loadStore,events:notificationEvents,connectionString:process.env.DATABASE_URL});
+const realtimeTransport = createRealtimeTransport({database,loadStore:loadDeliveryStore,events:notificationEvents,connectionString:process.env.DATABASE_URL});
 const NOTIFICATION_HEARTBEAT_MS = Number(process.env.NOTIFICATION_HEARTBEAT_MS || 25_000);
 // Longest a single notification stream stays open before the client must reconnect with a fresh token.
 const NOTIFICATION_STREAM_MAX_MS = Number(process.env.NOTIFICATION_STREAM_MAX_MS || 10 * 60_000);
@@ -2348,12 +2353,17 @@ async function handleAuditedRequest(req, res) {
 
     await expireElapsedIssueWindows();
     const notificationRead = req.method === 'GET' && ['/notifications', '/notifications/stream'].includes(pathname);
-    const notificationClaims = notificationRead ? await verifiedClerkClaimsFor(req) : null;
+    const hotRead = req.method === 'GET' && isHotReadPath(pathname);
+    const notificationClaims = notificationRead || hotRead ? await verifiedClerkClaimsFor(req) : null;
     let store = notificationRead
-      ? await loadNotificationStore(database, notificationClaims?.claims?.sub || null, {
+      ? await (pathname === '/notifications' ? loadInboxStore : loadNotificationStore)(database, notificationClaims?.claims?.sub || null, {
+        limit: url.searchParams.get('limit'), role: url.searchParams.get('role') || req.headers['x-gridgo-role'], replay: pathname === '/notifications/stream',
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
       })
-      : await load();
+      : hotRead ? await loadHotReadStore(database, notificationClaims?.claims?.sub || null, pathname, {
+        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), selectedRole: req.headers['x-gridgo-role'],
+        sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
+      }) : await load();
 
     if (
       (req.method === "GET" || req.method === "HEAD")
@@ -2406,7 +2416,8 @@ async function handleAuditedRequest(req, res) {
         clerkUser = null;
       }
       let user = auth.user;
-      if (clerkUser) {
+      const identityProbe = clerkUser ? { users: store.users.map(candidate => candidate.id === user.id ? structuredClone(candidate) : candidate) } : null;
+      if (clerkUser && applyClerkIdentityCopy(identityProbe, identityProbe.users.find(candidate => candidate.id === user.id), clerkUser).mutated) {
         user = await enqueueMutation(async () => {
           const latest = await load();
           const latestUser = (latest.users || []).find((candidate) => candidate.id === auth.user.id);
@@ -7663,10 +7674,19 @@ async function runLifecycleWork() {
   try {
     await continueAfterStepFailure([
       sweepRescheduleRequests,
-      async () => enqueueMutation(async () => {
-        const store = await load();
-        if (expireShopAcceptances(store, { at: now(), createId: id })) await save(store);
-      }),
+      async () => {
+        const candidate = await database.query(`SELECT 1 FROM orders
+          WHERE state = 'supplier_assigned' AND supplier_id IS NOT NULL AND (
+            data->'shopAcceptance' IS NULL
+            OR data #>> '{shopAcceptance,supplierId}' IS DISTINCT FROM supplier_id
+            OR (data #>> '{shopAcceptance,status}' = 'pending'
+              AND (data #>> '{shopAcceptance,deadlineAt}')::timestamptz <= now())) LIMIT 1`);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (expireShopAcceptances(store, { at: now(), createId: id })) await save(store);
+        });
+      },
       sweepProductionPenalties,
       expireElapsedIssueWindows,
       sweepProductionInactivity,
@@ -7753,7 +7773,7 @@ try {
 } catch {
   console.warn('Web Push unavailable: check VAPID configuration and web_push_vapid migration');
 }
-drainPushOutbox = createOutboxWorker({database,loadStore,delivery:pushDelivery,webDelivery:webPushDelivery});
+drainPushOutbox = createOutboxWorker({database,loadStore:loadPushDeliveryStore,delivery:pushDelivery,webDelivery:webPushDelivery});
 await realtimeTransport.start();
 
 server.listen(PORT, HOST, () => {

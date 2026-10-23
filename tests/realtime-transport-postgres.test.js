@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createDatabase } from "../src/database.js";
 import {
   loadStore,
+  loadDeliveryStore,
   saveStore,
   originalDomainStore,
 } from "../src/postgres-store.js";
@@ -25,7 +26,7 @@ test(
     let rejectNextRead = false;
     const a = createRealtimeTransport({
         database: db,
-        loadStore,
+        loadStore: loadDeliveryStore,
         events: eventsA,
         connectionString: url,
       }),
@@ -36,7 +37,7 @@ test(
             rejectNextRead = false;
             throw new Error("transient read failure");
           }
-          return loadStore(...args);
+          return loadDeliveryStore(...args);
         },
         logger: { warn() {} },
         events: eventsB,

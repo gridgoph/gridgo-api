@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import webpush from 'web-push';
 import { createDatabase } from '../src/database.js';
-import { loadStore, saveStore } from '../src/postgres-store.js';
+import { loadStore, saveStore, loadPushDeliveryStore } from '../src/postgres-store.js';
 import { loadVapid, validSubscription, validPushEndpoint, routeWebPush, createWebPushDelivery } from '../src/web-push.js';
 import { enqueueNotificationPushes, createOutboxWorker } from '../src/push-outbox.js';
 
@@ -112,7 +112,7 @@ test('PostgreSQL Web Push keys, atomic outbox, encrypted transport, retry, role 
     assert.equal(await queue('silent', { push: false }), 0);
     assert.equal(await queue('client', { appRole: 'client' }), 0);
     assert.equal(await queue('send'), 1);
-    const drain = createOutboxWorker({ database: db, loadStore, delivery: { configured: false }, webDelivery: delivery });
+    const drain = createOutboxWorker({ database: db, loadStore: loadPushDeliveryStore, delivery: { configured: false }, webDelivery: delivery });
     await drain();
     let attempt = (await db.query('SELECT * FROM notification_push_outbox WHERE user_id=$1', [f.a])).rows[0];
     assert.equal(attempt.status, 'pending');
