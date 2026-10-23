@@ -51,7 +51,7 @@ Send a Clerk session token as `Authorization: Bearer <token>`. The account's ver
 - `GET /issue-reports/:id` returns one report.
 - `PATCH /issue-reports/:id` with `{ "status": "published", "publishedIn": "09-24-2026" }` marks it handled. `publishedIn` is kept only for `published`.
 
-The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities } }`. Each support desk report is `{ id, issue, category, status, priority, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }] }`.
+The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities }, triageCounts }`. Each support desk report is `{ id, issue, category, status, priority, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }], triage, aiReview }` (see [Triage and AI review](#triage-and-ai-review)).
 Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL_SECONDS`, default 5 minutes), so download them right after listing.
 
 ## Statuses and the tracker issue link
@@ -82,3 +82,71 @@ Operations and Super Admin can PATCH `/ops/issue-reports/:id` with only `{ "prio
 Every report includes `priority` (default false). All list routes accept `priority=true` to return pinned reports across statuses, with the existing `before`/`limit` paging. Optional `status` and `since` further narrow the query. `counts.priorities` is the total number of pinned reports across all statuses; existing status counts stay unchanged. Pinning a report does not change its linked GitHub issue.
 
 Migration `1791976000000_issue_report_priorities` adds the boolean and last priority actor/time (`priority_updated_by`, `priority_updated_at`) and a partial paging index. Deploy API/migration before dashboard.
+
+## Triage and AI review
+
+Staff triage and AI review sit beside the workflow `status`; neither changes the status, priority, tracker link, or the reporter's own `category`. Migration `1792600000000_issue_report_triage` adds the columns (every existing report starts `unreviewed` with no AI review) and refuses to roll back once any report has been triaged or AI reviewed.
+
+Every report on every read route (support desk, dashboard, firstmate) carries:
+
+```json
+{
+  "triage": {
+    "validity": "unreviewed | valid | spam | duplicate",
+    "category": "bug | feature | question | feedback | other | null",
+    "labels": ["checkout", "map"],
+    "duplicateOf": "<report id> | null",
+    "triagedBy": { "id": "<user id>", "name": "Ana | null" },
+    "triagedAt": "<ISO time> | null"
+  },
+  "aiReview": null
+}
+```
+
+`aiReview` is `null` until an AI review is recorded, then `{ reviewedAt, validity, category, labels, duplicateOf, note, outcome }`. AI `validity` is `valid | spam | duplicate`; `note` is at most 500 characters or `null`. `outcome` compares the current human triage with the current AI suggestion: `pending` while `triage.validity` is `unreviewed`; `confirmed` when the validity matches and, where the AI named them, the category and duplicate target match too; otherwise `overridden`. Labels never affect `outcome`. `triagedBy` is `null` until a person triages, and `name` is `null` when the identity has no user row. For Operations and the support desk, GitHub URLs in `aiReview.note` are redacted like other text.
+
+Labels are free lowercase slugs (`^[a-z0-9][a-z0-9-]{0,31}$`), at most 10 per report. Writes trim, lowercase and de-duplicate them; the list sent replaces the stored list. There is no separate label table: `triageCounts.labels` lists every label in use.
+
+### Staff triage (Operations and Super Admin)
+
+`PATCH /ops/issue-reports/:id` with only a `triage` object:
+
+```json
+{ "triage": { "validity": "duplicate", "category": "bug", "labels": ["checkout"], "duplicateOf": "<report id>" } }
+```
+
+- Every field is optional, but at least one is required; unknown fields are `400 invalid_request`. Omitted fields keep their stored value. `category: null` clears it.
+- `duplicateOf` must be another existing report and needs the resulting validity to be `duplicate`. Changing validity away from `duplicate` clears it; it becomes `null` if the target report is ever deleted.
+- `validity: "unreviewed"` undoes a verdict.
+- Each triage write records the caller as `triagedBy` and the time as `triagedAt`.
+- `triage` cannot be combined with `status`, `publishedIn`, `trackerIssueUrl`, or `priority` (`400 invalid_request`). Clients and other roles get `403 forbidden`; support desk and firstmate PATCHes with `triage` are also `403 forbidden`. An unknown report is `404 issue_report_not_found`.
+
+### AI review (firstmate only)
+
+`PATCH /firstmate/issue-reports/:id` with only an `aiReview` object:
+
+```json
+{ "aiReview": { "validity": "spam", "category": "other", "labels": ["promo"], "duplicateOf": null, "note": "Advertising, not a GRIDGO problem." } }
+```
+
+- `validity` is required; `category`, `labels`, `duplicateOf` and `note` default to empty. Each write replaces the whole AI suggestion and sets `reviewedAt` to now. `duplicateOf` needs `validity: "duplicate"`.
+- Only the `ai_*` columns are written, so an AI review never changes the human `triage`, whether it is sent before or after the person.
+- `aiReview` cannot be combined with workflow fields (`400 invalid_request`). Dashboard and support desk PATCHes with `aiReview` are `403 forbidden`.
+
+### Filters and counts
+
+Every list route (`/issue-reports`, `/ops/issue-reports`, `/firstmate/issue-reports`) also accepts these filters. They combine with `status`, `since`, `priority`, `limit` and `before` paging:
+
+- `validity=unreviewed,valid` (comma-separated, any of the four values). For example, the default "not spam" view is `validity=unreviewed,valid,duplicate`.
+- `triageCategory=bug,none`: the staff category, comma-separated. `none` matches reports with no staff category.
+- `label=checkout`: reports carrying that label. Matching is case-insensitive.
+- `aiReviewed=true|false`.
+
+An unknown value is `400 invalid_request`. The list response adds `triageCounts` next to the unchanged `counts`. These are totals over every report, whatever the filters:
+
+```json
+{ "triageCounts": { "validity": { "unreviewed": 1, "valid": 1, "spam": 1, "duplicate": 1 },
+  "aiReviewed": 1, "aiAwaitingHuman": 0, "labels": [{ "label": "map", "count": 2 }] } }
+```
+
+`aiAwaitingHuman` counts reports that have an AI review but are still `unreviewed`. `labels` is sorted by most used, then by name. Status `counts` still include spam, so the existing paging contract keeps working. Only authenticated staff and firstmate receive counts. The public `POST /issue-reports` response returns no counts, and anything counted publicly, such as the reports site, should use `validity` to leave spam out.
