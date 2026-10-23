@@ -1399,3 +1399,56 @@ test("checkout-funnel events migration adds and removes its own table only", { s
     assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name, "1792120000000_listing_express");
   });
 });
+
+test("issue-report triage migration defaults reports to unreviewed, constrains triage, and keeps it on rollback", { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner({ ...migrationOptions(schema, "up", 1792539400000, client), timestamp: true });
+    const report = "22222222-2222-4222-8222-222222222222";
+    const other = "33333333-3333-4333-8333-333333333333";
+    await client.query(`INSERT INTO issue_reports(id,issue,category,status,published_in,tracker_issue_url,priority)
+      VALUES ($1,'Keep existing metadata','bug','published','10-13-2026','https://github.com/gridgoph/gridgo-web/issues/1',true),
+             ($2,'Another report',NULL,'new',NULL,NULL,false)`, [report, other]);
+    await runner({ ...migrationOptions(schema, "up", 1792600000000, client), timestamp: true });
+    assert.equal((await client.query("SELECT name FROM pgmigrations ORDER BY id DESC LIMIT 1")).rows[0].name, "1792600000000_issue_report_triage");
+    assert.deepEqual((await client.query(`SELECT category,status,published_in,tracker_issue_url,priority,validity,triage_category,labels,
+        duplicate_of,triaged_by,triaged_at,ai_reviewed_at,ai_validity,ai_category,ai_labels,ai_duplicate_of,ai_note
+      FROM issue_reports WHERE id=$1`, [report])).rows[0], {
+      category: "bug", status: "published", published_in: "10-13-2026", tracker_issue_url: "https://github.com/gridgoph/gridgo-web/issues/1",
+      priority: true, validity: "unreviewed", triage_category: null, labels: [], duplicate_of: null, triaged_by: null, triaged_at: null,
+      ai_reviewed_at: null, ai_validity: null, ai_category: null, ai_labels: [], ai_duplicate_of: null, ai_note: null,
+    });
+    for (const [assignment, constraint] of [
+      ["validity='maybe'", "issue_reports_validity_check"],
+      ["triage_category='urgent'", "issue_reports_triage_category_check"],
+      ["labels=ARRAY['Has Caps']", "issue_reports_labels_check"],
+      ["labels=ARRAY['ok','']", "issue_reports_labels_check"],
+      ["labels=ARRAY['ok',NULL]", "issue_reports_labels_check"],
+      [`labels=ARRAY[${Array.from({ length: 11 }, (_, n) => `'l${n}'`).join(",")}]`, "issue_reports_labels_check"],
+      [`duplicate_of='${other}'`, "issue_reports_duplicate_check"],
+      [`validity='duplicate', duplicate_of='${report}'`, "issue_reports_duplicate_check"],
+      ["triaged_by='u_ops'", "issue_reports_triaged_check"],
+      ["ai_validity='spam'", "issue_reports_ai_review_check"],
+      ["ai_validity='unreviewed', ai_reviewed_at=now()", "issue_reports_ai_validity_check"],
+      ["ai_note='x'", "issue_reports_ai_review_check"],
+      ["ai_reviewed_at=now(), ai_validity='spam', ai_note='  '", "issue_reports_ai_note_check"],
+      ["ai_reviewed_at=now(), ai_validity='valid', ai_labels=ARRAY['a b']", "issue_reports_ai_labels_check"],
+    ]) {
+      await assert.rejects(client.query(`UPDATE issue_reports SET ${assignment} WHERE id=$1`, [report]), new RegExp(constraint), assignment);
+    }
+    await client.query(`UPDATE issue_reports SET validity='duplicate', duplicate_of=$2, labels=ARRAY['checkout','map-2'],
+      triaged_by='u_ops', triaged_at=now(), ai_reviewed_at=now(), ai_validity='duplicate', ai_duplicate_of=$2, ai_note='Same as the other one'
+      WHERE id=$1`, [report, other]);
+    assert.equal((await client.query("SELECT count(*)::int AS n FROM issue_reports WHERE labels @> ARRAY['map-2']")).rows[0].n, 1);
+    await client.query("BEGIN");
+    await assert.rejects(runner(migrationOptions(schema, "down", 1, client)), /triage exists/);
+    await client.query("ROLLBACK");
+    await client.query(`UPDATE issue_reports SET validity='unreviewed', duplicate_of=NULL, labels='{}', triaged_by=NULL, triaged_at=NULL,
+      ai_reviewed_at=NULL, ai_validity=NULL, ai_duplicate_of=NULL, ai_note=NULL`);
+    await runner(migrationOptions(schema, "down", 1, client));
+    assert.equal((await client.query(`SELECT count(*)::int AS n FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name='issue_reports' AND (column_name IN ('validity','labels','triaged_at') OR column_name LIKE 'ai\\_%')`, [schema])).rows[0].n, 0);
+    assert.equal((await client.query("SELECT to_regprocedure('issue_report_labels_valid(text[])') AS f")).rows[0].f, null);
+    assert.deepEqual((await client.query("SELECT status,priority,tracker_issue_url FROM issue_reports WHERE id=$1", [report])).rows[0],
+      { status: "published", priority: true, tracker_issue_url: "https://github.com/gridgoph/gridgo-web/issues/1" });
+  });
+});
