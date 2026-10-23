@@ -62,6 +62,13 @@ test('notification reads keep inbox and stream visibility without loading unrela
     await assert.rejects(database.transaction(() => postgresStore.saveStore(database, scoped)), /read-only/);
   }
   assert.deepEqual((await postgresStore.loadNotificationStore(database, 'unmapped')).users, []);
+  for (const lastEventId of ['ntf_7', 'ntf_1', 'missing']) {
+    const replay = await postgresStore.loadNotificationStore(database, 'clerk_supplier', { lastEventId, replay: true });
+    const originalIndex = full.notifications.findIndex(n => n.id === lastEventId);
+    if (lastEventId === 'ntf_7') assert.deepEqual(replay.notifications, full.notifications.slice(originalIndex).filter(n => n.userId === 'supplier'));
+    if (lastEventId === 'ntf_1') assert.deepEqual(replay.notifications, [full.notifications[originalIndex]]);
+    if (lastEventId === 'missing') assert.deepEqual(replay.notifications, []);
+  }
   await database.query("UPDATE order_payments SET status='confirmed' WHERE order_id='order' AND code='final_online'");
   const settled = listInbox(await postgresStore.loadNotificationStore(database, 'clerk_client'), 'client', { role: 'client' });
   assert.equal(settled.notifications.find(n => n.id === 'ntf_2').collectHold, false);

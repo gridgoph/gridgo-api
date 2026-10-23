@@ -441,3 +441,28 @@ Duration confirmations now carry an explicit audit marker even for unchanged
 legacy saves. Older Express-only audit differences are not confirmations; proven
 reason clearing remains protected. Historical empty audit details cannot prove
 an unchanged save's intent (see `docs/SCHEDULING_API.md`).
+
+## PostgreSQL query statistics
+
+The server and local compose files preload `pg_stat_statements`. CI does not
+install the server compose file: an operator must copy this change and recreate
+only PostgreSQL during an approved maintenance window (the named volume stays).
+If other preload libraries are configured, retain them in the comma-separated
+`shared_preload_libraries` value. No API boot code changes database settings.
+
+After PostgreSQL restarts, a database administrator enables the extension in the
+GRIDGO database, once:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+SHOW shared_preload_libraries;
+SELECT calls, rows, mean_exec_time, total_exec_time, query
+FROM pg_stat_statements
+WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+ORDER BY total_exec_time DESC LIMIT 20;
+```
+
+Retain the statistics for before/after comparisons; do not reset them during a
+release. Query text is normalized, but access to these statistics remains an
+operator privilege. Production acceptance for issue 307 still requires actual
+API request-log measurements after the dev release and production rollout.

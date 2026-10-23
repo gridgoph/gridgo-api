@@ -22,6 +22,10 @@ export function createColourWorker({database,load,save,storage,render=renderColo
     try {
       await database.transaction(async () => {
         if (!(await database.query("SELECT pg_try_advisory_xact_lock(hashtext('gridgo-colour-renderer')) AS locked")).rows[0].locked) return;
+        const candidate = await database.query(`SELECT 1 FROM files
+          WHERE state = 'ready' AND COALESCE(data->>'deleteRequestedAt', '') = ''
+            AND data @? '$.colourAnalyses[*] ? (@.status == "pending")' LIMIT 1`);
+        if (!candidate.rowCount) return;
         const store = await load();
         const file = store.files.find(file => file.state === 'ready' && !file.deleteRequestedAt && file.colourAnalyses?.some(job => job.status === 'pending'));
         const job = file?.colourAnalyses.find(job => job.status === 'pending');
