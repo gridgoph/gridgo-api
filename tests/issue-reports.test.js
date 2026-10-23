@@ -569,7 +569,7 @@ test("the list pages with before=<last id shown>, never repeating or skipping a 
 
   const everything = await call(base, "/firstmate/issue-reports?status=new", { token: FIRSTMATE_TOKEN });
   assert.equal(everything.body.reports.length, 7);
-  assert.deepEqual(Object.keys(everything.body).sort(), ["counts", "reports"]);
+  assert.deepEqual(Object.keys(everything.body).sort(), ["counts", "reports", "triageCounts"]);
 
   const paged = [];
   let before = null;
@@ -826,4 +826,222 @@ test("report notification rollback removes uploaded screenshots and metadata", {
   assert.equal((await database.query("SELECT report_id FROM issue_report_screenshots WHERE report_id=$1", [reportId])).rowCount, 0);
   assert.equal(storage.objects.size, 0);
   assert.equal(delivered, false);
+});
+
+test("staff triage and AI review are separate: filters, permissions, and AI never overwriting a human verdict", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const users = { ops: { id: "u_triage_ops", role: "ops_admin" }, super: { id: "u_triage_super", role: "super_admin" }, client: { id: "u_triage_client", role: "client" } };
+  for (const user of Object.values(users)) resolveAuthorizationContext({ userRoleMemberships: [{ userId: user.id, role: user.role }] }, user);
+  const env = { ...DESK_ENV, FIRSTMATE_TRACKER_TOKEN: FIRSTMATE_TOKEN };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const send = (response, status, body) => {
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(body));
+    };
+    let handled;
+    if (isStaffIssueReportsRoute(url.pathname)) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const parsed = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      handled = await routeStaffIssueReports({
+        req, res, pathname: url.pathname, url, user: users[req.headers["x-test-user"]] ?? null,
+        readBody: async () => parsed, send, database, storage,
+      });
+    } else if (isFirstmateIssueReportsRoute(url.pathname)) {
+      handled = await routeFirstmateIssueReports({ req, res, pathname: url.pathname, url, send, database, storage, env });
+    } else {
+      handled = await routeIssueReports({ req, res, pathname: url.pathname, url, send, database, storage, env, verifyClerk, loadClerkUser });
+    }
+    if (!handled) send(res, 404, { error: "unrouted" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    server.close();
+    await database.query("TRUNCATE issue_reports CASCADE").catch(() => {});
+    await database.query("DELETE FROM users WHERE id = $1", [users.super.id]).catch(() => {});
+    await database.close?.();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+  await database.query("DELETE FROM users WHERE id = $1", [users.super.id]);
+  await database.query(
+    `INSERT INTO users (id, clerk_user_id, email, name, role, created_at, position, data)
+     VALUES ($1, 'clerk_triage_super', 'triage-super@gridgo.test', 'Triage Admin', 'super_admin', now(), 0, '{}')`,
+    [users.super.id],
+  );
+  const staff = (who, pathname, body) => fetch(`${base}${pathname}`, {
+    method: body ? "PATCH" : "GET",
+    headers: { "Content-Type": "application/json", ...(who ? { "X-Test-User": who } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  }).then(async (response) => ({ status: response.status, body: await response.json() }));
+  const firstmate = (pathname, body) => call(base, pathname, { token: FIRSTMATE_TOKEN, ...(body ? { method: "PATCH", body } : {}) });
+  const ids = async (who, query) => {
+    const listed = await staff(who, `/ops/issue-reports${query}`);
+    assert.equal(listed.status, 200, `${query}: ${JSON.stringify(listed.body)}`);
+    return listed.body.reports.map((report) => report.id);
+  };
+
+  const filed = [];
+  for (const [index, issue] of ["Checkout map is blank", "BUY FOLLOWERS NOW", "Checkout map blank again", "Add dark mode"].entries()) {
+    const report = await createIssueReport(database, storage, { issue, category: index === 3 ? "feature" : "bug", screenshots: [] });
+    await database.query("UPDATE issue_reports SET created_at = $2 WHERE id = $1", [report.id, `2026-10-0${index + 1}T00:00:00Z`]);
+    filed.push(report.id);
+  }
+  const [a, b, c, d] = filed;
+
+  const fresh = await staff("ops", `/ops/issue-reports/${a}`);
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.body.category, "bug", "the reporter's category stays");
+  assert.deepEqual(fresh.body.triage, { validity: "unreviewed", category: null, labels: [], duplicateOf: null, triagedBy: null, triagedAt: null });
+  assert.equal(fresh.body.aiReview, null);
+  const initial = await staff("ops", "/ops/issue-reports");
+  assert.deepEqual(initial.body.counts, { new: 4, tracked: 0, published: 0, dismissed: 0, priorities: 0 });
+  assert.deepEqual(initial.body.triageCounts, {
+    validity: { unreviewed: 4, valid: 0, spam: 0, duplicate: 0 }, aiReviewed: 0, aiAwaitingHuman: 0, labels: [],
+  });
+
+  // Who may write which half.
+  assert.equal((await staff("client", `/ops/issue-reports/${a}`, { triage: { validity: "valid" } })).status, 403);
+  assert.equal((await staff(null, `/ops/issue-reports/${a}`, { triage: { validity: "valid" } })).status, 401);
+  for (const response of [
+    await call(base, `/issue-reports/${a}`, { method: "PATCH", token: DESK_TOKEN, body: { triage: { validity: "valid" } } }),
+    await call(base, `/issue-reports/${a}`, { method: "PATCH", token: DESK_TOKEN, body: { aiReview: { validity: "valid" } } }),
+    await firstmate(`/firstmate/issue-reports/${a}`, { triage: { validity: "valid" } }),
+    await staff("ops", `/ops/issue-reports/${a}`, { aiReview: { validity: "valid" } }),
+    await staff("super", `/ops/issue-reports/${a}`, { aiReview: { validity: "valid" } }),
+  ]) {
+    assert.equal(response.status, 403, JSON.stringify(response.body));
+    assert.equal(response.body.error, "forbidden");
+  }
+
+  for (const triage of [
+    { validity: "maybe" }, { category: "urgent" }, { labels: "checkout" }, { labels: ["has space"] }, { labels: ["-dash"] },
+    { labels: ["x".repeat(33)] }, { labels: Array.from({ length: 11 }, (_, n) => `l${n}`) }, { labels: [7] },
+    { duplicateOf: a, validity: "duplicate" }, { duplicateOf: b, validity: "valid" }, { duplicateOf: b },
+    { duplicateOf: "00000000-0000-4000-8000-000000000000", validity: "duplicate" }, { duplicateOf: "nope", validity: "duplicate" },
+    { reason: "x" }, {}, null, ["valid"],
+  ]) {
+    const refused = await staff("ops", `/ops/issue-reports/${a}`, { triage });
+    assert.equal(refused.status, 400, JSON.stringify(triage));
+    assert.equal(refused.body.error, "invalid_request");
+  }
+  for (const body of [{ triage: { validity: "valid" }, status: "dismissed" }, { triage: { validity: "valid" }, priority: true }]) {
+    assert.equal((await staff("ops", `/ops/issue-reports/${a}`, body)).status, 400, JSON.stringify(body));
+  }
+  for (const aiReview of [
+    { validity: "unreviewed" }, {}, { validity: "spam", note: "x".repeat(501) }, { validity: "spam", note: 5 },
+    { validity: "valid", duplicateOf: b }, { validity: "spam", confidence: 1 }, { validity: "valid", labels: ["Bad Label"] },
+  ]) {
+    assert.equal((await firstmate(`/firstmate/issue-reports/${a}`, { aiReview })).status, 400, JSON.stringify(aiReview));
+  }
+  assert.equal((await firstmate(`/firstmate/issue-reports/${a}`, { aiReview: { validity: "spam" }, status: "dismissed" })).status, 400);
+  assert.equal((await staff("ops", "/ops/issue-reports/00000000-0000-4000-8000-000000000000", { triage: { validity: "valid" } })).status, 404);
+  assert.equal((await firstmate("/firstmate/issue-reports/00000000-0000-4000-8000-000000000000", { aiReview: { validity: "valid" } })).status, 404);
+  const untouched = (await database.query("SELECT validity, triaged_at, ai_reviewed_at FROM issue_reports WHERE id = $1", [a])).rows[0];
+  assert.deepEqual(untouched, { validity: "unreviewed", triaged_at: null, ai_reviewed_at: null }, "refused writes change nothing");
+
+  // AI goes first and suggests spam; the human verdict stays unreviewed.
+  const link = "https://github.com/gridgoph/gridgo-web/issues/31";
+  const suggested = await firstmate(`/firstmate/issue-reports/${a}`, {
+    aiReview: { validity: "spam", category: "other", labels: ["Promo", "promo"], note: ` Looks like an ad; see ${link} ` },
+  });
+  assert.equal(suggested.status, 200, JSON.stringify(suggested.body));
+  assert.equal(suggested.body.triage.validity, "unreviewed");
+  assert.equal(suggested.body.triage.triagedAt, null);
+  assert.deepEqual({ ...suggested.body.aiReview, reviewedAt: undefined }, {
+    reviewedAt: undefined, validity: "spam", category: "other", labels: ["promo"], duplicateOf: null,
+    note: `Looks like an ad; see ${link}`, outcome: "pending",
+  });
+  assert.equal((await staff("ops", `/ops/issue-reports/${a}`)).body.aiReview.note, "Looks like an ad; see [link hidden]");
+  assert.equal((await staff("super", `/ops/issue-reports/${a}`)).body.aiReview.note, `Looks like an ad; see ${link}`);
+  assert.deepEqual(await ids("ops", "?aiReviewed=true"), [a]);
+  assert.deepEqual(await ids("ops", "?aiReviewed=false"), [d, c, b]);
+  assert.deepEqual((await staff("ops", "/ops/issue-reports")).body.triageCounts.aiAwaitingHuman, 1);
+
+  // A person overrides it.
+  const triaged = await staff("super", `/ops/issue-reports/${a}`, { triage: { validity: "valid", category: "bug", labels: [" Checkout", "map", "checkout"] } });
+  assert.equal(triaged.status, 200, JSON.stringify(triaged.body));
+  assert.equal(triaged.body.triage.validity, "valid");
+  assert.equal(triaged.body.triage.category, "bug");
+  assert.deepEqual(triaged.body.triage.labels, ["checkout", "map"]);
+  assert.deepEqual(triaged.body.triage.triagedBy, { id: users.super.id, name: "Triage Admin" });
+  assert.ok(triaged.body.triage.triagedAt);
+  assert.equal(triaged.body.aiReview.outcome, "overridden");
+  assert.equal(triaged.body.aiReview.validity, "spam", "the AI suggestion is kept beside the verdict");
+  const human = (await database.query("SELECT validity, triage_category, labels, triaged_by, triaged_at FROM issue_reports WHERE id = $1", [a])).rows[0];
+
+  // AI reviews again, agreeing this time: the human columns do not move.
+  const agreed = await firstmate(`/firstmate/issue-reports/${a}`, { aiReview: { validity: "valid", category: "bug", labels: ["checkout"] } });
+  assert.equal(agreed.status, 200);
+  assert.equal(agreed.body.aiReview.outcome, "confirmed");
+  assert.equal(agreed.body.aiReview.note, null, "each AI review replaces the whole suggestion");
+  assert.deepEqual(agreed.body.aiReview.labels, ["checkout"]);
+  // ...nor when it disagrees, nor through the workflow route.
+  await firstmate(`/firstmate/issue-reports/${a}`, { aiReview: { validity: "duplicate", duplicateOf: c, category: "feature", labels: [] } });
+  const tracked = await firstmate(`/firstmate/issue-reports/${a}`, { status: "tracked", trackerIssueUrl: link });
+  assert.equal(tracked.status, 200);
+  assert.equal(tracked.body.aiReview.duplicateOf, c);
+  assert.equal(tracked.body.aiReview.outcome, "overridden");
+  assert.deepEqual(tracked.body.triage, {
+    validity: "valid", category: "bug", labels: ["checkout", "map"], duplicateOf: null,
+    triagedBy: { id: users.super.id, name: "Triage Admin" }, triagedAt: triaged.body.triage.triagedAt,
+  });
+  assert.deepEqual((await database.query("SELECT validity, triage_category, labels, triaged_by, triaged_at FROM issue_reports WHERE id = $1", [a])).rows[0], human);
+
+  // Partial triage keeps the other fields; duplicateOf follows validity.
+  assert.equal((await staff("ops", `/ops/issue-reports/${b}`, { triage: { validity: "spam" } })).body.triage.validity, "spam");
+  const duplicate = await staff("ops", `/ops/issue-reports/${c}`, { triage: { validity: "duplicate", duplicateOf: a, labels: ["map"] } });
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicate.body));
+  assert.equal(duplicate.body.triage.duplicateOf, a);
+  assert.deepEqual(duplicate.body.triage.triagedBy, { id: users.ops.id, name: null });
+  assert.equal((await staff("ops", `/ops/issue-reports/${c}`, { triage: { category: "bug" } })).body.triage.duplicateOf, a);
+  const labelled = await staff("ops", `/ops/issue-reports/${d}`, { triage: { category: "feature", labels: ["ui"] } });
+  assert.equal(labelled.body.triage.validity, "unreviewed");
+  assert.equal(labelled.body.triage.category, "feature");
+  assert.deepEqual((await staff("ops", `/ops/issue-reports/${d}`, { triage: { validity: "valid" } })).body.triage.labels, ["ui"]);
+  assert.equal((await staff("ops", `/ops/issue-reports/${d}`, { triage: { validity: "unreviewed" } })).body.triage.category, "feature");
+
+  // Filters, alone and with the existing ones and paging.
+  assert.deepEqual(await ids("ops", "?validity=spam"), [b]);
+  assert.deepEqual(await ids("ops", "?validity=unreviewed,valid"), [d, a]);
+  assert.deepEqual(await ids("ops", "?triageCategory=bug"), [c, a]);
+  assert.deepEqual(await ids("ops", "?triageCategory=none"), [b]);
+  assert.deepEqual(await ids("ops", "?triageCategory=feature,none"), [d, b]);
+  assert.deepEqual(await ids("ops", "?label=map"), [c, a]);
+  assert.deepEqual(await ids("ops", "?label=MAP&validity=duplicate"), [c]);
+  assert.deepEqual(await ids("ops", "?label=nothing"), []);
+  assert.deepEqual(await ids("ops", "?status=tracked&validity=valid"), [a]);
+  assert.deepEqual(await ids("ops", "?status=new&validity=valid"), []);
+  assert.deepEqual(await ids("ops", `?validity=unreviewed,valid,duplicate&limit=1&before=${d}`), [c]);
+  assert.deepEqual(await ids("ops", `?validity=unreviewed,valid,duplicate&limit=5&before=${c}`), [a]);
+  for (const query of ["?validity=open", "?validity=spam,", "?triageCategory=urgent", "?label=has%20space", "?aiReviewed=yes"]) {
+    const refused = await staff("ops", `/ops/issue-reports${query}`);
+    assert.equal(refused.status, 400, query);
+    assert.equal(refused.body.error, "invalid_request");
+  }
+  const desk = await call(base, `/issue-reports?validity=spam`, { token: DESK_TOKEN });
+  assert.deepEqual(desk.body.reports.map((report) => report.id), [b]);
+  assert.equal(desk.body.reports[0].triage.validity, "spam");
+  const fm = await firstmate("/firstmate/issue-reports?aiReviewed=true&validity=valid");
+  assert.deepEqual(fm.body.reports.map((report) => report.id), [a]);
+  assert.deepEqual(fm.body.reports[0].triage.labels, ["checkout", "map"]);
+
+  assert.deepEqual((await staff("ops", "/ops/issue-reports")).body.triageCounts, {
+    validity: { unreviewed: 1, valid: 1, spam: 1, duplicate: 1 }, aiReviewed: 1, aiAwaitingHuman: 0,
+    labels: [{ label: "map", count: 2 }, { label: "checkout", count: 1 }, { label: "ui", count: 1 }],
+  });
+  assert.deepEqual((await staff("ops", "/ops/issue-reports")).body.counts, { new: 3, tracked: 1, published: 0, dismissed: 0, priorities: 0 });
+
+  // Leaving duplicate clears the target; a deleted target leaves no dangling id.
+  assert.equal((await staff("ops", `/ops/issue-reports/${c}`, { triage: { validity: "valid" } })).body.triage.duplicateOf, null);
+  await staff("ops", `/ops/issue-reports/${c}`, { triage: { validity: "duplicate", duplicateOf: b } });
+  await database.query("DELETE FROM issue_reports WHERE id = $1", [b]);
+  assert.equal((await staff("ops", `/ops/issue-reports/${c}`)).body.triage.duplicateOf, null);
+
+  // Priority and status changes leave triage alone.
+  await staff("ops", `/ops/issue-reports/${a}`, { priority: true });
+  await staff("ops", `/ops/issue-reports/${a}`, { status: "dismissed" });
+  assert.deepEqual((await database.query("SELECT validity, triage_category, labels, triaged_by, triaged_at FROM issue_reports WHERE id = $1", [a])).rows[0], human);
 });

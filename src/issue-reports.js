@@ -18,6 +18,13 @@ import { firstmateRefusal } from "./tracker.js";
 export const ISSUE_MAX_LENGTH = 5000;
 export const ISSUE_CATEGORIES = Object.freeze(["bug", "feature", "other"]);
 export const ISSUE_STATUSES = Object.freeze(["new", "tracked", "published", "dismissed"]);
+// Staff triage, independent of the workflow status. `unreviewed` is the default.
+export const ISSUE_VALIDITIES = Object.freeze(["unreviewed", "valid", "spam", "duplicate"]);
+// The staff category; the reporter's own `category` is never rewritten.
+export const TRIAGE_CATEGORIES = Object.freeze(["bug", "feature", "question", "feedback", "other"]);
+export const LABEL_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export const MAX_LABELS = 10;
+export const AI_NOTE_MAX_LENGTH = 500;
 // For link managers, `new` and `dismissed` clear the tracker issue link.
 const LINKED_STATUSES = Object.freeze(["tracked", "published"]);
 // The GitHub tracker issue a report became. Firstmate files it; GRIDGO only stores the link.
@@ -262,30 +269,74 @@ async function projectReports(database, storage, rows) {
     createdAt: asIso(row.created_at),
     updatedAt: asIso(row.updated_at),
     screenshots: byReport.get(row.id) ?? [],
+    triage: {
+      validity: row.validity,
+      category: row.triage_category,
+      labels: row.labels,
+      duplicateOf: row.duplicate_of,
+      triagedBy: row.triaged_by ? { id: row.triaged_by, name: row.triaged_by_name ?? null } : null,
+      triagedAt: row.triaged_at ? asIso(row.triaged_at) : null,
+    },
+    aiReview: row.ai_reviewed_at ? {
+      reviewedAt: asIso(row.ai_reviewed_at),
+      validity: row.ai_validity,
+      category: row.ai_category,
+      labels: row.ai_labels,
+      duplicateOf: row.ai_duplicate_of,
+      note: row.ai_note,
+      outcome: aiReviewOutcome(row),
+    } : null,
   }));
 }
 
-const REPORT_COLUMNS = "id, issue, category, status, published_in, tracker_issue_url, priority, created_at, updated_at";
+/**
+ * How the human verdict stands against the AI suggestion: `pending` until a
+ * person sets a validity, then `confirmed` when they agree on validity (and on
+ * the category and duplicate target, where the AI named one), else `overridden`.
+ */
+function aiReviewOutcome(row) {
+  if (row.validity === "unreviewed") return "pending";
+  const agrees = row.validity === row.ai_validity
+    && (row.ai_category == null || row.triage_category === row.ai_category)
+    && (row.ai_duplicate_of == null || row.duplicate_of === row.ai_duplicate_of);
+  return agrees ? "confirmed" : "overridden";
+}
+
+const REPORT_COLUMNS = `r.id, r.issue, r.category, r.status, r.published_in, r.tracker_issue_url, r.priority, r.created_at, r.updated_at,
+  r.validity, r.triage_category, r.labels, r.duplicate_of, r.triaged_by, triager.name AS triaged_by_name, r.triaged_at,
+  r.ai_reviewed_at, r.ai_validity, r.ai_category, r.ai_labels, r.ai_duplicate_of, r.ai_note`;
+const REPORT_FROM = "issue_reports r LEFT JOIN users triager ON triager.id = r.triaged_by";
 
 /**
  * Newest first, with `id` breaking ties so pages never overlap. `before` is
  * the id of the last report of the previous page: only older reports follow.
+ * `validities` and `triageCategories` are lists (a null category entry means
+ * uncategorised); `label` is one label the report must carry.
  */
-export async function listIssueReports(database, storage, { status = null, since = null, limit = 200, before = null, priority = false } = {}) {
+export async function listIssueReports(database, storage, {
+  status = null, since = null, limit = 200, before = null, priority = false,
+  validities = null, triageCategories = null, label = null, aiReviewed = null,
+} = {}) {
+  const categories = triageCategories?.filter(Boolean) ?? null;
   const result = await database.query(
-    `SELECT ${REPORT_COLUMNS} FROM issue_reports
-     WHERE ($1::text IS NULL OR status = $1) AND ($2::timestamptz IS NULL OR created_at >= $2)
-       AND (NOT $5::boolean OR priority)
-       AND ($4::uuid IS NULL OR (created_at, id) < (SELECT created_at, id FROM issue_reports WHERE id = $4))
-     ORDER BY created_at DESC, id DESC
+    `SELECT ${REPORT_COLUMNS} FROM ${REPORT_FROM}
+     WHERE ($1::text IS NULL OR r.status = $1) AND ($2::timestamptz IS NULL OR r.created_at >= $2)
+       AND (NOT $5::boolean OR r.priority)
+       AND ($4::uuid IS NULL OR (r.created_at, r.id) < (SELECT created_at, id FROM issue_reports WHERE id = $4))
+       AND ($6::text[] IS NULL OR r.validity = ANY($6))
+       AND (NOT $7::boolean OR r.triage_category = ANY($8) OR ($9::boolean AND r.triage_category IS NULL))
+       AND ($10::text IS NULL OR r.labels @> ARRAY[$10::text])
+       AND ($11::boolean IS NULL OR (r.ai_reviewed_at IS NOT NULL) = $11)
+     ORDER BY r.created_at DESC, r.id DESC
      LIMIT $3`,
-    [status, since, limit, before, priority],
+    [status, since, limit, before, priority, validities, triageCategories != null, categories ?? [],
+      triageCategories?.includes(null) ?? false, label, aiReviewed],
   );
   return projectReports(database, storage, result.rows);
 }
 
 export async function findIssueReport(database, storage, id) {
-  const result = await database.query(`SELECT ${REPORT_COLUMNS} FROM issue_reports WHERE id = $1`, [id]);
+  const result = await database.query(`SELECT ${REPORT_COLUMNS} FROM ${REPORT_FROM} WHERE r.id = $1`, [id]);
   const [report] = await projectReports(database, storage, result.rows);
   return report ?? null;
 }
@@ -312,6 +363,139 @@ async function reportCounts(database) {
   for (const row of result.rows) counts[row.status] = row.n;
   counts.priorities = (await database.query("SELECT count(*)::int AS n FROM issue_reports WHERE priority")).rows[0].n;
   return counts;
+}
+
+/** Totals across every report, whatever the list filters; `labels` is most used first. */
+async function triageCounts(database) {
+  const validity = Object.fromEntries(ISSUE_VALIDITIES.map((value) => [value, 0]));
+  for (const row of (await database.query("SELECT validity, count(*)::int AS n FROM issue_reports GROUP BY validity")).rows) {
+    validity[row.validity] = row.n;
+  }
+  const ai = (await database.query(
+    `SELECT count(*) FILTER (WHERE ai_reviewed_at IS NOT NULL)::int AS reviewed,
+       count(*) FILTER (WHERE ai_reviewed_at IS NOT NULL AND validity = 'unreviewed')::int AS awaiting
+     FROM issue_reports`,
+  )).rows[0];
+  const labels = (await database.query(
+    `SELECT label, count(*)::int AS n FROM issue_reports, unnest(labels) AS label
+     GROUP BY label ORDER BY n DESC, label`,
+  )).rows.map((row) => ({ label: row.label, count: row.n }));
+  return { validity, aiReviewed: ai.reviewed, aiAwaitingHuman: ai.awaiting, labels };
+}
+
+function listParam(url, name, allowed) {
+  const raw = url?.searchParams.get(name);
+  if (raw == null || raw === "") return null;
+  const values = [...new Set(raw.split(",").map((value) => value.trim()))];
+  if (values.some((value) => !allowed.includes(value))) {
+    throw new ReportError(400, "invalid_request", `${name} must be a comma-separated list of: ${allowed.join(", ")}.`);
+  }
+  return values;
+}
+
+function booleanParam(url, name) {
+  const raw = url?.searchParams.get(name);
+  if (raw == null) return null;
+  if (!["true", "false"].includes(raw)) throw new ReportError(400, "invalid_request", `${name} must be true or false.`);
+  return raw === "true";
+}
+
+const invalid = (message) => new ReportError(400, "invalid_request", message);
+
+function categoryInput(value, field) {
+  if (value === null) return null;
+  if (!TRIAGE_CATEGORIES.includes(value)) throw invalid(`${field} must be one of: ${TRIAGE_CATEGORIES.join(", ")}, or null.`);
+  return value;
+}
+
+/** Trimmed, lowercased and deduplicated; the whole list replaces the stored one. */
+function labelsInput(value, field) {
+  if (!Array.isArray(value)) throw invalid(`${field} must be a list of labels.`);
+  const labels = [...new Set(value.map((label) => (typeof label === "string" ? label.trim().toLowerCase() : label)))];
+  if (labels.some((label) => typeof label !== "string" || !LABEL_RE.test(label))) {
+    throw invalid(`Each of ${field} must be 1-32 lowercase letters, digits or hyphens, starting with a letter or digit.`);
+  }
+  if (labels.length > MAX_LABELS) throw invalid(`${field} can hold at most ${MAX_LABELS} labels.`);
+  return labels;
+}
+
+async function duplicateInput(database, id, value, field) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !UUID_RE.test(value) || value.toLowerCase() === id.toLowerCase()) {
+    throw invalid(`${field} must be the id of another issue report, or null.`);
+  }
+  if (!(await database.query("SELECT 1 FROM issue_reports WHERE id = $1", [value])).rowCount) {
+    throw invalid(`${field} must be the id of another issue report, or null.`);
+  }
+  return value;
+}
+
+function onlyKeys(object, keys, field) {
+  if (!object || typeof object !== "object" || Array.isArray(object)) throw invalid(`${field} must be an object.`);
+  const unknown = Object.keys(object).filter((key) => !keys.includes(key));
+  if (unknown.length) throw invalid(`${field} accepts only: ${keys.join(", ")}.`);
+}
+
+/**
+ * Staff triage: omitted fields keep their stored value, `labels` replaces the
+ * list, and leaving `duplicate` clears `duplicateOf`. Records who and when.
+ */
+async function applyTriage(database, id, input, actor) {
+  onlyKeys(input, ["validity", "category", "labels", "duplicateOf"], "triage");
+  if (!Object.keys(input).length) throw invalid("triage must change at least one of validity, category, labels or duplicateOf.");
+  if (Object.hasOwn(input, "validity") && !ISSUE_VALIDITIES.includes(input.validity)) {
+    throw invalid(`triage.validity must be one of: ${ISSUE_VALIDITIES.join(", ")}.`);
+  }
+  const category = Object.hasOwn(input, "category") ? categoryInput(input.category, "triage.category") : undefined;
+  const labels = Object.hasOwn(input, "labels") ? labelsInput(input.labels, "triage.labels") : undefined;
+  return database.transaction(async () => {
+    const current = (await database.query("SELECT validity, duplicate_of FROM issue_reports WHERE id = $1 FOR UPDATE", [id])).rows[0];
+    if (!current) return false;
+    const validity = input.validity ?? current.validity;
+    let duplicateOf = validity === "duplicate" ? current.duplicate_of : null;
+    if (Object.hasOwn(input, "duplicateOf")) {
+      duplicateOf = await duplicateInput(database, id, input.duplicateOf, "triage.duplicateOf");
+      if (duplicateOf && validity !== "duplicate") throw invalid("triage.duplicateOf needs validity duplicate.");
+    }
+    await database.query(
+      `UPDATE issue_reports SET validity = $2,
+         triage_category = CASE WHEN $3::boolean THEN $4 ELSE triage_category END,
+         labels = coalesce($5::text[], labels), duplicate_of = $6,
+         triaged_by = $7, triaged_at = now(), updated_at = now()
+       WHERE id = $1`,
+      [id, validity, category !== undefined, category ?? null, labels ?? null, duplicateOf, actor.id],
+    );
+    return true;
+  }, { lockKey: ISSUE_LOCK });
+}
+
+/**
+ * AI review replaces only the AI suggestion as a whole; the human triage
+ * columns are not part of this statement, so no AI write can change them.
+ */
+async function applyAiReview(database, id, input) {
+  onlyKeys(input, ["validity", "category", "labels", "duplicateOf", "note"], "aiReview");
+  if (!["valid", "spam", "duplicate"].includes(input.validity)) {
+    throw invalid("aiReview.validity must be one of: valid, spam, duplicate.");
+  }
+  const category = categoryInput(input.category ?? null, "aiReview.category");
+  const labels = labelsInput(input.labels ?? [], "aiReview.labels");
+  const noteRaw = input.note ?? null;
+  if (noteRaw !== null && typeof noteRaw !== "string") throw invalid("aiReview.note must be text or null.");
+  const note = asTrimmedString(noteRaw) || null;
+  if (note && note.length > AI_NOTE_MAX_LENGTH) throw invalid(`aiReview.note must be ${AI_NOTE_MAX_LENGTH} characters or fewer.`);
+  return database.transaction(async () => {
+    if (!(await database.query("SELECT 1 FROM issue_reports WHERE id = $1 FOR UPDATE", [id])).rowCount) return false;
+    const duplicateOf = await duplicateInput(database, id, input.duplicateOf ?? null, "aiReview.duplicateOf");
+    if (duplicateOf && input.validity !== "duplicate") throw invalid("aiReview.duplicateOf needs validity duplicate.");
+    await database.query(
+      `UPDATE issue_reports SET ai_reviewed_at = now(), ai_validity = $2, ai_category = $3, ai_labels = $4,
+         ai_duplicate_of = $5, ai_note = $6, updated_at = now()
+       WHERE id = $1`,
+      [id, input.validity, category, labels, duplicateOf, note],
+    );
+    return true;
+  }, { lockKey: ISSUE_LOCK });
 }
 
 /** Omitted keeps the stored link, null or "" clears it, anything else must be a tracker issue URL. */
@@ -362,7 +546,9 @@ function withoutGithubLinks(value) {
  * and firstmate's service token (`/firstmate/issue-reports`); the caller has
  * already decided who may reach it.
  */
-async function reviewIssueReports({ method, path, base, url, res, send, database, storage, readPatch, priorityActor = null, canManageTrackerLink = false }) {
+async function reviewIssueReports({
+  method, path, base, url, res, send, database, storage, readPatch, staffActor = null, canManageTrackerLink = false, aiReviewer = false,
+}) {
   const project = report => canManageTrackerLink ? report : withoutGithubLinks(report);
   if (method === "GET" && path === base) {
     const status = url?.searchParams.get("status") || null;
@@ -389,8 +575,15 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
     if (priorityRaw != null && !["true", "false"].includes(priorityRaw)) {
       throw new ReportError(400, "invalid_request", "priority must be true or false.");
     }
-    const reports = await listIssueReports(database, storage, { status, since: sinceRaw, limit, before, priority: priorityRaw === "true" });
-    send(res, 200, { reports: reports.map(project), counts: await reportCounts(database) });
+    const triageCategories = listParam(url, "triageCategory", [...TRIAGE_CATEGORIES, "none"])
+      ?.map((value) => (value === "none" ? null : value)) ?? null;
+    const label = url?.searchParams.get("label")?.trim().toLowerCase() || null;
+    if (label && !LABEL_RE.test(label)) throw invalid("label must be 1-32 lowercase letters, digits or hyphens.");
+    const reports = await listIssueReports(database, storage, {
+      status, since: sinceRaw, limit, before, priority: priorityRaw === "true",
+      validities: listParam(url, "validity", ISSUE_VALIDITIES), triageCategories, label, aiReviewed: booleanParam(url, "aiReviewed"),
+    });
+    send(res, 200, { reports: reports.map(project), counts: await reportCounts(database), triageCounts: await triageCounts(database) });
     return true;
   }
 
@@ -405,16 +598,30 @@ async function reviewIssueReports({ method, path, base, url, res, send, database
       throw new ReportError(403, "tracker_issue_url_forbidden", "Only Super Admin or the firstmate service can change the tracker issue link.");
     }
     if (body && Object.hasOwn(body, "priority")) {
-      if (!priorityActor) throw new ReportError(403, "forbidden", "Only Operations and Super Admin can change priority.");
+      if (!staffActor) throw new ReportError(403, "forbidden", "Only Operations and Super Admin can change priority.");
       if (typeof body.priority !== "boolean" || Object.keys(body).some(key => key !== "priority")) {
         throw new ReportError(400, "invalid_request", "Send priority as true or false, separately from status changes.");
       }
       const result = await database.transaction(() => database.query(
         `UPDATE issue_reports SET priority = $2, priority_updated_by = $3,
            priority_updated_at = now(), updated_at = now()
-         WHERE id = $1 RETURNING id`, [id, body.priority, priorityActor.id],
+         WHERE id = $1 RETURNING id`, [id, body.priority, staffActor.id],
       ), { lockKey: ISSUE_LOCK });
       if (!result.rowCount) throw notFound;
+      send(res, 200, project(await findIssueReport(database, storage, id)));
+      return true;
+    }
+    for (const [key, allowed, who] of [
+      ["triage", Boolean(staffActor), "Only Operations and Super Admin can triage reports."],
+      ["aiReview", aiReviewer, "Only the firstmate service can record an AI review."],
+    ]) {
+      if (!body || !Object.hasOwn(body, key)) continue;
+      if (!allowed) throw new ReportError(403, "forbidden", who);
+      if (Object.keys(body).length !== 1) throw invalid(`Send ${key} on its own, separately from status and priority changes.`);
+      const applied = key === "triage"
+        ? await applyTriage(database, id, body.triage, staffActor)
+        : await applyAiReview(database, id, body.aiReview);
+      if (!applied) throw notFound;
       send(res, 200, project(await findIssueReport(database, storage, id)));
       return true;
     }
@@ -510,7 +717,7 @@ export async function routeStaffIssueReports({ req, res, pathname, url, user, re
       throw new ReportError(403, "forbidden", "Only Operations and Super Admin can read issue reports.");
     }
     if (await reviewIssueReports({
-      method: req.method, path, base: STAFF_BASE, url, res, send, database, storage, priorityActor: user,
+      method: req.method, path, base: STAFF_BASE, url, res, send, database, storage, staffActor: user,
       canManageTrackerLink: identityHasMembership(user, "super_admin"),
       readPatch: () => readBody(req),
     })) return true;
@@ -548,7 +755,7 @@ export async function routeFirstmateIssueReports({ req, res, pathname, url, send
     if (refusal) throw new ReportError(refusal.status, refusal.error, refusal.message);
     if (await reviewIssueReports({
       method: req.method, path, base: FIRSTMATE_BASE, url, res, send, database, storage,
-      canManageTrackerLink: true,
+      canManageTrackerLink: true, aiReviewer: true,
       readPatch: () => readJsonBody(req, 64 * 1024),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
