@@ -117,6 +117,19 @@ export function supplierContactFor(store, supplierId) {
   };
 }
 
+/**
+ * The client's name, for Operations and Super Admin only. It comes from the
+ * user record the platform already stores. A blank name is null, so a queue
+ * can say the name is unavailable instead of looking like there is no client.
+ * Shops, riders, and the client do not receive this lookup.
+ */
+export function clientNameFor(store, clientId) {
+  if (!store || !clientId) return null;
+  const user = (store.users || []).find((row) => row.id === clientId);
+  const name = typeof user?.name === "string" ? user.name.trim() : "";
+  return name || null;
+}
+
 /*
  The two shapes the word "pickup" has carried.
 
@@ -1631,6 +1644,9 @@ export function publicOrderFor(order, user, store = null) {
         'supplierPlatformPayoutMinor','onlineDueMinor','initialOnlineMinor','finalOnlineMinor','directStoreDueMinor','paymentPlan','effectiveTotalMinor']) delete publicRecord[key];
     }
   }
+  // The orders queue names the client. Only Operations and Super Admin receive
+  // it. A shop, a rider, and the client keep the projection they already had.
+  if (ops) publicRecord.clientName = clientNameFor(store, order.clientId);
   return publicRecord;
 }
 
