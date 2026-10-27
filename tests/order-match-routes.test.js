@@ -350,6 +350,8 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
     downpaymentMinor: 41_900,
     balanceMinor: 0,
     downpaymentStatus: "pending_confirmation",
+    downpaymentMethod: "qr_manual",
+    downpaymentConfirmationSource: null,
     balanceStatus: "not_required",
   });
   assert.equal(committed.downpaymentPercent, 100);
@@ -418,6 +420,8 @@ test("with the setting at 75, checkout snapshots a 75/25 split and a balance to 
     downpaymentMinor: 31_425,
     balanceMinor: 10_475,
     downpaymentStatus: "pending_confirmation",
+    downpaymentMethod: "qr_manual",
+    downpaymentConfirmationSource: null,
     balanceStatus: "not_submitted",
   });
   const committed = store.orders.find((order) => order.id === checkedOut.body.order.id);
