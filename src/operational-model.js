@@ -1,3 +1,5 @@
+import { collectedVoucherFundingMinor } from './voucher-funding.js';
+import { clientVoucher } from './voucher-projection.js';
 import { isReviewData, assertReviewMoneyAllowed } from './review-data.js';
 import { performanceEnabled } from './supplier-performance-policy.js';
 import { approvalProofSummary, canReadApprovalProof } from './approval-proof.js';
@@ -812,7 +814,33 @@ export function collectedSupplierPrincipalMinor(order) {
     .filter(
       (allocation) => allocation.component === "supplier_principal" && confirmedPayments.has(allocation.paymentCode),
     )
-    .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
+    .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0) + collectedVoucherFundingMinor(order, "supplier_principal");
+}
+
+/** Shared collected delivery attribution for reporting and refund revenue. */
+export function collectedDeliveryForOrder(order) {
+  const originalSplit = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000);
+  const cashMinor = (order.paymentAllocations || [])
+    .filter(row => row.component === 'delivery_pass_through' && order.payments?.[row.paymentCode]?.status === 'confirmed')
+    .reduce((sum, row) => sum + finiteMinor(row.amountMinor, 'allocation.amountMinor'), 0);
+  const extraMinor = deliveryPinCollectedMinor(order);
+  const baseSplit = deliverySplit(cashMinor, originalSplit.riderCommissionBps);
+  const fundedDeliveryMinor = collectedVoucherFundingMinor(order, 'delivery_pass_through');
+  const fundedRiderMinor = order.coversOrderTotal ? Math.min(order.gridgoRiderTopupMinor || 0, fundedDeliveryMinor) : 0;
+  if (order.coversOrderTotal) {
+    const baseFunds = cashMinor + fundedRiderMinor;
+    baseSplit.riderPayoutMinor = Math.min(originalSplit.riderPayoutMinor, baseFunds);
+    baseSplit.platformDeliveryShareMinor = baseFunds - baseSplit.riderPayoutMinor;
+  }
+  const extraSplit = deliverySplit(extraMinor, originalSplit.riderCommissionBps);
+  if (order.coversOrderTotal && extraMinor > 0) {
+    // The difference of two rounded entitlements may differ from rounding the fee delta.
+    extraSplit.riderPayoutMinor = order.deliveryPin.change.riderDifferenceMinor ?? extraSplit.riderPayoutMinor;
+    extraSplit.platformDeliveryShareMinor = extraMinor - extraSplit.riderPayoutMinor;
+  }
+  return { collectedMinor: cashMinor + extraMinor, fundedRiderMinor,
+    riderCollectedMinor: baseSplit.riderPayoutMinor + extraSplit.riderPayoutMinor,
+    platformCollectedMinor: baseSplit.platformDeliveryShareMinor + extraSplit.platformDeliveryShareMinor };
 }
 
 export function moneyReportingForOrder(order, store = null) {
@@ -829,13 +857,12 @@ export function moneyReportingForOrder(order, store = null) {
       && order.payments?.[allocation.paymentCode]?.status === "confirmed")
     .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
   const serviceFeeCollectedMinor = collectedComponent("service_fee") + supplementTotals(store, order).feeMinor;
-  const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000));
-  const deliveryCollectedMinor = collectedComponent("delivery_pass_through") + deliveryPinCollectedMinor(order);
-  const baseCollectedSplit = deliverySplit(collectedComponent("delivery_pass_through"), split.riderCommissionBps);
-  const extraSplit = deliverySplit(deliveryPinCollectedMinor(order), split.riderCommissionBps);
-  const collectedSplit = { riderPayoutMinor: baseCollectedSplit.riderPayoutMinor + extraSplit.riderPayoutMinor,
-    platformDeliveryShareMinor: baseCollectedSplit.platformDeliveryShareMinor + extraSplit.platformDeliveryShareMinor };
-  const platformCollectedMinor = serviceFeeCollectedMinor + collectedSplit.platformDeliveryShareMinor;
+  const originalSplit = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000);
+  const split = adjustedDeliverySplit(order, originalSplit);
+  const deliveryCollection = collectedDeliveryForOrder(order);
+  const { fundedRiderMinor } = deliveryCollection;
+  const platformCollectedMinor = serviceFeeCollectedMinor + deliveryCollection.platformCollectedMinor
+    - collectedVoucherFundingMinor(order, 'supplier_principal') - fundedRiderMinor;
   const adjustedMinor = (order.revenueAdjustments || [])
     .filter((adjustment) => adjustment.kind === "adjustment")
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
@@ -868,12 +895,14 @@ export function moneyReportingForOrder(order, store = null) {
     deliverySettlement: {
       deliveryFeeMinor: effectiveDeliveryFeeMinor(order),
       ...split,
-      collectedMinor: deliveryCollectedMinor,
-      riderCollectedMinor: collectedSplit.riderPayoutMinor,
-      platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
+      collectedMinor: deliveryCollection.collectedMinor,
+      ...(order.coversOrderTotal ? { gridgoRiderTopupMinor: order.gridgoRiderTopupMinor, fundedRiderMinor } : {}),
+      riderCollectedMinor: deliveryCollection.riderCollectedMinor,
+      platformCollectedMinor: deliveryCollection.platformCollectedMinor,
     },
     ...(order.voucher ? { voucherFunding: { ...order.voucher, amountMinor: order.voucherDiscountMinor,
-      serviceFeeMinor: order.voucherServiceFeeMinor, deliveryMinor: order.voucherDeliveryMinor } } : {}),
+      serviceFeeMinor: order.voucherServiceFeeMinor, deliveryMinor: order.voucherDeliveryMinor,
+      ...(order.coversOrderTotal ? { supplierMinor: order.voucherSupplierMinor, gridgoSupplierTopupMinor: order.gridgoSupplierTopupMinor, gridgoRiderTopupMinor: order.gridgoRiderTopupMinor } : {}) } } : {}),
     platformRevenue: {
       ...(order.voucher ? { voucherDiscountMinor: order.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
@@ -1339,7 +1368,15 @@ export function publicOrderFor(order, user, store = null) {
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
   if (!ops && !owningClient) {
-    for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor']) delete publicRecord[field];
+    for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor', 'voucherSupplierMinor', 'clientSupplierSubtotalMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor', 'coversOrderTotal']) delete publicRecord[field];
+  }
+  if (!ops) {
+    for (const field of ['voucherSupplierMinor', 'clientSupplierSubtotalMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor']) delete publicRecord[field];
+    if (publicRecord.voucher) publicRecord.voucher = clientVoucher(publicRecord.voucher);
+    // Supplier settlement shows the complete principal; client cash/funding details are staff-only.
+    if (!owningClient && publicRecord.paymentAllocations) publicRecord.paymentAllocations = publicRecord.paymentAllocations.map(row => {
+      const { gridgoFundedMinor = 0, ...visible } = row; return { ...visible, amountMinor: row.amountMinor + gridgoFundedMinor };
+    });
   }
   // Legacy payment breakdowns carry fee labels. Hide that breakdown for the
   // client when checkout hides fees, including immutable quote snapshots.

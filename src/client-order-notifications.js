@@ -519,7 +519,9 @@ export function notifyOpsJobNeedsQa(store, order, { createId, at }) {
       type: "ops_job_needs_qa",
       orderId: order.id,
       title: "New job needs a check",
-      body: "A new job is waiting for payment confirmation and artwork review.",
+      body: order.payments?.initial?.confirmationSource === "gridgo_voucher"
+        ? "A voucher-funded job is waiting for artwork review. No client transfer is required."
+        : "A new job is waiting for payment confirmation and artwork review.",
     }),
     { createId, at },
   );

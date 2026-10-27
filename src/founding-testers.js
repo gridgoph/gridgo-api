@@ -1,3 +1,4 @@
+import { promotionSettings } from './promotion-settings.js';
 import { publicVoucher } from './vouchers.js';
 import { createTesterReward, issueTesterReward } from './tester-rewards.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
@@ -75,7 +76,7 @@ export function reconcileFoundingTester(store, clientId, { id, at, resume = fals
   const row = rowFor(store, clientId);
   const prior = (store.orderSurveys || []).filter(s => s.clientId === clientId && s.rewardVoucherId).sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))[0];
   const reusedVoucher = prior && store.vouchers.find(v => v.id === prior.rewardVoucherId);
-  const reward = createTesterReward(store, { kind: 'mission', clientId, inviterId: null, inviteId: null, amountMinor: reusedVoucher ? 0 : 1500 }, { id, at });
+  const reward = createTesterReward(store, { kind: 'mission', clientId, inviterId: null, inviteId: null, amountMinor: reusedVoucher ? 0 : promotionSettings(store).rewards.missionMinor }, { id, at });
   if (!issueTesterReward(store, reward, { id, at, actorId }, { reusedVoucher })) return !previous;
   const voucher = store.vouchers.find(v => v.id === reward.voucherId);
   row.rewardReused = Boolean(reusedVoucher);

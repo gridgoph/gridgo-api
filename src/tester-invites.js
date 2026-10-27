@@ -1,3 +1,4 @@
+import { promotionSettings } from './promotion-settings.js';
 import crypto from 'node:crypto';
 import { GRIDGO_OFFICE } from './gridgo-office.js';
 import { voucherFail as fail } from './vouchers.js';
@@ -109,7 +110,7 @@ export function reconcileTesterInvite(store, clientId, ctx) {
   const previous = store.testerRewards.find(r => r.kind === 'referral' && r.clientId === clientId);
   if (previous && (!ctx.resume || previous.status !== 'paused')) return false;
   invite.completedAt ||= ctx.at;
-  const reward = createTesterReward(store, { kind: 'referral', clientId, inviterId: invite.inviterId, inviteId: invite.id, amountMinor: 3000 }, ctx);
+  const reward = createTesterReward(store, { kind: 'referral', clientId, inviterId: invite.inviterId, inviteId: invite.id, amountMinor: promotionSettings(store).rewards.inviteMinor * 2 }, ctx);
   const { checks, evidence, blocked } = referralChecks(store, invite);
   Object.assign(reward, { checks, evidence });
   if (blocked) {

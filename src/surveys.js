@@ -1,3 +1,4 @@
+import { promotionSettings } from './promotion-settings.js';
 import { foundingTesterEligible, testerOrderFacts, reconcileFoundingTester, publicFoundingTester } from './founding-testers.js';
 import { carriedToOffice } from './operational-model.js';
 import { notifyAdmins } from './domain-events.js';
@@ -122,7 +123,7 @@ export function submitSurvey(store, order, body, { id, at }) {
     // A private assigned campaign per entitlement preserves the wallet's one-per-campaign
     // rule without calendar-week loopholes or changes to published campaign terms.
     const campaign = { id: id('vcamp'), name: 'Thank you for your order feedback', purpose: 'survey', code: generatedVoucherCode(),
-      mode: 'assigned', status: 'active', valueMinor: 1500, totalLimit: 1, perAccountLimit: 1,
+      mode: 'assigned', status: 'active', valueMinor: promotionSettings(store).rewards.surveyMinor, totalLimit: 1, perAccountLimit: 1,
       validityDays: 30, endsAt: null, createdAt: at, updatedAt: at };
     store.voucherCampaigns.push(campaign);
     const { voucher } = issueVoucher(store, campaign, order.clientId, { id, at, actorId: order.clientId, adultConfirmed: false });

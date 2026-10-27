@@ -1,3 +1,4 @@
+import { sweepPromotions } from './promotions.js';
 import crypto from 'node:crypto';
 import { voucherMoney } from './voucher-money.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
@@ -42,7 +43,9 @@ export function issueVoucher(store, campaign, clientId, { id, at, actorId = null
   if (store.vouchers.filter(v => v.campaignId === campaign.id).length >= campaign.totalLimit) voucherFail(409, 'voucher_campaign_cap_reached');
   const voucher = { id: id('vch'), campaignId: campaign.id, clientId, status: 'available', valueMinor: campaign.valueMinor,
     issuedAt: at, expiresAt: campaign.endsAt || new Date(Date.parse(at) + campaign.validityDays * 86400000).toISOString(),
-    emailAllowed: adultConfirmed === true, data: {} };
+    emailAllowed: adultConfirmed === true,
+    ...(['founding_launch', 'friend_pass'].includes(campaign.purpose) ? { promotionKind: campaign.purpose === 'founding_launch' ? 'founding' : 'friend_pass' } : {}),
+    data: campaign.coversOrderTotal ? { coversOrderTotal: true, promotionClaimSequence: store.vouchers.filter(v => v.promotionKind).length + 1 } : {} };
   store.vouchers.push(voucher);
   voucherEvent(store, voucher, 'issued', { id, at, actorId });
   notice(store, voucher, 'issued', { id, at });
@@ -56,11 +59,12 @@ export function availableVouchers(store, clientId, at, cartId = null) {
       && r.status === 'reserved' && !expired(r.expiresAt, at) && r.cartId !== cartId));
 }
 export function selectVoucher(store, cart, groups, at) {
-  const candidates = availableVouchers(store, cart.clientId, at, cart.id).filter(v => voucherMoney(groups, v.valueMinor).voucherDiscountMinor > 0);
+  const candidates = availableVouchers(store, cart.clientId, at, cart.id).filter(v => voucherMoney(groups, v.valueMinor, v.data).voucherDiscountMinor > 0);
   const choice = (store.voucherCartChoices || []).find(c => c.id === cart.id);
   if (choice?.removed) return null;
   if (choice?.voucherId) return candidates.find(v => v.id === choice.voucherId) || null;
-  return candidates.length === 1 ? candidates[0] : null;
+  return candidates.sort((a, b) => voucherMoney(groups, b.valueMinor, b.data).voucherDiscountMinor - voucherMoney(groups, a.valueMinor, a.data).voucherDiscountMinor
+    || Date.parse(a.issuedAt) - Date.parse(b.issuedAt) || a.id.localeCompare(b.id))[0] || null;
 }
 export function releaseVoucherReservations(store, { id, at }, predicate = () => true) {
   initVouchers(store);
@@ -106,6 +110,22 @@ export function confirmVoucher(store, orders, { id, at, actorId }) {
   store.voucherRedemptions.push(redemption);
   voucherEvent(store, voucher, 'redeemed', { id, at, actorId, amountMinor: redemption.amountMinor, redemptionId: redemption.id, orderIds: redemption.data.orderIds });
 }
+/** Settle a zero-client-cash checkout at its complete voucher boundary, never as a transfer. */
+export function settleVoucherInitial(store, orders, { id, at, actorId }) {
+  if (!orders.length || orders.some(o => o.payments.initial.amountMinor !== 0)) voucherFail(409, 'voucher_zero_cash_boundary_required');
+  confirmVoucher(store, orders, { id, at, actorId });
+  for (const order of orders) {
+    Object.assign(order.payments.initial, { method: 'gridgo_voucher', status: 'confirmed', confirmationSource: 'gridgo_voucher',
+      confirmedAt: at, confirmedBy: null, reference: null, proofFileId: null, submittedAt: null });
+    order.state = 'needs_qa';
+    order.paymentStatus = order.payments.final_online.status === 'not_required' ? 'paid' : 'initial_payment_confirmed';
+    order.updatedAt = at;
+    order.timeline.push({ at, by: actorId, state: order.state, note: 'Initial installment settled by GRIDGO voucher; no client transfer required.' });
+    store.auditLog.push({ id: id('aud'), at, actorId, actorRole: 'client', action: 'payment.zero_cash_settled', entityType: 'order', entityId: order.id,
+      orderId: order.id, detail: { voucherId: order.voucher?.id, amountMinor: 0, source: 'gridgo_voucher' } });
+    queueInvalidate(store, { resource: 'orders', userIds: [order.clientId] });
+  }
+}
 export function restoreVoucherForRefund(store, order, { id, at, actorId, clientCaused, reason }) {
   initVouchers(store);
   if (!order.voucher) return;
@@ -137,7 +157,7 @@ export function sweepVouchers(store, { id, at }) {
       }
     }
   }
-  return changed;
+  return sweepPromotions(store, { id, at }) || changed;
 }
 export function addVoucherCode(store, clientId, code, { id, at }) {
   initVouchers(store);
@@ -161,6 +181,7 @@ export function publicVoucher(store, voucher, at) {
   const reservation = store.voucherReservations.find(r => r.voucherId === voucher.id && r.status === 'reserved' && !expired(r.expiresAt, at));
   const status = voucher.status === 'available' && expired(voucher.expiresAt, at) ? 'expired' : voucher.status;
   return { id: voucher.id, campaignId: voucher.campaignId, name: campaignFor(store, voucher)?.name,
+    ...(voucher.promotionKind ? { promotionKind: voucher.promotionKind, coversOrderTotal: true, upgradedAt: voucher.data.upgradedAt ?? null } : {}),
     valueMinor: voucher.valueMinor, status, issuedAt: voucher.issuedAt, expiresAt: voucher.expiresAt,
     secondsRemaining: Math.max(0, Math.ceil((Date.parse(voucher.expiresAt) - Date.parse(at)) / 1000)),
     redeemable: status === 'available' && !reservation && campaignFor(store, voucher)?.status === 'active',

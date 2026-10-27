@@ -92,7 +92,7 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
       return result({ campaign: created }, true, 201);
     }
     if (!campaign) fail(404, 'voucher_campaign_not_found');
-    if (['survey', 'founding_tester', 'tester_referral'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
+    if (['survey', 'founding_tester', 'tester_referral', 'founding_launch', 'friend_pass'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
     if (req.method === 'PATCH' && !campaigns[2]) {
       if (campaign.status !== 'draft' || store.vouchers.some(v => v.campaignId === campaign.id)) fail(409, 'voucher_campaign_immutable');
       const input = campaignInput({ ...campaign, ...object(await readBody(req)) }, at);
@@ -143,6 +143,7 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
       voidTesterReward(store, testerReward, why, { id, at, actorId: user.id });
       return result({ voucher: publicVoucher(store, voucher, at) }, true);
     }
+    if (voucher.promotionKind && item[2] === 'reissue') fail(409, 'promotion_voucher_managed');
     if (item[2] === 'void') {
       if (voucher.status !== 'available') fail(409, 'voucher_not_voidable');
       if (store.voucherReservations.some(r => r.voucherId === voucher.id && r.status === 'reserved' && r.data.orderIds?.length)) fail(409, 'voucher_payment_reconciliation_required');

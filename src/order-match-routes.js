@@ -8,7 +8,8 @@ import { specialInstructions } from './special-instructions.js';
 import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
-import { selectVoucher, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
+import { clientVoucher } from './voucher-projection.js';
+import { selectVoucher, settleVoucherInitial, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
 import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './operating-hours.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
@@ -68,6 +69,7 @@ import {
 } from "./order-match.js";
 import {
   notifyClientReceiptReady,
+  notifyOrderParties,
   notifyOpsJobNeedsQa,
   notifyOpsPaymentSubmitted,
 } from "./client-order-notifications.js";
@@ -538,7 +540,7 @@ function cartVoucherPlan(store, cart, lines, at) {
   });
   if (money.some(group => !group)) return null;
   const voucher = selectVoucher(store, cart, money, at);
-  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0) };
+  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0, voucher?.data) };
 }
 
 function clientCartLineAmounts(store,cart,lines,at) {
@@ -603,7 +605,8 @@ export function clientCartQuote(store, cart, lines, at) {
       const allocation = voucherPlan.groups[index], rate = downpaymentPercent * 100;
       return roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate)
         - Math.min(allocation.voucherServiceFeeMinor, roundBps(group.grossServiceFeeMinor, rate))
-        - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate));
+        - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate))
+        - Math.min(allocation.voucherSupplierMinor || 0, roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate) - roundBps(group.grossServiceFeeMinor, rate) - roundBps(group.deliveryFeeMinor, rate));
     }), 'voucher.downpayment');
   }
   return {
@@ -612,11 +615,13 @@ export function clientCartQuote(store, cart, lines, at) {
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
     voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
     discountKind: voucherPlan?.discountKind || null,
-    voucherGroups: voucherPlan?.groups.map((group, index) => ({ groupId: grouped[index].lines[0].id,
+    voucherGroups: voucherPlan?.groups.map((group, index) => {
+      const { voucherSupplierMinor: _supplierFunding, clientSupplierSubtotalMinor: _supplierCash, ...visible } = group;
+      return { groupId: grouped[index].lines[0].id,
       ...(voucherPlan.money[index].serviceFeeSchedule?.version === 2 ? {
         organizationDiscountMinor: group.organizationDiscountMinor, voucherDiscountMinor: group.voucherDiscountMinor,
         totalMinor: group.totalMinor,
-      } : group) })) || [],
+      } : visible) }; }) || [],
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
@@ -895,10 +900,12 @@ function publicMatchedOrder(store, order) {
       downpaymentMinor: order.payments.initial.amountMinor,
       balanceMinor: order.payments.final_online.amountMinor,
       downpaymentStatus: order.payments.initial.status,
+      downpaymentMethod: order.payments.initial.method,
+      downpaymentConfirmationSource: order.payments.initial.confirmationSource ?? null,
       balanceStatus: order.payments.final_online.status,
     },
     jobs,
-    ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
+    ...(order.voucher ? { voucher: clientVoucher(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer || null),
     fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
@@ -911,14 +918,8 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, offeredProjection = null } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, offeredProjection = null, zeroCashBoundary = false } = {}) {
   assertRequestFulfillment(cart, body);
-  const payment = record(body.payment, "payment");
-  if (payment.method !== "qr_manual") {
-    fail(400, "payment_method_not_allowed", "Checkout accepts QR Ph manual payment only.", { allowed: ["qr_manual"] });
-  }
-  const reference = text(payment.reference, "payment.reference", 100);
-  const proof = fileFor(store, user, text(payment.proofFileId, "payment.proofFileId", 120), "payment_proof", "payment.proofFileId");
   const cartLines = (groupLines || store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
     .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
@@ -1159,7 +1160,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       initial: {
         amountMinor: downpaymentMinor, method: "qr_manual", status: "pending_confirmation",
         label: upfront ? "Full payment" : `${downpaymentPercent}% downpayment`,
-        reference, proofFileId: proof.fileId, submittedAt: at,
+        reference: null, proofFileId: null, submittedAt: null,
       },
       // Kept on a paid-up-front order so the installment list has one shape;
       // `not_required` settles every gate that waits on the balance.
@@ -1202,6 +1203,16 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   snapshotPayoutPlan(order, { supplierPlatformPayoutMinor: itemSubtotalMinor });
 
   if (voucher && voucherAllocation) applyVoucherMoney(order, voucherAllocation, voucher);
+  let proof = null;
+  if (zeroCashBoundary) {
+    if (!voucher || order.payments.initial.amountMinor !== 0) fail(409, 'voucher_zero_cash_boundary_required', 'Refresh the checkout payment amount.');
+  } else {
+    const payment = record(body.payment, 'payment');
+    if (payment.method !== 'qr_manual') fail(400, 'payment_method_not_allowed', 'Checkout accepts QR Ph manual payment only.', { allowed: ['qr_manual'] });
+    const reference = text(payment.reference, 'payment.reference', 100);
+    proof = fileFor(store, user, text(payment.proofFileId, 'payment.proofFileId', 120), 'payment_proof', 'payment.proofFileId');
+    Object.assign(order.payments.initial, { reference, proofFileId: proof.fileId, submittedAt: at });
+  }
   order.invoiceNumber = invoiceNumber(orderId, at);
 
   store.orderJobs ||= [];
@@ -1215,7 +1226,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     for (const fileId of artworkFileIdsFor(snapshot.lineItem)) attachOrderFile(fileFor(store, user, fileId, "artwork", "artworkFileId"), orderId, `line:${snapshot.lineItem.id}:artwork`);
     if (snapshot.lineItem.mockupFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.mockupFileId, "mockup", "mockupFileId"), orderId, `line:${snapshot.lineItem.id}:mockup`);
   }
-  attachOrderFile(proof, orderId, "payment:initial:proof");
+  if (proof) attachOrderFile(proof, orderId, "payment:initial:proof");
   recordApprovalProof({ store, order, user, approval: body.approval, at, id: createId, req, cartVersion: cart.version });
 
   const invoice = {
@@ -1256,6 +1267,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     totalMinor: order.totalMinor,
     ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor,
       voucherServiceFeeMinor: order.voucherServiceFeeMinor, voucherDeliveryMinor: order.voucherDeliveryMinor,
+      ...(order.coversOrderTotal ? { voucherSupplierMinor: order.voucherSupplierMinor, gridgoSupplierTopupMinor: order.gridgoSupplierTopupMinor, gridgoRiderTopupMinor: order.gridgoRiderTopupMinor } : {}),
       clientServiceFeeMinor: order.clientServiceFeeMinor, clientDeliveryFeeMinor: order.clientDeliveryFeeMinor } : {}),
     paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor: order.payments.initial.amountMinor, balanceMinor: order.payments.final_online.amountMinor },
   };
@@ -1273,9 +1285,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     entityType: "order", entityId: orderId, orderId,
     detail: { jobCount: jobs.length, itemSubtotalMinor, ...fee, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
-  notifyOpsJobNeedsQa(store, order, { createId, at });
+  if (!zeroCashBoundary) notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
-    notifyOpsPaymentSubmitted(store, order, { createId, at });
+    if (!zeroCashBoundary) notifyOpsPaymentSubmitted(store, order, { createId, at });
     notifyClientReceiptReady(store, order, { createId, at });
   }
   queueOrderInvalidate(store, order, ["orders"]);
@@ -1295,10 +1307,18 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   const honouredOffers = groups.map(group => offeredGroupProjection(store, cart, group.lines, at));
   const plan = cartVoucherPlan(store, cart, lines, at);
   const voucher = plan?.voucher;
+  const zeroCashBoundary = Boolean(voucher?.data?.coversOrderTotal && clientCartQuote(store, cart, lines, at).downpaymentMinor === 0);
   if (groups.length < 2) {
-    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0], offeredProjection: honouredOffers[0] });
+    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0], offeredProjection: honouredOffers[0], zeroCashBoundary });
     if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
     else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
+    if (zeroCashBoundary) {
+      const order = store.orders.find(o => o.id === result.order.id);
+      settleVoucherInitial(store, [order], { id: createId, at, actorId: user.id });
+      notifyOpsJobNeedsQa(store, order, { createId, at });
+      notifyOrderParties(store, order, { createId, at });
+      result.order = publicMatchedOrder(store, order);
+    }
     return result;
   }
   if (groups.some(group => !group.deadline)) fail(400, "basket_deadline_required", "Set a deadline for every product before checkout.");
@@ -1313,12 +1333,20 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     results[index] = checkout(store, user, cart, body, createId, at, req, {
       groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)),
       pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index],
-      offeredProjection: honouredOffers[index],
+      offeredProjection: honouredOffers[index], zeroCashBoundary,
     });
   }
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
   if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: orders.map(o => o.id), amountMinor: plan.voucherDiscountMinor });
   else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
+  if (zeroCashBoundary) {
+    settleVoucherInitial(store, orders, { id: createId, at, actorId: user.id });
+    for (const order of orders) {
+      notifyOpsJobNeedsQa(store, order, { createId, at });
+      notifyOrderParties(store, order, { createId, at });
+    }
+    results[0].order = publicMatchedOrder(store, orders[0]);
+  }
   const first = orders[0];
   const basket = { id: basketId, clientId: user.id, receiptOrderId: first.id,
     orderIds: orders.map((order) => order.id), totalMinor: addMinor(orders.map((order) => order.totalMinor), "basket.totalMinor"),
@@ -1350,7 +1378,10 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     totalMinor: basket.totalMinor,
     ...(voucher ? { voucher: { id: voucher.id, campaignId: voucher.campaignId, fundedBy: 'GRIDGO', label: 'GRIDGO-funded voucher', amountMinor: plan.voucherDiscountMinor },
       voucherDiscountMinor: plan.voucherDiscountMinor, voucherServiceFeeMinor: addMinor(orders.map(o => o.voucherServiceFeeMinor || 0), 'voucher.fee'),
-      voucherDeliveryMinor: addMinor(orders.map(o => o.voucherDeliveryMinor || 0), 'voucher.delivery') } : {}),
+      voucherDeliveryMinor: addMinor(orders.map(o => o.voucherDeliveryMinor || 0), 'voucher.delivery'),
+      voucherSupplierMinor: addMinor(orders.map(o => o.voucherSupplierMinor || 0), 'voucher.supplier'),
+      gridgoSupplierTopupMinor: addMinor(orders.map(o => o.gridgoSupplierTopupMinor || 0), 'voucher.supplierTopup'),
+      gridgoRiderTopupMinor: addMinor(orders.map(o => o.gridgoRiderTopupMinor || 0), 'voucher.riderTopup') } : {}),
     paymentPlan: { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
   };
   for (const order of orders) order.invoiceNumber = first.invoiceNumber;
@@ -1363,7 +1394,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
     action: "basket.checkout", entityType: "basket", entityId: basket.id,
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
-  notifyOpsPaymentSubmitted(store, first, { createId, at });
+  if (!zeroCashBoundary) notifyOpsPaymentSubmitted(store, first, { createId, at });
   notifyClientReceiptReady(store, first, { createId, at });
   return { order: results[0].order, basket: publicBasket(store, basket, user), invoice };
 }

@@ -4,7 +4,7 @@ Server contract for report **63AFAA4A**, tracked in [gridgo-api#204](https://git
 
 ## Identity and storage
 
-All routes require a Clerk session and database membership. `/admin/*` below requires Super Admin; Operations has only the explicit read-only lookup. Clients can read and redeem only their own vouchers. Email matching finds existing client memberships; it never provisions users, links identities, or changes roles. No transfer, cash conversion, minimum-order rule, percentage voucher or free-delivery type exists. The Founding Tester referral programme below is the only automatic invite reward.
+All routes require a Clerk session and database membership. `/admin/*` below requires Super Admin; Operations has only the explicit read-only lookup. Clients can read and redeem only their own vouchers. Email matching finds existing client memberships; it never provisions users, links identities, or changes roles. No transfer, cash conversion, minimum-order rule, percentage voucher or free-delivery type exists. The Founding Tester referral programme and [launch Friend Pass](#launch-promotions) have separate invitation and reward rules.
 
 Migration `1791975600000` creates `voucher_campaigns`, `vouchers`, `voucher_reservations`, `voucher_redemptions`, append-only `voucher_ledger`, `voucher_code_attempts`, `voucher_cart_choices`, and `voucher_email_outbox`. Identity, lifecycle, limits, and money are relational columns. Bounded reservation order IDs, refund decisions and reminder timestamps are JSONB snapshots. The existing domain transaction/advisory lock serializes every mutation, including campaign caps and code claims. Unique constraints enforce one wallet item per account/campaign, one live reservation per voucher/cart, and one current consumption per voucher. Money, ledger, audit and notifications commit together.
 
@@ -118,13 +118,13 @@ The existing authenticated cart quote/checkout arithmetic is authoritative. Matc
 | POST | `/me/carts/:id/voucher` | apply `{voucherId}` or add-and-apply `{code}`; `{cart,serverTime}` |
 | DELETE | `/me/carts/:id/voucher` | remove and release reservation; `{cart,serverTime}` |
 
-The cart must belong to the client and be draft. Existing `GET /me/carts/:id`, `/quote` previews, and checkout include the same voucher pricing. Exactly one eligible available wallet voucher is auto-selected. With multiple eligible vouchers the client chooses; the server does not pick arbitrarily. Remove suppresses future auto-selection for that cart until an explicit apply. GET previews never reserve or write. POST apply reserves for 30 minutes, bounded by voucher expiry. Checkout auto-selection reserves at checkout if not previously reserved; an existing reservation deadline is not extended by checkout. Expired reservations are released during the lifecycle sweep or the next reserve operation.
+The cart must belong to the client and be draft. Existing `GET /me/carts/:id`, `/quote` previews, and checkout include the same voucher pricing. Without an explicit choice, the eligible voucher with the largest usable discount is auto-selected. Ties use issuance time then voucher ID. Remove suppresses future auto-selection for that cart until an explicit apply. GET previews never reserve or write. POST apply reserves for 30 minutes, bounded by voucher expiry. Checkout auto-selection reserves at checkout if not previously reserved; an existing reservation deadline is not extended by checkout. Expired reservations are released during the lifecycle sweep or the next reserve operation.
 
 `cart.clientQuote` adds `voucher` (wallet projection or null), `voucherDiscountMinor`, `discountKind` (voucher/organization/null), and `voucherGroups` with group IDs, voucher fee/delivery funding, net client service/delivery fees and adjusted totals. `organizationDiscountMinor`, `totalMinor`, `downpaymentMinor`, `balanceMinor`, and `cart.groups[].totalMinor` reflect the selected discount. Incomplete quotes keep `totalMinor:null` and do not select a voucher. Monetary fields are nonnegative integer centavos. The 75% legacy setting retains the principal payment allocation, so a voucher can reduce the first installment by more than 75% of its face value; always render the returned payment plan.
 
 A voucher replaces the Organization discount only if its **usable** value is strictly larger. Equal savings retain the Organization discount and leave the voucher untouched. An explicit apply that cannot improve the Organization discount returns `409 voucher_not_better_than_organization`.
 
-One voucher covers one checkout payment boundary, including a multi-shop/multi-deadline basket. First fund gross GRIDGO service fees, then delivery/pickup charges, never shop principal. The usable value is capped by those charges; unused face value is forfeited on consumption. For baskets, fee funding is apportioned by gross service-fee weights with largest-remainder rounding, stable cart-group ties. Delivery overflow uses the same weights, capped at each group's delivery charge, redistributing overflow to groups with capacity. All-zero weights split equally. The sum of group discounts exactly equals the usable voucher value.
+One voucher covers one checkout payment boundary, including a multi-shop/multi-deadline basket. Ordinary campaigns first fund gross GRIDGO service fees, then delivery/pickup charges, never shop principal (progressive-fee campaigns retain their existing service-fee-only cap). Launch campaigns opt into whole-order funding below. The usable value is capped by those charges; unused face value is forfeited on consumption. For baskets, fee funding is apportioned by gross service-fee weights with largest-remainder rounding, stable cart-group ties. Delivery overflow uses the same weights, capped at each group's delivery charge, redistributing overflow to groups with capacity. All-zero weights split equally. The sum of group discounts exactly equals the usable voucher value.
 
 Checkout snapshots a separate `voucher` line:
 
@@ -132,7 +132,7 @@ Checkout snapshots a separate `voucher` line:
 {"id":"vch_...","campaignId":"vcamp_...","label":"GRIDGO-funded voucher","fundedBy":"GRIDGO","amountMinor":1500,"serviceFeeMinor":1000,"deliveryMinor":500}
 ```
 
-Orders also store `voucherDiscountMinor`, `voucherServiceFeeMinor`, `voucherDeliveryMinor`, `clientServiceFeeMinor`, and `clientDeliveryFeeMinor`. Gross `serviceFeeMinor`/`deliveryFeeMinor`, shop subtotal, principal payment allocations, payout stage amounts/shares, rider split and rider pay remain intact. Only client fee/delivery allocations and installment totals decrease. Immutable invoice snapshots show the separate GRIDGO-funded discount against GRIDGO charges, with shop amounts unchanged; any delivery overflow is separately identified. No supplier tax-credit note is generated pending accountant confirmation.
+Orders also store `voucherDiscountMinor`, `voucherServiceFeeMinor`, `voucherDeliveryMinor`, `clientServiceFeeMinor`, and `clientDeliveryFeeMinor`. For ordinary vouchers, gross `serviceFeeMinor`/`deliveryFeeMinor`, shop subtotal, principal payment allocations, payout stage amounts/shares, rider split and rider pay remain intact. Only client fee/delivery allocations and installment totals decrease. Immutable invoice snapshots show the separate GRIDGO-funded discount against GRIDGO charges, with shop amounts unchanged; any delivery overflow is separately identified. No supplier tax-credit note is generated pending accountant confirmation.
 
 Client/Operations order and invoice projections include the voucher line. Ordinary supplier/rider projections omit wallet identifiers and discount funding fields. Operations money reporting additionally includes `voucherFunding`, while platform revenue reports the voucher discount and net fee. Supplier settlement and rider entitlements are unchanged.
 
@@ -364,3 +364,88 @@ client-fault exclusions, shop/GRIDGO failure exceptions, cutoff equality, histor
 reward reuse, concurrent/idempotent award, rollback, private role projections,
 audited settings versioning, code ownership, review-data denial, and durable capped
 reminders through the inbox/push outbox.
+
+## Launch promotions
+
+Migration `1793090000000` adds versioned `promotion_settings`, email-bound `promotion_invites`, voucher `promotion_kind`, and payment allocation `gridgo_funded_minor`. These extend the existing wallet and ledger. There is no public/shared launch code, marketing email, category restriction or delivery-zone rule. Ordinary survey, mission, referral and staff campaigns keep their existing eligibility, validity and funding rules.
+
+Defaults (calendar dates are Asia/Manila; JSON uses equivalent UTC timestamps):
+
+```json
+{
+  "founding": {"amountMinor":20000,"slots":30,"startsAt":"2026-10-26T16:00:00.000Z","endsAt":"2026-11-08T15:59:59.000Z","enabled":true},
+  "friendPass": {"amountMinor":10000,"perFounder":1,"total":20,"upgradeAt":"2026-11-01T15:59:59.000Z","enabled":true},
+  "budgetCapMinor":900000,
+  "rewards":{"surveyMinor":1500,"missionMinor":1500,"inviteMinor":1500}
+}
+```
+
+| Method | Path | Access / body |
+| --- | --- | --- |
+| GET | `/admin/promotions` | Operations or Super Admin |
+| PATCH | `/admin/promotions` | Super Admin; `{expectedVersion, founding?:{...}, friendPass?:{...}, budgetCapMinor?, rewards?:{...}, reason?}` |
+| GET | `/me/promotions` | Client |
+| POST | `/me/promotions/founding/claim` | Client; empty body |
+| POST | `/me/promotions/friend-pass/invite` | Founder; `{email}` |
+| POST | `/me/promotions/friend-pass/claim` | Invited client; empty body |
+
+All responses are private and uncached. Settings have an independent version, initially 1. PATCH merges supplied sections, validates integer money/limits and timestamp ranges, increments the version, and audits previous/current values. A stale/missing `expectedVersion` returns `409 settings_version_conflict`. It cannot lower the budget cap beneath current commitments. New claims snapshot the current amount and end date; existing wallet values/expiry remain unchanged, apart from the specified Friend Pass upgrade. Reward amounts snapshot when a new reward entitlement is created, including a budget-paused entitlement; resuming preserves that value. `inviteMinor` applies to each side of the existing tester referral reward, whose total is twice that amount. Their separate monthly tester budget still applies.
+
+`GET /admin/promotions` and PATCH return:
+
+- `settings`, `version`, `serverTime`.
+- `founding`: `slots`, `claimed` (live slot holders, including upgrades), `available`, `used`, `expiredUnused`, `claims[]`. Each claim includes `clientId`, `id` (same client ID), `name`, `email`, `voucherId`, `claimedAt`, `valueMinor`, `status` (`available|reserved|used|expired|void`), `promotionKind`, nullable `upgradedAt`, and historical benefiting `orderIds[]`.
+- `friendPass`: `total`, `issued` (claimed passes, including expired/void/upgraded), `invites[]`. Each invite includes `id`, `founder:{id,name,email}`, `email`/`friendEmail`, nullable matched `clientId`, `status` (`invited|claimed|used|expired|void|skipped_already_founder`), `createdAt`, nullable `claimedAt`, `valueMinor`, and `upgradedAt`. Unclaimed expired offers report `expired`.
+- `budget`: `capMinor`, `committedMinor`, `redeemedMinor`, `remainingMinor`. Commitment is live face value; redeemed is actual net consumption, excluding restored redemptions. Values used/forfeited remain committed after expiry. Ordinary reward/admin campaigns do not consume this launch budget.
+
+All three client mutations return the current `GET /me/promotions` projection:
+
+```json
+{
+  "serverTime":"2026-10-27T01:00:00.000Z",
+  "rewards":{"surveyMinor":1500,"missionMinor":1500,"inviteMinor":1500},
+  "founding":{"claimable":true,"amountMinor":20000,"slotsLeft":30,"endsAt":"2026-11-08T15:59:59.000Z","voucher":null},
+  "friendPass":{"canInvite":false,"invite":null,"invites":[],"offer":null,"voucher":null}
+}
+```
+
+Additive `rewards` lets the client show current survey/mission/invite amounts before an entitlement is issued. `invite` is the latest active Founder invitation, falling back to the latest skipped invitation. Additive `invites[]` supports adjustable `perFounder` above one and retains skipped history. `offer` is the waiting invitation projection with `amountMinor` and `endsAt`; only its matched client sees it. Wallet items retain the existing countdown and reservation shape and add `promotionKind:founding|friend_pass`, `coversOrderTotal:true`, and nullable `upgradedAt`. A reserved wallet item retains `status:available` plus `reservation`, as in `/me/vouchers`; the staff claim report uses `status:reserved`.
+
+Only active client memberships can claim, excluding review/test data and identities with `staff`, `ops_admin` or `super_admin` memberships. Signing in or viewing the offer takes no slot. Claims serialize under the domain lock. PostgreSQL additionally enforces one launch voucher per identity across both types, permanently: used, expired and void vouchers cannot earn another claim. An expired-unused or void Founding claim releases its slot and live commitment, while retaining that personal history. A used voucher keeps its slot. Issued launch campaigns are managed internally; generic campaign issue/edit/status and voucher reissue cannot bypass eligibility, slot or budget limits. Existing audited void rules still apply.
+
+Only a holder of an original Founding voucher can invite. Pending invitations and claimed passes consume `perFounder` and `total` quotas; skipped existing Founders consume neither. Emails are trimmed/lowercased and must match exactly one eligible client, using the same policy as tester invitations. Matching never provisions or links an identity. Self-invites and any previously attributed email are refused. A pending invite matched to an existing Founder, including someone who claims Founding after invitation, becomes `skipped_already_founder`; the Founder can invite a different email. Matching runs during account reconciliation/save and the periodic sweep. The friend receives one durable in-app waiting notice on match, and ordinary voucher-ready notice on claim. No notification email is sent.
+
+From `upgradeAt`, the voucher lifecycle sweep upgrades available, unexpired, unreserved Friend Passes in claim order, with an immutable claim sequence resolving timestamp ties. Each upgraded pass consumes one free Founding slot. The value increases to the current Founding amount (never decreases an already higher promise), only when its entire increment fits the budget. It retains its original Friend Pass identity, expiry and invitation attribution; it does not gain Founder invitation rights. Reserved and used vouchers are untouched. Each upgrade writes an `upgraded` voucher ledger event and audit with previous/new values and is idempotent.
+
+Launch budget checks use live face value, including reserved/used vouchers and upgrades. Claims and individual upgrades never partially issue. Error codes are stable: `promotion_disabled`, `promotion_not_started`, `promotion_ended`, `promotion_sold_out`, `promotion_budget_reached`, `promotion_already_has_discount`, `promotion_not_founder`, `promotion_invite_used`, `promotion_self_invite`, `promotion_email_already_invited`, `promotion_offer_unavailable`, `promotion_ineligible_account`, `invalid_promotion_email`, `invalid_promotion_settings`, and `promotion_voucher_managed`. Eligibility errors are 403 on invite and 409 on claims; malformed input is 400, other promotion conflicts are 409. Ordinary route authentication/authorization remains 401/403.
+
+### Whole-order funding and reconciliation
+
+The campaign flag `coversOrderTotal:true` is internal and enabled only for launch vouchers. Discounts consume gross service fee, then delivery/pickup, then supplier subtotal, capped at the full order/checkout total. For example, PHP 200 printing plus PHP 100 delivery minus a PHP 200 voucher leaves PHP 100 payable. The automatic organization discount competes under the existing larger-savings rule. There is one client discount line, including baskets.
+
+Baskets retain largest-remainder apportionment: service fee weights first; delivery uses fee weights capped by available delivery and redistributes overflow; remaining principal funding uses supplier-subtotal weights. Each group floors at zero, and group discounts sum exactly to the checkout discount. Preview downpayment/balance and checkout installments use the same reductions, including the 75% setting. When the net initial installment is zero, checkout settles it atomically through the shared voucher boundary without QR evidence. A positive basket retains the ordinary shared QR confirmation even when one group costs zero. Zero balances remain `final_online:not_required`.
+
+Gross supplier subtotal, supplier payout plan/stages, delivery fee, and rider split/earnings remain unchanged. Each affected `paymentAllocations[]` entry records **client cash** in `amountMinor` and separate `gridgoFundedMinor` for waived/funded components. Zero-cash rows with funding are retained. Cash allocations sum to the client's installments; cash plus funding reconciles to gross component entitlements. Funding becomes available with installment confirmation; a zero `not_required` balance's funding is available after initial confirmation. It never becomes refundable client cash.
+
+Orders, staff invoice snapshots and Operations reporting record `voucherSupplierMinor`, `gridgoSupplierTopupMinor`, `gridgoRiderTopupMinor`, and `voucher`'s `supplierMinor`, `coversOrderTotal`, and top-up fields. `gridgoRiderTopupMinor` is the preserved rider obligation exceeding remaining client delivery cash, with the platform share waived first. Staff `voucherFunding` exposes this split. Client checkout, order reads and invoices share the same voucher projection: they show the single combined voucher discount and omit `supplierMinor`, `gridgoSupplierTopupMinor` and `gridgoRiderTopupMinor`, including nested basket groups. Supplier/rider order projections omit voucher identity and funding details. Existing acknowledgement receipts keep the single voucher discount line and verified cash total.
+
+Payout collection caps count confirmed cash plus committed GRIDGO supplier funding; gross payout amounts remain intact. Refunds return only verified client cash, while the funding covers agreed supplier/rider obligations before cash is reserved for those obligations. SQL checks prevent refunds or payout obligations exceeding their respective cash/funding pools, and protect committed voucher/funding snapshots. No-fault restoration, client-cancel forfeiture, reservation expiry and the basket-wide redemption boundary retain their existing rules.
+
+
+### Zero client cash and deferred matching
+
+Migration `1793091000000` adds the explicit `gridgo_voucher` payment method, guarded no-cash refund settlements, and a unique non-skipped Friend Pass client attribution. `founding.enabled` remains the master gate for both launch promotions; Friend Pass additionally requires `friendPass.enabled`.
+
+For `POST /me/carts/:id/checkout`, `payment` may be omitted when the authoritative quote's `downpaymentMinor` is zero and a whole-order voucher covers the checkout. The server reserves and consumes the voucher once in the same transaction, records the existing cash/funding allocation split, and marks the initial installment `method: "gridgo_voucher"`, `status: "confirmed"`, `confirmationSource: "gridgo_voucher"`. `reference`, `proofFileId`, `submittedAt`, and `confirmedBy` are null; this is no bank transfer. It advances the order to `needs_qa` with `fileCheck` still pending, not into supplier production. The checkout order's payment plan adds `downpaymentMethod` and `downpaymentConfirmationSource`. A 75% order can have a settled zero initial installment and still owe a positive `final_online` balance under the existing balance gates.
+
+An all-zero basket consumes and settles at its complete shared boundary. If the basket owes any client cash, all groups retain its shared QR payment status and reference, including zero-cash groups; no group confirms independently. SQL checks recognize GRIDGO funding through the same confirmed-initial/settled-balance statuses used by `collectedVoucherFundingMinor`, verify zero cash and absent transfer evidence, and require the voucher redemption. Ordinary positive-cash checkout still requires QR proof and reference.
+
+The existing refund request/review/preview/settle endpoints support a settled, voucher-backed order with zero verified client cash and no previous cancellation/remedy settlement. `publicRefund` adds `noCashSettlementEligible`; review requires no receiving QR in this case, while complaint substantiation, staff permissions, reasons, fault, work stop, shop agreement, rider evidence, and available-funds checks remain. Preview returns `canSettle: true` and `noCashSettlement: true` for the zero amount. Settle uses `totalMinor: 0` plus the existing agreed-entitlement fields and required `clientCaused` boolean.
+
+The no-cash settlement is immutable, has `snapshot.noCashSettlement: true`, returns `settlement.noCashSettlement: true`, closes the request with terminal `status: "paid"`, and leaves `payment: null`. Here paid means the remedy is complete; no `refund_attempts` or `refund_payments` row, reference, receipt, or fabricated transfer exists. `refund.no_cash_settled` audit and inbox events identify that distinction. Unpaid stages are superseded; any agreed shop remainder remains a separate funded settlement payout subject to its existing evidence and hold gates. Original order money, installments and gross stage snapshots remain intact. Uncollected future balance is cancelled by the settlement, not marked as collected.
+
+No-fault remedies restore only the same unexpired voucher, preserving amount, expiry and permanent personal claim history. Client fault forfeits it; expired vouchers are never restored. A shared basket voucher still waits for every benefiting group's no-fault remedy: a zero-cash group's decision is recorded at no-cash settlement, and a positive-cash group's decision at the actual reserved refund transfer. Retries use the existing request version and idempotency key; a terminal no-cash remedy cannot be opened or transferred again.
+
+Delivery collection reporting uses the original rider entitlement and the externally funded rider portion of settled voucher allocations, then adds paid pin surcharges once. Both initial-only and fully collected plans reconcile `collectedMinor + fundedRiderMinor = riderCollectedMinor + platformCollectedMinor`. Cash refund settlement uses this same collected split, returning at most the collected platform delivery share less previous settlement reservations. Recording the client transfer books only that attributed platform share (plus refunded service fee) as a revenue return; it cannot invent platform delivery revenue from voucher-funded rider cash. Lower-pin credits remain separately reserved refunds; historical collected funds are not an additional rider transfer.
+
+Every deferred Friend Pass email match checks existing client attribution before binding. A client retains the first valid invitation, including after that invitation was claimed and the verified email later changes. A conflicting invitation remains unbound and exposes additive `unmatchedReason: "account_already_attributed"` without changing the dashboard's existing status enum. Other reasons follow tester matching: `no_client_account`, `ambiguous_email`, and `self_invite`. A partial unique index on matched `clientId` for non-skipped invitations prevents duplicate attribution even if application matching is bypassed; skipped existing Founders retain their existing history and quota policy.
