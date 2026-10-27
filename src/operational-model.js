@@ -1200,6 +1200,12 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.deliveryReminder;
+  if (['ops_admin', 'super_admin'].includes(user?.role)
+    || user?.role === 'rider' && user.id === order.riderId
+    || user?.role === 'client' && user.id === order.clientId) {
+    publicRecord.deliveryReminder = clone(store?.deliveryReminders?.find(row => row.orderId === order.id) ?? null);
+  } else delete publicRecord.deliveryPackagePhotoFileIds;
   if (!["ops_admin", "super_admin"].includes(user?.role)) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
       if (!record) continue;

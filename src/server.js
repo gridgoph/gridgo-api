@@ -24,6 +24,8 @@ import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './a
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
+import { routeOrderSharing } from './order-sharing.js';
+import { validateDeliveryReminder } from './delivery-reminders.js';
 import { routePricingFeedback } from './pricing-feedback-routes.js';
 import { syncSurveys } from './surveys.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
@@ -2721,7 +2723,8 @@ async function handleAuditedRequest(req, res) {
       if (testerResponse.mutated) await save(store);
       return send(res, testerResponse.status, testerResponse.body);
     }
-    const surveyResponse = await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id })
+    const surveyResponse = await routeOrderSharing({ req, url, store, user, readBody, now, id })
+      || await routeSurveys({ req, url, store, user, readBody, readRawBody, now, id })
       || await routePricingFeedback({ req, url, store, user, readBody, now, id });
     if (surveyResponse) {
       res.setHeader("Cache-Control", "private, no-store");
@@ -7324,6 +7327,7 @@ async function handleAuditedRequest(req, res) {
           message: "Attach the delivery photo or signature image to this order before completing delivery.",
         });
       }
+      const reminder = validateDeliveryReminder(store, order, body);
       if (!carriedToOffice(order) && order.handover) {
         const denied = checkHandoverAttempt(order, body.otp, now());
         audit(store, { actor: user,
@@ -7340,6 +7344,14 @@ async function handleAuditedRequest(req, res) {
         riderId: user.id,
         recordedAt: deliveredAt,
       };
+      if (reminder) {
+        store.deliveryReminders.push({ orderId: order.id, clientId: order.clientId, riderId: user.id,
+          deliveredAt, ...reminder });
+        audit(store, { actor: user, action: 'delivery.reminder_recorded', entityType: 'order', entityId: order.id,
+          orderId: order.id, detail: reminder });
+        notifyAdmins(store, 'delivery_reminder_recorded', 'Delivery reminder recorded', order,
+          `delivery-reminder:${order.id}`, { createId: id, at: deliveredAt });
+      }
       recordDeliveryProof(order, evidenceFileId, store.files);
       if (carriedToOffice(order)) {
         order.state = "awaiting_collection";

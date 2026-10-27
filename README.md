@@ -8,6 +8,8 @@ Immutable checkout/sample approvals, private signature evidence and PDF download
 
 Pilot door-delivery acknowledgement receipts, automatic AR numbering, rider reads and client PDF downloads are documented in [Acknowledgement receipts](docs/ACKNOWLEDGEMENT_RECEIPTS_API.md).
 
+Order share-card state, tap telemetry and weekly rider handoff reminders are documented in [Sharing and reminders](docs/SHARING_AND_REMINDERS_API.md).
+
 Per-page document/construction colour estimates, shop tier prices, copies/sets and price-check gates are documented in [Colour pricing](docs/COLOUR_PRICING_API.md).
 
 Per-item special instructions, shop acknowledgement and paid specification changes are documented in [Order changes](docs/ORDER_CHANGES_API.md).

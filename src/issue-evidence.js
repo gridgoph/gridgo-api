@@ -4,7 +4,7 @@ import { refundFail as fail } from './refund-policy.js';
 const pick = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined)
   .map(key => [key, structuredClone(value[key])]));
 const EVIDENCE_PURPOSES = new Set(['artwork', 'mockup', 'finished_product_photo', 'production_photo',
-  'fulfilment_proof', 'packing_photo', 'handoff_signature', 'delivery_photo', 'approval_signature', 'approval_sample_photo']);
+  'fulfilment_proof', 'packing_photo', 'handoff_signature', 'delivery_photo', 'delivery_package_photo', 'approval_signature', 'approval_sample_photo']);
 export const PROBLEM_TYPES = ['material_quality', 'damage', 'wrong_item', 'delivery', 'other'];
 
 export function problemPhotos(store, user, body) {
@@ -45,7 +45,8 @@ export function gatherIssueEvidence(store, order, photos, at) {
     { id: 'shop_qa', kind: 'shop_qa', data: pick(order.shopHandover, ['finished', 'review', 'attempts']) },
     { id: 'rider_check', kind: 'rider_check', data: { checklist: structuredClone(order.pickupChecklist ?? null),
       ...pick(order.shopHandover, ['inspections', 'packingPhotos']) } },
-    { id: 'delivery', kind: 'delivery', data: pick(order, ['deliveryEvidence', 'deliveryPhotoFileIds', 'deliveryProofFileIds']) },
+    { id: 'delivery', kind: 'delivery', data: { ...pick(order, ['deliveryEvidence', 'deliveryPhotoFileIds', 'deliveryProofFileIds', 'deliveryPackagePhotoFileIds']),
+      reminder: structuredClone((store.deliveryReminders || []).find(row => row.orderId === order.id) ?? null) } },
     { id: 'client_photos', kind: 'client_report', data: { fileIds: photos.map(file => file.fileId) } },
   ];
   groups.forEach(group => findIds(group.data));
