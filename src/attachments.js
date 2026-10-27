@@ -1,4 +1,5 @@
 import { canReadApprovalProof } from './approval-proof.js';
+import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
 import { displayFilename } from './display-filename.js';
@@ -1382,13 +1383,14 @@ export function authorizeFileRead(user, store, file) {
     if (sent.some((reference) => canReadPickupChatPhoto(user, store, reference))) return;
     forbidden();
   }
-  if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (file.purpose === 'delivery_package_photo') {
     if (hasApprovedWorkRole(user, 'rider') && file.ownerId === user.id) return;
-    if (user.role === 'client' && (file.references || []).some(ref => ref.type === 'order'
-      && store.orders.some(order => order.id === ref.id && order.clientId === user.id))) return;
+    if ((file.references || []).some(ref => ref.type === 'order' && store.orders.some(order => order.id === ref.id
+      && deliveryPackagePhotoId(store, order) === file.fileId
+      && (['ops_admin', 'super_admin'].includes(user.role) || user.role === 'client' && order.clientId === user.id)))) return;
     forbidden();
   }
+  if (["ops_admin", "super_admin"].includes(user.role)) return;
   if (["approval_signature", "approval_sample_photo"].includes(file.purpose)) {
     const refs = (file.references || []).filter(ref => ref.type === 'order');
     if (!refs.length && user.role === 'client' && file.ownerId === user.id) return;

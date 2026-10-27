@@ -9,6 +9,7 @@ import { apiForTest } from './fixtures/reschedule-http.js';
 import { syncSurveys } from '../src/surveys.js';
 import { publicOrderFor } from '../src/operational-model.js';
 import { retentionDecision } from '../src/file-retention-policy.js';
+import { gatherIssueEvidence } from '../src/issue-evidence.js';
 
 const DB = process.env.DATABASE_URL;
 const answers = { fulfillmentStars: 5, easeStars: 5, priceFeeling: 3, qualityStars: 5, recommendScore: 10 };
@@ -33,7 +34,18 @@ async function setup(t, state = 'issue_window_open') {
     references: fileId === 'proof' ? [{ type: 'order', id: 'order', field: 'deliveryPhotoFileIds' }] : [],
   });
   await db.transaction(() => saveStore(db, store));
-  return { db, api: await apiForTest(t), at };
+  const api = await apiForTest(t);
+  // /health becomes available before startup file recovery finishes.
+  const deadline = Date.now() + 10000;
+  while (true) {
+    const ready = await api('rider', 'GET', '/files/proof/download-url');
+    if (ready.status !== 503 || ready.body.error !== 'storage_initializing' || Date.now() >= deadline) {
+      assert.equal(ready.status, 200, JSON.stringify(ready.body));
+      break;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return { db, api, at };
 }
 
 test('HTTP survey-to-share lifecycle persists the single repeat and taps, including concurrent event retries without any reward', { skip: !DB }, async t => {
@@ -138,6 +150,70 @@ test('HTTP modern delivery refuses missing acknowledgement/consent and stores an
   await assert.rejects(db.query("UPDATE delivery_reminders SET reminded_client=false WHERE order_id='order'"), /append-only/);
   current.claims.push({ id: 'open-claim', orderId: 'order', status: 'open' });
   assert.equal(retentionDecision(current, current.files.find(f => f.fileId === 'package'), '2035-01-01T00:00:00.000Z').eligible, false);
+});
+
+test('HTTP package attachment stays private before completion, including an abandoned attachment and issue evidence', { skip: !DB }, async t => {
+  const { db, api } = await setup(t, 'out_for_delivery');
+  assert.equal((await api('rider', 'POST', '/files/package/attach', { orderId: 'order' })).status, 200);
+  for (const actor of ['client', 'ops', 'admin']) {
+    for (const suffix of ['', '/download-url']) assert.equal((await api(actor, 'GET', `/files/package${suffix}`)).status, 403, `${actor}${suffix}`);
+    assert.deepEqual((await api(actor, 'GET', '/orders/order')).body.order.deliveryPackagePhotoFileIds, []);
+  }
+  assert.equal((await api('rider', 'GET', '/files/package')).status, 200);
+  const store = await loadStore(db);
+  assert.ok(!gatherIssueEvidence(store, store.orders[0], [], new Date().toISOString()).files.some(file => file.fileId === 'package'));
+  // No completion: subsequent reads still cannot turn an abandoned attachment into proof.
+  assert.equal((await api('client', 'GET', '/files/package/download-url')).status, 403);
+  assert.equal(store.deliveryReminders.length, 0);
+});
+
+for (const [name, body] of [
+  ['explicit consent refusal', { ...delivery, clientAgreedToPhoto: false }],
+  ['omitted selected photo', { ...delivery, clientAgreedToPhoto: true }],
+  ['omitted consent', delivery],
+  ['legacy completion', { evidenceType: 'photo', evidenceFileId: 'proof' }],
+]) test(`HTTP completion detaches every package attachment on ${name}`, { skip: !DB }, async t => {
+  const { db, api } = await setup(t, 'out_for_delivery');
+  assert.equal((await api('rider', 'POST', '/files/package/attach', { orderId: 'order' })).status, 200);
+  const result = await api('rider', 'POST', '/dispatch/order/delivery', body);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.order.deliveryReminder.packagePhotoFileId, null);
+  assert.deepEqual(result.body.order.deliveryPackagePhotoFileIds, []);
+  const store = await loadStore(db), file = store.files.find(f => f.fileId === 'package');
+  assert.deepEqual(file.references, []);
+  assert.equal((await db.query("SELECT 1 FROM file_references WHERE file_id='package'")).rowCount, 0);
+  assert.equal(retentionDecision(store, file, '2035-01-01T00:00:00.000Z').reason, 'unused');
+  assert.equal(retentionDecision(store, file, '2035-01-01T00:00:00.000Z').eligible, true);
+  for (const actor of ['client', 'ops', 'admin']) assert.equal((await api(actor, 'GET', '/files/package/download-url')).status, 403);
+});
+
+test('HTTP completion keeps only the selected consented package photo, atomically with reminder and proof', { skip: !DB }, async t => {
+  const { db, api } = await setup(t, 'out_for_delivery');
+  await db.transaction(async () => {
+    const store = await loadStore(db), second = structuredClone(store.files.find(f => f.fileId === 'package'));
+    second.fileId = 'package-other'; second.objectKey = 'private/package-other'; store.files.push(second);
+    await saveStore(db, store);
+  });
+  for (const fileId of ['package', 'package-other']) assert.equal((await api('rider', 'POST', `/files/${fileId}/attach`, { orderId: 'order' })).status, 200);
+  const body = { ...delivery, clientAgreedToPhoto: true, packagePhotoFileId: 'package' };
+  // Rejected completion must leave both private candidates available for a corrected retry.
+  assert.equal((await api('rider', 'POST', '/dispatch/order/delivery', { ...body, remindedClient: false })).status, 400);
+  let store = await loadStore(db);
+  assert.equal(store.deliveryReminders.length, 0);
+  assert.ok(store.files.find(f => f.fileId === 'package-other').references.some(ref => ref.id === 'order'));
+  const result = await api('rider', 'POST', '/dispatch/order/delivery', body);
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(result.body.order.deliveryPackagePhotoFileIds, ['package']);
+  store = await loadStore(db);
+  assert.deepEqual(store.files.find(f => f.fileId === 'package-other').references, []);
+  assert.equal(store.deliveryReminders[0].packagePhotoFileId, 'package');
+  for (const actor of ['client', 'ops', 'admin']) {
+    assert.equal((await api(actor, 'GET', '/files/package/download-url')).status, 200);
+    assert.equal((await api(actor, 'GET', '/files/package-other/download-url')).status, 403);
+  }
+  const evidence = gatherIssueEvidence(store, store.orders[0], [], new Date().toISOString());
+  assert.ok(evidence.files.some(file => file.fileId === 'package'));
+  assert.ok(!evidence.files.some(file => file.fileId === 'package-other'));
 });
 
 test('HTTP legacy riders finish without invented reminder consent, and optional consent needs no photo', { skip: !DB }, async t => {

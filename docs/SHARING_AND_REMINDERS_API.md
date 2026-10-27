@@ -139,7 +139,8 @@ Upload the package-only JPEG/PNG/WebP (max 20 MiB) via existing multipart
 `POST /files` with `purpose=delivery_package_photo`, then
 `POST /files/:fileId/attach` with `{ "orderId": "order_123" }`.
 Only the assigned approved rider can attach it, while the door delivery is
-`picked_up` or `out_for_delivery`. Photograph the package only, never documents
+`picked_up` or `out_for_delivery`. Attachment stages a rider-only candidate;
+it does not record consent or authorize client/staff reads. Photograph the package only, never documents
 or shop signage; the server validates the file's image type, ownership,
 readiness and order reference, not its visual contents.
 
@@ -161,10 +162,21 @@ client, assigned rider and ops/super only:
 }
 ```
 
-These roles also receive `deliveryPackagePhotoFileIds` when a package photo is
-attached. Use the existing `GET /files/:fileId` signed-read flow. Package photos
-are private to their approved rider owner, owning client and ops/super; suppliers
-cannot read them or receive these fields. Delivery reminder snapshots are
+The rider can preview attached candidates before completion. Clients and staff
+receive an empty `deliveryPackagePhotoFileIds` list and cannot read package
+photo metadata or signed downloads until completion commits an affirmative
+reminder and photo consent with that selected file ID. Completion retains only
+that selected photo and detaches every other candidate in the same transaction.
+Consent false, omitted consent, an omitted photo ID, or a legacy completion
+retains no package photo. Discarded candidates lose their order reference and
+become unused uploads for the existing retention cleanup. A failed completion
+leaves the candidates private for a corrected retry; an abandoned attachment
+never becomes client/staff delivery proof and retains the existing order-file
+retention and open-case protections.
+
+Use the existing `GET /files/:fileId` signed-read flow. The selected package photo
+is private to its approved rider owner, owning client and ops/super; suppliers
+cannot read it or receive these fields. Delivery reminder snapshots are
 immutable. Photos follow delivery-proof retention and open-case holds and are
 included in staff issue evidence.
 

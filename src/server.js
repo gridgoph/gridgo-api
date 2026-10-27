@@ -26,6 +26,7 @@ import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './suppli
 import { routeSurveys } from './survey-routes.js';
 import { routeOrderSharing } from './order-sharing.js';
 import { validateDeliveryReminder } from './delivery-reminders.js';
+import { finalizeDeliveryPackagePhotos } from './delivery-package-photos.js';
 import { routePricingFeedback } from './pricing-feedback-routes.js';
 import { syncSurveys } from './surveys.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
@@ -7338,6 +7339,7 @@ async function handleAuditedRequest(req, res) {
         if (denied) { await save(store); return send(res, denied.status, denied.body); }
       }
       const deliveredAt = now();
+      finalizeDeliveryPackagePhotos(store, order, reminder);
       order.deliveryEvidence = {
         fileId: evidenceFileId,
         evidenceType: body.evidenceType,
