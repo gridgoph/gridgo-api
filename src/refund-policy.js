@@ -77,7 +77,7 @@ export function assertRefundWorkAllowed(store, order) {
 
 export function collectedRefundComponents(order, store = null) {
   if (isReviewData(order)) return { principalMinor: 0, feeMinor: 0, deliveryMinor: 0 };
-  if (Object.values(order.payments || {}).some((payment) => payment.status === 'confirmed' && payment.method !== 'qr_manual')) {
+  if (Object.values(order.payments || {}).some((payment) => payment.status === 'confirmed' && payment.amountMinor > 0 && payment.method !== 'qr_manual')) {
     refundFail(409, 'refund_collection_reconciliation_required', 'Only verified cash transfers are refundable. Pilot Credits are never cash.');
   }
   const components = { principalMinor: 0, feeMinor: 0, deliveryMinor: 0 };
@@ -97,6 +97,13 @@ export function collectedRefundComponents(order, store = null) {
   components.principalMinor = sumMinor([components.principalMinor, supplement.principalMinor]);
   components.feeMinor = sumMinor([components.feeMinor, supplement.feeMinor]);
   return components;
+}
+
+/** A consumed, settled voucher can need a remedy even when no client cash moved. */
+export function noCashVoucherRemedy(order, store = null) {
+  return Boolean(order?.voucher && !isReviewData(order) && !refundSettlementFor(store, order) && order.payments?.initial?.status === 'confirmed'
+    && sumMinor(Object.values(collectedRefundComponents(order, store))) === 0
+    && sumMinor(['supplier_principal', 'service_fee', 'delivery_pass_through'].map(component => collectedVoucherFundingMinor(order, component))) > 0);
 }
 
 /** Cumulative proportional rounding gives the final refund the exact remainder. */

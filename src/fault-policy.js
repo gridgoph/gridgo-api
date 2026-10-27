@@ -1,4 +1,4 @@
-import { refundFail as fail, sumMinor, productionStarted, deliveryCompleted, calculateRefundSettlement, refundHold } from './refund-policy.js';
+import { refundFail as fail, sumMinor, productionStarted, deliveryCompleted, calculateRefundSettlement, refundHold, noCashVoucherRemedy } from './refund-policy.js';
 import { approvalSnapshotSha256 } from './approval-proof.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
@@ -33,7 +33,7 @@ export function cancellationQuote(store, order) {
     sumMinor((store.refundSettlements || []).filter(row => row.orderId === order.id).map(row => row[field]))]));
   const amounts = calculateRefundSettlement(order, { store, beforeProduction,
     shopEntitlementMinor: beforeProduction ? 0 : start.amountMinor, riderEntitlementMinor: 0, earlier });
-  if (!amounts.totalMinor) fail(409, 'refund_no_available_funds', 'No verified cash remains to refund.');
+  if (!amounts.totalMinor && !noCashVoucherRemedy(order, store)) fail(409, 'refund_no_available_funds', 'No verified cash remains to refund.');
   const quoteToken = approvalSnapshotSha256({ orderId: order.id, state: order.state, updatedAt: order.updatedAt,
     payments: order.payments, allocations: order.paymentAllocations, stages: order.payoutMilestones,
     quoteVersion: order.quoteVersion, beforeProduction, amounts });

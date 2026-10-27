@@ -64,11 +64,19 @@ function inviteEvent(store, invite, action, ctx) {
     appRole: m.role, type: 'promotion_invite', title: 'Friend Pass activity', body: `Friend Pass ${action}.`, read: false });
   queueInvalidate(store, { resource: 'notifications', userIds: [invite.founderId, invite.clientId].filter(Boolean) });
 }
-function matchedClient(store, invite) {
-  if (invite.clientId) return store.users.find(u => u.id === invite.clientId);
+function matchPromotionInvite(store, invite, ignoreAttribution = false) {
+  if (invite.clientId) return { target: store.users.find(u => u.id === invite.clientId), reason: null };
   const matches = store.users.filter(u => promotionEligible(store, u.id) && normalizeEmail(u.email) === invite.email);
-  return matches.length === 1 && matches[0].id !== invite.founderId ? matches[0] : null;
+  if (matches.length !== 1) return { target: null, reason: matches.length ? 'ambiguous_email' : 'no_client_account' };
+  const target = matches[0];
+  if (target.id === invite.founderId) return { target: null, reason: 'self_invite' };
+  if (!ignoreAttribution && own(store, target.id)?.promotionKind !== 'founding'
+    && (store.promotionInvites || []).some(i => i.id !== invite.id && i.clientId === target.id && i.status !== 'skipped_already_founder')) {
+    return { target: null, reason: 'account_already_attributed' };
+  }
+  return { target, reason: null };
 }
+const matchedClient = (store, invite) => matchPromotionInvite(store, invite).target;
 const skipped = (store, invite) => invite.status === 'skipped_already_founder'
   || !invite.voucherId && own(store, matchedClient(store, invite)?.id)?.promotionKind === 'founding';
 function inviteView(store, invite, at) {
@@ -76,13 +84,18 @@ function inviteView(store, invite, at) {
   const status = skipped(store, invite) ? 'skipped_already_founder' : voucher ? publicVoucher(store, voucher, at).status : invite.status === 'invited' && Date.parse(at) >= Date.parse(promotionSettings(store).founding.endsAt) ? 'expired' : invite.status;
   return { id: invite.id, founder: person(store, invite.founderId), email: invite.email, friendEmail: invite.email,
     clientId: friend?.id ?? null, status: status === 'available' || status === 'reserved' ? 'claimed' : status,
+    unmatchedReason: matchPromotionInvite(store, invite).reason ?? invite.unmatchedReason ?? null,
     createdAt: invite.createdAt, claimedAt: invite.claimedAt, valueMinor: voucher?.valueMinor ?? null, upgradedAt: voucher?.data?.upgradedAt ?? null };
 }
 export function reconcilePromotionInvites(store, ctx) {
   let changed = false;
   for (const invite of store.promotionInvites || []) {
     if (invite.status !== 'invited') continue;
-    const target = matchedClient(store, invite);
+    const { target, reason } = matchPromotionInvite(store, invite);
+    if (invite.unmatchedReason !== reason) {
+      invite.unmatchedReason = reason; changed = true;
+      if (reason === 'account_already_attributed') inviteEvent(store, invite, 'attribution_conflict', ctx);
+    }
     if (!target) continue;
     if (!invite.clientId) { invite.clientId = target.id; changed = true; }
     if (skipped(store, invite)) {
@@ -117,8 +130,8 @@ export function inviteFriend(store, founderId, email, ctx) {
   const counted = store.promotionInvites.filter(i => !skipped(store, i));
   if (counted.filter(i => i.founderId === founderId).length >= settings.friendPass.perFounder) fail(409, 'promotion_invite_used');
   if (counted.length >= settings.friendPass.total) fail(409, 'promotion_sold_out');
-  const invite = { id: ctx.id('pinv'), founderId, email, clientId: null, voucherId: null, status: 'invited', createdAt: ctx.at, claimedAt: null, notifiedAt: null };
-  const target = matchedClient(store, invite);
+  const invite = { id: ctx.id('pinv'), founderId, email, clientId: null, voucherId: null, status: 'invited', createdAt: ctx.at, claimedAt: null, notifiedAt: null, unmatchedReason: null };
+  const target = matchPromotionInvite(store, invite, true).target;
   if (target && store.promotionInvites.some(i => i.clientId === target.id && !skipped(store, i))) fail(409, 'promotion_email_already_invited');
   if (target && own(store, target.id)?.promotionKind === 'friend_pass') fail(409, 'promotion_already_has_discount');
   store.promotionInvites.push(invite);

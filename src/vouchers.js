@@ -110,6 +110,22 @@ export function confirmVoucher(store, orders, { id, at, actorId }) {
   store.voucherRedemptions.push(redemption);
   voucherEvent(store, voucher, 'redeemed', { id, at, actorId, amountMinor: redemption.amountMinor, redemptionId: redemption.id, orderIds: redemption.data.orderIds });
 }
+/** Settle a zero-client-cash checkout at its complete voucher boundary, never as a transfer. */
+export function settleVoucherInitial(store, orders, { id, at, actorId }) {
+  if (!orders.length || orders.some(o => o.payments.initial.amountMinor !== 0)) voucherFail(409, 'voucher_zero_cash_boundary_required');
+  confirmVoucher(store, orders, { id, at, actorId });
+  for (const order of orders) {
+    Object.assign(order.payments.initial, { method: 'gridgo_voucher', status: 'confirmed', confirmationSource: 'gridgo_voucher',
+      confirmedAt: at, confirmedBy: null, reference: null, proofFileId: null, submittedAt: null });
+    order.state = 'needs_qa';
+    order.paymentStatus = order.payments.final_online.status === 'not_required' ? 'paid' : 'initial_payment_confirmed';
+    order.updatedAt = at;
+    order.timeline.push({ at, by: actorId, state: order.state, note: 'Initial installment settled by GRIDGO voucher; no client transfer required.' });
+    store.auditLog.push({ id: id('aud'), at, actorId, actorRole: 'client', action: 'payment.zero_cash_settled', entityType: 'order', entityId: order.id,
+      orderId: order.id, detail: { voucherId: order.voucher?.id, amountMinor: 0, source: 'gridgo_voucher' } });
+    queueInvalidate(store, { resource: 'orders', userIds: [order.clientId] });
+  }
+}
 export function restoreVoucherForRefund(store, order, { id, at, actorId, clientCaused, reason }) {
   initVouchers(store);
   if (!order.voucher) return;

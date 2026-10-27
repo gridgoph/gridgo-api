@@ -9,7 +9,7 @@ const mappings = [
   ['voucher_code_attempts', 'voucherCodeAttempts', { id: 'id', window_at: 'windowAt', failures: 'failures', locked_until: 'lockedUntil' }],
   ['voucher_cart_choices', 'voucherCartChoices', { id: 'id', voucher_id: 'voucherId', removed: 'removed' }],
   ['voucher_email_outbox', 'voucherEmailOutbox', { id: 'id', voucher_id: 'voucherId', email: 'email', subject: 'subject', body: 'body', status: 'status', attempts: 'attempts', next_at: 'nextAt', created_at: 'createdAt' }],
-  ['promotion_invites', 'promotionInvites', { id: 'id', founder_id: 'founderId', email: 'email', client_id: 'clientId', voucher_id: 'voucherId', status: 'status', created_at: 'createdAt', claimed_at: 'claimedAt', notified_at: 'notifiedAt' }],
+  ['promotion_invites', 'promotionInvites', { id: 'id', founder_id: 'founderId', email: 'email', client_id: 'clientId', voucher_id: 'voucherId', status: 'status', created_at: 'createdAt', claimed_at: 'claimedAt', notified_at: 'notifiedAt', unmatched_reason: 'unmatchedReason' }],
 ];
 export const voucherTables = mappings.map(([name, , fields]) => ({ name, keys: ['id'], columns: Object.keys(fields), ...(name === 'voucher_ledger' ? { appendOnly: true } : {}) }));
 export const emptyVoucherStore = () => Object.fromEntries(mappings.map(([, collection]) => [collection, []]));

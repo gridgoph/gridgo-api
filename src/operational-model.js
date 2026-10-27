@@ -830,19 +830,27 @@ export function moneyReportingForOrder(order, store = null) {
       && order.payments?.[allocation.paymentCode]?.status === "confirmed")
     .reduce((sum, allocation) => sum + finiteMinor(allocation.amountMinor, "allocation.amountMinor"), 0);
   const serviceFeeCollectedMinor = collectedComponent("service_fee") + supplementTotals(store, order).feeMinor;
-  const split = adjustedDeliverySplit(order, deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000));
+  const originalSplit = deliverySplit(order.deliveryFeeMinor ?? 0, order.riderCommissionBps ?? 10_000);
+  const split = adjustedDeliverySplit(order, originalSplit);
   const deliveryCollectedMinor = collectedComponent("delivery_pass_through") + deliveryPinCollectedMinor(order);
   const baseCollectedSplit = deliverySplit(collectedComponent("delivery_pass_through"), split.riderCommissionBps);
   const fundedDeliveryMinor = collectedVoucherFundingMinor(order, 'delivery_pass_through');
+  const fundedRiderMinor = order.coversOrderTotal ? Math.min(order.gridgoRiderTopupMinor || 0, fundedDeliveryMinor) : 0;
   if (order.coversOrderTotal) {
-    baseCollectedSplit.riderPayoutMinor = Math.min(split.riderPayoutMinor, collectedComponent('delivery_pass_through') + fundedDeliveryMinor);
-    baseCollectedSplit.platformDeliveryShareMinor = Math.max(0, collectedComponent('delivery_pass_through') - split.riderPayoutMinor);
+    const baseFunds = collectedComponent('delivery_pass_through') + fundedRiderMinor;
+    baseCollectedSplit.riderPayoutMinor = Math.min(originalSplit.riderPayoutMinor, baseFunds);
+    baseCollectedSplit.platformDeliveryShareMinor = baseFunds - baseCollectedSplit.riderPayoutMinor;
   }
   const extraSplit = deliverySplit(deliveryPinCollectedMinor(order), split.riderCommissionBps);
+  if (order.coversOrderTotal && deliveryPinCollectedMinor(order) > 0) {
+    // The difference of two rounded entitlements may differ from rounding the fee delta.
+    extraSplit.riderPayoutMinor = order.deliveryPin.change.riderDifferenceMinor ?? extraSplit.riderPayoutMinor;
+    extraSplit.platformDeliveryShareMinor = deliveryPinCollectedMinor(order) - extraSplit.riderPayoutMinor;
+  }
   const collectedSplit = { riderPayoutMinor: baseCollectedSplit.riderPayoutMinor + extraSplit.riderPayoutMinor,
     platformDeliveryShareMinor: baseCollectedSplit.platformDeliveryShareMinor + extraSplit.platformDeliveryShareMinor };
   const platformCollectedMinor = serviceFeeCollectedMinor + collectedSplit.platformDeliveryShareMinor
-    - collectedVoucherFundingMinor(order, 'supplier_principal') - (order.coversOrderTotal ? Math.min(order.gridgoRiderTopupMinor || 0, fundedDeliveryMinor) : 0);
+    - collectedVoucherFundingMinor(order, 'supplier_principal') - fundedRiderMinor;
   const adjustedMinor = (order.revenueAdjustments || [])
     .filter((adjustment) => adjustment.kind === "adjustment")
     .reduce((sum, adjustment) => sum + Number(adjustment.amountMinor || 0), 0);
@@ -876,7 +884,7 @@ export function moneyReportingForOrder(order, store = null) {
       deliveryFeeMinor: effectiveDeliveryFeeMinor(order),
       ...split,
       collectedMinor: deliveryCollectedMinor,
-      ...(order.coversOrderTotal ? { gridgoRiderTopupMinor: order.gridgoRiderTopupMinor, fundedRiderMinor: Math.min(order.gridgoRiderTopupMinor || 0, fundedDeliveryMinor) } : {}),
+      ...(order.coversOrderTotal ? { gridgoRiderTopupMinor: order.gridgoRiderTopupMinor, fundedRiderMinor } : {}),
       riderCollectedMinor: collectedSplit.riderPayoutMinor,
       platformCollectedMinor: collectedSplit.platformDeliveryShareMinor,
     },
