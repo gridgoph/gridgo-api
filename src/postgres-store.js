@@ -103,7 +103,7 @@ const TABLES = [
   { name: "order_baskets", keys: ["id"], columns: ["id", "client_id", "receipt_order_id", "total_minor", "pickup_fee_minor", "deadline", "fulfillment_mode", "payment", "created_at", "updated_at"] },
   { name: "order_basket_groups", keys: ["basket_id", "position"], columns: ["basket_id", "order_id", "position"] },
   { name: "order_payments", keys: ["order_id", "code"], columns: ["order_id", "code", "amount_minor", "method", "status", "position", "data"] },
-  { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor"] },
+  { name: "order_payment_allocations", keys: ["order_id", "payment_code", "component"], columns: ["order_id", "payment_code", "component", "amount_minor", "gridgo_funded_minor"] },
   { name: "platform_revenue_adjustments", keys: ["id"], columns: ["id", "order_id", "kind", "amount_minor", "reason", "created_by", "created_at"], appendOnly: true },
   { name: "payout_milestones", keys: ["order_id", "code"], columns: ["order_id", "code", "share_percent", "amount_minor", "production_deduction_minor", "status", "position", "data"] },
   // Money is relational; policy and bounded warning history are snapshots.
@@ -576,6 +576,7 @@ function rowsFromStore(store) {
         payment_code: allocation.paymentCode,
         component: allocation.component,
         amount_minor: money(allocation.amountMinor, "paymentAllocation.amountMinor"),
+        gridgo_funded_minor: money(allocation.gridgoFundedMinor || 0, "paymentAllocation.gridgoFundedMinor"),
       });
     }
     for (const adjustment of (order.revenueAdjustments || [])) {
@@ -1449,6 +1450,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       paymentCode: row.payment_code,
       component: row.component,
       amountMinor: row.amount_minor,
+      ...(row.gridgo_funded_minor ? { gridgoFundedMinor: row.gridgo_funded_minor } : {}),
     });
   }
   const revenueAdjustments = new Map();

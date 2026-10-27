@@ -40,7 +40,7 @@ export function issueTesterReward(store, reward, ctx, { reusedVoucher = null } =
   const vouchers = reusedVoucher ? [reusedVoucher] : recipients.map(clientId => {
     const campaign = { id: ctx.id('vcamp'), name: reward.kind === 'mission' ? 'Thank you, Founding Tester' : 'Founding Tester invite reward',
       purpose: reward.kind === 'mission' ? 'founding_tester' : 'tester_referral', code: generatedVoucherCode(), mode: 'assigned', status: 'active',
-      valueMinor: 1500, totalLimit: 1, perAccountLimit: 1, validityDays: 30, endsAt: null, createdAt: ctx.at, updatedAt: ctx.at };
+      valueMinor: Number(BigInt(reward.amountMinor) / BigInt(recipients.length)), totalLimit: 1, perAccountLimit: 1, validityDays: 30, endsAt: null, createdAt: ctx.at, updatedAt: ctx.at };
     store.voucherCampaigns.push(campaign);
     const voucher = issueVoucher(store, campaign, clientId, { ...ctx, adultConfirmed: false }).voucher;
     voucher.data.testerRewardId = reward.id;

@@ -3,12 +3,13 @@ import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedIt
 import { recordFileCheckTransition, supplierArtworkReleased } from './artwork-gates.js';
 import { cancellationQuote, publicCancellationQuote, acceptedCancellationQuote } from './fault-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
-import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
+import { adjustedDeliverySplit, deliveryPinPaymentPending } from './delivery-pin-policy.js';
+import { noCashVoucherRemedy } from './refund-policy.js';
 import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
   supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents, ACTIVE_REFUND_STATUSES } from './refund-policy.js';
-import { deliverySplit } from './operational-model.js';
+import { deliverySplit, collectedDeliveryForOrder } from './operational-model.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { resolvePayoutReceipt, bindPayoutReceipt, paymentReferenceValue } from './payout-receipt.js';
 import { opsPayoutAccountProjection } from './payout-account.js';
@@ -57,19 +58,20 @@ export function publicRefund(store, request, user) {
   const events = (store.refundEvents || []).filter((row) => row.requestId === request.id).sort((a, b) => a.requestVersion - b.requestVersion);
   const result = { id: request.id, orderId: request.orderId, status: request.status, version: request.version,
     policyVersion: request.policyVersion, kind: request.kind, reason: request.reason, evidenceFileIds: request.evidenceFileIds,
+    noCashSettlementEligible: noCashVoucherRemedy(store.orders.find(o => o.id === request.orderId), store),
     destination: request.destination, beforeProduction: request.beforeProduction, late: request.late,
     createdAt: request.createdAt, updatedAt: request.updatedAt, filingDeadlineAt: request.filingDeadlineAt,
     history: events.filter((row) => ops || row.kind !== 'supplier_paid').map(({ kind, reason, createdAt }) => ({ kind, reason, at: createdAt })),
     settlement: settlement ? { id: settlement.id, principalMinor: settlement.principalMinor, feeMinor: settlement.feeMinor,
       deliveryMinor: settlement.deliveryMinor, totalMinor: settlement.totalMinor, disposition: settlement.disposition,
-      reason: settlement.reason, approvedAt: settlement.createdAt } : null,
+      reason: settlement.reason, approvedAt: settlement.createdAt, noCashSettlement: settlement.snapshot.noCashSettlement === true } : null,
     payment: payment ? { id: payment.id, reference: payment.reference, receiptFileId: payment.receiptFileId,
       amountMinor: payment.amountMinor, paidAt: payment.paidAt, evidenceLabel: 'Wallet transfer evidence' } : null };
   const acceptedQuote = acceptedCancellationQuote(store, request);
   if (acceptedQuote) result.cancellationQuote = ops ? structuredClone(acceptedQuote) : publicCancellationQuote(acceptedQuote);
   if (ops) {
     result.clientId = request.clientId;
-    result.settlement = settlement || null;
+    result.settlement = settlement ? { ...settlement, noCashSettlement: settlement.snapshot.noCashSettlement === true } : null;
     result.attempt = attempt || null;
     result.payment = payment ? { ...payment, evidenceLabel: 'Wallet transfer evidence' } : null;
     const order = store.orders.find((row) => row.id === request.orderId);
@@ -91,6 +93,7 @@ function notify(store, request, order, kind, createId, at) {
     rejected: 'The refund request was rejected. Open the request for the reason.', withdrawn: 'The refund request was withdrawn.',
     destination: 'The receiving QR changed and requires review.', attempt: 'A manual refund payment is reserved.',
     unknown: 'The refund payment needs reconciliation. Do not send another transfer.', failed: 'Operations confirmed that no refund transfer occurred.',
+    no_cash_settled: 'The funded order remedy was completed. No client cash transfer was needed.',
     supplier_paid: 'The agreed shop settlement payout was recorded.' };
   store.notifications ||= [];
   const seen = new Set();
@@ -204,7 +207,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     if (!['requested', 'reviewed'].includes(request.status)) fail(409, 'refund_state_conflict', 'Preview a refund that has not been settled.');
     if (body.expectedVersion !== request.version) fail(409, 'refund_stale', 'Reload this refund before previewing it.', { currentVersion: request.version });
     const { amounts, maximum } = settlementCalculation(store, order, request, body);
-    return { status: 200, body: { amounts, availableTotalMinor: maximum.totalMinor, canSettle: amounts.totalMinor > 0 } };
+    return { status: 200, body: { amounts, availableTotalMinor: maximum.totalMinor, canSettle: amounts.totalMinor > 0 || noCashVoucherRemedy(order, store), noCashSettlement: amounts.totalMinor === 0 && noCashVoucherRemedy(order, store) } };
   }
   const key = text(req.headers?.['idempotency-key'], 'Idempotency-Key', 120);
   const bodyHash = crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex');
@@ -247,7 +250,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     const late = lateFiling(store, order, at);
     if (late && user.role !== 'super_admin') fail(409, 'refund_window_closed', 'The filing window is closed. Contact Super Admin.', { escalateTo: 'super_admin' });
     if (!['cancellation', 'complaint'].includes(body.kind)) fail(400, 'invalid_refund_kind', 'Choose cancellation or complaint.');
-    if (!sumMinor(Object.values(collectedRefundComponents(order, store)))) fail(409, 'refund_payment_not_verified', 'Operations must verify the payment before a refund can be requested.');
+    if (!sumMinor(Object.values(collectedRefundComponents(order, store))) && !noCashVoucherRemedy(order, store)) fail(409, 'refund_payment_not_verified', 'Operations must verify the payment before a refund can be requested.');
     const evidenceIds = body.evidenceFileIds ?? [];
     if (!Array.isArray(evidenceIds) || evidenceIds.length > 10 || new Set(evidenceIds).size !== evidenceIds.length) fail(400, 'invalid_refund_evidence', 'Attach up to ten distinct evidence files.');
     const evidence = evidenceIds.map((fileId) => readyFile(store, fileId, 'refund_evidence', user.id));
@@ -282,11 +285,12 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   } else if (action === 'review') {
     if (!['requested', 'reviewed', 'destination_review'].includes(request.status)) fail(409, 'refund_state_conflict', 'This refund cannot be reviewed now.');
     if (request.late && user.role !== 'super_admin') fail(403, 'refund_super_admin_required', 'Super Admin must review a late case.');
-    if (body.destinationVerified !== true || !request.destination) fail(400, 'refund_destination_verification_required', 'Verify the client’s receiving QR and account name.');
+    const noCash = noCashVoucherRemedy(order, store);
+    if (!noCash && (body.destinationVerified !== true || !request.destination)) fail(400, 'refund_destination_verification_required', 'Verify the client’s receiving QR and account name.');
     if (request.kind === 'complaint' && body.substantiated !== true) fail(400, 'refund_complaint_not_substantiated', 'Record a substantiated complaint or reject it with a reason.');
     request.status = settlementFor(store, request) ? 'approved' : 'reviewed';
     eventKind = 'reviewed';
-    eventData = { destinationRevision: request.destination.revision, substantiated: body.substantiated === true };
+    eventData = { destinationRevision: request.destination?.revision ?? null, noCashSettlementEligible: noCash, substantiated: body.substantiated === true };
   } else if (action === 'settle') {
     if (request.status !== 'reviewed' || settlementFor(store, request)) fail(409, 'refund_state_conflict', 'Review the refund before settling it.');
     if (request.late && user.role !== 'super_admin') fail(403, 'refund_super_admin_required', 'Super Admin must settle a late case.');
@@ -295,19 +299,17 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     const shopAgreement = text(body.shopAgreement, 'shopAgreement');
     const deliveryEvidence = text(body.deliveryEvidence, 'deliveryEvidence');
     const { amounts, maximum } = settlementCalculation(store, order, request, body);
-    if (!amounts.totalMinor) fail(409, 'refund_no_available_funds', 'No available refund remains. Refer the remedy to Super Admin.', { escalateTo: 'super_admin' });
+    const noCash = amounts.totalMinor === 0 && noCashVoucherRemedy(order, store);
+    if (!amounts.totalMinor && !noCash) fail(409, 'refund_no_available_funds', 'No available refund remains. Refer the remedy to Super Admin.', { escalateTo: 'super_admin' });
     refundMinor(body.totalMinor, 'totalMinor');
     if (body.totalMinor > maximum.totalMinor) fail(409, 'refund_exceeds_available_funds', 'The requested total exceeds available funds. Refer the remedy to Super Admin.', {
       availableTotalMinor: maximum.totalMinor, escalateTo: 'super_admin',
     });
     if (body.totalMinor !== amounts.totalMinor) fail(409, 'refund_amount_mismatch', 'Review the calculated component amounts before approving.', { amounts });
     // Returned delivery is unused service. Attribute only the collected platform share to revenue.
-    const extra = deliveryPinCollectedMinor(order);
-    const originalCollectedSplit = deliverySplit(amounts.collected.deliveryMinor - extra, order.riderCommissionBps ?? 10000);
-    const extraCollectedSplit = deliverySplit(extra, order.riderCommissionBps ?? 10000);
-    const collectedSplit = { platformDeliveryShareMinor: sumMinor([originalCollectedSplit.platformDeliveryShareMinor, extraCollectedSplit.platformDeliveryShareMinor]) };
+    const collectedSplit = collectedDeliveryForOrder(order);
     const previousPlatform = sumMinor(store.refundSettlements.filter((row) => row.orderId === order.id).map((row) => row.platformDeliveryMinor));
-    const platformDeliveryMinor = Math.min(amounts.deliveryMinor, Math.max(0, collectedSplit.platformDeliveryShareMinor - previousPlatform));
+    const platformDeliveryMinor = Math.min(amounts.deliveryMinor, Math.max(0, collectedSplit.platformCollectedMinor - previousPlatform));
     const settlement = { id: id('rsettle'), requestId: request.id, orderId: order.id, createdBy: user.id, createdAt: at,
       sequence: store.refundSettlements.filter((row) => row.orderId === order.id).length + 1,
       reason: eventReason, shopAgreement, deliveryEvidence,
@@ -315,6 +317,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       shopEntitlementMinor: amounts.shopEntitlementMinor, riderEntitlementMinor: amounts.riderEntitlementMinor,
       principalMinor: amounts.principalMinor, feeMinor: amounts.feeMinor, deliveryMinor: amounts.deliveryMinor,
       platformDeliveryMinor, totalMinor: amounts.totalMinor, snapshot: { ...amounts,
+        ...(noCash ? { noCashSettlement: true } : {}),
         ...(typeof body.clientCaused === 'boolean' ? { clientCaused: body.clientCaused } : {}),
         ...(order.directStoreDueMinor > 0 ? { directStoreDueMinor: order.directStoreDueMinor, directStoreCollectedMinor: 0 } : {}) } };
     store.refundSettlements.push(settlement);
@@ -336,7 +339,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
         supplierId: order.supplierId, amountMinor: amounts.remainingShopMinor, status: 'pending',
         reference: null, receiptFileId: null, releasedAt: null, releasedBy: null, createdAt: at });
     }
-    request.status = 'approved';
+    request.status = noCash ? 'paid' : 'approved';
     if (settlement.disposition === 'cancelled') {
       const from = order.state;
       order.state = 'cancelled';
@@ -349,8 +352,12 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     }
     order.updatedAt = at;
     order.timeline ||= [];
-    order.timeline.push({ at, by: user.id, state: order.state, note: 'Refund settlement approved; no client transfer recorded yet.' });
-    eventKind = 'settled'; eventData = { settlementId: settlement.id, supersededStages, supersededPayoutIds };
+    order.timeline.push({ at, by: user.id, state: order.state, note: noCash ? 'No-cash voucher remedy completed; no client transfer required.' : 'Refund settlement approved; no client transfer recorded yet.' });
+    eventKind = noCash ? 'no_cash_settled' : 'settled'; eventData = { settlementId: settlement.id, supersededStages, supersededPayoutIds, noCashSettlement: noCash };
+    if (noCash) {
+      restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: body.clientCaused, reason: eventReason });
+      if (order.shopRecovery?.refundRequestId === request.id) order.shopRecovery.status = 'refunded';
+    }
   } else if (action === 'reject' || action === 'withdraw') {
     if (action === 'reject' && request.late && user.role !== 'super_admin') fail(403, 'refund_super_admin_required', 'Super Admin must decide a late case.');
     if (settlementFor(store, request) || !['requested', 'reviewed'].includes(request.status)) fail(409, 'refund_state_conflict', 'A settled refund cannot be withdrawn or rejected. Reconcile its payment.');
