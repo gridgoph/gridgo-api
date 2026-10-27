@@ -28,6 +28,8 @@ import { routePricingFeedback } from './pricing-feedback-routes.js';
 import { syncSurveys } from './surveys.js';
 import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
 import { ACTIVE_TRACKING_STATES, assignmentTime, pickupTime, currentRiderPings, latestPing, trackingSettings, locationFreshness, clientTracking, pingDiagnostics } from './rider-tracking.js';
+import { routePromotions } from './promotion-routes.js';
+import { reconcilePromotionInvites } from './promotions.js';
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
@@ -385,6 +387,7 @@ async function refreshFoundingTester(store, clientId) {
   return enqueueMutation(async () => {
     const latest = await load(), ctx = { id, at: now() };
     let changed = matchTesterInvites(latest, ctx);
+    changed = reconcilePromotionInvites(latest, ctx) || changed;
     changed = recordTesterCartStep(latest, clientId, ctx.at) || changed;
     changed = reconcileFoundingTester(latest, clientId, ctx) || changed;
     changed = reconcileTesterInvite(latest, clientId, ctx) || changed;
@@ -404,6 +407,7 @@ async function save(view) {
   await reconcileCalls(database, store, { createId: id, at: now() });
   cancelVoucherReservations(store, { id, at: now() });
   syncSurveys(store, { id, at: now() });
+  reconcilePromotionInvites(store, { id, at: now() });
   const previousStore = originalDomainStore(store);
   if (previousStore) {
     const touched = new Set();
@@ -2731,6 +2735,12 @@ async function handleAuditedRequest(req, res) {
       return send(res, surveyResponse.status, surveyResponse.body);
     }
 
+    const promotionResponse = await routePromotions({ req, url, store, user, readBody, now, id });
+    if (promotionResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (promotionResponse.mutated) await save(store);
+      return send(res, promotionResponse.status, promotionResponse.body);
+    }
     const voucherResponse = await routeVouchers({ req, url, store, user, readBody, readRawBody, now, id });
     if (voucherResponse) {
       if (voucherResponse.mutated) await save(store);
@@ -7706,7 +7716,13 @@ async function runLifecycleWork() {
       async () => {
         // Idle wallets must not contend with checkout/provider work. Recheck
         // the graph under the domain lock only when a release or notice is due.
-        const candidate = await database.query(`SELECT 1 FROM voucher_reservations
+        const candidate = await database.query(`SELECT 1 FROM vouchers v CROSS JOIN promotion_settings p
+          WHERE p.id='launch' AND v.promotion_kind='friend_pass' AND v.status='available'
+            AND v.expires_at > $1 AND v.data->>'upgradedAt' IS NULL
+            AND (p.settings->'friendPass'->>'upgradeAt')::timestamptz <= $1
+            AND (p.settings->'founding'->>'endsAt')::timestamptz > $1
+          UNION ALL
+          SELECT 1 FROM voucher_reservations
           WHERE status = 'reserved' AND expires_at <= $1
           UNION ALL
           SELECT 1 FROM vouchers

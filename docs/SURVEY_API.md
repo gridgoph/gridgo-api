@@ -136,8 +136,7 @@ Cards add `rewardProgram`; mission submissions use `rewardStatus:"founding_teste
 and resolve `reward` to the single account wallet item. Non-tester clients retain
 the survey cooldown below. Existing submitted survey records are immutable.
 
-Every eligible submission receives the same ₱15 (`1500` centavos) voucher,
-regardless of scores, tags or comments, unless that user already received a
+Every eligible submission receives a voucher at the current `rewards.surveyMinor` (default ₱15 / `1500` centavos), configured in [promotion settings](VOUCHERS_API.md#launch-promotions). Already-issued amounts remain fixed. Scores, tags and comments do not affect the amount. A submission earns no new voucher if that user already received a
 survey reward within the preceding seven elapsed days. Exact seven-day equality
 qualifies again. The cooldown is across all orders and all app sessions.
 

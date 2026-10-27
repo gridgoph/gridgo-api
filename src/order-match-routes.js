@@ -538,7 +538,7 @@ function cartVoucherPlan(store, cart, lines, at) {
   });
   if (money.some(group => !group)) return null;
   const voucher = selectVoucher(store, cart, money, at);
-  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0) };
+  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0, voucher?.data) };
 }
 
 function clientCartLineAmounts(store,cart,lines,at) {
@@ -603,7 +603,8 @@ export function clientCartQuote(store, cart, lines, at) {
       const allocation = voucherPlan.groups[index], rate = downpaymentPercent * 100;
       return roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate)
         - Math.min(allocation.voucherServiceFeeMinor, roundBps(group.grossServiceFeeMinor, rate))
-        - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate));
+        - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate))
+        - Math.min(allocation.voucherSupplierMinor || 0, roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate) - roundBps(group.grossServiceFeeMinor, rate) - roundBps(group.deliveryFeeMinor, rate));
     }), 'voucher.downpayment');
   }
   return {
@@ -612,11 +613,13 @@ export function clientCartQuote(store, cart, lines, at) {
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
     voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
     discountKind: voucherPlan?.discountKind || null,
-    voucherGroups: voucherPlan?.groups.map((group, index) => ({ groupId: grouped[index].lines[0].id,
+    voucherGroups: voucherPlan?.groups.map((group, index) => {
+      const { voucherSupplierMinor: _supplierFunding, clientSupplierSubtotalMinor: _supplierCash, ...visible } = group;
+      return { groupId: grouped[index].lines[0].id,
       ...(voucherPlan.money[index].serviceFeeSchedule?.version === 2 ? {
         organizationDiscountMinor: group.organizationDiscountMinor, voucherDiscountMinor: group.voucherDiscountMinor,
         totalMinor: group.totalMinor,
-      } : group) })) || [],
+      } : visible) }; }) || [],
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
@@ -1256,6 +1259,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     totalMinor: order.totalMinor,
     ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor,
       voucherServiceFeeMinor: order.voucherServiceFeeMinor, voucherDeliveryMinor: order.voucherDeliveryMinor,
+      ...(order.coversOrderTotal ? { voucherSupplierMinor: order.voucherSupplierMinor, gridgoSupplierTopupMinor: order.gridgoSupplierTopupMinor, gridgoRiderTopupMinor: order.gridgoRiderTopupMinor } : {}),
       clientServiceFeeMinor: order.clientServiceFeeMinor, clientDeliveryFeeMinor: order.clientDeliveryFeeMinor } : {}),
     paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor: order.payments.initial.amountMinor, balanceMinor: order.payments.final_online.amountMinor },
   };
@@ -1350,7 +1354,10 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     totalMinor: basket.totalMinor,
     ...(voucher ? { voucher: { id: voucher.id, campaignId: voucher.campaignId, fundedBy: 'GRIDGO', label: 'GRIDGO-funded voucher', amountMinor: plan.voucherDiscountMinor },
       voucherDiscountMinor: plan.voucherDiscountMinor, voucherServiceFeeMinor: addMinor(orders.map(o => o.voucherServiceFeeMinor || 0), 'voucher.fee'),
-      voucherDeliveryMinor: addMinor(orders.map(o => o.voucherDeliveryMinor || 0), 'voucher.delivery') } : {}),
+      voucherDeliveryMinor: addMinor(orders.map(o => o.voucherDeliveryMinor || 0), 'voucher.delivery'),
+      voucherSupplierMinor: addMinor(orders.map(o => o.voucherSupplierMinor || 0), 'voucher.supplier'),
+      gridgoSupplierTopupMinor: addMinor(orders.map(o => o.gridgoSupplierTopupMinor || 0), 'voucher.supplierTopup'),
+      gridgoRiderTopupMinor: addMinor(orders.map(o => o.gridgoRiderTopupMinor || 0), 'voucher.riderTopup') } : {}),
     paymentPlan: { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
   };
   for (const order of orders) order.invoiceNumber = first.invoiceNumber;

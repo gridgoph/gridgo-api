@@ -25,7 +25,11 @@ export function clientInvoice(snapshot, { exposeWorking = false, hideSupplierAmo
     });
     for (const group of section.groups || []) priceSection(group);
     if (section.groups?.length) section.lines = section.groups.flatMap(group => group.lines);
-    if (!exposeWorking) { delete section.serviceFeeSchedule; delete section.serviceFeeWorking; }
+    if (!exposeWorking) {
+      delete section.serviceFeeSchedule; delete section.serviceFeeWorking;
+      for (const field of ['voucherSupplierMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor']) delete section[field];
+      if (section.voucher) for (const field of ['supplierMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor']) delete section.voucher[field];
+    }
     if (hideSupplierAmounts) {
       delete section.itemSubtotalMinor;
       delete section.serviceFeeMinor;

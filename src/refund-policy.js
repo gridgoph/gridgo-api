@@ -1,3 +1,4 @@
+import { collectedVoucherFundingMinor } from './voucher-funding.js';
 import { isReviewData } from './review-data.js';
 import { supplementTotals, changePayoutsFor } from './order-change-policy.js';
 import { deliveryPinCollectedMinor } from './delivery-pin-policy.js';
@@ -112,27 +113,30 @@ export function calculateRefundSettlement(order, {
   store = null, beforeProduction, shopEntitlementMinor, riderEntitlementMinor, earlier = {}, principalMinor, settlementPaidMinor = 0,
 }) {
   const collected = collectedRefundComponents(order, store);
+  const funded = component => collectedVoucherFundingMinor(order, component);
+  const principalTopupMinor = funded('supplier_principal');
+  const deliveryTopupMinor = order.coversOrderTotal ? funded('delivery_pass_through') : (order.voucherDeliveryMinor || 0);
   const previous = Object.fromEntries(['principalMinor', 'feeMinor', 'deliveryMinor'].map((field) =>
     [field, refundMinor(earlier[field] ?? 0, field)]));
   const releasedMinor = sumMinor([settlementPaidMinor, ...changePayoutsFor(store, order).map(row => row.amountMinor), ...(order.payoutMilestones || []).filter((stage) => stage.status === 'released')
     .map((stage) => stage.amountMinor)]);
   refundMinor(shopEntitlementMinor, 'shopEntitlementMinor');
   refundMinor(riderEntitlementMinor, 'riderEntitlementMinor');
-  if (riderEntitlementMinor > collected.deliveryMinor + (order.voucherDeliveryMinor || 0) - previous.deliveryMinor) {
+  if (riderEntitlementMinor > collected.deliveryMinor + deliveryTopupMinor - previous.deliveryMinor) {
     refundFail(409, 'refund_requires_super_admin', 'Verified delivery funds do not cover the rider obligation. Reconcile collection with Super Admin before approving.', { escalateTo: 'super_admin' });
   }
   if (shopEntitlementMinor < releasedMinor) {
     refundFail(409, 'refund_requires_super_admin', 'This settlement would recover a released shop payout. Refer it to Super Admin.', { escalateTo: 'super_admin' });
   }
   const remainingShopMinor = shopEntitlementMinor - releasedMinor;
-  if (shopEntitlementMinor > collected.principalMinor - previous.principalMinor
+  if (shopEntitlementMinor > collected.principalMinor + principalTopupMinor - previous.principalMinor
       || previous.feeMinor > collected.feeMinor || previous.deliveryMinor > collected.deliveryMinor) {
     refundFail(409, 'refund_exceeds_available_funds', 'Verified funds do not cover the agreed obligations. Refer this to Super Admin.', { escalateTo: 'super_admin' });
   }
   if (beforeProduction && (releasedMinor || shopEntitlementMinor || riderEntitlementMinor)) {
     refundFail(409, 'refund_requires_super_admin', 'A full pre-production refund conflicts with recorded obligations. Refer it to Super Admin.', { escalateTo: 'super_admin' });
   }
-  const availablePrincipalMinor = Math.max(0, collected.principalMinor - previous.principalMinor - releasedMinor - remainingShopMinor);
+  const availablePrincipalMinor = Math.max(0, collected.principalMinor - previous.principalMinor - Math.max(0, releasedMinor + remainingShopMinor - principalTopupMinor));
   const principal = principalMinor ?? availablePrincipalMinor;
   refundMinor(principal, 'principalMinor');
   if (principal > availablePrincipalMinor || (beforeProduction && principal !== availablePrincipalMinor)) {
@@ -142,7 +146,7 @@ export function calculateRefundSettlement(order, {
   }
   const feeMinor = beforeProduction ? collected.feeMinor - previous.feeMinor : proportionalFee(order, principal, collected, previous, store);
   const deliveryMinor = deliveryCompleted(order) ? 0
-    : Math.max(0, collected.deliveryMinor - previous.deliveryMinor - Math.max(0, riderEntitlementMinor - (order.voucherDeliveryMinor || 0)));
+    : Math.max(0, collected.deliveryMinor - previous.deliveryMinor - Math.max(0, riderEntitlementMinor - deliveryTopupMinor));
   const amounts = { principalMinor: principal, feeMinor, deliveryMinor };
   return { ...amounts, totalMinor: sumMinor(Object.values(amounts)), collected, previous, releasedMinor,
     remainingShopMinor, shopEntitlementMinor, riderEntitlementMinor, availablePrincipalMinor };
