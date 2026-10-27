@@ -39,6 +39,77 @@ async function remedy(api, orderId, {clientCaused=false,totalMinor=0,shopEntitle
   const replay=await ok(api,'ops','POST',`/refund-requests/${refund.id}/settle`,body,200,{key}); assert.deepEqual(replay,settled);
   return settled.refund;
 }
+for (const [amount, quantities, zeroCash] of [[20000,[1],true],[20000,[10],false],[50000,[1,1],true],[35000,[10,10],false]]) {
+  test(`HTTP checkout voucher privacy matches order and invoice (${quantities.length} shops, zero cash=${zeroCash})`,{skip:!DB},async t=>{
+    const {db,s,api}=await setup(t,{amount}); const path=await cart(api,s,quantities);
+    const placed=await ok(api,'client','POST',`${path}/checkout`,zeroCash?{}:{payment:{method:'qr_manual',reference:'PRIVATE-FUNDING',proofFileId:'receipt'}},201);
+    assert.equal((placed.basket?.totalMinor??placed.order.totalMinor)===0,zeroCash);
+    const privateFields=['supplierMinor','gridgoSupplierTopupMinor','gridgoRiderTopupMinor'];
+    const assertPrivate=voucher=>{
+      assert.ok(voucher); assert.ok(voucher.amountMinor>0); assert.equal(voucher.fundedBy,'GRIDGO');
+      for(const field of privateFields) assert.equal(Object.hasOwn(voucher,field),false,`${field} must be staff-only`);
+    };
+    assertPrivate(placed.order.voucher);
+    const groupOrders=placed.basket?placed.basket.groups.map(g=>g.order):[placed.order];
+    const stored=await loadStore(db);
+    for(const checkoutOrder of groupOrders){
+      assertPrivate(checkoutOrder.voucher);
+      const normal=(await ok(api,'client','GET',`/orders/${checkoutOrder.id}`)).order;
+      assert.deepEqual(checkoutOrder.voucher,normal.voucher);
+      const staff=(await ok(api,'ops','GET',`/orders/${checkoutOrder.id}`)).order;
+      const internal=stored.orders.find(o=>o.id===checkoutOrder.id);
+      for(const field of privateFields) assert.equal(staff.voucher[field],internal.voucher[field]);
+    }
+    const receipt=(await ok(api,'client','GET',`/orders/${placed.order.id}/invoice`)).invoice;
+    assertPrivate(placed.invoice.voucher); assertPrivate(receipt.voucher);
+    for(const section of [...(placed.invoice.groups||[]),...(receipt.groups||[])]) assertPrivate(section.voucher);
+    assert.deepEqual(placed.order.voucher,groupOrders[0].voucher);
+  });
+}
+for(const [percent,finalPaid,pin] of [[100,true,false],[75,false,false],[75,true,false],[100,true,true],[75,false,true],[75,true,true]]) {
+  test(`HTTP/SQL cash refund uses funded delivery collection (${percent}%, final paid=${finalPaid}, pin=${pin})`,{skip:!DB},async t=>{
+    const {db,s,api}=await setup(t,{percent,amount:6000,riderRate:pin?8001:8500}); const path=await cart(api,s,[10]);
+    const placed=await ok(api,'client','POST',`${path}/checkout`,{payment:{method:'qr_manual',reference:'REFUND-FUNDING',proofFileId:'receipt'}},201);
+    const orderId=placed.order.id;
+    await ok(api,'ops','POST',`/orders/${orderId}/payments/initial/confirm`,{});
+    if(percent===75&&finalPaid){
+      await ok(api,'client','POST',`/orders/${orderId}/payments/final_online/submit`,{method:'qr_manual',reference:'REFUND-FINAL',proofFileId:'finalProof'});
+      await ok(api,'ops','POST',`/orders/${orderId}/payments/final_online/confirm`,{});
+    }
+    if(pin){
+      await mutate(db,s=>{const o=s.orders.find(o=>o.id===orderId);o.state='production';requestDeliveryPin(s,o,{at:AT,id,audit,user:s.users.find(u=>u.id==='supplier')});});
+      const point={lat:7.06+8/111.195,lng:125.6,label:'Paid surcharge pin'};
+      const current=(await ok(api,'client','GET',`/orders/${orderId}/delivery-pin`)).deliveryPin;
+      const {preview}=await ok(api,'client','POST',`/orders/${orderId}/delivery-pin/preview`,{point});
+      let changed=(await ok(api,'client','POST',`/orders/${orderId}/delivery-pin/change`,{expectedVersion:current.version,point,feeDifferenceMinor:preview.feeDifferenceMinor,acknowledgeOneChange:true})).deliveryPin;
+      changed=(await ok(api,'client','POST',`/orders/${orderId}/delivery-pin/payment`,{expectedVersion:changed.version,proofFileId:'pinProof',reference:'REFUND-PIN'})).deliveryPin;
+      await ok(api,'ops','POST',`/orders/${orderId}/delivery-pin/payment/confirm`,{expectedVersion:changed.version,amountMinor:preview.feeDifferenceMinor,reason:'Pin transfer verified'});
+    }
+    const before=(await ok(api,'ops','GET',`/orders/${orderId}`)).order, delivery=before.deliverySettlement;
+    if(!pin) assert.equal(delivery.platformCollectedMinor,0);
+    assert.equal(delivery.collectedMinor+delivery.fundedRiderMinor,delivery.riderCollectedMinor+delivery.platformCollectedMinor);
+    const storedBefore=await loadStore(db), original=storedBefore.orders.find(o=>o.id===orderId);
+    const cash=Object.values(original.payments).filter(p=>p.status==='confirmed').reduce((sum,p)=>sum+p.amountMinor,0)+(original.deliveryPin?.change?.payment?.amountMinor||0);
+    let refund=await remedy(api,orderId,{cashDestination:true,totalMinor:cash});
+    assert.equal(refund.settlement.deliveryMinor,delivery.collectedMinor);
+    assert.equal(refund.settlement.platformDeliveryMinor,delivery.platformCollectedMinor);
+    const persisted=await db.query('SELECT platform_delivery_minor FROM refund_settlements WHERE request_id=$1',[refund.id]);
+    assert.equal(Number(persisted.rows[0].platform_delivery_minor),delivery.platformCollectedMinor);
+    ({refund}=await ok(api,'ops','POST',`/refund-requests/${refund.id}/payment-attempts`,{expectedVersion:refund.version,reason:'Return verified client cash',destinationVerified:true,destinationRevision:1,provider:'gcash',sourceWallet:'ops-main'}));
+    await ok(api,'ops','POST',`/refund-requests/${refund.id}/payments`,{expectedVersion:refund.version,reason:'Refund transfer completed',attemptId:refund.attempt.id,amountMinor:cash,reference:'FUNDED-CASH-REFUND',receiptFileId:'refundReceipt',paidAt:AT});
+    const after=(await ok(api,'ops','GET',`/orders/${orderId}`)).order;
+    const platformRefund=refund.settlement.feeMinor+delivery.platformCollectedMinor;
+    assert.equal(after.platformRevenue.refundedMinor,platformRefund===0?0:-platformRefund);
+    const ledger=await db.query("SELECT COALESCE(sum(amount_minor),0) AS amount FROM platform_revenue_adjustments WHERE order_id=$1 AND kind='refund'",[orderId]);
+    assert.equal(Number(ledger.rows[0].amount),platformRefund===0?0:-platformRefund);
+    // Returning all cash leaves only external GRIDGO funds, with revenue's funding cost preserved.
+    const netDelivery=delivery.collectedMinor+delivery.fundedRiderMinor-refund.settlement.deliveryMinor;
+    const netRider=delivery.riderCollectedMinor-(refund.settlement.deliveryMinor-refund.settlement.platformDeliveryMinor);
+    const netPlatform=delivery.platformCollectedMinor-refund.settlement.platformDeliveryMinor;
+    assert.equal(netDelivery,netRider+netPlatform);
+    assert.equal(after.platformRevenue.collectedMinor+after.platformRevenue.refundedMinor,before.platformRevenue.collectedMinor-platformRefund);
+  });
+}
 for (const [percent, amount, quantities] of [[100,20000,[1]],[75,20000,[1]],[75,21000,[10]],[100,50000,[1,1]]]) {
   test(`HTTP/SQL no-cash checkout has no invented transfer (${percent}%, ${quantities.length} shops, ${amount})`,{skip:!DB},async t=>{
     const {db,s,api}=await setup(t,{percent,amount}); const path=await cart(api,s,quantities);

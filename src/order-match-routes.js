@@ -8,6 +8,7 @@ import { specialInstructions } from './special-instructions.js';
 import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
+import { clientVoucher } from './voucher-projection.js';
 import { selectVoucher, settleVoucherInitial, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
 import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './operating-hours.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
@@ -904,7 +905,7 @@ function publicMatchedOrder(store, order) {
       balanceStatus: order.payments.final_online.status,
     },
     jobs,
-    ...(order.voucher ? { voucher: structuredClone(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
+    ...(order.voucher ? { voucher: clientVoucher(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer || null),
     fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },

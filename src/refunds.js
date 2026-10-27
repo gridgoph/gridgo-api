@@ -3,13 +3,13 @@ import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedIt
 import { recordFileCheckTransition, supplierArtworkReleased } from './artwork-gates.js';
 import { cancellationQuote, publicCancellationQuote, acceptedCancellationQuote } from './fault-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
-import { adjustedDeliverySplit, deliveryPinPaymentPending, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
+import { adjustedDeliverySplit, deliveryPinPaymentPending } from './delivery-pin-policy.js';
 import { noCashVoucherRemedy } from './refund-policy.js';
 import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
   supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents, ACTIVE_REFUND_STATUSES } from './refund-policy.js';
-import { deliverySplit } from './operational-model.js';
+import { deliverySplit, collectedDeliveryForOrder } from './operational-model.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { resolvePayoutReceipt, bindPayoutReceipt, paymentReferenceValue } from './payout-receipt.js';
 import { opsPayoutAccountProjection } from './payout-account.js';
@@ -307,12 +307,9 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     });
     if (body.totalMinor !== amounts.totalMinor) fail(409, 'refund_amount_mismatch', 'Review the calculated component amounts before approving.', { amounts });
     // Returned delivery is unused service. Attribute only the collected platform share to revenue.
-    const extra = deliveryPinCollectedMinor(order);
-    const originalCollectedSplit = deliverySplit(amounts.collected.deliveryMinor - extra, order.riderCommissionBps ?? 10000);
-    const extraCollectedSplit = deliverySplit(extra, order.riderCommissionBps ?? 10000);
-    const collectedSplit = { platformDeliveryShareMinor: sumMinor([originalCollectedSplit.platformDeliveryShareMinor, extraCollectedSplit.platformDeliveryShareMinor]) };
+    const collectedSplit = collectedDeliveryForOrder(order);
     const previousPlatform = sumMinor(store.refundSettlements.filter((row) => row.orderId === order.id).map((row) => row.platformDeliveryMinor));
-    const platformDeliveryMinor = Math.min(amounts.deliveryMinor, Math.max(0, collectedSplit.platformDeliveryShareMinor - previousPlatform));
+    const platformDeliveryMinor = Math.min(amounts.deliveryMinor, Math.max(0, collectedSplit.platformCollectedMinor - previousPlatform));
     const settlement = { id: id('rsettle'), requestId: request.id, orderId: order.id, createdBy: user.id, createdAt: at,
       sequence: store.refundSettlements.filter((row) => row.orderId === order.id).length + 1,
       reason: eventReason, shopAgreement, deliveryEvidence,
