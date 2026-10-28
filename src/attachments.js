@@ -1,4 +1,5 @@
 import { canReadApprovalProof } from './approval-proof.js';
+import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
 import { displayFilename } from './display-filename.js';
@@ -33,6 +34,7 @@ const KINDS = new Set([
   "finished_product_photo",
   "packing_photo",
   "delivery_photo",
+  "delivery_package_photo",
   "handoff_signature",
   "supplier_invoice",
   "service_image",
@@ -72,6 +74,10 @@ export const PURPOSE_POLICIES = Object.freeze({
   delivery_photo: {
     roles: ["rider"],
     maxBytes: 20 * 1024 * 1024,
+    contentTypes: ["image/jpeg", "image/png", "image/webp"],
+  },
+  delivery_package_photo: {
+    roles: ["rider"], maxBytes: 20 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   // The supplier's signature, drawn on the rider's phone at the counter once
@@ -1089,6 +1095,12 @@ export function authorizeFileAttach(user, file, target, store = null) {
     }
     return;
   }
+  if (file.purpose === 'delivery_package_photo') {
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'rider') || record.riderId !== user.id) forbidden();
+    if (record.fulfillmentMode !== 'delivery' || !['picked_up', 'out_for_delivery'].includes(record.state)
+      || record.deliveryEvidence?.recordedAt) fail(409, 'package_photo_upload_not_allowed', 'Attach the package photo during the client delivery handover.');
+    return;
+  }
   if (file.purpose === "delivery_photo") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
     if (!DELIVERY_PHOTO_STATES.has(record.state)) {
@@ -1216,6 +1228,7 @@ export function attachFileReference(file, target, store = null) {
     finished_product_photo: "finishedProductPhotoFileIds",
     packing_photo: "packingPhotoFileIds",
     delivery_photo: "deliveryPhotoFileIds",
+    delivery_package_photo: "deliveryPackagePhotoFileIds",
     handoff_signature: "handoffSignatureFileIds",
     service_image: "imageFileIds",
     verification_document: "verificationDocumentFileIds",
@@ -1368,6 +1381,13 @@ export function authorizeFileRead(user, store, file) {
     const sent = (file.references || []).filter((reference) => reference.type === "pickup_chat_message");
     if (!sent.length && file.ownerId === user.id) return;
     if (sent.some((reference) => canReadPickupChatPhoto(user, store, reference))) return;
+    forbidden();
+  }
+  if (file.purpose === 'delivery_package_photo') {
+    if (hasApprovedWorkRole(user, 'rider') && file.ownerId === user.id) return;
+    if ((file.references || []).some(ref => ref.type === 'order' && store.orders.some(order => order.id === ref.id
+      && deliveryPackagePhotoId(store, order) === file.fileId
+      && (['ops_admin', 'super_admin'].includes(user.role) || user.role === 'client' && order.clientId === user.id)))) return;
     forbidden();
   }
   if (["ops_admin", "super_admin"].includes(user.role)) return;

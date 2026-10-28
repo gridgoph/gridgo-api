@@ -9,6 +9,7 @@ import { parsePaperSize } from './print-layout.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
+import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from './sharing-store.js';
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
@@ -111,6 +112,7 @@ const TABLES = [
   ...refundTableDefinitions,
   ...voucherTables,
   surveyTable,
+  ...sharingTables,
   foundingTesterTable,
   ...testerProgramTables,
   ...checkoutExitTables,
@@ -136,6 +138,7 @@ export function emptyStore() {
     ...emptyStaffStore(),
     ...emptyVoucherStore(),
     orderSurveys: [],
+    ...emptySharingStore(),
     checkoutVisits: [],
     checkoutExitPrompts: [],
     supplierInvoices: [],
@@ -220,6 +223,7 @@ function rowsFromStore(store) {
   voucherRows(store, rows);
   performanceRows(store, rows);
   surveyRows(store, rows);
+  sharingRows(store, rows);
   foundingTesterRows(store, rows);
   testerProgramRows(store, rows);
   checkoutExitRows(store, rows);
@@ -1120,6 +1124,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadVoucherRows(store, loaded);
   loadPerformanceRows(store, loaded);
   loadSurveyRows(store, loaded);
+  loadSharingRows(store, loaded);
   loadFoundingTesterRows(store, loaded);
   loadTesterProgramRows(store, loaded);
   loadCheckoutExitRows(store, loaded);

@@ -1,4 +1,5 @@
 import { collectedVoucherFundingMinor } from './voucher-funding.js';
+import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { clientVoucher } from './voucher-projection.js';
 import { isReviewData, assertReviewMoneyAllowed } from './review-data.js';
 import { performanceEnabled } from './supplier-performance-policy.js';
@@ -1200,6 +1201,16 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.deliveryReminder;
+  if (['ops_admin', 'super_admin'].includes(user?.role)
+    || user?.role === 'rider' && user.id === order.riderId
+    || user?.role === 'client' && user.id === order.clientId) {
+    publicRecord.deliveryReminder = clone(store?.deliveryReminders?.find(row => row.orderId === order.id) ?? null);
+    if (user?.role !== 'rider') {
+      const selected = deliveryPackagePhotoId(store, order);
+      publicRecord.deliveryPackagePhotoFileIds = selected ? [selected] : [];
+    }
+  } else delete publicRecord.deliveryPackagePhotoFileIds;
   if (!["ops_admin", "super_admin"].includes(user?.role)) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
       if (!record) continue;

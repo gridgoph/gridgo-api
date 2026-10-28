@@ -1,10 +1,11 @@
 import { approvalReviewSnapshot } from './approval-proof.js';
+import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { refundFail as fail } from './refund-policy.js';
 
 const pick = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined)
   .map(key => [key, structuredClone(value[key])]));
 const EVIDENCE_PURPOSES = new Set(['artwork', 'mockup', 'finished_product_photo', 'production_photo',
-  'fulfilment_proof', 'packing_photo', 'handoff_signature', 'delivery_photo', 'approval_signature', 'approval_sample_photo']);
+  'fulfilment_proof', 'packing_photo', 'handoff_signature', 'delivery_photo', 'delivery_package_photo', 'approval_signature', 'approval_sample_photo']);
 export const PROBLEM_TYPES = ['material_quality', 'damage', 'wrong_item', 'delivery', 'other'];
 
 export function problemPhotos(store, user, body) {
@@ -26,6 +27,7 @@ export function problemPhotos(store, user, body) {
 
 /** Snapshot facts only. Missing historical proof is never reconstructed as approval. */
 export function gatherIssueEvidence(store, order, photos, at) {
+  const packagePhotoId = deliveryPackagePhotoId(store, order);
   const specification = approvalReviewSnapshot(store, order);
   const approvals = (order.approvalProofs || []).map(proof => pick(proof, ['id', 'phase', 'status', 'method', 'at',
     'statement', 'signatureFileId', 'samplePhotoFileId', 'snapshot', 'snapshotSha256']));
@@ -45,11 +47,14 @@ export function gatherIssueEvidence(store, order, photos, at) {
     { id: 'shop_qa', kind: 'shop_qa', data: pick(order.shopHandover, ['finished', 'review', 'attempts']) },
     { id: 'rider_check', kind: 'rider_check', data: { checklist: structuredClone(order.pickupChecklist ?? null),
       ...pick(order.shopHandover, ['inspections', 'packingPhotos']) } },
-    { id: 'delivery', kind: 'delivery', data: pick(order, ['deliveryEvidence', 'deliveryPhotoFileIds', 'deliveryProofFileIds']) },
+    { id: 'delivery', kind: 'delivery', data: { ...pick(order, ['deliveryEvidence', 'deliveryPhotoFileIds', 'deliveryProofFileIds']),
+      deliveryPackagePhotoFileIds: packagePhotoId ? [packagePhotoId] : [],
+      reminder: structuredClone((store.deliveryReminders || []).find(row => row.orderId === order.id) ?? null) } },
     { id: 'client_photos', kind: 'client_report', data: { fileIds: photos.map(file => file.fileId) } },
   ];
   groups.forEach(group => findIds(group.data));
   for (const file of store.files || []) {
+    if (file.purpose === 'delivery_package_photo' && file.fileId !== packagePhotoId) continue;
     if (EVIDENCE_PURPOSES.has(file.purpose) && file.references?.some(ref => ref.type === 'order' && ref.id === order.id)) ids.add(file.fileId);
   }
   const files = [...ids].sort().map(fileId => {
