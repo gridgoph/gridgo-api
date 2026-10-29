@@ -442,6 +442,58 @@ legacy saves. Older Express-only audit differences are not confirmations; proven
 reason clearing remains protected. Historical empty audit details cannot prove
 an unchanged save's intent (see `docs/SCHEDULING_API.md`).
 
+## Targeted read indexes and interrupted builds
+
+Migration `1793275200000_client_bootstrap_reads` builds five indexes with
+individual `CREATE INDEX CONCURRENTLY IF NOT EXISTS` commands.
+`pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
+for this migration only. Earlier migrations and completed index builds can
+therefore remain committed if a later build fails. HTTP mutation transactions,
+advisory locks, audit and notification commits are unchanged.
+The existing unique partial `voucher_one_reservation` index already supports
+the reserved-voucher query; this migration adds no duplicate reservation index.
+
+A cancelled concurrent build can leave an invalid index. `IF NOT EXISTS` only
+checks its name and does not repair it. Before retrying an interrupted run,
+ensure that failed migrator has exited, then run this recovery as the database
+owner. Keep psql autocommit enabled: no `BEGIN` or `--single-transaction`.
+`\gexec` executes each generated rebuild as a separate top-level command.
+The rebuild also works if an earlier retry already recorded the migration while
+skipping an invalid index. See [PostgreSQL concurrent index recovery](https://www.postgresql.org/docs/17/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY).
+
+```sh
+docker exec -i gridgo-postgres psql -X -v ON_ERROR_STOP=1 -U gridgo_api -d gridgo <<'SQL'
+SELECT c.relname, i.indisvalid, i.indisready
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indexrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relname IN (
+  'users_bootstrap_email_idx', 'users_bootstrap_unusual_email_idx',
+  'tester_invites_unmatched_idx', 'promotion_invites_pending_idx',
+  'promotion_invites_client_idx'
+) ORDER BY c.relname;
+
+SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indexrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
+  'users_bootstrap_email_idx', 'users_bootstrap_unusual_email_idx',
+  'tester_invites_unmatched_idx', 'promotion_invites_pending_idx',
+  'promotion_invites_client_idx'
+)
+\gexec
+SQL
+
+cd ~/gridgo/api
+docker compose run --rm --no-deps migrate
+```
+
+The retry retains valid indexes, creates missing ones and records the migration
+if it was still pending. Re-run the first query afterwards: all five indexes
+must be present with `indisvalid = true` and `indisready = true`. Do not remove
+or fake a `pgmigrations` row to recover an index build.
+
 ## PostgreSQL query statistics
 
 The production `postgres:17-alpine` image includes both

@@ -113,9 +113,11 @@ reconciliation/save path inside that same lock. A no-op returns the scoped
 projection without reading historical tables. Scoped graphs still cannot be
 saved. No cache, reward rule, response shape or transaction boundary changes.
 
-The new forward migration adds indexes for normalized identity lookup,
-unresolved invitations, attribution and active voucher reservations. Unusual
-Unicode/whitespace emails remain candidates for JavaScript's existing matching
+The new forward migration adds five concurrent indexes for normalized identity
+lookup, unresolved invitations and attribution. Reserved voucher reads use the
+existing unique partial `voucher_one_reservation` index. Interrupted builds use
+the [deployment recovery procedure](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
+Unusual Unicode/whitespace emails remain candidates for JavaScript's existing matching
 policy; SQL normalization cannot silently change attribution.
 
 Measured against the pre-change base `0206e28`, using private PostgreSQL 17 and
@@ -150,11 +152,22 @@ vouchers. It compares progress and reconciliation decisions against full-store
 facts, tests Unicode invitation matching, and asserts constant rows/projections
 under unrelated history growth. The test-only module hook selects the complete
 reader and freezes both clocks; the API has no runtime legacy-reader switch.
-The final complete `npm test -- --maxWorkers=2` run passed **2,031 tests** with
+The final complete `npm test -- --maxWorkers=2` run passed **2,033 tests** with
 zero failures/skips on private PostgreSQL 17. The optional authentication
 timestamp test retries authentication while polling, since its existing
 best-effort write can skip a concurrent bootstrap foreign-key lock; runtime
 timestamp/locking behaviour is unchanged.
+
+The concurrent-index follow-up was applied on a fresh database and the current
+dev schema (`04e9758066c224ecdd6d2442af63aa8384bfc493`). A three-connection
+probe held an older user update open while the real migration waited; a later
+update of another user completed in 3 ms, and all five indexes finished valid.
+`tests/client-bootstrap-index-migration.test.js` first reproduced the old
+write-blocking lock, then passed with concurrent builds under the runner's
+default single transaction. Cancellation/retry checks preserve completed indexes
+and repair invalid builds; the exact documented psql recovery also passed when
+the migration had already been recorded. Reserved-voucher reads use the existing
+unique partial index without an additional duplicate.
 
 ## Remaining work
 
