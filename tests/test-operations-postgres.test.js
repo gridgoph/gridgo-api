@@ -252,7 +252,7 @@ const GET_ROUTES = [
   '/admin/legal/acceptances', '/admin/legal/documents', '/admin/privacy-requests', '/admin/season-windows',
   '/admin/season-windows/push-settings', '/admin/files/retention', '/admin/tracker', '/admin/me', '/audit', '/audit?format=csv',
   '/issue-reports', '/support-tickets', '/me/account-deletion-request', '/me/privacy-requests', '/staff/hub/claims',
-  '/me/carts', '/me/addresses', '/me/preferences', '/me/deadline-days', '/me/catalog-items', '/me/supplier-profile',
+  '/me/files', '/me/carts', '/me/addresses', '/me/preferences', '/me/deadline-days', '/me/catalog-items', '/me/supplier-profile',
   '/me/supplier-readiness', '/me/supplier-services', '/me/shop-hours', '/me/supplier-payment-terms', '/me/rider-profile', '/me/reviews',
   '/me/production-lapses', '/me/performance', '/me/surveys', '/me/vouchers', '/me/organization', '/me/organization/statements',
   '/me/client-application', '/me/client-application/checklist', '/me/product-types', '/me/product-type-requests',

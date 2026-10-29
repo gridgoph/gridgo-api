@@ -354,7 +354,8 @@ function ownCart(store, user, cartId, { draft = false } = {}) {
 
 function fileFor(store, user, fileId, purpose, field) {
   const file = (store.files || []).find((row) => row.fileId === fileId);
-  if (!file || file.ownerId !== user.id || file.state !== "ready" || file.purpose !== purpose || !file.objectKey) {
+  if (!file || file.ownerId !== user.id || file.state !== "ready" || file.purpose !== purpose || !file.objectKey
+    || (['artwork', 'mockup'].includes(purpose) && file.savedFileDeletionRequestedAt)) {
     fail(409, "file_not_ready", `Choose your own ready ${purpose} file.`, { field });
   }
   return file;

@@ -1,4 +1,5 @@
 import { collectedVoucherFundingMinor } from './voucher-funding.js';
+import { DEFAULT_SAVED_FILES_LIMIT_BYTES } from './file-retention-policy.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { clientVoucher } from './voucher-projection.js';
 import { isReviewData, assertReviewMoneyAllowed } from './review-data.js';
@@ -289,6 +290,7 @@ export function defaultOperationalSettings() {
      */
     coverSpineRequired: false,
     clientShopChatContactThreshold: 3,
+    savedFilesLimitBytes: DEFAULT_SAVED_FILES_LIMIT_BYTES,
     approvalProofRequired: false,
     issueWindowHours: 24,
     productionNudge: defaultProductionNudge(),
@@ -402,6 +404,10 @@ export function validateOperationalSettings(settings) {
     if (!valid) fail(400, 'invalid_tester_signup_form_url', 'Use an HTTPS form URL with one {code} query placeholder, or null.');
   }
   const downpaymentPercent = settings?.downpaymentPercent;
+  if (settings?.savedFilesLimitBytes !== undefined
+      && (!Number.isSafeInteger(settings.savedFilesLimitBytes) || settings.savedFilesLimitBytes < 0)) {
+    fail(400, 'invalid_saved_files_limit', 'Set My files storage to a nonnegative whole number of bytes.', { field: 'savedFilesLimitBytes' });
+  }
   if (downpaymentPercent !== undefined && !DOWNPAYMENT_PERCENTS.includes(downpaymentPercent)) {
     fail(400, "invalid_downpayment_percent",
       "Set the checkout downpayment to 75 or 100 percent.",
