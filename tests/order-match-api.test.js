@@ -481,6 +481,14 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
   });
   assert.equal(first.status, 201, JSON.stringify(first.body));
   const lineId = first.body.cart.lines[0].id;
+  const expectedFormats = match.body.listings.find((listing) => listing.id === "item_supplier_a").acceptedFormats;
+  assert.ok(expectedFormats.length > 0);
+  assert.deepEqual(first.body.cart.lines[0].listing.acceptedFormats, expectedFormats);
+  const updated = await request(instance.api, `/me/carts/${cartId}/lines/${lineId}`, {
+    method: "PATCH", subject: "clerk_client", body: { quantity: 1 },
+  });
+  assert.equal(updated.status, 200, JSON.stringify(updated.body));
+  assert.deepEqual(updated.body.cart.lines[0].listing.acceptedFormats, expectedFormats);
   const mockup = await request(instance.api, `/me/carts/${cartId}/lines/${lineId}/mockup`, {
     method: "PUT", subject: "clerk_client", body: { fileId: "file_mock" },
   });

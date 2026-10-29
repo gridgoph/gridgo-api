@@ -23,6 +23,8 @@ Supplier/rider order and dispatch access requires current approval. Order reads 
 
 `GET /users?role=` remains a membership directory filter, not an actor selector. It includes secondary memberships and projects that role's profile/approval; without the filter it retains the primary-user directory.
 
+Staff-only `GET /users?role=supplier` rows additionally include `contactName` from the current supplier profile, or `null` when absent. The account-holder `name` stays unchanged; non-supplier rows omit `contactName`.
+
 ## Complete route index
 
 | Method | Path | Authorization | Contract |
