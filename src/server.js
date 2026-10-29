@@ -1144,7 +1144,7 @@ function otherActiveSuperAdmin(store, targetId) {
 }
 
 /** Directory filters select authoritative memberships, retaining their role profile. */
-function roleDirectoryUser(store, user, role) {
+function roleDirectoryUser(store, user, role, { includeContactName = false } = {}) {
   const projected = { ...user, role };
   if (["supplier", "rider"].includes(role)) {
     const approval = (store.approvalCases || []).find((c) => c.userId === user.id && c.kind === role);
@@ -1153,6 +1153,7 @@ function roleDirectoryUser(store, user, role) {
   if (role === "supplier") {
     const profile = supplierProfileProjection(store, user.id);
     if (profile) { projected.supplierName = profile.shopName; projected.shop = profile.shop; }
+    if (includeContactName) projected.contactName = profile?.contactName ?? null;
   } else if (role === "rider") {
     const profile = riderProfileProjection(store, user.id);
     if (profile) projected.riderProfile = profile;
@@ -4168,7 +4169,7 @@ async function handleAuditedRequest(req, res) {
       const testerFilter = url.searchParams.get('foundingTester');
       if (testerFilter != null && !['true', 'false'].includes(testerFilter)) return send(res, 400, { error: 'invalid_founding_tester_filter' });
       let list = role
-        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => userWithAccountState(roleDirectoryUser(store, u, role)))
+        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => userWithAccountState(roleDirectoryUser(store, u, role, { includeContactName: true })))
         : store.users.map(userWithAccountState);
       list = list.map(u => u.role === 'client' ? { ...u, foundingTester: publicFoundingTester(store, u.id, now()).label !== null } : u);
       if (testerFilter != null) list = list.filter(u => u.role === 'client' && u.foundingTester === (testerFilter === 'true'));

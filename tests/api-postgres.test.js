@@ -3626,6 +3626,51 @@ test(
    },
  );
 
+test("supplier directory exposes the saved shop contact only to staff", { skip: !DATABASE_URL }, async () => {
+  const database = createDatabase({ DATABASE_URL });
+  await clearAndFixture(database);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    store.userRoleMemberships.push({ userId: "user_promote", role: "supplier", createdAt: AT });
+    await saveStore(database, store);
+  });
+  const instance = await startApi();
+  try {
+    const updated = await request(instance.api, "/me/supplier-profile", {
+      method: "PATCH", subject: "clerk_supplier",
+      body: { expectedVersion: 1, contactName: "New Shop Contact" },
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    for (const subject of ["clerk_ops", "clerk_super"]) {
+      const directory = await request(instance.api, "/users?role=supplier", { subject });
+      assert.equal(directory.status, 200);
+      const supplier = directory.body.users.find((u) => u.id === "user_supplier");
+      assert.equal(supplier.contactName, "New Shop Contact");
+      assert.equal(supplier.name, "Supplier");
+      assert.equal(supplier.supplierName, "Print Shop");
+      assert.equal(directory.body.users.find((u) => u.id === "user_promote").contactName, null);
+      for (const role of ["client", "rider", "ops_admin", "super_admin"]) {
+        const other = await request(instance.api, `/users?role=${role}`, { subject });
+        assert.equal(other.status, 200);
+        assert.ok(other.body.users.length > 0);
+        assert.ok(other.body.users.every((u) => !Object.hasOwn(u, "contactName")));
+      }
+    }
+    for (const subject of [undefined, "clerk_client", "clerk_supplier", "clerk_rider"]) {
+      const denied = await request(instance.api, "/users?role=supplier", { subject });
+      assert.equal(denied.status, subject ? 403 : 401);
+    }
+    const matching = await request(instance.api, "/orders/ord_payout/eligible-suppliers", { subject: "clerk_ops" });
+    assert.equal(matching.status, 200);
+    assert.ok(matching.body.candidates.length > 0);
+    assert.ok(matching.body.candidates.every((c) => !Object.hasOwn(c.supplier, "contactName")));
+  } finally {
+    instance.child.kill("SIGTERM");
+    await new Promise((resolve) => instance.child.once("exit", resolve));
+    await database.close();
+  }
+});
+
 test(
   "supplier service verification and assignment use current membership approval",
   { skip: !DATABASE_URL },
