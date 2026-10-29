@@ -992,7 +992,7 @@ async function authenticateRequest(req, store) {
   const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
   if (auth.user) {
     setAuditActor(auth.user);
-    await noteLastAuthenticated(store, auth.user);
+    noteLastAuthenticated(auth.user);
   }
   return auth;
 }
@@ -1002,24 +1002,16 @@ async function authenticateRequest(req, store) {
  * A later instant replaces the stored one. The same instant does not.
  * This is not `staff.sign_in`, and it does not store a session id or token.
  */
-async function noteLastAuthenticated(store, user) {
+function noteLastAuthenticated(user) {
   const at = now();
-  const next = Date.parse(at);
   const current = Date.parse(user.lastAuthenticatedAt || "");
-  if (Number.isFinite(current) && current >= next) return;
-  user.lastAuthenticatedAt = at;
-  const stored = (store.users || []).find((candidate) => candidate.id === user.id);
-  if (stored && stored !== user) {
-    const storedAt = Date.parse(stored.lastAuthenticatedAt || "");
-    if (!Number.isFinite(storedAt) || next > storedAt) stored.lastAuthenticatedAt = at;
-  }
-  await database.query(
-    `UPDATE users
-        SET last_authenticated_at = $2::timestamptz
-      WHERE id = $1
-        AND (last_authenticated_at IS NULL OR last_authenticated_at < $2::timestamptz)`,
-    [user.id, at],
-  );
+  if (Number.isFinite(current) && current >= Date.parse(at)) return;
+  // Do not change the request's store: a later save must not reintroduce this
+  // optional write into the domain transaction. Directory reads see persisted
+  // telemetry on a subsequent load.
+  void database.recordLastAuthenticated(user.id, at).catch(error => {
+    console.warn(`Last authenticated write failed: ${error?.code || 'unknown'}`);
+  });
 }
 
 // Clerk owns sign-in. Record the first authenticated app bootstrap for a session;

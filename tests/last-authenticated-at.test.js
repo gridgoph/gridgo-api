@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import pg from 'pg';
 import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore } from '../src/postgres-store.js';
 import { resetDatabase } from './fixtures/reset-database.js';
@@ -37,13 +38,13 @@ test('a successful authentication records lastAuthenticatedAt and a later one mo
   assert.equal(Object.hasOwn(session.body.user, 'lastAuthenticatedAt'), false);
   assert.equal(JSON.stringify(session.body).includes('lastAuthenticatedAt'), false);
 
-  const first = userById(await loadStore(db), 'client').lastAuthenticatedAt;
+  const first = await waitForTimestamp(db, 'client', value => typeof value === 'string');
   assert.equal(typeof first, 'string');
   assert.notEqual(first, AT);
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal((await api('client', 'GET', '/auth/me/client')).status, 200);
-  const second = userById(await loadStore(db), 'client').lastAuthenticatedAt;
+  const second = await waitForTimestamp(db, 'client', value => Date.parse(value) > Date.parse(first));
   assert.ok(Date.parse(second) > Date.parse(first), `${second} should be later than ${first}`);
 
   const directory = await api('admin', 'GET', '/users');
@@ -62,6 +63,7 @@ test('a successful authentication records lastAuthenticatedAt and a later one mo
   assert.equal(Object.hasOwn(profile.body.user, 'lastAuthenticatedAt'), false);
 
   assert.equal((await api('supplier', 'GET', '/auth/me/supplier')).status, 200);
+  await waitForTimestamp(db, 'supplier', value => typeof value === 'string');
   const matching = await api('admin', 'GET', '/orders/order/eligible-suppliers');
   assert.equal(matching.status, 200, JSON.stringify(matching.body));
   const supplier = matching.body.candidates.find((candidate) => candidate.supplier?.id === 'supplier');
@@ -80,4 +82,131 @@ test('a successful authentication records lastAuthenticatedAt and a later one mo
   const blob = (await db.query(`SELECT data FROM users WHERE id = 'client'`)).rows[0].data;
   assert.equal(Object.hasOwn(blob, 'lastAuthenticatedAt'), false);
   assert.equal(JSON.stringify(blob).includes('session_'), false);
+});
+
+// A synchronous UPDATE here used to make readable requests wait for this lock.
+test('a locked user row does not delay an authenticated GET', { skip: !DATABASE_URL }, async (t) => {
+  await setup(t);
+  const api = await apiForTest(t);
+  assert.equal((await api('client', 'GET', '/settings')).status, 200);
+  const locker = new pg.Client({ connectionString: DATABASE_URL });
+  await locker.connect();
+  try {
+    await locker.query('BEGIN');
+    await locker.query("SELECT id FROM users WHERE id = 'client' FOR UPDATE");
+    const response = await api('client', 'GET', '/settings', null, { signal: AbortSignal.timeout(750) });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    // The lock is still held when the response arrives.
+  } finally {
+    await locker.query('ROLLBACK');
+    await locker.end();
+  }
+});
+
+async function rejectTimestampWrites(db) {
+  await db.query(`
+    CREATE SEQUENCE test_auth_write_attempt;
+    CREATE FUNCTION test_fail_auth_write() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.last_authenticated_at IS DISTINCT FROM OLD.last_authenticated_at THEN
+        PERFORM nextval('test_auth_write_attempt');
+        RAISE EXCEPTION 'test timestamp write failure';
+      END IF;
+      RETURN NEW;
+    END $$;
+    CREATE TRIGGER test_fail_auth_write BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION test_fail_auth_write();
+  `);
+}
+
+async function removeTimestampFailure(db) {
+  await db.query(`DROP TRIGGER test_fail_auth_write ON users;
+    DROP FUNCTION test_fail_auth_write(); DROP SEQUENCE test_auth_write_attempt;`);
+}
+
+async function waitFor(db, read, predicate) {
+  for (let n = 0; n < 100; n++) {
+    const value = await read(db);
+    if (predicate(value)) return value;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.fail('timed out waiting for the timestamp write');
+}
+
+async function waitForFailedWrite(db) {
+  await waitFor(db, async () => (await db.query('SELECT is_called FROM test_auth_write_attempt')).rows[0].is_called, Boolean);
+}
+
+test('a failing timestamp write cannot fail an authenticated GET', { skip: !DATABASE_URL }, async (t) => {
+  const db = await setup(t);
+  const api = await apiForTest(t);
+  await rejectTimestampWrites(db);
+  try {
+    const response = await api('client', 'GET', '/settings');
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    await waitForFailedWrite(db);
+    assert.equal(userById(await loadStore(db), 'client').lastAuthenticatedAt, undefined);
+  } finally {
+    await removeTimestampFailure(db);
+  }
+});
+
+test('a failing timestamp write cannot abort a mutation transaction', { skip: !DATABASE_URL }, async (t) => {
+  const db = await setup(t);
+  const api = await apiForTest(t);
+  await rejectTimestampWrites(db);
+  try {
+    const ranking = ['distance', 'quality', 'cost', 'speed'];
+    const response = await api('client', 'PUT', '/me/preferences', { ranking });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    // A concurrent FK/key-share lock may legitimately skip the optional write.
+    const stored = await loadStore(db);
+    assert.deepEqual(stored.clientPreferences.find(row => row.userId === 'client').ranking, ranking);
+    assert.equal(userById(stored, 'client').lastAuthenticatedAt, undefined);
+  } finally {
+    await removeTimestampFailure(db);
+  }
+});
+
+async function waitForTimestamp(db, userId, predicate) {
+  return waitFor(db, async () => userById(await loadStore(db), userId).lastAuthenticatedAt, predicate);
+}
+
+test('timestamp SQL failures use a separate connection and leave the domain transaction usable', { skip: !DATABASE_URL }, async (t) => {
+  const db = await setup(t);
+  await rejectTimestampWrites(db);
+  try {
+    await db.transaction(async () => {
+      await assert.rejects(db.recordLastAuthenticated('client', new Date().toISOString()), /test timestamp write failure/);
+      await db.query("UPDATE users SET name = 'Committed client' WHERE id = 'client'");
+    });
+    assert.equal(userById(await loadStore(db), 'client').name, 'Committed client');
+  } finally {
+    await removeTimestampFailure(db);
+  }
+});
+
+test('timestamp recording skips a locked row and bounds a slow SQL write', { skip: !DATABASE_URL }, async (t) => {
+  const db = await setup(t);
+  const locker = new pg.Client({ connectionString: DATABASE_URL });
+  await locker.connect();
+  try {
+    await locker.query('BEGIN');
+    await locker.query("SELECT id FROM users WHERE id = 'client' FOR UPDATE");
+    const result = await db.recordLastAuthenticated('client', new Date().toISOString());
+    assert.equal(result.rowCount, 0);
+  } finally {
+    await locker.query('ROLLBACK');
+    await locker.end();
+  }
+  await db.query(`CREATE FUNCTION test_slow_auth_write() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$;
+    CREATE TRIGGER test_slow_auth_write BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION test_slow_auth_write();`);
+  try {
+    await assert.rejects(db.recordLastAuthenticated('client', new Date().toISOString()), error => error.code === '57014');
+    assert.equal(userById(await loadStore(db), 'client').lastAuthenticatedAt, undefined);
+  } finally {
+    await db.query('DROP TRIGGER test_slow_auth_write ON users; DROP FUNCTION test_slow_auth_write();');
+  }
 });
