@@ -267,8 +267,8 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
 
   async function startPart(headerBytes) {
     partCount += 1;
-    if (partCount > 2) {
-      fail(400, "invalid_multipart", "Upload exactly one `purpose` field and one `file` field.");
+    if (partCount > 3) {
+      fail(400, "invalid_multipart", "Upload one `purpose`, one `file` and optional `saveToMyFiles`.");
     }
     const headers = {};
     for (const line of headerBytes.toString("latin1").split("\r\n")) {
@@ -300,11 +300,11 @@ export async function parseMultipartStream(stream, contentType, options = {}) {
       };
       return;
     }
-    if (disposition.name !== "purpose") {
+    if (!['purpose', 'saveToMyFiles'].includes(disposition.name)) {
       fail(
         400,
         "unexpected_form_field",
-        `Remove the unsupported upload form field: ${disposition.name}. Send only \`purpose\` and \`file\`.`,
+        `Remove the unsupported upload form field: ${disposition.name}. Send only \`purpose\`, \`file\` and optional \`saveToMyFiles\`.`,
         { field: disposition.name },
       );
     }
@@ -667,6 +667,10 @@ export function markFileReady(file, at) {
   }
   file.state = "ready";
   file.readyAt = at;
+  if (['artwork', 'mockup'].includes(file.purpose) && file.saveToMyFilesRequestedAt) {
+    file.savedAt = file.saveToMyFilesRequestedAt;
+    delete file.saveToMyFilesRequestedAt;
+  }
   return file;
 }
 
@@ -743,6 +747,8 @@ export function publicFile(file, user = null) {
     state: file.state,
     createdAt: file.createdAt,
     readyAt: file.readyAt,
+    ...(user?.role === 'client' && user.id === file.ownerId && ['artwork', 'mockup'].includes(file.purpose)
+      ? { savedAt: file.savedAt ?? null } : {}),
     deleteRequestedAt: file.deleteRequestedAt,
     deletedAt: file.deletedAt,
     references: (file.references || []).map((reference) =>
@@ -1016,6 +1022,9 @@ export function resolveFileTarget(store, purpose, body, user = null) {
 export function authorizeFileAttachOwner(user, file) {
   if (!file) fail(404, "file_not_found", "That file no longer exists. Refresh your uploads and try again.");
   if (!user || file.ownerId !== user.id) forbidden();
+  if (['artwork', 'mockup'].includes(file.purpose) && file.savedFileDeletionRequestedAt) {
+    fail(409, 'file_not_ready', 'This file is waiting for account-closure deletion. Upload a new copy to use it again.');
+  }
   if (file.state !== "ready") {
     fail(409, "file_not_ready", "This upload is not ready to attach. Wait for a successful upload response and try again.", {
       state: file.state,

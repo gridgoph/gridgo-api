@@ -10,6 +10,25 @@ function fixture(purpose = 'artwork') {
   const order = { id: 'order', clientId: 'client', state: 'completed', timeline: [{ state: 'completed', at: close }] };
   return { file, store: { files: [file], orders: [order], users: [{ id: 'client', accountStatus: 'active' }] } };
 }
+for (const purpose of ['artwork', 'mockup']) test(`saved ${purpose} survives retention and staff early deletion`, () => {
+  const { store, file } = fixture(purpose);
+  file.savedAt = close;
+  assert.deepEqual(retentionDecision(store, file, at), { eligible: false, reason: 'saved_file' });
+  assert.throws(() => assertEarlyFileDeletion(store, file, { id: 'admin', role: 'super_admin' }, 'Reason'), { code: 'file_retention_hold' });
+  assert.doesNotThrow(() => assertEarlyFileDeletion(store, file, { id: 'client', role: 'client' }));
+  file.references = []; store.orders = [];
+  assert.doesNotThrow(() => assertEarlyFileDeletion(store, file, { id: 'client', role: 'client' }));
+  file.savedAt = null;
+  assert.equal(retentionDecision(store, file, at).eligible, true);
+});
+test('saved metadata never alters evidence retention', () => {
+  for (const purpose of ['payment_proof', 'supplier_invoice', 'delivery_photo', 'verification_document']) {
+    const { store, file } = fixture(purpose);
+    const before = retentionDecision(store, file, at);
+    file.savedAt = close;
+    assert.deepEqual(retentionDecision(store, file, at), before);
+  }
+});
 for (const [purpose, deadline] of [
   ['artwork', '2026-11-03'], ['mockup', '2026-11-03'],
   ['payment_proof', '2031-10-04'], ['payout_receipt', '2031-10-04'], ['refund_receipt', '2031-10-04'],

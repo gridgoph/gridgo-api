@@ -19,7 +19,7 @@ GRIDGO uses the API as the **control plane** and MinIO as the **download data pl
 
 Presigned GETs avoid routing 50–200 MiB artwork back through the single Node process. Payment proofs and payout/refund receipts additionally support an authenticated API byte read for browser receipt reading when a LAN storage origin is blocked. Uploads remain proxied because only the API can enforce byte limits and signature inspection before declaring a file ready.
 
-The prior NestJS API's broader shape—upload, presigned URL, inspect, get, delete, and my-uploads—was evaluated. This contract adopts upload, metadata get, presigned GET, and safe delete. Binary inspection and `my-uploads` are deferred: inspection needs a defined analysis product, while current apps reach files from role-scoped orders/services. Those routes may be added later without changing this contract.
+The prior NestJS API's broader shape—upload, presigned URL, inspect, get, delete, and my-uploads—was evaluated. This contract adopts upload, metadata get, presigned GET, and safe delete. The opt-in client library is `GET /me/files` below; it lists only files explicitly saved by the client. Binary inspection remains deferred.
 
 ## MinIO origins and physical phones
 
@@ -54,7 +54,7 @@ For the hosted pilot, `MINIO_ENDPOINT` is the single-label MinIO container origi
 - API example base: `http://127.0.0.1:18787`
 - Auth header on every route below: `Authorization: Bearer <Clerk session JWT>`
 - Errors: JSON `{ "error": "snake_case", "message": "concrete problem and recovery" }`, with only the documented additive detail fields
-- Upload field names: exactly one binary `file` and one text `purpose`
+- Upload field names: exactly one binary `file`, one text `purpose`, and optional text `saveToMyFiles` (`"true" | "false"`)
 - Upload, target-resolution, and attach role labels mean PostgreSQL memberships, not the legacy `users.role`; an identity that adds supplier membership can upload and attach its own supplier evidence and service images.
 - The client must not supply a bucket, object key, URL, owner ID, lifecycle state, size, or detected MIME
 - IDs are opaque. Clients may persist `fileId`, never an object key or presigned URL.
@@ -95,6 +95,8 @@ A public file object has exactly this shape:
 ```
 
 For `purpose: "verification_document"`, the attached file object additionally contains `verificationDocumentType: "business_permit" | "valid_id" | "sample_work"`, and its user reference contains the same value as `documentType`. That field is absent before attachment and for every other purpose.
+
+Owning-client artwork/mockup projections additionally include `savedAt: string | null` (UTC save date). Other roles do not receive that private library choice. Missing legacy values mean unsaved.
 
 The durable internal record additionally has a server-generated `objectKey`. It is never returned as a standalone metadata field. The authorized presigned URL necessarily encodes the bucket and key in its signed path; clients must treat the complete URL as an opaque, expiring capability and never parse those internals. `purpose` is the retention and authorization tag; it is not inferred from a target.
 
@@ -203,6 +205,7 @@ Request: `multipart/form-data` with exactly:
 |---|---|---|---|
 | `purpose` | text | yes | one purpose enum |
 | `file` | file | yes | one file with a filename; part MIME may be empty/generic on iOS |
+| `saveToMyFiles` | text | no | `"true"` saves artwork/mockup to My files; `"false"` or omitted keeps the normal retention rule |
 
 React Native / Expo:
 
@@ -225,6 +228,8 @@ const response = await fetch(`${apiUrl}/files`, {
 Do not manually set the request `Content-Type`; React Native supplies the multipart boundary. The native fetch body streams from the file URI. Do not read the URI into base64 or a JavaScript buffer.
 
 Success: `201 { "file": File }`; returned `file.state` is always `ready`, `references` is initially `[]`, and `objectKey` is absent.
+
+For an opted-in upload, quota is reserved in the same transaction that creates `pending_upload`, before MinIO receives bytes. Concurrent uploads/saves cannot overspend it. A failed upload's durable pending row counts until compensation or normal unused-upload cleanup tombstones it; opt-in retention protects only ready files, not abandoned uploads. Saving payment, invoice, verification, delivery or any other evidence is refused with `400 saved_file_purpose_not_allowed`. Invalid save-flag text is `400 invalid_saved_file_choice`.
 
 Curl for each purpose:
 
@@ -258,6 +263,71 @@ PAYMENT_QR_FILE_ID=$(curl -fsS -X POST "$API/files" -H "Authorization: Bearer $O
 `tracker_decision` is evidence a Super Admin attaches to a tracker decision (JPEG/PNG/WebP/PDF, 10 MiB, at most 6 per decision). It is not attachable: upload it, then send its `fileId` in `attachmentIds` to `POST /admin/tracker/:repo/:number/decisions` ([Tracker API](TRACKER_API.md)). Binding writes a `tracker_decision` reference so the file reads as `file_in_use`. Only Super Admin may upload, read, sign or delete it; Operations gets `403`.
 
 `supplier_payout_qr` is the shop's own receiving plate (JPEG/PNG/WebP, 5 MiB), the one Operations scans to release a payout. It is not attachable either: upload it, then send its `fileId` as `qrFileId` to `PATCH /me/payout-account` (see `docs/OPERATIONAL_MODEL_V2_API.md`, "Supplier payout account"). Binding writes a `supplier_payout_account` reference; replacement/removal unlinks the old plate. The old picture then follows unused-file cleanup, including its default-off deletion flag, just like a replaced platform QR. Only the owning shop and Operations / Super Admin may read the bytes through `GET /files/:id/download-url`.
+
+## My files — opt-in client artwork library
+
+These routes require the **selected `client` database membership** and the normal account-standing gates. Suspended/removed accounts cannot list or change their library. Operations, Super Admin, shops, riders and hub staff cannot use these library routes, even for files they can read through an existing order. No owner/user ID is accepted in a request. Another client's file is `404 file_not_found`. Existing order-based artwork permissions remain unchanged; saving does not grant new readers or expose other saved files.
+
+### GET /me/files?offset=0
+
+Lists only the caller's **ready, saved** artwork and mockup files, most recently saved first, with file ID as tie-breaker. Pages contain at most 50 entries. `offset` must be a nonnegative safe integer (`400 invalid_offset`). Responses are `Cache-Control: private, no-store, max-age=0`:
+
+```json
+{
+  "files": [{
+    "fileId": "file_8c9f61e4b2aa",
+    "purpose": "artwork",
+    "originalFilename": "opening-banner.png",
+    "size": 48231,
+    "detectedContentType": "image/png",
+    "savedAt": "2026-10-29T10:15:31.000Z",
+    "preview": { "status": "ready", "downloadUrlPath": "/files/file_8c9f61e4b2aa/preview-url", "retryPath": "/files/file_8c9f61e4b2aa/preview" },
+    "previewUrl": "<short-lived signed image URL>",
+    "downloadUrl": "<short-lived signed original URL>",
+    "expiresAt": "2026-10-29T10:20:31.000Z"
+  }],
+  "usage": { "usedBytes": 48231, "limitBytes": 500000000 },
+  "nextOffset": null
+}
+```
+
+`previewUrl` is the signed original for JPEG/PNG/WebP, or an existing ready PDF thumbnail; it is `null` when a thumbnail is not available. Artwork PDF preview generation/retry continues through the existing `preview` paths. Mockup PDFs have `preview: null` and can be opened using `downloadUrl`. DOCX/PSD retain the existing unsupported-thumbnail behavior; the original can still be downloaded. Do not persist signed URLs. A storage failure leaves the entry visible with `unavailable: true`, an `error` (`minio_unavailable`, `storage_object_missing`, or `storage_object_mismatch`), and nullable URLs; retry/refetch later. No references, other clients' file details or standalone private object keys appear in the list.
+
+### PATCH /me/files/:fileId
+
+Body: `{ "saved": true }` or `{ "saved": false }`. The caller must own a ready `artwork` or `mockup` file. Returns `200 { file: File, usage: { usedBytes, limitBytes } }`. Saving twice preserves the original `savedAt` and does not consume extra quota; unmarking twice is also idempotent. An actual change writes `file.saved` / `file.unsaved` audit evidence in the same mutation transaction. Unmarking releases library quota immediately and resumes the **original** unsaved deadline, without resetting the completion/upload clock or deleting the object immediately. A file already past that deadline becomes eligible on the next enabled retention pass. Non-boolean `saved` is `400 invalid_saved_file_choice`; a non-artwork purpose is `400 saved_file_purpose_not_allowed`; a pending/deleted/deleting file is `409 file_not_ready`.
+
+### DELETE /me/files/:fileId
+
+Deletes an own saved artwork/mockup (also available through `DELETE /files/:fileId`). An unattached saved upload can be deleted. Every related order must already be `completed` or `payout_released`, and no draft cart may still use it (`409 file_in_use`). An open case or unresolved relationship returns `409 file_retention_hold`; a refusal leaves the file saved. This deletes the original and any cached thumbnail, not merely the library choice. Use PATCH to unmark instead.
+
+Successful deletion returns `200 { file: File, usage: { usedBytes, limitBytes } }` and frees space when its state is `deleted`. It uses the same durable intent, audit and locked storage deletion as ordinary early deletion. A later case can defer a pending deletion, and storage errors leave a retryable intent. Bytes still pending deletion count toward quota. Repeat deletion is safe. Super Admin early-deletion requests cannot erase saved artwork; only the owning client's explicit deletion or account closure can end the saved retention choice.
+
+### Reuse without re-upload
+
+Use a saved artwork `fileId` directly in the existing `POST /me/carts/:id/lines` or `PATCH /me/carts/:id/lines/:lineId`, either as `artworkFileId` or in `artworkAttachments: [{ "kind": "file", "fileId": "..." }]`. Reuse a saved mockup with the existing `PUT /me/carts/:id/lines/:lineId/mockup` body `{ "fileId": "..." }`. The normal ownership, ready-state, accepted-format, artwork-check and checkout rules still apply. Checkout adds the new order/line references to the same private original; it creates no byte copy or extra saved quota charge. The file remains saved across orders, and deletion checks every related order and case. Direct order attachment through `/files/:fileId/attach` retains its existing ownership checks too.
+
+### Per-client limit and account closure
+
+Artwork queued for account-closure deletion cannot acquire new cart or order references (`409 file_not_ready`). Existing open-order readers retain access while work/case holds defer cleanup; upload a new copy for a new request after restoration.
+
+`settings.savedFilesLimitBytes` defaults to **500 MB (`500000000` bytes)**, including for settings created before this field existed. Super Admin changes it through the existing `PATCH /settings` with `{ expectedVersion, reason, savedFilesLimitBytes }`; stale versions return `409 settings_version_conflict`. It must be a nonnegative safe integer (`400 invalid_saved_files_limit`). Zero prevents new nonempty saves. Reducing it below current usage preserves existing saved files and blocks further saves until enough space is freed. There is no effect on ordinary unsaved uploads or evidence retention.
+
+Usage sums the sizes of the caller's saved artwork/mockup files in `pending_upload`, `ready` or `delete_pending`. Saving past the limit returns:
+
+```json
+{
+  "error": "saved_files_limit_reached",
+  "message": "My files storage is full. Delete saved files or turn off Save to My files, then try again.",
+  "limitBytes": 500000000,
+  "usedBytes": 490000000,
+  "fileSizeBytes": 20000000
+}
+```
+
+This is `409` and leaves the save/upload uncommitted. Deleting files or unmarking them frees library capacity. Every save and upload reservation shares the domain transaction/advisory lock.
+
+Account suspension preserves saved choices. Account removal (`PATCH /users/:id/account`, `status: "removed"`) and completion of a verified in-app account-deletion request end them, append `file.saved_account_closed` audit entries and persist deletion requests. The worker removes those bytes after commit, independently of the automatic-retention flag, and retries at startup/daily reconciliation. Open orders, unresolved relationships and open cases defer deletion; completed/payout-released/cancelled orders qualify once their holds clear. Old draft carts cannot prolong saved retention after account closure. Pending uploads finish/compensate before cleanup can delete them. Restoring a removed account does not restore its prior save choices. Public web deletion intake/completion never maps a library by an unverified email: Operations must verify ownership and remove the mapped account through its existing process. Merely filing a deletion request does not remove files. Payment, invoice, delivery and verification evidence retain their existing rules.
 
 ## POST /files/:fileId/attach — bind to a domain record
 
@@ -372,7 +442,7 @@ Dashboard integration: fetch this API path with `Authorization: Bearer <Clerk se
 
 ## DELETE /files/:fileId — file deletion
 
-Auth: **Super Admin only**, or the owning client deleting their own `artwork` / `mockup` after every related order is `completed` or `payout_released`. Client artwork still used by a draft cart cannot be deleted. Clients cannot delete unattached uploads through this endpoint; unused uploads follow scheduled cleanup. Operations, suppliers and riders cannot delete files early, including their own verification evidence.
+Auth: **Super Admin only**, or the owning client deleting their own `artwork` / `mockup` after every related order is `completed` or `payout_released`. Client artwork still used by a draft cart cannot be deleted. The owner may also delete an unattached **saved** file; unattached unsaved uploads follow scheduled cleanup. Super Admin cannot delete saved artwork (`409 file_retention_hold`). Operations, suppliers and riders cannot delete files early, including their own verification evidence.
 
 Super Admin sends a JSON body `{ "reason": "Written reason for deletion" }`. A nonblank reason of at most 2,000 characters is required (`400 reason_required` / `reason_too_long`). Client deletion needs no body. Both actions append a durable `file.early_delete` audit entry with actor, file ID, purpose, timestamp, and the Super Admin's trimmed reason. Authorization follows the selected database membership, never token role claims.
 
@@ -393,7 +463,8 @@ The policy decided on 4 October 2026 is implemented in `src/file-retention-polic
 
 | File type | Retention |
 | --- | --- |
-| Client artwork and design files (`artwork`, `mockup`) | 30 days after order completion. Cancelled orders do not qualify as completed. |
+| Unsaved client artwork and design files (`artwork`, `mockup`) | 30 days after order completion. Cancelled orders do not qualify as completed. |
+| Ready client artwork/design files explicitly saved to My files | Until the client deletes/unmarks them or closes/deletes the account; open-order and case holds still apply. Unfinished uploads keep the existing grace/compensation lifecycle. |
 | Money proof (`payment_proof`, `payout_receipt`, `refund_receipt`) | 5 years after the order closes (completed, payout released, or cancelled). |
 | Refund QR revisions and supporting refund evidence (`refund_qr`, `refund_evidence`) | 5 years after order closure, as part of the financial evidence. |
 | Production and delivery photos, legacy fulfilment proofs, handoff signatures, client approval signatures and received-sample photos | 1 year after order closure. |
@@ -418,7 +489,7 @@ GRIDGO_FILE_RETENTION_DELETE_ENABLED=true npm run files:retention -- --execute
 
 Even `--execute` only reports counts while the flag is off. Real passes also report `deleted` and `failed`; a CLI pass with failures exits nonzero. Keep the flag off for the first production rollout. Firstmate must run the production dry run, report counts by file type, and stop for approval before enabling deletion. This implementation does not execute production cleanup.
 
-Privacy-notice wording for the landing/client follow-up: “We retain artwork for 30 days after completion, money evidence for five years after order closure, production/delivery evidence for one year, and verification documents while an account is active plus one year after closure or application rejection; open cases pause deletion.”
+Captain-approved replacement artwork wording for the landing/client privacy notice (26–29 October 2026 decision; website publication is a separate release task): “Artwork and design files, and mockups: 30 days after the order is completed. Files you choose to keep with 'Save to My files' stay in My files until you delete them or close your account. You can delete any of them sooner yourself once the order is completed and nothing about it is still open.” Money evidence stays at five years after order closure, production/delivery evidence at one year, and verification documents while an account is active plus one year after closure or application rejection; open cases pause deletion.
 
 ## File lifecycle and crash recovery
 
