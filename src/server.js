@@ -68,6 +68,8 @@ import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionTiming, productionLatenessTier } from './production-penalties.js';
 import { createFileRetention } from "./file-retention.js";
+import { DEFAULT_SAVED_FILES_LIMIT_BYTES, ownLibraryFile, setFileSaved, savedFilesUsage,
+  listSavedFiles, requestAccountSavedFileDeletion } from './saved-files.js';
 import { packingPhotoFiles } from "./packing-progress.js";
 import { productionPhotoFiles, signProductionPhotos } from "./production-progress.js";
 import { routeRefunds } from "./refunds.js";
@@ -403,6 +405,15 @@ async function save(view) {
   // A test operations view commits through its underlying full store.
   const store = mergeTestOperationsView(view);
   if (store !== view) moveQueuedInvalidates(view, store);
+  let closedSavedFiles = 0;
+  const savedOwners = new Set((store.files || []).filter(file => file.state !== 'deleted'
+    && (file.savedAt || file.saveToMyFilesRequestedAt)).map(file => file.ownerId));
+  for (const owner of store.users || []) {
+    if (owner.accountStatus === 'removed' && savedOwners.has(owner.id)) {
+      closedSavedFiles += requestAccountSavedFileDeletion(store, owner.id, { at: now(), audit });
+    }
+  }
+  if (closedSavedFiles) database.afterCommit(() => { void fileRetention.reconcile().catch(() => console.warn('saved file closure cleanup deferred')); });
   enforceReviewData(store, originalDomainStore(store));
   if ((store.files || []).some(file => file.colourAnalyses?.some(job => job.status === "pending"))) database.afterCommit(() => { void drainColourAnalyses().catch(() => console.warn("colour worker failed")); });
   assertSupplementCollectionsUnique(store);
@@ -562,6 +573,13 @@ async function legalResponse(req, res, url, user = null) {
 
 async function deletionRequestEvent({ action, id: requestId, eventId, actor, detail }) {
   const latest = await load();
+  if (action === 'account_deletion_request_completed') {
+    // Web intake never proves ownership and must not link a library by email.
+    const request = (await database.query('SELECT user_id FROM account_deletion_requests WHERE id=$1', [requestId])).rows[0];
+    if (request?.user_id && requestAccountSavedFileDeletion(latest, request.user_id, { at: now(), actor, audit })) {
+      database.afterCommit(() => { void fileRetention.reconcile().catch(() => console.warn('saved file deletion deferred')); });
+    }
+  }
   audit(latest, { actor, action, entityType: 'account_deletion_request', entityId: requestId, detail });
   const title = action === 'account_deletion_requested' ? 'Account deletion requested'
     : action === 'account_deletion_request_completed' ? 'Account deletion completed' : 'Apple revocation updated';
@@ -850,6 +868,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
+    savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
     hubPickup: publicHubPickup(rest),
     hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
@@ -3262,7 +3281,7 @@ async function handleAuditedRequest(req, res) {
 
     const needsInitializedStorage =
       (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
-      (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
+      (req.method === "DELETE" && /^\/(?:files|me\/files)\/[^/]+$/.test(pathname));
     if (storageInitializing && needsInitializedStorage) {
       throw new AttachmentError(
         503,
@@ -3272,23 +3291,44 @@ async function handleAuditedRequest(req, res) {
     }
 
     // ---- private files: streamed upload control plane + presigned MinIO download plane ----
+    if (req.method === 'GET' && pathname === '/me/files') {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      return send(res, 200, await listSavedFiles({ store, user, offset: Number(url.searchParams.get('offset') || 0), storage: objectStorage }));
+    }
+    if (req.method === 'PATCH' && /^\/me\/files\/[^/]+$/.test(pathname)) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      const body = await readBody(req);
+      const result = setFileSaved(store, user, pathname.split('/')[3], body?.saved, now());
+      if (result.changed) {
+        audit(store, { actor: user, action: body.saved ? 'file.saved' : 'file.unsaved', entityType: 'file', entityId: result.file.fileId });
+        await save(store);
+      }
+      return send(res, 200, { file: publicFile(result.file, user), usage: savedFilesUsage(store, user) });
+    }
     if (req.method === "POST" && pathname === "/files") {
       req.setTimeout(Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS || 15 * 60 * 1000));
       const { fields, file } = await parseMultipartStream(req, req.headers["content-type"], {
         tempDir: path.join(ROOT, ".tmp", "uploads"),
       });
       try {
-        const unexpectedFields = Object.keys(fields).filter((name) => name !== "purpose");
+        const unexpectedFields = Object.keys(fields).filter((name) => !['purpose', 'saveToMyFiles'].includes(name));
         if (unexpectedFields.length) {
           throw new AttachmentError(
             400,
             "unexpected_form_field",
-            `Remove the unsupported upload form field: ${unexpectedFields[0]}. Send only \`purpose\` and \`file\`.`,
+            `Remove the unsupported upload form field: ${unexpectedFields[0]}. Send only \`purpose\`, \`file\` and optional \`saveToMyFiles\`.`,
             { field: unexpectedFields[0] },
           );
         }
         const purpose = String(fields.purpose || "");
         authorizeFileUpload(user, purpose);
+        if (fields.saveToMyFiles !== undefined && !['true', 'false'].includes(fields.saveToMyFiles)) {
+          throw new AttachmentError(400, 'invalid_saved_file_choice', 'Send saveToMyFiles as true or false.');
+        }
+        const saveToMyFiles = fields.saveToMyFiles === 'true';
+        if (saveToMyFiles && !['artwork', 'mockup'].includes(purpose)) {
+          throw new AttachmentError(400, 'saved_file_purpose_not_allowed', 'Only artwork and design mockups can be saved to My files.');
+        }
         let detectedContentType = await validateUploadFromDisk(file, purpose);
         if (purpose === 'client_shop_chat_attachment') detectedContentType = await sanitizeChatUpload(file, detectedContentType);
         if (storageInitializing) {
@@ -3329,6 +3369,10 @@ async function handleAuditedRequest(req, res) {
           }
           authorizeFileUpload(latestUser, purpose);
           latestStore.files.push(pending);
+          if (saveToMyFiles) {
+            setFileSaved(latestStore, latestUser, fileId, true, createdAt, { pendingUpload: true });
+            audit(latestStore, { actor: latestUser, action: 'file.saved', entityType: 'file', entityId: fileId });
+          }
           await save(latestStore);
         });
 
@@ -3378,7 +3422,7 @@ async function handleAuditedRequest(req, res) {
             catch (error) { logPreviewFailure(fileId, 'upload_metadata', error); }
           }
           // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
-          return send(res, 201, { file: publicFile(ready) });
+          return send(res, 201, { file: publicFile(ready, ['artwork', 'mockup'].includes(purpose) ? user : null) });
         } catch (error) {
           await compensatePendingFile(fileId, objectKey);
           throw error;
@@ -3612,17 +3656,22 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, await fileRetention.run({ dryRun: true }));
     }
 
-    if (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname)) {
+    if (req.method === "DELETE" && /^\/(?:files|me\/files)\/[^/]+$/.test(pathname)) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
       const body = await readBody(req);
-      const deleted = await fileRetention.deleteEarly(pathname.split("/")[2], async (latestStore) => {
+      const libraryRoute = pathname.startsWith('/me/files/');
+      const fileId = pathname.split('/')[libraryRoute ? 3 : 2];
+      if (libraryRoute) ownLibraryFile(store, user, fileId, { savedOnly: true });
+      const deleted = await fileRetention.deleteEarly(fileId, async (latestStore) => {
         const latestUser = selectActorRole(
           latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
           { restrictMemberships: Boolean(eventRole) },
         );
         if (latestUser && accountHoldDenial(latestUser)) throw new AttachmentError(403, "forbidden");
+        if (libraryRoute) ownLibraryFile(latestStore, latestUser, fileId, { savedOnly: true });
         return latestUser;
       }, body?.reason);
-      return send(res, 200, { file: publicFile(deleted, user) });
+      return send(res, 200, { file: publicFile(deleted, user), ...(libraryRoute ? { usage: savedFilesUsage(await load(), user) } : {}) });
     }
 
     if (pathname.startsWith('/web-push/')) {
@@ -3964,6 +4013,7 @@ async function handleAuditedRequest(req, res) {
         foundingTesterLaunchAt: Object.hasOwn(body, 'foundingTesterLaunchAt') ? body.foundingTesterLaunchAt : (store.settings.foundingTesterLaunchAt ?? null),
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
         clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
+        savedFilesLimitBytes: Object.hasOwn(body, 'savedFilesLimitBytes') ? body.savedFilesLimitBytes : (store.settings.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES),
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours && {
           sameDayReviewMinutes: operatingHours(store.settings).sameDayReviewMinutes,
           sameDayPromiseAllowanceMinutes: operatingHours(store.settings).sameDayPromiseAllowanceMinutes, ...body.operatingHours,
@@ -7547,7 +7597,7 @@ const server = http.createServer((req, res) => {
     (req.method === "POST" && pathname === "/files") ||
     (req.method === 'POST' && /^\/files\/[^/]+\/(preview|preview-failure)$/.test(pathname)) ||
     (req.method === "POST" && /^\/files\/[^/]+\/attach$/.test(pathname)) ||
-    (req.method === "DELETE" && /^\/files\/[^/]+$/.test(pathname));
+    (req.method === "DELETE" && /^\/(?:files|me\/files)\/[^/]+$/.test(pathname));
   // Read-only despite POST: never hold the domain lock during outbound checks.
   if (req.method === "POST" && pathname === "/artwork/link-check") {
     void handleRequest(req, res);

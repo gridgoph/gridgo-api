@@ -1,6 +1,8 @@
 // Retention operates on domain relationships, never object-key naming conventions.
 const DAY = 86_400_000;
 const ARTWORK = new Set(['artwork', 'mockup']);
+export const DEFAULT_SAVED_FILES_LIMIT_BYTES = 500_000_000;
+export const isSavedArtwork = file => ARTWORK.has(file?.purpose) && Boolean(file.savedAt);
 const MONEY = new Set(['supplier_invoice', 'payment_proof', 'payout_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
 const PHOTOS = new Set(['finished_product_photo', 'packing_photo', 'production_photo', 'fulfilment_proof', 'delivery_photo', 'delivery_package_photo', 'handoff_signature', 'approval_signature', 'approval_sample_photo']);
 const CLOSED = new Set(['completed', 'payout_released', 'cancelled']);
@@ -78,6 +80,7 @@ export function retentionDecision(store, file, at) {
   if (file.purpose === 'legal_document') return keep('legal_evidence');
   if (file.purpose === 'client_shop_chat_attachment' && (file.references || []).length) return keep('order_chat_evidence');
   if (!['ready', 'pending_upload', 'delete_pending'].includes(file.state)) return keep('not_live');
+  if (isSavedArtwork(file)) return keep('saved_file');
   const links = fileRelationships(store, file);
   if (links.held) return keep('open_case');
   if (file.state === 'delete_pending' && file.deletionSource === 'early') {
@@ -128,8 +131,9 @@ export function assertEarlyFileDeletion(store, file, user, reason) {
     if (typeof reason !== 'string' || !reason.trim()) fail(400, 'reason_required');
     if (reason.trim().length > 2000) fail(400, 'reason_too_long');
   } else if (file.ownerId !== user.id || !ARTWORK.has(file.purpose)) fail(403, 'forbidden');
+  if (isSavedArtwork(file) && user.role !== 'client') fail(409, 'file_retention_hold');
   const links = fileRelationships(store, file);
   if (links.held) fail(409, 'file_retention_hold');
-  if (user.role === 'client' && (!links.orders.length || links.activeCart
+  if (user.role === 'client' && ((!links.orders.length && !isSavedArtwork(file)) || links.activeCart
     || links.orders.some((order) => order.clientId !== user.id || !['completed', 'payout_released'].includes(order.state)))) fail(409, 'file_in_use');
 }

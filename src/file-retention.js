@@ -1,7 +1,7 @@
 import { isPreviewDocument, previewObjectKey } from './artwork-preview.js';
 import { DOCX_CONTENT_TYPE } from './docx.js';
 import { invalidateRiderDocumentsForFile, markFileDeleted } from './attachments.js';
-import { assertEarlyFileDeletion, fileRelationships, retentionDecision } from './file-retention-policy.js';
+import { assertEarlyFileDeletion, fileRelationships, retentionDecision, isSavedArtwork } from './file-retention-policy.js';
 
 export function createFileRetention({ database, load, save, storage, enabled = false,
   now = () => new Date().toISOString(), id }) {
@@ -16,13 +16,25 @@ export function createFileRetention({ database, load, save, storage, enabled = f
     invalidateRiderDocumentsForFile(store, file, now());
     audit(store, file, source === 'retention' ? 'file.retention_delete' : 'file.early_delete', actor, reason);
   }
+  function closureDeletable(store, file) {
+    if (!['artwork', 'mockup'].includes(file?.purpose) || !file.savedFileDeletionRequestedAt) return false;
+    const links = fileRelationships(store, file);
+    // A closed account cannot check out its old draft carts. Historical order
+    // snapshots and every open-case hold still protect the original bytes.
+    return !links.held && links.orders.every(order => ['completed', 'payout_released', 'cancelled'].includes(order.state));
+  }
   async function finishPending(fileId) {
     return database.transaction(async () => {
       const store = await load();
       const file = store.files.find((row) => row.fileId === fileId);
-      if (!file || file.state !== 'delete_pending' || !['early', 'retention'].includes(file.deletionSource)
+      const links = file && fileRelationships(store, file);
+      if (!file || file.state !== 'delete_pending' || !['early', 'retention', 'saved_file', 'account_closed'].includes(file.deletionSource)
+        || (isSavedArtwork(file) && file.deletionSource !== 'saved_file')
+        || (file.deletionSource === 'saved_file' && (links.activeCart
+          || links.orders.some(order => !['completed', 'payout_released'].includes(order.state))))
+        || (file.deletionSource === 'account_closed' && !closureDeletable(store, file))
         || (file.deletionSource === 'retention' && (!enabled || !retentionDecision(store, file, now()).eligible))
-        || fileRelationships(store, file).held) return false;
+        || links.held) return false;
       // Keep the domain lock until deletion finishes: opening a case cannot race
       // the final protection check. The pending intent was committed separately.
       // Delete the deterministic derivative even if a crash prevented its
@@ -48,8 +60,9 @@ export function createFileRetention({ database, load, save, storage, enabled = f
       if (!['ready', 'delete_pending'].includes(file.state)) {
         throw Object.assign(new Error('file_state_conflict'), { status: 409, code: 'file_state_conflict' });
       }
-      if (file.state !== 'delete_pending' || file.deletionSource !== 'early') {
-        pending(store, file, 'early', latestActor, typeof reason === 'string' ? reason.trim() : null);
+      const source = isSavedArtwork(file) && latestActor.role === 'client' ? 'saved_file' : 'early';
+      if (file.state !== 'delete_pending' || file.deletionSource !== source) {
+        pending(store, file, source, latestActor, typeof reason === 'string' ? reason.trim() : null);
         await save(store);
       }
     });
@@ -87,7 +100,16 @@ export function createFileRetention({ database, load, save, storage, enabled = f
   }
   async function reconcile() {
     for (const file of (await load()).files) {
-      if (file.state !== 'delete_pending') continue;
+      if (file.state === 'ready' && file.savedFileDeletionRequestedAt) {
+        await database.transaction(async () => {
+          const store = await load();
+          const current = store.files.find(row => row.fileId === file.fileId);
+          if (current?.state !== 'ready' || !closureDeletable(store, current)) return;
+          pending(store, current, 'account_closed', null, 'account_closed');
+          await save(store);
+        });
+      }
+      if (file.state !== 'delete_pending' && !(file.state === 'ready' && file.savedFileDeletionRequestedAt)) continue;
       try { await finishPending(file.fileId); } catch { /* Retry on the daily pass. */ }
     }
   }

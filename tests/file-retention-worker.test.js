@@ -24,6 +24,64 @@ test('dry run counts each purpose without storage or metadata writes even when e
   assert.equal(report.total, 3); assert.deepEqual(report.byPurpose, { artwork: 1, payment_proof: 1, catalog_item_photo: 1 });
   assert.deepEqual(f.store, before); assert.equal(f.commits, 0); assert.equal(f.objects.size, 3);
 });
+test('saved artwork is skipped while unsaved files expire; legacy early retries cannot delete saved bytes', async () => {
+  const f = fixture({ enabled: true });
+  f.store.files[0].savedAt = '2020-01-01T00:00:00Z';
+  const result = await f.worker.run({ dryRun: false });
+  assert.equal(result.deleted, 2);
+  assert.equal(f.store.files[0].state, 'ready');
+  assert.ok(f.objects.has('private/artwork'));
+  Object.assign(f.store.files[0], { state: 'delete_pending', deletionSource: 'early' });
+  assert.equal(await f.worker.finishPending('artwork'), false);
+});
+test('own deletion of saved unattached artwork frees bytes with automatic cleanup off', async () => {
+  const f = fixture();
+  Object.assign(f.store.files[0], { savedAt: '2020-01-01T00:00:00Z', references: [] });
+  f.store.orders = [];
+  await f.worker.deleteEarly('artwork', { id: 'client', role: 'client' });
+  assert.equal(f.store.files[0].state, 'deleted');
+  assert.ok(!f.objects.has('private/artwork'));
+});
+test('account closure deletes saved files only after open orders and case holds clear, even with cleanup off', async () => {
+  const f = fixture();
+  Object.assign(f.store.files[0], { savedAt: null, savedFileDeletionRequestedAt: '2020-01-01T00:00:00Z' });
+  f.store.orders[0].state = 'production';
+  await f.worker.reconcile();
+  assert.equal(f.store.files[0].state, 'ready');
+  f.store.orders[0].state = 'completed'; f.hold();
+  await f.worker.reconcile();
+  assert.equal(f.store.files[0].state, 'ready');
+  f.store.issues = [];
+  await f.worker.reconcile();
+  assert.equal(f.store.files[0].state, 'deleted');
+  assert.ok(!f.objects.has('private/artwork'));
+  assert.equal(f.store.files[1].state, 'ready', 'money evidence is untouched');
+});
+test('a saved-file delete retry rechecks open work after a storage outage', async () => {
+  const f = fixture({ failDelete: true }); f.store.files[0].savedAt = '2020-01-01T00:00:00Z';
+  await assert.rejects(f.worker.deleteEarly('artwork', { id: 'client', role: 'client' }));
+  f.store.orders[0].state = 'production';
+  // Retry must refuse before contacting unavailable storage again.
+  assert.equal(await f.worker.finishPending('artwork'), false);
+});
+test('abandoned opted-in upload reservations expire under the unchanged grace policy', async () => {
+  const f = fixture({ enabled: true });
+  Object.assign(f.store.files[0], { state: 'pending_upload', saveToMyFilesRequestedAt: '2020-01-01T00:00:00Z', references: [] });
+  f.store.orders = [];
+  await f.worker.run({ dryRun: false });
+  assert.equal(f.store.files[0].state, 'deleted');
+});
+test('account-closure retries preserve newly opened cases and cancel neither money nor evidence retention', async () => {
+  const f = fixture();
+  Object.assign(f.store.files[0], { savedFileDeletionRequestedAt: '2020-01-01T00:00:00Z',
+    state: 'delete_pending', deletionSource: 'account_closed' });
+  f.hold();
+  assert.equal(await f.worker.finishPending('artwork'), false);
+  assert.ok(f.objects.has('private/artwork'));
+  f.store.issues = [];
+  assert.equal(await f.worker.finishPending('artwork'), true);
+  assert.equal(f.store.files[1].state, 'ready');
+});
 test('real cleanup is OFF by default, including an explicit execution request', async () => {
   const f = fixture(); const report = await f.worker.run({ dryRun: false });
   assert.equal(report.dryRun, true); assert.equal(report.deletionEnabled, false);

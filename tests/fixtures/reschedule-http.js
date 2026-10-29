@@ -23,12 +23,12 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
-export async function apiForTest(t, env = {}) {
-  const storage = http.createServer((req, res) => {
+export async function apiForTest(t, env = {}, { storageHandler } = {}) {
+  const storage = http.createServer(storageHandler || ((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
     else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
     else { res.writeHead(404); res.end(); }
-  });
+  }));
   await new Promise((resolve) => storage.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => storage.close(resolve)));
   const storageUrl = `http://127.0.0.1:${storage.address().port}`;
