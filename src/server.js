@@ -990,8 +990,28 @@ async function authenticateRequest(req, store) {
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
   const verified = await verifiedClerkClaimsFor(req);
   const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
-  if (auth.user) setAuditActor(auth.user);
+  if (auth.user) {
+    setAuditActor(auth.user);
+    noteLastAuthenticated(auth.user);
+  }
   return auth;
+}
+
+/**
+ * Last time GRIDGO accepted this account, for every role.
+ * A later instant replaces the stored one. The same instant does not.
+ * This is not `staff.sign_in`, and it does not store a session id or token.
+ */
+function noteLastAuthenticated(user) {
+  const at = now();
+  const current = Date.parse(user.lastAuthenticatedAt || "");
+  if (Number.isFinite(current) && current >= Date.parse(at)) return;
+  // Do not change the request's store: a later save must not reintroduce this
+  // optional write into the domain transaction. Directory reads see persisted
+  // telemetry on a subsequent load.
+  void database.recordLastAuthenticated(user.id, at).catch(error => {
+    console.warn(`Last authenticated write failed: ${error?.code || 'unknown'}`);
+  });
 }
 
 // Clerk owns sign-in. Record the first authenticated app bootstrap for a session;
@@ -1070,6 +1090,9 @@ function publicUser(u) {
   delete rest.accountStatusReason;
   delete rest.accountStatusAt;
   delete rest.accountStatusBy;
+  // Sign-in time is for the Roles directory (`GET /users`) only.
+  // Catalogue, matching, and every other publicUser payload omit it.
+  delete rest.lastAuthenticatedAt;
   // Clients always expose an authoritative accountType (never undefined for consumers).
   // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
   if (u.role === "client") {
@@ -1102,6 +1125,19 @@ function userWithAccountState(user) {
   const projected = publicUser(user);
   if (!projected) return projected;
   return { ...projected, ...accountStateFields(user), reviewData: isReviewData(user), version: user.version || 1 };
+}
+
+function directoryLastAuthenticatedAt(value) {
+  if (value == null || value === "") return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+/** `GET /users` is the only projection that includes when GRIDGO last accepted the account. */
+function directoryUser(user) {
+  const projected = userWithAccountState(user);
+  if (!projected) return projected;
+  return { ...projected, lastAuthenticatedAt: directoryLastAuthenticatedAt(user.lastAuthenticatedAt) };
 }
 
 function accountHoldDenial(user) {
@@ -4169,8 +4205,8 @@ async function handleAuditedRequest(req, res) {
       const testerFilter = url.searchParams.get('foundingTester');
       if (testerFilter != null && !['true', 'false'].includes(testerFilter)) return send(res, 400, { error: 'invalid_founding_tester_filter' });
       let list = role
-        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => userWithAccountState(roleDirectoryUser(store, u, role, { includeContactName: true })))
-        : store.users.map(userWithAccountState);
+        ? store.users.filter((u) => hasRole(store, u.id, role)).map((u) => directoryUser(roleDirectoryUser(store, u, role, { includeContactName: true })))
+        : store.users.map(directoryUser);
       list = list.map(u => u.role === 'client' ? { ...u, foundingTester: publicFoundingTester(store, u.id, now()).label !== null } : u);
       if (testerFilter != null) list = list.filter(u => u.role === 'client' && u.foundingTester === (testerFilter === 'true'));
       res.setHeader('Cache-Control', 'private, no-store');

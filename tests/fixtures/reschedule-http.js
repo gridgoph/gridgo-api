@@ -46,7 +46,8 @@ export async function apiForTest(t, env = {}) {
   t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise((resolve) => child.once('exit', resolve)); } });
   const origin = `http://127.0.0.1:${port}`;
   let healthy = false;
-  for (let n = 0; n < 200; n++) {
+  // Importing the API can take longer than five seconds on a cold start.
+  for (let n = 0; n < 800; n++) {
     if (child.exitCode !== null) throw new Error(output);
     try { if ((await fetch(`${origin}/health`)).ok) { healthy = true; break; } } catch {}
     await new Promise((resolve) => setTimeout(resolve, 25));
