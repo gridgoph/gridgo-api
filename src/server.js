@@ -33,6 +33,7 @@ import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } f
 import { ACTIVE_TRACKING_STATES, assignmentTime, pickupTime, currentRiderPings, latestPing, trackingSettings, locationFreshness, clientTracking, pingDiagnostics } from './rider-tracking.js';
 import { routePromotions } from './promotion-routes.js';
 import { reconcilePromotionInvites } from './promotions.js';
+import { testerBootstrapNeedsWrite } from './client-bootstrap.js';
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
@@ -302,6 +303,7 @@ import {
   isHotReadPath,
   loadHotReadStore,
   loadStore,
+  loadClientBootstrapStore,
   originalNotificationIds,
   saveDeviceTokenStore,
   saveStore,
@@ -390,7 +392,12 @@ function notifyMissingJobDetails(store, order) {
 
 async function refreshFoundingTester(store, clientId) {
   return enqueueMutation(async () => {
-    const latest = await load(), ctx = { id, at: now() };
+    let latest = await loadClientBootstrapStore(database, clientId);
+    const ctx = { id, at: now() };
+    if (!testerBootstrapNeedsWrite(latest, clientId, ctx)) return latest;
+    // A real change keeps the complete, audited save boundary. The probe and
+    // this reload run under the same transaction-scoped domain advisory lock.
+    latest = await load();
     let changed = matchTesterInvites(latest, ctx);
     changed = reconcilePromotionInvites(latest, ctx) || changed;
     changed = recordTesterCartStep(latest, clientId, ctx.at) || changed;
@@ -2424,7 +2431,7 @@ async function handleAuditedRequest(req, res) {
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
       })
       : hotRead ? await loadHotReadStore(database, notificationClaims?.claims?.sub || null, pathname, {
-        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), selectedRole: req.headers['x-gridgo-role'],
+        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'),
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
       }) : await load();
 

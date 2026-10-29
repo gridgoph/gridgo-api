@@ -38,13 +38,13 @@ test('a successful authentication records lastAuthenticatedAt and a later one mo
   assert.equal(Object.hasOwn(session.body.user, 'lastAuthenticatedAt'), false);
   assert.equal(JSON.stringify(session.body).includes('lastAuthenticatedAt'), false);
 
-  const first = await waitForTimestamp(db, 'client', value => typeof value === 'string');
+  const first = await waitForTimestamp(db, 'client', value => typeof value === 'string', () => api('client', 'GET', '/auth/me/client'));
   assert.equal(typeof first, 'string');
   assert.notEqual(first, AT);
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal((await api('client', 'GET', '/auth/me/client')).status, 200);
-  const second = await waitForTimestamp(db, 'client', value => Date.parse(value) > Date.parse(first));
+  const second = await waitForTimestamp(db, 'client', value => Date.parse(value) > Date.parse(first), () => api('client', 'GET', '/auth/me/client'));
   assert.ok(Date.parse(second) > Date.parse(first), `${second} should be later than ${first}`);
 
   const directory = await api('admin', 'GET', '/users');
@@ -63,7 +63,7 @@ test('a successful authentication records lastAuthenticatedAt and a later one mo
   assert.equal(Object.hasOwn(profile.body.user, 'lastAuthenticatedAt'), false);
 
   assert.equal((await api('supplier', 'GET', '/auth/me/supplier')).status, 200);
-  await waitForTimestamp(db, 'supplier', value => typeof value === 'string');
+  await waitForTimestamp(db, 'supplier', value => typeof value === 'string', () => api('supplier', 'GET', '/auth/me/supplier'));
   const matching = await api('admin', 'GET', '/orders/order/eligible-suppliers');
   assert.equal(matching.status, 200, JSON.stringify(matching.body));
   const supplier = matching.body.candidates.find((candidate) => candidate.supplier?.id === 'supplier');
@@ -168,8 +168,15 @@ test('a failing timestamp write cannot abort a mutation transaction', { skip: !D
   }
 });
 
-async function waitForTimestamp(db, userId, predicate) {
-  return waitFor(db, async () => userById(await loadStore(db), userId).lastAuthenticatedAt, predicate);
+async function waitForTimestamp(db, userId, predicate, retryAuthentication) {
+  return waitFor(db, async () => {
+    const value = userById(await loadStore(db), userId).lastAuthenticatedAt;
+    // Optional telemetry can skip a bootstrap's concurrent FK/key-share lock.
+    // Retry authentication instead of relying on a slow full-store read to
+    // give the independent timestamp connection time to win that race.
+    if (!predicate(value)) await retryAuthentication?.();
+    return value;
+  }, predicate);
 }
 
 test('timestamp SQL failures use a separate connection and leave the domain transaction usable', { skip: !DATABASE_URL }, async (t) => {

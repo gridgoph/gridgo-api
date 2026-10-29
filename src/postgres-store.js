@@ -981,23 +981,20 @@ async function readCatalogItemContext(graph, ids) {
   await read('platform_settings', 'WHERE singleton');
 }
 
-const HOT_READ_PATHS = new Set(['/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me']);
+const HOT_READ_PATHS = new Set(['/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
 export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname); }
 
 /** Explicit route graphs. Other routes retain the complete transactional adapter. */
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, selectedRole = null } = {}) {
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
-    // Client bootstrap reconciles founding/referral rewards under the domain
-    // lock; keep its complete write graph until that reconciliation is scoped.
-    if (pathname === '/auth/me' && (loaded.users[0]?.role === 'client' || selectedRole === 'client')) return loadStore(database);
-    if (pathname.startsWith('/auth/me')) {
+    if (pathname.startsWith('/auth/me') || pathname === '/me') {
       await read('platform_settings', 'WHERE singleton');
-      for (const name of ['supplier_profiles', 'rider_profiles']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
+      for (const name of ['client_profiles', 'supplier_profiles', 'rider_profiles', 'organization_accounts']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
       await read('rider_documents', 'WHERE rider_id = ANY($1::text[])', [ids]);
       if (pathname === '/auth/me/supplier') {
         await read('supplier_services', 'WHERE supplier_id = ANY($1::text[])', [ids]);
@@ -1036,6 +1033,46 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
       const owners = [...new Set([...ids, ...loaded.product_type_requests.map(row => row.supplier_id)])];
       await read('users', 'WHERE id = ANY($1::text[])', [owners]);
     }
+    return graph.finish();
+  });
+}
+
+/** Client bootstrap's read/probe facts, never a writable compatibility graph.
+ * Global invitation matching is existing bootstrap behaviour: only unresolved
+ * invitations and their identity/attribution facts are needed to test for work.
+ */
+export async function loadClientBootstrapStore(database, clientId) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database), { loaded, read } = graph;
+    await readIdentity(graph, [clientId]);
+    await read('platform_settings', 'WHERE singleton');
+    for (const name of ['client_profiles', 'supplier_profiles', 'rider_profiles', 'organization_accounts']) await read(name, 'WHERE user_id = $1', [clientId]);
+    await read('rider_documents', 'WHERE rider_id = $1', [clientId]);
+    await read('founding_testers', 'WHERE client_id = $1', [clientId]);
+    await read('tester_rewards', 'WHERE client_id = $1', [clientId]);
+    await read('tester_tracking', 'WHERE client_id = $1', [clientId]);
+    await read('orders', 'WHERE client_id = $1', [clientId]);
+    const orders = loaded.orders.map(row => row.id);
+    for (const name of ['order_payments', 'order_line_items', 'issues', 'refund_settlements', 'order_surveys']) await read(name, 'WHERE order_id = ANY($1::text[])', [orders]);
+    await read('client_carts', 'WHERE client_id = $1', [clientId]);
+    await read('client_cart_lines', 'WHERE cart_id = ANY($1::text[])', [loaded.client_carts.map(row => row.id)]);
+    await read('tester_invites', 'WHERE client_id IS NULL OR client_id = $1', [clientId]);
+    await read('promotion_invites', "WHERE status = 'invited'");
+    const emails = [...new Set([...loaded.tester_invites.filter(row => !row.client_id), ...loaded.promotion_invites.filter(row => !row.client_id)].map(row => row.email))];
+    const owners = [...new Set([clientId, ...loaded.tester_invites.map(row => row.inviter_id), ...loaded.promotion_invites.map(row => row.client_id)].filter(Boolean))];
+    // Keep unusual Unicode/whitespace emails as candidates for the JS matching
+    // policy: PostgreSQL lower/btrim need not have JavaScript's exact semantics.
+    await read('users', `WHERE id = ANY($1::text[]) ${emails.length ? "OR lower(btrim(email)) = ANY($2::text[]) OR email ~ '[^!-~]'" : ''}`, emails.length ? [owners, emails] : [owners]);
+    const identities = loaded.users.map(row => row.id);
+    await read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [identities]);
+    // Retain attributed rows too: both policies reject duplicate attribution.
+    await read('tester_invites', 'WHERE client_id IS NULL OR client_id = ANY($1::text[])', [identities]);
+    await read('promotion_invites', "WHERE status = 'invited' OR client_id = ANY($1::text[])", [identities]);
+    const rewardVoucher = loaded.founding_testers[0]?.reward_voucher_id || null;
+    await read('vouchers', `WHERE id = $1 OR (client_id = ANY($2::text[]) AND promotion_kind IN ('founding', 'friend_pass'))`, [rewardVoucher, identities]);
+    await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+    await read('voucher_reservations', "WHERE voucher_id = $1 AND status = 'reserved'", [rewardVoucher]);
+    await read('promotion_settings', "WHERE id = 'launch'");
     return graph.finish();
   });
 }

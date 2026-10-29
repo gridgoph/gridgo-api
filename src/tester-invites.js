@@ -102,13 +102,17 @@ export function referralChecks(store, invite) {
   }
   return { checks, evidence: { invitee }, blocked: Object.values(checks).some(c => c.status === 'match') };
 }
-export function reconcileTesterInvite(store, clientId, ctx) {
-  init(store);
+export function testerInviteNeedsReconciliation(store, clientId, { resume = false } = {}) {
   const invite = store.testerInvites.find(i => i.clientId === clientId);
   if (!invite || !client(store, invite.inviterId) || !foundingTesterEligible(store, clientId)
     || testerProgress(store, clientId, { preserveAward: false }).completedCount !== 5) return false;
   const previous = store.testerRewards.find(r => r.kind === 'referral' && r.clientId === clientId);
-  if (previous && (!ctx.resume || previous.status !== 'paused')) return false;
+  return !previous || (resume && previous.status === 'paused');
+}
+export function reconcileTesterInvite(store, clientId, ctx) {
+  init(store);
+  if (!testerInviteNeedsReconciliation(store, clientId, ctx)) return false;
+  const invite = store.testerInvites.find(i => i.clientId === clientId);
   invite.completedAt ||= ctx.at;
   const reward = createTesterReward(store, { kind: 'referral', clientId, inviterId: invite.inviterId, inviteId: invite.id, amountMinor: promotionSettings(store).rewards.inviteMinor * 2 }, ctx);
   const { checks, evidence, blocked } = referralChecks(store, invite);
