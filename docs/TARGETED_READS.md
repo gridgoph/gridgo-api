@@ -1,4 +1,4 @@
-# Targeted reads: first delivery for issue 307
+# Targeted reads for issue 307
 
 This is an incremental replacement of the compatibility store reader. Domain
 mutations still use `loadStore` and `saveStore` under their existing transaction
@@ -15,7 +15,8 @@ and authorization/projection functions.
 | `/settings` | Singleton settings, caller identity/memberships/cases, the configured QR file |
 | `/taxonomy`, `/zones`, `/catalog` | The requested reference collection and caller authorization facts |
 | `/auth/me/{ops,admin,supplier,rider}` | Caller identity, profiles, memberships/cases/documents; own supplier readiness inputs where needed; one indexed staff-session audit row |
-| Non-client `/auth/me` | Caller identity graph; unchanged Clerk profile copies avoid a write transaction/full reload |
+| `/auth/me` | Caller identity graph; unchanged Clerk profile copies avoid a write transaction/full reload |
+| Client `/me`, `/auth/me/client`, `/auth/me` bootstrap | Caller progress, profiles, organization and reward voucher; unresolved invitation identity/attribution facts; no inbox, audit, ping or push history |
 | `/ops/product-type-requests` | Existing 51-row cursor/status query and supplier review marks |
 | `/ops/catalog-reviews` | Existing 51-row review cursor/status query and those listings' projection/blocker inputs |
 | `/ops/colour-price-checks` | Draft-cart lines referencing colour-priced current/approved listings and their quote inputs/artwork metadata |
@@ -52,8 +53,10 @@ It signs local RSA Clerk tokens and uses a local Clerk stub; it never connects
 to production or Clerk. It records ten measured requests per route/scale using
 the API's own request log after warm-up, plus database rows returned by the
 complete reader and scoped readers. The default uses the current server.
-`PERF_SERVER_REF=<base-commit>` loads an older server entrypoint from Git without
-another checkout (requires Node with `module.registerHooks`, e.g. Node 24).
+`PERF_SERVER_REF=<base-commit>` loads the older application and its `src` modules
+from Git without another checkout (requires Node with `module.registerHooks`,
+e.g. Node 24). Row-count instrumentation always uses the working-tree readers;
+the JSON records both references explicitly.
 `PERF_LABEL`, `PERF_SAMPLES`, `PERF_BASE_ROWS` and `PERF_PRINT_LOGS=1` customize
 reporting. The child API binds an available loopback port and is stopped by its
 own child PID.
@@ -98,19 +101,75 @@ the notification candidate query returns at most 100 rows per batch.
 `notifications_inbox_page_idx` (100 rows, 0.227 ms) and
 `notifications_watermark_idx` (one row, 0.093 ms).
 
+## Client bootstrap follow-up (29 October 2026)
+
+Client bootstrap still enters the same domain transaction and advisory lock.
+`loadClientBootstrapStore` reads only the current client's progress and public
+reward facts plus unresolved global invitations and their matching/attribution
+facts. The existing invitation policies run on a disposable copy. The existing
+reward entry guards decide whether reconciliation can change anything. When it
+can, the handler reloads the complete writable graph and executes the original
+reconciliation/save path inside that same lock. A no-op returns the scoped
+projection without reading historical tables. Scoped graphs still cannot be
+saved. No cache, reward rule, response shape or transaction boundary changes.
+
+The new forward migration adds indexes for normalized identity lookup,
+unresolved invitations, attribution and active voucher reservations. Unusual
+Unicode/whitespace emails remain candidates for JavaScript's existing matching
+policy; SQL normalization cannot silently change attribution.
+
+Measured against the pre-change base `0206e28`, using private PostgreSQL 17 and
+MinIO, available loopback API ports and a local Clerk stub. Five measured
+API-log samples per route/scale after warm-up; histories contain 10,000 then
+100,000 rows **each** in notifications, audit, location pings and delivered push
+outbox. This repeats the first delivery's synthetic volume profile; it is an
+approximation, not a copy or inventory of current production data. The full
+suite was not running during these measurements.
+
+| Client route | Before 1× median | After 1× median | Before 10× median | After 10× median | After 10× p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `/me` | 554 ms | 8 ms | 6109 ms | 10 ms | 11 ms |
+| `/auth/me/client` | 524 ms | 9 ms | 5224 ms | 8 ms | 15 ms |
+| `/auth/me` | 511 ms | 10 ms | 5473 ms | 10 ms | 11 ms |
+
+The complete reader transfers **30,300 → 300,300** rows (111 queries). Client
+bootstrap transfers **8 → 8** rows (30 queries), realtime identities **5 → 5**,
+inbox **106 → 106**, settings **4 → 4**, and a claimed push batch **7 → 7**.
+Other already-converted hot paths measured 3–9 ms median at 10× history.
+With 10,000 unrelated identities, `EXPLAIN (ANALYZE, BUFFERS)` for the invitation
+identity query used a bitmap combination of the primary key, normalized-email
+index and unusual-email partial index (one returned row, 0.038 ms execution).
+The benchmark reports `/auth/me?client` as the client-token sample label; the
+route is the same `/auth/me` and the query is ignored by the handler.
+
+`tests/client-bootstrap-reads-postgres.test.js` compares actual HTTP responses
+against the full-store reader for all three changed routes, including every
+existing role, selected-role failures, unmapped/anonymous sessions, account
+suspension, business/organization profiles, multiple memberships and awarded
+vouchers. It compares progress and reconciliation decisions against full-store
+facts, tests Unicode invitation matching, and asserts constant rows/projections
+under unrelated history growth. The test-only module hook selects the complete
+reader and freezes both clocks; the API has no runtime legacy-reader switch.
+The final complete `npm test -- --maxWorkers=2` run passed **2,031 tests** with
+zero failures/skips on private PostgreSQL 17. The optional authentication
+timestamp test retries authentication while polling, since its existing
+best-effort write can skip a concurrent bootstrap foreign-key lock; runtime
+timestamp/locking behaviour is unchanged.
+
 ## Remaining work
 
 Issue 307 remains open. This delivery preserves response contracts and does not
 claim production acceptance or complete removal of `loadStore`.
 
-- Main request fallback: `/orders` and detail/job projections, `/me`, client
-  `/auth/me` and `/auth/me/client`, matching/carts/catalogue operations, file
+- Main request fallback: `/orders` and detail/job projections,
+  matching/carts/catalogue operations, file
   routes, remaining operational reads and unrecognized paths. Order projections
   include cross-order counters, finance/hold graphs and private file access;
   these need dedicated differential tests before scoping.
-- Client bootstrap reconciliation (`refreshFoundingTester`) matches invitations
-  and can award money. Staff's first sign-in and changed Clerk identity copies
-  still take the complete audited mutation path.
+- Client bootstrap when the scoped probe finds real reconciliation work (new
+  invitation matching, cart-step recording or a possible reward), staff's first
+  sign-in and changed Clerk identity copies retain the complete mutation path.
+  Global unresolved invitation work remains part of bootstrap compatibility.
 - Unconditional production penalty/performance and inactivity sweeps, file
   retention/reconciliation, and workers/lifecycle handlers when a candidate
   actually needs a mutation still use the complete store. They need scoped
@@ -127,7 +186,9 @@ claim production acceptance or complete removal of `loadStore`.
 
 ### Remaining compatibility-loader call sites
 
-The explicit `load()` calls remaining in `src/server.js` at this revision are:
+The following line inventory records the **first delivery** (23 October), before
+later route additions; use function names rather than these historical line
+numbers to locate the current call sites:
 
 | Purpose | Lines |
 | --- | --- |
@@ -143,7 +204,7 @@ The explicit `load()` calls remaining in `src/server.js` at this revision are:
 | Artwork link/checkout preparation | 7594, 7604 |
 | Active calls, due shop acceptance, hub reminder, voucher, survey and tester-reminder mutations | 7664, 7686, 7702, 7722, 7738, 7753 |
 
-`loadHotReadStore` also deliberately falls back to `loadStore` for the client
-`/auth/me` reconciliation path. This inventory identifies follow-up work; it is
-not an assertion that these mutation graphs can safely be replaced by read-only
-stores.
+Client `/auth/me` no longer falls back inside `loadHotReadStore`. Real bootstrap
+mutations still reload through `refreshFoundingTester`. This inventory identifies
+follow-up work; it does not assert that mutation graphs can safely be replaced
+by read-only stores.

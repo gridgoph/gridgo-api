@@ -69,10 +69,14 @@ function notify(store, clientId, type, title, body, { id, at }, push = true) {
   queueInvalidate(store, { resource: 'notifications', userIds: [clientId] });
 }
 /** One account at a time inside the domain transaction. No background bulk award. */
-export function reconcileFoundingTester(store, clientId, { id, at, resume = false, actorId = null }) {
+export function foundingTesterNeedsReconciliation(store, clientId, { resume = false } = {}) {
   if (!foundingTesterEligible(store, clientId) || account(store, clientId)?.awardedAt || testerProgress(store, clientId).completedCount !== 5) return false;
   const previous = store.testerRewards?.find(r => r.kind === 'mission' && r.clientId === clientId);
-  if (previous && (!resume || previous.status !== 'paused')) return false;
+  return !previous || (resume && previous.status === 'paused');
+}
+export function reconcileFoundingTester(store, clientId, { id, at, resume = false, actorId = null }) {
+  if (!foundingTesterNeedsReconciliation(store, clientId, { resume })) return false;
+  const previous = store.testerRewards?.find(r => r.kind === 'mission' && r.clientId === clientId);
   const row = rowFor(store, clientId);
   const prior = (store.orderSurveys || []).filter(s => s.clientId === clientId && s.rewardVoucherId).sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))[0];
   const reusedVoucher = prior && store.vouchers.find(v => v.id === prior.rewardVoucherId);

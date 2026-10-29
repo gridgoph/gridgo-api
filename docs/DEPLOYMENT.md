@@ -444,11 +444,35 @@ an unchanged save's intent (see `docs/SCHEDULING_API.md`).
 
 ## PostgreSQL query statistics
 
+The production `postgres:17-alpine` image includes both
+`pg_stat_statements.so` and `extension/pg_stat_statements.control`; no custom
+database image or new API dependency is required. Verify the installed image
+before the maintenance window:
+
+```sh
+docker exec gridgo-postgres sh -c 'ls "$(pg_config --pkglibdir)/pg_stat_statements.so" "$(pg_config --sharedir)/extension/pg_stat_statements.control"'
+docker exec gridgo-postgres psql -U gridgo_api -d gridgo -c 'SHOW shared_preload_libraries'
+```
+
 The server and local compose files preload `pg_stat_statements`. CI does not
 install the server compose file: an operator must copy this change and recreate
 only PostgreSQL during an approved maintenance window (the named volume stays).
 If other preload libraries are configured, retain them in the comma-separated
 `shared_preload_libraries` value. No API boot code changes database settings.
+
+If the installed server compose file lacks that setting, install the reviewed
+`postgres.command` from `deploy/docker-compose.yml` (preserving any other preload
+libraries), then run these exact commands during the maintenance window:
+
+```sh
+cd ~/gridgo/api
+docker compose up -d --wait --no-deps --force-recreate postgres
+docker exec gridgo-postgres pg_isready -U gridgo_api -d gridgo
+docker exec gridgo-postgres psql -U gridgo_api -d gridgo -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements'
+```
+
+The recreation reuses `gridgo_postgres_data`; do not remove the volume. The
+extension is enabled separately in each database an operator wants to measure.
 
 After PostgreSQL restarts, a database administrator enables the extension in the
 GRIDGO database, once:

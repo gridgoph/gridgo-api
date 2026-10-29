@@ -11,7 +11,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createDatabase } from '../src/database.js';
-import { loadStore, saveStore, loadHotReadStore, loadInboxStore, loadPushDeliveryStore } from '../src/postgres-store.js';
+import { loadStore, saveStore, loadHotReadStore, loadInboxStore, loadPushDeliveryStore, loadDeliveryStore, loadClientBootstrapStore } from '../src/postgres-store.js';
 import { seedReferenceData } from '../src/seed.js';
 import { resetDatabase } from '../tests/fixtures/reset-database.js';
 
@@ -20,9 +20,9 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLen
 const issuer = 'https://benchmark.clerk.accounts.dev', party = 'http://localhost:19006';
 const samples = Number(process.env.PERF_SAMPLES || 10);
 const baseRows = Number(process.env.PERF_BASE_ROWS || 10000);
-function token() {
+function token(subject = 'clerk_perf_ops') {
   const now = Math.floor(Date.now() / 1000);
-  const parts = [Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'perf' })).toString('base64url'), Buffer.from(JSON.stringify({ iss: issuer, sub: 'clerk_perf_ops', sid: 'perf-session', azp: party, iat: now - 5, nbf: now - 5, exp: now + 3600 })).toString('base64url')];
+  const parts = [Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'perf' })).toString('base64url'), Buffer.from(JSON.stringify({ iss: issuer, sub: subject, sid: 'perf-session', azp: party, iat: now - 5, nbf: now - 5, exp: now + 3600 })).toString('base64url')];
   const payload = parts.join('.');
   return `${payload}.${crypto.sign('RSA-SHA256', Buffer.from(payload), privateKey).toString('base64url')}`;
 }
@@ -67,6 +67,8 @@ async function readerRows() {
     full: await count(loadStore),
     settings: await count(db => loadHotReadStore(db, 'clerk_perf_ops', '/settings')),
     inbox: await count(db => loadInboxStore(db, 'clerk_perf_ops')),
+    clientBootstrap: await count(db => loadClientBootstrapStore(db, 'perf_client')),
+    realtime: await count(db => loadDeliveryStore(db, { userIds: ['perf_ops'] })),
     push: await count(db => loadPushDeliveryStore(db, [{ user_id: 'perf_ops', notification_id: 'perf_notice_1', device_id: 'perf_device' }])),
   };
 }
@@ -76,14 +78,19 @@ async function measure(scale) {
   // real RSA/issuer/azp verification. Never contact a real identity provider.
   const clerk = http.createServer((req, res) => { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end('{"errors":[{"code":"not_found"}]}'); });
   clerk.listen(0, '127.0.0.1'); await once(clerk, 'listening');
-  // Optional baseline entrypoint, loaded from Git without another checkout or
-  // modifying the worktree. Shared reader implementation remains identical.
+  // Optional baseline application, loaded from Git without another checkout or
+  // modifying the worktree. Load all src modules at that ref, including readers.
   const hook = `import { registerHooks } from 'node:module';
     import { execFileSync } from 'node:child_process';
-    import { pathToFileURL } from 'node:url';
-    const source = execFileSync('git', ['show', process.env.PERF_SERVER_REF + ':src/server.js'], {encoding:'utf8'});
-    const entry = pathToFileURL(process.cwd() + '/src/server.js').href;
-    registerHooks({load(url, context, next) { return url === entry ? {format:'module',source,shortCircuit:true} : next(url,context); }});`;
+    import { fileURLToPath } from 'node:url';
+    import { relative } from 'node:path';
+    registerHooks({load(url, context, next) {
+      if (!url.startsWith('file:')) return next(url,context);
+      const path = relative(process.cwd(), fileURLToPath(url));
+      if (!path.startsWith('src/') || !path.endsWith('.js')) return next(url,context);
+      const source = execFileSync('git', ['show', process.env.PERF_SERVER_REF + ':' + path], {encoding:'utf8'});
+      return {format:'module',source,shortCircuit:true};
+    }});`;
   const args = process.env.PERF_SERVER_REF ? ['--import', `data:text/javascript,${encodeURIComponent(hook)}`, 'src/server.js'] : ['src/server.js'];
   const child = spawn(process.execPath, args, { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test', CLERK_SECRET_KEY: 'test-only-placeholder', CLERK_ISSUER: issuer, CLERK_AUTHORIZED_PARTIES: party, CLERK_JWT_KEY: publicKey.export({ type: 'spki', format: 'pem' }), CLERK_API_URL: `http://127.0.0.1:${clerk.address().port}`, GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000', GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: '0', GRIDGO_FCM_SERVICE_ACCOUNT_FILE: '', GRIDGO_APNS_KEY_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
@@ -95,24 +102,25 @@ async function measure(scale) {
     }
     // Wait for startup lifecycle work so the sample excludes startup contention.
     await new Promise(resolve => setTimeout(resolve, 1000));
-    const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks'];
+    const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/me', '/auth/me/client', '/auth/me?client'];
+    const subjectFor = path => ['/me', '/auth/me/client', '/auth/me?client'].includes(path) ? 'clerk_perf_client' : 'clerk_perf_ops';
     for (const path of paths) {
-      const warm = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token()}` } });
+      const warm = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token(subjectFor(path))}` } });
       assert.equal(warm.status, 200, `${path}: ${await warm.text()}`);
     }
-    await new Promise(resolve => setTimeout(resolve, 50)); output = '';
-    for (let i = 0; i < samples; i++) for (const path of paths) {
-      const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token()}` } });
-      assert.equal(response.status, 200, path); await response.arrayBuffer();
-    }
-    await new Promise(resolve => setTimeout(resolve, 50));
     const timings = {};
     for (const path of paths) {
-      const values = [...output.matchAll(/\[gridgo-api\] GET (\S+) 200 (\d+)ms/g)].filter(m => m[1] === path).map(m => Number(m[2])).sort((a, b) => a - b);
+      await new Promise(resolve => setTimeout(resolve, 50)); output = '';
+      for (let i = 0; i < samples; i++) {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token(subjectFor(path))}` } });
+        assert.equal(response.status, 200, path); await response.arrayBuffer();
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const values = [...output.matchAll(/\[gridgo-api\] GET (\S+) 200 (\d+)ms/g)].filter(m => m[1] === path.split('?')[0]).map(m => Number(m[2])).sort((a, b) => a - b);
       assert.equal(values.length, samples, `request log samples ${path}`);
       timings[path] = { medianMs: values[Math.floor(values.length / 2)], p95Ms: values[Math.ceil(values.length * .95) - 1] };
     }
-    console.log(JSON.stringify({ label: process.env.PERF_LABEL || 'current', scale, rowsPerHistoryTable: baseRows * scale, timings, reads: await readerRows() }));
+    console.log(JSON.stringify({ label: process.env.PERF_LABEL || 'current', serverRef: process.env.PERF_SERVER_REF || 'working-tree', scale, rowsPerHistoryTable: baseRows * scale, timings, readerRef: 'working-tree', reads: await readerRows() }));
     if (process.env.PERF_PRINT_LOGS === '1') console.log(output);
   } finally {
     // Only the child PID created by this process is signalled.
