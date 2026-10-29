@@ -475,6 +475,10 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     id: "option_item_a_matte", optionGroupId: "group_item_a_paper", label: "Matte",
     priceModifierMinor: 2_500, specBinding: null, active: true, sortOrder: 0,
   });
+  store.catalogOptions.push({
+    id: "option_item_a_retired", optionGroupId: "group_item_a_paper", label: "Retired",
+    priceModifierMinor: 9_999, active: false, sortOrder: 1,
+  });
   const call = caller(store, client);
   const created = await call("POST", "/me/carts", { fulfillmentMode: "pickup" });
   const cartId = created.body.cart.id;
@@ -493,6 +497,9 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     distanceZone: null,
     name: "supplier_a Flyers",
     supplierId: "supplier_a",
+    subcategoryCode: "flyers",
+    pricingUnit: "per_unit",
+    measureUnit: null,
     fromPriceMinor: 12_500,
     effectivePriceMinor: 12_500,
     clientFromPriceMinor: 13_750,
@@ -501,6 +508,11 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     printLayouts: [],
     express: false,
     coverSpineForm: false,
+    acceptedFormats: [{ code: "pdf", displayName: "PDF", inputKind: "file", active: true }],
+    optionGroups: [{
+      id: "group_item_a_paper", name: "Paper", kind: "spec", required: true, sortOrder: 0,
+      options: [{ id: "option_item_a_matte", label: "Matte", specBinding: null, sortOrder: 0 }],
+    }],
     selectedOptions: [{ id: "option_item_a_matte", label: "Matte" }],
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, 25_000);
@@ -521,6 +533,53 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
   assert.equal(removed.status, 200);
   assert.equal(removed.body.cart.lines.length, 1);
   assert.equal(Object.hasOwn(removed.body.cart.lines[0].listing, "photos"), false);
+});
+
+test("cart line mutations carry effective artwork formats without a listing cache", async (t) => {
+  const pdf = {
+    code: "pdf", displayName: "PDF", inputKind: "file", active: true,
+    extensions: ["pdf"], mimeTypes: ["application/pdf"],
+  };
+  const canva = {
+    code: "canva_link", displayName: "Canva link", inputKind: "url", active: true,
+    extensions: [], mimeTypes: [],
+  };
+  for (const mode of ["inherit", "override"]) {
+    await t.test(mode, async () => {
+      const { store, client } = fixture();
+      store.acceptedFileFormats = [pdf, canva, { code: "retired", active: false }];
+      const item = store.catalogItems.find((row) => row.id === "item_a");
+      item.fileFormatMode = mode;
+      store.catalogItemFileFormats.push(
+        { catalogItemId: item.id, formatCode: "pdf" },
+        { catalogItemId: item.id, formatCode: "canva_link" },
+        { catalogItemId: item.id, formatCode: "retired" },
+        { catalogItemId: item.id, formatCode: "unknown" },
+      );
+      const call = caller(store, client);
+      const cartId = (await call("POST", "/me/carts", { fulfillmentMode: "pickup" })).body.cart.id;
+      const added = await call("POST", `/me/carts/${cartId}/lines`, {
+        catalogItemId: item.id, optionIds: [], quantity: 1,
+      });
+      const expected = mode === "inherit" ? [pdf] : [canva, pdf];
+      const assertFormats = (response) => {
+        for (const line of response.body.cart.lines) {
+          assert.deepEqual(line.listing.acceptedFormats, expected);
+          // These are the reads the installed Artwork screen makes immediately.
+          assert.deepEqual(line.listing.acceptedFormats.filter((format) => format.inputKind === "file"), [pdf]);
+          assert.deepEqual(line.listing.acceptedFormats.filter((format) => format.inputKind === "url"), mode === "inherit" ? [] : [canva]);
+        }
+      };
+      assertFormats(added);
+      assertFormats(await call("GET", `/me/carts/${cartId}`));
+      assertFormats(await call("PATCH", `/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`, { quantity: 2 }));
+      const second = await call("POST", `/me/carts/${cartId}/lines`, {
+        catalogItemId: item.id, optionIds: [], quantity: 1,
+      });
+      assertFormats(second);
+      assertFormats(await call("DELETE", `/me/carts/${cartId}/lines/${second.body.cart.lines[0].id}`));
+    });
+  }
 });
 
 test("cart payloads include one shop counter per selected supplier", async () => {
@@ -628,6 +687,9 @@ test("a tarpaulin cart line is refused when requested width exceeds the printer 
   });
   assert.equal(fits.status, 201);
   assert.equal(fits.body.cart.lines[0].listing.printerMaxWidthFeet, 5);
+  assert.equal(fits.body.cart.lines[0].listing.subcategoryCode, "tarpaulins_outdoor_banners");
+  assert.equal(fits.body.cart.lines[0].listing.pricingUnit, "per_area");
+  assert.equal(fits.body.cart.lines[0].listing.measureUnit, "ft");
 
   await assert.rejects(
     call("PATCH", `/me/carts/${cartId}/lines/${fits.body.cart.lines[0].id}`, {
@@ -658,6 +720,10 @@ test("document pages come from the file, selected pages price copies and snapsho
     catalogItemId: item.id, optionIds: [], quantity: 2, measurement: { pages: 1 },
   });
   assert.equal(added.body.cart.lines[0].lineSubtotalMinor, null);
+  assert.equal(added.body.cart.lines[0].listing.pricingUnit, "per_page");
+  assert.deepEqual(added.body.cart.lines[0].listing.prepareFile, {
+    recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false,
+  });
   const url = `/me/carts/${cartId}/lines/${added.body.cart.lines[0].id}`;
   const attached = await call("PATCH", url, { artworkFileId: file.fileId, measurement: { pages: 999 } });
   assert.deepEqual(attached.body.cart.lines[0].measurement, { pages: 30 });
