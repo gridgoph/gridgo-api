@@ -36,8 +36,10 @@ import {
   identityHasMembership } from "./authorization-context.js";
 import {
   catalogItemBlockers,
+  catalogGroupsForItem,
   clientMoneyMinor,
   createOrderLineSnapshot,
+  effectiveAcceptedFormats,
   itemTurnaroundHours,
   listingFitsPrinterCap,
   minimumCatalogPrice,
@@ -447,6 +449,9 @@ function publicCartListingStub(store, item, optionIds) {
     id: item.id,
     name: item.name,
     supplierId: item.supplierId,
+    subcategoryCode: item.subcategoryCode,
+    pricingUnit: item.pricingUnit || "per_unit",
+    measureUnit: item.measureUnit ?? null,
     fromPriceMinor: item.pricedByColour ? clientMoneyMinor(store,fromPriceMinor) : fromPriceMinor,
     effectivePriceMinor: selected.effectiveUnitPriceMinor,
     clientFromPriceMinor: clientMoneyMinor(store, fromPriceMinor),
@@ -456,6 +461,22 @@ function publicCartListingStub(store, item, optionIds) {
     ...(item.pricedByColour || item.oneColour || item.colourPricing ? {pricedByColour: item.pricedByColour === true, oneColour: item.oneColour === true, colourPricing: publicColourListing(item.colourPricing)} : {}),
     express: listingExpress(item),
     coverSpineForm: coverSpineApplies(item),
+    // Artwork opens from this response even when the client's listing cache is empty.
+    acceptedFormats: effectiveAcceptedFormats(store, item),
+    ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
+    optionGroups: catalogGroupsForItem(store, item.id, { includeInactiveOptions: false }).map((group) => ({
+      id: group.id,
+      name: group.name,
+      kind: group.kind,
+      required: group.required,
+      sortOrder: group.sortOrder,
+      options: group.options.map((option) => ({
+        id: option.id,
+        label: option.label,
+        specBinding: option.specBinding ?? null,
+        sortOrder: option.sortOrder,
+      })),
+    })),
     selectedOptions: selected.selectedOptions.map((option) => ({ id: option.id, label: option.label })),
   };
 }
