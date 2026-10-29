@@ -53,7 +53,7 @@ function rowKey(row, columns) {
 const TABLES = [
   { name: "season_windows", keys: ["id"], columns: ["id", "name", "start_date", "end_date", "demand_level", "message", "version", "notice_queued_at", "created_at", "updated_at"] },
   { name: "platform_settings", keys: ["singleton"], columns: ["singleton", "version", "settings"] },
-  { name: "users", keys: ["id"], columns: ["review_data", "id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "position", "data"] },
+  { name: "users", keys: ["id"], columns: ["review_data", "id", "clerk_user_id", "email", "name", "phone", "role", "account_type", "org_name", "verification_status", "account_status", "account_status_reason", "account_status_at", "account_status_by", "shop_lat", "shop_lng", "shop_label", "version", "created_at", "last_authenticated_at", "position", "data"] },
   { name: "organization_accounts", keys: ["user_id"], columns: ["user_id", "name_key", "school_key", "data"] },
   { name: "organization_email_challenges", keys: ["user_id"], columns: ["user_id", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
@@ -264,8 +264,9 @@ function rowsFromStore(store) {
       shop_label: user.shop?.label ?? null,
       version: user.version || 1,
       created_at: user.createdAt,
+      last_authenticated_at: user.lastAuthenticatedAt ?? null,
       position,
-      data: without(user, ["reviewData", "id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "accountStatus", "accountStatusReason", "accountStatusAt", "accountStatusBy", "shop", "version", "createdAt"]),
+      data: without(user, ["reviewData", "id", "clerkUserId", "email", "name", "phone", "role", "accountType", "orgName", "verificationStatus", "accountStatus", "accountStatusReason", "accountStatusAt", "accountStatusBy", "shop", "version", "createdAt", "lastAuthenticatedAt"]),
     });
   }
   for (const membership of (store.userRoleMemberships || [])) {
@@ -1155,6 +1156,11 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       present(item, "accountStatusBy", row.account_status_by);
     }
     if (row.shop_lat != null) item.shop = { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label };
+    delete item.lastAuthenticatedAt;
+    if (row.last_authenticated_at) {
+      const parsed = row.last_authenticated_at instanceof Date ? row.last_authenticated_at : new Date(row.last_authenticated_at);
+      if (Number.isFinite(parsed.getTime())) item.lastAuthenticatedAt = parsed.toISOString();
+    }
     return item;
   });
   store.userRoleMemberships = orderedBy(loaded.user_role_memberships, "user_id", "role").map((row) => {
@@ -1654,7 +1660,17 @@ async function upsertChanged(database, table, before, current) {
       );
       continue;
     }
-    const updates = updatable.map((column) => `${column} = EXCLUDED.${column}`).join(", ");
+    const updates = updatable.map((column) => {
+      // A later request must not lose a newer sign-in when an older store snapshot is saved.
+      if (table.name === "users" && column === "last_authenticated_at") {
+        return `last_authenticated_at = CASE
+          WHEN users.last_authenticated_at IS NULL THEN EXCLUDED.last_authenticated_at
+          WHEN EXCLUDED.last_authenticated_at IS NULL THEN users.last_authenticated_at
+          ELSE GREATEST(users.last_authenticated_at, EXCLUDED.last_authenticated_at)
+        END`;
+      }
+      return `${column} = EXCLUDED.${column}`;
+    }).join(", ");
     await database.query(
       `INSERT INTO ${table.name} (${table.columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${table.keys.join(", ")}) DO UPDATE SET ${updates}`,
       table.columns.map((column) => row[column]),

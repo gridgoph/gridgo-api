@@ -57,6 +57,37 @@ export function createDatabase(env = process.env) {
     console.error(`PostgreSQL idle client error: ${error?.code || "unknown"}`);
   });
 
+  // Optional authentication telemetry must not borrow a request transaction or
+  // exhaust its pool. Keep its own small, time-bounded autocommit pool.
+  let authenticationPool;
+  async function recordLastAuthenticated(userId, at) {
+    if (!authenticationPool) {
+      authenticationPool = new Pool({
+        connectionString,
+        max: 1,
+        connectionTimeoutMillis: 250,
+        idleTimeoutMillis: 30_000,
+        statement_timeout: 250,
+        lock_timeout: 50,
+      });
+      // Idle connection errors are independent of the observed request too.
+      authenticationPool.on('error', error => {
+        console.warn(`Last authenticated connection failed: ${error?.code || 'unknown'}`);
+      });
+    }
+    return authenticationPool.query(
+      `WITH candidate AS (
+         SELECT id FROM users
+          WHERE id = $1 AND (last_authenticated_at IS NULL OR last_authenticated_at < $2::timestamptz)
+          FOR UPDATE SKIP LOCKED
+       )
+       UPDATE users SET last_authenticated_at = $2::timestamptz
+        FROM candidate WHERE users.id = candidate.id
+          AND (users.last_authenticated_at IS NULL OR users.last_authenticated_at < $2::timestamptz)`,
+      [userId, at],
+    );
+  }
+
   function current() {
     const active = context.getStore();
     return active && !active.finished ? active : null;
@@ -177,13 +208,14 @@ export function createDatabase(env = process.env) {
 
   return {
     query,
+    recordLastAuthenticated,
     transaction,
     snapshot,
     afterCommit,
     markRollback,
     assertReady,
     health,
-    close: () => pool.end(),
+    close: () => Promise.all([pool.end(), authenticationPool?.end()]),
     inTransaction: () => Boolean(current()),
     inWriteTransaction: () => Boolean(current() && !current().readOnly),
   };
