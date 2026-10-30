@@ -1,5 +1,10 @@
 import { artworkFileIdsFor } from './artwork-attachments.js';
 import { supplierArtworkReleased } from "./artwork-gates.js";
+
+/** File signing may need an earlier reference without adding it to an order list. */
+export function orderFileReadStore(store) {
+  return store?.orderFileReadContext ? { ...store, ...store.orderFileReadContext } : store;
+}
 // Shared by order projections and file metadata/download authorization.
 export function canReadOrderArtwork(user, store, order, fileId, purpose, file = null) {
   if (!user || !order || !["artwork", "mockup"].includes(purpose)) return false;

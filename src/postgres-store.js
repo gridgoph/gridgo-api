@@ -1,9 +1,11 @@
 import { artworkFileIdsFor } from './artwork-attachments.js';
-import { notificationVisible, parseNotificationListLimit } from './notifications.js';
-import { isTestOperationsUser } from './test-operations.js';
+import { notificationVisible, parseNotificationListLimit, canAccessOrder, hasRole } from './notifications.js';
+import { isTestOperationsUser, testOperationsView } from './test-operations.js';
+import { identityHasMembership, selectActorRole } from './authorization-context.js';
+import { supplierArtworkReleased } from './artwork-gates.js';
 import { testerProgramTables, emptyTesterProgram, testerProgramRows, loadTesterProgramRows } from './tester-program-store.js';
 import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from './founding-tester-store.js';
-import { enforceReviewData, labelReviewNotifications } from './review-data.js';
+import { enforceReviewData, labelReviewNotifications, reviewReportView } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
 import { finalizeAuditEntries } from './audit.js';
@@ -981,18 +983,149 @@ async function readCatalogItemContext(graph, ids) {
   await read('platform_settings', 'WHERE singleton');
 }
 
-const HOT_READ_PATHS = new Set(['/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname); }
+const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
+const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname); }
+
+/** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
+ * In particular, an unassigned multi-shop order and a held dispatch offer need
+ * their jobs/refund facts before visibility can be decided.
+ */
+async function readOrderGraph(database, graph, pathname, { role, includeReviewData }) {
+  const { loaded, read } = graph;
+  const identityStore = graph.finish();
+  const raw = identityStore.users[0];
+  if (!raw || (role && !hasRole(identityStore, raw.id, role))) return identityStore;
+  const selected = role || (pathname === '/jobs' && hasRole(identityStore, raw.id, 'supplier') ? 'supplier' : raw.role);
+  const actor = selectActorRole(identityStore, raw, selected, { restrictMemberships: Boolean(role) });
+  const staff = ['ops_admin', 'super_admin'].some(role => identityHasMembership(actor, role));
+  const reviewOnly = isTestOperationsUser(identityStore, raw.id);
+  const detail = ORDER_DETAIL_READ.test(pathname);
+  const values = [raw.id];
+  let ownership = 'FALSE';
+  if (hasRole(identityStore, raw.id, selected)) {
+    if (pathname === '/jobs') ownership = selected === 'supplier' ? 'supplier_id = $1' : 'FALSE';
+    else if (['ops_admin', 'super_admin'].includes(selected)) ownership = 'TRUE';
+    else if (selected === 'client') ownership = 'client_id = $1';
+    else if (selected === 'supplier') ownership = `(supplier_id = $1 OR (supplier_id IS NULL AND id IN
+      (SELECT order_id FROM order_jobs WHERE supplier_id = $1 AND state <> 'cancelled')))`;
+    else if (selected === 'rider') ownership = `(rider_id = $1 OR (state = 'ready_for_dispatch' AND rider_id IS NULL AND review_data = $2))`;
+  }
+  // Keep $1 typed even on a staff/empty read, where ownership uses no parameter.
+  let where = `WHERE $1::text IS NOT NULL AND (${ownership})`;
+  if (selected === 'rider' && pathname !== '/jobs' && hasRole(identityStore, raw.id, selected)) values.push(raw.reviewData === true);
+  const reviewScope = reviewOnly ? 'AND review_data' : staff && !detail && !includeReviewData ? 'AND NOT review_data' : '';
+  where += ` ${reviewScope}`;
+  if (detail) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
+  await read('orders', where, values);
+  await read('platform_settings', 'WHERE singleton');
+  let orderIds = loaded.orders.map(row => row.id);
+  for (const name of ['order_jobs', 'refund_requests', 'refund_settlements']) {
+    await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  }
+  if (reviewOnly) {
+    await readIdentity(graph, [...new Set([raw.id, ...loaded.orders.flatMap(row => [row.client_id, row.supplier_id, row.rider_id]),
+      ...loaded.order_jobs.flatMap(row => [row.supplier_id, row.rider_id]), ...loaded.refund_requests.map(row => row.client_id),
+      ...loaded.refund_settlements.map(row => row.created_by)].filter(Boolean))]);
+  }
+  const candidates = graph.finish();
+  const policyStore = reviewOnly ? testOperationsView(candidates, actor) : candidates;
+  const visible = new Set(policyStore.orders.filter(order => pathname === '/jobs'
+    ? order.supplierId === raw.id && supplierArtworkReleased(order)
+    : canAccessOrder(policyStore, raw.id, order, { role: selected, offer: true })).map(order => order.id));
+  loaded.orders = loaded.orders.filter(row => visible.has(row.id));
+  orderIds = [...visible];
+  for (const name of ['order_jobs', 'refund_requests', 'refund_settlements']) {
+    loaded[name] = loaded[name].filter(row => visible.has(row.order_id));
+  }
+  if (!orderIds.length) {
+    const store = graph.finish();
+    // Preserve the existing 403 for a real, inaccessible detail without
+    // hydrating its private graph. Test operations still sees hidden rows as 404.
+    if (detail) store.orderReadForbidden = (await database.query(
+      `SELECT EXISTS (SELECT 1 FROM orders WHERE id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
+      [pathname.split('/')[2]],
+    )).rows[0].present;
+    return store;
+  }
+  for (const name of ['order_line_items', 'order_payments', 'order_payment_allocations', 'payout_milestones',
+    'platform_revenue_adjustments', 'claims', 'order_change_requests', 'order_change_payments', 'order_change_payouts',
+    'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders']) {
+    await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  }
+  await read('order_line_item_options', 'WHERE order_line_item_id = ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
+  await read('refund_payments', 'WHERE request_id = ANY($1::text[])', [loaded.refund_settlements.map(row => row.request_id)]);
+  const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
+  await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  await read('zones', 'WHERE code = ANY($1::text[])', [loaded.orders.map(row => row.zone_code).filter(Boolean)]);
+
+  // Include both attached evidence and IDs in immutable snapshots (legacy
+  // artwork, payout proof copies, QR and preview metadata can lack references).
+  const strings = new Set();
+  const collect = value => {
+    if (typeof value === 'string') strings.add(value);
+    else if (value && typeof value === 'object') for (const child of Object.values(value)) collect(child);
+  };
+  for (const rows of Object.values(loaded)) collect(rows);
+  await read('file_references', "WHERE reference_type = 'order' AND reference_id = ANY($1::text[])", [orderIds]);
+  await read('files', 'WHERE file_id = ANY($1::text[])', [[...strings, ...loaded.file_references.map(row => row.file_id)]]);
+  await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+
+  // Reused legacy artwork can still point only at its earlier order. Load
+  // those reference facts for the existing file policy, never into the list.
+  const referenceIds = [...new Set(loaded.file_references.filter(row => row.reference_type === 'order'
+    && !visible.has(row.reference_id)).map(row => row.reference_id))];
+  let referenceContext;
+  if (referenceIds.length) {
+    const context = readGraph(database);
+    await context.read('orders', 'WHERE id = ANY($1::text[])', [referenceIds]);
+    await context.read('order_jobs', 'WHERE order_id = ANY($1::text[])', [referenceIds]);
+    await context.read('order_line_items', 'WHERE order_id = ANY($1::text[])', [referenceIds]);
+    referenceContext = context.finish();
+  }
+
+  // Review views also test the account marks of child-row owners/creators.
+  const userIds = new Set([raw.id]);
+  const userFields = ['userId', 'clientId', 'supplierId', 'riderId', 'ownerId', 'staffId', 'partyUserId', 'originalSupplierId', 'redeemedBy', 'createdBy'];
+  for (const rows of Object.values(graph.finish())) if (Array.isArray(rows)) for (const row of rows) {
+    for (const field of userFields) if (row[field]) userIds.add(row[field]);
+  }
+  if (referenceContext) for (const row of [...referenceContext.orders, ...referenceContext.orderJobs]) {
+    for (const field of userFields) if (row[field]) userIds.add(row[field]);
+  }
+  await readIdentity(graph, [...userIds]);
+  const store = graph.finish();
+  if (referenceContext) {
+    let fileStore = { ...store, orders: [...store.orders, ...referenceContext.orders],
+      orderJobs: [...store.orderJobs, ...referenceContext.orderJobs], orderLineItems: [...store.orderLineItems, ...referenceContext.orderLineItems] };
+    if (reviewOnly) fileStore = testOperationsView(fileStore, actor);
+    else if (staff && !detail) fileStore = reviewReportView(fileStore, includeReviewData);
+    store.orderFileReadContext = { orders: fileStore.orders, orderJobs: fileStore.orderJobs, orderLineItems: fileStore.orderLineItems };
+  }
+  if (detail && ['ops_admin', 'super_admin'].includes(selected)) {
+    // This existing staff-only field counts events across the reporting view,
+    // not merely the opened order. Return only counts for the visible shops.
+    const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
+      FROM orders CROSS JOIN LATERAL jsonb_array_elements(COALESCE(NULLIF(data#>'{shopHandover,arrivedPacked}', 'null'::jsonb), '[]'::jsonb)) event
+      WHERE event->'supplierId' = ANY($1::jsonb[]) ${reviewScope}
+      GROUP BY event->'supplierId'`, [[...new Set(loaded.orders.map(row => JSON.stringify(row.supplier_id)))]]);
+    store.shopArrivedPackedCounts = new Map(counts.rows.map(row => [row.supplier, row.count]));
+  }
+  return store;
+}
 
 /** Explicit route graphs. Other routes retain the complete transactional adapter. */
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null } = {}) {
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
-    if (pathname.startsWith('/auth/me') || pathname === '/me') {
+    if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
+      return readOrderGraph(database, graph, pathname, { role, includeReviewData });
+    } else if (pathname.startsWith('/auth/me') || pathname === '/me') {
       await read('platform_settings', 'WHERE singleton');
       for (const name of ['client_profiles', 'supplier_profiles', 'rider_profiles', 'organization_accounts']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
       await read('rider_documents', 'WHERE rider_id = ANY($1::text[])', [ids]);
