@@ -1,3 +1,4 @@
+import { mapConcurrent } from './concurrent-map.js';
 import { validateArtworkLinks } from './artwork-links.js';
 
 export const MAX_ARTWORK_ATTACHMENTS = 10;
@@ -81,25 +82,33 @@ export function artworkPreviewFileId(store, line) {
 }
 
 /** Only call on role-safe response projections, then independently authorize every file. */
-export async function signArtworkAttachments(body, { findFile, authorizeRead, presignGet }) {
+export async function signArtworkAttachments(body, { findFile, authorizeRead, presignGet, concurrency = 1 }) {
   const signed = new Map();
-  async function walk(value) {
+  const entries = [], pending = new Map();
+  function walk(value) {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value.artworkAttachments)) {
-      for (const entry of value.artworkAttachments) {
-        if (entry.kind !== 'file') continue;
-        const file = findFile(entry.fileId);
-        if (!file || file.state !== 'ready' || file.purpose !== 'artwork' || file.deleteRequestedAt || file.deletedAt) continue;
-        try { authorizeRead(file); } catch { continue; }
-        try {
-          if (!signed.has(file.fileId)) signed.set(file.fileId, await presignGet(file.objectKey));
-          const url = signed.get(file.fileId);
-          entry.downloadUrl = url.url;
-          entry.downloadUrlExpiresAt = url.expiresAt;
-        } catch { /* Keep the attachment visible; readers can retry /files/:id/download-url. */ }
-      }
+      entries.push(...value.artworkAttachments);
     }
-    for (const [key, child] of Object.entries(value)) if (key !== 'artworkAttachments') await walk(child);
+    for (const [key, child] of Object.entries(value)) if (key !== 'artworkAttachments') walk(child);
   }
-  await walk(body);
+  walk(body);
+  await mapConcurrent(entries, concurrency, async entry => {
+    if (entry.kind !== 'file') return;
+    const file = findFile(entry.fileId);
+    if (!file || file.state !== 'ready' || file.purpose !== 'artwork' || file.deleteRequestedAt || file.deletedAt) return;
+    try { authorizeRead(file); } catch { return; }
+    // Serialize copies of the same file: reuse a success, but let a later
+    // occurrence retry a failed presign just as the original traversal did.
+    const attempt = (pending.get(file.fileId) || Promise.resolve()).catch(() => {}).then(async () => {
+      if (!signed.has(file.fileId)) signed.set(file.fileId, await presignGet(file.objectKey));
+      return signed.get(file.fileId);
+    });
+    pending.set(file.fileId, attempt);
+    try {
+      const url = await attempt;
+      entry.downloadUrl = url.url;
+      entry.downloadUrlExpiresAt = url.expiresAt;
+    } catch { /* Keep the attachment visible; readers can retry /files/:id/download-url. */ }
+  });
 }

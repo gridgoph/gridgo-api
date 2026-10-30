@@ -87,9 +87,19 @@ test('HTTP order bodies including signed galleries equal the original full-store
     };
     ${full ? `registerHooks({ load(url, context, next) {
       const result = next(url, context);
-      if (url.endsWith('/src/postgres-store.js')) return { ...result,
-        source: String(result.source).replace(/export function isHotReadPath\\(pathname\\) \\{[^}]+\\}/,
-          'export function isHotReadPath() { return false; }') };
+      if (url.endsWith('/src/postgres-store.js')) {
+        const source = String(result.source).replace(/export function isHotReadPath\\(pathname\\) \\{[^}]+\\}/,
+          'export function isHotReadPath() { return false; }');
+        if (source === String(result.source)) throw new Error('Full-store baseline was not installed');
+        return { ...result, source };
+      }
+      if (url.endsWith('/src/server.js')) {
+        const source = String(result.source).replace(
+          'return mapConcurrent(orders, 4, order => publicOrder(order, user, orderStore, unreadCounts, 4));',
+          'return Promise.all(orders.map(order => publicOrder(order, user, orderStore, unreadCounts)));');
+        if (source === String(result.source)) throw new Error('Serial signing baseline was not installed');
+        return { ...result, source };
+      }
       return result;
     } });` : ''}`;
   const env = full => ({ NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(hook(full))}`,

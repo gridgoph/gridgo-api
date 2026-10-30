@@ -4,6 +4,7 @@ import { testerBudget } from './tester-rewards.js';
 import { testerProgress, publicFoundingTester, reconcileFoundingTester, recordTesterCartStep, remindFoundingTesters } from './founding-testers.js';
 import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed, markReviewPayment } from './review-data.js';
 import { orderFileReadStore } from './order-file-access.js';
+import { mapConcurrent } from './concurrent-map.js';
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
@@ -1931,32 +1932,28 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
   return referenced ? file : null;
 }
 
-async function publicOrder(order, user, orderStore, unreadCounts = null) {
+async function publicOrder(order, user, orderStore, unreadCounts = null, signingConcurrency = 1) {
   const record = publicOrderFor(order, user, orderStore);
   const fileStore = orderFileReadStore(orderStore);
   if (record.pickupChat) record.pickupChat.unread = unreadCounts
     ? unreadCounts.get(order.id) ?? 0 : await pickupChatUnread(database, order, user.id);
-  await signProductionPhotos(record, {
+  const signing = {
     findFile: (fileId) => findFile(orderStore, fileId),
     authorizeRead: (file) => authorizeFileRead(user, fileStore, file),
     presignGet: (key) => objectStorage.presignGet(key),
-  });
-  await signProductionPhotos(record, {
-    findFile: (fileId) => findFile(orderStore, fileId),
-    authorizeRead: (file) => authorizeFileRead(user, fileStore, file),
-    presignGet: (key) => objectStorage.presignGet(key),
-  }, "packingProgress");
-  await signArtworkAttachments(record, {
-    findFile: (fileId) => findFile(orderStore, fileId),
-    authorizeRead: (file) => authorizeFileRead(user, fileStore, file),
-    presignGet: (key) => objectStorage.presignGet(key),
-  });
+    concurrency: signingConcurrency,
+  };
+  await signProductionPhotos(record, signing);
+  await signProductionPhotos(record, signing, "packingProgress");
+  await signArtworkAttachments(record, signing);
   return record;
 }
 
 async function publicOrderList(orders, user, orderStore) {
   const unreadCounts = await pickupChatUnreadCounts(database, orders, user, orderStore);
-  return Promise.all(orders.map(order => publicOrder(order, user, orderStore, unreadCounts)));
+  // Four orders, each with at most four file signers: at most sixteen active
+  // presigns in this response, irrespective of its historical order count.
+  return mapConcurrent(orders, 4, order => publicOrder(order, user, orderStore, unreadCounts, 4));
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
