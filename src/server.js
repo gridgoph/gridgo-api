@@ -277,7 +277,7 @@ import {
   qaRequestFileAudit,
   qaTickAudit,
 } from "./qa-review.js";
-import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
+import { isPickupChatRoute, pickupChatUnread, pickupChatUnreadCounts, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
 import { routeClientShopChat, isClientShopChatRoute } from './client-shop-chat-routes.js';
 import { sanitizeChatUpload } from './chat-image-sanitizer.js';
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
@@ -1931,10 +1931,11 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
   return referenced ? file : null;
 }
 
-async function publicOrder(order, user, orderStore) {
+async function publicOrder(order, user, orderStore, unreadCounts = null) {
   const record = publicOrderFor(order, user, orderStore);
   const fileStore = orderFileReadStore(orderStore);
-  if (record.pickupChat) record.pickupChat.unread = await pickupChatUnread(database, order, user.id);
+  if (record.pickupChat) record.pickupChat.unread = unreadCounts
+    ? unreadCounts.get(order.id) ?? 0 : await pickupChatUnread(database, order, user.id);
   await signProductionPhotos(record, {
     findFile: (fileId) => findFile(orderStore, fileId),
     authorizeRead: (file) => authorizeFileRead(user, fileStore, file),
@@ -1951,6 +1952,11 @@ async function publicOrder(order, user, orderStore) {
     presignGet: (key) => objectStorage.presignGet(key),
   });
   return record;
+}
+
+async function publicOrderList(orders, user, orderStore) {
+  const unreadCounts = await pickupChatUnreadCounts(database, orders, user, orderStore);
+  return Promise.all(orders.map(order => publicOrder(order, user, orderStore, unreadCounts)));
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -6121,7 +6127,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: await Promise.all(ordersFor(user, store).map((order) => publicOrder(order, user, store))) });
+      return send(res, 200, { orders: await publicOrderList(ordersFor(user, store), user, store) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -7543,9 +7549,8 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/jobs") {
       if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
-        jobs: await Promise.all(store.orders
-          .filter((o) => o.supplierId === user.id && supplierArtworkReleased(o))
-          .map((order) => publicOrder(order, user, store))),
+        jobs: await publicOrderList(store.orders
+          .filter((o) => o.supplierId === user.id && supplierArtworkReleased(o)), user, store),
       });
     }
 
