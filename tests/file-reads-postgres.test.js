@@ -2,15 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
-import { setupOrders, instrument } from './fixtures/order-reads.js';
-import { parityApiForTest } from './fixtures/read-parity.js';
+import { instrument } from './fixtures/order-reads.js';
+import { parityApiForTest, setupReadParity } from './fixtures/read-parity.js';
 import { AT } from './fixtures/reschedule.js';
 const skip = !process.env.DATABASE_URL;
 async function setup(database) {
-  const store = await setupOrders(database);
+  const store = await setupReadParity(database);
   const base = store.files.find(row => row.fileId === 'art_a_active');
   for (const purpose of ['tracker_decision','support_chat_image','delivery_chat_image','pickup_chat_image','client_shop_chat_attachment',
-    'delivery_package_photo','approval_signature','approval_sample_photo','client_verification_document','refund_qr','refund_receipt','refund_evidence',
+    'approval_signature','approval_sample_photo','client_verification_document','refund_qr','refund_receipt','refund_evidence',
     'payment_proof','verification_document','supplier_payout_qr','rider_verification_document','payout_receipt','handoff_signature','mockup']) {
     const references = ['refund_qr','refund_receipt','refund_evidence'].includes(purpose)
       ? [{ type: 'refund_request', id: store.refundRequests[0].id }]
@@ -56,6 +56,12 @@ test('file metadata and signed downloads preserve every role and purpose policy 
       assert.equal(current.status,old.status,`${who} ${path}`);
       assert.equal(current.body,old.body,`${who} ${path}: content bytes`);
     }
+  }
+  for (const api of [baseline, targeted]) {
+    assert.equal((await api('client','GET','/files/file_delivery_package_photo')).status,200);
+    assert.equal((await api('client','GET','/files/file_delivery_package_photo/download-url')).status,200);
+    assert.equal((await api('other','GET','/files/file_delivery_package_photo')).status,403);
+    assert.equal((await api('supplier','GET','/files/file_delivery_package_photo')).status,403);
   }
   assert.equal((await targeted('client','GET','/files/art_a_active/download-url')).status,200);
   assert.equal((await targeted('supplier','GET','/files/art_unreleased')).status,403);

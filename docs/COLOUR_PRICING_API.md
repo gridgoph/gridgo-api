@@ -36,7 +36,12 @@ GRIDGO never substitutes a base price, another size/tier or a platform estimate.
 PATCH to retain it. Recognized paper names and dimensions use the existing
 [print layout size parser](PRINT_LAYOUT_API.md); bare dimensions are inches.
 Returned sizes include canonical `widthMilli`, `heightMilli` (thousandths of mm)
-and `pageSize`. Duplicate physical sizes are refused, including rotated aliases.
+and `pageSize`. The colour-size table has no stored shop position: its read
+projection orders sizes by ascending `size_key` (the text `widthMilli:heightMilli`,
+compared by code unit). Its tier price keys follow `COLOUR_TIERS[tierSet]` order:
+`none`, `up_to_25`, `up_to_50`, `above_50` for large format, and `monochrome`,
+`full_colour` for A3. Omitted prices remain omitted, and zero prices remain offered.
+Duplicate physical sizes are refused, including rotated aliases.
 A3 paper uses the A3 tier set; other sizes use large-format tiers. Size options must have the existing `specBinding`
 with a paper `size`/`paper_size`/`item_size`/`dimensions` value. Their selected
 physical size selects the price table; a size with no table needs a price check.
