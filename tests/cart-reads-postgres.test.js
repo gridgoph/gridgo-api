@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, loadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
 import { setupOrders, instrument } from './fixtures/order-reads.js';
-import { apiForTest } from './fixtures/reschedule-http.js';
-import { readParityEnv } from './fixtures/read-parity.js';
+import { parityApiForTest } from './fixtures/read-parity.js';
 import { AT } from './fixtures/reschedule.js';
 
 const skip = !process.env.DATABASE_URL;
@@ -43,8 +42,8 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
   const database = createDatabase(process.env); t.after(() => database.close());
   await setup(database);
   const at = Date.now() + 120000;
-  const baseline = await apiForTest(t, readParityEnv(true, at));
-  const targeted = await apiForTest(t, readParityEnv(false, at));
+  const baseline = await parityApiForTest(t, true, at);
+  const targeted = await parityApiForTest(t, false, at);
   const paths = ['/me/preferences','/me/addresses', '/me/carts/cart', '/me/carts/single', '/me/carts/done', '/me/carts/foreign', '/me/carts/missing',
     '/me/carts/dual_cart', '/me/carts/%zz', '/me/carts/%00', '/me/carts/cart/quote', '/me/carts/cart/voucher', '/me/carts/single/voucher',
     '/me/carts/done/quote', '/me/carts/cart/groups/cart_line_0/listings', '/me/carts/cart/groups/missing/listings'];

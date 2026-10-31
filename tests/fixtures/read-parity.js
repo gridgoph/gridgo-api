@@ -1,3 +1,4 @@
+import { apiForTest } from './reschedule-http.js';
 // Test-only dispatcher bypass and clock; production has no baseline switch.
 export function readParityEnv(full, at) {
   const hook = `
@@ -20,3 +21,13 @@ export function readParityEnv(full, at) {
   return { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(hook)}`, MINIO_PUBLIC_URL: 'https://storage.example.invalid' };
 }
 
+
+// JWT claims must follow the same frozen clock as both API children. Otherwise
+// a slow CI run eventually issues nbf values later than the children's clock.
+export async function parityApiForTest(t, full, at, options = {}) {
+  const api = await apiForTest(t, readParityEnv(full, at), options);
+  const seconds = Math.floor(at / 1000);
+  return (who, method, path, body, opts = {}) => api(who, method, path, body, {
+    ...opts, claims: { iat: seconds - 5, nbf: seconds - 5, exp: seconds + 3600, ...opts.claims },
+  });
+}

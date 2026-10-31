@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
 import { setupOrders, instrument } from './fixtures/order-reads.js';
-import { apiForTest } from './fixtures/reschedule-http.js';
-import { readParityEnv } from './fixtures/read-parity.js';
+import { parityApiForTest } from './fixtures/read-parity.js';
 import { AT } from './fixtures/reschedule.js';
 const skip = !process.env.DATABASE_URL;
 async function setup(database) {
@@ -37,8 +36,8 @@ test('file metadata and signed downloads preserve every role and purpose policy 
   const store = await setup(database);
   const at = Date.now() + 120000;
   const storageHandler = (req,res) => {res.writeHead(200,{'Content-Length':'100','Content-Type':'image/png',ETag:'test'});res.end(req.method==='HEAD'?undefined:Buffer.alloc(100,65));};
-  const baseline = await apiForTest(t,readParityEnv(true,at),{storageHandler});
-  const targeted = await apiForTest(t,readParityEnv(false,at),{storageHandler});
+  const baseline = await parityApiForTest(t,true,at,{storageHandler});
+  const targeted = await parityApiForTest(t,false,at,{storageHandler});
   const ids = ['missing','not_ready','unattached','shop_file','service_file','photo_supplier','art_a_active','art_unreleased','art_multi','art_legacy','art_review',
     'production_photo_a_active','packing_photo_a_active','supplier_invoice_a_active',...store.files.filter(row => row.fileId.startsWith('file_')).map(row => row.fileId)];
   for (const who of [null,'client','other','supplier','replacement','rider','ops','admin','staff','test_ops','review_client','review_supplier','dual','suspended']) {

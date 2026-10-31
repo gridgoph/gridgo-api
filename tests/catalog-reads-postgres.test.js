@@ -4,12 +4,11 @@ import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
 import { setupOrders, instrument } from './fixtures/order-reads.js';
 import { listingSnapshot } from '../src/catalog-review-state.js';
-import { apiForTest } from './fixtures/reschedule-http.js';
 import { AT } from './fixtures/reschedule.js';
 
 const skip = !process.env.DATABASE_URL;
 const roles = [null, 'client', 'supplier', 'replacement', 'rider', 'ops', 'admin', 'staff', 'test_ops', 'review_client', 'dual', 'suspended'];
-import { readParityEnv } from './fixtures/read-parity.js';
+import { parityApiForTest } from './fixtures/read-parity.js';
 
 async function setup(database) {
   const store = await setupOrders(database);
@@ -36,8 +35,8 @@ test('catalogue HTTP bodies and signed photo fields equal the full-store route f
   const database = createDatabase(process.env); t.after(() => database.close());
   await setup(database);
   const at = Date.now() + 120000;
-  const baseline = await apiForTest(t, readParityEnv(true, at));
-  const targeted = await apiForTest(t, readParityEnv(false, at));
+  const baseline = await parityApiForTest(t, true, at);
+  const targeted = await parityApiForTest(t, false, at);
   const paths = ['/accepted-file-formats?q=pdf', '/catalog/shops', '/catalog/shops?categoryCode=bad',
     '/catalog/shops/supplier', '/catalog/shops/review_supplier', '/catalog/shops/missing', '/catalog/shops/%zz', '/catalog/items/%00',
     '/catalog/items/item_supplier', '/catalog/items/review_item', '/catalog/items/missing',

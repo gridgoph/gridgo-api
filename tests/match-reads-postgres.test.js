@@ -3,17 +3,17 @@ import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, isHotReadPath } from '../src/postgres-store.js';
 import { setupOrders, instrument } from './fixtures/order-reads.js';
-import { apiForTest } from './fixtures/reschedule-http.js';
-import { readParityEnv } from './fixtures/read-parity.js';
+import { parityApiForTest } from './fixtures/read-parity.js';
 import { AT } from './fixtures/reschedule.js';
 const skip = !process.env.DATABASE_URL;
 
 test('matching calendar and layout read responses equal full-store bytes across actors', { skip }, async t => {
   const database = createDatabase(process.env); t.after(() => database.close());
   await setupOrders(database);
-  const at = Date.now() + 120000;
-  const baseline = await apiForTest(t, readParityEnv(true, at));
-  const targeted = await apiForTest(t, readParityEnv(false, at));
+  // A deliberately shifted clock proves token claims track the API clock.
+  const at = Date.now() - 3600000;
+  const baseline = await parityApiForTest(t, true, at);
+  const targeted = await parityApiForTest(t, false, at);
   const paths = ['/me/deadline-days?subcategoryCode=flyers&days=7', '/me/deadline-days?subcategoryCode=missing',
     '/me/deadline-days', '/me/print-layout-check?catalogItemId=%00', '/me/print-layout-check?catalogItemId=item_supplier&fileIds=art_a_active',
     '/me/print-layout-check?catalogItemId=item_supplier&fileIds=art_unrelated', '/me/print-layout-check?catalogItemId=missing',
