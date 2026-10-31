@@ -983,9 +983,76 @@ async function readCatalogItemContext(graph, ids) {
   await read('platform_settings', 'WHERE singleton');
 }
 
+// Keep route matching exact: write-capable preview/quote routes are not reads.
+const CATALOG_READ = /^\/(?:catalog|ops\/catalog)\/(?:shops(?:\/[^/]+)?|items\/[^/]+|media\/[^/]+)$/;
+function isCatalogReadPath(pathname) {
+  return CATALOG_READ.test(pathname) || ['/accepted-file-formats', '/me/catalog-preview'].includes(pathname);
+}
+
+/** Only catalogue composites and their eligibility, rating and photo facts.
+ * Approved snapshots can retain photos and a service absent from the draft.
+ * Keep JS visibility/cursor policy authoritative, including review-only shops.
+ */
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null } = {}) {
+  const { loaded, read } = graph;
+  if (fileId) {
+    await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
+    await read('supplier_shop_media', 'WHERE file_id = $1', [fileId]);
+    // An approved photo may have been removed from the draft photo table.
+    await read('supplier_catalog_items', `WHERE id = ANY($1::text[])
+      OR approved_snapshot @> $2::jsonb
+      OR supplier_id = ANY($3::text[])`, [loaded.supplier_catalog_item_photos.map(row => row.catalog_item_id),
+      JSON.stringify({ catalogItemPhotos: [{ fileId }] }), loaded.supplier_shop_media.map(row => row.supplier_id)]);
+  } else if (itemIds) await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [itemIds]);
+  else if (supplierIds) await read('supplier_catalog_items', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  else await read('supplier_catalog_items', '');
+  const suppliers = [...new Set([...(supplierIds || []), ...loaded.supplier_catalog_items.map(row => row.supplier_id),
+    ...loaded.supplier_shop_media.map(row => row.supplier_id)])];
+  const owners = [...new Set([...actorIds, ...suppliers])];
+  await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
+  await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
+  await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+  const items = loaded.supplier_catalog_items.map(row => row.id);
+  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
+    'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps',
+    'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+    await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
+  }
+  await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
+  await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
+  await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
+    ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
+  await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+  await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  // Ratings exclude marked orders even if the supplier itself is unmarked.
+  await read('orders', 'WHERE id = ANY($1::text[])', [loaded.shop_reviews.map(row => row.order_id)]);
+  await readIdentity(graph, [...new Set([...owners, ...loaded.shop_reviews.map(row => row.client_id)])]);
+  for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories',
+    'taxonomy_materials', 'taxonomy_finishes', 'accepted_file_formats']) await read(name, '');
+  await read('platform_settings', 'WHERE singleton');
+}
+
+async function readCatalogueRoute(graph, ids, pathname) {
+  if (pathname === '/accepted-file-formats') {
+    await graph.read('accepted_file_formats', '');
+    return graph.finish();
+  }
+  const path = pathname.replace(/^\/ops/, '');
+  const parts = path.split('/');
+  const id = parts[3] ? decodeURIComponent(parts[3]) : null;
+  await readCatalogueGraph(graph, ids, {
+    supplierIds: pathname === '/me/catalog-preview' ? ids : parts[2] === 'shops' && id ? [id] : null,
+    itemIds: parts[2] === 'items' ? [id] : null,
+    fileId: parts[2] === 'media' ? id : null,
+  });
+  return graph.finish();
+}
+
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname); }
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1123,6 +1190,7 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
     } else if (pathname.startsWith('/auth/me') || pathname === '/me') {
