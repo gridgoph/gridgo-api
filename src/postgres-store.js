@@ -1050,9 +1050,60 @@ async function readCatalogueRoute(graph, ids, pathname) {
   return graph.finish();
 }
 
+const CART_READ = /^\/me\/carts\/[^/]+(?:\/(?:quote|voucher|groups\/[^/]+\/listings))?$/;
+function isCartReadPath(pathname) {
+  return CART_READ.test(pathname) || ['/me/preferences', '/me/addresses'].includes(pathname);
+}
+
+/** Parent orders are necessary even for cancelled jobs: queue de-duplication
+ * and recovery/marked-data policy must see the same facts as the full store.
+ */
+async function readShopWork(graph, supplierIds) {
+  const { loaded, read } = graph;
+  const ratingOrders = loaded.orders.map(row => row.id);
+  await read('order_jobs', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('orders', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])',
+    [supplierIds, [...ratingOrders, ...loaded.order_jobs.map(row => row.order_id)]]);
+}
+
+async function readCartGraph(graph, actorIds, pathname) {
+  const { loaded, read } = graph;
+  if (pathname === '/me/preferences') await read('client_match_preferences', 'WHERE client_id = ANY($1::text[])', [actorIds]);
+  else if (pathname === '/me/addresses') await read('client_saved_addresses', 'WHERE client_id = ANY($1::text[])', [actorIds]);
+  else {
+    const cartId = decodeURIComponent(pathname.split('/')[3]);
+    // Retain the foreign parent to preserve ownCart's 403 rather than 404.
+    await read('client_carts', 'WHERE id = $1', [cartId]);
+    const cart = loaded.client_carts[0];
+    if (!cart || !actorIds.includes(cart.client_id)) return graph.finish();
+    await read('client_cart_lines', 'WHERE cart_id = $1', [cartId]);
+    const suppliers = [...new Set(loaded.client_cart_lines.map(row => row.supplier_id))];
+    await readCatalogueGraph(graph, actorIds, { supplierIds: suppliers });
+    await readShopWork(graph, suppliers);
+    await read('client_match_selections', 'WHERE client_id = $1 AND selection->>\'cartId\' = $2', [cart.client_id, cartId]);
+    await read('organization_accounts', 'WHERE user_id = $1', [cart.client_id]);
+    await read('vouchers', 'WHERE client_id = $1', [cart.client_id]);
+    await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+    await read('voucher_reservations', 'WHERE voucher_id = ANY($1::text[])', [loaded.vouchers.map(row => row.id)]);
+    await read('voucher_cart_choices', 'WHERE id = $1', [cartId]);
+    await read('order_basket_groups', 'WHERE basket_id IN (SELECT basket_id FROM order_basket_groups WHERE order_id = $1)', [cart.checked_out_order_id]);
+    await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
+    // Preserve catalogue files and references while adding every artwork/preview
+    // used by guidance, layout and colour checks. Snapshots may carry old photos.
+    const fileIds = new Set(loaded.files.map(row => row.file_id));
+    for (const line of graph.finish().cartLines) {
+      for (const fileId of artworkFileIdsFor(line)) fileIds.add(fileId);
+      if (line.mockupFileId) fileIds.add(line.mockupFileId);
+    }
+    await read('files', 'WHERE file_id = ANY($1::text[])', [[...fileIds]]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [[...fileIds]]);
+  }
+  return graph.finish();
+}
+
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname); }
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1190,6 +1241,7 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
