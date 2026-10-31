@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, loadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
-import { setupOrders, instrument } from './fixtures/order-reads.js';
-import { parityApiForTest } from './fixtures/read-parity.js';
+import { instrument } from './fixtures/order-reads.js';
+import { parityApiForTest, setupReadParity } from './fixtures/read-parity.js';
 import { AT } from './fixtures/reschedule.js';
 
 const skip = !process.env.DATABASE_URL;
 async function setup(database) {
-  const store = await setupOrders(database);
+  const store = await setupReadParity(database);
   store.clientPreferences.push({ userId: 'client', ranking: ['speed', 'cost', 'quality', 'distance'], version: 2, updatedAt: AT });
   store.clientAddresses.push({ id: 'address', clientId: 'client', label: 'Home', addressLine: 'Davao', point: { lat: 7.07, lng: 125.61 }, isDefault: true, version: 1, createdAt: AT, updatedAt: AT });
   store.clientAddresses.push({ ...store.clientAddresses[0], id: 'deleted_address', isDefault: false, deletedAt: AT });
@@ -23,6 +23,10 @@ async function setup(database) {
         sortOrder: index, createdAt: AT, updatedAt: AT });
     }
   }
+  store.carts.push({ ...structuredClone(store.carts[1]), id: 'colour_cart' });
+  store.cartLines.push({ ...structuredClone(store.cartLines.find(row => row.cartId === 'single')),
+    id: 'colour_line', cartId: 'colour_cart', catalogItemId: 'item_colour', supplierId: 'replacement',
+    quantityMode: 'document_sets', printLayout: 'fit_to_paper' });
   const recent = new Date(Date.now() - 86400000).toISOString();
   store.productionLapses.push({id:'lapse',orderId:'a_active',supplierId:'supplier',tier:'minor',deadlineAt:recent,detectedAt:recent,
     rateBps:0,deductionMinor:0,remainingBalanceMinor:10000,policy:{warningsOnly:false}});
@@ -45,7 +49,7 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
   const baseline = await parityApiForTest(t, true, at);
   const targeted = await parityApiForTest(t, false, at);
   const paths = ['/me/preferences','/me/addresses', '/me/carts/cart', '/me/carts/single', '/me/carts/done', '/me/carts/foreign', '/me/carts/missing',
-    '/me/carts/dual_cart', '/me/carts/%zz', '/me/carts/%00', '/me/carts/cart/quote', '/me/carts/cart/voucher', '/me/carts/single/voucher',
+    '/me/carts/colour_cart', '/me/carts/colour_cart/groups/colour_line/listings', '/me/carts/dual_cart', '/me/carts/%zz', '/me/carts/%00', '/me/carts/cart/quote', '/me/carts/cart/voucher', '/me/carts/single/voucher',
     '/me/carts/done/quote', '/me/carts/cart/groups/cart_line_0/listings', '/me/carts/cart/groups/missing/listings'];
   for (const who of [null,'client','other','supplier','rider','ops','admin','test_ops','dual','suspended']) for (const path of paths) {
     for (const headers of [{}, { 'x-gridgo-role': 'client' }]) {
@@ -56,6 +60,12 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
       assert.equal(current.body, old.body, `${who} ${path}: serialized body`);
     }
   }
+  const colour = await targeted('client','GET','/me/carts/colour_cart');
+  assert.equal(colour.status, 200);
+  assert.deepEqual(colour.body.cart.lines[0].listing.colourPricing.sizes.map(size => size.paperSize), ['2x3.5 in', 'A4', 'A3', '20x30', '8x2 ft', '36x48', '4x8 ft']);
+  const colourGroup = await targeted('client','GET','/me/carts/colour_cart/groups/colour_line/listings');
+  assert.equal(colourGroup.status, 200);
+  assert.ok(colourGroup.body.listings.some(row => row.id === 'item_colour'));
   const multi = await targeted('client','GET','/me/carts/cart');
   assert.equal(multi.status, 200);
   assert.equal(multi.body.cart.groups.length, 3);

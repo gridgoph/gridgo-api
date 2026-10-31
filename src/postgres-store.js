@@ -8,6 +8,7 @@ import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from 
 import { enforceReviewData, labelReviewNotifications, reviewReportView } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
+import { canonicalColourPricing } from './colour-pricing.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
@@ -2226,9 +2227,10 @@ function colourPricingFromRows(loaded,id) {
   const sizes = (loaded.supplier_catalog_colour_sizes || []).filter(row => row.catalog_item_id === id).map(size => ({
     paperSize:size.paper_size,widthMilli:size.width_milli,heightMilli:size.height_milli,
     pageSize:parsePaperSize(size.paper_size)?.pageSize ?? null,tierSet:size.tier_set,
-    prices:Object.fromEntries((loaded.supplier_catalog_colour_prices || []).filter(row => row.catalog_item_id === id && row.size_key === size.size_key).map(row => [row.tier_code,row.price_minor])),
+    prices:Object.fromEntries((loaded.supplier_catalog_colour_prices || []).filter(row => row.catalog_item_id === id && row.size_key === size.size_key)
+      .map(row => [row.tier_code,row.price_minor])),
   }));
-  return sizes.length ? {sizes} : null;
+  return sizes.length ? canonicalColourPricing({sizes}) : null;
 }
 
 function catalogItemFromListRow(row) {

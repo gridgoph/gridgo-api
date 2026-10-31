@@ -18,6 +18,26 @@ export function parseQuantityMode(value) {
   if (!QUANTITY_MODES.includes(value)) fail('invalid_quantity_mode');
   return value;
 }
+/** One order for validated writes, row reads and legacy approved snapshots.
+ * Physical dimensions are integers; orientation affects only the final tie-break. */
+export function canonicalColourPricing(pricing) {
+  if (pricing == null) return null;
+  const result = structuredClone(pricing);
+  result.sizes.sort((a,b) => {
+    const dimensions = Math.min(a.widthMilli,a.heightMilli) - Math.min(b.widthMilli,b.heightMilli)
+      || Math.max(a.widthMilli,a.heightMilli) - Math.max(b.widthMilli,b.heightMilli);
+    if (dimensions) return dimensions;
+    const aKey = `${a.widthMilli}:${a.heightMilli}`, bKey = `${b.widthMilli}:${b.heightMilli}`;
+    return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
+  });
+  for (const size of result.sizes) {
+    const tiers = COLOUR_TIERS[size.tierSet];
+    size.prices = Object.fromEntries(Object.entries(size.prices)
+      .sort(([a],[b]) => tiers.indexOf(a) - tiers.indexOf(b)));
+  }
+  return result;
+}
+
 export function parseColourListing(body, item) {
   const pricedByColour = Object.hasOwn(body,'pricedByColour') ? body.pricedByColour : item.pricedByColour === true;
   const oneColour = Object.hasOwn(body,'oneColour') ? body.oneColour : item.oneColour === true;
@@ -44,7 +64,7 @@ export function parseColourListing(body, item) {
       }
       return {paperSize: String(size.paperSize).trim(), ...paper, tierSet, prices};
     });
-    colourPricing = {sizes};
+    colourPricing = canonicalColourPricing({sizes});
   }
   if (pricedByColour && !colourPricing?.sizes.length) fail('invalid_colour_pricing');
   return {pricedByColour, oneColour, colourPricing};
