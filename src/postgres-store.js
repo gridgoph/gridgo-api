@@ -983,9 +983,201 @@ async function readCatalogItemContext(graph, ids) {
   await read('platform_settings', 'WHERE singleton');
 }
 
+// Keep route matching exact: write-capable preview resolution is not a read.
+const CATALOG_READ = /^\/(?:catalog|ops\/catalog)\/(?:shops(?:\/[^/]+)?|items\/[^/]+|media\/[^/]+)$/;
+function isCatalogReadPath(pathname) {
+  return CATALOG_READ.test(pathname) || ['/accepted-file-formats', '/me/catalog-preview'].includes(pathname);
+}
+
+/** Only catalogue composites and their eligibility, rating and photo facts.
+ * Approved snapshots can retain photos and a service absent from the draft.
+ * Keep JS visibility/cursor policy authoritative, including review-only shops.
+ */
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null } = {}) {
+  const { loaded, read } = graph;
+  if (fileId) {
+    await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
+    await read('supplier_shop_media', 'WHERE file_id = $1', [fileId]);
+    // An approved photo may have been removed from the draft photo table.
+    await read('supplier_catalog_items', `WHERE id = ANY($1::text[])
+      OR approved_snapshot @> $2::jsonb
+      OR supplier_id = ANY($3::text[])`, [loaded.supplier_catalog_item_photos.map(row => row.catalog_item_id),
+      JSON.stringify({ catalogItemPhotos: [{ fileId }] }), [...(supplierIds || []), ...loaded.supplier_shop_media.map(row => row.supplier_id)]]);
+  } else if (subcategoryCode) await read('supplier_catalog_items', "WHERE subcategory_code = $1 OR approved_snapshot #>> '{item,subcategoryCode}' = $1", [subcategoryCode]);
+  else if (itemIds) await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [itemIds]);
+  else if (supplierIds) await read('supplier_catalog_items', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  else await read('supplier_catalog_items', '');
+  const suppliers = [...new Set([...(supplierIds || []), ...loaded.supplier_catalog_items.map(row => row.supplier_id),
+    ...loaded.supplier_shop_media.map(row => row.supplier_id)])];
+  const owners = [...new Set([...actorIds, ...suppliers])];
+  await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
+  await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
+  await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+  const items = loaded.supplier_catalog_items.map(row => row.id);
+  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
+    'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps',
+    'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+    await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
+  }
+  await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
+  await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
+  await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
+    ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
+  await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+  await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  // Ratings exclude marked orders even if the supplier itself is unmarked.
+  await read('orders', 'WHERE id = ANY($1::text[])', [loaded.shop_reviews.map(row => row.order_id)]);
+  await readIdentity(graph, [...new Set([...owners, ...loaded.shop_reviews.map(row => row.client_id)])]);
+  for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories',
+    'taxonomy_materials', 'taxonomy_finishes', 'accepted_file_formats']) await read(name, '');
+  await read('platform_settings', 'WHERE singleton');
+}
+
+async function readCatalogueRoute(graph, ids, pathname) {
+  if (pathname === '/accepted-file-formats') {
+    await graph.read('accepted_file_formats', '');
+    return graph.finish();
+  }
+  const path = pathname.replace(/^\/ops/, '');
+  const parts = path.split('/');
+  let id = null;
+  try { id = parts[3] ? decodeURIComponent(parts[3]) : null; } catch { return graph.finish(); }
+  if (id?.includes('\0')) return graph.finish();
+  await readCatalogueGraph(graph, ids, {
+    supplierIds: pathname === '/me/catalog-preview' ? ids : parts[2] === 'shops' && id ? [id] : null,
+    itemIds: parts[2] === 'items' ? [id] : null,
+    fileId: parts[2] === 'media' ? id : null,
+  });
+  return graph.finish();
+}
+
+const CART_READ = /^\/me\/carts\/[^/]+(?:\/(?:quote|voucher|groups\/[^/]+\/listings))?$/;
+function isCartReadPath(pathname) {
+  return CART_READ.test(pathname) || ['/me/preferences', '/me/addresses'].includes(pathname);
+}
+
+/** Parent orders are necessary even for cancelled jobs: queue de-duplication
+ * and recovery/marked-data policy must see the same facts as the full store.
+ */
+async function readShopWork(graph, supplierIds) {
+  const { loaded, read } = graph;
+  const ratingOrders = loaded.orders.map(row => row.id);
+  // Candidate sorting still computes lapse quality, even on anonymous group
+  // cards and calendars. Include incident parents and line-based exemptions.
+  await read('production_lapses', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('supplier_performance_events', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('order_jobs', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('orders', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])',
+    [supplierIds, [...ratingOrders, ...loaded.order_jobs.map(row => row.order_id), ...loaded.production_lapses.map(row => row.order_id),
+      ...loaded.supplier_performance_events.map(row => row.order_id)]]);
+  await read('order_line_items', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
+}
+
+async function readCartGraph(graph, actorIds, pathname) {
+  const { loaded, read } = graph;
+  if (pathname === '/me/preferences') await read('client_match_preferences', 'WHERE client_id = ANY($1::text[])', [actorIds]);
+  else if (pathname === '/me/addresses') await read('client_saved_addresses', 'WHERE client_id = ANY($1::text[])', [actorIds]);
+  else {
+    let cartId;
+    try { cartId = pathname.endsWith('/voucher') ? pathname.split('/')[3] : decodeURIComponent(pathname.split('/')[3]); }
+    catch { return graph.finish(); }
+    if (cartId.includes('\0')) return graph.finish();
+    // Retain the foreign parent to preserve ownCart's 403 rather than 404.
+    await read('client_carts', 'WHERE id = $1', [cartId]);
+    const cart = loaded.client_carts[0];
+    if (!cart || !actorIds.includes(cart.client_id)) return graph.finish();
+    await read('client_cart_lines', 'WHERE cart_id = $1', [cartId]);
+    const suppliers = [...new Set(loaded.client_cart_lines.map(row => row.supplier_id))];
+    await readCatalogueGraph(graph, actorIds, { supplierIds: suppliers });
+    await readShopWork(graph, suppliers);
+    await read('client_match_selections', "WHERE client_id = $1 AND selection->>'cartId' = $2", [cart.client_id, cartId]);
+    await read('organization_accounts', 'WHERE user_id = $1', [cart.client_id]);
+    await read('vouchers', 'WHERE client_id = $1', [cart.client_id]);
+    await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+    await read('voucher_reservations', 'WHERE voucher_id = ANY($1::text[])', [loaded.vouchers.map(row => row.id)]);
+    await read('voucher_cart_choices', 'WHERE id = $1', [cartId]);
+    await read('order_basket_groups', 'WHERE basket_id IN (SELECT basket_id FROM order_basket_groups WHERE order_id = $1)', [cart.checked_out_order_id]);
+    await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
+    // Preserve catalogue files and references while adding every artwork/preview
+    // used by guidance, layout and colour checks. Snapshots may carry old photos.
+    const fileIds = new Set(loaded.files.map(row => row.file_id));
+    for (const line of graph.finish().cartLines) {
+      for (const fileId of artworkFileIdsFor(line)) fileIds.add(fileId);
+      if (line.mockupFileId) fileIds.add(line.mockupFileId);
+    }
+    await read('files', 'WHERE file_id = ANY($1::text[])', [[...fileIds]]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [[...fileIds]]);
+  }
+  return graph.finish();
+}
+
+const sqlReadText = value => value && !value.includes('\0') ? value : null;
+const MATCH_READ_PATHS = new Set(['/me/deadline-days', '/me/print-layout-check']);
+async function readMatchGraph(graph, actorIds, pathname, params) {
+  const { loaded, read } = graph;
+  if (pathname === '/me/deadline-days') {
+    await readCatalogueGraph(graph, actorIds, { subcategoryCode: sqlReadText(params.get('subcategoryCode')?.trim()) });
+    await readShopWork(graph, loaded.supplier_profiles.map(row => row.user_id));
+  } else {
+    await readCatalogueGraph(graph, actorIds, { itemIds: [sqlReadText(params.get('catalogItemId')?.trim())] });
+    const fileIds = [...new Set([...loaded.files.map(row => row.file_id), ...params.getAll('fileIds')
+      .flatMap(value => value.split(',')).map(value => sqlReadText(value.trim())).filter(Boolean)])];
+    await read('files', 'WHERE file_id = ANY($1::text[])', [fileIds]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [fileIds]);
+  }
+  return graph.finish();
+}
+
+const FILE_READ = /^\/files\/[^/]+(?:\/(?:download-url|content))?$/;
+
+/** Authorize one ready file using the unchanged purpose/reference policies.
+ * Chat references snapshot their orderId separately from their message id.
+ * Load all references, including legacy line scope and refund ownership.
+ */
+async function readFileGraph(graph, actorIds, pathname) {
+  const { loaded, read } = graph;
+  const fileId = pathname.split('/')[2];
+  await read('files', 'WHERE file_id = $1', [fileId]);
+  await read('file_references', 'WHERE file_id = $1', [fileId]);
+  const files = loaded.files, references = loaded.file_references;
+  const referenceIds = references.map(row => row.reference_id);
+  const catalogIds = references.filter(row => row.reference_type === 'supplier_catalog_item').map(row => row.reference_id);
+  const shopIds = references.filter(row => row.reference_type === 'supplier_shop_media').map(row => row.reference_id);
+  if (catalogIds.length || shopIds.length) {
+    await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [catalogIds]);
+    await readCatalogueGraph(graph, actorIds, { fileId, supplierIds: [...shopIds, ...loaded.supplier_catalog_items.map(row => row.supplier_id)] });
+  }
+  const ratingOrders = loaded.orders.map(row => row.id);
+  await read('orders', 'WHERE id = ANY($1::text[])', [[...referenceIds, ...ratingOrders, ...references.map(row => row.data?.orderId).filter(Boolean)]]);
+  const orderIds = loaded.orders.map(row => row.id);
+  for (const name of ['order_jobs', 'order_line_items', 'delivery_reminders']) await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  await read('refund_requests', 'WHERE id = ANY($1::text[])', [referenceIds]);
+  // A supplier_service reference has its own live/owner policy, independent of
+  // the catalogue item's public eligibility.
+  await read('supplier_services', 'WHERE id = ANY($1::text[])', [[...referenceIds, ...loaded.supplier_services.map(row => row.id)]]);
+  await read('approval_cases', 'WHERE id = ANY($1::text[])', [referenceIds]);
+  const userIds = new Set([...actorIds, ...loaded.users.map(row => row.id), ...files.map(row => row.owner_id),
+    ...loaded.approval_cases.map(row => row.user_id),
+    ...references.filter(row => row.reference_type === 'user').map(row => row.reference_id)]);
+  // Review-only views filter child owners as well as the parent review mark.
+  const userFields = ['userId', 'clientId', 'supplierId', 'riderId', 'ownerId', 'partyUserId', 'createdBy', 'originalSupplierId'];
+  for (const rows of Object.values(graph.finish())) if (Array.isArray(rows)) for (const row of rows) {
+    for (const field of userFields) if (row[field]) userIds.add(row[field]);
+  }
+  for (const row of references) for (const field of userFields) if (row.data?.[field]) userIds.add(row.data[field]);
+  await readIdentity(graph, [...userIds].filter(Boolean));
+  // Retain supporting photos: a shop-media reference is public only when the
+  // shop still has a complete listing with a ready sample photo.
+  loaded.files = [...files, ...loaded.files.filter(row => row.file_id !== fileId)];
+  loaded.file_references = [...references, ...loaded.file_references.filter(row => row.file_id !== fileId)];
+  return graph.finish();
+}
+
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname); }
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1116,13 +1308,17 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
 }
 
 /** Explicit route graphs. Other routes retain the complete transactional adapter. */
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false } = {}) {
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (FILE_READ.test(pathname)) return readFileGraph(graph, ids, pathname);
+    if (MATCH_READ_PATHS.has(pathname)) return readMatchGraph(graph, ids, pathname, searchParams);
+    if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
+    if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
     } else if (pathname.startsWith('/auth/me') || pathname === '/me') {
