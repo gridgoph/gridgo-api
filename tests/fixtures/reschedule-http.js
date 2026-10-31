@@ -23,7 +23,7 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
-export async function apiForTest(t, env = {}, { storageHandler } = {}) {
+export async function apiForTest(t, env = {}, { storageHandler, onOutput } = {}) {
   const storage = http.createServer(storageHandler || ((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
     else if (req.method === 'DELETE') { res.writeHead(204); res.end(); }
@@ -42,7 +42,7 @@ export async function apiForTest(t, env = {}, { storageHandler } = {}) {
     ...env,
   }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
-  child.stdout.on('data', (data) => { output += data; }); child.stderr.on('data', (data) => { output += data; });
+  child.stdout.on('data', (data) => { output += data; onOutput?.(String(data)); }); child.stderr.on('data', (data) => { output += data; onOutput?.(String(data)); });
   t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await new Promise((resolve) => child.once('exit', resolve)); } });
   const origin = `http://127.0.0.1:${port}`;
   let healthy = false;

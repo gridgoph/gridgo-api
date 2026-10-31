@@ -1428,7 +1428,7 @@ export function publicOrderFor(order, user, store = null) {
   publicRecord.forcedByGridgo = Boolean(order.forcedSteps?.length);
   if (ops) {
     publicRecord.forcedStepReasonCodes = [...FORCED_STEP_REASONS];
-    publicRecord.shopArrivedPackedCount = (store?.orders || []).reduce((count, candidate) => count
+    publicRecord.shopArrivedPackedCount = store?.shopArrivedPackedCounts?.get(order.supplierId) ?? (store?.orders || []).reduce((count, candidate) => count
       + (candidate.shopHandover?.arrivedPacked || []).filter(event => event.supplierId === order.supplierId).length, 0);
   }
   delete publicRecord.transitionReadiness;

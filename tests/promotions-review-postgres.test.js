@@ -28,7 +28,9 @@ async function ok(api, user, method, path, body, expected=200, opts) {
 async function cart(api, s, quantities=[1]) {
   const made = await ok(api,'client','POST','/me/carts',{fulfillmentMode:'delivery',defaultDropoff:s.orders[0].dropoff},201);
   const path = `/me/carts/${made.cart.id}`;
-  for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline:'2026-10-30T10:00:00.000Z'},201);
+  // These live HTTP money tests need a feasible deadline whenever CI runs.
+  const deadline = new Date(Date.now() + 7 * 24 * 3600000).toISOString();
+  for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline},201);
   return path;
 }
 async function remedy(api, orderId, {clientCaused=false,totalMinor=0,shopEntitlementMinor=0,cashDestination=false}={}) {

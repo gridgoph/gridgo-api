@@ -3,6 +3,8 @@ import { matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from '
 import { testerBudget } from './tester-rewards.js';
 import { testerProgress, publicFoundingTester, reconcileFoundingTester, recordTesterCartStep, remindFoundingTesters } from './founding-testers.js';
 import { isReviewData, sameReviewData, setReviewData, reviewReportView, includeReviewData, enforceReviewData, labelReviewNotifications, assertReviewMoneyAllowed, markReviewPayment } from './review-data.js';
+import { orderFileReadStore } from './order-file-access.js';
+import { mapConcurrent } from './concurrent-map.js';
 import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-performance.js';
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
@@ -276,7 +278,7 @@ import {
   qaRequestFileAudit,
   qaTickAudit,
 } from "./qa-review.js";
-import { isPickupChatRoute, pickupChatUnread, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
+import { isPickupChatRoute, pickupChatUnread, pickupChatUnreadCounts, purgeClosedPickupChats, routePickupChat } from "./pickup-chat.js";
 import { routeClientShopChat, isClientShopChatRoute } from './client-shop-chat-routes.js';
 import { sanitizeChatUpload } from './chat-image-sanitizer.js';
 import { purgeClosedDeliveryChats, routeDeliveryChat } from "./delivery-chat.js";
@@ -1930,25 +1932,28 @@ function attachedReadyOrderFile(store, order, fileId, purpose, ownerId) {
   return referenced ? file : null;
 }
 
-async function publicOrder(order, user, orderStore) {
+async function publicOrder(order, user, orderStore, unreadCounts = null, signingConcurrency = 1) {
   const record = publicOrderFor(order, user, orderStore);
-  if (record.pickupChat) record.pickupChat.unread = await pickupChatUnread(database, order, user.id);
-  await signProductionPhotos(record, {
+  const fileStore = orderFileReadStore(orderStore);
+  if (record.pickupChat) record.pickupChat.unread = unreadCounts
+    ? unreadCounts.get(order.id) ?? 0 : await pickupChatUnread(database, order, user.id);
+  const signing = {
     findFile: (fileId) => findFile(orderStore, fileId),
-    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
+    authorizeRead: (file) => authorizeFileRead(user, fileStore, file),
     presignGet: (key) => objectStorage.presignGet(key),
-  });
-  await signProductionPhotos(record, {
-    findFile: (fileId) => findFile(orderStore, fileId),
-    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
-    presignGet: (key) => objectStorage.presignGet(key),
-  }, "packingProgress");
-  await signArtworkAttachments(record, {
-    findFile: (fileId) => findFile(orderStore, fileId),
-    authorizeRead: (file) => authorizeFileRead(user, orderStore, file),
-    presignGet: (key) => objectStorage.presignGet(key),
-  });
+    concurrency: signingConcurrency,
+  };
+  await signProductionPhotos(record, signing);
+  await signProductionPhotos(record, signing, "packingProgress");
+  await signArtworkAttachments(record, signing);
   return record;
+}
+
+async function publicOrderList(orders, user, orderStore) {
+  const unreadCounts = await pickupChatUnreadCounts(database, orders, user, orderStore);
+  // Four orders, each with at most four file signers: at most sixteen active
+  // presigns in this response, irrespective of its historical order count.
+  return mapConcurrent(orders, 4, order => publicOrder(order, user, orderStore, unreadCounts, 4));
 }
 
 function taxonomyCodeSet(taxonomy, kind) {
@@ -2432,6 +2437,7 @@ async function handleAuditedRequest(req, res) {
       })
       : hotRead ? await loadHotReadStore(database, notificationClaims?.claims?.sub || null, pathname, {
         after: url.searchParams.get('after') || '', status: url.searchParams.get('status'),
+        role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
       }) : await load();
 
@@ -6118,7 +6124,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: await Promise.all(ordersFor(user, store).map((order) => publicOrder(order, user, store))) });
+      return send(res, 200, { orders: await publicOrderList(ordersFor(user, store), user, store) });
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -6127,7 +6133,7 @@ async function handleAuditedRequest(req, res) {
       // subpaths handled elsewhere (transition POST, eligible-suppliers, issues)
       if (parts.length === 1) {
         const order = store.orders.find((o) => o.id === orderId);
-        if (!order) return send(res, 404, { error: "order_not_found" });
+        if (!order) return store.orderReadForbidden ? send(res, 403, { error: "forbidden" }) : send(res, 404, { error: "order_not_found" });
         const visible = ordersFor(user, store).some((o) => o.id === orderId);
         if (!visible) return send(res, 403, { error: "forbidden" });
         return send(res, 200, { order: await publicOrder(order, user, store) });
@@ -7540,9 +7546,8 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/jobs") {
       if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
-        jobs: await Promise.all(store.orders
-          .filter((o) => o.supplierId === user.id && supplierArtworkReleased(o))
-          .map((order) => publicOrder(order, user, store))),
+        jobs: await publicOrderList(store.orders
+          .filter((o) => o.supplierId === user.id && supplierArtworkReleased(o)), user, store),
       });
     }
 
