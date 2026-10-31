@@ -1064,9 +1064,15 @@ function isCartReadPath(pathname) {
 async function readShopWork(graph, supplierIds) {
   const { loaded, read } = graph;
   const ratingOrders = loaded.orders.map(row => row.id);
+  // Candidate sorting still computes lapse quality, even on anonymous group
+  // cards and calendars. Include incident parents and line-based exemptions.
+  await read('production_lapses', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('supplier_performance_events', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
   await read('order_jobs', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
   await read('orders', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])',
-    [supplierIds, [...ratingOrders, ...loaded.order_jobs.map(row => row.order_id)]]);
+    [supplierIds, [...ratingOrders, ...loaded.order_jobs.map(row => row.order_id), ...loaded.production_lapses.map(row => row.order_id),
+      ...loaded.supplier_performance_events.map(row => row.order_id)]]);
+  await read('order_line_items', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
 }
 
 async function readCartGraph(graph, actorIds, pathname) {
@@ -1074,7 +1080,9 @@ async function readCartGraph(graph, actorIds, pathname) {
   if (pathname === '/me/preferences') await read('client_match_preferences', 'WHERE client_id = ANY($1::text[])', [actorIds]);
   else if (pathname === '/me/addresses') await read('client_saved_addresses', 'WHERE client_id = ANY($1::text[])', [actorIds]);
   else {
-    const cartId = pathname.endsWith('/voucher') ? pathname.split('/')[3] : decodeURIComponent(pathname.split('/')[3]);
+    let cartId;
+    try { cartId = pathname.endsWith('/voucher') ? pathname.split('/')[3] : decodeURIComponent(pathname.split('/')[3]); }
+    catch { return graph.finish(); }
     if (cartId.includes('\0')) return graph.finish();
     // Retain the foreign parent to preserve ownCart's 403 rather than 404.
     await read('client_carts', 'WHERE id = $1', [cartId]);

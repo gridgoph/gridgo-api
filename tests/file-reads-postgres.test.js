@@ -77,6 +77,16 @@ test('file graphs only hydrate requested file references and keep a fixed query 
     await assert.rejects(database.transaction(() => saveStore(database,store)),/read-only/);
     return queries;
   };
+  for (const suffix of ['', '/download-url','/content']) {
+    const path = `/files/art_a_active${suffix}`;
+    const { db, queries } = instrument(database);
+    await loadHotReadStore(db,'clerk_client',path);
+    assert.ok(isHotReadPath(path),path);
+    assert.ok(queries.length <= 16,`${path}: ${queries.length} queries`);
+  }
+  const catalogueFile = instrument(database);
+  await loadHotReadStore(catalogueFile.db,'clerk_client','/files/shop_file');
+  assert.ok(catalogueFile.queries.length <= 50);
   const before = await sample();
   t.diagnostic('/files/art_a_active: ' + before.length + ' queries, ' + before.reduce((sum, q) => sum + q.rows, 0) + ' rows');
   await database.query(`INSERT INTO files(file_id,owner_id,purpose,state,object_key,original_filename,declared_content_type,size_bytes,created_at,position)

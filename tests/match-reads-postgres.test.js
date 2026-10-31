@@ -40,7 +40,7 @@ test('matching read graphs have fixed query budgets without unrelated history', 
       const url = new URL(path,'http://localhost');
       const {db,queries} = instrument(database);
       await loadHotReadStore(db,'clerk_client',url.pathname,{ searchParams:url.searchParams });
-      assert.ok(queries.length <= 36,`queries=${queries.length}`);
+      assert.ok(queries.length <= (url.pathname === '/me/deadline-days' ? 37 : 34),`queries=${queries.length}`);
       assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)));
       out.push(queries);
     }

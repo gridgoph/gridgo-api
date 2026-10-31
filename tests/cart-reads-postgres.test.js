@@ -24,6 +24,11 @@ async function setup(database) {
         sortOrder: index, createdAt: AT, updatedAt: AT });
     }
   }
+  const recent = new Date(Date.now() - 86400000).toISOString();
+  store.productionLapses.push({id:'lapse',orderId:'a_active',supplierId:'supplier',tier:'minor',deadlineAt:recent,detectedAt:recent,
+    rateBps:0,deductionMinor:0,remainingBalanceMinor:10000,policy:{warningsOnly:false}});
+  for (const orderId of ['a_active','review']) store.supplierPerformanceEvents.push({id:`event_${orderId}`,orderId,supplierId:'supplier',
+    kind:'late_finish',sourceKey:'fixture_finish',at:recent,recordedAt:recent});
   const expiresAt = new Date(Date.now() + 40 * 86400000).toISOString();
   store.voucherCampaigns.push({ id: 'campaign', name: 'Fixture credit', code: 'FIXTURE', purpose: 'manual', mode: 'assigned', status: 'active', valueMinor: 500, totalLimit: 100, perAccountLimit: 1, validityDays: 30, createdAt: AT, updatedAt: AT });
   store.voucherCampaigns.push({ ...store.voucherCampaigns[0], id: 'campaign_reserved', code: 'RESERVED' });
@@ -41,7 +46,7 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
   const baseline = await apiForTest(t, readParityEnv(true, at));
   const targeted = await apiForTest(t, readParityEnv(false, at));
   const paths = ['/me/preferences','/me/addresses', '/me/carts/cart', '/me/carts/single', '/me/carts/done', '/me/carts/foreign', '/me/carts/missing',
-    '/me/carts/dual_cart', '/me/carts/cart/quote', '/me/carts/cart/voucher', '/me/carts/single/voucher',
+    '/me/carts/dual_cart', '/me/carts/%zz', '/me/carts/%00', '/me/carts/cart/quote', '/me/carts/cart/voucher', '/me/carts/single/voucher',
     '/me/carts/done/quote', '/me/carts/cart/groups/cart_line_0/listings', '/me/carts/cart/groups/missing/listings'];
   for (const who of [null,'client','other','supplier','rider','ops','admin','test_ops','dual','suspended']) for (const path of paths) {
     for (const headers of [{}, { 'x-gridgo-role': 'client' }]) {
@@ -106,11 +111,22 @@ test('cart graph query count and rows ignore other clients and unrelated operati
     const store = await loadHotReadStore(db,'clerk_client','/me/carts/cart');
     assert.equal(store.carts.length, 1);
     assert.equal(store.cartLines.length, 3);
-    assert.ok(queries.length <= 50, `queries=${queries.length}`);
+    assert.equal(store.productionLapses.length,1);
+    assert.equal(store.supplierPerformanceEvents.length,2);
+    assert.ok(store.orders.some(row => row.id === 'review' && row.reviewData), 'incident parents retain report scope');
+    assert.ok(store.orderLineItems.length > 0, 'line-based scheduling exemptions are hydrated');
+    assert.ok(queries.length <= 49, `queries=${queries.length}`);
     assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)));
     await assert.rejects(database.transaction(() => saveStore(database,store)), /read-only/);
     return queries;
   };
+  for (const path of ['/me/preferences','/me/addresses','/me/carts/cart','/me/carts/cart/quote','/me/carts/cart/voucher','/me/carts/cart/groups/cart_line_0/listings']) {
+    const { db, queries } = instrument(database);
+    await loadHotReadStore(db,'clerk_client',path);
+    assert.ok(isHotReadPath(path),path);
+    assert.ok(queries.length <= (path.startsWith('/me/carts/') ? 49 : 5),`${path}: ${queries.length} queries`);
+    assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)),path);
+  }
   const before = await sample();
   t.diagnostic('/me/carts/cart: ' + before.length + ' queries, ' + before.reduce((sum, q) => sum + q.rows, 0) + ' rows');
   await database.query(`INSERT INTO client_carts(id,client_id,state,version,service_level,fulfillment_mode,created_at,updated_at)

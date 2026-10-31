@@ -66,6 +66,14 @@ test('catalogue graphs avoid unrelated history and use a fixed query budget', { 
     await assert.rejects(database.transaction(() => saveStore(database, store)), /read-only/);
     return queries;
   };
+  for (const path of ['/accepted-file-formats', '/catalog/shops', '/catalog/shops/supplier', '/catalog/items/item_supplier',
+    '/catalog/media/photo_supplier', '/ops/catalog/shops', '/ops/catalog/shops/supplier', '/ops/catalog/items/item_supplier', '/me/catalog-preview']) {
+    const { db, queries } = instrument(database);
+    await loadHotReadStore(db,'clerk_supplier',path);
+    assert.ok(isHotReadPath(path),path);
+    assert.ok(queries.length <= (path.includes('/media/') ? 34 : 32),`${path}: ${queries.length} queries`);
+    assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)),path);
+  }
   const before = await sample();
   t.diagnostic('/catalog/items/item_supplier: ' + before.length + ' queries, ' + before.reduce((sum, q) => sum + q.rows, 0) + ' rows');
   await database.query(`INSERT INTO orders (id,client_id,state,created_at,updated_at,position)
