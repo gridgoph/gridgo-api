@@ -2436,7 +2436,7 @@ async function handleAuditedRequest(req, res) {
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
       })
       : hotRead ? await loadHotReadStore(database, notificationClaims?.claims?.sub || null, pathname, {
-        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'),
+        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), searchParams: url.searchParams,
         role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
       }) : await load();

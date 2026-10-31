@@ -993,7 +993,7 @@ function isCatalogReadPath(pathname) {
  * Approved snapshots can retain photos and a service absent from the draft.
  * Keep JS visibility/cursor policy authoritative, including review-only shops.
  */
-async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null } = {}) {
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null } = {}) {
   const { loaded, read } = graph;
   if (fileId) {
     await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
@@ -1003,7 +1003,8 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
       OR approved_snapshot @> $2::jsonb
       OR supplier_id = ANY($3::text[])`, [loaded.supplier_catalog_item_photos.map(row => row.catalog_item_id),
       JSON.stringify({ catalogItemPhotos: [{ fileId }] }), loaded.supplier_shop_media.map(row => row.supplier_id)]);
-  } else if (itemIds) await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [itemIds]);
+  } else if (subcategoryCode) await read('supplier_catalog_items', "WHERE subcategory_code = $1 OR approved_snapshot #>> '{item,subcategoryCode}' = $1", [subcategoryCode]);
+  else if (itemIds) await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [itemIds]);
   else if (supplierIds) await read('supplier_catalog_items', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
   else await read('supplier_catalog_items', '');
   const suppliers = [...new Set([...(supplierIds || []), ...loaded.supplier_catalog_items.map(row => row.supplier_id),
@@ -1101,9 +1102,25 @@ async function readCartGraph(graph, actorIds, pathname) {
   return graph.finish();
 }
 
+const MATCH_READ_PATHS = new Set(['/me/deadline-days', '/me/print-layout-check']);
+async function readMatchGraph(graph, actorIds, pathname, params) {
+  const { loaded, read } = graph;
+  if (pathname === '/me/deadline-days') {
+    await readCatalogueGraph(graph, actorIds, { subcategoryCode: params.get('subcategoryCode')?.trim() || null });
+    await readShopWork(graph, loaded.supplier_profiles.map(row => row.user_id));
+  } else {
+    await readCatalogueGraph(graph, actorIds, { itemIds: [params.get('catalogItemId')?.trim() || null] });
+    const fileIds = [...new Set([...loaded.files.map(row => row.file_id), ...params.getAll('fileIds')
+      .flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean)])];
+    await read('files', 'WHERE file_id = ANY($1::text[])', [fileIds]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [fileIds]);
+  }
+  return graph.finish();
+}
+
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname); }
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1234,13 +1251,14 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
 }
 
 /** Explicit route graphs. Other routes retain the complete transactional adapter. */
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false } = {}) {
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (MATCH_READ_PATHS.has(pathname)) return readMatchGraph(graph, ids, pathname, searchParams);
     if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
