@@ -55,18 +55,9 @@ jobs:
       - run: npm run migrate
       - run: npm run seed
       - run: npm test -- --maxWorkers=2
-      # Blocks on high and critical, not on everything.
-      #
-      # The gate at its default level fails on any advisory at all, which sounds
-      # stricter than it is: a moderate finding three levels down a transitive
-      # tree, in a code path nothing reachable from the internet touches, stops a
-      # release that fixes real things. The MinIO client's query-string
-      # dependency is exactly that, and it has no non-breaking fix -- the patched
-      # library is ESM-only and the package requiring it is not.
-      #
-      # High and critical still stop the line, which is where a gate earns its
-      # keep. Moderate findings are read rather than obeyed.
-      - run: npm audit --omit=dev --audit-level=high
+      # Production dependencies, high/critical gate. Only the two approved IDs
+      # in audit-check.js are exempt through 2026-11-14 UTC; see issue #330.
+      - run: node scripts/audit-check.js
 
   image:
     name: Build image and prove PostgreSQL volume survival

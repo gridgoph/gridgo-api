@@ -1,5 +1,6 @@
 import { payoutStageLabel } from './payout-plan.js';
 import { sameProofFile } from './payout-proofs.js';
+import { mapConcurrent } from './concurrent-map.js';
 /** Shared evidence rule for packing and the client progress gallery. */
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const SHOP_PROOF_CODES = new Set(["production_started", "printing", "packaging_qc"]);
@@ -24,12 +25,11 @@ export function productionProgressFor(store, order) {
 }
 
 /** The caller must authorize each file exactly as a direct artwork download. */
-export async function signProductionPhotos(record, { findFile, authorizeRead, presignGet }, field = "productionProgress") {
+export async function signProductionPhotos(record, { findFile, authorizeRead, presignGet, concurrency = 1 }, field = "productionProgress") {
   if (!record?.[field]) return;
-  const visible = [];
-  for (const photo of record[field].photos) {
+  const signed = await mapConcurrent(record[field].photos, concurrency, async photo => {
     const file = findFile(photo.fileId);
-    try { authorizeRead(file); } catch { continue; }
+    try { authorizeRead(file); } catch { return null; }
     try {
       const signed = await presignGet(file.objectKey);
       photo.downloadUrl = signed.url;
@@ -38,8 +38,9 @@ export async function signProductionPhotos(record, { findFile, authorizeRead, pr
       // Keep evidence visible during storage outages. /files/:id/download-url
       // can be retried; a signing outage does not mean no photo was submitted.
     }
-    visible.push(photo);
-  }
+    return photo;
+  });
+  const visible = signed.filter(Boolean);
   record[field] = { status: visible.length ? "photos_available" : "waiting_for_photo", photos: visible };
 }
 

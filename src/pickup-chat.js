@@ -76,6 +76,24 @@ export async function pickupChatUnread(database, order, userId) {
   return result.rows[0].unread;
 }
 
+/** One request's visible conversations only; never cache across callers/reads. */
+export async function pickupChatUnreadCounts(database, orders, user, store) {
+  const eligible = orders.filter(order => pickupChatProjection(order, user, store));
+  const counts = new Map(eligible.map(order => [order.id, 0]));
+  if (!eligible.length) return counts;
+  const result = await database.query(
+    `SELECT m.order_id, m.rider_id, count(*)::int AS unread
+       FROM unnest($1::text[], $2::text[]) AS visible(order_id, rider_id)
+       JOIN pickup_chat_messages m ON m.order_id = visible.order_id AND m.rider_id = visible.rider_id
+       LEFT JOIN pickup_chat_reads r ON r.order_id = m.order_id AND r.rider_id = m.rider_id AND r.user_id = $3
+      WHERE m.sender_user_id <> $3 AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
+      GROUP BY m.order_id, m.rider_id`,
+    [eligible.map(order => order.id), eligible.map(order => order.riderId), user.id],
+  );
+  for (const row of result.rows) counts.set(row.order_id, row.unread);
+  return counts;
+}
+
 /**
  * Whether this caller may open a photo sent in a delivery conversation: one of
  * the two parties, to the rider it was sent with, while it can still be read.
