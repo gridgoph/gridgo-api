@@ -50,8 +50,9 @@ are stored. Recording is best effort on a separate bounded connection, so a
 locked row or failed observation may be retried on a later request. Observations
 never move the stored time backwards, and no other projection exposes it.
 
-After migrating, operators can run `npm run backfill:last-sign-ins` against the
-intended database. This idempotent command advances null/older values using only
+After migrating, operators can run `npm run backfill:last-sign-ins` from the
+shipped API image or a local checkout against the intended database. This
+idempotent command advances null/older values using only
 GRIDGO's durable `staff.sign_in` audit rows and remembers their hashed sessions.
 It makes no Clerk/network calls and ignores future audit times. Accounts without
 that evidence remain unchanged: creation times and ordinary activity cannot

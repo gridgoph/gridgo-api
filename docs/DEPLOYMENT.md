@@ -6,6 +6,14 @@ historical observations from GRIDGO's `staff.sign_in` audit evidence. The comman
 is idempotent and preserves newer timestamps; it does not contact Clerk. Accounts
 without a sign-in audit stay unchanged. See [Clerk-only identity](../README.md#clerk-only-identity).
 
+From the production compose directory, use the shipped API image and its database environment:
+
+```bash
+docker compose run --rm --no-deps api npm run backfill:last-sign-ins
+```
+
+Sessions already live at deploy may record their first post-deploy request rather than their original sign-in time.
+
 This runbook is authoritative for the PostgreSQL 17 and Clerk-only production service at `gridgo-api.talasora.com`. CI builds and smoke-tests the image on every ref, but publishes to `ghcr.io/gridgoph/gridgo-api` (immutable `sha-...` plus `latest`) and invokes the server's restricted `api` deploy command only after a default-branch merge; feature-branch builds never push an image. CI never writes compose or secret files to the server.
 
 The PostgreSQL/Clerk cutover starts from the captain-authorized empty state. Do not restore `store.json`, write a JSON importer, recreate demo users, or copy development Clerk credentials into production.

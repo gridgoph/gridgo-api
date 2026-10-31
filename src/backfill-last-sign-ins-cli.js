@@ -1,5 +1,5 @@
-import { createDatabase } from '../src/database.js';
-import { backfillLastSignIns } from '../src/last-sign-in.js';
+import { createDatabase } from './database.js';
+import { backfillLastSignIns } from './last-sign-in.js';
 
 const database = createDatabase();
 try {
