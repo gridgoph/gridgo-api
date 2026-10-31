@@ -22,7 +22,7 @@ function userById(store, id) {
   return store.users.find((user) => user.id === id);
 }
 
-test('a successful authentication records lastAuthenticatedAt and a later one moves it forward', { skip: !DATABASE_URL }, async (t) => {
+test('a successful session records lastAuthenticatedAt and a new session moves it forward', { skip: !DATABASE_URL }, async (t) => {
   const db = await setup(t);
   const api = await apiForTest(t);
 
@@ -44,7 +44,10 @@ test('a successful authentication records lastAuthenticatedAt and a later one mo
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal((await api('client', 'GET', '/auth/me/client')).status, 200);
-  const second = await waitForTimestamp(db, 'client', value => Date.parse(value) > Date.parse(first), () => api('client', 'GET', '/auth/me/client'));
+  assert.equal(userById(await loadStore(db), 'client').lastAuthenticatedAt, first);
+  const newSession = () => api('client', 'GET', '/auth/me/client', null, { claims: { sid: 'session_client_new' } });
+  assert.equal((await newSession()).status, 200);
+  const second = await waitForTimestamp(db, 'client', value => Date.parse(value) > Date.parse(first), newSession);
   assert.ok(Date.parse(second) > Date.parse(first), `${second} should be later than ${first}`);
 
   const directory = await api('admin', 'GET', '/users');
@@ -94,7 +97,7 @@ test('a locked user row does not delay an authenticated GET', { skip: !DATABASE_
   try {
     await locker.query('BEGIN');
     await locker.query("SELECT id FROM users WHERE id = 'client' FOR UPDATE");
-    const response = await api('client', 'GET', '/settings', null, { signal: AbortSignal.timeout(750) });
+    const response = await api('client', 'GET', '/settings', null, { signal: AbortSignal.timeout(750), claims: { sid: 'new_locked_session' } });
     assert.equal(response.status, 200, JSON.stringify(response.body));
     // The lock is still held when the response arrives.
   } finally {
@@ -184,7 +187,7 @@ test('timestamp SQL failures use a separate connection and leave the domain tran
   await rejectTimestampWrites(db);
   try {
     await db.transaction(async () => {
-      await assert.rejects(db.recordLastAuthenticated('client', new Date().toISOString()), /test timestamp write failure/);
+      await assert.rejects(db.recordLastAuthenticated('client', new Date().toISOString(), 'a'.repeat(64)), /test timestamp write failure/);
       await db.query("UPDATE users SET name = 'Committed client' WHERE id = 'client'");
     });
     assert.equal(userById(await loadStore(db), 'client').name, 'Committed client');
@@ -200,8 +203,9 @@ test('timestamp recording skips a locked row and bounds a slow SQL write', { ski
   try {
     await locker.query('BEGIN');
     await locker.query("SELECT id FROM users WHERE id = 'client' FOR UPDATE");
-    const result = await db.recordLastAuthenticated('client', new Date().toISOString());
+    const result = await db.recordLastAuthenticated('client', new Date().toISOString(), 'a'.repeat(64));
     assert.equal(result.rowCount, 0);
+    assert.equal((await db.query('SELECT count(*) AS n FROM user_sign_in_sessions')).rows[0].n, 0);
   } finally {
     await locker.query('ROLLBACK');
     await locker.end();
@@ -211,8 +215,9 @@ test('timestamp recording skips a locked row and bounds a slow SQL write', { ski
     CREATE TRIGGER test_slow_auth_write BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION test_slow_auth_write();`);
   try {
-    await assert.rejects(db.recordLastAuthenticated('client', new Date().toISOString()), error => error.code === '57014');
+    await assert.rejects(db.recordLastAuthenticated('client', new Date().toISOString(), 'a'.repeat(64)), error => error.code === '57014');
     assert.equal(userById(await loadStore(db), 'client').lastAuthenticatedAt, undefined);
+    assert.equal((await db.query('SELECT count(*) AS n FROM user_sign_in_sessions')).rows[0].n, 0);
   } finally {
     await db.query('DROP TRIGGER test_slow_auth_write ON users; DROP FUNCTION test_slow_auth_write();');
   }
