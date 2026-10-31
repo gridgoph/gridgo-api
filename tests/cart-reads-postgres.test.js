@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
-import { loadHotReadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
+import { loadHotReadStore, loadStore, saveStore, isHotReadPath } from '../src/postgres-store.js';
 import { setupOrders, instrument } from './fixtures/order-reads.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { readParityEnv } from './fixtures/read-parity.js';
@@ -59,6 +59,41 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
   assert.equal((await targeted('client','GET','/me/carts/done')).body.cart.basketId, 'basket');
   assert.equal((await targeted('client','GET','/me/carts/single')).body.cart.clientQuote.voucher.id, 'reserved');
   assert.equal(multi.body.cart.clientQuote.voucher.id, 'available');
+  // Create the timing guarantee through the real mutation boundary, then prove
+  // that a targeted GET preserves it after the shop's queue changes.
+  const created = await baseline('client','POST','/me/carts',{});
+  assert.equal(created.status,201);
+  const selectedCart = created.body.cart.id;
+  const match = await baseline('client','POST','/me/matches', { cartId:selectedCart, subcategoryCode:'flyers', units:10,
+    deadline:new Date(at + 20 * 86400000).toISOString(), fulfillmentMode:'delivery', dropoff:{lat:7.07,lng:125.61,label:'Home'} });
+  assert.equal(match.status,200,JSON.stringify(match.body));
+  assert.ok(match.body.listings.length);
+  const added = await baseline('client','POST',`/me/carts/${selectedCart}/lines`, { selectToken:match.body.listings[0].selectToken,
+    matchRequestId:match.body.matchRequestId, quantity:10, optionIds:[] });
+  assert.equal(added.status,201,JSON.stringify(added.body));
+  await database.query("UPDATE order_jobs SET estimated_hours = 1000 WHERE supplier_id = $1", [match.body.shop.supplierId]);
+  const oldGuarantee = await baseline('client','GET',`/me/carts/${selectedCart}`,null,{raw:true});
+  const newGuarantee = await targeted('client','GET',`/me/carts/${selectedCart}`,null,{raw:true});
+  assert.equal(newGuarantee.body,oldGuarantee.body);
+  assert.equal(JSON.parse(newGuarantee.body).cart.groups[0].readyBy,added.body.cart.groups[0].readyBy);
+
+  // An approved organisation keeps its discount during an officer renewal.
+  // The pending case alone cannot grant it; its current officer is required.
+  await database.transaction(async () => {
+    const current = await loadStore(database);
+    Object.assign(current.users.find(row => row.id === 'client'), {accountType:'organization',orgName:'Fixture school'});
+    Object.assign(current.clientProfiles.find(row => row.userId === 'client'), {clientKind:'business',businessName:'Fixture school',businessNature:'School'});
+    current.approvalCases.push({id:'organization_case',userId:'client',kind:'business_client',status:'pending',version:1,applicationRevision:1,createdAt:AT,updatedAt:AT});
+    current.organizationAccounts.push({userId:'client',nameKey:'fixture school',schoolKey:'fixture school',currentOfficer:{name:'Current officer'}});
+    for (const voucher of current.vouchers) voucher.status = 'void';
+    await saveStore(database,current);
+  });
+  const oldOrganization = await baseline('client','GET','/me/carts/cart',null,{raw:true});
+  const newOrganization = await targeted('client','GET','/me/carts/cart',null,{raw:true});
+  assert.equal(newOrganization.status,200);
+  assert.equal(newOrganization.body,oldOrganization.body);
+  assert.ok(JSON.parse(newOrganization.body).cart.clientQuote.organizationDiscountMinor > 0);
+
 });
 
 test('cart graph query count and rows ignore other clients and unrelated operational history', { skip }, async t => {
@@ -77,6 +112,7 @@ test('cart graph query count and rows ignore other clients and unrelated operati
     return queries;
   };
   const before = await sample();
+  t.diagnostic('/me/carts/cart: ' + before.length + ' queries, ' + before.reduce((sum, q) => sum + q.rows, 0) + ' rows');
   await database.query(`INSERT INTO client_carts(id,client_id,state,version,service_level,fulfillment_mode,created_at,updated_at)
     SELECT 'growth_'||i,'other','draft',1,'standard','delivery',$1,$1 FROM generate_series(1,1000) i`,[AT]);
   await database.query(`INSERT INTO orders(id,client_id,state,created_at,updated_at,position)

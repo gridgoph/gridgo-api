@@ -39,7 +39,7 @@ test('catalogue HTTP bodies and signed photo fields equal the full-store route f
   const baseline = await apiForTest(t, readParityEnv(true, at));
   const targeted = await apiForTest(t, readParityEnv(false, at));
   const paths = ['/accepted-file-formats?q=pdf', '/catalog/shops', '/catalog/shops?categoryCode=bad',
-    '/catalog/shops/supplier', '/catalog/shops/review_supplier', '/catalog/shops/missing',
+    '/catalog/shops/supplier', '/catalog/shops/review_supplier', '/catalog/shops/missing', '/catalog/shops/%zz', '/catalog/items/%00',
     '/catalog/items/item_supplier', '/catalog/items/review_item', '/catalog/items/missing',
     '/catalog/media/photo_supplier', '/catalog/media/shop_image', '/catalog/media/missing',
     '/ops/catalog/shops', '/ops/catalog/shops/supplier', '/ops/catalog/items/item_supplier', '/me/catalog-preview'];
@@ -67,6 +67,7 @@ test('catalogue graphs avoid unrelated history and use a fixed query budget', { 
     return queries;
   };
   const before = await sample();
+  t.diagnostic('/catalog/items/item_supplier: ' + before.length + ' queries, ' + before.reduce((sum, q) => sum + q.rows, 0) + ' rows');
   await database.query(`INSERT INTO orders (id,client_id,state,created_at,updated_at,position)
     SELECT 'growth_'||i,'other','draft',$1,$1,1000+i FROM generate_series(1,1000) i`, [AT]);
   assert.deepEqual(await sample(), before);

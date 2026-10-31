@@ -983,7 +983,7 @@ async function readCatalogItemContext(graph, ids) {
   await read('platform_settings', 'WHERE singleton');
 }
 
-// Keep route matching exact: write-capable preview/quote routes are not reads.
+// Keep route matching exact: write-capable preview resolution is not a read.
 const CATALOG_READ = /^\/(?:catalog|ops\/catalog)\/(?:shops(?:\/[^/]+)?|items\/[^/]+|media\/[^/]+)$/;
 function isCatalogReadPath(pathname) {
   return CATALOG_READ.test(pathname) || ['/accepted-file-formats', '/me/catalog-preview'].includes(pathname);
@@ -1002,7 +1002,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
     await read('supplier_catalog_items', `WHERE id = ANY($1::text[])
       OR approved_snapshot @> $2::jsonb
       OR supplier_id = ANY($3::text[])`, [loaded.supplier_catalog_item_photos.map(row => row.catalog_item_id),
-      JSON.stringify({ catalogItemPhotos: [{ fileId }] }), loaded.supplier_shop_media.map(row => row.supplier_id)]);
+      JSON.stringify({ catalogItemPhotos: [{ fileId }] }), [...(supplierIds || []), ...loaded.supplier_shop_media.map(row => row.supplier_id)]]);
   } else if (subcategoryCode) await read('supplier_catalog_items', "WHERE subcategory_code = $1 OR approved_snapshot #>> '{item,subcategoryCode}' = $1", [subcategoryCode]);
   else if (itemIds) await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [itemIds]);
   else if (supplierIds) await read('supplier_catalog_items', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
@@ -1042,7 +1042,9 @@ async function readCatalogueRoute(graph, ids, pathname) {
   }
   const path = pathname.replace(/^\/ops/, '');
   const parts = path.split('/');
-  const id = parts[3] ? decodeURIComponent(parts[3]) : null;
+  let id = null;
+  try { id = parts[3] ? decodeURIComponent(parts[3]) : null; } catch { return graph.finish(); }
+  if (id?.includes('\0')) return graph.finish();
   await readCatalogueGraph(graph, ids, {
     supplierIds: pathname === '/me/catalog-preview' ? ids : parts[2] === 'shops' && id ? [id] : null,
     itemIds: parts[2] === 'items' ? [id] : null,
@@ -1072,7 +1074,8 @@ async function readCartGraph(graph, actorIds, pathname) {
   if (pathname === '/me/preferences') await read('client_match_preferences', 'WHERE client_id = ANY($1::text[])', [actorIds]);
   else if (pathname === '/me/addresses') await read('client_saved_addresses', 'WHERE client_id = ANY($1::text[])', [actorIds]);
   else {
-    const cartId = decodeURIComponent(pathname.split('/')[3]);
+    const cartId = pathname.endsWith('/voucher') ? pathname.split('/')[3] : decodeURIComponent(pathname.split('/')[3]);
+    if (cartId.includes('\0')) return graph.finish();
     // Retain the foreign parent to preserve ownCart's 403 rather than 404.
     await read('client_carts', 'WHERE id = $1', [cartId]);
     const cart = loaded.client_carts[0];
@@ -1081,7 +1084,7 @@ async function readCartGraph(graph, actorIds, pathname) {
     const suppliers = [...new Set(loaded.client_cart_lines.map(row => row.supplier_id))];
     await readCatalogueGraph(graph, actorIds, { supplierIds: suppliers });
     await readShopWork(graph, suppliers);
-    await read('client_match_selections', 'WHERE client_id = $1 AND selection->>\'cartId\' = $2', [cart.client_id, cartId]);
+    await read('client_match_selections', "WHERE client_id = $1 AND selection->>'cartId' = $2", [cart.client_id, cartId]);
     await read('organization_accounts', 'WHERE user_id = $1', [cart.client_id]);
     await read('vouchers', 'WHERE client_id = $1', [cart.client_id]);
     await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
@@ -1102,25 +1105,71 @@ async function readCartGraph(graph, actorIds, pathname) {
   return graph.finish();
 }
 
+const sqlReadText = value => value && !value.includes('\0') ? value : null;
 const MATCH_READ_PATHS = new Set(['/me/deadline-days', '/me/print-layout-check']);
 async function readMatchGraph(graph, actorIds, pathname, params) {
   const { loaded, read } = graph;
   if (pathname === '/me/deadline-days') {
-    await readCatalogueGraph(graph, actorIds, { subcategoryCode: params.get('subcategoryCode')?.trim() || null });
+    await readCatalogueGraph(graph, actorIds, { subcategoryCode: sqlReadText(params.get('subcategoryCode')?.trim()) });
     await readShopWork(graph, loaded.supplier_profiles.map(row => row.user_id));
   } else {
-    await readCatalogueGraph(graph, actorIds, { itemIds: [params.get('catalogItemId')?.trim() || null] });
+    await readCatalogueGraph(graph, actorIds, { itemIds: [sqlReadText(params.get('catalogItemId')?.trim())] });
     const fileIds = [...new Set([...loaded.files.map(row => row.file_id), ...params.getAll('fileIds')
-      .flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean)])];
+      .flatMap(value => value.split(',')).map(value => sqlReadText(value.trim())).filter(Boolean)])];
     await read('files', 'WHERE file_id = ANY($1::text[])', [fileIds]);
     await read('file_references', 'WHERE file_id = ANY($1::text[])', [fileIds]);
   }
   return graph.finish();
 }
 
+const FILE_READ = /^\/files\/[^/]+(?:\/(?:download-url|content))?$/;
+
+/** Authorize one ready file using the unchanged purpose/reference policies.
+ * Chat references snapshot their orderId separately from their message id.
+ * Load all references, including legacy line scope and refund ownership.
+ */
+async function readFileGraph(graph, actorIds, pathname) {
+  const { loaded, read } = graph;
+  const fileId = pathname.split('/')[2];
+  await read('files', 'WHERE file_id = $1', [fileId]);
+  await read('file_references', 'WHERE file_id = $1', [fileId]);
+  const files = loaded.files, references = loaded.file_references;
+  const referenceIds = references.map(row => row.reference_id);
+  const catalogIds = references.filter(row => row.reference_type === 'supplier_catalog_item').map(row => row.reference_id);
+  const shopIds = references.filter(row => row.reference_type === 'supplier_shop_media').map(row => row.reference_id);
+  if (catalogIds.length || shopIds.length) {
+    await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [catalogIds]);
+    await readCatalogueGraph(graph, actorIds, { fileId, supplierIds: [...shopIds, ...loaded.supplier_catalog_items.map(row => row.supplier_id)] });
+  }
+  const ratingOrders = loaded.orders.map(row => row.id);
+  await read('orders', 'WHERE id = ANY($1::text[])', [[...referenceIds, ...ratingOrders, ...references.map(row => row.data?.orderId).filter(Boolean)]]);
+  const orderIds = loaded.orders.map(row => row.id);
+  for (const name of ['order_jobs', 'order_line_items', 'delivery_reminders']) await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  await read('refund_requests', 'WHERE id = ANY($1::text[])', [referenceIds]);
+  // A supplier_service reference has its own live/owner policy, independent of
+  // the catalogue item's public eligibility.
+  await read('supplier_services', 'WHERE id = ANY($1::text[])', [[...referenceIds, ...loaded.supplier_services.map(row => row.id)]]);
+  await read('approval_cases', 'WHERE id = ANY($1::text[])', [referenceIds]);
+  const userIds = new Set([...actorIds, ...loaded.users.map(row => row.id), ...files.map(row => row.owner_id),
+    ...loaded.approval_cases.map(row => row.user_id),
+    ...references.filter(row => row.reference_type === 'user').map(row => row.reference_id)]);
+  // Review-only views filter child owners as well as the parent review mark.
+  const userFields = ['userId', 'clientId', 'supplierId', 'riderId', 'ownerId', 'partyUserId', 'createdBy', 'originalSupplierId'];
+  for (const rows of Object.values(graph.finish())) if (Array.isArray(rows)) for (const row of rows) {
+    for (const field of userFields) if (row[field]) userIds.add(row[field]);
+  }
+  for (const row of references) for (const field of userFields) if (row.data?.[field]) userIds.add(row.data[field]);
+  await readIdentity(graph, [...userIds].filter(Boolean));
+  // Retain supporting photos: a shop-media reference is public only when the
+  // shop still has a complete listing with a ready sample photo.
+  loaded.files = [...files, ...loaded.files.filter(row => row.file_id !== fileId)];
+  loaded.file_references = [...references, ...loaded.file_references.filter(row => row.file_id !== fileId)];
+  return graph.finish();
+}
+
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname); }
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1258,6 +1307,7 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (FILE_READ.test(pathname)) return readFileGraph(graph, ids, pathname);
     if (MATCH_READ_PATHS.has(pathname)) return readMatchGraph(graph, ids, pathname, searchParams);
     if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);

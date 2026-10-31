@@ -15,7 +15,7 @@ test('matching calendar and layout read responses equal full-store bytes across 
   const baseline = await apiForTest(t, readParityEnv(true, at));
   const targeted = await apiForTest(t, readParityEnv(false, at));
   const paths = ['/me/deadline-days?subcategoryCode=flyers&days=7', '/me/deadline-days?subcategoryCode=missing',
-    '/me/deadline-days', '/me/print-layout-check?catalogItemId=item_supplier&fileIds=art_a_active',
+    '/me/deadline-days', '/me/print-layout-check?catalogItemId=%00', '/me/print-layout-check?catalogItemId=item_supplier&fileIds=art_a_active',
     '/me/print-layout-check?catalogItemId=item_supplier&fileIds=art_unrelated', '/me/print-layout-check?catalogItemId=missing',
     '/me/print-layout-check?catalogItemId=item_supplier&fileIds=' + Array.from({length:11},(_,i) => `f${i}`).join(',')];
   for (const who of [null,'client','other','supplier','rider','ops','admin','test_ops','review_client','dual']) for (const path of paths) {
@@ -26,7 +26,7 @@ test('matching calendar and layout read responses equal full-store bytes across 
     assert.equal(current.body,old.body,`${who} ${path}: bytes`);
   }
   assert.equal((await targeted('client','GET',paths[0])).status,200);
-  assert.equal((await targeted('client','GET',paths[3])).status,200);
+  assert.equal((await targeted('client','GET',paths[4])).status,200);
 });
 
 test('matching read graphs have fixed query budgets without unrelated history', { skip }, async t => {
@@ -47,6 +47,7 @@ test('matching read graphs have fixed query budgets without unrelated history', 
     return out;
   };
   const before = await sample();
+  t.diagnostic('matching helper queries: ' + before.map(queries => queries.length).join(', '));
   await database.query(`INSERT INTO orders(id,client_id,state,created_at,updated_at,position)
     SELECT 'growth_'||i,'other','draft',$1,$1,1000+i FROM generate_series(1,1000) i`,[AT]);
   assert.deepEqual(await sample(),before);
