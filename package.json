@@ -12,6 +12,7 @@
     "seed": "node --env-file-if-exists=.env src/seed.js",
     "seed:dev": "node --env-file-if-exists=.env src/seed-dev.js",
     "bootstrap-admin": "node --env-file-if-exists=.env src/bootstrap-admin.js",
+    "backfill:last-sign-ins": "node --env-file-if-exists=.env scripts/backfill-last-sign-ins.mjs",
     "files:retention": "node --env-file-if-exists=.env src/file-retention-cli.js",
     "production:correct": "node --env-file-if-exists=.env scripts/correct-production-time.mjs",
     "review-data:set": "node --env-file-if-exists=.env src/review-data-cli.js"

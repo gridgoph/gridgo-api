@@ -94,6 +94,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyWebhook } from "@clerk/backend/webhooks";
+import { recordUserSignIn } from './last-sign-in.js';
 import {
   activateClerkClientProfile,
   applyClerkIdentityCopy,
@@ -1020,26 +1021,22 @@ async function authenticateRequest(req, store) {
   const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
   if (auth.user) {
     setAuditActor(auth.user);
-    noteLastAuthenticated(auth.user);
+    noteLastAuthenticated(auth.user, verified.claims?.sid);
   }
   return auth;
 }
 
 /**
- * Last time GRIDGO accepted this account, for every role.
- * A later instant replaces the stored one. The same instant does not.
- * This is not `staff.sign_in`, and it does not store a session id or token.
+ * First time GRIDGO accepts each verified session, for every role.
+ * Session fingerprints and the monotonic timestamp commit together, outside
+ * the request transaction. This does not create `staff.sign_in` audit rows.
  */
-function noteLastAuthenticated(user) {
+function noteLastAuthenticated(user, sessionId) {
   const at = now();
-  const current = Date.parse(user.lastAuthenticatedAt || "");
-  if (Number.isFinite(current) && current >= Date.parse(at)) return;
   // Do not change the request's store: a later save must not reintroduce this
   // optional write into the domain transaction. Directory reads see persisted
   // telemetry on a subsequent load.
-  void database.recordLastAuthenticated(user.id, at).catch(error => {
-    console.warn(`Last authenticated write failed: ${error?.code || 'unknown'}`);
-  });
+  void recordUserSignIn(database, user.id, sessionId, at);
 }
 
 // Clerk owns sign-in. Record the first authenticated app bootstrap for a session;

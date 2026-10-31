@@ -42,6 +42,21 @@ Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Autho
 - Supplier/rider memberships come only from their fixed enrollment routes or the audited GRIDGO role route; Operations and administrator memberships are assignment-only. An activation request can never choose or inherit one of those memberships.
 - `POST /auth/logout` releases the optional push device token to the anonymous app-update pool. The app terminates its Clerk session with Clerk; the API has no local session to revoke.
 
+The staff Roles directory's `lastAuthenticatedAt` records GRIDGO's first accepted
+request per verified Clerk session (`sid`), rather than JWT refreshes or ongoing
+activity. Sessions without `sid` do not record a time. Hashed session fingerprints
+deduplicate returning devices across API restarts; no tokens or raw session IDs
+are stored. Recording is best effort on a separate bounded connection, so a
+locked row or failed observation may be retried on a later request. Observations
+never move the stored time backwards, and no other projection exposes it.
+
+After migrating, operators can run `npm run backfill:last-sign-ins` against the
+intended database. This idempotent command advances null/older values using only
+GRIDGO's durable `staff.sign_in` audit rows and remembers their hashed sessions.
+It makes no Clerk/network calls and ignores future audit times. Accounts without
+that evidence remain unchanged: creation times and ordinary activity cannot
+recover past client, supplier or rider sign-ins. This command never runs at boot.
+
 This preserves the existing Google activation response shape. Follow-up app/dashboard work must remove calls expecting `{token,user}` from API login/signup, use Clerk JWTs directly, and call authenticated `POST /devices` after sign-in to claim a phone.
 
 ## First administrator

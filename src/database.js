@@ -60,7 +60,7 @@ export function createDatabase(env = process.env) {
   // Optional authentication telemetry must not borrow a request transaction or
   // exhaust its pool. Keep its own small, time-bounded autocommit pool.
   let authenticationPool;
-  async function recordLastAuthenticated(userId, at) {
+  async function recordLastAuthenticated(userId, at, sessionHash) {
     if (!authenticationPool) {
       authenticationPool = new Pool({
         connectionString,
@@ -78,13 +78,22 @@ export function createDatabase(env = process.env) {
     return authenticationPool.query(
       `WITH candidate AS (
          SELECT id FROM users
-          WHERE id = $1 AND (last_authenticated_at IS NULL OR last_authenticated_at < $2::timestamptz)
+          WHERE id = $1 AND NOT EXISTS (
+            SELECT 1 FROM user_sign_in_sessions WHERE user_id = $1 AND session_hash = $3
+          )
           FOR UPDATE SKIP LOCKED
+       ), adopted AS (
+         INSERT INTO user_sign_in_sessions (user_id, session_hash, authenticated_at)
+         SELECT id, $3, $2::timestamptz FROM candidate
+         ON CONFLICT (user_id, session_hash) DO NOTHING
+         RETURNING user_id, authenticated_at
+       ), updated AS (
+         UPDATE users SET last_authenticated_at = adopted.authenticated_at
+          FROM adopted WHERE users.id = adopted.user_id
+            AND (users.last_authenticated_at IS NULL OR users.last_authenticated_at < adopted.authenticated_at)
        )
-       UPDATE users SET last_authenticated_at = $2::timestamptz
-        FROM candidate WHERE users.id = candidate.id
-          AND (users.last_authenticated_at IS NULL OR users.last_authenticated_at < $2::timestamptz)`,
-      [userId, at],
+       SELECT user_id FROM adopted`,
+      [userId, at, sessionHash],
     );
   }
 
