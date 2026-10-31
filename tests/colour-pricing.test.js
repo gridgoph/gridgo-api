@@ -50,3 +50,15 @@ test('shop configuration rejects invented tiers, floating prices and fixed-price
   assert.throws(() => parseColourListing({...body,colourPricing:{sizes:[{paperSize:'A3',tierSet:{toString:null},prices:{}}]}},listing), /invalid_colour_pricing/);
   assert.throws(() => parseColourListing({...body,colourPricing:{sizes:[{paperSize:'A3',tierSet:'a3',prices:{full_colour:1.2}}]}},listing), /invalid_colour_pricing/);
 });
+
+
+test('colour writes order by numeric shorter and longer sides and declared tiers', () => {
+  const body = { pricedByColour: true, colourPricing: { sizes: ['4x8 ft', '36x60', '8x2 ft', 'A4', '36x48', '2x3.5 in']
+    .map(paperSize => ({ paperSize, tierSet: 'large_format', prices: { above_50: 99, up_to_50: 55, none: 0, up_to_25: 25 } })) } };
+  const original = structuredClone(body);
+  const result = parseColourListing(body, { pricingUnit: 'per_page', printLayouts: ['fit_to_paper'] });
+  assert.deepEqual(result.colourPricing.sizes.map(size => size.paperSize), ['2x3.5 in', 'A4', '8x2 ft', '36x48', '36x60', '4x8 ft']);
+  for (const size of result.colourPricing.sizes) assert.deepEqual(Object.entries(size.prices),
+    [['none', 0], ['up_to_25', 25], ['up_to_50', 55], ['above_50', 99]]);
+  assert.deepEqual(body, original);
+});

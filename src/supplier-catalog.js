@@ -2,6 +2,7 @@ import { effectiveProductionTime, productionTimeReview } from './production-time
 import { supplierAccountIsActive } from "./supplier-eligibility.js";
 import { publicColourListing, publicColourQuote } from './colour-projection.js';
 import { colourQuoteFor } from './colour-analysis.js';
+import { canonicalColourPricing } from './colour-pricing.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
@@ -1292,7 +1293,7 @@ export function privateCatalogItem(store, item) {
     printLayouts: listingPrintLayouts(item),
     pricedByColour: item.pricedByColour === true,
     oneColour: item.oneColour === true,
-    colourPricing: structuredClone(item.colourPricing ?? null),
+    colourPricing: canonicalColourPricing(item.colourPricing),
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     express: listingExpress(item),
     coverSpineForm: coverSpineApplies(item),

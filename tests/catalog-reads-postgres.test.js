@@ -8,7 +8,7 @@ import { AT } from './fixtures/reschedule.js';
 
 const skip = !process.env.DATABASE_URL;
 const roles = [null, 'client', 'supplier', 'replacement', 'rider', 'ops', 'admin', 'staff', 'test_ops', 'review_client', 'dual', 'suspended'];
-import { parityApiForTest, setupReadParity } from './fixtures/read-parity.js';
+import { parityApiForTest, setupReadParity, readParityColourPricing } from './fixtures/read-parity.js';
 
 async function setup(database) {
   const store = await setupReadParity(database);
@@ -80,21 +80,91 @@ test('catalogue graphs avoid unrelated history and use a fixed query budget', { 
   assert.deepEqual(await sample(), before);
 });
 
-// Removing either sort in colourPricingFromRows must fail even when the SQL
+// Removing canonical size/tier ordering must fail even when the SQL
 // planner happens to choose heap scans for both HTTP servers.
-test('colour listing reads use size keys and declared tiers without changing rates or omissions', { skip }, async t => {
+test('colour listing reads use numeric dimensions and declared tiers without changing rates or omissions', { skip }, async t => {
   const database = createDatabase(process.env); t.after(() => database.close());
   await setupReadParity(database);
   const full = (await loadStore(database)).catalogItems.find(row => row.id === 'item_colour');
   const targeted = (await loadHotReadStore(database, 'clerk_client', '/catalog/items/item_colour')).catalogItems[0];
   const own = (await listOwnCatalogItems(database, { supplierId: 'replacement' })).items.find(row => row.id === 'item_colour');
   for (const item of [full, targeted, own]) {
-    assert.deepEqual(item.colourPricing.sizes.map(size => size.paperSize), ['A4', 'A3', '20x30', '36x48']);
+    assert.deepEqual(item.colourPricing.sizes.map(size => size.paperSize), ['2x3.5 in', 'A4', 'A3', '20x30', '8x2 ft', '36x48', '4x8 ft']);
     assert.deepEqual(item.colourPricing.sizes.map(size => Object.entries(size.prices)), [
+      [['none', 10], ['above_50', 20]],
       [['none', 0], ['above_50', 500]],
       [['monochrome', 0], ['full_colour', 2500]],
       [['none', 1000], ['up_to_25', 2000], ['up_to_50', 3000], ['above_50', 4000]],
+      [['none', 600], ['above_50', 800]],
       [['none', 3000], ['up_to_25', 6000], ['up_to_50', 10000], ['above_50', 20000]],
+      [['none', 200], ['above_50', 400]],
     ]);
   }
+});
+
+
+test('unchanged colour PATCH in shop entry order stays approved without a review notice', { skip }, async t => {
+  const database = createDatabase(process.env); t.after(() => database.close());
+  await setupReadParity(database);
+  const before = await loadStore(database);
+  const notices = before.notifications.filter(row => row.type === 'catalog_review_pending').map(row => row.id);
+  const api = await parityApiForTest(t, false, Date.now() + 120000);
+  const result = await api('replacement', 'PATCH', '/me/catalog-items/item_colour', {
+    expectedVersion: 1, description: 'Same rates, updated text', colourPricing: readParityColourPricing(),
+  });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.item.reviewStatus, 'approved');
+  assert.deepEqual(result.body.item.colourPricing.sizes.map(size => size.paperSize),
+    ['2x3.5 in', 'A4', 'A3', '20x30', '8x2 ft', '36x48', '4x8 ft']);
+  const after = await loadStore(database);
+  const item = after.catalogItems.find(row => row.id === 'item_colour');
+  assert.equal(item.reviewStatus, 'approved');
+  assert.equal(item.approvedSnapshot, null);
+  assert.deepEqual(after.notifications.filter(row => row.type === 'catalog_review_pending').map(row => row.id), notices);
+  assert.equal((await api('replacement', 'GET', '/me/catalog-items/item_colour')).body.item.reviewStatus, 'approved');
+  const changedRates = readParityColourPricing();
+  changedRates.sizes.find(size => size.paperSize === '20x30').prices.none = 1001;
+  const changed = await api('replacement', 'PATCH', '/me/catalog-items/item_colour', {
+    expectedVersion: result.body.item.version, colourPricing: changedRates,
+  });
+  assert.equal(changed.status, 200, JSON.stringify(changed.body));
+  assert.equal(changed.body.item.reviewStatus, 'pending', 'a real price change must still require review');
+  const revised = await loadStore(database);
+  const revision = revised.catalogItems.find(row => row.id === item.id);
+  assert.equal(revision.colourPricing.sizes.find(size => size.paperSize === '20x30').prices.none, 1001);
+  assert.equal(revision.approvedSnapshot.item.colourPricing.sizes.find(size => size.paperSize === '20x30').prices.none, 1000);
+  assert.ok(revised.notifications.filter(row => row.type === 'catalog_review_pending').length > notices.length);
+});
+
+test('pending colour revision projects legacy approved JSONB sizes and tiers canonically', { skip }, async t => {
+  const database = createDatabase(process.env); t.after(() => database.close());
+  const store = await setupReadParity(database);
+  const item = store.catalogItems.find(row => row.id === 'item_colour');
+  item.approvedSnapshot = listingSnapshot(store, item);
+  // Old snapshots kept the shop's order; JSONB also reorders price keys.
+  const sizes = item.approvedSnapshot.item.colourPricing.sizes;
+  item.approvedSnapshot.item.colourPricing.sizes = readParityColourPricing().sizes
+    .map(({ paperSize }) => sizes.find(size => size.paperSize === paperSize));
+  item.reviewStatus = 'pending';
+  item.colourPricing.sizes.find(size => size.paperSize === '20x30').prices.none = 99999;
+  await database.transaction(() => saveStore(database, store));
+  const snapshot = (await loadStore(database)).catalogItems.find(row => row.id === item.id).approvedSnapshot;
+  const at = Date.now() + 120000;
+  for (const full of [true, false]) {
+    const api = await parityApiForTest(t, full, at);
+    const client = await api('client', 'GET', '/catalog/items/item_colour');
+    assert.equal(client.status, 200);
+    assert.deepEqual(client.body.item.colourPricing.sizes.map(size => size.paperSize),
+      ['2x3.5 in', 'A4', 'A3', '20x30', '8x2 ft', '36x48', '4x8 ft']);
+    assert.deepEqual(client.body.item.colourPricing.sizes.find(size => size.paperSize === '20x30').offeredTiers,
+      ['none', 'up_to_25', 'up_to_50', 'above_50']);
+    assert.deepEqual(client.body.item.colourPricing.sizes.find(size => size.paperSize === 'A3').offeredTiers,
+      ['monochrome', 'full_colour']);
+    assert.ok(client.body.item.colourPricing.sizes.every(size => !Object.hasOwn(size, 'prices')));
+    const own = await api('replacement', 'GET', '/me/catalog-items/item_colour');
+    assert.equal(own.body.item.reviewStatus, 'pending');
+    assert.equal(own.body.item.colourPricing.sizes.find(size => size.paperSize === '20x30').prices.none, 99999);
+  }
+  assert.deepEqual((await loadStore(database)).catalogItems.find(row => row.id === item.id).approvedSnapshot, snapshot,
+    'projection must not rewrite historical snapshots');
 });

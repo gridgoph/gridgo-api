@@ -4,18 +4,27 @@ import { saveStore } from '../../src/postgres-store.js';
 import { parseColourListing } from '../../src/colour-pricing.js';
 import { AT } from './reschedule.js';
 
+export function readParityColourPricing() {
+  return { sizes: [
+    { paperSize: '36x48', tierSet: 'large_format', prices: { none: 3000, up_to_25: 6000, up_to_50: 10000, above_50: 20000 } },
+    { paperSize: '4x8 ft', tierSet: 'large_format', prices: { above_50: 400, none: 200 } },
+    { paperSize: 'A3', tierSet: 'a3', prices: { full_colour: 2500, monochrome: 0 } },
+    { paperSize: '20x30', tierSet: 'large_format', prices: { none: 1000, up_to_25: 2000, up_to_50: 3000, above_50: 4000 } },
+    { paperSize: '8x2 ft', tierSet: 'large_format', prices: { above_50: 800, none: 600 } },
+    { paperSize: 'A4', tierSet: 'large_format', prices: { above_50: 500, none: 0 } },
+    { paperSize: '2x3.5 in', tierSet: 'large_format', prices: { above_50: 20, none: 10 } },
+  ] };
+}
+
 export async function setupReadParity(database) {
   const store = await setupOrders(database);
   const item = { ...structuredClone(store.catalogItems.find(row => row.id === 'item_replacement')),
     id: 'item_colour', pricingUnit: 'per_page', printLayouts: ['fit_to_paper'] };
-  // Heap insertion order differs from the size primary key. Both tier sets,
-  // a free tier and an omitted tier must survive the reader unchanged.
-  Object.assign(item, parseColourListing({ pricedByColour: true, colourPricing: { sizes: [
-    { paperSize: '36x48', tierSet: 'large_format', prices: { none: 3000, up_to_25: 6000, up_to_50: 10000, above_50: 20000 } },
-    { paperSize: 'A3', tierSet: 'a3', prices: { full_colour: 2500, monochrome: 0 } },
-    { paperSize: '20x30', tierSet: 'large_format', prices: { none: 1000, up_to_25: 2000, up_to_50: 3000, above_50: 4000 } },
-    { paperSize: 'A4', tierSet: 'large_format', prices: { above_50: 500, none: 0 } },
-  ] } }, item));
+  const entered = readParityColourPricing();
+  Object.assign(item, parseColourListing({ pricedByColour: true, colourPricing: entered }, item));
+  // Emulate legacy heap insertion order even after new writes canonicalise.
+  // Wide, rotated and small sheets distinguish numeric dimensions from text.
+  item.colourPricing.sizes = entered.sizes.map(({ paperSize }) => item.colourPricing.sizes.find(size => size.paperSize === paperSize));
   store.catalogItems.push(item);
   store.files.push({ ...structuredClone(store.files.find(row => row.fileId === 'photo_replacement')),
     fileId: 'photo_colour', objectKey: 'private/photo_colour',

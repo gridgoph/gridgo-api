@@ -62,7 +62,7 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
   }
   const colour = await targeted('client','GET','/me/carts/colour_cart');
   assert.equal(colour.status, 200);
-  assert.deepEqual(colour.body.cart.lines[0].listing.colourPricing.sizes.map(size => size.paperSize), ['A4', 'A3', '20x30', '36x48']);
+  assert.deepEqual(colour.body.cart.lines[0].listing.colourPricing.sizes.map(size => size.paperSize), ['2x3.5 in', 'A4', 'A3', '20x30', '8x2 ft', '36x48', '4x8 ft']);
   const colourGroup = await targeted('client','GET','/me/carts/colour_cart/groups/colour_line/listings');
   assert.equal(colourGroup.status, 200);
   assert.ok(colourGroup.body.listings.some(row => row.id === 'item_colour'));

@@ -1,4 +1,5 @@
 /** Approved composite snapshots isolate supplier drafts from every client price path. */
+import { canonicalColourPricing } from './colour-pricing.js';
 export const CATALOG_REVIEW_TABLES = [
   "catalogItems", "catalogOptionGroups", "catalogOptions", "catalogItemPhotos",
   "catalogPriceTiers", "catalogSpeedTiers", "catalogItemFileFormats",
@@ -8,6 +9,7 @@ const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt"
 export function listingSnapshot(store, item) {
   const { approvedSnapshot, reviewStatus, reviewReason, reviewedAt, reviewedBy, ...record } = item;
   const snapshot = { item: structuredClone(record) };
+  if (record.colourPricing != null) snapshot.item.colourPricing = canonicalColourPricing(record.colourPricing);
   const groups = (store.catalogOptionGroups || []).filter(row => row.catalogItemId === item.id);
   for (const key of CATALOG_REVIEW_TABLES.slice(1)) {
     snapshot[key] = structuredClone((store[key] || []).filter(row => key === "catalogOptions"
@@ -24,6 +26,7 @@ export function sensitiveSnapshot(snapshot) {
     "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli", "minimumOrderQuantity", "printerMaxWidthFeet", "printLayouts", "fileFormatMode", "pricedByColour", "oneColour", "colourPricing"];
   value.item = Object.fromEntries(fields.map(key => [key, snapshot.item[key] ??
     (key === "pricedByColour" || key === "oneColour" ? false : key === "pricingUnit" ? "per_unit" : key === "fileFormatMode" ? "inherit" : key === "printLayouts" ? [] : null)]));
+  value.item.colourPricing = canonicalColourPricing(value.item.colourPricing);
   function stable(record) {
     if (Array.isArray(record)) return record.map(stable);
     if (record && typeof record === "object") return Object.fromEntries(Object.keys(record).sort()
@@ -68,6 +71,7 @@ export function approvedCatalogView(store) {
   for (const draft of revisions) {
     const snapshot = draft.approvedSnapshot;
     const item = { ...snapshot.item, reviewStatus: "approved" };
+    if (item.colourPricing != null) item.colourPricing = canonicalColourPricing(item.colourPricing);
     for (const key of LIVE_FIELDS) {
       if (Object.hasOwn(draft, key)) item[key] = draft[key];
       else delete item[key];
