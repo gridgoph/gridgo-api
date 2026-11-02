@@ -109,7 +109,7 @@ test('Super Admin edits the cover with the settings version handshake; Operation
   const api = await apiForTest(t);
   const current = (await api('admin', 'GET', '/settings')).body;
   assert.equal(current.settings.shopMoveCoverBps, 5000);
-  assert.equal((await api('client', 'GET', '/settings')).body.settings.shopMoveCoverBps, undefined);
+  assert.equal((await api('client', 'GET', '/settings')).body.settings.shopMoveCoverBps, 5000);
   assert.equal((await api('ops', 'PATCH', '/settings', { expectedVersion: current.version, reason: 'Change', shopMoveCoverBps: 4000 })).status, 403);
   assert.equal((await api('admin', 'PATCH', '/settings', { expectedVersion: current.version - 1, reason: 'Change', shopMoveCoverBps: 4000 })).body.error, 'settings_version_conflict');
   assert.equal((await api('admin', 'PATCH', '/settings', { expectedVersion: current.version, reason: 'Change', shopMoveCoverBps: 10001 })).body.error, 'invalid_shop_move_cover');

@@ -172,7 +172,7 @@ therefore never exceeds the fee it holds; an unpaid or voucher-funded fee lowers
 (`capLimitedByCollection: true` for staff). `shopMoveCoverBps` is a Super Admin setting
 (default `5000`, i.e. 50% of the original service fee; whole number 0–10,000, otherwise
 `400 invalid_shop_move_cover`) on `PATCH /settings` with the usual `expectedVersion`
-handshake. `GET /settings` returns it to Operations/Super Admin only. Open offers re-price
+handshake; `GET /settings` returns it. Open offers re-price
 on acceptance; an accepted move keeps its snapshot.
 
 A `client` fault keeps the legacy match (no dearer line) and `pricing.ruleApplies: false`:

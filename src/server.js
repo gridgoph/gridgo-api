@@ -866,7 +866,6 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (!['ops_admin', 'super_admin'].includes(user?.role)) {
     delete rest.serviceFeeSchedule;
     delete rest.scheduledServiceFee;
-    delete rest.shopMoveCoverBps;
   }
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
@@ -883,7 +882,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
-    ...(['ops_admin', 'super_admin'].includes(user?.role) ? { shopMoveCoverBps: shopMoveCoverBps(rest) } : {}),
+    shopMoveCoverBps: shopMoveCoverBps(rest),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
     hubPickup: publicHubPickup(rest),
