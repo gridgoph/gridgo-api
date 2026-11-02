@@ -6,7 +6,24 @@ import { assertRefundWorkAllowed } from './refund-policy.js';
 export const PACKAGING_STATES = ['supplier_self_qc', 'ready_for_dispatch'];
 const requirement = (code, message) => ({ code, message });
 
-/** Shared preflight and write-time evidence policy. Receipt scans remain optional. */
+/** The assigned shop's ready, attached invoice/receipt scans for this order. */
+export function receiptScanFiles(store, order) {
+  return (store?.files || []).filter(file => file.purpose === 'supplier_invoice' && file.state === 'ready'
+    && file.ownerId === order.supplierId && file.objectKey
+    && (file.references || []).some(ref => ref.type === 'order' && ref.id === order.id));
+}
+
+/** Finance switch, read at the transition: orders already ready are never re-gated. */
+export const receiptScanRequired = (store, next) => next === 'ready_for_dispatch' && store?.settings?.shopReceiptScanRequired === true;
+
+export const RECEIPT_SCAN_REQUIRED_MESSAGE = 'Scan or upload this order\'s shop invoice or receipt and attach it before calling a rider. GRIDGO needs the scan before dispatch.';
+
+/**
+ * Shared preflight and write-time evidence policy. Receipt scans are optional
+ * unless Super Admin turns on `shopReceiptScanRequired`; then the shop's
+ * Ready-for-rider-pickup step waits for the attached scan. Operations' audited
+ * forced step records the missing scan in `skippedChecks` instead.
+ */
 export function productionTransitionReadiness(store, order, next, { operations = false, reason = '', reasonCode } = {}) {
   const missing = [];
   const fromAllowed = order.state === 'production'
@@ -33,10 +50,10 @@ export function productionTransitionReadiness(store, order, next, { operations =
     if (next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length) missing.push(requirement('packing_photo_required',
       'Add a photo of the finished prints packed and ready before marking Ready for dispatch.'));
   }
-  const receiptAttached = (store?.files || []).some(file => file.purpose === 'supplier_invoice' && file.state === 'ready'
-    && file.ownerId === order.supplierId && file.objectKey
-    && (file.references || []).some(ref => ref.type === 'order' && ref.id === order.id));
-  return { allowed: missing.length === 0, missing, receiptScan: { required: false, attached: receiptAttached } };
+  const receiptAttached = receiptScanFiles(store, order).length > 0;
+  const required = receiptScanRequired(store, next);
+  if (required && !receiptAttached && !operations) missing.push(requirement('receipt_scan_required', RECEIPT_SCAN_REQUIRED_MESSAGE));
+  return { allowed: missing.length === 0, missing, receiptScan: { required, attached: receiptAttached } };
 }
 
 const ZONES = { nearby: 'Nearby', away: 'Away', long_distance: 'Long Distance', out_of_zone: 'Out of Zone' };

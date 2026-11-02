@@ -766,6 +766,8 @@ Default `GET /settings` response:
 }
 ```
 
+`shopReceiptScanRequired` (Finance, default `false`, Super Admin editable through the same handshake) makes the shop attach its invoice/receipt scan before Ready for rider pickup; see [SHOP_RECEIPT_SCAN_API.md](SHOP_RECEIPT_SCAN_API.md).
+
 `artworkGuidance` (the recommended resolution and colour per product type, Super Admin editable through the same `PATCH /settings` handshake) is described in [ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
 
 `paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
@@ -1171,7 +1173,7 @@ optional. Every staff production correction in either flow now requires a
 listed `reasonCode` plus the `reason` note and exposes the Forced by GRIDGO tag.
 
 
-[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Legacy production and packing photo requirements follow this section; version-2 handovers follow the linked handover contract. Supplier invoice scans remain optional.
+[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Legacy production and packing photo requirements follow this section; version-2 handovers follow the linked handover contract. Supplier invoice scans remain optional unless the [shop receipt scan](SHOP_RECEIPT_SCAN_API.md) switch is on.
 
 Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 claim_hold_active` while the order's claim payout-hold flag is set or any claim is `open`/`payout_held`. This applies to the assigned supplier and Operations/Super Admin corrections, before photo/override checks. Operations must release or resolve all active claims before packing can continue; a correction reason cannot bypass the hold.
 
