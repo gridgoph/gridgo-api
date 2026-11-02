@@ -1,5 +1,6 @@
 /** Approved composite snapshots isolate supplier drafts from every client price path. */
 import { canonicalColourPricing } from './colour-pricing.js';
+import { inheritQuoteViewer } from './quote-listings.js';
 export const CATALOG_REVIEW_TABLES = [
   "catalogItems", "catalogOptionGroups", "catalogOptions", "catalogItemPhotos",
   "catalogPriceTiers", "catalogSpeedTiers", "catalogItemFileFormats",
@@ -66,7 +67,7 @@ export function approvedCatalogView(store) {
   if (store[APPROVED_VIEW]) return store;
   const revisions = (store.catalogItems || []).filter(item => item.approvedSnapshot);
   if (!revisions.length) return store;
-  const view = { ...store, [APPROVED_VIEW]: true };
+  const view = inheritQuoteViewer(store, { ...store, [APPROVED_VIEW]: true });
   for (const key of CATALOG_REVIEW_TABLES) view[key] = [...(store[key] || [])];
   for (const draft of revisions) {
     const snapshot = draft.approvedSnapshot;

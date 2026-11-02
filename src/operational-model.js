@@ -298,6 +298,8 @@ export function defaultOperationalSettings() {
      * Off until Super Admin turns it on. Never an official GRIDGO receipt.
      */
     shopReceiptScanRequired: false,
+    /** Days a published quote's options stay acceptable (docs/QUOTE_REQUESTS_API.md). */
+    quoteValidityDays: 7,
     clientShopChatContactThreshold: 3,
     savedFilesLimitBytes: DEFAULT_SAVED_FILES_LIMIT_BYTES,
     approvalProofRequired: false,
@@ -389,6 +391,10 @@ export function validateOperationalSettings(settings) {
   }
   if (settings?.shopReceiptScanRequired !== undefined && typeof settings.shopReceiptScanRequired !== "boolean") {
     fail(400, "invalid_shop_receipt_scan_required", "shopReceiptScanRequired must be a JSON boolean.", { field: "shopReceiptScanRequired" });
+  }
+  const quoteValidity = settings?.quoteValidityDays;
+  if (quoteValidity !== undefined && (!Number.isSafeInteger(quoteValidity) || quoteValidity < 1 || quoteValidity > 90)) {
+    fail(400, "invalid_quote_validity_days", "quoteValidityDays must be a whole number of days from 1 to 90.", { field: "quoteValidityDays" });
   }
   const riderCommissionBps = settings?.riderCommissionBps;
   if (riderCommissionBps !== undefined && (!Number.isInteger(riderCommissionBps)

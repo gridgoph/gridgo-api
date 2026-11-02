@@ -13,6 +13,7 @@ import { coverSpineApplies } from "./hardbound-cover.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { measurementKindFor, priceLine } from "./pricing.js";
+import { isQuoteListing, quoteListingVisible } from "./quote-listings.js";
 
 /** Volume breaks and speeds a listing sells, ordered as the client reads them. */
 function priceTiersFor(store, itemId) {
@@ -371,13 +372,15 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
   const photos = (store.catalogItemPhotos || [])
     .filter((photo) => photo.catalogItemId === item.id)
     .filter((photo) => readyFile(store, photo.fileId));
-  if (photos.length === 0) blockers.push("photo");
+  // A quote listing is the shop's price for one client's brief; it has no sample photo.
+  if (photos.length === 0 && !isQuoteListing(item)) blockers.push("photo");
   for (const group of catalogGroupsForItem(store, item.id)) {
     if (group.options.filter((option) => option.active !== false).length === 0) {
       blockers.push(`option_group:${group.id}`);
     }
   }
   if (publicOnly) {
+    if (!quoteListingVisible(store, item)) blockers.push("quote_only");
     const owner = (store.users || []).find(row => row.id === item.supplierId);
     if (!supplierAccountIsActive(owner?.accountStatus)) blockers.push("account_inactive");
     if (item.reviewStatus && item.reviewStatus !== "approved") blockers.push("listing_not_approved");
@@ -762,7 +765,7 @@ export function supplierCatalogReadiness(store, supplierId) {
     && (store.supplierServiceFileFormats || []).some((record) => record.supplierServiceId === service.id));
   if (reviewReady.length === 0) missing.push("review_ready_service_line");
   const completeItems = (store.catalogItems || []).filter((item) =>
-    item.supplierId === supplierId
+    item.supplierId === supplierId && !isQuoteListing(item)
     && item.active !== false
     && catalogItemBlockers(store, item).length === 0);
   if (completeItems.length === 0) missing.push("complete_catalog_item");
@@ -1118,7 +1121,7 @@ export function listOwnCatalogItemsFromGraph(store, params) {
     });
   }
 
-  let items = (store.catalogItems || []).filter((item) => item.supplierId === supplierId);
+  let items = (store.catalogItems || []).filter((item) => item.supplierId === supplierId && !isQuoteListing(item));
   if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
   if (active === true) items = items.filter((item) => item.active !== false);
   if (active === false) items = items.filter((item) => item.active === false);
@@ -1188,7 +1191,7 @@ export function listStaffCatalogItemsFromGraph(store, params) {
     maxPriceMinor = null,
   } = params;
 
-  let items = [...(store.catalogItems || [])];
+  let items = (store.catalogItems || []).filter(item => !isQuoteListing(item));
   if (params.productionTimeReview === 'required') items = items.filter(item => productionTimeReview(store, item).required);
   if (supplierId) items = items.filter((item) => item.supplierId === supplierId);
   if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
@@ -1239,7 +1242,7 @@ function staffCatalogAfterCursor(item, cursor) {
 }
 
 function staffCatalogShops(store) {
-  const ids = [...new Set((store.catalogItems || []).map((item) => item.supplierId).filter(Boolean))];
+  const ids = [...new Set((store.catalogItems || []).filter(item => !isQuoteListing(item)).map((item) => item.supplierId).filter(Boolean))];
   return ids
     .map((supplierId) => {
       const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);

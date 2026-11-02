@@ -76,6 +76,8 @@ import {
   notifyOpsPaymentSubmitted,
 } from "./client-order-notifications.js";
 import { queueOrderInvalidate } from "./notifications.js";
+import { grantQuoteListings, isQuoteListing } from "./quote-listings.js";
+import { assertQuoteCheckout, markQuoteOrdered } from "./quote-requests.js";
 
 const DEFAULT_RANKING = Object.freeze(["quality", "speed", "cost", "distance"]);
 
@@ -423,6 +425,8 @@ function ownCart(store, user, cartId, { draft = false } = {}) {
   if (!cart) fail(404, "cart_not_found", "That cart no longer exists.");
   if (cart.clientId !== user.id) fail(403, "forbidden", "That cart belongs to another client.");
   if (draft && cart.state !== "draft") fail(409, "cart_checked_out", "That cart has already been checked out.");
+  // The owner's accepted quote listings price in their own carts only.
+  grantQuoteListings(store, user.id);
   return cart;
 }
 
@@ -589,6 +593,60 @@ function cartLinePromiseBy(store, cart, line, item, at) {
     if (error instanceof AvailabilityError || error.code === 'speed_tier_unavailable') return null;
     throw error;
   }
+}
+
+/**
+ * The fulfillment a quote request was made for, resolved exactly as a match
+ * resolves it: pickup is the GRIDGO hub point, delivery an owned address or pin.
+ */
+export function quoteRequestFulfillment(store, user, body) {
+  const fulfillmentMode = body.fulfillmentMode ?? "delivery";
+  if (!["delivery", "pickup"].includes(fulfillmentMode)) {
+    fail(400, "invalid_fulfillment_mode", "Choose delivery or pickup.", { field: "fulfillmentMode" });
+  }
+  if (fulfillmentMode === "pickup" && store.settings?.hubPickupEnabled !== true) {
+    fail(409, "hub_pickup_disabled", "Hub pickup is currently unavailable. Choose delivery.");
+  }
+  const dropoff = fulfillmentMode === "pickup" ? gridgoOfficePoint() : addressPoint(store, user.id, body);
+  if (!dropoff) fail(400, "dropoff_required", "Choose a delivery drop-off for this quote.", { field: "dropoff" });
+  return { fulfillmentMode, dropoff };
+}
+
+/**
+ * Accepting a quote option: a fresh draft cart holding the option's private
+ * whole-job listing, locked to the request's fulfillment like a matched cart.
+ * Everything after this is the ordinary cart and checkout.
+ */
+export function openQuoteCart(store, user, { item, quantity, requestFulfillment, artworkFileIds = [], structuredSpec = {}, specialInstructions: notes = "" }, { id, at }) {
+  const cart = {
+    id: id("cart"), clientId: user.id, state: "draft", version: 1, serviceLevel: "standard", scheduledFor: null,
+    fulfillmentMode: requestFulfillment.fulfillmentMode, deadline: null,
+    defaultDropoff: requestFulfillment.fulfillmentMode === "delivery" ? { ...requestFulfillment.dropoff } : null,
+    requestFulfillment: structuredClone(requestFulfillment), createdAt: at, updatedAt: at,
+  };
+  const line = {
+    id: id("cline"), cartId: cart.id, supplierId: item.supplierId, catalogItemId: item.id, optionIds: [], quantity,
+    measurement: null, structuredSpec: structuredClone(structuredSpec), speedTierId: null, sortOrder: 0, createdAt: at, updatedAt: at,
+  };
+  grantQuoteListings(store, user.id);
+  const formats = publicCatalogItem(store, item)?.acceptedFormats;
+  if (notes) line.specialInstructions = specialInstructions(notes);
+  // The brief's own files start as the artwork; the client may replace them in the cart.
+  const usable = artworkFileIds.filter(fileId => {
+    const file = (store.files || []).find(row => row.fileId === fileId);
+    return file?.ownerId === user.id && file.state === "ready" && file.purpose === "artwork"
+      && listingAcceptsArtwork(formats, file.detectedContentType);
+  });
+  if (usable.length) writeArtworkAttachments(line, { artworkAttachments: usable.map(fileId => ({ kind: "file", fileId })) }, formats);
+  for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
+  assertCartLinePriceable(store, item, line);
+  store.carts ||= [];
+  store.carts.push(cart);
+  store.cartLines ||= [];
+  store.cartLines.push(line);
+  lockCartFeeSchedules(store, cart, at);
+  updateCart(cart, at);
+  return publicCart(store, cart, at);
 }
 
 function publicCartForLineMutation(store, cart, at) {
@@ -785,7 +843,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       // Null until given; only hardbound and binding products ask.
       coverSpine: publicCartCoverSpine(line),
       coverSpineRequired: Boolean(item && coverSpineApplies(item) && coverSpineRequiredSetting(store.settings)),
-      approvalMethod: approvalPolicy(store.settings, { categories: [store.supplierServices.find(service => service.id === item?.supplierServiceId)?.categoryCode] }).method,
+      approvalMethod: approvalPolicy(store.settings, { categories: [store.supplierServices.find(service => service.id === item?.supplierServiceId)?.categoryCode], quoted: isQuoteListing(item) }).method,
       // The client's exact colours, and what each uploaded file uses beside them.
       colorTargets: colorTargetsFor(line),
       artworkColors: artworkColorsFor(store, artworkFileIdsFor(line)),
@@ -1106,6 +1164,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     if (!listing || listing.supplierId !== line.supplierId) {
       fail(409, "catalog_item_stale", "A cart listing changed or is no longer public. Refresh the cart before checkout.", { lineId: line.id });
     }
+    if (isQuoteListing(item)) assertQuoteCheckout(store, item, { user, cart, line, at });
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     assertListingArtwork(store, item, line);
     syncDocumentPages(store, item, line, {}, { required: !item.pricedByColour });
@@ -1217,7 +1276,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.", { lineIds: cartLines.map(line => line.id) });
   }
   order.approvalPolicy = approvalPolicy(store.settings, { categories: [...grouped.values()].flat().map(({ item }) =>
-    store.supplierServices.find(service => service.id === item.supplierServiceId)?.categoryCode) });
+    store.supplierServices.find(service => service.id === item.supplierServiceId)?.categoryCode),
+    // An accepted quote is a quoted job: its approval is drawn, as in the request flow.
+    quoted: [...grouped.values()].flat().some(({ item }) => isQuoteListing(item)) });
   order.supplierId = job.supplierId;
   snapshotShopClock(store, order);
   order.pickup = { ...job.pickup };
@@ -1393,6 +1454,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     entityType: "order", entityId: orderId, orderId,
     detail: { jobCount: jobs.length, itemSubtotalMinor, ...fee, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
+  for (const { item } of [...grouped.values()].flat()) if (isQuoteListing(item)) markQuoteOrdered(store, item, order, { user, at, createId });
   if (!zeroCashBoundary) notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
     if (!zeroCashBoundary) notifyOpsPaymentSubmitted(store, order, { createId, at });
@@ -2026,6 +2088,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) {
       fail(409, "catalog_item_stale", "That listing changed or is no longer public.");
     }
+    // Only accepting the quote puts its listing in a cart, once.
+    if (isQuoteListing(item)) fail(409, "quote_line_locked", "Accept the quote to add it; it cannot be added again.");
     if (!Array.isArray(body.optionIds)) fail(400, "invalid_catalog_options", "optionIds must be an array.", { field: "optionIds" });
     selectedCatalogPrice(store, item, body.optionIds);
     const at = now();
@@ -2109,6 +2173,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
     const body = record(await readBody(req));
+    // The accepted quote fixed what is made and for how much; artwork, notes and
+    // the drop-off stay editable.
+    if (isQuoteListing((store.catalogItems || []).find(row => row.id === line.catalogItemId))
+        && ["quantity", "optionIds", "measurement", "deadline", "speedTierId", "printLayout", "coverSpine", "quantityMode"].some(field => Object.hasOwn(body, field))) {
+      fail(409, "quote_line_locked", "The accepted quote fixes this product. Cancel it and request a new quote to change it.");
+    }
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
     if (Object.hasOwn(body, 'speedTierId')) {
       const item = store.catalogItems.find(item => item.id === line.catalogItemId);

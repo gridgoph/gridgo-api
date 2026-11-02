@@ -1,4 +1,5 @@
 import { expandProductionTimeBody, clearProductionTimeReview, productionTimeFields, productionTimeAudit } from './production-time.js';
+import { isQuoteListing } from "./quote-listings.js";
 import { previewProductionTime } from './production-time-preview.js';
 import { reviewCatalogView, includeReviewData } from './review-data.js';
 import { parseColourListing } from './colour-pricing.js';
@@ -220,7 +221,8 @@ function ownService(store, user, serviceId) {
 function ownItem(store, user, itemId) {
   requireSupplier(user);
   const item = (store.catalogItems || []).find((candidate) => candidate.id === itemId);
-  if (!item) fail(404, "catalog_item_not_found", "That catalog item no longer exists.");
+  // A quote listing is GRIDGO's record of a shop's reply, never the shop's to edit.
+  if (!item || isQuoteListing(item)) fail(404, "catalog_item_not_found", "That catalog item no longer exists.");
   if (item.supplierId !== user.id) fail(403, "forbidden", "That catalog item belongs to another supplier.");
   return item;
 }
@@ -973,7 +975,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     requireSupplier(user);
     const body = expandProductionTimeBody(catalogRecord(await readBody(req)), shopProductionDayMinutes(store, user.id));
     const fields = productionTimeFields(body.productionTime, shopProductionDayMinutes(store, user.id));
-    const items = (store.catalogItems || []).filter(item => item.supplierId === user.id);
+    const items = (store.catalogItems || []).filter(item => item.supplierId === user.id && !isQuoteListing(item));
     const versions = body.expectedVersions;
     if (!versions || typeof versions !== 'object' || Array.isArray(versions)
       || Object.keys(versions).length !== items.length
