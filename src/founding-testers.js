@@ -17,9 +17,9 @@ export function foundingTesterEligible(store, clientId) {
 // manufacture a successful handover. Client fault takes precedence over exceptions.
 export function testerOrderFacts(store, order) {
   const decisions = (store.issues || []).filter(i => i.orderId === order.id).map(i => i.faultDecision).filter(d => d?.status === 'approved');
-  const settlements = (store.refundSettlements || []).filter(s => s.orderId === order.id && s.disposition !== 'delivery_adjustment');
+  const settlements = (store.refundSettlements || []).filter(s => s.orderId === order.id && !['delivery_adjustment', 'price_adjustment'].includes(s.disposition));
   const clientFault = decisions.some(d => d.fault === 'client') || settlements.some(s => s.snapshot?.clientCaused === true);
-  const failureAt = [...(order.shopFailureEvents || []).map(e => e.at), ...decisions.filter(d => ['shop', 'gridgo'].includes(d.fault)).map(d => d.approvedAt || d.recordedAt)]
+  const failureAt = [...(order.shopFailureEvents || []).filter(e => e.fault !== 'client').map(e => e.at), ...decisions.filter(d => ['shop', 'gridgo'].includes(d.fault)).map(d => d.approvedAt || d.recordedAt)]
     .filter(at => Number.isFinite(Date.parse(at))).sort()[0] || null;
   const excluded = isReviewData(order) || clientFault || (!failureAt && (order.state === 'cancelled' || settlements.length > 0));
   const placed = !excluded && (Boolean(failureAt) || order.payments?.initial?.status === 'confirmed');

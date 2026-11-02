@@ -15,7 +15,8 @@ import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './co
 import { createColourWorker } from './colour-worker.js';
 import { signArtworkAttachments } from './artwork-attachments.js';
 import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
-import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique } from './order-change-policy.js';
+import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique, changesFor } from './order-change-policy.js';
+import { awaitedTopUp, shopMoveCoverBps } from './shop-move-pricing.js';
 import { specialInstructions, acknowledgeInstructions } from './special-instructions.js';
 import { requestDeliveryPin, routeDeliveryPin } from './delivery-pin.js';
 import { deliveryPinPaymentPending, deliveryPinLocked } from './delivery-pin-policy.js';
@@ -463,8 +464,9 @@ async function save(view) {
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
     if (before.get(order.id)?.state !== order.state && ["payment_authorized", "production"].includes(order.state)) assertApprovalBeforeProceeding(order);
+    const topUpPending = changesFor(store, order).some(row => row.status === 'pending_confirmation' && awaitedTopUp(order, row));
     if (changePaymentPending(store, order) && (!changeWindowOpen(order)
-        || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted'))) {
+        || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted' && !topUpPending))) {
       throw Object.assign(new Error('Resolve the submitted change transfer before closing production or changing shops.'), { status: 409, code: 'change_payment_pending' });
     }
     if (before.get(order.id)?.supplierId !== order.supplierId && supplementTotals(store, order).totalMinor > 0) {
@@ -864,6 +866,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (!['ops_admin', 'super_admin'].includes(user?.role)) {
     delete rest.serviceFeeSchedule;
     delete rest.scheduledServiceFee;
+    delete rest.shopMoveCoverBps;
   }
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
@@ -880,6 +883,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
+    ...(['ops_admin', 'super_admin'].includes(user?.role) ? { shopMoveCoverBps: shopMoveCoverBps(rest) } : {}),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
     hubPickup: publicHubPickup(rest),
@@ -4072,6 +4076,8 @@ async function handleAuditedRequest(req, res) {
         // New checkouts only: every order keeps the split it was placed under.
         downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
+        // Live recoveries re-price on acceptance; an accepted move keeps its snapshot.
+        shopMoveCoverBps: Object.hasOwn(body, "shopMoveCoverBps") ? body.shopMoveCoverBps : shopMoveCoverBps(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:

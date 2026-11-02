@@ -48,13 +48,21 @@ export function deliveryCompleted(order) {
     || (order.timeline || []).some((event) => event.state === 'awaiting_collection');
 }
 
+/**
+ * Reserved credits that adjust a price without stopping work: a lower delivery
+ * pin and a cheaper substitute shop. Neither is a work hold or a terminal settlement.
+ */
+export const ADJUSTMENT_REFUND_KINDS = Object.freeze(['delivery_pin', 'shop_move']);
+export const ADJUSTMENT_DISPOSITIONS = Object.freeze(['delivery_adjustment', 'price_adjustment']);
+export const terminalSettlement = (row) => !ADJUSTMENT_DISPOSITIONS.includes(row.disposition);
+
 export function refundHold(store, order) {
-  return (store?.refundRequests || []).some((request) => request.orderId === order.id && request.kind !== 'delivery_pin'
+  return (store?.refundRequests || []).some((request) => request.orderId === order.id && !ADJUSTMENT_REFUND_KINDS.includes(request.kind)
     && ACTIVE_REFUND_STATUSES.includes(request.status));
 }
 
 export function refundSettlementFor(store, order) {
-  return (store?.refundSettlements || []).filter((row) => row.orderId === order.id && row.disposition !== 'delivery_adjustment')
+  return (store?.refundSettlements || []).filter((row) => row.orderId === order.id && terminalSettlement(row))
     .sort((a, b) => a.sequence - b.sequence).at(-1) || null;
 }
 

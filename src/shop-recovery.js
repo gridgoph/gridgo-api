@@ -12,6 +12,7 @@ import { privilegedAdminMemberships, queueOrderInvalidate } from './notification
 import { writeDraft } from './client-order-notifications.js';
 import { assessProductionLapses } from './production-penalties.js';
 import { refundHold, refundSettlementFor } from './refund-policy.js';
+import { priceShopMove, recoveryFault, SHOP_FAULT_KINDS } from './shop-move-pricing.js';
 
 export const CANCELLABLE_SHOP_STATES = new Set(['supplier_assigned', 'awaiting_checkout', 'awaiting_initial_payment',
   'payment_authorized', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'rider_assigned']);
@@ -28,8 +29,12 @@ export function startShopAcceptance(store, order, at) {
     workingMinutes: 60, schedule, status: 'pending' };
 }
 
-/** Match every immutable line and selected spec, never a subcategory price floor. */
-function compatibleLines(store, order, supplierId) {
+/**
+ * Match every immutable line and selected spec, never a subcategory price floor.
+ * A client-caused move keeps the legacy same-or-cheaper line rule; a shop- or
+ * GRIDGO-caused move accepts any price and the price rule settles the difference.
+ */
+function compatibleLines(store, order, supplierId, fault = 'shop') {
   const lines = (store.orderLineItems || []).filter((line) => line.orderId === order.id);
   if (!lines.length) return null;
   const selections = [];
@@ -55,8 +60,8 @@ function compatibleLines(store, order, supplierId) {
       try {
         const { selectedOptions } = selectedCatalogPrice(store, item, ids);
         const price = priceCatalogSelection(store, item, { selectedOptions, quantity: line.quantity, measurement: line.measurement || null });
-        if (price.lineSubtotalMinor > line.lineSubtotalMinor) continue;
-        selected = { lineId: line.id, catalogItemId: item.id, optionIds: ids, version: item.version,
+        if (fault === 'client' && price.lineSubtotalMinor > line.lineSubtotalMinor) continue;
+        selected = { lineId: line.id, catalogItemId: item.id, optionIds: ids, version: item.version, lineSubtotalMinor: price.lineSubtotalMinor,
           turnaroundHours: listing.turnaroundHours || line.turnaroundHoursSnapshot || 24 };
         break;
       } catch (error) {
@@ -69,32 +74,58 @@ function compatibleLines(store, order, supplierId) {
   return selections;
 }
 
-export function findReplacementShop(store, order, at, reserve = true) {
+export const MAX_RECOVERY_OPTIONS = 4;
+
+/** Ranked compatible substitutes; each carries its own snapshotted price rule. */
+export function rankedReplacements(store, order, at, { reserve = true, limit = MAX_RECOVERY_OPTIONS, fault = 'shop', onlySupplierId = null } = {}) {
+  const pricingStore = store;
   store = approvedCatalogView(store);
   const expiresAt = new Date(Date.parse(at) + 15 * 60000).toISOString();
   const projectionAt = reserve ? expiresAt : at;
   const lines = (store.orderLineItems || []).filter((line) => line.orderId === order.id);
   const source = store.catalogItems?.find((item) => item.id === lines[0]?.sourceCatalogItemId);
-  if (!source?.subcategoryCode) return null;
+  if (!source?.subcategoryCode) return [];
   const excluded = [...new Set([order.supplierId, ...(order.declinedBy || []), ...(store.users || []).filter(u => !sameReviewData(order, u)).map(u => u.id)].filter(Boolean))];
   const ranking = store.clientPreferences?.find((row) => row.userId === order.clientId)?.ranking || ['quality', 'speed', 'cost', 'distance'];
-  for (let attempt = 0; attempt < (store.supplierProfiles || []).length; attempt++) {
+  const options = [];
+  for (let attempt = 0; attempt < (store.supplierProfiles || []).length && options.length < limit; attempt++) {
     let match;
     try {
       match = matchShop(store, { subcategoryCode: source.subcategoryCode, ranking, dropoff: order.requestFulfillment?.dropoff ?? order.dropoff ?? null,
         excludedSupplierIds: excluded, units: lines.reduce((sum, line) => sum + line.quantity, 0), now: at });
-    } catch (error) { if (error instanceof MatchError) return null; throw error; }
+    } catch (error) { if (error instanceof MatchError) break; throw error; }
     const supplierId = match.shop.supplierId;
-    const selections = compatibleLines(store, order, supplierId);
-    if (selections) {
-      const { projection } = projectShopFinish(store, { supplierId, now: projectionAt,
-        turnaroundHours: Math.max(...selections.map((row) => row.turnaroundHours)), units: lines.reduce((sum, line) => sum + line.quantity, 0) });
-      return { supplierId, pickup: structuredClone(store.supplierProfiles.find((row) => row.userId === supplierId).shop),
-        readyBy: projection.readyBy, promiseBy: projection.promiseBy, expiresAt, selections };
-    }
     excluded.push(supplierId);
+    if (onlySupplierId && supplierId !== onlySupplierId) continue;
+    const selections = compatibleLines(store, order, supplierId, fault);
+    if (!selections) continue;
+    const { projection } = projectShopFinish(store, { supplierId, now: projectionAt,
+      turnaroundHours: Math.max(...selections.map((row) => row.turnaroundHours)), units: lines.reduce((sum, line) => sum + line.quantity, 0) });
+    const substitutePriceMinor = selections.reduce((sum, row) => sum + row.lineSubtotalMinor, 0);
+    options.push({ optionId: `option_${options.length + 1}`, supplierId, pickup: structuredClone(store.supplierProfiles.find((row) => row.userId === supplierId).shop),
+      readyBy: projection.readyBy, promiseBy: projection.promiseBy, expiresAt, selections,
+      pricing: priceShopMove(pricingStore, order, substitutePriceMinor, fault) });
+    if (onlySupplierId) break;
   }
-  return null;
+  return options;
+}
+
+/** The primary offer plus up to three alternatives the client may pick instead. */
+export function findReplacementShop(store, order, at, reserve = true, fault = recoveryFault(order.shopRecovery?.kind)) {
+  const [primary, ...alternatives] = rankedReplacements(store, order, at, { reserve, fault });
+  return primary ? { ...primary, alternatives } : null;
+}
+
+function recoveryMessage(order, kind) {
+  const recovery = order.shopRecovery;
+  if (kind === 'accepted') return 'The client accepted a replacement match.';
+  if (kind === 'awaiting_payment') return 'The client chose to pay the price difference for the replacement shop. Work starts once Operations confirms the transfer.';
+  if (kind === 'refund_requested') return 'The client chose a full refund. Operations will arrange the transfer.';
+  if (recovery.status === 'ops_review') return 'The shop cannot fulfil this order. Operations is reviewing the next step.';
+  const lead = recovery.fault === 'gridgo' ? 'Your order needs to move to another shop.' : 'The original shop could not fulfil your order.';
+  if (!recovery.proposal) return `${lead} No replacement is available. You can choose a full refund.`;
+  if (recovery.proposal.pricing?.rule === 'above_cap') return `${lead} A vetted replacement costs more than GRIDGO can cover. Pay the difference, pick another shop, or choose a full refund.`;
+  return `${lead} A vetted replacement is available. Accept the revised date or choose a full refund.`;
 }
 
 export function notifyRecovery(store, order, kind, at, createId) {
@@ -104,32 +135,39 @@ export function notifyRecovery(store, order, kind, at, createId) {
   if (kind === 'accepted') recipients.push({ userId: order.supplierId, role: 'supplier' });
   for (const recipient of recipients) writeDraft(store, { userId: recipient.userId, appRole: recipient.role,
     type: 'shop_recovery', occurrenceKey: `${recovery.id}:${kind}`, orderId: order.id, title: 'Order fulfilment update',
-    body: kind === 'accepted' ? 'The client accepted a replacement match.' : kind === 'refund_requested'
-      ? 'The client chose a full refund. Operations will arrange the transfer.'
-      : recovery.status === 'ops_review' ? 'The shop cannot fulfil this order. Operations is reviewing the next step.'
-      : recovery.proposal ? 'The original shop could not fulfil your order. A vetted replacement is available. Accept the revised date or choose a full refund.'
-      : 'The original shop could not fulfil your order. No replacement is available. You can choose a full refund.', read: false }, { id: createId('ntf'), at });
+    body: recoveryMessage(order, kind), read: false }, { id: createId('ntf'), at });
   queueOrderInvalidate(store, order, ['orders', 'jobs', 'dispatch', 'payouts']);
 }
 
-export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null, reasonCode = null }) {
+/**
+ * Open a recovery for a shop failure, lateness, GRIDGO or a client-caused move.
+ * Never moves the order: the client chooses, and any released shop payout or an
+ * earlier priced move sends the case to Operations.
+ */
+export function recordShopFailure(store, order, { kind, reason, at, createId, actorId = null, actorRole = null, reasonCode = null }) {
   if (rescheduleHold(order)) fail('reschedule_fulfillment_stopped');
   if (recoveryHeld(order)) fail('shop_recovery_pending');
   if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail('shop_cancel_not_available');
   if (refundHold(store, order) || refundSettlementFor(store, order)) fail('refund_fulfillment_stopped');
   assessProductionLapses(store, { at, createId, orderId: order.id });
-  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, stage: order.state, reason, reasonCode, at, actorId,
-    exemption: tightDeclineExemption(order, kind, reason) };
+  const fault = recoveryFault(kind);
+  const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, fault, stage: order.state, reason, reasonCode, at, actorId,
+    exemption: SHOP_FAULT_KINDS.includes(kind) ? tightDeclineExemption(order, kind, reason) : null };
   (order.shopFailureEvents ||= []).push(event);
   order.declinedBy = [...new Set([...(order.declinedBy || []), order.supplierId])];
   if (order.shopAcceptance) order.shopAcceptance.status = kind;
   const jobs = (store.orderJobs || []).filter((job) => job.orderId === order.id);
-  const requiresOps = paidShopShare(store, order) || jobs.some((job) => job.supplierId !== order.supplierId);
-  order.shopRecovery = { id: event.id, status: requiresOps ? 'ops_review' : 'awaiting_client', originalSupplierId: order.supplierId,
-    stage: order.state, createdAt: at, originalSnapshot: { pickup: structuredClone(order.pickup || null), readyBy: order.readyBy || null, promiseBy: order.promiseBy || null }, proposal: requiresOps ? null : findReplacementShop(store, order, at) };
+  // A second move after a priced one would re-price an already adjusted order.
+  const pricedBefore = (order.shopMoves || []).some((move) => move.pricing?.differenceMinor);
+  const requiresOps = paidShopShare(store, order) || jobs.some((job) => job.supplierId !== order.supplierId) || pricedBefore;
+  order.shopRecovery = { id: event.id, kind, fault, status: requiresOps ? 'ops_review' : 'awaiting_client', originalSupplierId: order.supplierId,
+    stage: order.state, createdAt: at, originalSnapshot: { pickup: structuredClone(order.pickup || null), readyBy: order.readyBy || null, promiseBy: order.promiseBy || null },
+    proposal: requiresOps ? null : findReplacementShop(store, order, at, true, fault) };
   order.updatedAt = at;
-  store.auditLog.push({ id: createId('aud'), at, actorId, actorRole: actorId ? 'supplier' : 'system',
-    action: `order.shop_${kind}`, entityType: 'order', entityId: order.id, orderId: order.id, detail: event, reason });
+  store.auditLog.push({ id: createId('aud'), at, actorId, actorRole: actorRole || (actorId ? 'supplier' : 'system'),
+    action: `order.shop_${kind}`, entityType: 'order', entityId: order.id, orderId: order.id,
+    detail: { ...event, proposal: order.shopRecovery.proposal ? { supplierId: order.shopRecovery.proposal.supplierId, pricing: order.shopRecovery.proposal.pricing,
+      alternatives: order.shopRecovery.proposal.alternatives.map((row) => ({ supplierId: row.supplierId, pricing: row.pricing })) } : null }, reason });
   notifyRecovery(store, order, 'offered', at, createId);
   return event;
 }
