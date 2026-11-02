@@ -11,9 +11,13 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createDatabase } from '../src/database.js';
-import { loadStore, saveStore, loadHotReadStore, loadInboxStore, loadPushDeliveryStore, loadDeliveryStore, loadClientBootstrapStore } from '../src/postgres-store.js';
+import { loadStore, saveStore, loadHotReadStore, loadInboxStore, loadPushDeliveryStore, loadDeliveryStore, loadClientBootstrapStore, loadProductionSweepStore } from '../src/postgres-store.js';
+import { syncSupplierPerformance } from '../src/supplier-performance.js';
+import { assessProductionLapses } from '../src/production-penalties.js';
+import { applyProductionNudges } from '../src/production-inactivity.js';
 import { seedReferenceData } from '../src/seed.js';
 import { resetDatabase } from '../tests/fixtures/reset-database.js';
+import { fixture as committedOrderFixture } from '../tests/fixtures/reschedule.js';
 
 const database = createDatabase(process.env);
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -42,6 +46,15 @@ async function fixture() {
       store.userRoleMemberships.push({ userId: id, role, createdAt: at });
     }
     store.orders.push({ id: 'perf_order', title: 'Historical job', clientId: 'perf_client', state: 'cancelled', cancelledAt: at, cancellationReason: 'Synthetic historical benchmark', fulfillmentMode: 'pickup', supplierSubtotalMinor: 10000, subtotalMinor: 10000, serviceFeeRateBps: 1000, serviceFeeMinor: 1000, deliveryFeeMinor: 0, totalMinor: 11000, riderCommissionBps: 8500, moneyModelVersion: 2, payoutHold: false, payments: { initial: { amountMinor: 8250, method: 'qr_manual', status: 'not_submitted' }, final_online: { amountMinor: 2750, method: 'qr_manual', status: 'not_submitted' } }, payoutMilestones: [], paymentAllocations: [], revenueAdjustments: [], createdAt: at, updatedAt: at });
+    // Active shop work for the production lifecycle probe; reminders and lapses stay not yet due.
+    store.users.push({ id: 'perf_supplier', clerkUserId: 'clerk_perf_supplier', email: 'perf_supplier@example.test', name: 'perf_supplier', role: 'supplier', verificationStatus: 'approved', createdAt: at });
+    store.userRoleMemberships.push({ userId: 'perf_supplier', role: 'supplier', createdAt: at });
+    const ahead = new Date(Date.parse(at) + 7 * 86400000).toISOString();
+    const committed = committedOrderFixture().orders[0];
+    for (let i = 0; i < 20; i++) {
+      store.orders.push({ ...structuredClone(committed), id: `perf_active_${i}`, clientId: 'perf_client', supplierId: 'perf_supplier',
+        commercialCommittedAt: at, readyBy: ahead, createdAt: at, updatedAt: at, timeline: [{ at, state: 'production', by: 'perf_supplier' }] });
+    }
     store.deviceTokens.push({ id: 'perf_device', userId: 'perf_ops', token: 'perf_token', platform: 'android', createdAt: at, updatedAt: at });
     await saveStore(database, store);
   });
@@ -70,7 +83,29 @@ async function readerRows() {
     clientBootstrap: await count(db => loadClientBootstrapStore(db, 'perf_client')),
     realtime: await count(db => loadDeliveryStore(db, { userIds: ['perf_ops'] })),
     push: await count(db => loadPushDeliveryStore(db, [{ user_id: 'perf_ops', notification_id: 'perf_notice_1', device_id: 'perf_device' }])),
+    productionSweep: await count(loadProductionSweepStore),
   };
+}
+/** The production penalty and inactivity sweeps' per-tick decision, before
+ * (complete store, then under the domain lock) and after (read-only probe). */
+async function lifecycleTimings() {
+  const decide = (store) => {
+    const at = new Date().toISOString(), id = prefix => `${prefix}_bench`;
+    syncSupplierPerformance(store, { at, id }); assessProductionLapses(store, { at, createId: id });
+    return applyProductionNudges(store, { at, createId: id, limit: 100 }).length;
+  };
+  const timings = {};
+  for (const [name, load] of [['completeStore', () => loadStore(database)], ['probe', () => loadProductionSweepStore(database)]]) {
+    const values = [];
+    for (let i = 0; i < samples; i++) {
+      const started = performance.now();
+      assert.equal(decide(await load()), 0, 'benchmark fixture has no due reminder');
+      values.push(Math.round(performance.now() - started));
+    }
+    values.sort((a, b) => a - b);
+    timings[name] = { medianMs: values[Math.floor(values.length / 2)], p95Ms: values[Math.ceil(values.length * .95) - 1] };
+  }
+  return timings;
 }
 async function measure(scale) {
   const port = await freePort();
@@ -120,7 +155,7 @@ async function measure(scale) {
       assert.equal(values.length, samples, `request log samples ${path}`);
       timings[path] = { medianMs: values[Math.floor(values.length / 2)], p95Ms: values[Math.ceil(values.length * .95) - 1] };
     }
-    console.log(JSON.stringify({ label: process.env.PERF_LABEL || 'current', serverRef: process.env.PERF_SERVER_REF || 'working-tree', scale, rowsPerHistoryTable: baseRows * scale, timings, readerRef: 'working-tree', reads: await readerRows() }));
+    console.log(JSON.stringify({ label: process.env.PERF_LABEL || 'current', serverRef: process.env.PERF_SERVER_REF || 'working-tree', scale, rowsPerHistoryTable: baseRows * scale, timings, lifecycleDecision: await lifecycleTimings(), readerRef: 'working-tree', reads: await readerRows() }));
     if (process.env.PERF_PRINT_LOGS === '1') console.log(output);
   } finally {
     // Only the child PID created by this process is signalled.
