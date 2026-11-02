@@ -883,8 +883,8 @@ function readGraph(database) {
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
     loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
   }
-  function finish() {
-    const store = storeFromRows(loaded, { writable: false });
+  function finish(options = {}) {
+    const store = storeFromRows(loaded, { ...options, writable: false });
     notificationReadStores.add(store);
     return store;
   }
@@ -955,6 +955,50 @@ export async function loadPushDeliveryStore(database, rows) {
     const table = DEVICE_TOKENS_TABLE;
     store.deviceTokens = (await database.query(`SELECT ${table.columns.join(', ')} FROM device_tokens WHERE id = ANY($1::text[])`, [rows.map(row => row.device_id).filter(Boolean)])).rows.map(deviceTokenItem);
     return store;
+  });
+}
+
+const PRODUCTION_WATCHED_STATES = ['payment_authorized', 'production', 'supplier_self_qc'];
+
+/** Read-only decision graph for the production lifecycle sweeps.
+ * `syncSupplierPerformance`, `assessProductionLapses` and `applyProductionNudges`
+ * decide each order from that order's own facts, so a superset of the orders
+ * they can change, with every fact those decisions read, gives the same
+ * answer as the complete store. The caller still takes the domain lock and
+ * the complete writable graph before it changes anything.
+ */
+export async function loadProductionSweepStore(database) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database), { loaded, read } = graph;
+    await read('platform_settings', 'WHERE singleton');
+    // Nudges: a shop job in a watched state. Performance and lapses: committed
+    // shop work with a ready-by date, plus any recorded shop failure or
+    // arrived-packed event, whatever the order's current shop.
+    await read('orders', `WHERE (supplier_id IS NOT NULL AND (state = ANY($1::text[])
+        OR (commercial_committed_at IS NOT NULL AND (ready_by IS NOT NULL OR data ? 'readyBy'))))
+      OR (jsonb_typeof(data->'shopFailureEvents') = 'array' AND jsonb_array_length(data->'shopFailureEvents') > 0)
+      OR (jsonb_typeof(data#>'{shopHandover,arrivedPacked}') = 'array' AND jsonb_array_length(data#>'{shopHandover,arrivedPacked}') > 0)`,
+    [PRODUCTION_WATCHED_STATES]);
+    const orderIds = loaded.orders.map(row => row.id);
+    for (const name of ['order_line_items', 'payout_milestones', 'production_lapses', 'supplier_performance_events',
+      'claims', 'refund_requests', 'refund_settlements']) {
+      await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+    }
+    const watched = loaded.orders.filter(row => row.supplier_id && PRODUCTION_WATCHED_STATES.includes(row.state));
+    const watchedIds = watched.map(row => row.id);
+    const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
+    await read('notifications', "WHERE order_id = ANY($1::text[]) AND type = 'shop_production_inactive'", [watchedIds]);
+    // A shop's proof upload resets its silence clock.
+    await read('files', `WHERE purpose = 'fulfilment_proof' AND owner_id = ANY($1::text[])
+      AND file_id IN (SELECT file_id FROM file_references WHERE reference_id = ANY($2::text[]))`,
+    [[...new Set(watched.map(row => row.supplier_id))], watchedIds]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+    await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+    await read('user_role_memberships', "WHERE role IN ('ops_admin', 'super_admin')");
+    return graph.finish({
+      legalPenaltyGate: await loadLegalPenaltyGate(database),
+      supplierPerformanceLaunchedAt: (await database.query('SELECT launched_at FROM supplier_performance_launch WHERE singleton')).rows[0]?.launched_at || null,
+    });
   });
 }
 

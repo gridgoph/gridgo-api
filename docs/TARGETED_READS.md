@@ -23,10 +23,13 @@ and authorization/projection functions.
 | `/ops/shop-failures` | Orders containing failure events and their participants; preserves the existing unpaginated response |
 | Cross-process realtime | Committed notification or invalidated subject, connected recipient, and current visibility facts; reconnect loads connected identities only |
 | Push outbox | Claimed batch (at most 25), its notifications, current recipients/memberships, referenced orders/holds, active rider trips, claimed devices/subscriptions, season windows |
+| Production penalty/performance and inactivity sweeps | Read-only decision probe: committed or watched shop orders and their lines, payout stages, lapses, performance events, claims and refund holds; sent production reminders and proof files for watched jobs; shop schedules and staff memberships. The complete writable graph is loaded under the domain lock only when the probe finds work |
 
 Web Push enqueue reads subscriptions for the new notifications' recipients.
 Idle colour rendering and shop-acceptance sweeps use indexed candidate probes
-before the complete mutation graph. No cache is introduced: reference/settings
+before the complete mutation graph. The production penalty/performance and
+inactivity sweeps run their unchanged decision functions on a read-only probe
+first (see [production lifecycle sweeps](#production-lifecycle-sweeps-2-november-2026)). No cache is introduced: reference/settings
 writes are visible on the next snapshot across API processes without a cache
 invalidation protocol.
 
@@ -183,10 +186,15 @@ claim production acceptance or complete removal of `loadStore`.
   invitation matching, cart-step recording or a possible reward), staff's first
   sign-in and changed Clerk identity copies retain the complete mutation path.
   Global unresolved invitation work remains part of bootstrap compatibility.
-- Unconditional production penalty/performance and inactivity sweeps, file
-  retention/reconciliation, and workers/lifecycle handlers when a candidate
-  actually needs a mutation still use the complete store. They need scoped
-  writable graphs that retain audit/outbox atomicity.
+- File retention/reconciliation, and workers/lifecycle handlers when a
+  candidate actually needs a mutation (including a production sweep whose probe
+  found work) still use the complete store. They need scoped writable graphs
+  that retain audit/outbox atomicity.
+- The production sweep probe still reads every committed shop order with a
+  ready-by date, including finished history: the existing per-order rules decide
+  lateness from timing, holds and exemptions, which SQL cannot pre-filter without
+  re-implementing them. Its cost grows with order count, not with inbox, audit,
+  location or push history.
 - Anonymous device registration/unregistration still uses the separate complete
   device registry adapter, rather than individual token queries.
 - Initial SSE replay, order lists and shop-failure lists preserve their existing
@@ -221,3 +229,72 @@ Client `/auth/me` no longer falls back inside `loadHotReadStore`. Real bootstrap
 mutations still reload through `refreshFoundingTester`. This inventory identifies
 follow-up work; it does not assert that mutation graphs can safely be replaced
 by read-only stores.
+
+## Production lifecycle sweeps (2 November 2026)
+
+Every lifecycle tick (30 seconds by default, on every API replica) ran the
+production penalty/performance sweep and the production inactivity sweep. Both
+entered the domain transaction, took the advisory lock and read the complete
+store, even when nothing was due. Every HTTP mutation waited behind those reads.
+
+`loadProductionSweepStore` now builds a read-only snapshot graph for both
+sweeps. `syncSupplierPerformance`, `assessProductionLapses` and
+`applyProductionNudges` run unchanged on it, with discarded ids. Each decides
+an order from that order's own facts, so the probe loads a superset of the
+orders they can change, and every fact those decisions read:
+
+- orders with a shop in a watched production state, committed shop orders with
+  a ready-by date, and orders carrying shop failure or arrived-packed events;
+- those orders' line items, payout stages, lapses, performance events, claims,
+  refund requests and settlements;
+- sent `shop_production_inactive` reminders and `fulfilment_proof` files
+  referencing the watched jobs;
+- the shops' schedules, Operations/Super Admin memberships, settings, the
+  performance launch time and the legal penalty gate.
+
+When the probe decides nothing changes, the tick takes no lock and reads no
+history. When it finds work, the sweep runs exactly as before: the complete
+writable graph under the domain lock, the same functions and the same audited
+`save()`. Due work is never skipped; work that becomes due between the probe and
+the next tick is picked up then, as before.
+
+Migration `1793600000000_production_sweep_reads` adds two concurrent indexes:
+`notifications_order_type_idx` for sent reminders, and
+`file_references_reference_id_idx` for proof files, whatever their reference
+type. Interrupted builds use the same
+[recovery procedure](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
+Migration `1793600100000_pg_stat_statements` creates the `pg_stat_statements`
+extension when the server ships it and the migrator may create it; otherwise it
+leaves a notice. The preload is still the
+[operator step](DEPLOYMENT.md#postgresql-query-statistics).
+
+`tests/production-sweep-reads-postgres.test.js` compares the probe with the
+complete store across a production timeline: pre-launch legacy lapses,
+performance adoption, on-time and late finishes, shop failures, arrived-packed
+events, warning-only pilots, applied lapses, open claims, payout holds, proof
+uploads, sent reminders and repeats. Decisions, lapses, events, order changes
+and reminder drafts must match. The complete store must change nothing outside
+the probe's orders, and a committed tick must leave the probe with nothing to do.
+A structural check records every store collection the three functions read and
+fails if one is missing from the probe. Tenfold unrelated notification, audit and
+location history leaves the probe's queries and rows unchanged. A spawned API
+still writes the reminder, lapse, audit and performance clock on its first tick.
+`tests/production-sweep-index-migration.test.js` proves the index build lets a
+later writer finish while an older writer stays open, and that both probe
+queries use the new indexes.
+
+`scripts/benchmark-targeted-reads.mjs` now adds 20 active shop orders and
+reports the per-tick decision cost. On private PostgreSQL 17, five samples per
+scale, with 10,000 then 100,000 rows each in notifications, audit, location
+pings and delivered push outbox:
+
+| Per-tick production decision | 1× median | 1× p95 | 10× median | 10× p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Complete store, under the domain lock (before) | 440 ms | 596 ms | 2900 ms | 3192 ms |
+| Read-only probe, no lock (after) | 10 ms | 30 ms | 5 ms | 6 ms |
+
+The probe returns **84 → 84** rows in 16 queries; the complete reader returns
+**30,482 → 300,482** rows in 111 queries. Both sweeps ran once per tick, so an
+idle tick held the write lock for two complete reads before this change and
+holds it for none now. `EXPLAIN (ANALYZE, BUFFERS)` at 10× used
+`notifications_order_type_idx` (two buffers, 0.054 ms).

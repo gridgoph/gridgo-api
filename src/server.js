@@ -307,6 +307,7 @@ import {
   loadHotReadStore,
   loadStore,
   loadClientBootstrapStore,
+  loadProductionSweepStore,
   originalNotificationIds,
   saveDeviceTokenStore,
   saveStore,
@@ -1805,7 +1806,16 @@ async function sweepRescheduleRequests() {
   });
 }
 
+// The lifecycle probes decide on a read-only snapshot outside the domain lock.
+// Their ids are discarded; only the complete writable graph below is saved.
+let productionProbeSequence = 0;
+const productionProbeId = (prefix) => `${prefix}_probe_${++productionProbeSequence}`;
+
 async function sweepProductionPenalties() {
+  const probe = await loadProductionSweepStore(database);
+  const probeAt = now();
+  const probePerformance = syncSupplierPerformance(probe, { at: probeAt, id: productionProbeId });
+  if (!assessProductionLapses(probe, { at: probeAt, createId: productionProbeId }) && !probePerformance) return;
   await enqueueMutation(async () => {
     const store = await load();
     const at = now();
@@ -1870,6 +1880,8 @@ async function sweepOrderCallHistory() {
 
 async function sweepProductionInactivity() {
   try {
+    const probe = await loadProductionSweepStore(database);
+    if (!applyProductionNudges(probe, { at: now(), createId: productionProbeId, limit: 1 }).length) return;
     await enqueueMutation(async () => {
       const store = await load();
       const created = applyProductionNudges(store, { at: now(), createId: id, limit: 100 });
