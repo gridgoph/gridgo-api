@@ -1,4 +1,4 @@
-import { refundFail as fail, sumMinor, productionStarted, deliveryCompleted, calculateRefundSettlement, refundHold, noCashVoucherRemedy } from './refund-policy.js';
+import { terminalSettlement, refundFail as fail, sumMinor, productionStarted, deliveryCompleted, calculateRefundSettlement, refundHold, noCashVoucherRemedy } from './refund-policy.js';
 import { approvalSnapshotSha256 } from './approval-proof.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
@@ -7,7 +7,7 @@ import { deliveryPinPaymentPending } from './delivery-pin-policy.js';
 /** The opt-in cancellation quote uses the existing available-funds arithmetic. */
 export function cancellationQuote(store, order) {
   if (order.state === 'cancelled' || refundHold(store, order)
-    || (store.refundSettlements || []).some(row => row.orderId === order.id && row.disposition !== 'delivery_adjustment')) {
+    || (store.refundSettlements || []).some(row => row.orderId === order.id && terminalSettlement(row))) {
     fail(409, 'refund_state_conflict', 'Resolve the existing cancellation or refund first.');
   }
   if (deliveryCompleted(order)) fail(409, 'cancellation_after_delivery', 'Report a problem with a delivered order.');

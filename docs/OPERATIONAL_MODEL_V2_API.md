@@ -822,6 +822,8 @@ Each of the first three `maxDistanceMeters` values must be an actual JSON intege
 
 `downpaymentPercent` is the share of an order-match checkout the client pays up front: `100` (default) or `75`. Anything else, including strings and `null`, is `400 invalid_downpayment_percent` with `field: "downpaymentPercent"`. It decides new checkouts only; see [Upfront checkout](#upfront-checkout). Omitted on PATCH, the current value is kept; absent on an older row, GET returns `100`.
 
+`shopMoveCoverBps` (Super Admin, whole number 0–10,000, default `5000`) is GRIDGO's cover for a dearer substitute shop as basis points of the original order's service fee, never above the fee actually collected; anything else is `400 invalid_shop_move_cover`. Omitted on PATCH, the current value is kept; absent on an older row, GET returns `5000`. Contract: [Substitute-shop price rule](SHOP_RECOVERY_API.md#substitute-shop-price-rule).
+
 `productionNudge` is the live cadence for a shop that has not made the next production move. Desk (Operational settings, both `/ops/settings` and `/admin/settings`) edits one object on this same route:
 
 | Field | Rule |

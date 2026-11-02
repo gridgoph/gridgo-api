@@ -8,6 +8,8 @@ All money is **integer PHP centavos**, bounded by the JavaScript safe-integer ra
 
 [Delivery pin changes](DELIVERY_PIN_API.md#non-cancelling-delivery-credit) add `kind: "delivery_pin"` and settlement `disposition: "delivery_adjustment"`. They reserve only the delivery-fee reduction and reuse destination review, payment-attempt reservation, reconciliation and payment recording below. They **do not** cancel fulfillment, hold work/payouts, supersede supplier stages or restore vouchers. The amount is reserved by the pin route; do not call `/settle`, `/reject` or `/withdraw`. The existing one-active-request rule still applies. Later cancellation/complaint settlements count delivery credits and confirmed pin surcharges in the available-funds ceiling. The cancellation/complaint lifecycle below is unchanged.
 
+A cheaper substitute shop adds `kind: "shop_move"` with settlement `disposition: "price_adjustment"` (item principal only) under the same non-stopping rules; see [Shop recovery](SHOP_RECOVERY_API.md#substitute-shop-price-rule).
+
 ## Policy and lifecycle
 
 Before production, including an accepted order in `payment_authorized` and an order with no replacement shop in `approved_for_matching`, refund the entire verified collection. Filing immediately holds work and supplier payouts under the same transaction lock used by production start. Operations must confirm work stopped and zero shop/rider obligation before approval.

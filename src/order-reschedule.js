@@ -191,9 +191,10 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
       order.productionNoCommunication = null; order.productionReassignmentEligible = false;
       order.fulfilmentProofFileIds = []; order.proofFileIds = [];
       for (const stage of order.payoutMilestones || []) {
-        const { code, sharePercent, amountMinor, productionDeductionMinor } = stage;
+        const { code, sharePercent, amountMinor, productionDeductionMinor, priceAdjustmentMinor } = stage;
         for (const key of Object.keys(stage)) delete stage[key];
-        Object.assign(stage, { code, sharePercent, amountMinor, productionDeductionMinor: productionDeductionMinor || 0, status: 'pending_pof', pofFileIds: [] });
+        Object.assign(stage, { code, sharePercent, amountMinor, productionDeductionMinor: productionDeductionMinor || 0,
+          ...(priceAdjustmentMinor ? { priceAdjustmentMinor } : {}), status: 'pending_pof', pofFileIds: [] });
       }
       for (const job of store.orderJobs || []) if (job.orderId === order.id) {
         Object.assign(job, { supplierId: replacement.supplierId, pickup: replacement.pickup, riderId: null,

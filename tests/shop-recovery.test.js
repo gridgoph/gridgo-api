@@ -194,11 +194,13 @@ test('any released share forces Operations review; cannot accept even a tampered
   await assert.rejects(call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id }), { code: 'shop_recovery_requires_operations' });
 });
 
-test('matching rejects missing specs, higher prices, wrong product, and previously failed shops', () => {
+test('matching rejects missing specs, wrong product, previously failed shops, and dearer lines only for client-caused moves', () => {
   const store = fixture(), order = store.orders[0];
   assert.equal(findReplacementShop(store, order, AT).supplierId, 'replacement');
   store.catalogItems[1].basePriceMinor = 10001;
-  assert.equal(findReplacementShop(store, order, AT), null);
+  // A shop- or GRIDGO-caused move prices the difference instead of refusing the shop.
+  assert.equal(findReplacementShop(store, order, AT, true, 'shop').pricing.rule, 'covered');
+  assert.equal(findReplacementShop(store, order, AT, true, 'client'), null);
   store.catalogItems[1].basePriceMinor = 10000;
   store.catalogItems[1].name = 'Other product';
   assert.equal(findReplacementShop(store, order, AT), null);
@@ -243,8 +245,11 @@ test('client projection keeps alternative identity, pickup, specs mapping and in
   const view = publicOrderFor(order, { id: 'client', role: 'client' }, store);
   assert.equal(view.shopRecovery.canAccept, true);
   assert.equal(view.shopRecovery.proposal, undefined);
-  assert.deepEqual(Object.keys(view.shopRecovery).sort(), ['canAccept', 'canRefund', 'createdAt', 'id', 'refundRequestId', 'replacement', 'status']);
-  assert.deepEqual(Object.keys(view.shopRecovery.replacement), ['promiseBy']);
+  assert.deepEqual(Object.keys(view.shopRecovery).sort(), ['alternatives', 'canAccept', 'canPayDifference', 'canPickAlternative', 'canRefund',
+    'createdAt', 'fault', 'id', 'refundRequestId', 'replacement', 'status', 'topUp']);
+  assert.deepEqual(Object.keys(view.shopRecovery.replacement), ['optionId', 'promiseBy', 'pricing']);
+  assert.deepEqual(Object.keys(view.shopRecovery.replacement.pricing).sort(), ['clientPaysMinor', 'differenceMinor', 'gridgoCoverMinor',
+    'newPriceMinor', 'originalPriceMinor', 'refundMinor', 'rule', 'ruleApplies']);
   assert.equal(view.shopFailureEvents, undefined);
 });
 
@@ -336,4 +341,218 @@ test('replacement matching uses the approved type and specs while a listing revi
   assert.equal(replacement?.supplierId, 'replacement');
   item.approvedSnapshot = null;
   assert.equal(findReplacementShop(store, store.orders[0], AT), null);
+});
+
+// ---- Substitute-shop price rule (gridgoph/gridgo-api#225) ----
+const priceShop = (store, supplierId, priceMinor) => { store.catalogItems.find((item) => item.supplierId === supplierId).basePriceMinor = priceMinor; };
+const sumStages = (order) => order.payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0);
+const opsCall = (store, action, body) => call(store, action, body, { id: 'ops', role: 'ops_admin' });
+const changeCall = async (store, user, path, body) => {
+  const { routeOrderChanges } = await import('../src/order-changes.js');
+  store.refundCommands ||= [];
+  return routeOrderChanges({ req: { method: 'POST', headers: { 'idempotency-key': id('key') } }, url: new URL(`http://test/orders/order/change-requests/${path}`),
+    store, user, readBody: async () => body, now: () => AT, id, audit: (s, row) => s.auditLog.push(row) });
+};
+
+test('cheaper substitute: shop paid its own price, exact difference reserved in the manual refund flow without stopping work', async () => {
+  const { moneyReportingForOrder } = await import('../src/operational-model.js');
+  const { refundHold, refundSettlementFor } = await import('../src/refund-policy.js');
+  const store = fixture(), order = store.orders[0];
+  priceShop(store, 'replacement', 8000);
+  failShop(store);
+  assert.deepEqual(publicOrderFor(order, { id: 'client', role: 'client' }, store).shopRecovery.replacement.pricing,
+    { ruleApplies: true, rule: 'cheaper', originalPriceMinor: 10000, newPriceMinor: 8000, differenceMinor: -2000, gridgoCoverMinor: 0, clientPaysMinor: 0, refundMinor: 2000 });
+  const response = await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id });
+  assert.equal(response.status, 200);
+  assert.equal(order.supplierId, 'replacement');
+  assert.equal(order.shopRecovery.status, 'accepted');
+  assert.equal(order.totalMinor, 11000, 'committed client money is immutable');
+  assert.equal(sumStages(order), 8000);
+  assert.equal(order.payoutMilestones.reduce((sum, stage) => sum + stage.priceAdjustmentMinor, 0), -2000);
+  const [request] = store.refundRequests;
+  assert.deepEqual([request.kind, request.status], ['shop_move', 'destination_review']);
+  const [settlement] = store.refundSettlements;
+  assert.deepEqual([settlement.disposition, settlement.principalMinor, settlement.feeMinor, settlement.totalMinor], ['price_adjustment', 2000, 0, 2000]);
+  assert.equal(refundHold(store, order), false);
+  assert.equal(refundSettlementFor(store, order), null);
+  assert.equal(activePayoutHold(store, order), false);
+  assert.equal(store.refundPayments?.length || 0, 0, 'no transfer is claimed');
+  assert.equal(moneyReportingForOrder(order, store).supplierSettlement.totalSupplierEarningsMinor, 8000);
+  const [move] = order.shopMoves;
+  assert.deepEqual([move.fault, move.choice, move.refundRequestId, move.refundStatus], ['shop', 'replacement', request.id, 'reserved']);
+  assert.ok(store.auditLog.some((row) => row.action === 'order.shop_move_applied'));
+  assert.ok(store.auditLog.some((row) => row.action === 'refund.shop_move_credit_reserved'));
+  const clientView = publicOrderFor(order, { id: 'client', role: 'client' }, store);
+  assert.equal(clientView.shopMoves[0].refundMinor, 2000);
+  assert.equal(clientView.shopMoves[0].toSupplierId, undefined);
+  assert.equal((clientView.payoutMilestones || []).some((stage) => 'priceAdjustmentMinor' in stage || 'amountMinor' in stage), false);
+  assert.equal(publicOrderFor(order, { id: 'replacement', role: 'supplier' }, store).shopMoves, undefined);
+  assert.equal(publicOrderFor(order, { id: 'ops', role: 'ops_admin' }, store).shopMoves[0].pricing.capBps, 5000);
+});
+
+test('dearer substitute under the cap: GRIDGO covers it from its service fee, the client pays nothing extra', async () => {
+  const { moneyReportingForOrder } = await import('../src/operational-model.js');
+  const store = fixture(), order = store.orders[0];
+  priceShop(store, 'replacement', 10400);
+  failShop(store);
+  const view = publicOrderFor(order, { id: 'client', role: 'client' }, store).shopRecovery;
+  assert.deepEqual([view.replacement.pricing.rule, view.replacement.pricing.gridgoCoverMinor, view.canAccept, view.canPayDifference], ['covered', 400, true, false]);
+  assert.equal((await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id })).status, 200);
+  assert.equal(order.shopRecovery.status, 'accepted');
+  assert.equal(sumStages(order), 10400);
+  assert.equal((store.orderChanges || []).length, 0);
+  assert.equal(store.refundRequests?.length || 0, 0);
+  const money = moneyReportingForOrder(order, store);
+  assert.equal(money.platformRevenue.shopMoveCoverMinor, 400);
+  assert.equal(money.platformRevenue.netServiceFeeMinor, 600);
+  assert.equal(money.supplierSettlement.totalSupplierEarningsMinor, 10400);
+  assert.equal(money.supplierSettlement.shopMovePriceAdjustmentMinor, 400);
+});
+
+test('above the cap the client must consent to pay the rest; Operations-confirmed transfer releases the hold', async () => {
+  const { moneyReportingForOrder } = await import('../src/operational-model.js');
+  const { supplementTotals } = await import('../src/order-change-policy.js');
+  const store = fixture(), order = store.orders[0];
+  priceShop(store, 'replacement', 11000);
+  failShop(store);
+  const view = publicOrderFor(order, { id: 'client', role: 'client' }, store).shopRecovery;
+  assert.deepEqual(view.replacement.pricing, { ruleApplies: true, rule: 'above_cap', originalPriceMinor: 10000, newPriceMinor: 11000,
+    differenceMinor: 1000, gridgoCoverMinor: 500, clientPaysMinor: 500, refundMinor: 0 });
+  assert.deepEqual([view.canAccept, view.canPayDifference, view.canRefund], [false, true, true]);
+  await assert.rejects(call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id }), { code: 'shop_move_top_up_consent_required' });
+  await assert.rejects(call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id, acceptTopUpMinor: 499 }), { code: 'shop_move_top_up_consent_required' });
+  assert.equal(order.supplierId, 'original');
+  assert.equal((await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id, acceptTopUpMinor: 500 })).status, 200);
+  assert.equal(order.supplierId, 'replacement');
+  assert.equal(order.shopRecovery.status, 'awaiting_payment');
+  assert.equal(activePayoutHold(store, order), true, 'work waits for the client transfer');
+  assert.equal(sumStages(order), 10500, 'stages carry the original price plus GRIDGO cover');
+  const [topUp] = store.orderChanges;
+  assert.deepEqual([topUp.status, topUp.extraPrincipalMinor, topUp.feeMinor, topUp.totalMinor, topUp.supplierId], ['pending_payment', 500, 0, 500, 'replacement']);
+  assert.equal(publicOrderFor(order, { id: 'client', role: 'client' }, store).shopRecovery.topUp.amountMinor, 500);
+  await assert.rejects(changeCall(store, { id: 'client', role: 'client' }, `${topUp.id}/answer`, { expectedVersion: 1, answer: 'decline' }), { code: 'shop_move_top_up_use_recovery' });
+  store.files.push({ fileId: 'proof', ownerId: 'client', purpose: 'payment_proof', state: 'ready', objectKey: 'private/proof' });
+  assert.equal((await changeCall(store, { id: 'client', role: 'client' }, `${topUp.id}/payment`, { expectedVersion: 1, proofFileId: 'proof', reference: 'gc-1' })).status, 200);
+  assert.equal((await changeCall(store, { id: 'ops', role: 'ops_admin' }, `${topUp.id}/payment/confirm`, { expectedVersion: 2, amountMinor: 500, reason: 'Transfer verified' })).status, 200);
+  assert.equal(order.shopRecovery.status, 'accepted');
+  assert.equal(order.shopAcceptance.supplierId, 'replacement');
+  assert.equal(order.shopMoves[0].status, 'applied');
+  assert.equal(supplementTotals(store, order).principalMinor, 500);
+  assert.equal(moneyReportingForOrder(order, store).supplierSettlement.totalSupplierEarningsMinor, 11000);
+});
+
+test('above the cap the client may instead pick another offered shop', async () => {
+  const store = fixture(), order = store.orders[0];
+  addShop(store, { id: 'alt', lat: 7.06, lng: 125.6, turnaroundHours: 1, reviews: [1, 1, 1, 1, 1] });
+  store.catalogItems.forEach((item) => { item.name = 'Flyers'; });
+  priceShop(store, 'replacement', 11000);
+  priceShop(store, 'alt', 10200);
+  // Quality ranks the dearer shop first; the cheaper one is offered as an alternative.
+  for (const n of [1, 2, 3, 4, 5]) store.shopReviews.push({ id: `rev_replacement_${n}`, supplierId: 'replacement', qualityStars: 5, createdAt: AT });
+  failShop(store);
+  const view = publicOrderFor(order, { id: 'client', role: 'client' }, store).shopRecovery;
+  assert.equal(view.replacement.pricing.rule, 'above_cap');
+  assert.equal(view.canPickAlternative, true);
+  const [alternative] = view.alternatives;
+  assert.equal(alternative.pricing.rule, 'covered');
+  await assert.rejects(call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id, optionId: 'nope' }), { code: 'invalid_shop_recovery_option' });
+  assert.equal((await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id, optionId: alternative.optionId })).status, 200);
+  assert.equal(order.supplierId, 'alt');
+  assert.equal(order.shopRecovery.status, 'accepted');
+  assert.deepEqual([order.shopMoves[0].choice, order.shopMoves[0].gridgoCoverMinor], ['alternative', 200]);
+});
+
+test('above the cap the client may cancel for a full refund; nothing moves', async () => {
+  const store = fixture(), order = store.orders[0];
+  priceShop(store, 'replacement', 11000);
+  failShop(store);
+  assert.equal((await call(store, 'shop-recovery/refund', { recoveryId: order.shopRecovery.id })).status, 200);
+  assert.equal(order.supplierId, 'original');
+  assert.deepEqual([store.refundRequests[0].kind, order.shopRecovery.status], ['cancellation', 'refund_requested']);
+  assert.equal(order.shopMoves, undefined);
+});
+
+test('after choosing to pay the rest the client can still take the full refund, and withdrawing restores the payment step', async () => {
+  const { routeRefunds } = await import('../src/refunds.js');
+  const store = fixture(), order = store.orders[0];
+  priceShop(store, 'replacement', 11000);
+  failShop(store);
+  await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id, acceptTopUpMinor: 500 });
+  assert.equal((await call(store, 'shop-recovery/refund', { recoveryId: order.shopRecovery.id })).status, 200);
+  assert.deepEqual([order.shopRecovery.status, order.shopMoves[0].status], ['refund_requested', 'refund_requested']);
+  const refund = store.refundRequests[0];
+  await routeRefunds({ req: { method: 'POST', headers: { 'idempotency-key': id('key') } }, url: new URL(`http://test/refund-requests/${refund.id}/withdraw`),
+    store, user: { id: 'client', role: 'client' }, readBody: async () => ({ expectedVersion: refund.version, reason: 'Will pay' }), now: () => AT, id, audit: () => {} });
+  assert.deepEqual([order.shopRecovery.status, order.shopMoves[0].status], ['awaiting_payment', 'awaiting_payment']);
+});
+
+test('client-caused move keeps the legacy rule: no dearer shop, no refund or cover, original price paid', async () => {
+  const store = fixture(), order = store.orders[0];
+  await assert.rejects(call(store, 'shop-recovery/start', { cause: 'client', reason: 'Client asked' }), { code: 'forbidden' });
+  priceShop(store, 'replacement', 10400);
+  await opsCall(store, 'shop-recovery/start', { cause: 'client', reason: 'Client asked to change shop' });
+  assert.deepEqual([order.shopRecovery.fault, order.shopRecovery.proposal], ['client', null]);
+  order.shopRecovery = null; order.declinedBy = []; order.shopFailureEvents = [];
+  priceShop(store, 'replacement', 8000);
+  await opsCall(store, 'shop-recovery/start', { cause: 'client', reason: 'Client asked to change shop' });
+  assert.deepEqual([order.shopRecovery.proposal.pricing.ruleApplies, order.shopRecovery.proposal.pricing.refundMinor], [false, 0]);
+  assert.equal((await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id })).status, 200);
+  assert.equal(sumStages(order), 10000);
+  assert.equal(order.payoutMilestones.some((stage) => stage.priceAdjustmentMinor), false);
+  assert.equal(store.refundRequests?.length || 0, 0);
+});
+
+test('GRIDGO cover never exceeds the service fee actually collected', async () => {
+  const store = fixture(), order = store.orders[0];
+  order.payments.initial.amountMinor = 10300;
+  order.paymentAllocations[1].amountMinor = 300; // a voucher funded the rest of the fee
+  priceShop(store, 'replacement', 10400);
+  failShop(store);
+  const pricing = order.shopRecovery.proposal.pricing;
+  assert.deepEqual([pricing.capByRateMinor, pricing.serviceFeeCollectedMinor, pricing.capMinor, pricing.capLimitedByCollection], [500, 300, 300, true]);
+  assert.deepEqual([pricing.rule, pricing.gridgoCoverMinor, pricing.clientPaysMinor], ['above_cap', 300, 100]);
+});
+
+test('Super Admin cap changes re-price an open offer before consent; validation bounds the setting', async () => {
+  const { validateOperationalSettings, defaultOperationalSettings: defaults } = await import('../src/operational-model.js');
+  assert.throws(() => validateOperationalSettings({ ...defaults(), shopMoveCoverBps: 10_001 }), { code: 'invalid_shop_move_cover' });
+  assert.equal(defaults().shopMoveCoverBps, 5000);
+  const store = fixture(), order = store.orders[0];
+  priceShop(store, 'replacement', 10400);
+  failShop(store);
+  store.settings.shopMoveCoverBps = 2000;
+  const response = await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id });
+  assert.equal(response.body.error, 'shop_recovery_offer_changed');
+  assert.equal(order.supplierId, 'original');
+  assert.deepEqual([order.shopRecovery.proposal.pricing.rule, order.shopRecovery.proposal.pricing.clientPaysMinor], ['above_cap', 200]);
+});
+
+test('Operations opens late and GRIDGO recoveries; lateness needs eligibility and neither counts as a shop decline', async () => {
+  const store = fixture(), order = store.orders[0];
+  order.state = 'production';
+  await assert.rejects(opsCall(store, 'shop-recovery/start', { cause: 'late', reason: 'Severely late' }), { code: 'shop_late_not_eligible' });
+  await assert.rejects(opsCall(store, 'shop-recovery/start', { cause: 'other', reason: 'x' }), { code: 'invalid_shop_recovery_cause' });
+  await assert.rejects(opsCall(store, 'shop-recovery/start', { cause: 'gridgo' }), { code: 'shop_recovery_reason_required' });
+  order.productionReassignmentEligible = true;
+  await opsCall(store, 'shop-recovery/start', { cause: 'late', reason: 'Severely late' });
+  assert.deepEqual([order.shopRecovery.kind, order.shopRecovery.fault, order.shopRecovery.status], ['late', 'shop', 'awaiting_client']);
+  assert.ok(store.auditLog.some((row) => row.action === 'order.shop_late' && row.actorRole === 'ops_admin'));
+  const gridgo = fixture();
+  await opsCall(gridgo, 'shop-recovery/start', { cause: 'gridgo', reason: 'Platform routing error' });
+  assert.equal(gridgo.orders[0].shopRecovery.fault, 'gridgo');
+  const events = await routeShopRecovery({ req: { method: 'GET' }, url: new URL('http://test/me/shop-failures'), store: gridgo,
+    user: { id: 'original', role: 'supplier' }, readBody: async () => ({}), now: () => AT, id });
+  assert.deepEqual(events.body.events, []);
+});
+
+test('a second move after a priced move goes to Operations instead of re-pricing', async () => {
+  const store = fixture(), order = store.orders[0];
+  addShop(store, { id: 'third', lat: 7.06, lng: 125.6, turnaroundHours: 1 });
+  store.catalogItems.forEach((item) => { item.name = 'Flyers'; });
+  priceShop(store, 'replacement', 8000);
+  priceShop(store, 'third', 9000);
+  failShop(store);
+  await call(store, 'shop-recovery/accept', { recoveryId: order.shopRecovery.id });
+  failShop(store, { at: '2026-10-05T00:30:00.000Z' });
+  assert.deepEqual([order.shopRecovery.status, order.shopRecovery.proposal], ['ops_review', null]);
 });
