@@ -187,7 +187,7 @@ inbox rows to both Operations and Super Admin memberships. Apps refresh the
 ledger on these events. Notifications and order invalidations use the existing
 save/outbox boundary; financial details are not copied into push payloads.
 
-Audit actions are `supplier_invoice.expected`, `supplier_invoice.scan_attached`,
+Audit actions are `supplier_invoice.expected`, `supplier_invoice.scan_uploaded`, `supplier_invoice.scan_attached`,
 `supplier_invoice.submitted`, `supplier_invoice.corrected` and
 `supplier_invoice.collected`. Correction audits include the reason and both
 versions of entered details. The collection actor and time are immutable in

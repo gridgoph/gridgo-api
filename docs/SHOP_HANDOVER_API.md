@@ -2,9 +2,10 @@
 
 Report 6C695C15 changes packing order, not payout plans. This contract supersedes
 the supplier packing-photo prerequisite **only for `handoverFlow: "rider_packs"`**.
-Receipt/invoice scans remain **optional**: the report described an existing
-receipt gate, but the invoice and readiness contracts do not have one. Missing
-scans never block production, dispatch or payout.
+Receipt/invoice scans remain **optional** unless Super Admin turns on the
+Finance switch `shopReceiptScanRequired`; then only the shop's Ready-for-rider-
+pickup step waits for the attached scan ([Shop receipt scan](SHOP_RECEIPT_SCAN_API.md)).
+Missing scans never block production or payout.
 
 ## Compatibility and rollout
 
@@ -28,7 +29,7 @@ Supplier app labels: **Ready for rider pickup**, replacing **Package for pickup*
 and **Mark package ready**. At readiness and call-rider confirmation, show:
 **Prepare packing materials. Do not pack yet; the rider checks the unpacked
 items first.** Update the packaging instructions screen accordingly. Keep
-receipt upload visibly optional.
+receipt upload visibly optional unless `receiptScan.required` is true.
 
 ## Production finished and GRIDGO QA
 

@@ -2,7 +2,8 @@
 
 Version-2 handovers supersede the legacy photo gates below: see
 [Shop handover](SHOP_HANDOVER_API.md) for finished-product QA, rider packing and
-forced-step reasons. Receipt scans remain optional in both flows.
+forced-step reasons. Receipt scans are optional in both flows unless the
+[shop receipt scan](SHOP_RECEIPT_SCAN_API.md) switch is on.
 
 Report 6C695C15. Supplier app and supplier web must adopt this additive contract.
 No production order was inspected or changed during backend implementation.
@@ -24,8 +25,10 @@ The existing policy is unchanged:
 - Open/payout-held claims and independent refund, replacement and deadline
   holds still stop work. Operations cannot bypass those holds. Staff photo
   corrections still require an audited reason.
-- Supplier invoice/receipt scans remain **optional**. Their absence never
-  disables packaging or dispatch. The separate packing-at-rider proposal is
+- Supplier invoice/receipt scans remain **optional** while the
+  `shopReceiptScanRequired` switch is off (the default). When it is on, only
+  `ready_for_dispatch` adds `receipt_scan_required`; see
+  [Shop receipt scan](SHOP_RECEIPT_SCAN_API.md). The separate packing-at-rider proposal is
   outside this change.
 
 PostgreSQL HTTP reproduction covers both transition edges, the attachment
@@ -68,7 +71,7 @@ Operations sees the **supplier's** checklist here, not permission to override.
 Render every `missing[].message` beside the relevant action, and disable it when
 `allowed` is false. Refresh after uploads, attachments and order invalidations.
 This is a snapshot, not a reservation: POST always rechecks under the domain lock.
-Keep the optional receipt scan visibly optional and outside the missing list.
+While `receiptScan.required` is false, keep the receipt scan visibly optional and outside the missing list.
 
 Authenticated `POST /orders/:id/transition` domain refusals retain their HTTP
 status and stable `error` code, and return a plain `message` plus `missing` as
@@ -80,7 +83,7 @@ connectivity error for a 400/403/409 response.
 
 Relevant codes include `production_photo_required`, `packing_photo_required`,
 `claim_hold_active`, `transition_not_allowed`,
-`production_override_reason_required`, `reschedule_fulfillment_stopped`,
+`production_override_reason_required`, `receipt_scan_required`, `reschedule_fulfillment_stopped`,
 `shop_recovery_pending` and `refund_fulfillment_stopped`. Unauthorized parties
 receive no photo/receipt checklist about another shop's order.
 

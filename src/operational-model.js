@@ -16,7 +16,7 @@ import { adjustedDeliverySplit, effectiveDeliveryFeeMinor, deliveryPinCollectedM
 import { feeSchedule, validateFeeSchedule } from './service-fee.js';
 import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
-import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
+import { PACKAGING_STATES, productionTransitionReadiness, receiptScanFiles, supplierJobDetails } from './job-readiness.js';
 import { displayFilename } from './display-filename.js';
 import { deliveryMilestones } from './rider-tracking.js';
 export { clientRiderLocationPing } from './rider-tracking.js';
@@ -289,6 +289,12 @@ export function defaultOperationalSettings() {
      * coverage; released builds cannot send it.
      */
     coverSpineRequired: false,
+    /**
+     * Finance: whether a shop must attach its scanned invoice/receipt
+     * (`supplier_invoice`) before the order becomes Ready for rider pickup.
+     * Off until Super Admin turns it on. Never an official GRIDGO receipt.
+     */
+    shopReceiptScanRequired: false,
     clientShopChatContactThreshold: 3,
     savedFilesLimitBytes: DEFAULT_SAVED_FILES_LIMIT_BYTES,
     approvalProofRequired: false,
@@ -376,6 +382,9 @@ export function validateOperationalSettings(settings) {
   }
   if (settings?.coverSpineRequired !== undefined && typeof settings.coverSpineRequired !== "boolean") {
     fail(400, "invalid_cover_spine_required", "coverSpineRequired must be a JSON boolean.", { field: "coverSpineRequired" });
+  }
+  if (settings?.shopReceiptScanRequired !== undefined && typeof settings.shopReceiptScanRequired !== "boolean") {
+    fail(400, "invalid_shop_receipt_scan_required", "shopReceiptScanRequired must be a JSON boolean.", { field: "shopReceiptScanRequired" });
   }
   const riderCommissionBps = settings?.riderCommissionBps;
   if (riderCommissionBps !== undefined && (!Number.isInteger(riderCommissionBps)
@@ -1426,7 +1435,13 @@ export function publicOrderFor(order, user, store = null) {
     if (riderPackingFlow(order)) publicRecord.pickupReminder = 'Ready for rider pickup. Prepare packing materials. Do not pack yet; unpack any already-packed items for the rider check.';
   }
   publicRecord.forcedByGridgo = Boolean(order.forcedSteps?.length);
+  // Shop invoice/receipt scans are Operations/Super Admin finance evidence:
+  // never projected to clients, riders or other shops.
+  delete publicRecord.receiptScan;
   if (ops) {
+    const scans = receiptScanFiles(store, order).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.fileId.localeCompare(b.fileId));
+    publicRecord.receiptScan = { attached: scans.length > 0, fileIds: scans.map(file => file.fileId),
+      latestFileId: scans.at(-1)?.fileId ?? null, latestUploadedAt: scans.at(-1)?.createdAt ?? null };
     publicRecord.forcedStepReasonCodes = [...FORCED_STEP_REASONS];
     publicRecord.shopArrivedPackedCount = store?.shopArrivedPackedCounts?.get(order.supplierId) ?? (store?.orders || []).reduce((count, candidate) => count
       + (candidate.shopHandover?.arrivedPacked || []).filter(event => event.supplierId === order.supplierId).length, 0);

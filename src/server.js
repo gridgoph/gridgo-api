@@ -888,6 +888,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     coverSpineRequired: rest.coverSpineRequired === true,
+    shopReceiptScanRequired: rest.shopReceiptScanRequired === true,
     approvalProofRequired: rest.approvalProofRequired === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
@@ -3445,6 +3446,10 @@ async function handleAuditedRequest(req, res) {
             }
             authorizeFileUpload(latestUser, purpose);
             markFileReady(latestFile, now());
+            if (purpose === 'supplier_invoice') {
+              audit(latestStore, { actor: latestUser, action: 'supplier_invoice.scan_uploaded', entityType: 'file', entityId: fileId,
+                detail: { fileId, supplierId: latestUser.id, contentType: latestFile.detectedContentType, size: latestFile.size } });
+            }
             queueColourRequest(latestFile, sourceColourRequest(latestStore.settings), now());
             await save(latestStore);
             return latestFile;
@@ -4080,6 +4085,8 @@ async function handleAuditedRequest(req, res) {
           body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
         approvalProofRequired: Object.hasOwn(body, "approvalProofRequired") ? body.approvalProofRequired : store.settings.approvalProofRequired === true,
         coverSpineRequired: Object.hasOwn(body, "coverSpineRequired") ? body.coverSpineRequired : store.settings.coverSpineRequired === true,
+        // Applies at the next Ready-for-rider-pickup transition only; orders already ready are unaffected.
+        shopReceiptScanRequired: Object.hasOwn(body, "shopReceiptScanRequired") ? body.shopReceiptScanRequired : store.settings.shopReceiptScanRequired === true,
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
@@ -6561,6 +6568,7 @@ async function handleAuditedRequest(req, res) {
           const skippedChecks = riderPackingFlow(order) ? handoverRequirements(store, order, next).map(item => item.code)
             : [!productionPhotoFiles(store, order).length && 'production_photo_required',
               next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length && 'packing_photo_required'].filter(Boolean);
+          if (readiness.receiptScan.required && !readiness.receiptScan.attached) skippedChecks.push('receipt_scan_required');
           const forced = { at: now(), by: user.id, role: user.role, from: order.state, to: next,
             reasonCode: body.reasonCode, note: body.reason.trim(), skippedChecks };
           (order.forcedSteps ||= []).push(forced);
@@ -6568,7 +6576,8 @@ async function handleAuditedRequest(req, res) {
             actor: user, action: 'order.production_override', entityType: 'order', entityId: order.id,
             orderId: order.id, reason: body.reason.trim(), detail: { ...forced,
               photoMissing: productionPhotoFiles(store, order).length === 0,
-              packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0 },
+              packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0,
+              receiptScanMissing: readiness.receiptScan.required && !readiness.receiptScan.attached },
           });
         }
       }
