@@ -24,8 +24,8 @@ staff listing index, supplier readiness, shop reviews and the pricing dashboard.
 owning client's cart can price one, and only the accepted option of an unexpired quote
 checks out (`409 quote_not_accepted` / `409 quote_expired` at checkout otherwise). The
 quote cart line is locked: adding another quote listing to a cart, or changing the line's
-quantity, options, measurement, deadline, speed tier, print layout, spine or quantity mode
-is `409 quote_line_locked`. The client may still change the line's artwork and special
+quantity, options, measurement, deadline, speed tier, print layout, spine, quantity mode,
+structured spec (which carries the brief) or colour targets is `409 quote_line_locked`. The client may still change the line's artwork and special
 instructions as in any cart.
 
 ## Statuses

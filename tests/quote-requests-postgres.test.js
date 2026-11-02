@@ -177,6 +177,9 @@ test('quote requests: brief, Operations replies, anonymous A/B options, accept i
 
   // The accepted spec is fixed; artwork and notes stay editable.
   assert.equal((await api('client', 'PATCH', `/me/carts/${cartId}/lines/${line.id}`, { quantity: 9 })).body.error, 'quote_line_locked');
+  for (const locked of [{ structuredSpec: { size: '20 x 60 ft' } }, { colorTargets: [] }]) {
+    assert.equal((await api('client', 'PATCH', `/me/carts/${cartId}/lines/${line.id}`, locked)).body.error, 'quote_line_locked');
+  }
   assert.equal((await api('client', 'PATCH', `/me/carts/${cartId}/lines/${line.id}`, { specialInstructions: 'Mount on the left wall' })).status, 200);
   const otherCart = (await api('client', 'POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: DROPOFF })).body.cart;
   const again = await api('client', 'POST', `/me/carts/${otherCart.id}/lines`, { catalogItemId: opsView.options[1].catalogItemId, quantity: 1, optionIds: [] });

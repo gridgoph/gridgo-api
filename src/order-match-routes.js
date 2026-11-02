@@ -2173,10 +2173,11 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
     const body = record(await readBody(req));
-    // The accepted quote fixed what is made and for how much; artwork, notes and
-    // the drop-off stay editable.
+    // The accepted quote fixed what is made and for how much, including the brief
+    // carried in structuredSpec; artwork, notes and the drop-off stay editable.
     if (isQuoteListing((store.catalogItems || []).find(row => row.id === line.catalogItemId))
-        && ["quantity", "optionIds", "measurement", "deadline", "speedTierId", "printLayout", "coverSpine", "quantityMode"].some(field => Object.hasOwn(body, field))) {
+        && ["quantity", "optionIds", "measurement", "deadline", "speedTierId", "printLayout", "coverSpine", "quantityMode",
+          "structuredSpec", "colorTargets"].some(field => Object.hasOwn(body, field))) {
       fail(409, "quote_line_locked", "The accepted quote fixes this product. Cancel it and request a new quote to change it.");
     }
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
