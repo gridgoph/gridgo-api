@@ -1,4 +1,5 @@
 import { approvedCatalogView } from "./catalog-review-state.js";
+import { isQuoteListing } from "./quote-listings.js";
 import {
   CatalogError, catalogItemBlockers, itemTurnaroundHours, listingFitsPrinterCap, supplierCatalogReadiness,
 } from "./supplier-catalog.js";
@@ -99,7 +100,7 @@ export function supplierReadinessDetails(store, supplierId, request = null, now 
   store = approvedCatalogView(store);
   const profile = (store.supplierProfiles || []).find(row => row.userId === supplierId);
   const shopBlockers = supplierMatchBlockersFor(store)(supplierId, profile);
-  const items = (store.catalogItems || []).filter(row => row.supplierId === supplierId);
+  const items = (store.catalogItems || []).filter(row => row.supplierId === supplierId && !isQuoteListing(row));
   const listings = items.map(item => {
     const missing = [...new Set([...catalogItemBlockers(store, item, { publicOnly: true }), ...shopBlockers])].map(step);
     return { catalogItemId: item.id, ready: missing.length === 0, missing };

@@ -21,6 +21,7 @@ import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
 import { deliverySplit } from "./operational-model.js";
 import { listingPrintLayouts } from "./print-layout.js";
+import { quoteRequestTables, emptyQuoteRequestStore, quoteRequestRows, loadQuoteRequestRows } from './quote-request-store.js';
 
 const BASELINE = Symbol("postgresStoreBaseline");
 const notificationReadStores = new WeakSet();
@@ -82,7 +83,8 @@ const TABLES = [
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
+  ...quoteRequestTables,
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "quote_request_id", "quote_client_id"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
@@ -142,6 +144,7 @@ export function emptyStore() {
     ...emptyVoucherStore(),
     orderSurveys: [],
     ...emptySharingStore(),
+    ...emptyQuoteRequestStore(),
     checkoutVisits: [],
     checkoutExitPrompts: [],
     supplierInvoices: [],
@@ -230,6 +233,7 @@ function rowsFromStore(store) {
   foundingTesterRows(store, rows);
   testerProgramRows(store, rows);
   checkoutExitRows(store, rows);
+  quoteRequestRows(store, rows);
   supplierInvoiceRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
@@ -464,6 +468,7 @@ function rowsFromStore(store) {
       suspended_by: item.suspendedBy ?? null,
       sort_order: item.sortOrder, version: item.version || 1,
       created_at: item.createdAt, updated_at: item.updatedAt,
+      quote_request_id: item.quoteRequestId ?? null, quote_client_id: item.quoteClientId ?? null,
     });
   }
   for (const item of store.catalogItems || []) {
@@ -1223,7 +1228,8 @@ async function readFileGraph(graph, actorIds, pathname) {
 
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname); }
+const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1354,6 +1360,43 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
 }
 
 /** Explicit route graphs. Other routes retain the complete transactional adapter. */
+/**
+ * Quote requests (docs/QUOTE_REQUESTS_API.md): the caller's own requests, or
+ * one bounded Operations queue page, their shop replies and the named parties.
+ * Published options are snapshots on the request, so no catalogue is read.
+ */
+async function readQuoteGraph(graph, ids, pathname, status) {
+  const { loaded, read } = graph;
+  const [, scope, rawId] = QUOTE_READ.exec(pathname);
+  let requestId = null;
+  if (rawId) {
+    try { requestId = decodeURIComponent(rawId); } catch { return graph.finish(); }
+    if (requestId.includes('\0')) return graph.finish();
+  }
+  if (status?.includes('\0')) return graph.finish();
+  const at = new Date().toISOString();
+  if (requestId) await read('quote_requests', 'WHERE id = $1', [requestId]);
+  else if (scope === 'me') await read('quote_requests', 'WHERE client_id = ANY($1::text[])', [ids]);
+  else {
+    const due = "status IN ('published','accepted') AND valid_until <= $1";
+    const where = status === 'open' ? `status IN ('requested','quoting') OR (status IN ('published','accepted') AND valid_until > $1)`
+      : status === 'expired' ? `status = 'expired' OR (${due})`
+      : ['published', 'accepted'].includes(status) ? `status = $2 AND valid_until > $1`
+      : status ? 'status = $2 AND $1::timestamptz IS NOT NULL' : '$1::timestamptz IS NOT NULL';
+    const values = ['published', 'accepted'].includes(status) || (status && !['open', 'expired'].includes(status)) ? [at, status] : [at];
+    await read('quote_requests', `WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT 200`, values);
+  }
+  if (scope === 'ops') {
+    const requestIds = loaded.quote_requests.map(row => row.id);
+    await read('quote_replies', 'WHERE quote_request_id = ANY($1::text[])', [requestIds]);
+    const suppliers = [...new Set([...loaded.quote_replies.map(row => row.supplier_id),
+      ...loaded.quote_requests.flatMap(row => (row.data?.options || []).map(option => option.supplierId))])];
+    await read('users', 'WHERE id = ANY($1::text[])', [[...new Set([...ids, ...loaded.quote_requests.map(row => row.client_id), ...suppliers])]]);
+    await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  }
+  return graph.finish();
+}
+
 export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
@@ -1365,6 +1408,7 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     if (MATCH_READ_PATHS.has(pathname)) return readMatchGraph(graph, ids, pathname, searchParams);
     if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
+    if (QUOTE_READ.test(pathname)) return readQuoteGraph(graph, ids, pathname, status);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
     } else if (pathname === '/me/home-summary') {
@@ -1568,6 +1612,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadFoundingTesterRows(store, loaded);
   loadTesterProgramRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
+  loadQuoteRequestRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;
   store.supplierPerformanceLaunchedAt = supplierPerformanceLaunchedAt;
@@ -1742,6 +1787,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     present(item, "suspendReason", row.suspend_reason);
     present(item, "suspendedAt", row.suspended_at);
     present(item, "suspendedBy", row.suspended_by);
+    present(item, "quoteRequestId", row.quote_request_id);
+    present(item, "quoteClientId", row.quote_client_id);
     return item;
   });
   store.catalogOptionGroups = orderedBy(loaded.supplier_catalog_option_groups, "catalog_item_id", "sort_order", "id").map((row) => ({
@@ -2261,6 +2308,7 @@ function catalogHitsCte() {
         JOIN supplier_services service ON service.id = item.supplier_service_id
         CROSS JOIN params
        WHERE item.supplier_id = params.supplier_id
+         AND item.quote_request_id IS NULL
          AND ($3::text IS NULL OR item.subcategory_code = $3)
          AND ($4::boolean IS NULL OR item.active = $4)
     ),

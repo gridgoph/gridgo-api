@@ -1,4 +1,5 @@
 import { reportOrderAllowed } from './review-data.js';
+import { isQuoteListing } from "./quote-listings.js";
 /**
  * What clients said about each shop, read back.
  *
@@ -82,7 +83,7 @@ function fromPriceMinor(store, supplierId, categoryCode) {
       .map((row) => row.code),
   );
   const prices = (store.catalogItems || [])
-    .filter((item) => item.supplierId === supplierId && subcategories.has(item.subcategoryCode))
+    .filter((item) => item.supplierId === supplierId && !isQuoteListing(item) && subcategories.has(item.subcategoryCode))
     .map((item) => (Number.isSafeInteger(item.fromPriceMinor) ? item.fromPriceMinor : item.basePriceMinor))
     .filter((value) => Number.isSafeInteger(value) && value >= 0);
   return prices.length ? Math.min(...prices) : null;

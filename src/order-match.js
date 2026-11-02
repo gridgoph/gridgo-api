@@ -1,4 +1,5 @@
 import { sameReviewData, reportOrderAllowed } from './review-data.js';
+import { isQuoteListing } from "./quote-listings.js";
 import { performanceTopPick } from './supplier-performance-policy.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { operatingHours, reviewTiming, schedulingDay, deadlineDayReason, dispatchReadyAt } from './operating-hours.js';
@@ -298,6 +299,8 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
   const activeSubcategories = new Set((store.taxonomy?.subcategories || []).filter(row => row.active !== false).map(row => row.code));
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {
+    // A quote listing is one client's accepted price, never a matchable capability.
+    if (isQuoteListing(item)) continue;
     if (subcategoryCode ? item.subcategoryCode !== subcategoryCode : !activeSubcategories.has(item.subcategoryCode)) continue;
     if (onlySupplierId && item.supplierId !== onlySupplierId) continue;
     if (excluded.has(item.supplierId) || !shops.has(item.supplierId)) continue;
@@ -436,6 +439,28 @@ function scoreRows(rows, ranking) {
   }
   rows.sort((a, b) => compareFactors(a, b, ranking) || a.supplierId.localeCompare(b.supplierId));
   return weights;
+}
+
+/**
+ * Rank published quote options the way matching ranks shops: the client's
+ * strict priority over quality, padded promise hour, all-in price and distance
+ * zone, with the same single badge naming the factor that decided first place.
+ * Each choice carries `supplierId`, `cost`, `promiseBy` and `distanceZone`.
+ */
+export function rankQuoteChoices(store, choices, ranking = MATCH_FACTORS, now = new Date().toISOString()) {
+  const view = approvedCatalogView(store);
+  const rows = choices.map((choice) => {
+    const listings = (view.catalogItems || []).filter(item => item.supplierId === choice.supplierId && !isQuoteListing(item))
+      .map(item => publicCatalogItem(view, item, { at: now })).filter(Boolean);
+    const rating = shopRating(view, choice.supplierId);
+    const base = rating && rating.count >= MIN_REVIEWS_FOR_RATING ? Math.min(100, rating.average * 20)
+      : listings.length ? capabilityScore(view, choice.supplierId, listings) : 50;
+    return { ...choice, projection: { promiseBy: choice.promiseBy },
+      quality: Math.max(0, base - recentLapseQualityPenalty(view, choice.supplierId, now)) };
+  });
+  rows.sort((a, b) => compareFactors(a, b, ranking) || String(a.id).localeCompare(String(b.id)));
+  const key = rows.length > 1 ? decidingFactor(rows[0], rows[1], ranking) || "vetted" : "vetted";
+  return { rows, matchReason: rows.length ? { key, label: REASON_LABELS[key] } : null };
 }
 
 // An allowlist: never spread a catalog record into an anonymous match card.

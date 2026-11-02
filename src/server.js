@@ -1,4 +1,6 @@
 import { routeTesterProgram } from './tester-program-routes.js';
+import { isQuoteListing } from "./quote-listings.js";
+import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays } from "./quote-requests.js";
 import { matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from './tester-invites.js';
 import { testerBudget } from './tester-rewards.js';
 import { testerProgress, publicFoundingTester, reconcileFoundingTester, recordTesterCartStep, remindFoundingTesters } from './founding-testers.js';
@@ -892,6 +894,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     coverSpineRequired: rest.coverSpineRequired === true,
     shopReceiptScanRequired: rest.shopReceiptScanRequired === true,
+    quoteValidityDays: quoteValidityDays(rest),
     approvalProofRequired: rest.approvalProofRequired === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
@@ -3120,6 +3123,13 @@ async function handleAuditedRequest(req, res) {
       if (rescheduleResponse.mutated) await save(store);
       return send(res, rescheduleResponse.status, rescheduleResponse.body);
     }
+    const quoteResponse = await routeQuoteRequests({ req, url, store, user, readBody, now, id, audit });
+    if (quoteResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (quoteResponse.mutated) await save(store);
+      if (quoteResponse.status < 400 && quoteResponse.body.cart) await decorateCatalogPhotoUrls(store, quoteResponse.body);
+      return send(res, quoteResponse.status, quoteResponse.body);
+    }
     const recoveryResponse = await routeShopRecovery({ req, url, store, user, readBody, now, id, audit });
     if (recoveryResponse) {
       if (recoveryResponse.mutated) await save(store);
@@ -4092,6 +4102,8 @@ async function handleAuditedRequest(req, res) {
         coverSpineRequired: Object.hasOwn(body, "coverSpineRequired") ? body.coverSpineRequired : store.settings.coverSpineRequired === true,
         // Applies at the next Ready-for-rider-pickup transition only; orders already ready are unaffected.
         shopReceiptScanRequired: Object.hasOwn(body, "shopReceiptScanRequired") ? body.shopReceiptScanRequired : store.settings.shopReceiptScanRequired === true,
+        // New publications only: a published quote keeps the validity it was given.
+        quoteValidityDays: Object.hasOwn(body, "quoteValidityDays") ? body.quoteValidityDays : quoteValidityDays(store.settings),
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
@@ -5752,7 +5764,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 200, await readPricingDashboard(database, {
           orders: store.orders || [],
           lines: store.orderLineItems || [],
-          catalog: store.catalogItems || [],
+          catalog: (store.catalogItems || []).filter(item => !isQuoteListing(item)),
           users: store.users || [],
           audit: store.auditLog || [],
           refundRequests: store.refundRequests || [],
@@ -7852,6 +7864,16 @@ async function runLifecycleWork() {
       },
       sweepProductionPenalties,
       expireElapsedIssueWindows,
+      async () => {
+        // Quote options past their validity; idle ticks read one indexed row.
+        const candidate = await database.query(`SELECT 1 FROM quote_requests
+          WHERE status IN ('published', 'accepted') AND valid_until <= $1 LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (expireQuoteRequests(store, { at: now(), id, audit })) await save(store);
+        });
+      },
       sweepProductionInactivity,
       sweepSeasonWindows,
       async () => {
