@@ -38,7 +38,9 @@ export async function up(pgm) {
         AND (bug_confirmed_at IS NULL) = (bug_reward_outcome IS NULL)
         AND (bug_reward_id IS NOT NULL) = coalesce(bug_reward_outcome IN ('granted', 'paused'), false)
         AND coalesce((bug_reward_outcome = 'no_reporter') = (reporter_id IS NULL), true)
-      );
+      ),
+      ADD CONSTRAINT issue_reports_bug_self_confirmation_check
+        CHECK (bug_confirmed_by IS NULL OR reporter_id IS NULL OR bug_confirmed_by <> reporter_id);
     CREATE INDEX issue_reports_reporter_idx ON issue_reports (reporter_id) WHERE reporter_id IS NOT NULL;
 
     CREATE FUNCTION guard_issue_report_bug_confirmation() RETURNS trigger LANGUAGE plpgsql AS $$

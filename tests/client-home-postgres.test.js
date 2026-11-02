@@ -152,6 +152,15 @@ test('confirming a real bug grants a tester one PHP 15 voucher, once ever, idemp
   await assert.rejects(db.query('UPDATE issue_reports SET reporter_id = NULL WHERE id = $1', [second]), /reporter is immutable/);
   const reward = confirmed.bugConfirmation.reward.id;
   await assert.rejects(db.query("UPDATE issue_reports SET bug_confirmed_at = now(), bug_confirmed_by = 'ops', bug_reward_outcome = 'granted', bug_reward_id = $2 WHERE id = $1", [spam, reward]), /duplicate key|owner mismatch/);
+
+  // A staff member who is also a client never confirms their own report.
+  await db.query("INSERT INTO user_role_memberships (user_id, role, created_at) VALUES ('ops', 'client', now())");
+  const own = await file(api, 'ops', 'Staff found this while testing as a client');
+  const self = await api('ops', 'POST', `/ops/issue-reports/${own}/confirm-bug`, {});
+  assert.equal(self.status, 403); assert.equal(self.body.error, 'issue_report_self_confirmation');
+  await assert.rejects(db.query("UPDATE issue_reports SET bug_confirmed_at = now(), bug_confirmed_by = 'ops', bug_reward_outcome = 'not_tester' WHERE id = $1", [own]),
+    /issue_reports_bug_self_confirmation_check/);
+  assert.equal((await ok(api, 'admin', 'POST', `/ops/issue-reports/${own}/confirm-bug`, {})).bugConfirmation.confirmedBy.id, 'admin');
 });
 
 test('budget pause holds the bug-report voucher until Super Admin resumes it; non-testers earn none', { skip: !DB }, async t => {

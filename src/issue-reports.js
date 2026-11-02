@@ -827,6 +827,10 @@ export async function routeConfirmIssueReportBug({ req, res, pathname, user, sen
     )).rows[0];
     if (!current) throw notFound;
     if (!current.bug_confirmed_at) {
+      // Staff can hold a client membership too; nobody confirms their own report.
+      if (current.reporter_id && current.reporter_id === user.id) {
+        throw new ReportError(403, "issue_report_self_confirmation", "Another Operations or Super Admin member must confirm your own report.");
+      }
       if (["spam", "duplicate"].includes(current.validity)) {
         throw new ReportError(409, "issue_report_not_confirmable",
           `This report is triaged as ${current.validity}. Confirm the original report, or change its triage first.`);

@@ -168,6 +168,8 @@ Returns `200` and the report in the dashboard projection.
   setting is null), or an already-awarded Founding Tester.
 - Confirming the same report again is an idempotent `200` that changes nothing,
   including concurrent retries.
+- Nobody confirms their own report (staff can also hold a client membership):
+  `403 issue_report_self_confirmation`, also enforced by a database check.
 - Reports triaged `spam` or `duplicate` are `409 issue_report_not_confirmable`. Confirm the
   original report, or change the triage first.
 - Errors: `401 unauthorized`, `403 forbidden` (any other role), `404 issue_report_not_found`,
