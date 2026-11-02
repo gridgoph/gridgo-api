@@ -180,7 +180,7 @@ Client projections never expose the shop `lineSubtotalMinor`. Their
 `sheetPriceMinor` is an alias of the all-in `clientSheetPriceMinor`; display that
 per-sheet amount with the colour level (for example “Page 2: 18% strong colour,
 ₱87”). `clientPageTotalMinor` covers **all** copies/sets of that page and sums
-exactly to `clientLineSubtotalMinor`. Fees use the existing shop/deadline group
+exactly to `clientLineSubtotalMinor`. Fees use the existing shop delivery group
 allocation, including other cart lines, rather than marking up pages separately.
 These item amounts are before separately shown organization/voucher discounts
 and fulfillment charges, matching the existing client line/invoice amounts.
@@ -227,13 +227,13 @@ Statuses before a colour price can be accepted:
 
 On an unpriced page, `sheetPriceMinor:null`, `status:"needs_price_check"` and
 `message:"This page needs a price check"`. The line/checkout total stays null.
-Clients receive null page amounts until all lines in the shop/deadline group can
+Clients receive null page amounts until all lines in the shop delivery group can
 be priced, since a group fee cannot yet be allocated. Supplier/staff evidence
 retains any other pages' available shop rates. Checkout refuses
 `409 colour_price_check_required`; other incomplete colour evidence refuses
 `409 colour_analysis_required`. The existing service-fee brackets, discounts,
 vouchers, payment and basket boundaries operate on the **sum of shop page prices**,
-once per shop/deadline group. Use existing all-in client amount fields. Never
+once per shop delivery group. Use existing all-in client amount fields. Never
 sum individually fee-marked page display amounts to manufacture a quote.
 
 A one-colour service returns the non-blocking `warning`:

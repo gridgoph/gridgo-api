@@ -15,7 +15,7 @@ examples are PHP 500 → 225; 1,999 → 899.55; 2,000 → 900; 5,000 → 1,650;
 20,000 → 5,400; 50,000 → 9,900.
 
 `src/service-fee.js` sums exact BigInt `sliceMinor * rateBps` numerators and rounds
-**half-up once per shop/deadline group**: `(sum + 5000) / 10000`. Working rows use
+**half-up once per shop delivery group**: `(sum + 5000) / 10000`. Working rows use
 differences of rounded cumulative fees, so their `amountMinor` values add exactly
 to the fee even when custom bracket limits create fractional centavos. No floats
 or per-bracket independent rounding are used. Unsafe inputs or totals are refused.
@@ -78,16 +78,18 @@ currently effective baseline before replacing a future proposal.
 
 ## Locking and legacy compatibility
 
-A shop/deadline cart group locks its schedule when first priced. Every line stores
+A shop delivery cart group ([shop deliveries](SHOP_DELIVERIES_API.md)) locks its schedule when first priced. Every line stores
 that group's schedule in `client_cart_lines.service_fee_snapshot`. Added/edited
 lines in the same group use its locked schedule. Removing its last line ends the
-lock. A line moved to another deadline inherits that destination group's schedule,
-or the currently effective table when that destination is new. Changing supplier
+lock. A line moved to another delivery inherits that destination group's schedule,
+or the currently effective table when that destination is new. Changing a line's
+date does not move it. Locks taken while groups were shop + date stay honoured on
+the same line. Changing supplier
 prices/quantities still changes the shop subtotal under the locked fee table.
 
-Checkout calculates once per shop/deadline group and snapshots the table, fee,
+Checkout calculates once per shop delivery group and snapshots the table, fee,
 bracket working and existing money allocations on each group order and invoice.
-Multiple groups at the same shop have independent brackets, matching the existing
+Separate deliveries from the same shop have independent brackets, matching the existing
 independent deadline/payment contracts. Combined basket totals sum those groups.
 For bracket receipts and cart displays, fee-inclusive line amounts apportion the
 fixed group fee by shop principal using largest remainders (ties in line order).

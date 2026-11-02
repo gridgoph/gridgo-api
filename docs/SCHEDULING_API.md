@@ -374,11 +374,12 @@ offer for unchanged selected work, including a Tight offer that would cross the
 retains the original internal production ready-by.
 
 The guarantee is server-owned, persisted with the selection, and bound to the
-client, cart, shop/deadline group, selected quantity/tier, and all same-shop draft
-work that influenced the offer: its own group plus earlier-deadline groups (all
-dated groups for an undated offer). This workload is checked when adding the
+client, cart, shop delivery group, selected quantity/tier, and all same-shop draft
+work that influenced the offer: its own delivery plus that shop's deliveries due
+no later than it (all of the shop's work for an undated offer; see
+[shop deliveries](SHOP_DELIVERIES_API.md)). This workload is checked when adding the
 selection and again before checkout materializes any group orders. Adding,
-editing or deleting relevant earlier work invalidates affected later offers and
+editing, deleting or re-splitting relevant work invalidates affected offers and
 uses the current recheck. Unchanged groups keep their offered dates even while
 checkout reserves earlier groups, and external customers' intervening queue work
 does not invalidate a still-valid offer. Changing selected work requires a fresh

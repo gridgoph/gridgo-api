@@ -13,7 +13,8 @@ Existing endpoints remain. `POST /me/carts`, `PATCH /me/carts/:id`, and
 Each product keeps its own deadline; see [per-line deadline fields](PER_LINE_DEADLINES_API.md).
 The cart keeps one `fulfillmentMode: delivery | pickup`. Cart-level `deadline`
 is a legacy default, while explicit line deadlines win. Checkout groups by shop
-and normalized deadline. Multiple groups require a date on every line
+delivery: a shop's products are one delivery due by their earliest date unless
+the client chose separate deliveries ([shop deliveries](SHOP_DELIVERIES_API.md)). Multiple groups require a date on every line
 (`400 basket_deadline_required`). Matching accepts each product's explicit date;
 `groupId` scopes its shop and supplies that group's date only when no date is sent.
 Checkout rechecks every group, reserving earlier dates first. Any infeasible
@@ -48,7 +49,7 @@ pass `{cartId, groupId, subcategoryCode, ...}` to `/me/matches`, then add a retu
 This restricts matching to that group without accepting a supplier identity from
 the client. New products use matching without `groupId`.
 
-Several items in the same shop with the same deadline incur one delivery fee, calculated to that
+Several items in the same shop delivery incur one delivery fee, calculated to that
 group's farthest effective drop-off using the existing distance bands. Legacy pickup
 remains free. Explicit pre-match hub pickup includes the allocated fee described below. An unavailable price or missing delivery point makes the
 corresponding preview total `null`; checkout refuses invalid lines. Previews are
@@ -226,7 +227,7 @@ The flat `lines`, `deliveryLines`, customer totals and `paymentPlan` remain, wit
 additive `basketId` and `groups: [{orderId,label,deadline,lines,clientItemSubtotalMinor,
 deliveryFeeMinor,totalMinor}]`. Operations also receives each group's
 `itemSubtotalMinor` and `serviceFeeMinor`. Single-shop legacy invoice fields stay unchanged. Delivery labels are Shop A, Shop B,
-etc.; different dates at the same shop share a label and carry distinct deadlines and order IDs. Client receipts expose `clientItemSubtotalMinor` and line
+etc.; separate deliveries from the same shop share a label and carry distinct deadlines, `deliveryNumber` and order IDs. Client receipts expose `clientItemSubtotalMinor` and line
 `clientUnitPriceMinor` / `clientAmountMinor`; they omit supplier amounts and
 service-fee decomposition. Operations retains the original amount fields.
 The receipt contains no shop identity or payout amounts. One receipt-ready

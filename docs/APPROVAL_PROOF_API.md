@@ -43,7 +43,7 @@ The server derives the method; it ignores a client-supplied product classificati
 | Existing `proof_approval` sample/artwork decision | `drawn` plus received-sample photo |
 
 The taxonomy and existing flow states provide these signals, so no additional
-category settings are necessary. A basket has one order per shop/deadline group;
+category settings are necessary. A basket has one order per shop delivery group;
 each gets its own proof containing only that group's lines. A basket approval
 must use `drawn` if any group needs it. Its same signature may be bound to each
 group in the single checkout transaction. `GET /me/carts/:id` exposes

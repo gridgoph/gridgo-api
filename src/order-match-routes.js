@@ -18,7 +18,7 @@ import { assertCheckoutPrintLayout, listingPrintLayouts, parseCartPrintLayout, p
 import { listingExpress } from "./express.js";
 import { assertCheckoutCoverSpine, assertCoverFileAttached, coverSpineApplies, coverSpineRequiredSetting, coverSpineSnapshot, parseCoverSpine, publicCartCoverSpine, publicOrderCoverSpine } from "./hardbound-cover.js";
 import { artworkColorsFor, colorTargetsFor, colorTargetsSnapshot, parseColorTargets } from "./color-targets.js";
-import { cartGroups, lineDeadline, sharedDeadline, groupSummary } from "./cart-groups.js";
+import { cartGroups, lineDeadline, lineDeliveryKey, sameDelivery, groupDeadline, earliestDate, sharedDeadline, groupSummary } from "./cart-groups.js";
 import { officerSnapshot } from "./client-applications.js";
 import { approvedOrganization, organizationFeeMoney, publicOrganizationDiscount } from "./organization-money.js";
 import { approvedCatalogView, CATALOG_REVIEW_TABLES } from "./catalog-review-state.js";
@@ -274,7 +274,7 @@ function resolveMatchSelection(store, user, cart, body, at) {
 function schedulingWork(cart, lines) {
   return JSON.stringify(lines.map(line => ({ id: line.id, catalogItemId: line.catalogItemId,
     supplierId: line.supplierId, quantity: line.quantity, speedTierId: line.speedTierId ?? null,
-    deadline: lineDeadline(cart, line), optionIds: [...(line.optionIds || [])].sort(),
+    deadline: lineDeadline(cart, line), deliveryKey: lineDeliveryKey(line), optionIds: [...(line.optionIds || [])].sort(),
     measurement: line.measurement ?? null, structuredSpec: line.structuredSpec ?? {},
   })).sort((a, b) => a.id.localeCompare(b.id)), (_key, value) =>
     // JSONB normalizes object key order; compare values, never insertion order.
@@ -282,15 +282,27 @@ function schedulingWork(cart, lines) {
       ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
 }
 
-function relevantSchedulingWork(cart, lines, supplierId, deadline) {
-  return lines.filter(line => line.supplierId === supplierId && (deadline == null
-    || (lineDeadline(cart, line) != null && Date.parse(lineDeadline(cart, line)) <= Date.parse(deadline))));
+// An offer depends on its own delivery and on the shop's deliveries due no later
+// than it; later deliveries never invalidate it. A new delivery has no lines yet.
+const NEW_DELIVERY = Symbol("newDelivery");
+function relevantSchedulingWork(cart, lines, supplierId, deliveryKey, deadline) {
+  const shopLines = lines.filter(line => line.supplierId === supplierId);
+  if (deadline == null) return shopLines;
+  const included = new Set(cartGroups(cart, shopLines).filter(group => group.deliveryKey === deliveryKey
+    || (group.deadline != null && Date.parse(group.deadline) <= Date.parse(deadline))).flatMap(group => group.lines));
+  return shopLines.filter(line => included.has(line));
+}
+// The delivery an offer joins and the date that delivery would then work to.
+function offerTarget(cart, lines, supplierId, { deliveryKey = null, separate = false, deadline = null }) {
+  if (separate) return { deliveryKey: NEW_DELIVERY, deadline };
+  const group = cartGroups(cart, lines.filter(line => line.supplierId === supplierId)).find(row => row.deliveryKey === deliveryKey);
+  return { deliveryKey, deadline: earliestDate([deadline, group?.deadline]) };
 }
 
 function offeredGroupProjection(store, cart, lines, at) {
   const fingerprint = schedulingWork(cart, lines);
-  const workload = schedulingWork(cart, relevantSchedulingWork(cart,
-    (store.cartLines || []).filter(line => line.cartId === cart.id), lines[0].supplierId, lineDeadline(cart, lines[0])));
+  const workload = schedulingWork(cart, relevantSchedulingWork(cart, (store.cartLines || []).filter(line => line.cartId === cart.id),
+    lines[0].supplierId, lineDeliveryKey(lines[0]), groupDeadline(cart, lines)));
   const saved = (store.matchSelections || []).find(row => row.clientId === cart.clientId
     && Date.parse(row.expiresAt) > Date.parse(at) && row.selection.cartId === cart.id
     && row.selection.groupFingerprint === fingerprint && row.selection.workloadFingerprint === workload
@@ -300,14 +312,15 @@ function offeredGroupProjection(store, cart, lines, at) {
 
 function cartGroupProjection(store, cart, lines, at) {
   return offeredGroupProjection(store, cart, lines, at)
-    ?? projectListingGroup(store, lines, { now: at, deadline: lineDeadline(cart, lines[0]) }).projection;
+    ?? projectListingGroup(store, lines, { now: at, deadline: groupDeadline(cart, lines) }).projection;
 }
 
 function bindOfferedGroup(store, cart, line, selection) {
   if (!selection?.offeredProjection || line.quantity !== selection.units) return false;
-  const workload = relevantSchedulingWork(cart, (store.cartLines || []).filter(row => row.cartId === cart.id),
-    line.supplierId, lineDeadline(cart, line));
-  const group = workload.filter(row => lineDeadline(cart, row) === lineDeadline(cart, line));
+  const existing = (store.cartLines || []).filter(row => row.cartId === cart.id);
+  const group = existing.filter(row => sameDelivery(row, line));
+  const workload = relevantSchedulingWork(cart, existing, line.supplierId,
+    group.length ? lineDeliveryKey(line) : NEW_DELIVERY, groupDeadline(cart, [...group, line]));
   if (schedulingWork(cart, workload) !== selection.draftFingerprint) return false;
   selection.cartId = cart.id;
   selection.groupFingerprint = schedulingWork(cart, [...group, line]);
@@ -315,11 +328,72 @@ function bindOfferedGroup(store, cart, line, selection) {
   return true;
 }
 
-function assertMatchDeadline(store, item, line, at) {
-  const deadline = line.deadline ?? line.matchDeadline;
+// The product is checked inside its delivery, which works to the earliest date
+// among its lines; other lines of the same delivery are passed as `siblings`.
+function assertMatchDeadline(store, item, line, at, { cart = null, siblings = [] } = {}) {
+  const lines = [...siblings.filter(row => row.id !== line.id), { ...line, catalogItemId: item.id }];
+  const deadline = groupDeadline(cart, lines);
   if (!deadline) return;
-  const { projection } = projectListingGroup(store, [{ ...line, catalogItemId: item.id }], { now: at, deadline });
-  if (!fitsDeadline(projection, deadline)) fail(409, "deadline_not_met", "This listing can no longer make the requested deadline.");
+  const { projection } = projectListingGroup(store, lines, { now: at, deadline });
+  if (!fitsDeadline(projection, deadline)) {
+    fail(409, "deadline_not_met", siblings.length
+      ? "This delivery can no longer make its earliest deadline; choose a later date or deliver this product separately."
+      : "This listing can no longer make the requested deadline.");
+  }
+}
+
+// A client's "deliver separately" choice for one shop: every line of that shop
+// in exactly one non-empty delivery. `split` is a shorthand for common choices.
+function deliveryPartition(cart, shopLines, body) {
+  const invalid = (message) => fail(400, "invalid_delivery_split", message, { field: "deliveries" });
+  if (body.split != null) {
+    if (body.deliveries != null) invalid("Send either split or deliveries, not both.");
+    if (body.split === "none") return [shopLines];
+    if (body.split !== "by_deadline") fail(400, "invalid_delivery_split", "split must be by_deadline or none.", { field: "split" });
+    const byDate = new Map();
+    for (const line of shopLines) {
+      const date = lineDeadline(cart, line);
+      if (!date) fail(400, "basket_deadline_required", "Set a deadline for every product before delivering by date.");
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date).push(line);
+    }
+    return [...byDate.entries()].sort(([left], [right]) => Date.parse(left) - Date.parse(right)).map(([, part]) => part);
+  }
+  if (!Array.isArray(body.deliveries) || !body.deliveries.length || body.deliveries.length > shopLines.length) {
+    invalid("Send deliveries as a list of line-ID lists, one per delivery.");
+  }
+  const seen = new Set();
+  const parts = body.deliveries.map((part) => {
+    if (!Array.isArray(part) || !part.length) invalid("Every delivery needs at least one product.");
+    return part.map((lineId) => {
+      const line = shopLines.find(row => row.id === lineId);
+      if (!line || seen.has(lineId)) invalid("Each of this shop's products must be in exactly one delivery.");
+      seen.add(lineId);
+      return line;
+    });
+  });
+  if (seen.size !== shopLines.length) invalid("Each of this shop's products must be in exactly one delivery.");
+  // Stable cart order inside each delivery and between deliveries.
+  const position = new Map(shopLines.map((line, index) => [line.id, index]));
+  return parts.map(part => part.sort((left, right) => position.get(left.id) - position.get(right.id)))
+    .sort((left, right) => position.get(left[0].id) - position.get(right[0].id));
+}
+
+function assertDeliveryDeadline(store, cart, lines, at) {
+  const deadline = groupDeadline(cart, lines);
+  if (!deadline) return;
+  let projection;
+  try {
+    projection = projectListingGroup(store, lines, { now: at, deadline }).projection;
+  } catch (error) {
+    // A stale listing or closed calendar is reported on the cart and at checkout.
+    if (error instanceof AvailabilityError || error instanceof MatchError || error.code === "speed_tier_unavailable") return;
+    throw error;
+  }
+  if (!fitsDeadline(projection, deadline)) {
+    fail(409, "deadline_not_met", "These products cannot all be ready by the earliest date in one delivery.",
+      { lineIds: lines.map(line => line.id), deadline });
+  }
 }
 
 function publicPreference(store, userId) {
@@ -508,8 +582,7 @@ function cartLinePromiseBy(store, cart, line, item, at) {
   if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
       || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   try {
-    const group = (store.cartLines || []).filter(row => row.cartId === cart.id
-      && row.supplierId === line.supplierId && lineDeadline(cart, row) === lineDeadline(cart, line));
+    const group = (store.cartLines || []).filter(row => row.cartId === cart.id && sameDelivery(row, line));
     return cartGroupProjection(store, cart, group.length ? group : [line], at).promiseBy;
   } catch (error) {
     // An unavailable calendar must not prevent the client from repairing a cart.
@@ -534,18 +607,25 @@ function cartDelivery(store, cart, supplierId, lines) {
   return { ...farthest, feeMinor: deliveryFeeForDistance(farthest.distance, store.settings) };
 }
 
-// Snapshot the schedule on every priced line, bound to its shop/deadline group.
+// Snapshot the schedule on every priced line, bound to its shop delivery group.
 // Removing the final line removes the lock; moving a line does not carry it to a new group.
+// Snapshots taken while groups were shop + date keep their lock on the same line.
 function groupFeeSettings(store, cart, lines, at) {
-  const key = JSON.stringify([lines[0]?.supplierId, lineDeadline(cart, lines[0] || {})]);
-  const saved = lines.find(line => JSON.stringify(line.serviceFeeSnapshot?.groupKey) === key)?.serviceFeeSnapshot;
+  const key = JSON.stringify([lines[0]?.supplierId, lineDeliveryKey(lines[0] || {})]);
+  const saved = (lines.find(line => JSON.stringify(line.serviceFeeSnapshot?.groupKey) === key)
+    ?? lines.find(line => legacyFeeKey(cart, line)))?.serviceFeeSnapshot;
   return feeSettings(store.settings, saved?.schedule || feeSchedule(store.settings, at));
+}
+function legacyFeeKey(cart, line) {
+  const [supplierId, date] = line.serviceFeeSnapshot?.groupKey || [];
+  return supplierId === line.supplierId && typeof date === "string" && !date.startsWith("dlv_")
+    && date === lineDeadline(cart, line);
 }
 export function lockCartFeeSchedules(store, cart, at) {
   for (const group of cartGroups(cart, store.cartLines.filter(line => line.cartId === cart.id))) {
     if (group.lines.some(line => cartLineSubtotal(store, line) == null)) continue;
     const schedule = groupFeeSettings(store, cart, group.lines, at).serviceFeeSchedule;
-    const groupKey = [group.supplierId, group.deadline];
+    const groupKey = [group.supplierId, group.deliveryKey];
     for (const line of group.lines) line.serviceFeeSnapshot = { groupKey, schedule: structuredClone(schedule) };
   }
 }
@@ -598,12 +678,14 @@ export function clientCartQuote(store, cart, lines, at) {
   const clientItemSubtotalMinor = subtotals.some((amount) => amount == null) ? null
     : addMinor(grouped.map(({ lines: entries }) => clientMoneyMinor({ settings: groupFeeSettings(store, cart, entries, at) },
       addMinor(entries.map((line) => subtotals[lines.indexOf(line)]), "quote.groupItems"))), "quote.items");
-  const deliveryLines = cart.fulfillmentMode === "pickup" ? [] : grouped.map(({ supplierId, deadline, lines: entries }) => {
+  const quoteShops = [...new Set(lines.map((line) => line.supplierId))];
+  const deliveryLines = cart.fulfillmentMode === "pickup" ? [] : grouped.map(({ supplierId, deadline, deliveryNumber, shopDeliveryCount, lines: entries }) => {
     const delivery = cartDelivery(store, cart, supplierId, entries);
     const lineIds = entries.map((line) => line.id);
     if (delivery.error) reasons.push({ lineIds, code: delivery.error });
     const distanceZone = delivery.error ? null : distanceZoneForDistance(delivery.distance, store.settings);
     return {
+      groupId: entries[0].id, label: shopLabel(quoteShops.indexOf(supplierId)), deliveryNumber, shopDeliveryCount,
       lineIds, deadline, distanceZone, deliveryFeeMinor: delivery.feeMinor ?? null,
       ...(distanceZone?.key === "out_of_zone" ? { distanceKm: Number((delivery.distance / 1000).toFixed(1)) } : {}),
     };
@@ -714,13 +796,13 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       listing,
       promiseBy: cartLinePromiseBy(store, cart, line, item, at),
       lineSubtotalMinor,
-      clientLineSubtotalMinor: clientMoneyMinor({ settings: groupFeeSettings(store, cart, lines.filter(entry => entry.supplierId === line.supplierId && lineDeadline(cart, entry) === lineDeadline(cart, line)), at) }, lineSubtotalMinor),
+      clientLineSubtotalMinor: clientMoneyMinor({ settings: groupFeeSettings(store, cart, lines.filter(entry => sameDelivery(entry, line)), at) }, lineSubtotalMinor),
     };
   });
   const supplierIds = [...new Set(lines.map((line) => line.supplierId))];
   const grouped = cartGroups(cart, lines);
   const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, grouped.length);
-  const groups = grouped.map(({ supplierId, deadline, lines: groupLines }, index) => {
+  const groups = grouped.map(({ supplierId, deadline, deliveryNumber, shopDeliveryCount, lines: groupLines }, index) => {
     const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
     const dropoffs = groupLines.map((line) => line.dropoff || cart.defaultDropoff);
     const deliveryFeeMinor = cart.fulfillmentMode === "pickup" ? pickupShares[index]
@@ -749,6 +831,8 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       }
     } catch (error) { if (!(error instanceof AvailabilityError) && error.code !== 'speed_tier_unavailable') throw error; }
     return { ...publicOrganizationDiscount(fee || {}), id: groupLines[0].id, label: shopLabel(supplierIds.indexOf(supplierId)), deadline, readyBy, expressPromise, scheduling, lineIds: groupLines.map((line) => line.id),
+      deliveryNumber, shopDeliveryCount, separateDelivery: shopDeliveryCount > 1,
+      canDeliverSeparately: lines.filter((line) => line.supplierId === supplierId).length > 1,
       ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { pickupFeeMinor: pickupShares[index] } : {}),
       clientItemSubtotalMinor: itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, serviceFeeMinor], "group.clientItems"), deliveryFeeMinor,
       totalMinor: deliveryFeeMinor == null || itemSubtotalMinor == null ? null : addMinor([itemSubtotalMinor, fee.serviceFeeMinor, deliveryFeeMinor], "group.totalMinor") };
@@ -895,6 +979,7 @@ function publicMatchedOrder(store, order) {
     id: order.id,
     deadline: order.deadline ?? null,
     ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
+    ...(order.shopDeliveryCount > 1 ? { deliveryNumber: order.deliveryNumber, shopDeliveryCount: order.shopDeliveryCount } : {}),
     state: order.state,
     ...publicOrganizationDiscount(order),
     ...(order.basketId || order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
@@ -940,7 +1025,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, offeredProjection = null, zeroCashBoundary = false } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, delivery = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, offeredProjection = null, zeroCashBoundary = false } = {}) {
   assertRequestFulfillment(cart, body);
   const cartLines = (groupLines || store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
@@ -958,8 +1043,11 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     clientId: user.id,
     reviewData: isReviewData(user),
     organizationOfficer: officerSnapshot(store, user.id),
-    deadline: lineDeadline(cart, cartLines[0]),
-    ...(basketId ? { basketId, groupLabel, basketDeadline: lineDeadline(cart, cartLines[0]) } : {}),
+    // A delivery works to the earliest date among its products.
+    deadline: groupDeadline(cart, cartLines),
+    ...(basketId ? { basketId, groupLabel, basketDeadline: groupDeadline(cart, cartLines) } : {}),
+    // Set only when the client chose separate deliveries from this shop.
+    ...(delivery?.shopDeliveryCount > 1 ? { deliveryNumber: delivery.deliveryNumber, shopDeliveryCount: delivery.shopDeliveryCount } : {}),
     // One shop per order, known since the match. It was null here, with the
     // shop recorded per job instead -- which is why no supplier surface ever
     // showed a checkout order: every one of them reads order.supplierId.
@@ -1124,11 +1212,9 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // before adding this order's own jobs to the committed queue.
   const [job] = jobs;
   const projection = offeredProjection && offeredGroupProjection(store, cart, cartLines, at)
-    ? offeredProjection : projectListingGroup(store, cartLines, { now: at, deadline: lineDeadline(cart, cartLines[0]) }).projection;
-  for (const line of cartLines) {
-    if (lineDeadline(cart, line) && !fitsDeadline(projection, lineDeadline(cart, line))) {
-      fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.");
-    }
+    ? offeredProjection : projectListingGroup(store, cartLines, { now: at, deadline: order.deadline }).projection;
+  if (order.deadline && !fitsDeadline(projection, order.deadline)) {
+    fail(409, "deadline_not_met", "This cart can no longer make the requested deadline; match again.", { lineIds: cartLines.map(line => line.id) });
   }
   order.approvalPolicy = approvalPolicy(store.settings, { categories: [...grouped.values()].flat().map(({ item }) =>
     store.supplierServices.find(service => service.id === item.supplierServiceId)?.categoryCode) });
@@ -1343,7 +1429,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     }
     return result;
   }
-  if (groups.some(group => !group.deadline)) fail(400, "basket_deadline_required", "Set a deadline for every product before checkout.");
+  if (lines.some(line => !lineDeadline(cart, line))) fail(400, "basket_deadline_required", "Set a deadline for every product before checkout.");
   const basketId = createId("bsk");
   const hubPickup = cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings) : null;
   const pickupShares = splitBasketFee(hubPickup?.feeMinor ?? 0, groups.length);
@@ -1353,7 +1439,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   for (const { group, index } of groups.map((group, index) => ({ group, index }))
     .sort((a, b) => Date.parse(a.group.deadline) - Date.parse(b.group.deadline) || a.index - b.index)) {
     results[index] = checkout(store, user, cart, body, createId, at, req, {
-      groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)),
+      groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)), delivery: group,
       pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index],
       offeredProjection: honouredOffers[index], zeroCashBoundary,
     });
@@ -1383,6 +1469,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     ...(cart.requestFulfillment ? { requestFulfillment: structuredClone(cart.requestFulfillment) } : {}),
     lines: results.flatMap((result) => result.invoice.lines),
     groups: results.map((result, index) => ({ orderId: result.order.id, label: result.order.groupLabel, deadline: groups[index].deadline,
+      ...(groups[index].shopDeliveryCount > 1 ? { deliveryNumber: groups[index].deliveryNumber, shopDeliveryCount: groups[index].shopDeliveryCount } : {}),
       lines: result.invoice.lines, itemSubtotalMinor: result.invoice.itemSubtotalMinor,
       ...(result.invoice.voucher ? { voucher: result.invoice.voucher, voucherDiscountMinor: result.invoice.voucherDiscountMinor } : {}),
       serviceFeeSchedule: result.invoice.serviceFeeSchedule, serviceFeeWorking: result.invoice.serviceFeeWorking, serviceFeeRateBps: result.invoice.serviceFeeRateBps,
@@ -1416,6 +1503,15 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
     action: "basket.checkout", entityType: "basket", entityId: basket.id,
     detail: { orderIds: basket.orderIds, totalMinor: basket.totalMinor } });
+  const separate = groups.map((group, index) => ({ group, order: orders[index] })).filter(({ group }) => group.shopDeliveryCount > 1);
+  if (separate.length) {
+    // The client's "deliver separately" choice, as it was paid for.
+    store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client",
+      action: "basket.separate_deliveries", entityType: "basket", entityId: basket.id,
+      detail: { deliveries: separate.map(({ group, order }) => ({ orderId: order.id, supplierId: group.supplierId,
+        label: order.groupLabel, deliveryNumber: group.deliveryNumber, shopDeliveryCount: group.shopDeliveryCount,
+        deadline: group.deadline, lineIds: group.lines.map(line => line.id), deliveryFeeMinor: order.deliveryFeeMinor })) } });
+  }
   if (!zeroCashBoundary) notifyOpsPaymentSubmitted(store, first, { createId, at });
   notifyClientReceiptReady(store, first, { createId, at });
   return { order: results[0].order, basket: publicBasket(store, basket, user), invoice };
@@ -1687,13 +1783,19 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     }
     const groupLine = body.groupId == null ? null : cartLines.find((line) => line.id === body.groupId);
     if (body.groupId != null && !groupLine) fail(404, "cart_group_not_found", "That group does not belong to this cart.");
+    if (body.separateDelivery != null && typeof body.separateDelivery !== "boolean") {
+      fail(400, "invalid_separate_delivery", "separateDelivery must be true or false.", { field: "separateDelivery" });
+    }
+    const separateDelivery = body.separateDelivery === true && Boolean(matchCart);
     const groupExclusions = groupLine ? (store.supplierProfiles || []).filter((profile) => profile.userId !== groupLine.supplierId).map((profile) => profile.userId) : [];
     const input = {
       subcategoryCode: body.subcategoryCode,
       ranking: body.ranking ?? publicPreference(store, user.id).ranking,
       dropoff: requestFulfillment?.dropoff ?? addressPoint(store, user.id, body) ?? matchCart?.defaultDropoff ?? null,
       excludedSupplierIds: [...(body.excludedSupplierIds || []), ...groupExclusions],
-      deadline: body.deadline != null ? parseDeadline(body.deadline) : groupLine ? lineDeadline(matchCart, groupLine) : matchCart?.deadline ?? null,
+      deadline: body.deadline != null ? parseDeadline(body.deadline)
+        : groupLine ? groupDeadline(matchCart, cartLines.filter(line => sameDelivery(line, groupLine))) : matchCart?.deadline ?? null,
+      deliveryKey: groupLine ? lineDeliveryKey(groupLine) : null, separateDelivery,
       units: body.units == null ? undefined : positiveInteger(body.units, "units"),
       now: at, measurement: body.measurement, structuredSpec: body.structuredSpec,
       optionIds: body.optionIds, widthFeet: body.widthFeet, cartLines: cartLines.map(line => ({ ...line, deadline: lineDeadline(matchCart, line) })),
@@ -1722,8 +1824,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
           cartId, speedTierId: listing.scheduling?.rushTier?.id ?? null, deadline: input.deadline, dropoff: input.dropoff,
           offeredProjection: structuredClone(offered.get(listing.id)),
           units: input.units ?? listing.minimumOrderQuantity ?? 1,
-          draftFingerprint: schedulingWork(matchCart, relevantSchedulingWork(matchCart, cartLines,
-            store.catalogItems.find(row => row.id === listing.id).supplierId, input.deadline ?? null)),
+          draftFingerprint: (() => {
+            const supplierId = store.catalogItems.find(row => row.id === listing.id).supplierId;
+            const target = offerTarget(matchCart, cartLines, supplierId, { deliveryKey: input.deliveryKey, separate: separateDelivery, deadline: input.deadline });
+            return schedulingWork(matchCart, relevantSchedulingWork(matchCart, cartLines, supplierId, target.deliveryKey, target.deadline));
+          })(),
+          ...(separateDelivery ? { separateDelivery: true } : input.deliveryKey ? { deliveryKey: input.deliveryKey } : {}),
           ...(requestFulfillment ? { requestFulfillment } : {}),
           subcategoryCode: input.subcategoryCode, ranking: input.ranking } });
       listing.selectToken = token;
@@ -1794,9 +1900,55 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const suppliers = [...new Set(lines.map(line => line.supplierId))];
     return { status: 200, mutated: false, body: {
       groupId, label: shopLabel(suppliers.indexOf(group.supplierId)), deadline: group.deadline,
-      ...cartGroupListings(store, { supplierId: group.supplierId, deadline: group.deadline,
+      ...cartGroupListings(store, { supplierId: group.supplierId, deadline: group.deadline, deliveryKey: group.deliveryKey,
         cartLines: lines.map(line => ({ ...line, deadline: lineDeadline(cart, line) })), now: now() }),
     } };
+  }
+
+  const deliveriesMatch = /^\/me\/carts\/([^/]+)\/groups\/([^/]+)\/deliveries$/.exec(pathname);
+  if (deliveriesMatch && req.method === "PUT") {
+    const cart = ownCart(store, user, decodeURIComponent(deliveriesMatch[1]), { draft: true });
+    const body = record(await readBody(req));
+    const at = now();
+    const lines = (store.cartLines || []).filter(line => line.cartId === cart.id)
+      .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
+    const groupId = decodeURIComponent(deliveriesMatch[2]);
+    const group = cartGroups(cart, lines).find(row => row.lines[0].id === groupId);
+    if (!group) fail(404, "cart_group_not_found", "That group does not belong to this cart.");
+    const shopLines = lines.filter(line => line.supplierId === group.supplierId);
+    const deliveries = deliveryPartition(cart, shopLines, body);
+    const before = cartGroups(cart, shopLines).map(row => row.lines.map(line => line.id));
+    const after = deliveries.map(part => part.map(line => line.id));
+    if (JSON.stringify(before) === JSON.stringify(after)) {
+      return { status: 200, body: { cart: publicCart(store, cart, at) }, mutated: false };
+    }
+    for (const part of deliveries) assertDeliveryDeadline(store, cart, part, at);
+    // The first delivery is the shop's main one; later products join it by default.
+    // A delivery that already had its own key keeps it, and with it its fee lock.
+    const used = new Set();
+    const keys = deliveries.map((part, index) => {
+      const existing = part[0].deliveryKey;
+      if (index === 0) return null;
+      const key = existing && part.every(line => line.deliveryKey === existing) && !used.has(existing) ? existing : id("dlv");
+      used.add(key);
+      return key;
+    });
+    deliveries.forEach((part, index) => {
+      for (const line of part) {
+        if ((line.deliveryKey ?? null) === keys[index]) continue;
+        if (keys[index]) line.deliveryKey = keys[index];
+        else delete line.deliveryKey;
+        line.updatedAt = at;
+      }
+    });
+    lockCartFeeSchedules(store, cart, at);
+    updateCart(cart, at);
+    store.auditLog ||= [];
+    store.auditLog.push({ id: id("aud"), at, actorId: user.id, actorRole: "client",
+      action: "cart.deliveries_set", entityType: "cart", entityId: cart.id,
+      detail: { supplierId: group.supplierId, split: typeof body.split === "string" ? body.split : "custom",
+        before, after, deliveryCount: after.length } });
+    return { status: 200, body: { cart: publicCart(store, cart, at) }, mutated: true };
   }
 
   const voucherRoute = /^\/me\/carts\/([^/]+)\/voucher$/.exec(pathname);
@@ -1888,6 +2040,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (selection && explicitDeadline && explicitDeadline !== (selection.deadline ? parseDeadline(selection.deadline) : null)) {
       fail(409, "select_token_deadline_mismatch", "Use the date selected by this match, or match again.");
     }
+    if (body.separateDelivery != null && typeof body.separateDelivery !== "boolean") {
+      fail(400, "invalid_separate_delivery", "separateDelivery must be true or false.", { field: "separateDelivery" });
+    }
+    if (selection && body.separateDelivery != null && body.separateDelivery !== (selection.separateDelivery === true)) {
+      fail(409, "select_token_delivery_mismatch", "Match again to change whether this is delivered separately.");
+    }
     const measurement = measurementFor(item, body);
     const structuredSpec = body.structuredSpec == null ? {} : structuredClone(record(body.structuredSpec, "structuredSpec"));
     assertPrinterCap(store, item, { measurement, structuredSpec, optionIds: body.optionIds });
@@ -1898,6 +2056,9 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       ...((explicitDeadline || selection?.deadline) ? { deadline: explicitDeadline || parseDeadline(selection.deadline) } : {}),
       ...((selection?.deadline || cart.deadline) ? { matchDeadline: selection?.deadline || cart.deadline } : {}),
       structuredSpec,
+      // Joins the shop's main delivery, the matched group's delivery, or a new one.
+      ...((selection ? selection.separateDelivery : body.separateDelivery === true) ? { deliveryKey: id("dlv") }
+        : selection?.deliveryKey ? { deliveryKey: selection.deliveryKey } : {}),
       speedTierId: selection?.speedTierId ?? body.speedTierId ?? null,
       sortOrder: lines.reduce((maximum, row) => Math.max(maximum, row.sortOrder), -1) + 1,
       createdAt: at, updatedAt: at,
@@ -1923,7 +2084,9 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     queueLineColour(store,item,line,at);
     assertCartLinePriceable(store, item, line);
     if (body.dropoff != null) line.dropoff = point(body.dropoff, "dropoff");
-    if (!bindOfferedGroup(store, cart, line, selection)) assertMatchDeadline(store, item, line, at);
+    if (!bindOfferedGroup(store, cart, line, selection)) {
+      assertMatchDeadline(store, item, line, at, { cart, siblings: lines.filter(row => sameDelivery(row, line)) });
+    }
     store.cartLines ||= [];
     store.cartLines.push(line);
     lockCartFeeSchedules(store, cart, at);
@@ -1956,7 +2119,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       const deadline = parseDeadline(body.deadline);
       const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
       if (!item || catalogItemBlockers(store, item, { publicOnly: true }).length) fail(409, "catalog_item_stale", "That listing is no longer available.");
-      assertMatchDeadline(store, item, { ...line, deadline, quantity: body.quantity == null ? line.quantity : positiveInteger(body.quantity, "quantity") }, at);
+      assertMatchDeadline(store, item, { ...line, deadline, quantity: body.quantity == null ? line.quantity : positiveInteger(body.quantity, "quantity") }, at,
+        { cart, siblings: (store.cartLines || []).filter(row => row.cartId === cart.id && sameDelivery(row, line)) });
       line.deadline = deadline;
     }
     assertRequestFulfillment(cart, body);
