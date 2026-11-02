@@ -289,6 +289,8 @@ Client follow-up: render these labels and ratings on the Top Pick and listings; 
 
 ## Cart
 
+Sample lines (`sample: true`) and batch lines made from an approved sample (`POST /me/sample-batches/:id/cart`) are defined in [SAMPLE_FIRST_API.md](SAMPLE_FIRST_API.md).
+
 ```text
 POST   /me/carts
 GET    /me/carts/:cartId

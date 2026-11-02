@@ -11,6 +11,7 @@ import { parsePaperSize } from './print-layout.js';
 import { canonicalColourPricing } from './colour-pricing.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
+import { sampleBatchTable, sampleBatchRows, loadSampleBatchRows } from './sample-batch-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
 import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from './sharing-store.js';
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
@@ -84,7 +85,7 @@ const TABLES = [
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
   ...quoteRequestTables,
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "quote_request_id", "quote_client_id"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "quote_request_id", "quote_client_id"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
@@ -98,10 +99,11 @@ const TABLES = [
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["review_data", "id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  sampleBatchTable,
   performanceTable,
   ...staffTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
   { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "speed_tier_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
@@ -148,6 +150,7 @@ export function emptyStore() {
     checkoutVisits: [],
     checkoutExitPrompts: [],
     supplierInvoices: [],
+    sampleBatchDrafts: [],
     surveyLaunchedAt: null,
     foundingTesters: [],
     ...emptyTesterProgram(),
@@ -235,6 +238,7 @@ function rowsFromStore(store) {
   checkoutExitRows(store, rows);
   quoteRequestRows(store, rows);
   supplierInvoiceRows(store, rows);
+  sampleBatchRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
@@ -455,6 +459,8 @@ function rowsFromStore(store) {
       print_layouts: listingPrintLayouts(item),
       priced_by_colour: item.pricedByColour === true, one_colour: item.oneColour === true,
       express: item.express === true,
+      sample_available: item.sampleAvailable === true,
+      sample_price_minor: money(item.samplePriceMinor ?? null, "catalogItem.samplePriceMinor"),
       production_time_review_reasons: item.productionTimeReviewReasons || [],
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       turnaround_days: item.turnaroundDays ?? null,
@@ -657,6 +663,9 @@ function rowsFromStore(store) {
       match_deadline: line.matchDeadline ?? null,
       deadline: line.deadline ?? null,
       delivery_key: line.deliveryKey ?? null,
+      sample: line.sample ?? null,
+      sample_batch_draft_id: line.sampleBatchDraftId ?? null,
+      sample_batch_pricing: line.sampleBatchDraftId ? (line.sampleBatchPricing || "held") : null,
       mockup_file_id: line.mockupFileId ?? null,
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
@@ -1144,6 +1153,9 @@ async function readCartGraph(graph, actorIds, pathname) {
     await readCatalogueGraph(graph, actorIds, { supplierIds: suppliers });
     await readShopWork(graph, suppliers);
     await read('client_match_selections', "WHERE client_id = $1 AND selection->>'cartId' = $2", [cart.client_id, cartId]);
+    // A batch line is priced from its own sample draft's held rules; other carts skip the read.
+    const sampleDraftIds = loaded.client_cart_lines.map(row => row.sample_batch_draft_id).filter(Boolean);
+    if (sampleDraftIds.length) await read('sample_batch_drafts', 'WHERE id = ANY($1::text[]) AND client_id = $2', [sampleDraftIds, cart.client_id]);
     await read('organization_accounts', 'WHERE user_id = $1', [cart.client_id]);
     await read('vouchers', 'WHERE client_id = $1', [cart.client_id]);
     await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
@@ -1614,6 +1626,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadCheckoutExitRows(store, loaded);
   loadQuoteRequestRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
+  loadSampleBatchRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;
   store.supplierPerformanceLaunchedAt = supplierPerformanceLaunchedAt;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
@@ -1778,6 +1791,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
       colourPricing: colourPricingFromRows(loaded,row.id),
       express: row.express === true,
+      sampleAvailable: row.sample_available === true,
+      samplePriceMinor: row.sample_price_minor ?? null,
       productionTimeReviewReasons: row.production_time_review_reasons || [],
       turnaroundMode: row.turnaround_mode, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
       minimumTurnaroundDays: row.minimum_turnaround_days ?? undefined, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
@@ -1866,6 +1881,9 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     present(item, "matchDeadline", row.match_deadline);
     present(item, "deadline", row.deadline);
     present(item, "deliveryKey", row.delivery_key);
+    present(item, "sample", row.sample);
+    present(item, "sampleBatchDraftId", row.sample_batch_draft_id);
+    present(item, "sampleBatchPricing", row.sample_batch_pricing);
     present(item, "artworkFileId", row.artwork_file_id);
     present(item, "documentPages", row.document_pages);
     if (row.artwork_links?.length) item.artworkLinks = row.artwork_links;

@@ -491,6 +491,20 @@ export function clientMoneyMinor(store, supplierMinor) {
   return supplierMinor == null ? null : supplierMinor + serviceFeeMoney(supplierMinor, feeSchedule(store.settings)).grossServiceFeeMinor;
 }
 
+/**
+ * A listing's sample offer as clients read it (docs/SAMPLE_FIRST_API.md).
+ * Colour-priced and quote listings never offer one; null prices when there is no offer.
+ */
+export function publicSampleOffer(store, item) {
+  const available = item.sampleAvailable === true && item.samplePriceMinor != null && item.pricedByColour !== true
+    && !item.quoteRequestId;
+  return {
+    sampleAvailable: available,
+    samplePriceMinor: available ? item.samplePriceMinor : null,
+    clientSamplePriceMinor: available ? clientMoneyMinor(store, item.samplePriceMinor) : null,
+  };
+}
+
 // Option discounts round the magnitude, then restore the sign, like the client UI.
 function clientModifierMinor(store, amount) {
   if (!Number.isSafeInteger(amount)) return null;
@@ -562,6 +576,8 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     // Same-day availability the shop switched on (docs/EXPRESS_API.md).
     express: listingExpress(item),
+    // "Order a sample first" (docs/SAMPLE_FIRST_API.md).
+    ...publicSampleOffer(store, item),
     // Hardbound and binding products ask for a cover choice and the spine text.
     coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id).map((tier) => ({
@@ -892,7 +908,9 @@ export function createOrderLineSnapshot(store, selection, createId) {
    a quantity, and a speed tier replaces it at a date -- none of which a single
    effectiveUnitPriceMinor can carry.
   */
-  const priced = priceCatalogSelection(store, item, {
+  // A sample (its own flat price) or a batch at a held price arrives priced by
+  // the Sample First policy; every other line goes through the listing's engine.
+  const priced = selection.pricedLine ?? priceCatalogSelection(store, item, {
     selectedOptions,
     quantity,
     measurement: selection.measurement ?? null,
@@ -939,7 +957,9 @@ export function createOrderLineSnapshot(store, selection, createId) {
       turnaroundMinutesSnapshot: Math.round((selection.speedTier?.turnaroundHours ?? itemTurnaroundHours(item, service)) * 60),
       ...(selection.speedTier ? { speedTierSnapshot: structuredClone(selection.speedTier) } : {}),
       baseUnitPriceMinor: item.basePriceMinor,
-      effectiveUnitPriceMinor: item.pricedByColour ? 0 : selection.speedTier ? priced.unitRateMinor : effectiveUnitPriceMinor,
+      // A speed or a volume (bulk) tier replaces the rate, so the billed rate is
+      // the engine's; the stored line math (rate x quantity) must agree with it.
+      effectiveUnitPriceMinor: item.pricedByColour ? 0 : (selection.speedTier || priced.volumeTierApplied) ? priced.unitRateMinor : effectiveUnitPriceMinor,
       quantity,
       ...(priced.colourPricing ? { colourPricing: structuredClone(priced.colourPricing), quantityMode: selection.quantityMode } : {}),
       // The size the client agreed to, kept with the price it produced. An
@@ -1299,6 +1319,8 @@ export function privateCatalogItem(store, item) {
     colourPricing: canonicalColourPricing(item.colourPricing),
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     express: listingExpress(item),
+    sampleAvailable: item.sampleAvailable === true,
+    samplePriceMinor: item.samplePriceMinor ?? null,
     coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),
