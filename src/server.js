@@ -226,7 +226,8 @@ import {
   resolveCategoryCode,
 } from "./taxonomy.js";
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
-import { routeAccountProfile } from "./account-profile-routes.js";
+import { routeAccountProfile, themePreferenceFor } from "./account-profile-routes.js";
+import { clientHomeSummary } from './client-home.js';
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
 import { publicFeaturedPrints, routeFeaturedPrints } from './featured-prints.js';
 import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
@@ -291,6 +292,7 @@ import {
   routeFirstmateIssueReports,
   routeIssueReports,
   routeStaffIssueReports,
+  routeConfirmIssueReportBug,
 } from "./issue-reports.js";
 import {
   createTracker,
@@ -1241,6 +1243,7 @@ function clientProfileProjection(store, userId) {
     clientKind: profile.clientKind,
     businessName: profile.businessName ?? null,
     businessNature: profile.businessNature ?? null,
+    themePreference: profile.themePreference ?? "system",
     updatedAt: profile.updatedAt,
   };
 }
@@ -1462,7 +1465,7 @@ function fixedAuthProjection(store, auth, role) {
     const approved = approvalCase?.status === "approved" || (Boolean(officerSnapshot(store, auth.user.id)) && approvalCase?.status !== "suspended");
     return {
       ...base,
-      clientProfile: { ...clientProfileProjection(store, auth.user.id), foundingTester: publicFoundingTester(store, auth.user.id, now()) },
+      clientProfile: { themePreference: themePreferenceFor(store, auth.user.id), ...clientProfileProjection(store, auth.user.id), foundingTester: publicFoundingTester(store, auth.user.id, now()) },
       organization: organizationProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       capabilities: {
@@ -2740,6 +2743,15 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (user) setAuditActor(user);
+    if (req.method === 'GET' && pathname === '/me/home-summary') {
+      // Targeted read (loadHotReadStore): the caller's own orders, missions and tester vouchers.
+      if (!user) return send(res, auth.status || 401, authFailureBody(auth));
+      if (!identityHasMembership(user, 'client')) {
+        return send(res, 403, { error: 'membership_required', message: 'This surface requires the client membership assigned in GRIDGO.', requiredRole: 'client' });
+      }
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, 200, clientHomeSummary(store, user.id, now()));
+    }
     // Test operations read and write through a review-only view of the store.
     const testOperations = Boolean(user) && isTestOperationsUser(store, user.id);
     if (testOperations) {
@@ -2897,7 +2909,7 @@ async function handleAuditedRequest(req, res) {
       createId: id,
       now,
       audit,
-      publicUser: u => ({ ...publicUser(u), ...(u.role === 'client' ? { foundingTester: publicFoundingTester(store, u.id, now()) } : {}) }),
+      publicUser: u => ({ ...publicUser(u), ...(u.role === 'client' ? { foundingTester: publicFoundingTester(store, u.id, now()), themePreference: themePreferenceFor(store, u.id) } : {}) }),
     });
     if (accountProfileResponse) {
       res.setHeader('Cache-Control', 'private, no-store');
@@ -2963,9 +2975,14 @@ async function handleAuditedRequest(req, res) {
         send,
         database,
         storage: objectStorage,
+        store,
       });
       return;
     }
+    if (await routeConfirmIssueReportBug({
+      req, res, pathname, user, send, database, storage: objectStorage, store, save, audit,
+      ctx: { id, at: now(), actorId: user?.id ?? null },
+    })) return;
 
     if (isAdminTrackerRoute(pathname)) {
       await tracker.routeAdmin({ req, res, pathname, url, user, readBody, send });

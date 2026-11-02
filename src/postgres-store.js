@@ -60,7 +60,7 @@ const TABLES = [
   { name: "organization_accounts", keys: ["user_id"], columns: ["user_id", "name_key", "school_key", "data"] },
   { name: "organization_email_challenges", keys: ["user_id"], columns: ["user_id", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
-  { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
+  { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "theme_preference", "updated_at"] },
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
@@ -276,7 +276,7 @@ function rowsFromStore(store) {
     rows.user_role_memberships.push({ user_id: membership.userId, role: membership.role, created_at: membership.createdAt, created_by: membership.createdBy ?? null });
   }
   for (const profile of (store.clientProfiles || [])) {
-    rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, updated_at: profile.updatedAt });
+    rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, theme_preference: profile.themePreference ?? "system", updated_at: profile.updatedAt });
   }
   for (const selection of (store.matchSelections || [])) {
     rows.client_match_selections.push({ token_hash: selection.tokenHash, client_id: selection.clientId,
@@ -1220,7 +1220,7 @@ async function readFileGraph(graph, actorIds, pathname) {
   return graph.finish();
 }
 
-const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
+const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
 export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname); }
 
@@ -1366,6 +1366,8 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
+    } else if (pathname === '/me/home-summary') {
+      await readClientHomeGraph(graph, ids);
     } else if (pathname.startsWith('/auth/me') || pathname === '/me') {
       await read('platform_settings', 'WHERE singleton');
       for (const name of ['client_profiles', 'supplier_profiles', 'rider_profiles', 'organization_accounts']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
@@ -1409,6 +1411,31 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     }
     return graph.finish();
   });
+}
+
+/** Client Home smart tile (docs/CLIENT_HOME_API.md): the caller's own orders and
+ * mission facts plus the vouchers their tester rewards reference. No inbox, audit,
+ * ping, push or other clients' history; constant under unrelated growth.
+ */
+async function readClientHomeGraph(graph, ids) {
+  const { loaded, read } = graph;
+  await read('platform_settings', 'WHERE singleton');
+  await read('client_profiles', 'WHERE user_id = ANY($1::text[])', [ids]);
+  await read('founding_testers', 'WHERE client_id = ANY($1::text[])', [ids]);
+  await read('tester_rewards', 'WHERE client_id = ANY($1::text[]) OR inviter_id = ANY($1::text[])', [ids]);
+  await read('tester_tracking', 'WHERE client_id = ANY($1::text[])', [ids]);
+  await read('orders', 'WHERE client_id = ANY($1::text[])', [ids]);
+  const orders = loaded.orders.map(row => row.id);
+  for (const name of ['order_payments', 'order_line_items', 'issues', 'refund_settlements', 'order_surveys']) await read(name, 'WHERE order_id = ANY($1::text[])', [orders]);
+  await read('client_carts', 'WHERE client_id = ANY($1::text[])', [ids]);
+  await read('client_cart_lines', 'WHERE cart_id = ANY($1::text[])', [loaded.client_carts.map(row => row.id)]);
+  const voucherIds = [...new Set([
+    ...loaded.tester_rewards.flatMap(row => [row.voucher_id, row.inviter_voucher_id]),
+    ...loaded.founding_testers.map(row => row.reward_voucher_id),
+  ].filter(Boolean))];
+  await read('vouchers', 'WHERE id = ANY($1::text[]) AND client_id = ANY($2::text[])', [voucherIds, ids]);
+  await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+  await read('voucher_reservations', "WHERE voucher_id = ANY($1::text[]) AND status = 'reserved'", [loaded.vouchers.map(row => row.id)]);
 }
 
 /** Client bootstrap's read/probe facts, never a writable compatibility graph.
@@ -1580,7 +1607,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     return item;
   });
   store.clientProfiles = orderedBy(loaded.client_profiles, "user_id").map((row) => {
-    const item = { userId: row.user_id, clientKind: row.client_kind, updatedAt: row.updated_at };
+    const item = { userId: row.user_id, clientKind: row.client_kind, themePreference: row.theme_preference ?? "system", updatedAt: row.updated_at };
     present(item, "businessName", row.business_name);
     present(item, "businessNature", row.business_nature);
     return item;
