@@ -507,6 +507,9 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     printerMaxWidthFeet: null,
     printLayouts: [],
     express: false,
+    sampleAvailable: false,
+    samplePriceMinor: null,
+    clientSamplePriceMinor: null,
     coverSpineForm: false,
     acceptedFormats: [{ code: "pdf", displayName: "PDF", inputKind: "file", active: true }],
     optionGroups: [{

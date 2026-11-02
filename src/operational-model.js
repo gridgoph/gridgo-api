@@ -276,6 +276,8 @@ export function defaultOperationalSettings() {
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
     /** GRIDGO's cover for a dearer substitute shop, in bps of the original service fee. */
     shopMoveCoverBps: DEFAULT_SHOP_MOVE_COVER_BPS,
+    /** Days a sampled batch keeps the shop's old price list after the sample reaches the client. */
+    sampleBatchHoldDays: 14,
     hubPickup: hubPickupSettings(),
     hubPickupEnabled: false,
     handoverOtpEnabled: false,
@@ -351,6 +353,10 @@ export function validateOperationalSettings(settings) {
   if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
   validateShopMoveCoverBps(settings?.shopMoveCoverBps, fail);
+  if (settings?.sampleBatchHoldDays !== undefined
+      && (!Number.isInteger(settings.sampleBatchHoldDays) || settings.sampleBatchHoldDays < 1 || settings.sampleBatchHoldDays > 90)) {
+    fail(400, "invalid_sample_batch_hold_days", "Hold a sampled batch price for a whole number of days from 1 to 90.", { field: "sampleBatchHoldDays" });
+  }
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
     fail(
@@ -1258,6 +1264,12 @@ export function publicOrderFor(order, user, store = null) {
   if (['client','ops_admin','super_admin'].includes(user?.role) && supplement.totalMinor) {
     publicRecord.supplementalTotalMinor = supplement.totalMinor;
     publicRecord.totalIncludingSupplementsMinor = order.totalMinor + supplement.totalMinor;
+  }
+  // Sample First (docs/SAMPLE_FIRST_API.md): tags and links are for every party;
+  // the client's sample decision and the held-price basis are not the rider's.
+  if (!['client', 'supplier', 'ops_admin', 'super_admin'].includes(user?.role)) {
+    delete publicRecord.sampleDecision;
+    delete publicRecord.sampleBatchPricing;
   }
   delete publicRecord.riderProgress;
   delete publicRecord.deliveryMilestones;

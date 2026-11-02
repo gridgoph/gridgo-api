@@ -3,6 +3,7 @@ import { isQuoteListing } from "./quote-listings.js";
 import { previewProductionTime } from './production-time-preview.js';
 import { reviewCatalogView, includeReviewData } from './review-data.js';
 import { parseColourListing } from './colour-pricing.js';
+import { parseSampleListing } from './sample-first.js';
 import { routeShopHours } from './shop-hours.js';
 import { productionDuration, productionProjection, shopProductionDayMinutes } from "./production-days.js";
 import { listingSnapshot, sensitiveSnapshot, startListingReview, retainApprovedPhotos } from "./catalog-review-state.js";
@@ -1064,6 +1065,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       updatedAt: at,
     };
     Object.assign(item, parseColourListing(body, item));
+    Object.assign(item, parseSampleListing(body, item, fail));
     if (!Array.isArray(store.catalogItems)) store.catalogItems = [];
     if (!Array.isArray(store.catalogOptionGroups)) store.catalogOptionGroups = [];
     if (!Array.isArray(store.catalogOptions)) store.catalogOptions = [];
@@ -1071,7 +1073,8 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     store.catalogItems.push(item);
     catalogReviewNotice(store, item, { id, now }, "catalog_review_pending");
     if (starter) copyStarterIntoItem(store, starter, item, id, at);
-    auditChange(audit, store, user, "catalog_item.create", "supplier_catalog_item", item.id, { serviceId: service.id });
+    auditChange(audit, store, user, "catalog_item.create", "supplier_catalog_item", item.id, { serviceId: service.id,
+      ...(item.sampleAvailable ? { sample: { sampleAvailable: true, samplePriceMinor: item.samplePriceMinor } } : {}) });
     return { status: 201, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }
 
@@ -1135,11 +1138,17 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     // about time, not what the client buys or pays (docs/EXPRESS_API.md).
     const expressBefore = item.express === true;
     if (body.express != null) item.express = booleanValue(body.express, "express");
+    // A sample offer applies at once, like Express; it never reopens review and
+    // never changes a batch price already held for a client (docs/SAMPLE_FIRST_API.md).
+    const sampleBefore = { sampleAvailable: item.sampleAvailable === true, samplePriceMinor: item.samplePriceMinor ?? null };
+    Object.assign(item, parseSampleListing(body, item, fail));
+    const sampleAfter = { sampleAvailable: item.sampleAvailable === true, samplePriceMinor: item.samplePriceMinor ?? null };
     const productionTimeConfirmed = clearProductionTimeReview(store, item, body);
     bumpVersion(item, now());
     auditChange(audit, store, user, "catalog_item.update", "supplier_catalog_item", item.id,
       { ...(productionTimeConfirmed ? { productionTimeConfirmed: true } : {}),
         ...((item.express === true) !== expressBefore ? { express: item.express === true } : {}),
+        ...(JSON.stringify(sampleBefore) !== JSON.stringify(sampleAfter) ? { sample: { previous: sampleBefore, current: sampleAfter } } : {}),
         ...(JSON.stringify(productionBefore) !== JSON.stringify(productionTimeAudit(item))
           ? { previous: productionBefore, current: productionTimeAudit(item) } : {}) });
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };

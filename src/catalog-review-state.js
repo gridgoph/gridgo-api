@@ -5,7 +5,9 @@ export const CATALOG_REVIEW_TABLES = [
   "catalogItems", "catalogOptionGroups", "catalogOptions", "catalogItemPhotos",
   "catalogPriceTiers", "catalogSpeedTiers", "catalogItemFileFormats",
 ];
-const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt", "suspendReason", "suspendedBy", "turnaroundMode", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "turnaroundHours", "minimumTurnaroundHours", "express"];
+const LIVE_FIELDS = ["name", "description", "active", "sortOrder", "suspendedAt", "suspendReason", "suspendedBy", "turnaroundMode", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "turnaroundHours", "minimumTurnaroundHours", "express",
+  // A sample offer applies at once and never reopens review (docs/SAMPLE_FIRST_API.md).
+  "sampleAvailable", "samplePriceMinor"];
 
 export function listingSnapshot(store, item) {
   const { approvedSnapshot, reviewStatus, reviewReason, reviewedAt, reviewedBy, ...record } = item;

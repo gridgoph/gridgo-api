@@ -78,6 +78,11 @@ import {
 import { queueOrderInvalidate } from "./notifications.js";
 import { grantQuoteListings, isQuoteListing } from "./quote-listings.js";
 import { assertQuoteCheckout, markQuoteOrdered } from "./quote-requests.js";
+import { notifyAdmins } from "./domain-events.js";
+import {
+  assertHeldPriceUsable, heldBatchPrice, heldPricingSnapshot, ownSampleBatch, publicSampleOffer,
+  sampleBatchHoldDays, sampleDecisionSummary, sampleLinePriceMinor,
+} from "./sample-first.js";
 
 const DEFAULT_RANKING = Object.freeze(["quality", "speed", "cost", "distance"]);
 
@@ -477,9 +482,12 @@ function syncDocumentPages(store, item, line, body, { required = false, previous
  * price, and showing the last one it had is showing a price nobody will honour.
  */
 function cartLineSubtotal(store, line) {
+  // A sample costs the shop's sample price, whatever the intended batch is.
+  if (line.sample) return sampleLinePriceMinor(store, line);
   const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
   if (!item) return null;
   try {
+    if (heldBatchLine(line)) return heldLinePrice(store, item, line).lineSubtotalMinor;
     const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
     const documentPages = documentPagesFor(store, item, line);
     return priceCatalogSelection(store, item, {
@@ -508,6 +516,16 @@ function cartLineSubtotal(store, line) {
  * the line and lets `below_minimum_quantity` and its siblings through.
  */
 function assertCartLinePriceable(store, item, line) {
+  if (line.sample) {
+    if (sampleLinePriceMinor(store, line) == null) fail(409, "sample_unavailable", "This listing no longer offers a sample.", { lineId: line.id });
+    // The batch the sample stands for must itself be orderable at its quantity.
+    const { sample: _sample, ...batch } = line;
+    return assertCartLinePriceable(store, item, { ...batch, quantity: line.sample.batchQuantity, speedTierId: line.sample.speedTierId ?? null });
+  }
+  if (heldBatchLine(line)) {
+    heldLinePrice(store, item, line);
+    return;
+  }
   const { selectedOptions } = selectedCatalogPrice(store, item, line.optionIds || []);
   if (item.pricedByColour) {
     if (item.minimumOrderQuantity != null && line.quantity < item.minimumOrderQuantity) fail(409, "below_minimum_quantity", "This shop does not run an order that small.");
@@ -519,6 +537,50 @@ function assertCartLinePriceable(store, item, line) {
     speedTier: listingTiming(store, item, line).tier,
     measurement: item.pricingUnit === "per_page" && !line.measurement ? { pages: 1 } : line.measurement || null,
   });
+}
+
+/** A rejected sample the client is re-sampling with changed specs. */
+function replaceableDraft(store, user, draftId) {
+  if (typeof draftId !== "string" || !draftId.trim()) fail(400, "invalid_sample", "replacesSampleBatchId must be a sample batch id.", { field: "replacesSampleBatchId" });
+  const draft = ownSampleBatch(store, user, draftId.trim());
+  if (draft.status !== "rejected" || draft.rejection?.next !== "resample") {
+    fail(409, "sample_batch_not_resampleable", "Only a sample rejected for another sample can be replaced.", { status: draft.status });
+  }
+  if ((store.sampleBatchDrafts || []).some(row => row.previousDraftId === draft.id)) {
+    fail(409, "sample_batch_already_resampled", "Another sample already replaces this one.");
+  }
+  return draft;
+}
+
+/** A batch line priced from its sample draft's held rules (not `current`). */
+function heldBatchLine(line) {
+  return Boolean(line.sampleBatchDraftId) && line.sampleBatchPricing !== "current";
+}
+
+function lineMeasurement(store, item, line, { fallbackPages = false } = {}) {
+  if (item.pricingUnit !== "per_page") return line.measurement || null;
+  const documentPages = documentPagesFor(store, item, line);
+  return documentPages ? { pages: documentPages.printed } : fallbackPages ? { pages: 1 } : line.measurement || null;
+}
+
+function heldLinePrice(store, item, line) {
+  const draft = (store.sampleBatchDrafts || []).find(row => row.id === line.sampleBatchDraftId);
+  if (!draft) fail(409, "sample_batch_not_found", "That sample batch no longer exists.", { lineId: line.id });
+  return heldBatchPrice(draft.heldPricing, { quantity: line.quantity, measurement: lineMeasurement(store, item, line, { fallbackPages: true }) });
+}
+
+/** Sample and held-batch lines arrive priced; everything else uses the listing engine. */
+function sampleFirstPricedLine(store, item, line) {
+  if (line.sample) {
+    const price = sampleLinePriceMinor(store, line);
+    return { unit: "sample", quantity: 1, billableMilliUnits: 1000, unitRateMinor: price, lineSubtotalMinor: price };
+  }
+  if (heldBatchLine(line)) return heldLinePrice(store, item, line);
+  return undefined;
+}
+
+function sampleFirstCartKind(lines) {
+  return lines.some(line => line.sample || line.sampleBatchDraftId);
 }
 
 function publicCartListingStub(store, item, optionIds) {
@@ -539,6 +601,7 @@ function publicCartListingStub(store, item, optionIds) {
     printLayouts: listingPrintLayouts(item),
     ...(item.pricedByColour || item.oneColour || item.colourPricing ? {pricedByColour: item.pricedByColour === true, oneColour: item.oneColour === true, colourPricing: publicColourListing(item.colourPricing)} : {}),
     express: listingExpress(item),
+    ...publicSampleOffer(store, item),
     coverSpineForm: coverSpineApplies(item),
     // Artwork opens from this response even when the client's listing cache is empty.
     acceptedFormats: effectiveAcceptedFormats(store, item),
@@ -850,6 +913,10 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
       specialInstructions: line.specialInstructions || "",
       mockupFileId: line.mockupFileId ?? null,
       dropoff: line.dropoff ? { ...line.dropoff } : null,
+      // Sample First (docs/SAMPLE_FIRST_API.md): a sample of one piece for an intended batch,
+      // or a batch made from an approved sample.
+      sample: line.sample ? { batchQuantity: line.sample.batchQuantity, replacesSampleBatchId: line.sample.replacesDraftId ?? null } : null,
+      sampleBatch: line.sampleBatchDraftId ? publicCartSampleBatch(store, line) : null,
       sortOrder: line.sortOrder,
       listing,
       promiseBy: cartLinePromiseBy(store, cart, line, item, at),
@@ -948,6 +1015,16 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     checkedOutOrderId: cart.checkedOutOrderId ?? null,
     createdAt: cart.createdAt,
     updatedAt: cart.updatedAt,
+  };
+}
+
+function publicCartSampleBatch(store, line) {
+  const draft = (store.sampleBatchDrafts || []).find(row => row.id === line.sampleBatchDraftId);
+  return {
+    draftId: line.sampleBatchDraftId,
+    pricing: line.sampleBatchPricing || "held",
+    sampleOrderId: draft?.sampleOrderId ?? null,
+    heldUntil: draft?.heldUntil ?? null,
   };
 }
 
@@ -1191,6 +1268,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       fail(409, "artwork_check_required", "The cart artwork changed while being checked. Retry checkout to check the current links.", { lineId: line.id, field: "artwork" });
     }
     if (line.mockupFileId) fileFor(store, user, line.mockupFileId, "mockup", "mockupFileId");
+    assertSampleFirstCheckout(store, user, item, line, at);
     if (!grouped.has(line.supplierId)) grouped.set(line.supplierId, []);
     grouped.get(line.supplierId).push({ line, item, listing });
   }
@@ -1219,10 +1297,12 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
         artworkFileId: line.artworkFileId, artworkAttachments: line.artworkAttachments,
         documentPages: line.documentPages, printLayout: line.printLayout,
         structuredSpec: line.structuredSpec || {},
+        pricedLine: sampleFirstPricedLine(store, item, line),
         createdAt: at,
         sortOrder: line.sortOrder,
       }, createId);
       snapshot.lineItem.jobId = jobId;
+      applySampleFirstSnapshot(store, line, snapshot);
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       if (line.quantityMode) snapshot.lineItem.quantityMode = line.quantityMode;
       if (!snapshot.lineItem.colourPricing) { const colour = colourQuoteFor(store,item,line); if (colour) snapshot.lineItem.colourPricing = structuredClone(colour); }
@@ -1448,6 +1528,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     lockCartFeeSchedules(store, cart, at);
     updateCart(cart, at);
   }
+  linkSampleFirstOrder(store, user, order, cartLines, { at, createId });
   store.auditLog ||= [];
   store.auditLog.push({
     id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "order_match.checkout",
@@ -1462,6 +1543,123 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   }
   queueOrderInvalidate(store, order, ["orders"]);
   return { order: publicMatchedOrder(store, order), invoice };
+}
+
+/** Sample First checkout gates, before anything is materialised. */
+function assertSampleFirstCheckout(store, user, item, line, at) {
+  if (line.sample) {
+    assertCartLinePriceable(store, item, line);
+    if (line.sample.replacesDraftId) replaceableDraft(store, user, line.sample.replacesDraftId);
+  }
+  if (line.sampleBatchDraftId) {
+    const draft = ownSampleBatch(store, user, line.sampleBatchDraftId);
+    if (draft.supplierId !== line.supplierId || draft.catalogItemId !== line.catalogItemId) {
+      fail(409, "catalog_item_stale", "This batch no longer matches its sample.", { lineId: line.id });
+    }
+    if (heldBatchLine(line)) assertHeldPriceUsable(store, draft, at);
+    else if (draft.status === "ordered") fail(409, "sample_batch_ordered", "This batch has already been ordered.", { batchOrderId: draft.batchOrderId });
+    else if (draft.status !== "approved") fail(409, "sample_batch_not_approved", "Approve the sample before ordering its batch.", { status: draft.status });
+    heldBatchLine(line) ? heldLinePrice(store, item, line) : assertCartLinePriceable(store, item, line);
+  }
+}
+
+/**
+ * The order line agrees with the price it was given. A sample is one piece at
+ * the sample price; a held batch records the held base rate, option effects and
+ * speed, so the snapshot reproduces exactly what the client was promised.
+ */
+function applySampleFirstSnapshot(store, line, snapshot) {
+  const { lineItem, options } = snapshot;
+  if (line.sample) {
+    lineItem.baseUnitPriceMinor = lineItem.lineSubtotalMinor;
+    lineItem.effectiveUnitPriceMinor = lineItem.lineSubtotalMinor;
+    delete lineItem.speedTierSnapshot;
+    return;
+  }
+  if (!heldBatchLine(line)) return;
+  const held = (store.sampleBatchDrafts || []).find(row => row.id === line.sampleBatchDraftId).heldPricing;
+  const item = (store.catalogItems || []).find(row => row.id === line.catalogItemId);
+  lineItem.baseUnitPriceMinor = held.basePriceMinor;
+  // The held rate after its bulk tier, speed and options, as the engine billed it.
+  lineItem.effectiveUnitPriceMinor = heldLinePrice(store, item, line).unitRateMinor;
+  if (held.speedTier) lineItem.speedTierSnapshot = structuredClone(held.speedTier);
+  else delete lineItem.speedTierSnapshot;
+  for (const option of options) {
+    const kept = held.options.find(row => row.optionId === option.sourceOptionId || row.optionId === option.id);
+    if (kept) {
+      option.priceModifierMinor = kept.priceModifierMinor;
+      option.priceMultiplierBps = kept.priceMultiplierBps ?? null;
+    }
+  }
+}
+
+/** Create a sample's batch draft, or link a batch to its sample. Same transaction as checkout. */
+function linkSampleFirstOrder(store, user, order, cartLines, { at, createId }) {
+  const sampleLine = cartLines.find(line => line.sample);
+  if (sampleLine) {
+    const view = approvedCatalogView(store);
+    const item = view.catalogItems.find(row => row.id === sampleLine.catalogItemId);
+    const batchSpeed = sampleLine.sample.speedTierId
+      ? listingTiming(store, item, { ...sampleLine, speedTierId: sampleLine.sample.speedTierId }).tier : null;
+    const batch = {
+      itemName: item.name,
+      quantity: sampleLine.sample.batchQuantity,
+      optionIds: [...(sampleLine.optionIds || [])],
+      measurement: sampleLine.measurement ? structuredClone(sampleLine.measurement) : null,
+      structuredSpec: structuredClone(sampleLine.structuredSpec || {}),
+      speedTierId: sampleLine.sample.speedTierId ?? null,
+      artworkFileId: sampleLine.artworkFileId ?? null,
+      artworkLinks: structuredClone(sampleLine.artworkLinks || []),
+      artworkAttachments: sampleLine.artworkAttachments ? structuredClone(sampleLine.artworkAttachments) : null,
+      documentPages: sampleLine.documentPages ? structuredClone(sampleLine.documentPages) : null,
+      printLayout: sampleLine.printLayout ?? null,
+      coverSpine: sampleLine.coverSpine ? structuredClone(sampleLine.coverSpine) : null,
+      colorTargets: sampleLine.colorTargets ? structuredClone(sampleLine.colorTargets) : null,
+      specialInstructions: sampleLine.specialInstructions || "",
+    };
+    const draft = {
+      id: createId("sbd"), clientId: user.id, supplierId: sampleLine.supplierId, catalogItemId: sampleLine.catalogItemId,
+      sampleOrderId: order.id, batchOrderId: null, previousDraftId: sampleLine.sample.replacesDraftId ?? null,
+      status: "awaiting_sample", holdDays: sampleBatchHoldDays(store.settings), sampleDeliveredAt: null, heldUntil: null,
+      batch, heldPricing: heldPricingSnapshot(store, item.id, { ...sampleLine, quantity: batch.quantity }, { at, speedTier: batchSpeed }),
+      approval: null, rejection: null, version: 1, createdAt: at, updatedAt: at,
+    };
+    store.sampleBatchDrafts ||= [];
+    store.sampleBatchDrafts.push(draft);
+    Object.assign(order, { orderTags: ["sample"], sampleBatchDraftId: draft.id });
+    store.auditLog ||= [];
+    store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "sample_batch.create",
+      entityType: "sample_batch", entityId: draft.id, orderId: order.id,
+      detail: { catalogItemId: draft.catalogItemId, batchQuantity: batch.quantity, holdDays: draft.holdDays,
+        previousDraftId: draft.previousDraftId, samplePriceMinor: order.supplierSubtotalMinor } });
+    return;
+  }
+  const batchLine = cartLines.find(line => line.sampleBatchDraftId);
+  if (!batchLine) return;
+  const draft = store.sampleBatchDrafts.find(row => row.id === batchLine.sampleBatchDraftId);
+  const sample = (store.orders || []).find(row => row.id === draft.sampleOrderId);
+  const pricing = heldBatchLine(batchLine) ? "held" : "current";
+  Object.assign(order, {
+    orderTags: ["batch_from_sample"], sampleOrderId: draft.sampleOrderId, sampleBatchDraftId: draft.id,
+    sampleBatchPricing: { pricing, heldUntil: draft.heldUntil, heldPricingCapturedAt: draft.heldPricing.capturedAt },
+    // The approved sample is the standard this batch is held to in a dispute.
+    sampleDecision: sampleDecisionSummary(draft),
+  });
+  draft.status = "ordered";
+  draft.batchOrderId = order.id;
+  draft.version = (draft.version || 1) + 1;
+  draft.updatedAt = at;
+  if (sample) {
+    sample.batchOrderId = order.id;
+    sample.updatedAt = at;
+    queueOrderInvalidate(store, sample, ["orders", "jobs"]);
+  }
+  store.auditLog ||= [];
+  store.auditLog.push({ id: createId("aud"), at, actorId: user.id, actorRole: "client", action: "sample_batch.batch_ordered",
+    entityType: "sample_batch", entityId: draft.id, orderId: order.id,
+    detail: { sampleOrderId: draft.sampleOrderId, pricing, quantity: batchLine.quantity, heldUntil: draft.heldUntil,
+      sampledQuantity: draft.batch.quantity, itemSubtotalMinor: order.supplierSubtotalMinor } });
+  notifyAdmins(store, "sample_batch_ordered", "Batch ordered from an approved sample", order, `sample_batch_ordered:${draft.id}`, { createId, at });
 }
 
 function checkoutBasket(store, user, cart, body, createId, at, req) {
@@ -1583,6 +1781,7 @@ export function isOrderMatchRoute(method, pathname) {
   if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
   if (method === "DELETE" && /^\/me\/addresses\/[^/]+$/.test(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
+  if (method === "POST" && /^\/me\/sample-batches\/[^/]+\/cart$/.test(pathname)) return true;
   if (method === "GET" && /^\/orders\/[^/]+\/invoice$/.test(pathname)) return true;
   return false;
 }
@@ -1923,6 +2122,71 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     return { status: 201, body: { cart: publicCart(store, cart, now()) }, mutated: true };
   }
 
+  // "Order the batch now": a new cart holding the intended batch from an
+  // approved sample, at the held price or the current one (docs/SAMPLE_FIRST_API.md).
+  const sampleCartMatch = /^\/me\/sample-batches\/([^/]+)\/cart$/.exec(pathname);
+  if (sampleCartMatch && req.method === "POST") {
+    requireClient(user);
+    const draft = ownSampleBatch(store, user, decodeURIComponent(sampleCartMatch[1]));
+    const body = record(await readBody(req));
+    const at = now();
+    const pricing = body.pricing ?? "held";
+    if (!["held", "current"].includes(pricing)) fail(400, "invalid_sample_batch_pricing", "pricing must be held or current.", { field: "pricing" });
+    if (pricing === "held") assertHeldPriceUsable(store, draft, at);
+    else if (draft.status === "ordered") fail(409, "sample_batch_ordered", "This batch has already been ordered.", { batchOrderId: draft.batchOrderId });
+    else if (draft.status !== "approved") fail(409, "sample_batch_not_approved", "Approve the sample before ordering its batch.", { status: draft.status });
+    const item = (store.catalogItems || []).find(row => row.id === draft.catalogItemId);
+    if (!item || item.supplierId !== draft.supplierId || catalogItemBlockers(store, item, { publicOnly: true }).length) {
+      fail(409, "catalog_item_stale", "The sampled listing is no longer available from this shop.");
+    }
+    const sample = (store.orders || []).find(row => row.id === draft.sampleOrderId);
+    const cart = {
+      id: id("cart"), clientId: user.id, state: "draft", version: 1,
+      serviceLevel: "standard", fulfillmentMode: sample?.fulfillmentMode === "pickup" ? "pickup" : "delivery", createdAt: at, updatedAt: at,
+    };
+    // Delivered as the sample was, unless the client chooses again here.
+    if (["fulfillmentMode", "defaultDropoff"].some(field => Object.hasOwn(body, field))) {
+      Object.assign(cart, fulfillmentInput(body, cart));
+    } else if (sample?.requestFulfillment) {
+      adoptRequestFulfillment(store, cart, sample.requestFulfillment);
+    } else if (cart.fulfillmentMode === "delivery") {
+      const job = (store.orderJobs || []).find(row => row.orderId === sample?.id);
+      const dropoff = job?.dropoff || sample?.dropoff;
+      if (dropoff) cart.defaultDropoff = { lat: dropoff.lat, lng: dropoff.lng, label: dropoff.label };
+    }
+    if (Object.hasOwn(body, "deadline")) cart.deadline = parseDeadline(body.deadline);
+    const batch = draft.batch;
+    const line = {
+      id: id("cline"), cartId: cart.id, supplierId: draft.supplierId, catalogItemId: item.id,
+      optionIds: [...(batch.optionIds || [])],
+      quantity: body.quantity == null ? batch.quantity : positiveInteger(body.quantity, "quantity"),
+      measurement: batch.measurement ? structuredClone(batch.measurement) : null,
+      structuredSpec: structuredClone(batch.structuredSpec || {}),
+      speedTierId: batch.speedTierId ?? null,
+      sampleBatchDraftId: draft.id, sampleBatchPricing: pricing,
+      sortOrder: 0, createdAt: at, updatedAt: at,
+    };
+    for (const field of ["artworkFileId", "artworkAttachments", "documentPages", "printLayout", "coverSpine", "colorTargets"]) {
+      if (batch[field] != null) line[field] = structuredClone(batch[field]);
+    }
+    if (batch.artworkLinks?.length) line.artworkLinks = structuredClone(batch.artworkLinks);
+    if (batch.specialInstructions) line.specialInstructions = batch.specialInstructions;
+    for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
+    listingTiming(store, item, line);
+    assertCartLinePriceable(store, item, line);
+    if (cart.deadline) assertMatchDeadline(store, item, line, at, { cart, siblings: [] });
+    store.carts ||= [];
+    store.carts.push(cart);
+    store.cartLines ||= [];
+    store.cartLines.push(line);
+    lockCartFeeSchedules(store, cart, at);
+    store.auditLog ||= [];
+    store.auditLog.push({ id: id("aud"), at, actorId: user.id, actorRole: "client", action: "sample_batch.cart_created",
+      entityType: "sample_batch", entityId: draft.id, orderId: draft.sampleOrderId,
+      detail: { cartId: cart.id, pricing, quantity: line.quantity, sampledQuantity: batch.quantity } });
+    return { status: 201, body: { cart: publicCart(store, cart, at) }, mutated: true };
+  }
+
   const cartMatch = /^\/me\/carts\/([^/]+)$/.exec(pathname);
   if (cartMatch && req.method === "GET") {
     const cart = ownCart(store, user, decodeURIComponent(cartMatch[1]));
@@ -2094,6 +2358,17 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     selectedCatalogPrice(store, item, body.optionIds);
     const at = now();
     const lines = (store.cartLines || []).filter((row) => row.cartId === cart.id);
+    // Sample First: a sample, or a batch made from one, is ordered on its own.
+    if (body.sample != null && typeof body.sample !== "boolean") fail(400, "invalid_sample", "sample must be true or false.", { field: "sample" });
+    const wantsSample = body.sample === true;
+    if (sampleFirstCartKind(lines) || (wantsSample && lines.length)) {
+      fail(409, "sample_cart_exclusive", "A sample, or a batch made from one, is ordered on its own. Use a new cart.");
+    }
+    if (wantsSample && !publicSampleOffer(store, approvedCatalogView(store).catalogItems.find(row => row.id === item.id) || item).sampleAvailable) {
+      fail(409, "sample_unavailable", "This listing does not offer a sample.");
+    }
+    if (!wantsSample && body.replacesSampleBatchId != null) fail(400, "invalid_sample", "replacesSampleBatchId needs sample: true.", { field: "replacesSampleBatchId" });
+    const replacedDraft = wantsSample && body.replacesSampleBatchId != null ? replaceableDraft(store, user, body.replacesSampleBatchId) : null;
     if (selection && (item.supplierId !== selection.supplierId || item.subcategoryCode !== selection.subcategoryCode)) {
       fail(409, "catalog_item_stale", "That listing changed since matching; match again.");
     }
@@ -2129,6 +2404,14 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     };
     if (selection && body.speedTierId != null && body.speedTierId !== selection.speedTierId) fail(409, 'select_token_tier_mismatch', 'Use the selected speed tier.');
     listingTiming(store, item, line);
+    if (wantsSample) {
+      // One sample piece at the shop's standard speed; the quantity and speed
+      // sent are the intended batch's, kept for its draft and held price.
+      line.sample = { batchQuantity: line.quantity, ...(line.speedTierId ? { speedTierId: line.speedTierId } : {}),
+        ...(replacedDraft ? { replacesDraftId: replacedDraft.id } : {}) };
+      line.quantity = 1;
+      line.speedTierId = null;
+    }
     if (Object.hasOwn(body, "specialInstructions")) line.specialInstructions = specialInstructions(body.specialInstructions);
     writeArtworkAttachments(line, body, publicCatalogItem(store, item)?.acceptedFormats);
     for (const fileId of artworkFileIdsFor(line)) fileFor(store, user, fileId, "artwork", "artworkFileId");
@@ -2172,7 +2455,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     updateCart(cart, at);
       return { status: 200, body: { cart: publicCartForLineMutation(store, cart, at) }, mutated: true };
     }
-    const body = record(await readBody(req));
+    let body = record(await readBody(req));
     // The accepted quote fixed what is made and for how much, including the brief
     // carried in structuredSpec; artwork, notes and the drop-off stay editable.
     if (isQuoteListing((store.catalogItems || []).find(row => row.id === line.catalogItemId))
@@ -2180,6 +2463,21 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
           "structuredSpec", "colorTargets"].some(field => Object.hasOwn(body, field))) {
       fail(409, "quote_line_locked", "The accepted quote fixes this product. Cancel it and request a new quote to change it.");
     }
+    // A batch made from an approved sample keeps the sample's specs: changed
+    // specs are a new sample, never the held price. Only how many and where.
+    if (line.sampleBatchDraftId) {
+      const locked = Object.keys(body).filter(key => !["quantity", "dropoff", "deadline"].includes(key));
+      if (locked.length) fail(409, "sample_batch_specs_locked", "A batch from a sample keeps the sample's specs. Order another sample to change them.", { fields: locked });
+    }
+    // On a sample line `quantity` is the intended batch; the sample stays one piece.
+    let sampleRepriced = false;
+    if (line.sample && Object.hasOwn(body, "quantity")) {
+      line.sample = { ...line.sample, batchQuantity: positiveInteger(body.quantity, "quantity") };
+      body = { ...body };
+      delete body.quantity;
+      sampleRepriced = true;
+    }
+    if (line.sample && Object.hasOwn(body, "speedTierId")) fail(409, "sample_speed_fixed", "A sample is made at the shop's standard speed.", { field: "speedTierId" });
     const before = { quantity: line.quantity, optionIds: line.optionIds, measurement: line.measurement };
     if (Object.hasOwn(body, 'speedTierId')) {
       const item = store.catalogItems.find(item => item.id === line.catalogItemId);
@@ -2239,7 +2537,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     // Only a change to what the line is priced on is held to the shop's
     // minimum. Attaching artwork to a line the shop has since put out of reach
     // is still allowed; the quantity is fixed through the sheet, not here.
-    const repriced = ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field))
+    const repriced = sampleRepriced || ["quantity", "optionIds", "measurement"].some((field) => Object.hasOwn(body, field))
       || (patchedItem?.pricingUnit === "per_page" && ["artworkFileId", "artworkAttachments", "pageRange"].some(field => Object.hasOwn(body, field)));
     if (repriced && patchedItem) {
       try {

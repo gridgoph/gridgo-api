@@ -768,6 +768,8 @@ Default `GET /settings` response:
 
 `shopReceiptScanRequired` (Finance, default `false`, Super Admin editable through the same handshake) makes the shop attach its invoice/receipt scan before Ready for rider pickup; see [SHOP_RECEIPT_SCAN_API.md](SHOP_RECEIPT_SCAN_API.md).
 
+`sampleBatchHoldDays` (default `14`, whole days 1–90, Super Admin editable through the same handshake) is how long a sampled batch price is held after the sample is delivered; see [SAMPLE_FIRST_API.md](SAMPLE_FIRST_API.md).
+
 `artworkGuidance` (the recommended resolution and colour per product type, Super Admin editable through the same `PATCH /settings` handshake) is described in [ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
 
 `paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.

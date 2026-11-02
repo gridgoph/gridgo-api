@@ -19,6 +19,7 @@ import { signArtworkAttachments } from './artwork-attachments.js';
 import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
 import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique, changesFor } from './order-change-policy.js';
 import { awaitedTopUp, shopMoveCoverBps } from './shop-move-pricing.js';
+import { routeSampleFirst, sampleBatchHoldDays } from './sample-first.js';
 import { specialInstructions, acknowledgeInstructions } from './special-instructions.js';
 import { requestDeliveryPin, routeDeliveryPin } from './delivery-pin.js';
 import { deliveryPinPaymentPending, deliveryPinLocked } from './delivery-pin-policy.js';
@@ -885,6 +886,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
     shopMoveCoverBps: shopMoveCoverBps(rest),
+    sampleBatchHoldDays: sampleBatchHoldDays(rest),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
     hubPickup: publicHubPickup(rest),
@@ -3130,6 +3132,12 @@ async function handleAuditedRequest(req, res) {
       if (quoteResponse.status < 400 && quoteResponse.body.cart) await decorateCatalogPhotoUrls(store, quoteResponse.body);
       return send(res, quoteResponse.status, quoteResponse.body);
     }
+    const sampleFirstResponse = await routeSampleFirst({ req, url, store, user, readBody, now, id });
+    if (sampleFirstResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (sampleFirstResponse.mutated) await save(store);
+      return send(res, sampleFirstResponse.status, sampleFirstResponse.body);
+    }
     const recoveryResponse = await routeShopRecovery({ req, url, store, user, readBody, now, id, audit });
     if (recoveryResponse) {
       if (recoveryResponse.mutated) await save(store);
@@ -4092,6 +4100,8 @@ async function handleAuditedRequest(req, res) {
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
         // Live recoveries re-price on acceptance; an accepted move keeps its snapshot.
         shopMoveCoverBps: Object.hasOwn(body, "shopMoveCoverBps") ? body.shopMoveCoverBps : shopMoveCoverBps(store.settings),
+        // New sample checkouts only: each draft keeps the hold length it was ordered under.
+        sampleBatchHoldDays: Object.hasOwn(body, "sampleBatchHoldDays") ? body.sampleBatchHoldDays : sampleBatchHoldDays(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:

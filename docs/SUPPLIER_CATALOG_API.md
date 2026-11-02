@@ -25,6 +25,8 @@ A listing is public only when the owner has a current `supplier` membership, the
 
 Requires a database `supplier` membership. Pending and rejected suppliers may edit. Nothing is public until approval + live service + complete active item.
 
+Listings may offer a paid sample (`sampleAvailable`, `samplePriceMinor`, live without review); see [SAMPLE_FIRST_API.md](SAMPLE_FIRST_API.md).
+
 ```text
 GET                    /accepted-file-formats?q=
 GET                    /listing-starters?subcategoryCode=
