@@ -2,7 +2,7 @@
 
 API contract for the client Home redesign, gridgo-client#335. The client app and the
 dashboard implement it separately after this API and migration
-`1793600000000_client_home_bug_rewards` are deployed. PHP money is integer centavos.
+`1793610000000_client_home_bug_rewards` are deployed. PHP money is integer centavos.
 Errors use `{ "error": "snake_case", "message": "..." }`.
 
 ## Theme preference
