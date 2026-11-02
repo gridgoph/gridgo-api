@@ -26,6 +26,8 @@ async function setup(database) {
       store.cartLines.push({ id: `${id}_line_${index}`, cartId: id, supplierId, catalogItemId: `item_${supplierId}`, optionIds: [],
         quantity: 10, structuredSpec: {}, artworkFileId: 'art_a_active', specialInstructions: 'Keep these edges',
         deadline: index === 2 ? new Date(Date.parse(deadline) + 86400000).toISOString() : deadline,
+        // The later product at the same shop is its own delivery, as migrated carts are.
+        ...(index === 2 ? { deliveryKey: 'dlv_cart_late' } : {}),
         sortOrder: index, createdAt: AT, updatedAt: AT });
     }
   }

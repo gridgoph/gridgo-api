@@ -28,16 +28,17 @@ for (const scenario of ['reverse_add', 'edit_earlier', 'edit_before_add', 'delet
       await saveStore(db, store); return response.body;
     });
     const cartId = (await request('POST', '/me/carts', { fulfillmentMode: 'pickup' })).cart.id;
-    const offer = deadline => request('POST', '/me/matches', { cartId, subcategoryCode: 'flyers', fulfillmentMode: 'pickup', units: 1, deadline });
+    // The second product is its own delivery, so each date is its own group order.
+    const offer = (deadline, separateDelivery = false) => request('POST', '/me/matches', { cartId, subcategoryCode: 'flyers', fulfillmentMode: 'pickup', units: 1, deadline, separateDelivery });
     const add = match => request('POST', `/me/carts/${cartId}/lines`, { selectToken: match.listings[0].selectToken,
       matchRequestId: match.matchRequestId, quantity: 1, optionIds: [], artworkFileId: 'art' });
     let early, later;
     if (scenario === 'reverse_add') {
       later = await offer('2026-10-19T10:00:00Z'); await add(later);
-      early = await offer('2026-10-19T09:00:00Z'); await add(early);
+      early = await offer('2026-10-19T09:00:00Z', true); await add(early);
     } else {
       early = await offer('2026-10-19T09:00:00Z'); await add(early);
-      later = await offer('2026-10-19T10:00:00Z');
+      later = await offer('2026-10-19T10:00:00Z', true);
       if (scenario !== 'edit_before_add') await add(later);
       if (scenario.startsWith('edit') || scenario === 'delete_earlier') {
         const store = await loadStore(db), line = store.cartLines.find(row => row.deadline === '2026-10-19T09:00:00.000Z');

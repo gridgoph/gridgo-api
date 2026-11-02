@@ -4,7 +4,7 @@ import { shopHoursStatus } from './shop-hours.js';
 import { operatingHours, reviewTiming, schedulingDay, deadlineDayReason, dispatchReadyAt } from './operating-hours.js';
 import { addOpeningMilliseconds } from './availability.js';
 import { shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
-import { cartGroups } from "./cart-groups.js";
+import { cartGroups, earliestDate } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { riderPackingFlow } from './shop-handover.js';
 import { recentLapseQualityPenalty, productionTiming } from './production-penalties.js';
@@ -291,7 +291,7 @@ export function projectListingGroup(store, lines, { now, deadline = null } = {})
   return result;
 }
 
-function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
+function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline: requestedDeadline, now, units, widthRequest, ranking = MATCH_FACTORS, delivery = {} }) {
   store = approvedCatalogView(store);
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
@@ -319,13 +319,17 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
     // Rank real listing projections, never combine one listing's low price
     // with another's fast promise. Each offered listing must meet the deadline.
+    // A product joins one delivery of this shop (its main one unless the client
+    // chose a separate delivery) and that delivery works to its earliest date.
     const draftGroups = cartGroups(null, (widthRequest?.cartLines || []).filter(line => line.supplierId === supplierId));
-    const requestedDate = deadline == null ? null : new Date(deadline).toISOString();
-    const groupLines = draftGroups.find(group => group.deadline === requestedDate)?.lines || [];
+    const target = delivery.separate ? null : draftGroups.find(group => group.deliveryKey === (delivery.key ?? null)) || null;
+    const deadline = earliestDate([requestedDeadline, target?.deadline]);
+    const groupLines = target?.lines || [];
+    const earlierGroups = draftGroups.filter(group => group !== target && group.deadline != null
+      && (deadline == null || Date.parse(group.deadline) < Date.parse(deadline)));
     const draftTiming = new Map();
     try {
-      for (const group of draftGroups.filter(group => group.deadline === requestedDate || (group.deadline != null
-        && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))))) {
+      for (const group of [...(target ? [target] : []), ...earlierGroups]) {
         for (const line of group.lines) {
           const item = store.catalogItems.find(item => item.id === line.catalogItemId);
           if (!item) throw new MatchError(409, 'catalog_item_stale', 'Repair unavailable draft work before adding another listing.');
@@ -336,8 +340,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       if (error instanceof MatchError) continue;
       throw error;
     }
-    const earlierJobs = draftGroups.filter(group => group.deadline != null
-      && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))).map(group => ({
+    const earlierJobs = earlierGroups.map(group => ({
       supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => draftTiming.get(line).maximum)),
     }));
     const projectionStore = earlierJobs.length ? { ...store, orderJobs: [...(store.orderJobs || []), ...earlierJobs] } : store;
@@ -458,9 +461,9 @@ function otherListing(row) {
 }
 
 /** Read-only add-more catalogue: the same eligibility/promise and anonymous card as matching. */
-export function cartGroupListings(store, { supplierId, deadline, cartLines, now }) {
+export function cartGroupListings(store, { supplierId, deadline, deliveryKey = null, cartLines, now }) {
   const { rows, missedDeadline } = candidateRows(store, {
-    supplierId, deadline, now, dropoff: null, widthRequest: { cartLines },
+    supplierId, deadline, now, dropoff: null, widthRequest: { cartLines }, delivery: { key: deliveryKey },
   });
   const listings = rows.flatMap(row => row.choices.map(otherListing));
   return { listings, emptyReason: listings.length ? null
@@ -554,6 +557,7 @@ export function matchShop(store, input = {}) {
     now,
     units: input.units,
     ranking,
+    delivery: { key: input.deliveryKey ?? null, separate: input.separateDelivery === true },
     widthRequest: {
       widthFeet: input.widthFeet,
       measurement: input.measurement,
