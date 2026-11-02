@@ -194,8 +194,12 @@ The warning never blocks anything.
 ```
 
 The shop must pass the ordinary matching gates (`404 supplier_not_found`,
-`409 quote_shop_unavailable` with `blockers`). `supplierServiceId` defaults to the shop's
-live service line in the product's category (else its first live line). `productionTime`
+`409 quote_shop_unavailable` with `blockers`). The reply stands on one of the shop's live
+service lines in the product's category (a retired category code counts through its
+alias): `supplierServiceId` defaults to that line. A shop with no such line, or a named
+`supplierServiceId` in another category, is `409 quote_service_category_mismatch` with
+`categoryCode`, `supplierId`, `field` and a plain `message` ("That shop has no live service
+line for …"); nothing is stored. A named line that is not live is `409 quote_shop_unavailable`. `productionTime`
 uses the catalogue shape (`{mode:"same_day",hours}` or `{mode:"days",minDays,maxDays}`).
 `priceMinor` is a positive integer. Allowed while `requested`, `quoting`, `published` or
 `expired`; otherwise `409 quote_request_closed`. The first reply moves `requested` to
@@ -204,8 +208,12 @@ uses the catalogue shape (`{mode:"same_day",hours}` or `{mode:"days",minDays,max
 ### `PATCH /ops/quote-requests/:id/replies/:replyId` → `200 { quoteRequest, reply }`
 
 Any of `priceMinor`, `productionTime`, `recommendedOptions`, `note`, `withdrawn`
-(boolean), plus optional `expectedReplyVersion` (`409 quote_reply_version_conflict`).
-`404 quote_reply_not_found`. Editing a published reply does not change what the client
+(boolean), `supplierServiceId` (another live line of the same shop), plus optional
+`expectedReplyVersion` (`409 quote_reply_version_conflict`). `404 quote_reply_not_found`.
+A reply that is (or becomes) active must stand on a live line in the product's category,
+checked again on every edit: otherwise `409 quote_service_category_mismatch` (with
+`replyId`). Withdrawing is always allowed, so a reply recorded on the wrong line can be
+withdrawn or moved to a fitting `supplierServiceId`. Editing a published reply does not change what the client
 sees until Operations publishes again. Audit `quote_request.reply_update` with before/after.
 
 ### `POST /ops/quote-requests/:id/publish` → `200 { quoteRequest }`
@@ -213,7 +221,11 @@ sees until Operations publishes again. Audit `quote_request.reply_update` with b
 `{ "replyIds": ["qrep_a", "qrep_b"] }`: one to three active replies, at most one per shop
 (`400 invalid_quote_options`, `409 quote_reply_not_found`, `409 quote_replies_required`
 before any reply). Each shop must still pass the gates and have an open production
-calendar (`409 quote_shop_unavailable`). Options are ranked by the client's priority and
+calendar (`409 quote_shop_unavailable`), and each reply's service line must still be live
+and in the product's category (`409 quote_service_category_mismatch` with `replyId`).
+Should the database still reject a quote listing for its category
+(`supplier_catalog_item_subcategory_check`), publish answers that same `409` and writes
+nothing, never a `500`. Options are ranked by the client's priority and
 labelled A, B, C in rank order. Publishing again (from `published` or `expired`) replaces
 the options, deactivates the earlier quote listings and restarts validity. Audit
 `quote_request.publish`; the client gets `quote_options_ready`, Operations

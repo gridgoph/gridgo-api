@@ -1,6 +1,6 @@
 import { routeTesterProgram } from './tester-program-routes.js';
 import { isQuoteListing } from "./quote-listings.js";
-import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays } from "./quote-requests.js";
+import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays, quoteSaveError } from "./quote-requests.js";
 import { matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from './tester-invites.js';
 import { testerBudget } from './tester-rewards.js';
 import { testerProgress, publicFoundingTester, reconcileFoundingTester, recordTesterCartStep, remindFoundingTesters } from './founding-testers.js';
@@ -3128,7 +3128,9 @@ async function handleAuditedRequest(req, res) {
     const quoteResponse = await routeQuoteRequests({ req, url, store, user, readBody, now, id, audit });
     if (quoteResponse) {
       res.setHeader('Cache-Control', 'private, no-store, max-age=0');
-      if (quoteResponse.mutated) await save(store);
+      if (quoteResponse.mutated) {
+        try { await save(store); } catch (error) { throw quoteSaveError(error); }
+      }
       if (quoteResponse.status < 400 && quoteResponse.body.cart) await decorateCatalogPhotoUrls(store, quoteResponse.body);
       return send(res, quoteResponse.status, quoteResponse.body);
     }

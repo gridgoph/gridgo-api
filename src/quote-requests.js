@@ -228,17 +228,50 @@ function setListingsActive(store, request, active, at, keepIds = null) {
   }
 }
 
-function resolveService(store, supplierId, subcategoryCode, requested) {
+/** The canonical category a code resolves to, the same way `check_catalog_item_subcategory` does. */
+function canonicalCategory(store, code) {
+  return (store.taxonomy?.categoryAliases || []).find(row => row.code === code)?.categoryCode ?? code;
+}
+
+export const QUOTE_SERVICE_CATEGORY_MISMATCH = 'quote_service_category_mismatch';
+
+function categoryMismatch(store, subcategoryCode, details) {
+  const subcategory = (store.taxonomy?.subcategories || []).find(row => row.code === subcategoryCode);
+  const name = subcategory?.name || subcategoryCode;
+  fail(409, QUOTE_SERVICE_CATEGORY_MISMATCH,
+    `That shop has no live service line for ${name}, so it cannot quote this request. Choose a shop that makes ${name}.`,
+    { categoryCode: subcategory?.categoryCode ?? null, ...details });
+}
+
+/**
+ * The shop's live service line a quote listing will stand on. It must be in the
+ * request's category, or the private listing cannot be created at publish
+ * (catalog item subcategory must match the owning service category).
+ */
+function resolveService(store, supplierId, subcategoryCode, requested, details = {}) {
   const live = (store.supplierServices || []).filter(row => row.supplierId === supplierId && row.state === 'live');
+  const categoryCode = canonicalCategory(store, (store.taxonomy?.subcategories || []).find(row => row.code === subcategoryCode)?.categoryCode);
+  const fits = row => categoryCode != null && canonicalCategory(store, row.categoryCode) === categoryCode;
   if (requested != null) {
     const service = live.find(row => row.id === requested);
-    if (!service) fail(409, 'quote_shop_unavailable', 'Choose a live service line of that shop.', { field: 'supplierServiceId' });
+    if (!service) fail(409, 'quote_shop_unavailable', 'Choose a live service line of that shop.', { field: 'supplierServiceId', ...details });
+    if (!fits(service)) categoryMismatch(store, subcategoryCode, { field: 'supplierServiceId', supplierId, ...details });
     return service;
   }
-  const categoryCode = (store.taxonomy?.subcategories || []).find(row => row.code === subcategoryCode)?.categoryCode;
-  const service = live.find(row => row.categoryCode === categoryCode) || live[0];
-  if (!service) fail(409, 'quote_shop_unavailable', 'That shop has no live service line to quote under.', { blockers: ['service_not_live'] });
+  if (!live.length) fail(409, 'quote_shop_unavailable', 'That shop has no live service line to quote under.', { blockers: ['service_not_live'], ...details });
+  const service = live.find(fits);
+  if (!service) categoryMismatch(store, subcategoryCode, { field: 'supplierId', supplierId, ...details });
   return service;
+}
+
+/**
+ * Publish refuses a mismatched line before writing, but should the database
+ * trigger still reject a quote listing, answer the same 409 instead of a 500.
+ */
+export function quoteSaveError(error) {
+  if (error?.constraint !== 'supplier_catalog_item_subcategory_check') return error;
+  return Object.assign(new Error('A chosen shop has no live service line for this product, so its option cannot be published. Choose a shop that makes it.'),
+    { status: 409, code: QUOTE_SERVICE_CATEGORY_MISMATCH, details: {} });
 }
 
 function assertShop(store, supplierId) {
@@ -274,7 +307,7 @@ function listingDescription(request, reply) {
 
 function createQuoteListing(store, request, reply, { id, at }) {
   const fields = productionTimeFor(store, reply.supplierId, reply.productionTime);
-  const service = resolveService(store, reply.supplierId, request.subcategoryCode, reply.supplierServiceId);
+  const service = resolveService(store, reply.supplierId, request.subcategoryCode, reply.supplierServiceId, { replyId: reply.id });
   const item = {
     id: id('sci'), supplierId: reply.supplierId, supplierServiceId: service.id, subcategoryCode: request.subcategoryCode,
     name: listingName(request), description: listingDescription(request, reply),
@@ -581,7 +614,7 @@ function editReply({ store, user, request, replyId, body, at, audit }) {
   if (body.expectedReplyVersion != null && body.expectedReplyVersion !== reply.version) {
     fail(409, 'quote_reply_version_conflict', 'This reply changed. Refresh it and try again.', { version: reply.version });
   }
-  const before = { priceMinor: reply.priceMinor, productionTime: structuredClone(reply.productionTime), status: reply.status };
+  const before = { priceMinor: reply.priceMinor, productionTime: structuredClone(reply.productionTime), status: reply.status, supplierServiceId: reply.supplierServiceId };
   if (Object.hasOwn(body, 'priceMinor')) reply.priceMinor = minorAmount(body.priceMinor, 'priceMinor', { positive: true });
   if (Object.hasOwn(body, 'productionTime')) {
     productionTimeFor(store, reply.supplierId, body.productionTime);
@@ -593,13 +626,19 @@ function editReply({ store, user, request, replyId, body, at, audit }) {
     if (typeof body.withdrawn !== 'boolean') fail(400, 'invalid_quote_request', 'withdrawn must be true or false.', { field: 'withdrawn' });
     reply.status = body.withdrawn ? 'withdrawn' : 'active';
   }
+  // An active reply must stand on a live service line in the request's category;
+  // Operations may move it to another line of the same shop, or withdraw it.
+  if (Object.hasOwn(body, 'supplierServiceId') || reply.status === 'active') {
+    const requested = Object.hasOwn(body, 'supplierServiceId') ? body.supplierServiceId : reply.supplierServiceId;
+    reply.supplierServiceId = resolveService(store, reply.supplierId, request.subcategoryCode, requested ?? null, { replyId }).id;
+  }
   reply.clientPriceMinor = clientPriceMinor(store, request, reply.priceMinor, at);
   reply.readyBy = replyReadyBy(store, request, reply.supplierId, productionTimeFor(store, reply.supplierId, reply.productionTime), at);
   reply.version += 1;
   reply.updatedAt = at;
   bump(request, at);
   audit(store, { actor: user, action: 'quote_request.reply_update', entityType: 'quote_request', entityId: request.id,
-    detail: { replyId, before, after: { priceMinor: reply.priceMinor, productionTime: reply.productionTime, status: reply.status } } });
+    detail: { replyId, before, after: { priceMinor: reply.priceMinor, productionTime: reply.productionTime, status: reply.status, supplierServiceId: reply.supplierServiceId } } });
   // A published option keeps the price the client was shown until Operations publishes again.
   return { status: 200, body: { quoteRequest: opsQuoteRequest(store, request, at), reply: opsReply(store, request, reply) }, mutated: true };
 }

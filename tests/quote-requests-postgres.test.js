@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore, loadHotReadStore } from '../src/postgres-store.js';
+import { quoteSaveError } from '../src/quote-requests.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { fixture, AT } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
@@ -321,4 +322,76 @@ test('quote request reads stay targeted: unrelated history does not grow what th
   assert.equal(staff.quoteReplies.length, 2);
   assert.deepEqual(staff.users.map(row => row.id).sort(), ['client', 'ops', 'replacement', 'supplier']);
   assert.deepEqual((await loadHotReadStore(db, 'clerk_ops', '/ops/quote-requests', { status: 'cancelled' })).quoteRequests, []);
+});
+
+test('quote replies must stand on a live service line in the request category, and publish never answers 500 for one', { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close()); await reset(db);
+  const store = setup();
+  // Each shop also has a live line in another category, listed first so no default can fall back to it.
+  store.taxonomy.categories.push({ id: 'large', code: 'large_format', name: 'Large format', active: true });
+  for (const supplierId of ['supplier', 'replacement']) {
+    store.supplierServices.unshift({ id: `large_${supplierId}`, supplierId, categoryCode: 'large_format', state: 'live', referenceRateMinor: 1000,
+      pricingBasis: 'per_unit', standardTurnaroundHours: 2, turnaroundHours: 2, version: 1, createdAt: AT, updatedAt: AT });
+  }
+  // The replacement shop's only line in the request's category is no longer live.
+  store.supplierServices.find(row => row.id === 'service_replacement').state = 'withdrawn';
+  await db.transaction(() => saveStore(db, store));
+  const api = await apiForTest(t);
+  const created = await api('client', 'POST', '/me/quote-requests', brief());
+  const path = `/ops/quote-requests/${created.body.quoteRequest.id}`;
+  const reply = (body) => api('ops', 'POST', `${path}/replies`, { priceMinor: 100_000, productionTime: days(2), ...body });
+
+  // POST: a shop with no live line in the category, or a named line of another category, is refused.
+  const noLine = await reply({ supplierId: 'replacement' });
+  assert.equal(noLine.status, 409, JSON.stringify(noLine.body));
+  assert.equal(noLine.body.error, 'quote_service_category_mismatch');
+  assert.equal(noLine.body.categoryCode, 'marketing_collateral');
+  assert.match(noLine.body.message, /no live service line for Business & store signages/);
+  const named = await reply({ supplierId: 'supplier', supplierServiceId: 'large_supplier' });
+  assert.equal(named.status, 409);
+  assert.equal(named.body.error, 'quote_service_category_mismatch');
+  assert.equal(named.body.field, 'supplierServiceId');
+  const good = await reply({ supplierId: 'supplier' });
+  assert.equal(good.status, 201, JSON.stringify(good.body));
+  assert.equal(good.body.reply.supplierServiceId, 'service_supplier');
+  let saved = await db.transaction(() => loadStore(db));
+  assert.equal(saved.quoteReplies.length, 1, 'refused replies are not stored');
+
+  // PATCH: moving to another category's line is refused; Operations may repair it to a fitting line.
+  const replyPath = `${path}/replies/${good.body.reply.id}`;
+  const moved = await api('ops', 'PATCH', replyPath, { supplierServiceId: 'large_supplier' });
+  assert.equal(moved.status, 409);
+  assert.equal(moved.body.error, 'quote_service_category_mismatch');
+  // A reply recorded before this check (stored on another category's line) cannot stay active or publish.
+  await db.query(`UPDATE quote_replies SET data = jsonb_set(data, '{supplierServiceId}', '"large_supplier"') WHERE id = $1`, [good.body.reply.id]);
+  const edited = await api('ops', 'PATCH', replyPath, { note: 'Called again' });
+  assert.equal(edited.body.error, 'quote_service_category_mismatch');
+  const publish = await api('ops', 'POST', `${path}/publish`, { replyIds: [good.body.reply.id] });
+  assert.equal(publish.status, 409, JSON.stringify(publish.body));
+  assert.equal(publish.body.error, 'quote_service_category_mismatch');
+  assert.equal(publish.body.replyId, good.body.reply.id);
+  saved = await db.transaction(() => loadStore(db));
+  assert.equal(saved.catalogItems.filter(item => item.quoteRequestId).length, 0, 'a refused publish writes no listing');
+  assert.equal(saved.quoteRequests[0].status, 'quoting');
+  const withdrawn = await api('ops', 'PATCH', replyPath, { withdrawn: true });
+  assert.equal(withdrawn.status, 200, 'a mismatched reply can always be withdrawn');
+  assert.equal((await api('ops', 'PATCH', replyPath, { withdrawn: false })).body.error, 'quote_service_category_mismatch');
+  const repaired = await api('ops', 'PATCH', replyPath, { withdrawn: false, supplierServiceId: 'service_supplier' });
+  assert.equal(repaired.status, 200, JSON.stringify(repaired.body));
+  assert.equal(repaired.body.reply.supplierServiceId, 'service_supplier');
+  const published = await api('ops', 'POST', `${path}/publish`, { replyIds: [good.body.reply.id] });
+  assert.equal(published.status, 200, JSON.stringify(published.body));
+
+  // Should the trigger still reject a quote listing, publish answers the same 409 rather than a 500.
+  let triggerError;
+  try {
+    await db.transaction(() => db.query(`UPDATE supplier_catalog_items SET supplier_service_id = 'large_supplier' WHERE id = $1`,
+      [published.body.quoteRequest.options[0].catalogItemId]));
+  } catch (error) { triggerError = error; }
+  assert.equal(triggerError?.constraint, 'supplier_catalog_item_subcategory_check', 'the database trigger is unchanged');
+  const mapped = quoteSaveError(triggerError);
+  assert.equal(mapped.status, 409);
+  assert.equal(mapped.code, 'quote_service_category_mismatch');
+  const other = new Error('other');
+  assert.equal(quoteSaveError(other), other);
 });
