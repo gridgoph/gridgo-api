@@ -2315,7 +2315,9 @@ function catalogHitsCte() {
     filtered AS (
       SELECT item.id, item.supplier_id, item.supplier_service_id, item.subcategory_code,
              item.name, item.description, item.base_price_minor, item.pricing_unit,
-             item.package_qty, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.turnaround_minutes, item.minimum_turnaround_minutes, item.minimum_turnaround_days, item.minimum_turnaround_hours,
+             item.package_qty, item.measure_unit, item.minimum_width_milli, item.minimum_height_milli,
+             item.minimum_length_milli, item.minimum_order_quantity, item.priced_by_colour, item.one_colour,
+             item.sample_available, item.sample_price_minor, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.turnaround_minutes, item.minimum_turnaround_minutes, item.minimum_turnaround_days, item.minimum_turnaround_hours,
              item.file_format_mode, item.active, item.sort_order, item.version,
              item.created_at, item.updated_at, item.search_text, item.search_tsv,
              item.printer_max_width_feet, item.print_layouts, item.express, item.production_time_review_reasons, item.review_status, item.review_reason, item.reviewed_at, item.reviewed_by, item.approved_snapshot,
@@ -2385,6 +2387,11 @@ function catalogItemFromListRow(row) {
     basePriceMinor: row.base_price_minor,
     pricingUnit: row.pricing_unit,
     packageQty: row.package_qty,
+    measureUnit: row.measure_unit ?? null,
+    minimumWidthMilli: row.minimum_width_milli ?? null,
+    minimumHeightMilli: row.minimum_height_milli ?? null,
+    minimumLengthMilli: row.minimum_length_milli ?? null,
+    minimumOrderQuantity: row.minimum_order_quantity ?? null,
     turnaroundMode: row.turnaround_mode,
     ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
     minimumTurnaroundDays: row.minimum_turnaround_days ?? null, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
@@ -2400,6 +2407,9 @@ function catalogItemFromListRow(row) {
     printLayouts: row.print_layouts || [],
     pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
     express: row.express === true,
+    // Sample First (docs/SAMPLE_FIRST_API.md): the shop's raw offer, same as the single read.
+    sampleAvailable: row.sample_available === true,
+    samplePriceMinor: row.sample_price_minor ?? null,
     productionTimeReviewReasons: row.production_time_review_reasons || [],
   };
 }

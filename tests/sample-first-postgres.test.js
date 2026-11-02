@@ -528,3 +528,41 @@ test("listing sample fields and the hold setting are validated, role-gated and s
   assert.equal(off.body.item.samplePriceMinor, 7_500);
   assert.equal((await call("clerk_client", "GET", `/me/sample-batches/${draftId}`)).body.sampleBatch.status, "awaiting_sample");
 });
+
+test("the shop's paged listing list carries the stored sample offer and pricing shape, like the single read", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  // A measured listing with minimums: the paged row must not fall back to defaults.
+  await mutate(database, (store) => {
+    const item = store.catalogItems.find(row => row.id === `${ITEM}_brochures`);
+    Object.assign(item, { pricingUnit: "per_area", measureUnit: "ft", minimumWidthMilli: 2_000, minimumHeightMilli: 3_000, minimumOrderQuantity: 5 });
+  });
+  const { api, child } = await startApi();
+  t.after(() => child.kill("SIGTERM"));
+  const call = client(api);
+  await offerSample(call, 6_500);
+
+  for (const query of ["", "?q=flyers", "?sort=name&limit=1"]) {
+    const listed = await call("clerk_supplier_a", "GET", `/me/catalog-items${query}`);
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    const flyers = listed.body.items.find(row => row.id === ITEM);
+    if (query !== "?sort=name&limit=1") {
+      assert.equal(flyers.sampleAvailable, true, query);
+      assert.equal(flyers.samplePriceMinor, 6_500, query);
+    }
+    for (const row of listed.body.items) {
+      const single = (await call("clerk_supplier_a", "GET", `/me/catalog-items/${row.id}`)).body.item;
+      // Photo URLs are signed per response; everything else must match.
+      const unsigned = (item) => ({ ...item, photos: item.photos.map(({ downloadUrl, downloadUrlExpiresAt, ...photo }) => photo) });
+      assert.deepEqual(unsigned(row), unsigned(single), `${query} ${row.id}`);
+    }
+  }
+  const brochures = (await call("clerk_supplier_a", "GET", "/me/catalog-items?subcategoryCode=brochures")).body.items[0];
+  assert.equal(brochures.sampleAvailable, false);
+  assert.equal(brochures.samplePriceMinor, null);
+  assert.equal(brochures.measureUnit, "ft");
+  assert.equal(brochures.minimumWidthMilli, 2_000);
+  assert.equal(brochures.minimumHeightMilli, 3_000);
+  assert.equal(brochures.minimumOrderQuantity, 5);
+});
