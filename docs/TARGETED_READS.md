@@ -17,6 +17,7 @@ and authorization/projection functions.
 | `/auth/me/{ops,admin,supplier,rider}` | Caller identity, profiles, memberships/cases/documents; own supplier readiness inputs where needed; one indexed staff-session audit row |
 | `/auth/me` | Caller identity graph; unchanged Clerk profile copies avoid a write transaction/full reload |
 | Client `/me`, `/auth/me/client`, `/auth/me` bootstrap | Caller progress, profiles, organization and reward voucher; unresolved invitation identity/attribution facts; no inbox, audit, ping or push history |
+| Client `/me/home-summary` | Caller identity, settings, own client profile, orders with their payment/line/issue/refund/survey facts, carts, tester rows, and only the vouchers those tester rows reference ([contract](CLIENT_HOME_API.md#smart-tile-summary)) |
 | `/ops/product-type-requests` | Existing 51-row cursor/status query and supplier review marks |
 | `/ops/catalog-reviews` | Existing 51-row review cursor/status query and those listings' projection/blocker inputs |
 | `/ops/colour-price-checks` | Draft-cart lines referencing colour-priced current/approved listings and their quote inputs/artwork metadata |

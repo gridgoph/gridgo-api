@@ -10,7 +10,9 @@
 import crypto from "node:crypto";
 
 import { identityHasMembership } from "./authorization-context.js";
-import { deskOperatorFromRequest } from "./support-desk.js";
+import { bugReportRewardAvailable, grantBugReportReward } from "./bug-report-rewards.js";
+import { foundingTesterEligible } from "./founding-testers.js";
+import { deskOperatorFromRequest, readBearer } from "./support-desk.js";
 import { requestClientKey, tooManyRequests } from "./support-rate-limit.js";
 import { asTrimmedString } from "./support-validate.js";
 import { firstmateRefusal } from "./tracker.js";
@@ -208,8 +210,8 @@ export async function createIssueReport(database, storage, input, { now = new Da
     }
     return await database.transaction(async () => {
       const result = await database.query(
-        `INSERT INTO issue_reports (id, issue, category) VALUES ($1, $2, $3) RETURNING id, created_at`,
-        [reportId, input.issue, input.category],
+        `INSERT INTO issue_reports (id, issue, category, reporter_id) VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
+        [reportId, input.issue, input.category, input.reporterId ?? null],
       );
       for (const object of objects) {
         await database.query(
@@ -269,6 +271,20 @@ async function projectReports(database, storage, rows) {
     createdAt: asIso(row.created_at),
     updatedAt: asIso(row.updated_at),
     screenshots: byReport.get(row.id) ?? [],
+    reporter: row.reporter_id ? { id: row.reporter_id, name: row.reporter_name ?? null } : null,
+    bugConfirmation: row.bug_confirmed_at ? {
+      confirmedAt: asIso(row.bug_confirmed_at),
+      confirmedBy: { id: row.bug_confirmed_by, name: row.bug_confirmed_by_name ?? null },
+      voucherOutcome: row.bug_reward_outcome,
+      // A voucher was actually issued: true once a paused entitlement is resumed, and after a void.
+      voucherGranted: Boolean(row.bug_reward_issued_at),
+      reward: row.bug_reward_id ? {
+        id: row.bug_reward_id,
+        status: row.bug_reward_status,
+        amountMinor: row.bug_reward_amount_minor,
+        voucherId: row.bug_reward_voucher_id ?? null,
+      } : null,
+    } : null,
     triage: {
       validity: row.validity,
       category: row.triage_category,
@@ -304,8 +320,14 @@ function aiReviewOutcome(row) {
 
 const REPORT_COLUMNS = `r.id, r.issue, r.category, r.status, r.published_in, r.tracker_issue_url, r.priority, r.created_at, r.updated_at,
   r.validity, r.triage_category, r.labels, r.duplicate_of, r.triaged_by, triager.name AS triaged_by_name, r.triaged_at,
-  r.ai_reviewed_at, r.ai_validity, r.ai_category, r.ai_labels, r.ai_duplicate_of, r.ai_note`;
-const REPORT_FROM = "issue_reports r LEFT JOIN users triager ON triager.id = r.triaged_by";
+  r.ai_reviewed_at, r.ai_validity, r.ai_category, r.ai_labels, r.ai_duplicate_of, r.ai_note,
+  r.reporter_id, reporter.name AS reporter_name, r.bug_confirmed_at, r.bug_confirmed_by, confirmer.name AS bug_confirmed_by_name,
+  r.bug_reward_outcome, r.bug_reward_id, reward.status AS bug_reward_status, reward.amount_minor AS bug_reward_amount_minor,
+  reward.voucher_id AS bug_reward_voucher_id, reward.issued_at AS bug_reward_issued_at`;
+const REPORT_FROM = `issue_reports r LEFT JOIN users triager ON triager.id = r.triaged_by
+  LEFT JOIN users reporter ON reporter.id = r.reporter_id
+  LEFT JOIN users confirmer ON confirmer.id = r.bug_confirmed_by
+  LEFT JOIN tester_rewards reward ON reward.id = r.bug_reward_id`;
 
 /**
  * Newest first, with `id` breaking ties so pages never overlap. `before` is
@@ -546,10 +568,26 @@ function withoutGithubLinks(value) {
  * and firstmate's service token (`/firstmate/issue-reports`); the caller has
  * already decided who may reach it.
  */
+/** The reporter's identity and reward references are for Operations and Super Admin only. */
+function withoutReporter(report) {
+  const { reporter, ...rest } = report;
+  if (rest.bugConfirmation) {
+    const { reward, ...confirmation } = rest.bugConfirmation;
+    rest.bugConfirmation = confirmation;
+  }
+  return rest;
+}
+
 async function reviewIssueReports({
   method, path, base, url, res, send, database, storage, readPatch, staffActor = null, canManageTrackerLink = false, aiReviewer = false,
+  reporterFacts = null,
 }) {
-  const project = report => canManageTrackerLink ? report : withoutGithubLinks(report);
+  const project = (report) => {
+    const visible = canManageTrackerLink ? report : withoutGithubLinks(report);
+    if (!staffActor) return withoutReporter(visible);
+    if (visible.reporter && reporterFacts) Object.assign(visible.reporter, reporterFacts(visible.reporter.id));
+    return visible;
+  };
   if (method === "GET" && path === base) {
     const status = url?.searchParams.get("status") || null;
     if (status && !ISSUE_STATUSES.includes(status)) {
@@ -669,8 +707,22 @@ export async function routeIssueReports({
       if (tooManyRequests(`issue-report:${ipKey}`, 10, 10 * 60 * 1000)) {
         throw new ReportError(429, "too_many_requests", "Too many reports from this connection. Wait a few minutes and try again.");
       }
+      // The client app sends its Clerk session so staff can credit a tester; the
+      // landing page sends none. A stale session is 401 so the app signs in again
+      // rather than silently filing anonymously. An unmapped session files anonymously.
+      const bearer = readBearer(req.headers.authorization);
+      let reporterId = null;
+      if (bearer) {
+        const verified = await verifyClerk(bearer);
+        if (!verified?.claims?.sub) {
+          req.resume();
+          throw new ReportError(401, "unauthorized", "Sign in again, then send the report.");
+        }
+        reporterId = (await database.query("SELECT id FROM users WHERE clerk_user_id = $1", [verified.claims.sub])).rows[0]?.id ?? null;
+      }
       const parsed = validateIssueReport(await readJsonBody(req));
       if (!parsed.ok) throw new ReportError(parsed.status ?? 400, parsed.code ?? "invalid_request", parsed.message);
+      parsed.value.reporterId = reporterId;
       const incomingBytes = parsed.value.screenshots.reduce((sum, shot) => sum + shot.bytes.length, 0);
       await assertDailyCapacity(database, incomingBytes, env);
       const report = await createIssueReport(database, storage, parsed.value, { notifyStaff });
@@ -708,7 +760,7 @@ export function isStaffIssueReportsRoute(pathname) {
  * Operations and Super Admin read the same reports from the dashboard with their
  * Clerk session. Runs after authentication; `readBody` is the server's parsed body.
  */
-export async function routeStaffIssueReports({ req, res, pathname, url, user, readBody, send, database, storage }) {
+export async function routeStaffIssueReports({ req, res, pathname, url, user, readBody, send, database, storage, store = null }) {
   if (!isStaffIssueReportsRoute(pathname)) return false;
   const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
   try {
@@ -719,9 +771,83 @@ export async function routeStaffIssueReports({ req, res, pathname, url, user, re
     if (await reviewIssueReports({
       method: req.method, path, base: STAFF_BASE, url, res, send, database, storage, staffActor: user,
       canManageTrackerLink: identityHasMembership(user, "super_admin"),
+      reporterFacts: store ? (reporterId) => reporterRewardFacts(store, reporterId) : null,
       readPatch: () => readBody(req),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
+  } catch (error) {
+    if (error instanceof ReportError || (error?.status && error?.code)) {
+      send(res, error.status, { error: error.code, message: error.message });
+      return true;
+    }
+    throw error;
+  }
+}
+
+/** Dashboard hints before confirming: will a confirmation earn the one-time voucher? */
+export function reporterRewardFacts(store, reporterId) {
+  return {
+    tester: foundingTesterEligible(store, reporterId),
+    bugRewardAvailable: bugReportRewardAvailable(store, reporterId),
+  };
+}
+
+const CONFIRM_BUG_RE = /^\/ops\/issue-reports\/([^/]+)\/confirm-bug$/;
+
+export function isConfirmIssueReportBugRoute(pathname) {
+  const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  return CONFIRM_BUG_RE.test(path);
+}
+
+/**
+ * `POST /ops/issue-reports/:id/confirm-bug`: Operations or Super Admin confirm the
+ * report is a real bug. Runs inside the domain transaction and advisory lock: the
+ * reward/voucher/audit rows (`save`) and the report's immutable confirmation commit
+ * together. A repeat confirmation of the same report is an idempotent 200.
+ */
+export async function routeConfirmIssueReportBug({ req, res, pathname, user, send, database, storage, store, save, audit, ctx }) {
+  if (!isConfirmIssueReportBugRoute(pathname)) return false;
+  const path = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  try {
+    if (req.method !== "POST") throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
+    if (!user) throw new ReportError(401, "unauthorized", "Sign in to GRIDGO to confirm issue reports.");
+    if (!(identityHasMembership(user, "ops_admin") || identityHasMembership(user, "super_admin"))) {
+      throw new ReportError(403, "forbidden", "Only Operations and Super Admin can confirm a bug.");
+    }
+    const id = CONFIRM_BUG_RE.exec(path)[1];
+    const notFound = new ReportError(404, "issue_report_not_found", `Issue report ${id} was not found.`);
+    if (!UUID_RE.test(id)) throw notFound;
+    const project = (report) => {
+      const visible = identityHasMembership(user, "super_admin") ? report : withoutGithubLinks(report);
+      if (visible.reporter) Object.assign(visible.reporter, reporterRewardFacts(store, visible.reporter.id));
+      return visible;
+    };
+    const current = (await database.query(
+      "SELECT reporter_id, validity, bug_confirmed_at FROM issue_reports WHERE id = $1 FOR UPDATE", [id],
+    )).rows[0];
+    if (!current) throw notFound;
+    if (!current.bug_confirmed_at) {
+      // Staff can hold a client membership too; nobody confirms their own report.
+      if (current.reporter_id && current.reporter_id === user.id) {
+        throw new ReportError(403, "issue_report_self_confirmation", "Another Operations or Super Admin member must confirm your own report.");
+      }
+      if (["spam", "duplicate"].includes(current.validity)) {
+        throw new ReportError(409, "issue_report_not_confirmable",
+          `This report is triaged as ${current.validity}. Confirm the original report, or change its triage first.`);
+      }
+      const { outcome, reward } = grantBugReportReward(store, current.reporter_id, ctx);
+      audit(store, { actor: user, action: "issue_report.bug_confirmed", entityType: "issue_report", entityId: id,
+        detail: { reporterId: current.reporter_id, outcome, testerRewardId: reward?.id ?? null } });
+      await save(store);
+      await database.query(
+        `UPDATE issue_reports SET bug_confirmed_at = now(), bug_confirmed_by = $2, bug_reward_outcome = $3, bug_reward_id = $4,
+           validity = 'valid', triage_category = 'bug', duplicate_of = NULL, triaged_by = $2, triaged_at = now(), updated_at = now()
+         WHERE id = $1`,
+        [id, user.id, outcome, reward?.id ?? null],
+      );
+    }
+    send(res, 200, project(await findIssueReport(database, storage, id)));
+    return true;
   } catch (error) {
     if (error instanceof ReportError || (error?.status && error?.code)) {
       send(res, error.status, { error: error.code, message: error.message });

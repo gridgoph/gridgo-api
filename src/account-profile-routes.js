@@ -2,8 +2,15 @@ import { CLIENT_APPLICATION_FIELDS } from "./client-applications.js";
 import { approvalCaseSummary, identityHasMembership } from "./authorization-context.js";
 import { applyForBusiness } from "./enrollment.js";
 import { philippineMobileNumber } from "./phone.js";
+import { queueInvalidate } from "./notifications.js";
 
 const BUSINESS_ACCOUNT_TYPES = new Set(["business", "organization"]);
+// Light/dark choice saved on the account. `system` follows the phone setting.
+export const THEME_PREFERENCES = Object.freeze(["system", "light", "dark"]);
+
+export function themePreferenceFor(store, userId) {
+  return (store.clientProfiles || []).find((candidate) => candidate.userId === userId)?.themePreference ?? "system";
+}
 
 export class AccountProfileError extends Error {
   constructor(status, code, message, details = {}) {
@@ -174,7 +181,8 @@ function addAddress(store, user, input, createId, at) {
 
 export function isAccountProfileRoute(method, pathname) {
   return (pathname === "/me" && ["GET", "PATCH"].includes(method))
-    || (pathname === "/me/business-apply" && method === "POST");
+    || (pathname === "/me/business-apply" && method === "POST")
+    || (pathname === "/me/theme" && method === "PATCH");
 }
 
 /**
@@ -186,11 +194,35 @@ export function isAccountProfileRoute(method, pathname) {
  * The apply route opens a pending `business_client` case. It does not flip
  * `accountType` — Operations does that on approve. Canonical clients should
  * post `POST /me/business-application` instead.
+ *
+ * PATCH /me/theme { "themePreference": "system"|"light"|"dark" } saves the
+ * client's light/dark choice; no version handshake (last write wins). Contract:
+ * docs/CLIENT_HOME_API.md#theme-preference.
  */
 export async function routeAccountProfile({ req, url, store, user, readBody, createId, now, audit, publicUser }) {
   const { pathname } = url;
   if (!isAccountProfileRoute(req.method, pathname)) return null;
   requireClient(store, user);
+
+  if (pathname === "/me/theme") {
+    const body = record(await readBody(req));
+    rejectUnexpected(body, ["themePreference"]);
+    if (!THEME_PREFERENCES.includes(body.themePreference)) {
+      fail(400, "invalid_theme_preference", `themePreference must be one of: ${THEME_PREFERENCES.join(", ")}.`, {
+        field: "themePreference",
+        allowed: THEME_PREFERENCES,
+      });
+    }
+    const profile = (store.clientProfiles || []).find((candidate) => candidate.userId === user.id);
+    if (!profile) fail(409, "client_profile_unavailable", "This identity does not have an editable client account profile.");
+    const mutated = (profile.themePreference ?? "system") !== body.themePreference;
+    if (mutated) {
+      profile.themePreference = body.themePreference;
+      // Other signed-in devices refetch the account and repaint.
+      queueInvalidate(store, { resource: "identity", userIds: [user.id] });
+    }
+    return { status: 200, body: { themePreference: body.themePreference }, mutated };
+  }
 
   if (req.method === "GET") {
     return { status: 200, body: accountBody(user, publicUser, store), mutated: false };
