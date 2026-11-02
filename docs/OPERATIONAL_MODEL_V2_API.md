@@ -905,7 +905,7 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 
 ### Hub pick-up settings
 
-`GET /settings` exposes `settings.hubPickup: {point,schedule,feeMinor}` to authenticated apps. `point` is the existing GRIDGO hub from `src/gridgo-office.js` and is read-only. Defaults are `feeMinor: 0` (PHP minor units) and `schedule: null` (operating hours not yet configured). Migration adds these defaults to existing settings; no existing order or cart is changed.
+`GET /settings` exposes `settings.hubPickup: {point,schedule,feeMinor,hoursSource,effectiveSchedule}` to authenticated apps. `point` is the existing GRIDGO hub from `src/gridgo-office.js` and is read-only. Defaults are `feeMinor: 0` (PHP minor units) and `schedule: null`, which means the hub follows `settings.operatingHours.schedule` (`hoursSource: "operating_hours"`); a set hub schedule wins (`hoursSource: "hub"`). `effectiveSchedule` is the schedule that applies; contract: [Hub and Admin App](HUB_HANDOVER_API.md#hub-and-admin-app). Migration adds these defaults to existing settings; no existing order or cart is changed.
 
 Only a Super Admin membership may include `hubPickup` in `PATCH /settings`, using the existing `expectedVersion` and nonblank `reason` handshake. Operations may continue editing its other settings but receives `403 forbidden` when attempting this field. Send the complete `{schedule,feeMinor}` object; omission preserves the previous value. Negative, fractional, string or unsafe fees return `400 invalid_hub_pickup`; invalid schedules return `400 invalid_hub_pickup_schedule`. Stale versions return `409 settings_version_conflict`. Success increments version and audits previous/current settings atomically.
 
@@ -930,7 +930,7 @@ Example dashboard update (sample hours, not production defaults):
 }
 ```
 
-Schedule follows the shared `src/availability.js` validation: weekday 0 is Sunday through 6 Saturday, times are whole minutes after midnight (0–1440), closing is after opening, and same-day windows cannot overlap. A configured schedule has at least one opening window (maximum 28); optional closures (maximum 120) use inclusive `startDay` / `endDay` date strings. `null` clears the schedule. The dashboard follow-up should place this editor next to delivery bands, restrict editing to Super Admin, and leave the fee at zero until explicitly configured. Read-only apps must distinguish an unconfigured schedule from an all-week opening claim.
+Schedule follows the shared `src/availability.js` validation: weekday 0 is Sunday through 6 Saturday, times are whole minutes after midnight (0–1440), closing is after opening, and same-day windows cannot overlap. A configured schedule has at least one opening window (maximum 28); optional closures (maximum 120) use inclusive `startDay` / `endDay` date strings. `null` clears the hub schedule so the hub follows operating hours again. The dashboard follow-up should place this editor next to delivery bands, restrict editing to Super Admin, and leave the fee at zero until explicitly configured. Read-only apps should label `hoursSource: "operating_hours"` as following GRIDGO's operating hours.
 
 The opt-in pre-match request and read-only checkout contract, including compatibility and fulfillment-charge fields, is [Fulfillment before matching](ORDER_MATCH_API.md#fulfillment-before-matching). Placed pickup orders and their invoices preserve the schedule and fee at checkout; subsequent settings edits apply only to future checkouts.
 

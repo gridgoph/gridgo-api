@@ -70,7 +70,7 @@ import { isArtworkCheckout, prepareArtworkCheckout } from "./order-match-routes.
 import { checkArtworkUpload } from "./artwork-file-check.js";
 import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-gates.js";
 import { prohibitedItemHold, assertProhibitedItemIntake } from './prohibited-items.js';
-import { hubPickupSettings, publicHubPickup } from "./hub-pickup.js";
+import { hubPickupSettings, settingsHubPickup } from "./hub-pickup.js";
 import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionTiming, productionLatenessTier } from './production-penalties.js';
@@ -889,7 +889,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     sampleBatchHoldDays: sampleBatchHoldDays(rest),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
-    hubPickup: publicHubPickup(rest),
+    hubPickup: settingsHubPickup(settings),
     hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,

@@ -225,7 +225,7 @@ test('staff-management and each hub reminder event write both administrator inbo
   for (const userId of ['ops', 'admin']) assert.ok(store.notifications.some(n => n.userId === userId && n.type === 'ops_hub_unclaimed_reminder'));
 });
 
-test('public pickup and staff hub publish the same unset and configured schedule', async () => {
+test('public pickup and staff hub follow operating hours when unset and the hub schedule when set', async () => {
   const expected = { utcOffsetMinutes: 480,
     week: [1, 3, 5].map(weekday => ({ weekday, opensMinute: 540, closesMinute: 1020 })), closures: [] };
   const custom = { utcOffsetMinutes: 480,
@@ -237,28 +237,37 @@ test('public pickup and staff hub publish the same unset and configured schedule
     const before = structuredClone(store.settings);
     const pickup = publicHubPickup(store.settings);
     const hub = (await call(store, 'other', '/staff/hub', {}, 'GET')).body.hub;
-    assert.deepEqual(pickup.schedule, hubPickup?.schedule ?? null);
-    assert.deepEqual(pickup.schedule, hub.schedule);
+    const ops = (await call(store, 'ops', '/ops/hub', {}, 'GET')).body.hub;
+    assert.deepEqual(pickup.schedule, hubPickup?.schedule ?? store.settings.operatingHours.schedule);
+    assert.equal(pickup.hoursSource, hubPickup?.schedule ? 'hub' : 'operating_hours');
+    assert.equal(pickup.feeMinor, hubPickup?.feeMinor ?? 0);
+    assert.deepEqual({ id: 'primary', name: 'GRIDGO pickup hub', ...pickup }, hub);
+    assert.deepEqual(hub.schedule, ops.schedule);
+    assert.equal(hub.hoursSource, ops.hoursSource);
     assert.deepEqual(store.settings, before);
-    if (pickup.schedule) pickup.schedule.week[0].opensMinute = 0;
+    pickup.schedule.week[0].opensMinute = 0;
     assert.deepEqual(publicHubPickup(store.settings).schedule, hub.schedule);
     assert.deepEqual(store.orders[0].handover.schedule, expected);
   }
 });
 
-test('unset hub hours allow pickup readiness and claims without counting invented missed days', async () => {
+test('the arrival snapshot follows operating hours when hub hours are unset', () => {
   const store = setup(null), order = store.orders[0];
-  assert.equal(order.handover.schedule, null);
-  assert.equal(sweepHubReminders(store, { at: '2026-10-12T10:00:00Z', id }), true);
-  assert.equal(order.handover.missedDays, 0);
-  assert.equal(order.handover.operationsRequired, false);
-  assert.deepEqual(order.handover.notifiedDays, []);
+  assert.deepEqual(order.handover.schedule, store.settings.operatingHours.schedule);
+  store.settings.operatingHours.schedule.week = [{ weekday: 0, opensMinute: 600, closesMinute: 700 }];
+  assert.notDeepEqual(order.handover.schedule, store.settings.operatingHours.schedule);
+});
+
+test('unset hub hours send the hours-set ready notice and count missed operating-hours days', async () => {
+  const store = setup(null), order = store.orders[0];
+  // AT is Monday 5 Oct 2026; default operating hours are Mon-Sat 08:00-17:00 Manila.
+  assert.equal(sweepHubReminders(store, { at: '2026-10-05T10:00:00Z', id }), true);
   const ready = store.notifications.find(n => n.type === 'hub_ready');
-  assert.match(ready.body, /Collection hours are not set yet/);
-  assert.equal(sweepHubReminders(store, { at: '2026-10-14T10:00:00Z', id }), false);
-  assert.equal(store.notifications.some(n => n.type.startsWith('hub_unclaimed')), false);
+  assert.doesNotMatch(ready.body, /not set yet/);
+  assert.equal(store.notifications.some(n => /not set yet/.test(n.body || '')), false);
+  assert.equal(order.handover.missedDays, 1);
   const handover = (await call(store, 'client', '/orders/order/handover', {}, 'GET')).body.handover;
-  assert.equal(handover.hub.schedule, null);
+  assert.deepEqual(handover.hub.schedule, store.settings.operatingHours.schedule);
   const claim = await call(store, 'other', '/staff/hub/claims', { qrToken: handover.qrToken, otp: handover.otp });
   assert.equal(claim.status, 200);
 });
