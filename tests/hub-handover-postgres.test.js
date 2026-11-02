@@ -218,7 +218,7 @@ test('a newly invited Clerk subject persists as staff without client or privileg
   assert.deepEqual(store.userRoleMemberships.filter(m => m.userId === me.body.staff.id).map(m => m.role), ['staff']);
 });
 
-test('HTTP settings and staff hub agree on unset, configured and cleared schedules', { skip: !DATABASE_URL }, async t => {
+test('HTTP settings and staff hub agree on unset (operating hours), configured and cleared schedules', { skip: !DATABASE_URL }, async t => {
   const { db, api } = await setup(t);
   await enroll(api);
   const custom = { utcOffsetMinutes: 480,
@@ -229,21 +229,33 @@ test('HTTP settings and staff hub agree on unset, configured and cleared schedul
     const hub = await api('other', 'GET', '/staff/hub');
     assert.equal(settings.status, 200);
     assert.equal(hub.status, 200);
+    const applied = schedule ?? settings.body.settings.operatingHours.schedule;
+    const source = schedule ? 'hub' : 'operating_hours';
     assert.deepEqual(settings.body.settings.hubPickup.schedule, schedule);
-    assert.deepEqual(hub.body.hub.schedule, schedule);
-    return settings.body.version;
+    assert.deepEqual(settings.body.settings.hubPickup.effectiveSchedule, applied);
+    assert.equal(settings.body.settings.hubPickup.hoursSource, source);
+    assert.deepEqual(hub.body.hub.schedule, applied);
+    assert.equal(hub.body.hub.hoursSource, source);
+    return { version: settings.body.version, operating: settings.body.settings.operatingHours.schedule };
   };
-  let version = await compare(null);
+  let { version, operating } = await compare(null);
+  assert.ok(operating?.week?.length);
+  const issued = structuredClone((await loadStore(db)).orders[0].handover.schedule);
   for (const schedule of [custom, null]) {
     const result = await api('admin', 'PATCH', '/settings', {
       expectedVersion: version, reason: 'Update collection hours', hubPickup: { schedule, feeMinor: 0 },
     });
     assert.equal(result.status, 200, JSON.stringify(result.body));
-    version = await compare(schedule);
+    ({ version } = await compare(schedule));
     const store = await loadStore(db);
     assert.deepEqual(store.settings.hubPickup.schedule, schedule);
-    assert.deepEqual(store.orders[0].handover.schedule, null);
+    assert.deepEqual(store.orders[0].handover.schedule, issued);
   }
+  // An editor round-trip of the projected settings object keeps following operating hours.
+  const current = (await api('admin', 'GET', '/settings')).body.settings.hubPickup;
+  const roundTrip = await api('admin', 'PATCH', '/settings', { expectedVersion: version, reason: 'Round-trip', hubPickup: current });
+  assert.equal(roundTrip.status, 200, JSON.stringify(roundTrip.body));
+  assert.equal((await loadStore(db)).settings.hubPickup.schedule, null);
 });
 
 test('pickup availability defaults off and requires Super Admin, reason and current version', { skip: !DATABASE_URL }, async t => {

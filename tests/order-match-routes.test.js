@@ -1,3 +1,4 @@
+import { operatingHours } from "../src/operating-hours.js";
 import { routeBaskets } from "../src/baskets.js";
 import { calculateRefundSettlement } from "../src/refund-policy.js";
 import { defaultOperationalSettings, publicOrderFor, moneyReportingForOrder, deliveryFeeForDistance, distanceMetersBetween } from "../src/operational-model.js";
@@ -1440,7 +1441,8 @@ test("explicit delivery needs a destination even without distance-first ranking;
   assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).status, 200);
   const pickup = await call("POST", "/me/matches/next", { subcategoryCode: "flyers", fulfillmentMode: "pickup", excludedSupplierIds: ["supplier_b"] });
   assert.equal(pickup.body.hubPickup.feeMinor, 0);
-  assert.equal(pickup.body.hubPickup.schedule, null);
+  assert.deepEqual(pickup.body.hubPickup.schedule, operatingHours(store.settings).schedule);
+  assert.equal(pickup.body.hubPickup.hoursSource, "operating_hours");
   assert.equal(pickup.body.listings[0].deliveryFeeMinor, 0);
 });
 
