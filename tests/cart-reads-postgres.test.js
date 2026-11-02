@@ -7,12 +7,18 @@ import { parityApiForTest, setupReadParity } from './fixtures/read-parity.js';
 import { AT } from './fixtures/reschedule.js';
 
 const skip = !process.env.DATABASE_URL;
+// GRIDGO is closed on Sundays (Manila). Twenty days ahead, moved so neither the
+// deadline nor the next day (a later group's deadline) falls on a Sunday.
+function openDeadline(from) {
+  const twentyDays = from + 20 * 86400000, manilaDay = new Date(twentyDays + 8 * 3600000).getUTCDay();
+  return new Date(twentyDays + ({ 6: 2, 0: 1 }[manilaDay] || 0) * 86400000).toISOString();
+}
 async function setup(database) {
   const store = await setupReadParity(database);
   store.clientPreferences.push({ userId: 'client', ranking: ['speed', 'cost', 'quality', 'distance'], version: 2, updatedAt: AT });
   store.clientAddresses.push({ id: 'address', clientId: 'client', label: 'Home', addressLine: 'Davao', point: { lat: 7.07, lng: 125.61 }, isDefault: true, version: 1, createdAt: AT, updatedAt: AT });
   store.clientAddresses.push({ ...store.clientAddresses[0], id: 'deleted_address', isDefault: false, deletedAt: AT });
-  const deadline = new Date(Date.now() + 20 * 86400000).toISOString();
+  const deadline = openDeadline(Date.now());
   for (const [id, state, clientId] of [['cart','draft','client'], ['single','draft','client'], ['done','checked_out','client'], ['foreign','draft','other'], ['dual_cart','draft','dual']]) {
     store.carts.push({ id, clientId, state, version: 2, serviceLevel: 'standard', fulfillmentMode: 'delivery', defaultDropoff: { lat: 7.07, lng: 125.61, label: 'Home' },
       ...(state === 'checked_out' ? { checkedOutOrderId: 'order', checkedOutAt: AT } : {}), deadline, createdAt: AT, updatedAt: AT });
@@ -79,7 +85,7 @@ test('cart reads preserve HTTP bytes, multi-shop anonymity, quotes, voucher rese
   assert.equal(created.status,201);
   const selectedCart = created.body.cart.id;
   const match = await baseline('client','POST','/me/matches', { cartId:selectedCart, subcategoryCode:'flyers', units:10,
-    deadline:new Date(at + 20 * 86400000).toISOString(), fulfillmentMode:'delivery', dropoff:{lat:7.07,lng:125.61,label:'Home'} });
+    deadline:openDeadline(at), fulfillmentMode:'delivery', dropoff:{lat:7.07,lng:125.61,label:'Home'} });
   assert.equal(match.status,200,JSON.stringify(match.body));
   assert.ok(match.body.listings.length);
   const added = await baseline('client','POST',`/me/carts/${selectedCart}/lines`, { selectToken:match.body.listings[0].selectToken,
