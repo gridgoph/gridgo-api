@@ -96,6 +96,7 @@ export function publicNotification(notification, order) {
     item.storeTarget = notification.storeTarget;
   }
   if (notification.approvalCaseId) item.approvalCaseId = notification.approvalCaseId;
+  if (notification.quoteRequestId) item.quoteRequestId = notification.quoteRequestId;
   if (notification.catalogItemId) item.catalogItemId = notification.catalogItemId;
   if (order?.title) item.orderTitle = order.title;
   if (order?.state) {

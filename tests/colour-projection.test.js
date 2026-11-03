@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { publicColourQuote, publicColourListing, orderColourClientAmount, publicColourChange } from '../src/colour-projection.js';
-import { priceColourPages, colourSettings } from '../src/colour-pricing.js';
+import { priceColourPages, colourSettings, parseColourListing } from '../src/colour-pricing.js';
 import { colourFixture } from './helpers/colour-fixture.mjs';
 import { clientInvoice } from '../src/invoice-projection.js';
 const quote = () => ({version:1,pricedByColour:true,...priceColourPages([{page:1,strongColourBps:0},{page:2,strongColourBps:1800}],{tierSet:'large_format',prices:{none:3000,up_to_25:6000}},colourSettings(),3,'document_sets')});
@@ -87,4 +87,37 @@ test('all cart and catalogue quote paths hide shop page prices and share the gro
   for (const row of cart.lines) {assert.equal(Object.hasOwn(row,'lineSubtotalMinor'),false);noShopPrices(row.colourPricing);assert.equal(Object.hasOwn(row.listing.colourPricing.sizes[0],'prices'),false);}
   const standalone=(await call('POST','/me/catalog-quotes',{catalogItemId:item.id,...line,quantity:30})).body.quote;
   noShopPrices(standalone.colourPricing);assert.equal(standalone.colourPricing.clientLineSubtotalMinor,790000);
+});
+
+
+test('legacy approved colour snapshots use canonical public and private projections without rewriting history', async () => {
+  const { listingSnapshot, approvedCatalogView } = await import('../src/catalog-review-state.js');
+  const { privateCatalogItem, publicCatalogItem } = await import('../src/supplier-catalog.js');
+  const { store, item } = colourFixture();
+  Object.assign(item, parseColourListing({ pricedByColour: true, colourPricing: { sizes: [
+    { paperSize: '4x8 ft', tierSet: 'large_format', prices: { none: 1000, above_50: 4000, up_to_25: 2000, up_to_50: 3000 } },
+    { paperSize: 'A4', tierSet: 'large_format', prices: { above_50: 500, none: 0 } },
+  ] } }, item));
+  item.approvedSnapshot = listingSnapshot(store, item);
+  const sizes = item.approvedSnapshot.item.colourPricing.sizes;
+  item.approvedSnapshot.item.colourPricing.sizes = ['4x8 ft', 'A4'].map(name => sizes.find(size => size.paperSize === name));
+  item.approvedSnapshot.item.colourPricing.sizes[0].prices = { none: 1000, above_50: 4000, up_to_25: 2000, up_to_50: 3000 };
+  item.reviewStatus = 'pending';
+  const original = structuredClone(item);
+  const view = approvedCatalogView(store);
+  const approved = view.catalogItems.find(row => row.id === item.id);
+  assert.deepEqual(approved.colourPricing.sizes.map(size => size.paperSize), ['A4', '4x8 ft']);
+  assert.deepEqual(Object.keys(approved.colourPricing.sizes[1].prices), ['none', 'up_to_25', 'up_to_50', 'above_50']);
+  const privateItem = privateCatalogItem(store, { ...item, colourPricing: original.approvedSnapshot.item.colourPricing });
+  const directPublic = publicColourListing(original.approvedSnapshot.item.colourPricing);
+  assert.deepEqual(directPublic.sizes.map(size => size.paperSize), ['A4', '4x8 ft']);
+  assert.deepEqual(directPublic.sizes[1].offeredTiers, ['none', 'up_to_25', 'up_to_50', 'above_50']);
+  assert.deepEqual(privateItem.colourPricing.sizes.map(size => size.paperSize), ['A4', '4x8 ft']);
+  assert.deepEqual(Object.entries(privateItem.colourPricing.sizes[1].prices),
+    [['none', 1000], ['up_to_25', 2000], ['up_to_50', 3000], ['above_50', 4000]]);
+  const publicItem = publicCatalogItem(store, item);
+  assert.deepEqual(publicItem.colourPricing.sizes.map(size => size.paperSize), ['A4', '4x8 ft']);
+  assert.deepEqual(publicItem.colourPricing.sizes[1].offeredTiers, ['none', 'up_to_25', 'up_to_50', 'above_50']);
+  assert.ok(publicItem.colourPricing.sizes.every(size => !Object.hasOwn(size, 'prices')));
+  assert.deepEqual(item, original);
 });

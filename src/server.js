@@ -1,4 +1,6 @@
 import { routeTesterProgram } from './tester-program-routes.js';
+import { isQuoteListing } from "./quote-listings.js";
+import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays, quoteSaveError } from "./quote-requests.js";
 import { matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from './tester-invites.js';
 import { testerBudget } from './tester-rewards.js';
 import { testerProgress, publicFoundingTester, reconcileFoundingTester, recordTesterCartStep, remindFoundingTesters } from './founding-testers.js';
@@ -15,7 +17,9 @@ import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './co
 import { createColourWorker } from './colour-worker.js';
 import { signArtworkAttachments } from './artwork-attachments.js';
 import { routeOrderChanges, releaseChangePayouts, closeUnavailableChanges } from './order-changes.js';
-import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique } from './order-change-policy.js';
+import { changePaymentPending, changeWindowOpen, supplementTotals, assertSupplementCollectionsUnique, changesFor } from './order-change-policy.js';
+import { awaitedTopUp, shopMoveCoverBps } from './shop-move-pricing.js';
+import { routeSampleFirst, sampleBatchHoldDays } from './sample-first.js';
 import { specialInstructions, acknowledgeInstructions } from './special-instructions.js';
 import { requestDeliveryPin, routeDeliveryPin } from './delivery-pin.js';
 import { deliveryPinPaymentPending, deliveryPinLocked } from './delivery-pin-policy.js';
@@ -66,7 +70,7 @@ import { isArtworkCheckout, prepareArtworkCheckout } from "./order-match-routes.
 import { checkArtworkUpload } from "./artwork-file-check.js";
 import { supplierArtworkReleased, recordFileCheckTransition } from "./artwork-gates.js";
 import { prohibitedItemHold, assertProhibitedItemIntake } from './prohibited-items.js';
-import { hubPickupSettings, publicHubPickup } from "./hub-pickup.js";
+import { hubPickupSettings, settingsHubPickup } from "./hub-pickup.js";
 import { routeShopRecovery } from './shop-recovery-routes.js';
 import { startShopAcceptance, expireShopAcceptances, recordShopFailure, recoveryHeld } from './shop-recovery.js';
 import { assessProductionLapses, productionPenaltySettings, supplierLapses, productionTiming, productionLatenessTier } from './production-penalties.js';
@@ -94,6 +98,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyWebhook } from "@clerk/backend/webhooks";
+import { recordUserSignIn } from './last-sign-in.js';
 import {
   activateClerkClientProfile,
   applyClerkIdentityCopy,
@@ -225,7 +230,8 @@ import {
   resolveCategoryCode,
 } from "./taxonomy.js";
 import { routeTaxonomyDelete } from "./taxonomy-delete.js";
-import { routeAccountProfile } from "./account-profile-routes.js";
+import { routeAccountProfile, themePreferenceFor } from "./account-profile-routes.js";
+import { clientHomeSummary } from './client-home.js';
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
 import { publicFeaturedPrints, routeFeaturedPrints } from './featured-prints.js';
 import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
@@ -290,6 +296,7 @@ import {
   routeFirstmateIssueReports,
   routeIssueReports,
   routeStaffIssueReports,
+  routeConfirmIssueReportBug,
 } from "./issue-reports.js";
 import {
   createTracker,
@@ -306,6 +313,7 @@ import {
   loadHotReadStore,
   loadStore,
   loadClientBootstrapStore,
+  loadProductionSweepStore,
   originalNotificationIds,
   saveDeviceTokenStore,
   saveStore,
@@ -459,8 +467,9 @@ async function save(view) {
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   for (const order of store.orders || []) {
     if (before.get(order.id)?.state !== order.state && ["payment_authorized", "production"].includes(order.state)) assertApprovalBeforeProceeding(order);
+    const topUpPending = changesFor(store, order).some(row => row.status === 'pending_confirmation' && awaitedTopUp(order, row));
     if (changePaymentPending(store, order) && (!changeWindowOpen(order)
-        || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted'))) {
+        || order.supplierId !== before.get(order.id)?.supplierId || (order.shopRecovery && order.shopRecovery.status !== 'accepted' && !topUpPending))) {
       throw Object.assign(new Error('Resolve the submitted change transfer before closing production or changing shops.'), { status: 409, code: 'change_payment_pending' });
     }
     if (before.get(order.id)?.supplierId !== order.supplierId && supplementTotals(store, order).totalMinor > 0) {
@@ -876,14 +885,18 @@ function publicOperationalSettings(settings, store = null, user = null) {
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
     downpaymentPercent: downpaymentPercentSetting(rest),
+    shopMoveCoverBps: shopMoveCoverBps(rest),
+    sampleBatchHoldDays: sampleBatchHoldDays(rest),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
     savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
-    hubPickup: publicHubPickup(rest),
+    hubPickup: settingsHubPickup(settings),
     hubPickupEnabled: rest.hubPickupEnabled === true,
     handoverOtpEnabled: rest.handoverOtpEnabled === true,
     serviceFeeVisibleToClient: rest.serviceFeeVisibleToClient ?? true,
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     coverSpineRequired: rest.coverSpineRequired === true,
+    shopReceiptScanRequired: rest.shopReceiptScanRequired === true,
+    quoteValidityDays: quoteValidityDays(rest),
     approvalProofRequired: rest.approvalProofRequired === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
     productionPenalty: productionPenaltySettings(rest),
@@ -1020,26 +1033,22 @@ async function authenticateRequest(req, store) {
   const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
   if (auth.user) {
     setAuditActor(auth.user);
-    noteLastAuthenticated(auth.user);
+    noteLastAuthenticated(auth.user, verified.claims?.sid);
   }
   return auth;
 }
 
 /**
- * Last time GRIDGO accepted this account, for every role.
- * A later instant replaces the stored one. The same instant does not.
- * This is not `staff.sign_in`, and it does not store a session id or token.
+ * First time GRIDGO accepts each verified session, for every role.
+ * Session fingerprints and the monotonic timestamp commit together, outside
+ * the request transaction. This does not create `staff.sign_in` audit rows.
  */
-function noteLastAuthenticated(user) {
+function noteLastAuthenticated(user, sessionId) {
   const at = now();
-  const current = Date.parse(user.lastAuthenticatedAt || "");
-  if (Number.isFinite(current) && current >= Date.parse(at)) return;
   // Do not change the request's store: a later save must not reintroduce this
   // optional write into the domain transaction. Directory reads see persisted
   // telemetry on a subsequent load.
-  void database.recordLastAuthenticated(user.id, at).catch(error => {
-    console.warn(`Last authenticated write failed: ${error?.code || 'unknown'}`);
-  });
+  void recordUserSignIn(database, user.id, sessionId, at);
 }
 
 // Clerk owns sign-in. Record the first authenticated app bootstrap for a session;
@@ -1243,6 +1252,7 @@ function clientProfileProjection(store, userId) {
     clientKind: profile.clientKind,
     businessName: profile.businessName ?? null,
     businessNature: profile.businessNature ?? null,
+    themePreference: profile.themePreference ?? "system",
     updatedAt: profile.updatedAt,
   };
 }
@@ -1464,7 +1474,7 @@ function fixedAuthProjection(store, auth, role) {
     const approved = approvalCase?.status === "approved" || (Boolean(officerSnapshot(store, auth.user.id)) && approvalCase?.status !== "suspended");
     return {
       ...base,
-      clientProfile: { ...clientProfileProjection(store, auth.user.id), foundingTester: publicFoundingTester(store, auth.user.id, now()) },
+      clientProfile: { themePreference: themePreferenceFor(store, auth.user.id), ...clientProfileProjection(store, auth.user.id), foundingTester: publicFoundingTester(store, auth.user.id, now()) },
       organization: organizationProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       capabilities: {
@@ -1808,7 +1818,16 @@ async function sweepRescheduleRequests() {
   });
 }
 
+// The lifecycle probes decide on a read-only snapshot outside the domain lock.
+// Their ids are discarded; only the complete writable graph below is saved.
+let productionProbeSequence = 0;
+const productionProbeId = (prefix) => `${prefix}_probe_${++productionProbeSequence}`;
+
 async function sweepProductionPenalties() {
+  const probe = await loadProductionSweepStore(database);
+  const probeAt = now();
+  const probePerformance = syncSupplierPerformance(probe, { at: probeAt, id: productionProbeId });
+  if (!assessProductionLapses(probe, { at: probeAt, createId: productionProbeId }) && !probePerformance) return;
   await enqueueMutation(async () => {
     const store = await load();
     const at = now();
@@ -1873,6 +1892,8 @@ async function sweepOrderCallHistory() {
 
 async function sweepProductionInactivity() {
   try {
+    const probe = await loadProductionSweepStore(database);
+    if (!applyProductionNudges(probe, { at: now(), createId: productionProbeId, limit: 1 }).length) return;
     await enqueueMutation(async () => {
       const store = await load();
       const created = applyProductionNudges(store, { at: now(), createId: id, limit: 100 });
@@ -2436,7 +2457,7 @@ async function handleAuditedRequest(req, res) {
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
       })
       : hotRead ? await loadHotReadStore(database, notificationClaims?.claims?.sub || null, pathname, {
-        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'),
+        after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), searchParams: url.searchParams,
         role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
       }) : await load();
@@ -2731,6 +2752,15 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (user) setAuditActor(user);
+    if (req.method === 'GET' && pathname === '/me/home-summary') {
+      // Targeted read (loadHotReadStore): the caller's own orders, missions and tester vouchers.
+      if (!user) return send(res, auth.status || 401, authFailureBody(auth));
+      if (!identityHasMembership(user, 'client')) {
+        return send(res, 403, { error: 'membership_required', message: 'This surface requires the client membership assigned in GRIDGO.', requiredRole: 'client' });
+      }
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, 200, clientHomeSummary(store, user.id, now()));
+    }
     // Test operations read and write through a review-only view of the store.
     const testOperations = Boolean(user) && isTestOperationsUser(store, user.id);
     if (testOperations) {
@@ -2888,7 +2918,7 @@ async function handleAuditedRequest(req, res) {
       createId: id,
       now,
       audit,
-      publicUser: u => ({ ...publicUser(u), ...(u.role === 'client' ? { foundingTester: publicFoundingTester(store, u.id, now()) } : {}) }),
+      publicUser: u => ({ ...publicUser(u), ...(u.role === 'client' ? { foundingTester: publicFoundingTester(store, u.id, now()), themePreference: themePreferenceFor(store, u.id) } : {}) }),
     });
     if (accountProfileResponse) {
       res.setHeader('Cache-Control', 'private, no-store');
@@ -2954,9 +2984,14 @@ async function handleAuditedRequest(req, res) {
         send,
         database,
         storage: objectStorage,
+        store,
       });
       return;
     }
+    if (await routeConfirmIssueReportBug({
+      req, res, pathname, user, send, database, storage: objectStorage, store, save, audit,
+      ctx: { id, at: now(), actorId: user?.id ?? null },
+    })) return;
 
     if (isAdminTrackerRoute(pathname)) {
       await tracker.routeAdmin({ req, res, pathname, url, user, readBody, send });
@@ -3089,6 +3124,21 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control', 'private, no-store, max-age=0');
       if (rescheduleResponse.mutated) await save(store);
       return send(res, rescheduleResponse.status, rescheduleResponse.body);
+    }
+    const quoteResponse = await routeQuoteRequests({ req, url, store, user, readBody, now, id, audit });
+    if (quoteResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (quoteResponse.mutated) {
+        try { await save(store); } catch (error) { throw quoteSaveError(error); }
+      }
+      if (quoteResponse.status < 400 && quoteResponse.body.cart) await decorateCatalogPhotoUrls(store, quoteResponse.body);
+      return send(res, quoteResponse.status, quoteResponse.body);
+    }
+    const sampleFirstResponse = await routeSampleFirst({ req, url, store, user, readBody, now, id });
+    if (sampleFirstResponse) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      if (sampleFirstResponse.mutated) await save(store);
+      return send(res, sampleFirstResponse.status, sampleFirstResponse.body);
     }
     const recoveryResponse = await routeShopRecovery({ req, url, store, user, readBody, now, id, audit });
     if (recoveryResponse) {
@@ -3419,6 +3469,10 @@ async function handleAuditedRequest(req, res) {
             }
             authorizeFileUpload(latestUser, purpose);
             markFileReady(latestFile, now());
+            if (purpose === 'supplier_invoice') {
+              audit(latestStore, { actor: latestUser, action: 'supplier_invoice.scan_uploaded', entityType: 'file', entityId: fileId,
+                detail: { fileId, supplierId: latestUser.id, contentType: latestFile.detectedContentType, size: latestFile.size } });
+            }
             queueColourRequest(latestFile, sourceColourRequest(latestStore.settings), now());
             await save(latestStore);
             return latestFile;
@@ -4046,6 +4100,10 @@ async function handleAuditedRequest(req, res) {
         // New checkouts only: every order keeps the split it was placed under.
         downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
+        // Live recoveries re-price on acceptance; an accepted move keeps its snapshot.
+        shopMoveCoverBps: Object.hasOwn(body, "shopMoveCoverBps") ? body.shopMoveCoverBps : shopMoveCoverBps(store.settings),
+        // New sample checkouts only: each draft keeps the hold length it was ordered under.
+        sampleBatchHoldDays: Object.hasOwn(body, "sampleBatchHoldDays") ? body.sampleBatchHoldDays : sampleBatchHoldDays(store.settings),
         serviceFeeRateBps: body.serviceFeeRateBps ?? store.settings.serviceFeeRateBps,
         organizationDiscountRateBps: Object.hasOwn(body, "organizationDiscountRateBps") ? body.organizationDiscountRateBps : (store.settings.organizationDiscountRateBps ?? 500),
         serviceFeeVisibleToClient:
@@ -4054,6 +4112,10 @@ async function handleAuditedRequest(req, res) {
           body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
         approvalProofRequired: Object.hasOwn(body, "approvalProofRequired") ? body.approvalProofRequired : store.settings.approvalProofRequired === true,
         coverSpineRequired: Object.hasOwn(body, "coverSpineRequired") ? body.coverSpineRequired : store.settings.coverSpineRequired === true,
+        // Applies at the next Ready-for-rider-pickup transition only; orders already ready are unaffected.
+        shopReceiptScanRequired: Object.hasOwn(body, "shopReceiptScanRequired") ? body.shopReceiptScanRequired : store.settings.shopReceiptScanRequired === true,
+        // New publications only: a published quote keeps the validity it was given.
+        quoteValidityDays: Object.hasOwn(body, "quoteValidityDays") ? body.quoteValidityDays : quoteValidityDays(store.settings),
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
         deliveryFeeBands: body.deliveryFeeBands ?? store.settings.deliveryFeeBands,
         productionNudge: body.productionNudge ?? store.settings.productionNudge ?? defaultProductionNudge(),
@@ -5714,7 +5776,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 200, await readPricingDashboard(database, {
           orders: store.orders || [],
           lines: store.orderLineItems || [],
-          catalog: store.catalogItems || [],
+          catalog: (store.catalogItems || []).filter(item => !isQuoteListing(item)),
           users: store.users || [],
           audit: store.auditLog || [],
           refundRequests: store.refundRequests || [],
@@ -6535,6 +6597,7 @@ async function handleAuditedRequest(req, res) {
           const skippedChecks = riderPackingFlow(order) ? handoverRequirements(store, order, next).map(item => item.code)
             : [!productionPhotoFiles(store, order).length && 'production_photo_required',
               next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length && 'packing_photo_required'].filter(Boolean);
+          if (readiness.receiptScan.required && !readiness.receiptScan.attached) skippedChecks.push('receipt_scan_required');
           const forced = { at: now(), by: user.id, role: user.role, from: order.state, to: next,
             reasonCode: body.reasonCode, note: body.reason.trim(), skippedChecks };
           (order.forcedSteps ||= []).push(forced);
@@ -6542,7 +6605,8 @@ async function handleAuditedRequest(req, res) {
             actor: user, action: 'order.production_override', entityType: 'order', entityId: order.id,
             orderId: order.id, reason: body.reason.trim(), detail: { ...forced,
               photoMissing: productionPhotoFiles(store, order).length === 0,
-              packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0 },
+              packingPhotoMissing: next === 'ready_for_dispatch' && packingPhotoFiles(store, order).length === 0,
+              receiptScanMissing: readiness.receiptScan.required && !readiness.receiptScan.attached },
           });
         }
       }
@@ -7812,6 +7876,16 @@ async function runLifecycleWork() {
       },
       sweepProductionPenalties,
       expireElapsedIssueWindows,
+      async () => {
+        // Quote options past their validity; idle ticks read one indexed row.
+        const candidate = await database.query(`SELECT 1 FROM quote_requests
+          WHERE status IN ('published', 'accepted') AND valid_until <= $1 LIMIT 1`, [now()]);
+        if (!candidate.rowCount) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (expireQuoteRequests(store, { at: now(), id, audit })) await save(store);
+        });
+      },
       sweepProductionInactivity,
       sweepSeasonWindows,
       async () => {

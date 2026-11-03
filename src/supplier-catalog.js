@@ -2,6 +2,7 @@ import { effectiveProductionTime, productionTimeReview } from './production-time
 import { supplierAccountIsActive } from "./supplier-eligibility.js";
 import { publicColourListing, publicColourQuote } from './colour-projection.js';
 import { colourQuoteFor } from './colour-analysis.js';
+import { canonicalColourPricing } from './colour-pricing.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { feeSchedule, serviceFeeMoney } from './service-fee.js';
 import { productionProjection, displayProductionDayMinutes } from "./production-days.js";
@@ -12,6 +13,7 @@ import { coverSpineApplies } from "./hardbound-cover.js";
 import { publicShopRating } from "./shop-rating.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { measurementKindFor, priceLine } from "./pricing.js";
+import { isQuoteListing, quoteListingVisible } from "./quote-listings.js";
 
 /** Volume breaks and speeds a listing sells, ordered as the client reads them. */
 function priceTiersFor(store, itemId) {
@@ -370,13 +372,15 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
   const photos = (store.catalogItemPhotos || [])
     .filter((photo) => photo.catalogItemId === item.id)
     .filter((photo) => readyFile(store, photo.fileId));
-  if (photos.length === 0) blockers.push("photo");
+  // A quote listing is the shop's price for one client's brief; it has no sample photo.
+  if (photos.length === 0 && !isQuoteListing(item)) blockers.push("photo");
   for (const group of catalogGroupsForItem(store, item.id)) {
     if (group.options.filter((option) => option.active !== false).length === 0) {
       blockers.push(`option_group:${group.id}`);
     }
   }
   if (publicOnly) {
+    if (!quoteListingVisible(store, item)) blockers.push("quote_only");
     const owner = (store.users || []).find(row => row.id === item.supplierId);
     if (!supplierAccountIsActive(owner?.accountStatus)) blockers.push("account_inactive");
     if (item.reviewStatus && item.reviewStatus !== "approved") blockers.push("listing_not_approved");
@@ -487,6 +491,20 @@ export function clientMoneyMinor(store, supplierMinor) {
   return supplierMinor == null ? null : supplierMinor + serviceFeeMoney(supplierMinor, feeSchedule(store.settings)).grossServiceFeeMinor;
 }
 
+/**
+ * A listing's sample offer as clients read it (docs/SAMPLE_FIRST_API.md).
+ * Colour-priced and quote listings never offer one; null prices when there is no offer.
+ */
+export function publicSampleOffer(store, item) {
+  const available = item.sampleAvailable === true && item.samplePriceMinor != null && item.pricedByColour !== true
+    && !item.quoteRequestId;
+  return {
+    sampleAvailable: available,
+    samplePriceMinor: available ? item.samplePriceMinor : null,
+    clientSamplePriceMinor: available ? clientMoneyMinor(store, item.samplePriceMinor) : null,
+  };
+}
+
 // Option discounts round the magnitude, then restore the sign, like the client UI.
 function clientModifierMinor(store, amount) {
   if (!Number.isSafeInteger(amount)) return null;
@@ -558,6 +576,8 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     // Same-day availability the shop switched on (docs/EXPRESS_API.md).
     express: listingExpress(item),
+    // "Order a sample first" (docs/SAMPLE_FIRST_API.md).
+    ...publicSampleOffer(store, item),
     // Hardbound and binding products ask for a cover choice and the spine text.
     coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id).map((tier) => ({
@@ -761,7 +781,7 @@ export function supplierCatalogReadiness(store, supplierId) {
     && (store.supplierServiceFileFormats || []).some((record) => record.supplierServiceId === service.id));
   if (reviewReady.length === 0) missing.push("review_ready_service_line");
   const completeItems = (store.catalogItems || []).filter((item) =>
-    item.supplierId === supplierId
+    item.supplierId === supplierId && !isQuoteListing(item)
     && item.active !== false
     && catalogItemBlockers(store, item).length === 0);
   if (completeItems.length === 0) missing.push("complete_catalog_item");
@@ -888,7 +908,9 @@ export function createOrderLineSnapshot(store, selection, createId) {
    a quantity, and a speed tier replaces it at a date -- none of which a single
    effectiveUnitPriceMinor can carry.
   */
-  const priced = priceCatalogSelection(store, item, {
+  // A sample (its own flat price) or a batch at a held price arrives priced by
+  // the Sample First policy; every other line goes through the listing's engine.
+  const priced = selection.pricedLine ?? priceCatalogSelection(store, item, {
     selectedOptions,
     quantity,
     measurement: selection.measurement ?? null,
@@ -935,7 +957,9 @@ export function createOrderLineSnapshot(store, selection, createId) {
       turnaroundMinutesSnapshot: Math.round((selection.speedTier?.turnaroundHours ?? itemTurnaroundHours(item, service)) * 60),
       ...(selection.speedTier ? { speedTierSnapshot: structuredClone(selection.speedTier) } : {}),
       baseUnitPriceMinor: item.basePriceMinor,
-      effectiveUnitPriceMinor: item.pricedByColour ? 0 : selection.speedTier ? priced.unitRateMinor : effectiveUnitPriceMinor,
+      // A speed or a volume (bulk) tier replaces the rate, so the billed rate is
+      // the engine's; the stored line math (rate x quantity) must agree with it.
+      effectiveUnitPriceMinor: item.pricedByColour ? 0 : (selection.speedTier || priced.volumeTierApplied) ? priced.unitRateMinor : effectiveUnitPriceMinor,
       quantity,
       ...(priced.colourPricing ? { colourPricing: structuredClone(priced.colourPricing), quantityMode: selection.quantityMode } : {}),
       // The size the client agreed to, kept with the price it produced. An
@@ -1117,7 +1141,7 @@ export function listOwnCatalogItemsFromGraph(store, params) {
     });
   }
 
-  let items = (store.catalogItems || []).filter((item) => item.supplierId === supplierId);
+  let items = (store.catalogItems || []).filter((item) => item.supplierId === supplierId && !isQuoteListing(item));
   if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
   if (active === true) items = items.filter((item) => item.active !== false);
   if (active === false) items = items.filter((item) => item.active === false);
@@ -1187,7 +1211,7 @@ export function listStaffCatalogItemsFromGraph(store, params) {
     maxPriceMinor = null,
   } = params;
 
-  let items = [...(store.catalogItems || [])];
+  let items = (store.catalogItems || []).filter(item => !isQuoteListing(item));
   if (params.productionTimeReview === 'required') items = items.filter(item => productionTimeReview(store, item).required);
   if (supplierId) items = items.filter((item) => item.supplierId === supplierId);
   if (subcategoryCode) items = items.filter((item) => item.subcategoryCode === subcategoryCode);
@@ -1238,7 +1262,7 @@ function staffCatalogAfterCursor(item, cursor) {
 }
 
 function staffCatalogShops(store) {
-  const ids = [...new Set((store.catalogItems || []).map((item) => item.supplierId).filter(Boolean))];
+  const ids = [...new Set((store.catalogItems || []).filter(item => !isQuoteListing(item)).map((item) => item.supplierId).filter(Boolean))];
   return ids
     .map((supplierId) => {
       const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
@@ -1292,9 +1316,11 @@ export function privateCatalogItem(store, item) {
     printLayouts: listingPrintLayouts(item),
     pricedByColour: item.pricedByColour === true,
     oneColour: item.oneColour === true,
-    colourPricing: structuredClone(item.colourPricing ?? null),
+    colourPricing: canonicalColourPricing(item.colourPricing),
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     express: listingExpress(item),
+    sampleAvailable: item.sampleAvailable === true,
+    samplePriceMinor: item.samplePriceMinor ?? null,
     coverSpineForm: coverSpineApplies(item),
     priceTiers: priceTiersFor(store, item.id),
     speedTiers: speedTiersFor(store, item.id),

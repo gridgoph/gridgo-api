@@ -1,10 +1,16 @@
 import { issueVoucher, generatedVoucherCode, voucherFail as fail, voucherEvent, releaseVoucherReservations } from './vouchers.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
+import { TESTER_CAMPAIGN_PURPOSES } from './tester-campaigns.js';
 
+const CAMPAIGNS = {
+  mission: { name: 'Thank you, Founding Tester', purpose: 'founding_tester' },
+  referral: { name: 'Founding Tester invite reward', purpose: 'tester_referral' },
+  bug_report: { name: 'Thank you for reporting a bug', purpose: 'tester_bug_report' },
+};
 export function testerBudget(store, at) {
   // Philippine calendar month; money is issued face value, never redemption value.
   const month = new Date(Date.parse(at) + 8 * 3600000).toISOString().slice(0, 7);
-  const campaigns = new Set(store.voucherCampaigns.filter(c => ['founding_tester', 'tester_referral'].includes(c.purpose)).map(c => c.id));
+  const campaigns = new Set(store.voucherCampaigns.filter(c => TESTER_CAMPAIGN_PURPOSES.includes(c.purpose)).map(c => c.id));
   const used = store.vouchers.filter(v => campaigns.has(v.campaignId)
     && new Date(Date.parse(v.issuedAt) + 8 * 3600000).toISOString().slice(0, 7) === month)
     .reduce((sum, v) => sum + BigInt(v.valueMinor), 0n);
@@ -38,8 +44,7 @@ export function issueTesterReward(store, reward, ctx, { reusedVoucher = null } =
   }
   const recipients = [reward.clientId, reward.inviterId].filter(Boolean);
   const vouchers = reusedVoucher ? [reusedVoucher] : recipients.map(clientId => {
-    const campaign = { id: ctx.id('vcamp'), name: reward.kind === 'mission' ? 'Thank you, Founding Tester' : 'Founding Tester invite reward',
-      purpose: reward.kind === 'mission' ? 'founding_tester' : 'tester_referral', code: generatedVoucherCode(), mode: 'assigned', status: 'active',
+    const campaign = { id: ctx.id('vcamp'), ...CAMPAIGNS[reward.kind], code: generatedVoucherCode(), mode: 'assigned', status: 'active',
       valueMinor: Number(BigInt(reward.amountMinor) / BigInt(recipients.length)), totalLimit: 1, perAccountLimit: 1, validityDays: 30, endsAt: null, createdAt: ctx.at, updatedAt: ctx.at };
     store.voucherCampaigns.push(campaign);
     const voucher = issueVoucher(store, campaign, clientId, { ...ctx, adultConfirmed: false }).voucher;

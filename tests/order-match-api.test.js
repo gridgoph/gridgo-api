@@ -2296,15 +2296,17 @@ for (const [groupCount, fulfillmentMode, dateMode] of [[2, 'delivery'], [3, 'del
     const cartId = created.body.cart.id;
     for (const [index, suffix] of (dateMode === 'same-shop' ? ['a', 'a'] : ['a', 'b', 'c'].slice(0, groupCount)).entries()) {
       const lineDate = new Date(Date.parse(deadline) + index * 86400000).toISOString();
+      // The later product at the same shop is delivered separately, so it is its own group.
+      const separate = dateMode === 'same-shop' && index > 0 ? { separateDelivery: true } : {};
       let selection = {};
       if (fulfillmentMode === 'pickup') {
-        const match = await post('/me/matches', { subcategoryCode: 'flyers', cartId, fulfillmentMode, ...(dateMode ? { deadline: lineDate } : {}) }, 'clerk_client');
+        const match = await post('/me/matches', { subcategoryCode: 'flyers', cartId, fulfillmentMode, ...separate, ...(dateMode ? { deadline: lineDate } : {}) }, 'clerk_client');
         assert.equal(match.status, 200, JSON.stringify(match.body));
         const listing = [...match.body.listings, ...match.body.otherListings].find(row => row.id === `item_supplier_${suffix}`);
         assert.ok(listing, JSON.stringify(match.body));
         selection = { selectToken: listing.selectToken, matchRequestId: match.body.matchRequestId };
       }
-      const added = await post(`/me/carts/${cartId}/lines`, { catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...selection, ...(dateMode ? { deadline: lineDate } : {}) }, 'clerk_client');
+      const added = await post(`/me/carts/${cartId}/lines`, { catalogItemId: `item_supplier_${suffix}`, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...selection, ...separate, ...(dateMode ? { deadline: lineDate } : {}) }, 'clerk_client');
       assert.equal(added.status, 201, JSON.stringify(added.body));
     }
     // A failure in a later group must roll back earlier groups and file bindings.
@@ -3512,4 +3514,44 @@ test('Founding Tester five-step invite path through real checkout, payment, hand
   assert.equal(stored.vouchers.length, 3, 'one mission voucher and both referral vouchers, once');
   assert.equal(stored.testerRewards.filter(r => r.kind === 'referral' && r.status === 'issued').length, 1);
   assert.equal((await call('/me/vouchers?tab=all', { subject: 'clerk_inviter' })).body.vouchers.length, 1);
+});
+
+test('separate shop deliveries persist through PostgreSQL, read back on the targeted cart read, and are audited', { skip: !DATABASE_URL }, async t => {
+  const database = createDatabase({ DATABASE_URL });
+  t.after(() => database.close());
+  await fixture(database);
+  const instance = await startApi();
+  t.after(async () => { instance.child.kill('SIGTERM'); await new Promise(resolve => instance.child.once('exit', resolve)); });
+  const call = (pathname, options = {}) => request(instance.api, pathname, { subject: 'clerk_client', ...options });
+  const early = new Date(Date.now() + 30 * 86400000).toISOString();
+  const late = new Date(Date.now() + 32 * 86400000).toISOString();
+  const cart = (await call('/me/carts', { method: 'POST', body: { fulfillmentMode: 'pickup' } })).body.cart;
+  const path = `/me/carts/${cart.id}`;
+  for (const [catalogItemId, deadline] of [['item_supplier_a', early], ['item_supplier_a_brochures', late]]) {
+    const added = await call(`${path}/lines`, { method: 'POST', body: { catalogItemId, deadline, quantity: 1, optionIds: [] } });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+  }
+  const merged = (await call(path)).body.cart;
+  assert.equal(merged.groups.length, 1);
+  assert.equal(merged.groups[0].deadline, early);
+  const split = `${path}/groups/${merged.groups[0].id}/deliveries`;
+  for (const subject of ['clerk_supplier_a', 'clerk_ops']) {
+    assert.equal((await call(split, { method: 'PUT', subject, body: { split: 'by_deadline' } })).status, 403);
+  }
+  const result = await call(split, { method: 'PUT', body: { split: 'by_deadline' } });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(result.body.cart.groups.map(group => [group.deadline, group.deliveryNumber, group.shopDeliveryCount]), [[early, 1, 2], [late, 2, 2]]);
+  const rows = (await database.query('SELECT id, delivery_key FROM client_cart_lines WHERE cart_id = $1 ORDER BY sort_order', [cart.id])).rows;
+  assert.equal(rows[0].delivery_key, null);
+  assert.match(rows[1].delivery_key, /^dlv_[0-9a-f]{12}$/);
+  const audit = (await database.query("SELECT actor_id, entity_id, data FROM audit_log WHERE action = 'cart.deliveries_set'")).rows;
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].actor_id, 'user_client');
+  assert.equal(audit[0].entity_id, cart.id);
+  assert.deepEqual(audit[0].data.detail.after, rows.map(row => [row.id]));
+  const reread = (await call(path)).body.cart;
+  assert.deepEqual(reread.groups.map(group => group.lineIds), rows.map(row => [row.id]));
+  const combined = await call(split, { method: 'PUT', body: { split: 'none' } });
+  assert.equal(combined.body.cart.groups.length, 1);
+  assert.equal((await database.query('SELECT count(*)::int AS n FROM client_cart_lines WHERE cart_id = $1 AND delivery_key IS NOT NULL', [cart.id])).rows[0].n, 0);
 });

@@ -1,6 +1,7 @@
+import { operatingHours } from "../src/operating-hours.js";
 import { routeBaskets } from "../src/baskets.js";
 import { calculateRefundSettlement } from "../src/refund-policy.js";
-import { defaultOperationalSettings, publicOrderFor, moneyReportingForOrder } from "../src/operational-model.js";
+import { defaultOperationalSettings, publicOrderFor, moneyReportingForOrder, deliveryFeeForDistance, distanceMetersBetween } from "../src/operational-model.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -507,6 +508,9 @@ test("adding a cart line returns cheap listing stubs without photos", async () =
     printerMaxWidthFeet: null,
     printLayouts: [],
     express: false,
+    sampleAvailable: false,
+    samplePriceMinor: null,
+    clientSamplePriceMinor: null,
     coverSpineForm: false,
     acceptedFormats: [{ code: "pdf", displayName: "PDF", inputKind: "file", active: true }],
     optionGroups: [{
@@ -1402,7 +1406,7 @@ test('cart group listings count combined capacity and each product minimum quant
   await assert.rejects(read(), { code: 'cart_checked_out' });
 });
 
-test('cart group listings use the selected group date and count earlier draft groups at that shop', async () => {
+test('cart group listings use the selected delivery date and count earlier deliveries at that shop', async () => {
   const { store, client } = fixture();
   store.settings.promiseAllowanceMinutes = 0;
   store.settings.operatingHours.sameDayPromiseAllowanceMinutes = 0;
@@ -1411,7 +1415,7 @@ test('cart group listings use the selected group date and count earlier draft gr
   const call = caller(store, client);
   const early = '2026-08-24T10:00:00.000Z', later = '2026-08-25T10:00:00.000Z';
   const cart = (await call('POST', '/me/carts', { deadline: early })).body.cart;
-  for (const deadline of [early, later]) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline, quantity: 1, optionIds: [] });
+  for (const deadline of [early, later]) await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline, quantity: 1, optionIds: [], separateDelivery: deadline === later });
   const groupId = store.cartLines[1].id;
   const read = () => call('GET', `/me/carts/${cart.id}/groups/${groupId}/listings`);
   const available = await read();
@@ -1437,7 +1441,8 @@ test("explicit delivery needs a destination even without distance-first ranking;
   assert.equal((await call("POST", "/me/matches", { subcategoryCode: "flyers" })).status, 200);
   const pickup = await call("POST", "/me/matches/next", { subcategoryCode: "flyers", fulfillmentMode: "pickup", excludedSupplierIds: ["supplier_b"] });
   assert.equal(pickup.body.hubPickup.feeMinor, 0);
-  assert.equal(pickup.body.hubPickup.schedule, null);
+  assert.deepEqual(pickup.body.hubPickup.schedule, operatingHours(store.settings).schedule);
+  assert.equal(pickup.body.hubPickup.hoursSource, "operating_hours");
   assert.equal(pickup.body.listings[0].deliveryFeeMinor, 0);
 });
 
@@ -1803,6 +1808,18 @@ for (const acrossShops of [false, true]) {
     for (const [item, deadline] of [['item_a', dates[0]], [acrossShops ? 'item_b' : 'item_a2', dates[1]], ['item_a', dates[0]]]) {
       await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item, deadline, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
     }
+    if (!acrossShops) {
+      // One shop is one delivery by its earliest date until the client splits it.
+      const merged = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+      assert.equal(merged.groupCount, 1);
+      assert.equal(merged.groups[0].deadline, dates[0]);
+      assert.equal(merged.groups[0].canDeliverSeparately, true);
+      assert.equal(merged.groups[0].separateDelivery, false);
+      assert.equal(merged.clientQuote.deliveryLines.length, 1);
+      assert.equal(merged.clientQuote.upfrontReason, 'platform_setting');
+      assert.equal(merged.clientQuote.downpaymentPercent, 75);
+      await call('PUT', `/me/carts/${cart.id}/groups/${merged.groups[0].id}/deliveries`, { split: 'by_deadline' });
+    }
     const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
     assert.deepEqual(preview.lines.map(line => line.deadline), [dates[0], dates[1], dates[0]]);
     assert.equal(preview.deadline, null);
@@ -1847,14 +1864,14 @@ for (const acrossShops of [false, true]) {
   });
 }
 
-test('selection tokens retain their own date and line edits recheck only that product', async () => {
+test('selection tokens retain their own date and delivery, and line edits recheck that delivery', async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
   const original = '2026-09-10T00:00:00.000Z';
   const later = '2026-09-12T00:00:00.000Z';
   const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup', deadline: original })).body.cart;
   for (const deadline of [original, later]) {
-    const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline })).body;
+    const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline, separateDelivery: deadline === later })).body;
     const listing = [...match.listings, ...match.otherListings].find(row => row.id === 'item_a');
     const input = { selectToken: listing.selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [], artworkFileId: 'file_art' };
     await assert.rejects(call('POST', `/me/carts/${cart.id}/lines`, { ...input, deadline: '2026-10-01T00:00:00Z' }), { code: 'select_token_deadline_mismatch' });
@@ -1865,8 +1882,10 @@ test('selection tokens retain their own date and line edits recheck only that pr
   const match = (await call('POST', '/me/matches', { cartId: cart.id, groupId: preview.groups[1].id, subcategoryCode: 'brochures' })).body;
   const selected = store.matchSelections.find(row => row.requestId === match.matchRequestId);
   assert.equal(selected.selection.deadline, later);
+  assert.equal(selected.selection.deliveryKey, store.cartLines[1].deliveryKey);
+  // A date edit keeps the product in its chosen delivery.
   const edited = (await call('PATCH', `/me/carts/${cart.id}/lines/${preview.lines[1].id}`, { deadline: original })).body.cart;
-  assert.equal(edited.groups.length, 1);
+  assert.equal(edited.groups.length, 2);
   assert.equal(edited.deadline, original);
   await assert.rejects(call('PATCH', `/me/carts/${cart.id}/lines/${preview.lines[1].id}`, { deadline: AT }), { code: 'deadline_not_met' });
 });
@@ -1889,16 +1908,22 @@ test('legacy single-date cart keeps one sub-order and its configured installment
   assert.equal(store.orders.length, 1);
 });
 
-test('a later-date slow product does not force the earlier product to miss its own match', async () => {
+test('an earlier product joins a slow shop delivery only when it is delivered separately', async () => {
   const { store, client } = fixture();
   const call = caller(store, client);
   const item = store.catalogItems.find(row => row.id === 'item_a2');
   item.turnaroundMode = 'override'; item.turnaroundHours = 240;
   const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart;
   await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: item.id, deadline: '2026-10-10T00:00:00Z', quantity: 1, optionIds: [], artworkFileId: 'file_art' });
-  const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-08-28T00:00:00Z' })).body;
-  assert.ok([...match.listings, ...match.otherListings].some(row => row.id === 'item_a'));
-  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline: '2026-08-28T00:00:00Z', quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  // Joining the slow product's delivery would move it to the earlier date.
+  const combined = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-08-28T00:00:00Z' })).body;
+  assert.ok(![...combined.listings, ...combined.otherListings].some(row => row.id === 'item_a'));
+  await assert.rejects(call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline: '2026-08-28T00:00:00Z', quantity: 1, optionIds: [], artworkFileId: 'file_art' }), { code: 'deadline_not_met' });
+  const match = (await call('POST', '/me/matches', { cartId: cart.id, subcategoryCode: 'flyers', deadline: '2026-08-28T00:00:00Z', separateDelivery: true })).body;
+  const listing = [...match.listings, ...match.otherListings].find(row => row.id === 'item_a');
+  assert.ok(listing);
+  await assert.rejects(call('POST', `/me/carts/${cart.id}/lines`, { selectToken: listing.selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [], artworkFileId: 'file_art', separateDelivery: false }), { code: 'select_token_delivery_mismatch' });
+  await call('POST', `/me/carts/${cart.id}/lines`, { selectToken: listing.selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
   const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, { payment: { method: 'qr_manual', reference: 'EARLIEST-FIRST', proofFileId: 'file_qr' } })).body;
   assert.deepEqual(placed.basket.groups.map(group => group.deadline), ['2026-10-10T00:00:00.000Z', '2026-08-28T00:00:00.000Z']);
 });
@@ -2103,4 +2128,206 @@ test('saved address deletion is owner-only, clears the default and refuses reuse
   await assert.rejects(call('DELETE', `/me/addresses/${first.id}`), { status: 404, code: 'address_not_found' });
   await assert.rejects(call('POST', '/me/matches', { subcategoryCode: 'flyers', addressId: first.id }), { code: 'address_not_found' });
   assert.deepEqual((await call('DELETE', `/me/addresses/${second.id}`)).body, { ok: true, defaultCleared: false });
+});
+
+// gridgo-api#275: a shop delivery works to its earliest product date, and the
+// client may split one shop into separately delivered, separately paid orders.
+const NEAR = { lat: 7.066, lng: 125.61, label: 'Near' };
+const FAR = { lat: 7.2, lng: 125.75, label: 'Far' };
+const PAY = (reference) => ({ payment: { method: 'qr_manual', reference, proofFileId: 'file_qr' } });
+
+test('one shop with several product dates is one delivery due by the earliest date', async () => {
+  const { store, client } = fixture();
+  store.settings.downpaymentPercent = 75;
+  const call = caller(store, client);
+  const early = '2026-09-10T00:00:00.000Z', late = '2026-09-18T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: NEAR })).body.cart;
+  // The later product goes in first: the order of adding never decides the date.
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a2', deadline: late, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline: early, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const preview = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  assert.deepEqual(preview.lines.map(line => line.deadline), [late, early]);
+  assert.equal(preview.groupCount, 1);
+  assert.equal(preview.isMultiGroup, false);
+  assert.equal(preview.deadline, early);
+  assert.equal(preview.groups[0].deadline, early);
+  assert.equal(preview.groups[0].deliveryNumber, 1);
+  assert.equal(preview.groups[0].shopDeliveryCount, 1);
+  assert.ok(Date.parse(preview.groups[0].readyBy) <= Date.parse(early));
+  assert.equal(preview.clientQuote.deliveryLines.length, 1);
+  assert.equal(preview.clientQuote.deliveryLines[0].deadline, early);
+  assert.equal(preview.clientQuote.downpaymentPercent, 75);
+  const placed = (await call('POST', `/me/carts/${cart.id}/checkout`, PAY('EARLIEST'))).body;
+  assert.equal(placed.basket, undefined);
+  assert.equal(placed.order.deadline, early);
+  assert.equal(placed.order.deliveryNumber, undefined);
+  assert.equal(store.orders.length, 1);
+  assert.equal(store.orderJobs.length, 1);
+  assert.equal(store.orderJobs[0].deadline, early);
+  assert.ok(Date.parse(store.orders[0].promiseBy) <= Date.parse(early));
+});
+
+test('a later product joins the shop delivery at its earlier date; matching sees the combined work', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const early = '2026-09-10T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'pickup' })).body.cart;
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', deadline: early, quantity: 1, optionIds: [], artworkFileId: 'file_art' });
+  const groupId = store.cartLines[0].id;
+  const match = (await call('POST', '/me/matches', { cartId: cart.id, groupId, subcategoryCode: 'brochures', deadline: '2026-10-01T00:00:00Z' })).body;
+  const listing = match.listings.find(row => row.id === 'item_a2');
+  assert.ok(Date.parse(listing.readyBy) <= Date.parse(early), 'offered against the delivery date, not the later product date');
+  const added = (await call('POST', `/me/carts/${cart.id}/lines`, { selectToken: listing.selectToken, matchRequestId: match.matchRequestId, quantity: 1, optionIds: [], artworkFileId: 'file_art' })).body.cart;
+  assert.equal(added.groups.length, 1);
+  assert.equal(added.groups[0].deadline, early);
+  assert.deepEqual(added.lines.map(line => line.deadline), [early, '2026-10-01T00:00:00.000Z']);
+  // Listings for the group are judged by the delivery's earliest date too.
+  const browse = (await call('GET', `/me/carts/${cart.id}/groups/${groupId}/listings`)).body;
+  assert.equal(browse.deadline, early);
+});
+
+test('deliver separately: each delivery quotes its own fee before payment, validated and audited', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const d0 = '2026-09-10T00:00:00.000Z', d1 = '2026-09-12T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: NEAR })).body.cart;
+  const path = `/me/carts/${cart.id}`;
+  for (const [catalogItemId, deadline, dropoff] of [['item_a', d0, null], ['item_a2', d1, FAR], ['item_a', d1, null]]) {
+    await call('POST', `${path}/lines`, { catalogItemId, deadline, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...(dropoff ? { dropoff } : {}) });
+  }
+  const [l1, l2, l3] = store.cartLines.map(line => line.id);
+  const shop = store.supplierProfiles.find(row => row.userId === 'supplier_a').shop;
+  const fee = (point) => deliveryFeeForDistance(distanceMetersBetween(shop, point), store.settings);
+  assert.notEqual(fee(NEAR), fee(FAR));
+  const merged = (await call('GET', path)).body.cart;
+  assert.equal(merged.groups.length, 1);
+  assert.equal(merged.groups[0].deliveryFeeMinor, fee(FAR), 'one delivery to the farthest drop-off');
+  const split = `${path}/groups/${merged.groups[0].id}/deliveries`;
+  for (const [body, code] of [
+    [{ deliveries: [[l1], [l2]] }, 'invalid_delivery_split'],
+    [{ deliveries: [[l1, l2], [l2, l3]] }, 'invalid_delivery_split'],
+    [{ deliveries: [[l1], [l2, 'cline_elsewhere'], [l3]] }, 'invalid_delivery_split'],
+    [{ deliveries: [[l1], []] }, 'invalid_delivery_split'],
+    [{ deliveries: [[l1, l2, l3]], split: 'none' }, 'invalid_delivery_split'],
+    [{ split: 'by_shop' }, 'invalid_delivery_split'],
+    [{}, 'invalid_delivery_split'],
+  ]) await assert.rejects(call('PUT', split, body), { code });
+  await assert.rejects(call('PUT', `${path}/groups/missing/deliveries`, { split: 'none' }), { code: 'cart_group_not_found' });
+  assert.equal(store.auditLog.length, 0);
+
+  const result = await call('PUT', split, { deliveries: [[l3, l2], [l1]].reverse() });
+  assert.equal(result.mutated, true);
+  const cartAfter = result.body.cart;
+  assert.deepEqual(cartAfter.groups.map(group => group.lineIds), [[l1], [l2, l3]]);
+  assert.deepEqual(cartAfter.groups.map(group => group.deadline), [d0, d1]);
+  assert.deepEqual(cartAfter.groups.map(group => group.label), ['Shop A', 'Shop A']);
+  assert.deepEqual(cartAfter.groups.map(group => [group.deliveryNumber, group.shopDeliveryCount, group.separateDelivery]), [[1, 2, true], [2, 2, true]]);
+  assert.deepEqual(cartAfter.groups.map(group => group.deliveryFeeMinor), [fee(NEAR), fee(FAR)]);
+  assert.deepEqual(cartAfter.clientQuote.deliveryLines.map(line => [line.groupId, line.label, line.deliveryNumber, line.deliveryFeeMinor]),
+    [[l1, 'Shop A', 1, fee(NEAR)], [l2, 'Shop A', 2, fee(FAR)]]);
+  assert.equal(cartAfter.clientQuote.deliveryFeeMinor, fee(NEAR) + fee(FAR));
+  assert.equal(cartAfter.clientQuote.totalMinor, cartAfter.groups.reduce((sum, group) => sum + group.totalMinor, 0));
+  assert.equal(cartAfter.clientQuote.upfrontReason, 'multiple_fulfillment_groups');
+  assert.equal(cartAfter.clientQuote.downpaymentPercent, 100);
+  assert.ok(cartAfter.lines.every(line => line.groupId && line.supplierId === undefined), 'split carts stay anonymous');
+  const [audit] = store.auditLog;
+  assert.equal(audit.action, 'cart.deliveries_set');
+  assert.equal(audit.entityId, cart.id);
+  assert.deepEqual(audit.detail, { supplierId: 'supplier_a', split: 'custom', before: [[l1, l2, l3]], after: [[l1], [l2, l3]], deliveryCount: 2 });
+
+  // The same choice again changes nothing and writes no audit row.
+  const again = await call('PUT', `${path}/groups/${l2}/deliveries`, { deliveries: [[l1], [l2, l3]] });
+  assert.equal(again.mutated, false);
+  assert.equal(store.auditLog.length, 1);
+  const keyBefore = store.cartLines.find(line => line.id === l2).deliveryKey;
+  assert.match(keyBefore, /^dlv_/);
+  assert.equal((await call('PUT', split, { split: 'none' })).body.cart.groups.length, 1);
+  assert.ok(store.cartLines.every(line => line.deliveryKey === undefined));
+  const byDate = (await call('PUT', split, { split: 'by_deadline' })).body.cart;
+  assert.deepEqual(byDate.groups.map(group => group.lineIds), [[l1], [l2, l3]]);
+  assert.deepEqual(store.auditLog.map(row => row.detail.split), ['custom', 'none', 'by_deadline']);
+
+  // Combining is refused when one delivery could no longer make the earliest date.
+  Object.assign(store.catalogItems.find(row => row.id === 'item_a2'), { turnaroundMode: 'override', turnaroundHours: 400 });
+  await assert.rejects(call('PUT', split, { split: 'none' }), (error) => error.code === 'deadline_not_met'
+    && error.details.deadline === d0 && error.details.lineIds.length === 3);
+  assert.equal(store.auditLog.length, 3);
+});
+
+test('separate deliveries check out as independent orders: own dispatch job, fee, rider split and payout', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const d0 = '2026-09-10T00:00:00.000Z', d1 = '2026-09-12T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { fulfillmentMode: 'delivery', defaultDropoff: NEAR })).body.cart;
+  const path = `/me/carts/${cart.id}`;
+  for (const [catalogItemId, deadline, dropoff] of [['item_a', d0, null], ['item_a2', d1, FAR], ['item_b', d1, null]]) {
+    await call('POST', `${path}/lines`, { catalogItemId, deadline, quantity: 1, optionIds: [], artworkFileId: 'file_art', ...(dropoff ? { dropoff } : {}) });
+  }
+  const [l1, l2, l3] = store.cartLines.map(line => line.id);
+  const preview = (await call('PUT', `${path}/groups/${l1}/deliveries`, { deliveries: [[l1], [l2]] })).body.cart;
+  assert.deepEqual(preview.groups.map(group => group.lineIds), [[l1], [l2], [l3]]);
+  const { basket, invoice } = (await call('POST', `${path}/checkout`, PAY('SPLIT'))).body;
+  assert.equal(basket.totalMinor, preview.clientQuote.totalMinor);
+  assert.deepEqual(basket.groups.map(group => group.label), ['Shop A', 'Shop A', 'Shop B']);
+  assert.deepEqual(basket.groups.map(group => group.deadline), [d0, d1, d1]);
+  assert.deepEqual(basket.groups.map(group => [group.deliveryNumber, group.shopDeliveryCount]), [[1, 2], [2, 2], [undefined, undefined]]);
+  assert.deepEqual(invoice.groups.map(group => group.deliveryNumber), [1, 2, undefined]);
+  assert.deepEqual(basket.groups.map(group => group.deliveryFeeMinor), preview.groups.map(group => group.deliveryFeeMinor));
+  assert.equal(invoice.deliveryLines.length, 3);
+  const shopA = basket.groups.filter(group => group.label === 'Shop A').map(group => store.orders.find(order => order.id === group.orderId));
+  assert.equal(new Set(shopA.map(order => order.supplierId)).size, 1);
+  for (const [index, order] of shopA.entries()) {
+    assert.equal(order.basketId, basket.id);
+    assert.equal(order.deliveryNumber, index + 1);
+    assert.equal(order.shopDeliveryCount, 2);
+    const jobs = store.orderJobs.filter(job => job.orderId === order.id);
+    assert.equal(jobs.length, 1, 'one dispatch job per delivery');
+    assert.deepEqual(jobs[0].dropoff, index ? FAR : { ...NEAR });
+    assert.equal(jobs[0].deliveryFeeMinor, order.deliveryFeeMinor);
+    assert.equal(jobs[0].riderPayoutMinor + jobs[0].platformDeliveryShareMinor, order.deliveryFeeMinor);
+    assert.equal(order.payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), order.supplierSubtotalMinor);
+    assert.equal(store.orderLineItems.filter(line => line.orderId === order.id).length, 1);
+    for (const role of ['client', 'supplier', 'ops_admin']) {
+      const projected = publicOrderFor(order, { id: role === 'client' ? client.id : 'someone', role }, store);
+      assert.equal(projected.deliveryNumber, index + 1);
+    }
+  }
+  assert.notEqual(shopA[0].deliveryFeeMinor, shopA[1].deliveryFeeMinor);
+  const audit = store.auditLog.find(row => row.action === 'basket.separate_deliveries');
+  assert.deepEqual(audit.detail.deliveries.map(row => [row.orderId, row.deliveryNumber, row.deadline, row.deliveryFeeMinor]),
+    shopA.map(order => [order.id, order.deliveryNumber, order.deadline, order.deliveryFeeMinor]));
+
+  // One basket payment funds every delivery; each then moves on its own.
+  let seq = 0;
+  const confirmed = await routeBaskets({ req: { method: 'POST' }, url: new URL(`http://gridgo.test/baskets/${basket.id}/payment/confirm`),
+    store, user: { id: 'ops', role: 'ops_admin' }, readBody: async () => ({}), id: () => `aud_split_${++seq}`, now: () => AT });
+  assert.equal(confirmed.status, 200);
+  assert.ok(store.orders.every(order => order.state === 'needs_qa' && order.payments.initial.amountMinor === order.totalMinor));
+  shopA[1].payments.initial.status = 'confirmed';
+  const sibling = structuredClone(shopA[0]);
+  const refund = calculateRefundSettlement(shopA[1], { beforeProduction: true, shopEntitlementMinor: 0, riderEntitlementMinor: 0 });
+  assert.equal(refund.deliveryMinor, shopA[1].deliveryFeeMinor);
+  assert.deepEqual(shopA[0], sibling);
+});
+
+test('carts without a delivery choice and legacy shop/date fee locks are unchanged', async () => {
+  const { store, client } = fixture();
+  const call = caller(store, client);
+  const deadline = '2026-09-10T00:00:00.000Z';
+  const cart = (await call('POST', '/me/carts', { deadline })).body.cart;
+  await call('POST', `/me/carts/${cart.id}/lines`, { catalogItemId: 'item_a', optionIds: [], quantity: 20 });
+  const line = store.cartLines[0];
+  // A schedule locked while groups were keyed by shop and date.
+  line.serviceFeeSnapshot = { groupKey: ['supplier_a', deadline], schedule: { version: 1, rateBps: 1000 } };
+  store.settings.serviceFeeSchedule = { version: 2, rounding: 'half_up_once', brackets: [
+    { upToMinor: 200000, rateBps: 4500 }, { upToMinor: 2000000, rateBps: 2500 }, { upToMinor: null, rateBps: 1500 },
+  ] };
+  const read = (await call('GET', `/me/carts/${cart.id}`)).body.cart;
+  assert.equal(read.groups[0].clientItemSubtotalMinor, 220000);
+  assert.equal(read.groups[0].separateDelivery, false);
+  assert.equal(read.groups[0].canDeliverSeparately, false);
+  await call('PATCH', `/me/carts/${cart.id}/lines/${line.id}`, { quantity: 20 });
+  assert.deepEqual(line.serviceFeeSnapshot.groupKey, ['supplier_a', null]);
+  assert.equal((await call('GET', `/me/carts/${cart.id}`)).body.cart.groups[0].clientItemSubtotalMinor, 220000);
+  assert.equal(line.deliveryKey, undefined);
 });

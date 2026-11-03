@@ -122,7 +122,7 @@ For new builds, add this to `POST /files/:fileId/attach` when attaching artwork 
 }
 ```
 
-Keep the existing attachment target fields, including line scope where required by the storage contract. The same `legalConsentVersion` and `artworkRights` fields belong in `POST /me/carts/:id/checkout`. Cart uploads occur before an order exists; checkout records a separate acceptance for **every resulting order**, including multiple shop/deadline groups. The shared basket payment boundary and integer-centavo calculations are unchanged.
+Keep the existing attachment target fields, including line scope where required by the storage contract. The same `legalConsentVersion` and `artworkRights` fields belong in `POST /me/carts/:id/checkout`. Cart uploads occur before an order exists; checkout records a separate acceptance for **every resulting order**, including multiple shop delivery groups. The shared basket payment boundary and integer-centavo calculations are unchanged.
 
 The acceptance references the owning client, order and exact document version in `legal_acceptances` with `purpose=artwork`. Repeated attachment of the same version to the same order does not replace the original evidence. A new version accepted for that order appends another row. Evidence is kept outside ordinary order projections. The original `/files` multipart byte-upload request remains `purpose` + `file`; consent is required at the order attachment/checkout boundary, when there is an order to bind it to.
 

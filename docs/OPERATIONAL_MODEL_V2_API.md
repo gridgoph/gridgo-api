@@ -766,6 +766,10 @@ Default `GET /settings` response:
 }
 ```
 
+`shopReceiptScanRequired` (Finance, default `false`, Super Admin editable through the same handshake) makes the shop attach its invoice/receipt scan before Ready for rider pickup; see [SHOP_RECEIPT_SCAN_API.md](SHOP_RECEIPT_SCAN_API.md).
+
+`sampleBatchHoldDays` (default `14`, whole days 1–90, Super Admin editable through the same handshake) is how long a sampled batch price is held after the sample is delivered; see [SAMPLE_FIRST_API.md](SAMPLE_FIRST_API.md).
+
 `artworkGuidance` (the recommended resolution and colour per product type, Super Admin editable through the same `PATCH /settings` handshake) is described in [ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).
 
 `paymentQr` describes the single supported manual QR checkout method. `method` and `caption` stay `qr_manual` / `QR Ph`. When Super Admin has activated a plate, `imageUrl` is the cache-busted public path `/public/payment-qr?v=<fileId>` (API-root relative). Omit `imageUrl` when none is uploaded — clients then use their bundled fallback. Do not advertise another payment method.
@@ -819,6 +823,10 @@ Each of the first three `maxDistanceMeters` values must be an actual JSON intege
 `serviceFeeVisibleToClient` (JSON boolean, default `true`; anything else is `400 invalid_service_fee_visibility`) decides whether client checkout names the `Service fee · N%` row. When false, client order projections also omit legacy payment `componentLines`, including accepted/pending quotes and quote history; staff and supplier projections retain them. Receipt-ready inbox copy is fee-neutral regardless of this setting. It never changes money: the fee is still charged and still inside the client's Printing amount. Omitted on PATCH, the current value is kept; absent on an older row, GET returns `true`.
 
 `downpaymentPercent` is the share of an order-match checkout the client pays up front: `100` (default) or `75`. Anything else, including strings and `null`, is `400 invalid_downpayment_percent` with `field: "downpaymentPercent"`. It decides new checkouts only; see [Upfront checkout](#upfront-checkout). Omitted on PATCH, the current value is kept; absent on an older row, GET returns `100`.
+
+`quoteValidityDays` (default `7`, integer 1–90) is how long published quote options stay acceptable; Super Admin only, other values are `400 invalid_quote_validity_days`. It applies to the next publish; see [Quote requests](QUOTE_REQUESTS_API.md#validity).
+
+`shopMoveCoverBps` (Super Admin, whole number 0–10,000, default `5000`) is GRIDGO's cover for a dearer substitute shop as basis points of the original order's service fee, never above the fee actually collected; anything else is `400 invalid_shop_move_cover`. Omitted on PATCH, the current value is kept; absent on an older row, GET returns `5000`. Contract: [Substitute-shop price rule](SHOP_RECOVERY_API.md#substitute-shop-price-rule).
 
 `productionNudge` is the live cadence for a shop that has not made the next production move. Desk (Operational settings, both `/ops/settings` and `/admin/settings`) edits one object on this same route:
 
@@ -897,7 +905,7 @@ Task G defines and validates both pickup financial shapes, but pickup commercial
 
 ### Hub pick-up settings
 
-`GET /settings` exposes `settings.hubPickup: {point,schedule,feeMinor}` to authenticated apps. `point` is the existing GRIDGO hub from `src/gridgo-office.js` and is read-only. Defaults are `feeMinor: 0` (PHP minor units) and `schedule: null` (operating hours not yet configured). Migration adds these defaults to existing settings; no existing order or cart is changed.
+`GET /settings` exposes `settings.hubPickup: {point,schedule,feeMinor,hoursSource,effectiveSchedule}` to authenticated apps. `point` is the existing GRIDGO hub from `src/gridgo-office.js` and is read-only. Defaults are `feeMinor: 0` (PHP minor units) and `schedule: null`, which means the hub follows `settings.operatingHours.schedule` (`hoursSource: "operating_hours"`); a set hub schedule wins (`hoursSource: "hub"`). `effectiveSchedule` is the schedule that applies; contract: [Hub and Admin App](HUB_HANDOVER_API.md#hub-and-admin-app). Migration adds these defaults to existing settings; no existing order or cart is changed.
 
 Only a Super Admin membership may include `hubPickup` in `PATCH /settings`, using the existing `expectedVersion` and nonblank `reason` handshake. Operations may continue editing its other settings but receives `403 forbidden` when attempting this field. Send the complete `{schedule,feeMinor}` object; omission preserves the previous value. Negative, fractional, string or unsafe fees return `400 invalid_hub_pickup`; invalid schedules return `400 invalid_hub_pickup_schedule`. Stale versions return `409 settings_version_conflict`. Success increments version and audits previous/current settings atomically.
 
@@ -922,7 +930,7 @@ Example dashboard update (sample hours, not production defaults):
 }
 ```
 
-Schedule follows the shared `src/availability.js` validation: weekday 0 is Sunday through 6 Saturday, times are whole minutes after midnight (0–1440), closing is after opening, and same-day windows cannot overlap. A configured schedule has at least one opening window (maximum 28); optional closures (maximum 120) use inclusive `startDay` / `endDay` date strings. `null` clears the schedule. The dashboard follow-up should place this editor next to delivery bands, restrict editing to Super Admin, and leave the fee at zero until explicitly configured. Read-only apps must distinguish an unconfigured schedule from an all-week opening claim.
+Schedule follows the shared `src/availability.js` validation: weekday 0 is Sunday through 6 Saturday, times are whole minutes after midnight (0–1440), closing is after opening, and same-day windows cannot overlap. A configured schedule has at least one opening window (maximum 28); optional closures (maximum 120) use inclusive `startDay` / `endDay` date strings. `null` clears the hub schedule so the hub follows operating hours again. The dashboard follow-up should place this editor next to delivery bands, restrict editing to Super Admin, and leave the fee at zero until explicitly configured. Read-only apps should label `hoursSource: "operating_hours"` as following GRIDGO's operating hours.
 
 The opt-in pre-match request and read-only checkout contract, including compatibility and fulfillment-charge fields, is [Fulfillment before matching](ORDER_MATCH_API.md#fulfillment-before-matching). Placed pickup orders and their invoices preserve the schedule and fee at checkout; subsequent settings edits apply only to future checkouts.
 
@@ -1171,7 +1179,7 @@ optional. Every staff production correction in either flow now requires a
 listed `reasonCode` plus the `reason` note and exposes the Forced by GRIDGO tag.
 
 
-[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Legacy production and packing photo requirements follow this section; version-2 handovers follow the linked handover contract. Supplier invoice scans remain optional.
+[Supplier job readiness](SUPPLIER_JOB_READINESS_API.md) defines the preflight checklist, authenticated transition refusal audit, readable job details and Operations checks for report 6C695C15. Legacy production and packing photo requirements follow this section; version-2 handovers follow the linked handover contract. Supplier invoice scans remain optional unless the [shop receipt scan](SHOP_RECEIPT_SCAN_API.md) switch is on.
 
 Packing transitions (`supplier_self_qc` and `ready_for_dispatch`) return `409 claim_hold_active` while the order's claim payout-hold flag is set or any claim is `open`/`payout_held`. This applies to the assigned supplier and Operations/Super Admin corrections, before photo/override checks. Operations must release or resolve all active claims before packing can continue; a correction reason cannot bypass the hold.
 

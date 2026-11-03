@@ -1,5 +1,6 @@
 import { splitVoucherMinor } from './voucher-money.js';
 import { serviceFeeMoney } from './service-fee.js';
+import { canonicalColourPricing } from './colour-pricing.js';
 
 /** Page display amounts cover all ordered copies/sets, so odd centavos can be
  * allocated exactly without fractional money or independently marking up sheets. */
@@ -29,7 +30,7 @@ export function publicColourQuote(quote, role, clientLineSubtotalMinor = null) {
 /** Customers need offered tiers, not the shop's private rate matrix. */
 export function publicColourListing(pricing) {
   if (!pricing) return null;
-  return {sizes:pricing.sizes.map(({prices,...size}) => ({...structuredClone(size),offeredTiers:Object.keys(prices)}))};
+  return {sizes:canonicalColourPricing(pricing).sizes.map(({prices,...size}) => ({...structuredClone(size),offeredTiers:Object.keys(prices)}))};
 }
 
 /** Match the original invoice's all-in line allocation using frozen money. */

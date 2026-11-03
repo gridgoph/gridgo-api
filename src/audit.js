@@ -23,7 +23,7 @@ const pick = (record, fields) => record == null ? null : safeAuditValue(Object.f
 const COMMON = ['reviewData', 'id', 'userId', 'orderId', 'status', 'state', 'version', 'createdAt', 'updatedAt'];
 const TARGETS = {
   supplier_profile: ['supplierProfiles', [...COMMON, 'schedule', 'isClosed']],
-  order: ['orders', [...COMMON, 'clientId', 'supplierId', 'riderId', 'readyBy', 'promiseBy', 'fulfillmentMode', 'pickup', 'dropoff', 'fileCheck', 'pickupChecklist', 'supplierSubtotalMinor', 'serviceFeeMinor', 'deliveryFeeMinor', 'totalMinor', 'payments', 'payoutMilestones', 'payoutHold', 'claimHold', 'rescheduleRequest', 'shopRecovery', 'refund', 'productionDeductionMinor', 'physicalInvoiceRequest', 'dropoffConfirmation', 'deliveryPin']],
+  order: ['orders', [...COMMON, 'clientId', 'supplierId', 'riderId', 'readyBy', 'promiseBy', 'fulfillmentMode', 'pickup', 'dropoff', 'fileCheck', 'pickupChecklist', 'supplierSubtotalMinor', 'serviceFeeMinor', 'deliveryFeeMinor', 'totalMinor', 'payments', 'payoutMilestones', 'payoutHold', 'claimHold', 'rescheduleRequest', 'shopRecovery', 'shopMoves', 'refund', 'productionDeductionMinor', 'physicalInvoiceRequest', 'dropoffConfirmation', 'deliveryPin']],
   user: ['users', [...COMMON, 'name', 'role', 'accountType', 'accountStatus', 'accountStatusReason', 'verificationStatus', 'shop']],
   claim: ['claims', [...COMMON, 'holdReason', 'reason', 'releaseReason']],
   issue: ['issues', [...COMMON, 'kind', 'category', 'claimId']],

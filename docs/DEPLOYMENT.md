@@ -1,5 +1,19 @@
 # GRIDGO API production deployment
 
+After applying the session-observation migration, run
+`npm run backfill:last-sign-ins` with the intended deployment database to recover
+historical observations from GRIDGO's `staff.sign_in` audit evidence. The command
+is idempotent and preserves newer timestamps; it does not contact Clerk. Accounts
+without a sign-in audit stay unchanged. See [Clerk-only identity](../README.md#clerk-only-identity).
+
+From the production compose directory, use the shipped API image and its database environment:
+
+```bash
+docker compose run --rm --no-deps api npm run backfill:last-sign-ins
+```
+
+Sessions already live at deploy may record their first post-deploy request rather than their original sign-in time.
+
 This runbook is authoritative for the PostgreSQL 17 and Clerk-only production service at `gridgo-api.talasora.com`. CI builds and smoke-tests the image on every ref, but publishes to `ghcr.io/gridgoph/gridgo-api` (immutable `sha-...` plus `latest`) and invokes the server's restricted `api` deploy command only after a default-branch merge; feature-branch builds never push an image. CI never writes compose or secret files to the server.
 
 The PostgreSQL/Clerk cutover starts from the captain-authorized empty state. Do not restore `store.json`, write a JSON importer, recreate demo users, or copy development Clerk credentials into production.
@@ -445,9 +459,11 @@ an unchanged save's intent (see `docs/SCHEDULING_API.md`).
 ## Targeted read indexes and interrupted builds
 
 Migration `1793275200000_client_bootstrap_reads` builds five indexes with
-individual `CREATE INDEX CONCURRENTLY IF NOT EXISTS` commands.
+individual `CREATE INDEX CONCURRENTLY IF NOT EXISTS` commands. Migration
+`1793600000000_production_sweep_reads` builds two more the same way:
+`notifications_order_type_idx` and `file_references_reference_id_idx`.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
-for this migration only. Earlier migrations and completed index builds can
+for these migrations only. Earlier migrations and completed index builds can
 therefore remain committed if a later build fails. HTTP mutation transactions,
 advisory locks, audit and notification commits are unchanged.
 The existing unique partial `voucher_one_reservation` index already supports
@@ -470,7 +486,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND c.relname IN (
   'users_bootstrap_email_idx', 'users_bootstrap_unusual_email_idx',
   'tester_invites_unmatched_idx', 'promotion_invites_pending_idx',
-  'promotion_invites_client_idx'
+  'promotion_invites_client_idx', 'notifications_order_type_idx',
+  'file_references_reference_id_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -480,7 +497,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'users_bootstrap_email_idx', 'users_bootstrap_unusual_email_idx',
   'tester_invites_unmatched_idx', 'promotion_invites_pending_idx',
-  'promotion_invites_client_idx'
+  'promotion_invites_client_idx', 'notifications_order_type_idx',
+  'file_references_reference_id_idx'
 )
 \gexec
 SQL
@@ -490,7 +508,7 @@ docker compose run --rm --no-deps migrate
 ```
 
 The retry retains valid indexes, creates missing ones and records the migration
-if it was still pending. Re-run the first query afterwards: all five indexes
+if it was still pending. Re-run the first query afterwards: every listed index whose migration has run
 must be present with `indisvalid = true` and `indisready = true`. Do not remove
 or fake a `pgmigrations` row to recover an index build.
 
@@ -526,8 +544,13 @@ docker exec gridgo-postgres psql -U gridgo_api -d gridgo -c 'CREATE EXTENSION IF
 The recreation reuses `gridgo_postgres_data`; do not remove the volume. The
 extension is enabled separately in each database an operator wants to measure.
 
-After PostgreSQL restarts, a database administrator enables the extension in the
-GRIDGO database, once:
+Migration `1793600100000_pg_stat_statements` runs `CREATE EXTENSION IF NOT
+EXISTS pg_stat_statements` in the GRIDGO database when the server ships the
+extension and the migrator may create it; otherwise it only leaves a notice and
+changes nothing. It cannot set `shared_preload_libraries` or restart PostgreSQL:
+until the preload above is installed, the extension exists but its view reports
+that the library is not loaded. If the migration only left a notice, a database
+administrator enables the extension in the GRIDGO database after the restart, once:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;

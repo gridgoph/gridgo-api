@@ -1,4 +1,5 @@
 import { retainApprovedPhotos } from "./catalog-review-state.js";
+import { isQuoteListing } from "./quote-listings.js";
 import { identityHasMembership } from "./authorization-context.js";
 import { CatalogError, assertExpectedVersion, bumpVersion, catalogItemBlockers, catalogGroupsForItem, privateCatalogItem, publicCatalogItem, listingStartersFor } from "./supplier-catalog.js";
 import { privilegedAdminMemberships, queueInvalidate } from "./notifications.js";
@@ -65,7 +66,7 @@ export async function routeCatalogReview({ req, url, store, user, readBody, id, 
     const status = url.searchParams.get("status") || "pending";
     if (!["pending", "approved", "needs_revision"].includes(status)) fail(400, "invalid_review_status", "Choose a review state.");
     const after = url.searchParams.get("after") || "";
-    const items = (store.catalogItems || []).filter(item => (item.reviewStatus || "approved") === status && item.id > after)
+    const items = (store.catalogItems || []).filter(item => !isQuoteListing(item) && (item.reviewStatus || "approved") === status && item.id > after)
       .sort((a, b) => a.id.localeCompare(b.id)).slice(0, 51);
     return { status: 200, body: { items: items.slice(0, 50).map(item => ({ ...privateCatalogItem(store, item), reviewBlockers: listingReviewBlockers(store, item) })),
       nextCursor: items.length > 50 ? items[49].id : null } };

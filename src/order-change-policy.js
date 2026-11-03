@@ -24,7 +24,7 @@ export function publicChange(store, row, role) {
   if (role === 'supplier') { delete result.payment; delete result.paymentHistory; delete result.totalMinor; }
   if (['supplier', 'ops_admin', 'super_admin'].includes(role) && row.status === 'applied' && row.extraPrincipalMinor > 0) {
     const payout = (store.orderChangePayouts || []).find(p => p.changeId === row.id);
-    const settled = (store.refundSettlements || []).some(s => s.orderId === row.orderId && s.disposition !== 'delivery_adjustment');
+    const settled = (store.refundSettlements || []).some(s => s.orderId === row.orderId && !['delivery_adjustment', 'price_adjustment'].includes(s.disposition));
     result.payout = payout ? { ...payout, status: 'released' } : { status: settled ? 'superseded' : 'pending', amountMinor: row.extraPrincipalMinor, releaseRequires: 'final_payout_stage' };
   }
   return result;

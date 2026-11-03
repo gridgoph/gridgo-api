@@ -4,7 +4,8 @@ import { recordFileCheckTransition, supplierArtworkReleased } from './artwork-ga
 import { cancellationQuote, publicCancellationQuote, acceptedCancellationQuote } from './fault-policy.js';
 import { changePaymentPending } from './order-change-policy.js';
 import { adjustedDeliverySplit, deliveryPinPaymentPending } from './delivery-pin-policy.js';
-import { noCashVoucherRemedy } from './refund-policy.js';
+import { noCashVoucherRemedy, ADJUSTMENT_REFUND_KINDS } from './refund-policy.js';
+import { recordRecoveryRefundChoice, restoreRecoveryAfterWithdraw } from './shop-move-pricing.js';
 import { restoreVoucherForRefund } from './vouchers.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
@@ -37,7 +38,7 @@ function bind(file, request, field) {
   file.references ||= [];
   file.references.push({ type: 'refund_request', id: request.id, field });
 }
-function changeDestination(store, request, user, body) {
+export function changeDestination(store, request, user, body) {
   if (user.role !== 'client' || user.id !== request.clientId) fail(403, 'forbidden', 'Only the owning client may supply their receiving QR.');
   if (body.ownershipConfirmed !== true) fail(400, 'refund_qr_ownership_required', 'Confirm this is your own receiving account.');
   const provider = text(body.provider, 'provider', 40).toLowerCase();
@@ -105,7 +106,8 @@ function notify(store, request, order, kind, createId, at) {
       type: `refund_${kind}`, title: 'Client refund',
       body: order.fileCheck?.refundRequestId === request.id && kind === 'requested'
         ? `Your order is on hold for a prohibited item. ${request.reason} Operations has opened a full refund request. No refund transfer has been recorded yet.`
-        : request.kind === 'delivery_pin' ? 'The delivery-fee credit was updated. Fulfillment and shop entitlements continue unchanged.' : role === 'supplier' && kind === 'rejected'
+        : request.kind === 'delivery_pin' ? 'The delivery-fee credit was updated. Fulfillment and shop entitlements continue unchanged.'
+        : request.kind === 'shop_move' ? 'The replacement-shop price difference refund was updated. Your order continues with the replacement shop.' : role === 'supplier' && kind === 'rejected'
         ? 'The refund request was rejected. Open the order for its work and payout status.' : copy[kind], read: false, at });
   }
   queueOrderInvalidate(store, order, ['orders', 'payouts', 'claims']);
@@ -270,10 +272,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       audit(store, { actor: user, action: 'order.file_check', entityType: 'order', entityId: order.id, orderId: order.id,
         reason: eventReason, detail: { from, to: order.state, fileCheck: { ...order.fileCheck } } });
     }
-    if (order.shopRecovery && ['awaiting_client', 'ops_review'].includes(order.shopRecovery.status)) {
-      order.shopRecovery.refundRequestId = request.id;
-      order.shopRecovery.status = 'refund_requested';
-    }
+    recordRecoveryRefundChoice(order, request.id);
     eventKind = 'requested';
     if (quotedCancellation) eventData = { cancellationQuote: structuredClone(quotedCancellation) };
   } else if (action === 'destination') {
@@ -365,8 +364,8 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     request.status = action === 'reject' ? 'rejected' : 'withdrawn';
     eventKind = request.status;
     if (order.shopRecovery?.refundRequestId === request.id) {
-      order.shopRecovery.status = action === 'withdraw' ? 'awaiting_client' : 'ops_review';
-      order.shopRecovery.refundRequestId = null;
+      if (action === 'withdraw') restoreRecoveryAfterWithdraw(order);
+      else { order.shopRecovery.status = 'ops_review'; order.shopRecovery.refundRequestId = null; }
     }
   } else if (action === 'payment-attempts') {
     if (request.status !== 'approved' || activeAttempt(store, request)) fail(409, 'refund_payment_reserved', 'A payer already reserved this refund, or approval is required. Do not send another transfer.');
@@ -425,7 +424,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     bind(receipt, request, 'transfer_evidence');
     store.refundPayments.push(payment); attempt.status = 'paid'; attempt.updatedAt = at; request.status = 'paid';
     const settlement = settlementFor(store, request);
-    if (request.kind !== 'delivery_pin') restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
+    if (!ADJUSTMENT_REFUND_KINDS.includes(request.kind)) restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
     order.revenueAdjustments ||= [];
     const returnedPlatform = sumMinor([settlement.feeMinor, settlement.platformDeliveryMinor]);
     if (returnedPlatform) order.revenueAdjustments.push({ id: id('rev'), kind: 'refund', amountMinor: -returnedPlatform,

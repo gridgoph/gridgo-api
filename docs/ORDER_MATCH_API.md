@@ -265,7 +265,7 @@ New requests choose Delivery or Pick-up immediately after the deadline, before c
 - `GET /settings` exposes `settings.hubPickupEnabled` (boolean, default `false`, including existing settings without the field). Clients hide the new-order pickup choice unless it is `true` and refresh settings on returning to the request screen. Super Admin changes it through `PATCH /settings` with `expectedVersion` and `reason`; other settings writes preserve it. Checkout rechecks the current flag under the mutation transaction and returns `409 hub_pickup_disabled` for pickup while off, including old drafts and multi-shop baskets. Delivery remains available. Already placed pickup orders retain payment, production, recovery and hub handover access, snapshots and money unchanged. Deploying this default disables new pickup; toggling it later needs no app update after the compatible client release.
 - Pick-up uses the fixed GRIDGO hub point returned by `GET /settings` at `settings.hubPickup.point`. The API overrides any supplied address for this path. Shop distance ranking is measured to the hub. The client's pickup charge is the configured flat hub fee, not a distance-band delivery charge.
 
-An explicit-choice match adds `requestFulfillment: {fulfillmentMode,dropoff}`; pickup also adds `hubPickup: {point,schedule,feeMinor}`. Every offered listing, including anonymous alternatives, has `deliveryFeeMinor` as its fulfillment-charge preview; pickup listings also have `pickupFeeMinor`, which names the same amount. Existing photo signing and selection-token expiry rules apply.
+An explicit-choice match adds `requestFulfillment: {fulfillmentMode,dropoff}`; pickup also adds `hubPickup: {point,schedule,hoursSource,feeMinor}`, where `schedule` is the applied hub schedule (operating hours when no hub schedule is set). Every offered listing, including anonymous alternatives, has `deliveryFeeMinor` as its fulfillment-charge preview; pickup listings also have `pickupFeeMinor`, which names the same amount. Existing photo signing and selection-token expiry rules apply.
 
 Create an empty cart (existing `POST /me/carts`), then add a listing with its `selectToken` and `matchRequestId`. The server carries the choice and resolved destination from that token into the cart. The cart's `requestFulfillment` is returned on full and compact reads and persists across API restarts; pickup carts expose the current `hubPickup` settings. Checkout renders this choice read-only. A conflicting fulfillment or destination on cart PATCH, fulfillment/drop-off PUT, line add/PATCH, or checkout returns `409 request_fulfillment_locked`. To change it, rematch and use a new empty cart. Attaching an explicit-choice token to an existing legacy nonempty cart returns `409 request_fulfillment_requires_empty_cart`.
 
@@ -288,6 +288,8 @@ Full and compact cart listing objects have the same fields, using the line drop-
 Client follow-up: render these labels and ratings on the Top Pick and listings; stop computing/displaying raw match distances from shop points or reason text. Before selecting an Out of Zone listing, show the delivery-cost warning. Checkout fee previews must read the four-band settings union: flat `feeMinor` for the first three bands, `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)` for the open-ended band. Do not use the rounded display `distanceKm` to calculate a charge. The API does not add a distance rejection or require warning acknowledgement.
 
 ## Cart
+
+Sample lines (`sample: true`) and batch lines made from an approved sample (`POST /me/sample-batches/:id/cart`) are defined in [SAMPLE_FIRST_API.md](SAMPLE_FIRST_API.md).
 
 ```text
 POST   /me/carts
@@ -639,7 +641,7 @@ Set drop-offs in one call with:
 
 Multi-shop baskets use the additive [multi-shop checkout contract](MULTI_SHOP_CHECKOUT_API.md):
 per-line deadlines and one basket fulfillment choice, 100% upfront for multiple groups,
-one combined receipt, and independent order ledgers per shop and deadline.
+one combined receipt, and independent order ledgers per shop delivery ([shop deliveries](SHOP_DELIVERIES_API.md)).
 The single-group flow below is unchanged. Field names and compatibility: [per-line deadlines](PER_LINE_DEADLINES_API.md).
 
 Upload the QR Ph screenshot with `POST /files`, `purpose=payment_proof`, then:

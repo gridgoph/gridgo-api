@@ -2,7 +2,7 @@ import { identityHasMembership } from './authorization-context.js';
 import { voucherFail as fail } from './vouchers.js';
 import { publicFoundingTester, testerOrderFacts, testerProgress, reconcileFoundingTester, recordTesterCartStep, foundingTesterEligible } from './founding-testers.js';
 import { createInviteCode, recordTesterInstallation, submitTesterInvite, matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from './tester-invites.js';
-import { testerBudget, voidTesterReward, testerEvent } from './tester-rewards.js';
+import { testerBudget, voidTesterReward, testerEvent, issueTesterReward } from './tester-rewards.js';
 
 const object = body => { if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request'); return body; };
 const publicReward = ({ evidence, ...reward }) => reward;
@@ -77,9 +77,15 @@ export async function routeTesterProgram({ req, url, store, user, readBody, now,
     if (action[2] === 'void') voidTesterReward(store, reward, body.reason.trim(), ctx);
     else {
       if (reward.status !== 'paused') fail(409, 'tester_reward_not_paused');
-      if (!foundingTesterEligible(store, reward.clientId) || testerProgress(store, reward.clientId, { preserveAward: reward.kind === 'mission' }).completedCount !== 5) fail(409, 'tester_reward_not_ready');
-      const reconciler = reward.kind === 'mission' ? reconcileFoundingTester : reconcileTesterInvite;
-      reconciler(store, reward.clientId, { ...ctx, resume: true });
+      if (reward.kind === 'bug_report') {
+        // A staff-confirmed report already earned it; only eligibility and budget are rechecked.
+        if (!foundingTesterEligible(store, reward.clientId)) fail(409, 'tester_reward_not_ready');
+        issueTesterReward(store, reward, ctx);
+      } else {
+        if (!foundingTesterEligible(store, reward.clientId) || testerProgress(store, reward.clientId, { preserveAward: reward.kind === 'mission' }).completedCount !== 5) fail(409, 'tester_reward_not_ready');
+        const reconciler = reward.kind === 'mission' ? reconcileFoundingTester : reconcileTesterInvite;
+        reconciler(store, reward.clientId, { ...ctx, resume: true });
+      }
       testerEvent(store, reward, 'resume_requested', ctx, { reason: body.reason.trim() });
     }
     return result({ reward: publicReward(reward), budget: testerBudget(store, at) }, true);

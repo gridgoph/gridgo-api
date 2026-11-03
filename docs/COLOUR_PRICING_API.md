@@ -36,7 +36,14 @@ GRIDGO never substitutes a base price, another size/tier or a platform estimate.
 PATCH to retain it. Recognized paper names and dimensions use the existing
 [print layout size parser](PRINT_LAYOUT_API.md); bare dimensions are inches.
 Returned sizes include canonical `widthMilli`, `heightMilli` (thousandths of mm)
-and `pageSize`. Duplicate physical sizes are refused, including rotated aliases.
+and `pageSize`. Writes and read projections use one canonical order, including
+approved snapshots served while a revision is pending. Sizes sort numerically by
+the smaller dimension, then the larger dimension, then `size_key` (the text
+`widthMilli:heightMilli`, compared by code unit) as the final tie-break. Orientation
+does not change the physical size order. Tier keys follow `COLOUR_TIERS[tierSet]`:
+`none`, `up_to_25`, `up_to_50`, `above_50` for large format, and `monochrome`,
+`full_colour` for A3. Omitted prices remain omitted, and zero prices remain offered.
+Duplicate physical sizes are refused, including rotated aliases.
 A3 paper uses the A3 tier set; other sizes use large-format tiers. Size options must have the existing `specBinding`
 with a paper `size`/`paper_size`/`item_size`/`dimensions` value. Their selected
 physical size selects the price table; a size with no table needs a price check.
@@ -173,7 +180,7 @@ Client projections never expose the shop `lineSubtotalMinor`. Their
 `sheetPriceMinor` is an alias of the all-in `clientSheetPriceMinor`; display that
 per-sheet amount with the colour level (for example “Page 2: 18% strong colour,
 ₱87”). `clientPageTotalMinor` covers **all** copies/sets of that page and sums
-exactly to `clientLineSubtotalMinor`. Fees use the existing shop/deadline group
+exactly to `clientLineSubtotalMinor`. Fees use the existing shop delivery group
 allocation, including other cart lines, rather than marking up pages separately.
 These item amounts are before separately shown organization/voucher discounts
 and fulfillment charges, matching the existing client line/invoice amounts.
@@ -220,13 +227,13 @@ Statuses before a colour price can be accepted:
 
 On an unpriced page, `sheetPriceMinor:null`, `status:"needs_price_check"` and
 `message:"This page needs a price check"`. The line/checkout total stays null.
-Clients receive null page amounts until all lines in the shop/deadline group can
+Clients receive null page amounts until all lines in the shop delivery group can
 be priced, since a group fee cannot yet be allocated. Supplier/staff evidence
 retains any other pages' available shop rates. Checkout refuses
 `409 colour_price_check_required`; other incomplete colour evidence refuses
 `409 colour_analysis_required`. The existing service-fee brackets, discounts,
 vouchers, payment and basket boundaries operate on the **sum of shop page prices**,
-once per shop/deadline group. Use existing all-in client amount fields. Never
+once per shop delivery group. Use existing all-in client amount fields. Never
 sum individually fee-marked page display amounts to manufacture a quote.
 
 A one-colour service returns the non-blocking `warning`:

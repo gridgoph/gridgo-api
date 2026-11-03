@@ -75,6 +75,8 @@ export function syncSupplierPerformance(store, { at, id, clockStore = store }) {
       }
     }
     for (const failure of order.shopFailureEvents || []) {
+      // Lateness is measured by its own finish/lapse events; GRIDGO and client moves are never the shop's failure.
+      if (!['declined', 'timed_out', 'cancelled'].includes(failure.kind)) continue;
       // Cancellation before acceptance is a decline, never an accepted-order cancellation.
       const kind = failure.kind === 'cancelled' && failure.stage === 'supplier_assigned' ? 'declined' : failure.kind;
       collect({ orderId: order.id, supplierId: failure.supplierId, sourceKey: `failure:${failure.id}`, kind,

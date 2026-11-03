@@ -1,10 +1,11 @@
 import { sameReviewData, reportOrderAllowed } from './review-data.js';
+import { isQuoteListing } from "./quote-listings.js";
 import { performanceTopPick } from './supplier-performance-policy.js';
 import { shopHoursStatus } from './shop-hours.js';
 import { operatingHours, reviewTiming, schedulingDay, deadlineDayReason, dispatchReadyAt } from './operating-hours.js';
 import { addOpeningMilliseconds } from './availability.js';
 import { shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
-import { cartGroups } from "./cart-groups.js";
+import { cartGroups, earliestDate } from "./cart-groups.js";
 import { approvedCatalogView } from "./catalog-review-state.js";
 import { riderPackingFlow } from './shop-handover.js';
 import { recentLapseQualityPenalty, productionTiming } from './production-penalties.js';
@@ -291,13 +292,15 @@ export function projectListingGroup(store, lines, { now, deadline = null } = {})
   return result;
 }
 
-function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline, now, units, widthRequest, ranking = MATCH_FACTORS }) {
+function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline: requestedDeadline, now, units, widthRequest, ranking = MATCH_FACTORS, delivery = {} }) {
   store = approvedCatalogView(store);
   const excluded = new Set((excludedSupplierIds || []).map(String));
   const shops = approvedOpenSuppliers(store);
   const activeSubcategories = new Set((store.taxonomy?.subcategories || []).filter(row => row.active !== false).map(row => row.code));
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {
+    // A quote listing is one client's accepted price, never a matchable capability.
+    if (isQuoteListing(item)) continue;
     if (subcategoryCode ? item.subcategoryCode !== subcategoryCode : !activeSubcategories.has(item.subcategoryCode)) continue;
     if (onlySupplierId && item.supplierId !== onlySupplierId) continue;
     if (excluded.has(item.supplierId) || !shops.has(item.supplierId)) continue;
@@ -319,13 +322,17 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
     const distanceZone = distance == null ? null : distanceZoneForDistance(distance, store.settings);
     // Rank real listing projections, never combine one listing's low price
     // with another's fast promise. Each offered listing must meet the deadline.
+    // A product joins one delivery of this shop (its main one unless the client
+    // chose a separate delivery) and that delivery works to its earliest date.
     const draftGroups = cartGroups(null, (widthRequest?.cartLines || []).filter(line => line.supplierId === supplierId));
-    const requestedDate = deadline == null ? null : new Date(deadline).toISOString();
-    const groupLines = draftGroups.find(group => group.deadline === requestedDate)?.lines || [];
+    const target = delivery.separate ? null : draftGroups.find(group => group.deliveryKey === (delivery.key ?? null)) || null;
+    const deadline = earliestDate([requestedDeadline, target?.deadline]);
+    const groupLines = target?.lines || [];
+    const earlierGroups = draftGroups.filter(group => group !== target && group.deadline != null
+      && (deadline == null || Date.parse(group.deadline) < Date.parse(deadline)));
     const draftTiming = new Map();
     try {
-      for (const group of draftGroups.filter(group => group.deadline === requestedDate || (group.deadline != null
-        && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))))) {
+      for (const group of [...(target ? [target] : []), ...earlierGroups]) {
         for (const line of group.lines) {
           const item = store.catalogItems.find(item => item.id === line.catalogItemId);
           if (!item) throw new MatchError(409, 'catalog_item_stale', 'Repair unavailable draft work before adding another listing.');
@@ -336,8 +343,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       if (error instanceof MatchError) continue;
       throw error;
     }
-    const earlierJobs = draftGroups.filter(group => group.deadline != null
-      && (requestedDate == null || Date.parse(group.deadline) < Date.parse(requestedDate))).map(group => ({
+    const earlierJobs = earlierGroups.map(group => ({
       supplierId, state: "needs_qa", estimatedHours: Math.max(...group.lines.map(line => draftTiming.get(line).maximum)),
     }));
     const projectionStore = earlierJobs.length ? { ...store, orderJobs: [...(store.orderJobs || []), ...earlierJobs] } : store;
@@ -435,6 +441,28 @@ function scoreRows(rows, ranking) {
   return weights;
 }
 
+/**
+ * Rank published quote options the way matching ranks shops: the client's
+ * strict priority over quality, padded promise hour, all-in price and distance
+ * zone, with the same single badge naming the factor that decided first place.
+ * Each choice carries `supplierId`, `cost`, `promiseBy` and `distanceZone`.
+ */
+export function rankQuoteChoices(store, choices, ranking = MATCH_FACTORS, now = new Date().toISOString()) {
+  const view = approvedCatalogView(store);
+  const rows = choices.map((choice) => {
+    const listings = (view.catalogItems || []).filter(item => item.supplierId === choice.supplierId && !isQuoteListing(item))
+      .map(item => publicCatalogItem(view, item, { at: now })).filter(Boolean);
+    const rating = shopRating(view, choice.supplierId);
+    const base = rating && rating.count >= MIN_REVIEWS_FOR_RATING ? Math.min(100, rating.average * 20)
+      : listings.length ? capabilityScore(view, choice.supplierId, listings) : 50;
+    return { ...choice, projection: { promiseBy: choice.promiseBy },
+      quality: Math.max(0, base - recentLapseQualityPenalty(view, choice.supplierId, now)) };
+  });
+  rows.sort((a, b) => compareFactors(a, b, ranking) || String(a.id).localeCompare(String(b.id)));
+  const key = rows.length > 1 ? decidingFactor(rows[0], rows[1], ranking) || "vetted" : "vetted";
+  return { rows, matchReason: rows.length ? { key, label: REASON_LABELS[key] } : null };
+}
+
 // An allowlist: never spread a catalog record into an anonymous match card.
 function otherListing(row) {
   const item = row.listing;
@@ -444,6 +472,7 @@ function otherListing(row) {
       "measurementKind", "measureUnit", "minimumWidthMilli", "minimumHeightMilli", "minimumLengthMilli",
       "minimumOrderQuantity", "printerMaxWidthFeet", "printLayouts", "coverSpineForm", "priceTiers", "speedTiers", "pricingBasis",
       "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version", "express",
+      "sampleAvailable", "samplePriceMinor", "clientSamplePriceMinor",
     ].map((key) => [key, item[key]])),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
     fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,
@@ -458,9 +487,9 @@ function otherListing(row) {
 }
 
 /** Read-only add-more catalogue: the same eligibility/promise and anonymous card as matching. */
-export function cartGroupListings(store, { supplierId, deadline, cartLines, now }) {
+export function cartGroupListings(store, { supplierId, deadline, deliveryKey = null, cartLines, now }) {
   const { rows, missedDeadline } = candidateRows(store, {
-    supplierId, deadline, now, dropoff: null, widthRequest: { cartLines },
+    supplierId, deadline, now, dropoff: null, widthRequest: { cartLines }, delivery: { key: deliveryKey },
   });
   const listings = rows.flatMap(row => row.choices.map(otherListing));
   return { listings, emptyReason: listings.length ? null
@@ -554,6 +583,7 @@ export function matchShop(store, input = {}) {
     now,
     units: input.units,
     ranking,
+    delivery: { key: input.deliveryKey ?? null, separate: input.separateDelivery === true },
     widthRequest: {
       widthFeet: input.widthFeet,
       measurement: input.measurement,

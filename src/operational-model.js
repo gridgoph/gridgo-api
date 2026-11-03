@@ -16,7 +16,7 @@ import { adjustedDeliverySplit, effectiveDeliveryFeeMinor, deliveryPinCollectedM
 import { feeSchedule, validateFeeSchedule } from './service-fee.js';
 import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
-import { PACKAGING_STATES, productionTransitionReadiness, supplierJobDetails } from './job-readiness.js';
+import { PACKAGING_STATES, productionTransitionReadiness, receiptScanFiles, supplierJobDetails } from './job-readiness.js';
 import { displayFilename } from './display-filename.js';
 import { deliveryMilestones } from './rider-tracking.js';
 export { clientRiderLocationPing } from './rider-tracking.js';
@@ -33,6 +33,7 @@ import { publicOrderCoverSpine } from "./hardbound-cover.js";
 import { defaultArtworkGuidance, publicArtworkGuidance } from "./artwork-guidance.js";
 import { artworkColorsFor, colorTargetsFor } from "./color-targets.js";
 import { publicRecovery } from './shop-recovery-projection.js';
+import { DEFAULT_SHOP_MOVE_COVER_BPS, validateShopMoveCoverBps, publicShopMoves, shopMoveTotals } from './shop-move-pricing.js';
 import { canReadOrderArtwork } from "./order-file-access.js";
 import { defaultProductionPenalty, supplierPenaltyAllowed, validateProductionPenalty, orderPenaltyMinor, productionPenaltySettings, productionLatenessTier, productionTiming } from './production-penalties.js';
 import { packingProgressFor } from "./packing-progress.js";
@@ -273,6 +274,10 @@ export function defaultOperationalSettings() {
     riderLocationRefreshIntervalSeconds: 20,
     riderLocationStaleAfterSeconds: 120,
     downpaymentPercent: DEFAULT_DOWNPAYMENT_PERCENT,
+    /** GRIDGO's cover for a dearer substitute shop, in bps of the original service fee. */
+    shopMoveCoverBps: DEFAULT_SHOP_MOVE_COVER_BPS,
+    /** Days a sampled batch keeps the shop's old price list after the sample reaches the client. */
+    sampleBatchHoldDays: 14,
     hubPickup: hubPickupSettings(),
     hubPickupEnabled: false,
     handoverOtpEnabled: false,
@@ -289,6 +294,14 @@ export function defaultOperationalSettings() {
      * coverage; released builds cannot send it.
      */
     coverSpineRequired: false,
+    /**
+     * Finance: whether a shop must attach its scanned invoice/receipt
+     * (`supplier_invoice`) before the order becomes Ready for rider pickup.
+     * Off until Super Admin turns it on. Never an official GRIDGO receipt.
+     */
+    shopReceiptScanRequired: false,
+    /** Days a published quote's options stay acceptable (docs/QUOTE_REQUESTS_API.md). */
+    quoteValidityDays: 7,
     clientShopChatContactThreshold: 3,
     savedFilesLimitBytes: DEFAULT_SAVED_FILES_LIMIT_BYTES,
     approvalProofRequired: false,
@@ -339,6 +352,11 @@ export function validateOperationalSettings(settings) {
   }
   if (settings?.hubPickup !== undefined) validateHubPickup(settings.hubPickup, fail);
   if (settings?.productionPenalty !== undefined) validateProductionPenalty(settings.productionPenalty);
+  validateShopMoveCoverBps(settings?.shopMoveCoverBps, fail);
+  if (settings?.sampleBatchHoldDays !== undefined
+      && (!Number.isInteger(settings.sampleBatchHoldDays) || settings.sampleBatchHoldDays < 1 || settings.sampleBatchHoldDays > 90)) {
+    fail(400, "invalid_sample_batch_hold_days", "Hold a sampled batch price for a whole number of days from 1 to 90.", { field: "sampleBatchHoldDays" });
+  }
   const serviceFeeRateBps = settings?.serviceFeeRateBps;
   if (!Number.isInteger(serviceFeeRateBps) || serviceFeeRateBps < 0 || serviceFeeRateBps > 10_000) {
     fail(
@@ -376,6 +394,13 @@ export function validateOperationalSettings(settings) {
   }
   if (settings?.coverSpineRequired !== undefined && typeof settings.coverSpineRequired !== "boolean") {
     fail(400, "invalid_cover_spine_required", "coverSpineRequired must be a JSON boolean.", { field: "coverSpineRequired" });
+  }
+  if (settings?.shopReceiptScanRequired !== undefined && typeof settings.shopReceiptScanRequired !== "boolean") {
+    fail(400, "invalid_shop_receipt_scan_required", "shopReceiptScanRequired must be a JSON boolean.", { field: "shopReceiptScanRequired" });
+  }
+  const quoteValidity = settings?.quoteValidityDays;
+  if (quoteValidity !== undefined && (!Number.isSafeInteger(quoteValidity) || quoteValidity < 1 || quoteValidity > 90)) {
+    fail(400, "invalid_quote_validity_days", "quoteValidityDays must be a whole number of days from 1 to 90.", { field: "quoteValidityDays" });
   }
   const riderCommissionBps = settings?.riderCommissionBps;
   if (riderCommissionBps !== undefined && (!Number.isInteger(riderCommissionBps)
@@ -853,7 +878,9 @@ export function collectedDeliveryForOrder(order) {
 export function moneyReportingForOrder(order, store = null) {
   const settlement = refundSettlementFor(store, order);
   const deductionsMinor = orderPenaltyMinor(order);
-  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor);
+  // A substitute shop is paid on its own price; GRIDGO's cover comes out of its service fee.
+  const shopMove = shopMoveTotals(order);
+  const entitlementMinor = settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierSubtotalMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor + shopMove.priceAdjustmentMinor);
   const refundedPrincipalMinor = (store?.refundSettlements || []).filter((row) => row.orderId === order.id)
     .reduce((sum, row) => sum + row.principalMinor, 0);
   const releasedThroughPlatformMinor = [...(order.payoutMilestones || []), ...supplierRefundPayouts(store, order), ...changePayoutsFor(store, order).map(row => ({ ...row, status: "released" }))]
@@ -881,7 +908,8 @@ export function moneyReportingForOrder(order, store = null) {
   const collectedPrincipalMinor = collectedSupplierPrincipalMinor(order) + supplementTotals(store, order).principalMinor;
   const protectedPaymentMinor = Math.max(
     0,
-    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor), collectedPrincipalMinor - refundedPrincipalMinor) - releasedThroughPlatformMinor,
+    Math.min(settlement?.shopEntitlementMinor ?? Math.max(0, (order.supplierPlatformPayoutMinor || 0) + supplementTotals(store, order).principalMinor - deductionsMinor + shopMove.priceAdjustmentMinor),
+      collectedPrincipalMinor - refundedPrincipalMinor + shopMove.gridgoCoverMinor) - releasedThroughPlatformMinor,
   );
   const reporting = {
     supplierSettlement: {
@@ -892,6 +920,7 @@ export function moneyReportingForOrder(order, store = null) {
       collectedSupplierPrincipalMinor: collectedPrincipalMinor,
       protectedPaymentMinor,
       gridgoDeductionsMinor: deductionsMinor,
+      ...(order.shopMoves?.length ? { shopMovePriceAdjustmentMinor: shopMove.priceAdjustmentMinor } : {}),
       totalSupplierEarningsMinor: entitlementMinor,
       supplierReleasedMinor: releasedThroughPlatformMinor,
       supplierOutstandingMinor: Math.max(
@@ -914,10 +943,11 @@ export function moneyReportingForOrder(order, store = null) {
       ...(order.voucher ? { voucherDiscountMinor: order.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
       organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
-      netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0) + supplementTotals(store, order).feeMinor,
+      netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0) + supplementTotals(store, order).feeMinor - shopMove.gridgoCoverMinor,
+      ...(order.shopMoves?.length ? { shopMoveCoverMinor: shopMove.gridgoCoverMinor, shopMoveClientRefundMinor: shopMove.clientRefundMinor, shopMoveClientTopUpMinor: shopMove.clientTopUpMinor } : {}),
       billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + supplementTotals(store, order).feeMinor + split.platformDeliveryShareMinor - (order.voucherDiscountMinor || 0) : 0,
       collectedMinor: platformCollectedMinor,
-      recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor) : 0,
+      recognizedMinor: handedOver ? Math.max(0, platformCollectedMinor + adjustedMinor + refundedMinor - shopMove.gridgoCoverMinor) : 0,
       adjustedMinor,
       refundedMinor,
     },
@@ -1235,6 +1265,12 @@ export function publicOrderFor(order, user, store = null) {
     publicRecord.supplementalTotalMinor = supplement.totalMinor;
     publicRecord.totalIncludingSupplementsMinor = order.totalMinor + supplement.totalMinor;
   }
+  // Sample First (docs/SAMPLE_FIRST_API.md): tags and links are for every party;
+  // the client's sample decision and the held-price basis are not the rider's.
+  if (!['client', 'supplier', 'ops_admin', 'super_admin'].includes(user?.role)) {
+    delete publicRecord.sampleDecision;
+    delete publicRecord.sampleBatchPricing;
+  }
   delete publicRecord.riderProgress;
   delete publicRecord.deliveryMilestones;
   if (order.fulfillmentMode === 'delivery' && (['ops_admin', 'super_admin'].includes(user?.role)
@@ -1374,6 +1410,10 @@ export function publicOrderFor(order, user, store = null) {
   delete publicRecord.shopFailureEvents;
   delete publicRecord.declinedBy;
   if (order.shopRecovery) publicRecord.shopRecovery = publicRecovery(order, user);
+  // Substitute-shop moves: full audit for staff, prices and cover for the owning client, nothing for others.
+  delete publicRecord.shopMoves;
+  const shopMoves = publicShopMoves(order, user);
+  if (shopMoves) publicRecord.shopMoves = shopMoves;
   if (publicRecord.shopAcceptance) {
     delete publicRecord.shopAcceptance.schedule;
     if (!ops && user?.role !== 'supplier') delete publicRecord.shopAcceptance;
@@ -1426,7 +1466,13 @@ export function publicOrderFor(order, user, store = null) {
     if (riderPackingFlow(order)) publicRecord.pickupReminder = 'Ready for rider pickup. Prepare packing materials. Do not pack yet; unpack any already-packed items for the rider check.';
   }
   publicRecord.forcedByGridgo = Boolean(order.forcedSteps?.length);
+  // Shop invoice/receipt scans are Operations/Super Admin finance evidence:
+  // never projected to clients, riders or other shops.
+  delete publicRecord.receiptScan;
   if (ops) {
+    const scans = receiptScanFiles(store, order).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.fileId.localeCompare(b.fileId));
+    publicRecord.receiptScan = { attached: scans.length > 0, fileIds: scans.map(file => file.fileId),
+      latestFileId: scans.at(-1)?.fileId ?? null, latestUploadedAt: scans.at(-1)?.createdAt ?? null };
     publicRecord.forcedStepReasonCodes = [...FORCED_STEP_REASONS];
     publicRecord.shopArrivedPackedCount = store?.shopArrivedPackedCounts?.get(order.supplierId) ?? (store?.orders || []).reduce((count, candidate) => count
       + (candidate.shopHandover?.arrivedPacked || []).filter(event => event.supplierId === order.supplierId).length, 0);
@@ -1541,7 +1587,7 @@ export function publicOrderFor(order, user, store = null) {
     delete publicRecord.payoutReceiptFileIds;
     if (Array.isArray(publicRecord.payoutMilestones)) {
       publicRecord.payoutMilestones = publicRecord.payoutMilestones.map((milestone) => {
-        const { amountMinor: _amountMinor, productionDeductionMinor: _productionDeductionMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
+        const { amountMinor: _amountMinor, productionDeductionMinor: _productionDeductionMinor, priceAdjustmentMinor: _priceAdjustmentMinor, receiptFileId: _receipt, reference: _reference, ...visible } = milestone;
         return visible;
       });
     }

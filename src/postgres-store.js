@@ -8,8 +8,10 @@ import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from 
 import { enforceReviewData, labelReviewNotifications, reviewReportView } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
+import { canonicalColourPricing } from './colour-pricing.js';
 import { finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
+import { sampleBatchTable, sampleBatchRows, loadSampleBatchRows } from './sample-batch-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
 import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from './sharing-store.js';
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
@@ -20,6 +22,7 @@ import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
 import { deliverySplit } from "./operational-model.js";
 import { listingPrintLayouts } from "./print-layout.js";
+import { quoteRequestTables, emptyQuoteRequestStore, quoteRequestRows, loadQuoteRequestRows } from './quote-request-store.js';
 
 const BASELINE = Symbol("postgresStoreBaseline");
 const notificationReadStores = new WeakSet();
@@ -59,7 +62,7 @@ const TABLES = [
   { name: "organization_accounts", keys: ["user_id"], columns: ["user_id", "name_key", "school_key", "data"] },
   { name: "organization_email_challenges", keys: ["user_id"], columns: ["user_id", "data"] },
   { name: "user_role_memberships", keys: ["user_id", "role"], columns: ["user_id", "role", "created_at", "created_by"] },
-  { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "updated_at"] },
+  { name: "client_profiles", keys: ["user_id"], columns: ["user_id", "client_kind", "business_name", "business_nature", "theme_preference", "updated_at"] },
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
@@ -81,7 +84,8 @@ const TABLES = [
   { name: "supplier_service_price_tiers", keys: ["id"], columns: ["id", "supplier_service_id", "tier_code", "color_tier", "min_quantity", "max_quantity", "unit_price_minor", "sort_order"] },
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot"] },
+  ...quoteRequestTables,
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "quote_request_id", "quote_client_id"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
@@ -95,10 +99,11 @@ const TABLES = [
   { name: "listing_starter_options", keys: ["id"], columns: ["id", "starter_group_id", "label", "price_modifier_minor", "price_multiplier_bps", "spec_binding", "sort_order"] },
   { name: "files", keys: ["file_id"], columns: ["file_id", "owner_id", "purpose", "original_filename", "declared_content_type", "detected_content_type", "size_bytes", "state", "object_key", "created_at", "position", "data"] },
   { name: "orders", keys: ["id"], columns: ["review_data", "id", "client_id", "supplier_id", "rider_id", "product_id", "state", "zone_code", "supplier_subtotal_minor", "subtotal_minor", "service_fee_rate_bps", "service_fee_minor", "delivery_fee_minor", "rider_commission_bps", "total_minor", "fulfillment_mode", "payment_plan", "quote_version", "supplier_downpayment_rate_bps", "online_due_minor", "direct_store_due_minor", "supplier_platform_payout_minor", "commercial_committed_at", "money_model_version", "payout_plan_version", "payout_hold", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "issue_window_opened_at", "issue_window_expires_at", "ready_by", "ready_at", "cancelled_at", "cancelled_by", "cancellation_reason", "created_at", "updated_at", "position", "data"] },
+  sampleBatchTable,
   performanceTable,
   ...staffTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
   { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "speed_tier_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
@@ -141,9 +146,11 @@ export function emptyStore() {
     ...emptyVoucherStore(),
     orderSurveys: [],
     ...emptySharingStore(),
+    ...emptyQuoteRequestStore(),
     checkoutVisits: [],
     checkoutExitPrompts: [],
     supplierInvoices: [],
+    sampleBatchDrafts: [],
     surveyLaunchedAt: null,
     foundingTesters: [],
     ...emptyTesterProgram(),
@@ -229,7 +236,9 @@ function rowsFromStore(store) {
   foundingTesterRows(store, rows);
   testerProgramRows(store, rows);
   checkoutExitRows(store, rows);
+  quoteRequestRows(store, rows);
   supplierInvoiceRows(store, rows);
+  sampleBatchRows(store, rows);
   for (const item of store.seasonWindows || []) rows.season_windows.push({
     id: item.id, name: item.name, start_date: item.startDate, end_date: item.endDate,
     demand_level: item.demandLevel, message: item.message, version: item.version,
@@ -275,7 +284,7 @@ function rowsFromStore(store) {
     rows.user_role_memberships.push({ user_id: membership.userId, role: membership.role, created_at: membership.createdAt, created_by: membership.createdBy ?? null });
   }
   for (const profile of (store.clientProfiles || [])) {
-    rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, updated_at: profile.updatedAt });
+    rows.client_profiles.push({ user_id: profile.userId, client_kind: profile.clientKind, business_name: profile.businessName ?? null, business_nature: profile.businessNature ?? null, theme_preference: profile.themePreference ?? "system", updated_at: profile.updatedAt });
   }
   for (const selection of (store.matchSelections || [])) {
     rows.client_match_selections.push({ token_hash: selection.tokenHash, client_id: selection.clientId,
@@ -450,6 +459,8 @@ function rowsFromStore(store) {
       print_layouts: listingPrintLayouts(item),
       priced_by_colour: item.pricedByColour === true, one_colour: item.oneColour === true,
       express: item.express === true,
+      sample_available: item.sampleAvailable === true,
+      sample_price_minor: money(item.samplePriceMinor ?? null, "catalogItem.samplePriceMinor"),
       production_time_review_reasons: item.productionTimeReviewReasons || [],
       turnaround_mode: item.turnaroundMode || "inherit", turnaround_hours: item.turnaroundHours ?? null,
       turnaround_days: item.turnaroundDays ?? null,
@@ -463,6 +474,7 @@ function rowsFromStore(store) {
       suspended_by: item.suspendedBy ?? null,
       sort_order: item.sortOrder, version: item.version || 1,
       created_at: item.createdAt, updated_at: item.updatedAt,
+      quote_request_id: item.quoteRequestId ?? null, quote_client_id: item.quoteClientId ?? null,
     });
   }
   for (const item of store.catalogItems || []) {
@@ -650,6 +662,10 @@ function rowsFromStore(store) {
       document_pages: line.documentPages ?? null,
       match_deadline: line.matchDeadline ?? null,
       deadline: line.deadline ?? null,
+      delivery_key: line.deliveryKey ?? null,
+      sample: line.sample ?? null,
+      sample_batch_draft_id: line.sampleBatchDraftId ?? null,
+      sample_batch_pricing: line.sampleBatchDraftId ? (line.sampleBatchPricing || "held") : null,
       mockup_file_id: line.mockupFileId ?? null,
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
@@ -882,8 +898,8 @@ function readGraph(database) {
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
     loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
   }
-  function finish() {
-    const store = storeFromRows(loaded, { writable: false });
+  function finish(options = {}) {
+    const store = storeFromRows(loaded, { ...options, writable: false });
     notificationReadStores.add(store);
     return store;
   }
@@ -957,6 +973,50 @@ export async function loadPushDeliveryStore(database, rows) {
   });
 }
 
+const PRODUCTION_WATCHED_STATES = ['payment_authorized', 'production', 'supplier_self_qc'];
+
+/** Read-only decision graph for the production lifecycle sweeps.
+ * `syncSupplierPerformance`, `assessProductionLapses` and `applyProductionNudges`
+ * decide each order from that order's own facts, so a superset of the orders
+ * they can change, with every fact those decisions read, gives the same
+ * answer as the complete store. The caller still takes the domain lock and
+ * the complete writable graph before it changes anything.
+ */
+export async function loadProductionSweepStore(database) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database), { loaded, read } = graph;
+    await read('platform_settings', 'WHERE singleton');
+    // Nudges: a shop job in a watched state. Performance and lapses: committed
+    // shop work with a ready-by date, plus any recorded shop failure or
+    // arrived-packed event, whatever the order's current shop.
+    await read('orders', `WHERE (supplier_id IS NOT NULL AND (state = ANY($1::text[])
+        OR (commercial_committed_at IS NOT NULL AND (ready_by IS NOT NULL OR data ? 'readyBy'))))
+      OR (jsonb_typeof(data->'shopFailureEvents') = 'array' AND jsonb_array_length(data->'shopFailureEvents') > 0)
+      OR (jsonb_typeof(data#>'{shopHandover,arrivedPacked}') = 'array' AND jsonb_array_length(data#>'{shopHandover,arrivedPacked}') > 0)`,
+    [PRODUCTION_WATCHED_STATES]);
+    const orderIds = loaded.orders.map(row => row.id);
+    for (const name of ['order_line_items', 'payout_milestones', 'production_lapses', 'supplier_performance_events',
+      'claims', 'refund_requests', 'refund_settlements']) {
+      await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+    }
+    const watched = loaded.orders.filter(row => row.supplier_id && PRODUCTION_WATCHED_STATES.includes(row.state));
+    const watchedIds = watched.map(row => row.id);
+    const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
+    await read('notifications', "WHERE order_id = ANY($1::text[]) AND type = 'shop_production_inactive'", [watchedIds]);
+    // A shop's proof upload resets its silence clock.
+    await read('files', `WHERE purpose = 'fulfilment_proof' AND owner_id = ANY($1::text[])
+      AND file_id IN (SELECT file_id FROM file_references WHERE reference_id = ANY($2::text[]))`,
+    [[...new Set(watched.map(row => row.supplier_id))], watchedIds]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+    await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+    await read('user_role_memberships', "WHERE role IN ('ops_admin', 'super_admin')");
+    return graph.finish({
+      legalPenaltyGate: await loadLegalPenaltyGate(database),
+      supplierPerformanceLaunchedAt: (await database.query('SELECT launched_at FROM supplier_performance_launch WHERE singleton')).rows[0]?.launched_at || null,
+    });
+  });
+}
+
 async function readCatalogReviewPage(graph, { ids, after, status }) {
   const { loaded, read } = graph;
   const reviewOnly = isTestOperationsUser(graph.finish(), ids[0]);
@@ -983,9 +1043,205 @@ async function readCatalogItemContext(graph, ids) {
   await read('platform_settings', 'WHERE singleton');
 }
 
-const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me']);
+// Keep route matching exact: write-capable preview resolution is not a read.
+const CATALOG_READ = /^\/(?:catalog|ops\/catalog)\/(?:shops(?:\/[^/]+)?|items\/[^/]+|media\/[^/]+)$/;
+function isCatalogReadPath(pathname) {
+  return CATALOG_READ.test(pathname) || ['/accepted-file-formats', '/me/catalog-preview'].includes(pathname);
+}
+
+/** Only catalogue composites and their eligibility, rating and photo facts.
+ * Approved snapshots can retain photos and a service absent from the draft.
+ * Keep JS visibility/cursor policy authoritative, including review-only shops.
+ */
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null } = {}) {
+  const { loaded, read } = graph;
+  if (fileId) {
+    await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
+    await read('supplier_shop_media', 'WHERE file_id = $1', [fileId]);
+    // An approved photo may have been removed from the draft photo table.
+    await read('supplier_catalog_items', `WHERE id = ANY($1::text[])
+      OR approved_snapshot @> $2::jsonb
+      OR supplier_id = ANY($3::text[])`, [loaded.supplier_catalog_item_photos.map(row => row.catalog_item_id),
+      JSON.stringify({ catalogItemPhotos: [{ fileId }] }), [...(supplierIds || []), ...loaded.supplier_shop_media.map(row => row.supplier_id)]]);
+  } else if (subcategoryCode) await read('supplier_catalog_items', "WHERE subcategory_code = $1 OR approved_snapshot #>> '{item,subcategoryCode}' = $1", [subcategoryCode]);
+  else if (itemIds) await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [itemIds]);
+  else if (supplierIds) await read('supplier_catalog_items', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  else await read('supplier_catalog_items', '');
+  const suppliers = [...new Set([...(supplierIds || []), ...loaded.supplier_catalog_items.map(row => row.supplier_id),
+    ...loaded.supplier_shop_media.map(row => row.supplier_id)])];
+  const owners = [...new Set([...actorIds, ...suppliers])];
+  await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
+  await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
+  await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+  const items = loaded.supplier_catalog_items.map(row => row.id);
+  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
+    'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps',
+    'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+    await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
+  }
+  await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
+  await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
+  await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
+    ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
+  await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+  await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  // Ratings exclude marked orders even if the supplier itself is unmarked.
+  await read('orders', 'WHERE id = ANY($1::text[])', [loaded.shop_reviews.map(row => row.order_id)]);
+  await readIdentity(graph, [...new Set([...owners, ...loaded.shop_reviews.map(row => row.client_id)])]);
+  for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories',
+    'taxonomy_materials', 'taxonomy_finishes', 'accepted_file_formats']) await read(name, '');
+  await read('platform_settings', 'WHERE singleton');
+}
+
+async function readCatalogueRoute(graph, ids, pathname) {
+  if (pathname === '/accepted-file-formats') {
+    await graph.read('accepted_file_formats', '');
+    return graph.finish();
+  }
+  const path = pathname.replace(/^\/ops/, '');
+  const parts = path.split('/');
+  let id = null;
+  try { id = parts[3] ? decodeURIComponent(parts[3]) : null; } catch { return graph.finish(); }
+  if (id?.includes('\0')) return graph.finish();
+  await readCatalogueGraph(graph, ids, {
+    supplierIds: pathname === '/me/catalog-preview' ? ids : parts[2] === 'shops' && id ? [id] : null,
+    itemIds: parts[2] === 'items' ? [id] : null,
+    fileId: parts[2] === 'media' ? id : null,
+  });
+  return graph.finish();
+}
+
+const CART_READ = /^\/me\/carts\/[^/]+(?:\/(?:quote|voucher|groups\/[^/]+\/listings))?$/;
+function isCartReadPath(pathname) {
+  return CART_READ.test(pathname) || ['/me/preferences', '/me/addresses'].includes(pathname);
+}
+
+/** Parent orders are necessary even for cancelled jobs: queue de-duplication
+ * and recovery/marked-data policy must see the same facts as the full store.
+ */
+async function readShopWork(graph, supplierIds) {
+  const { loaded, read } = graph;
+  const ratingOrders = loaded.orders.map(row => row.id);
+  // Candidate sorting still computes lapse quality, even on anonymous group
+  // cards and calendars. Include incident parents and line-based exemptions.
+  await read('production_lapses', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('supplier_performance_events', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('order_jobs', 'WHERE supplier_id = ANY($1::text[])', [supplierIds]);
+  await read('orders', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])',
+    [supplierIds, [...ratingOrders, ...loaded.order_jobs.map(row => row.order_id), ...loaded.production_lapses.map(row => row.order_id),
+      ...loaded.supplier_performance_events.map(row => row.order_id)]]);
+  await read('order_line_items', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
+}
+
+async function readCartGraph(graph, actorIds, pathname) {
+  const { loaded, read } = graph;
+  if (pathname === '/me/preferences') await read('client_match_preferences', 'WHERE client_id = ANY($1::text[])', [actorIds]);
+  else if (pathname === '/me/addresses') await read('client_saved_addresses', 'WHERE client_id = ANY($1::text[])', [actorIds]);
+  else {
+    let cartId;
+    try { cartId = pathname.endsWith('/voucher') ? pathname.split('/')[3] : decodeURIComponent(pathname.split('/')[3]); }
+    catch { return graph.finish(); }
+    if (cartId.includes('\0')) return graph.finish();
+    // Retain the foreign parent to preserve ownCart's 403 rather than 404.
+    await read('client_carts', 'WHERE id = $1', [cartId]);
+    const cart = loaded.client_carts[0];
+    if (!cart || !actorIds.includes(cart.client_id)) return graph.finish();
+    await read('client_cart_lines', 'WHERE cart_id = $1', [cartId]);
+    const suppliers = [...new Set(loaded.client_cart_lines.map(row => row.supplier_id))];
+    await readCatalogueGraph(graph, actorIds, { supplierIds: suppliers });
+    await readShopWork(graph, suppliers);
+    await read('client_match_selections', "WHERE client_id = $1 AND selection->>'cartId' = $2", [cart.client_id, cartId]);
+    // A batch line is priced from its own sample draft's held rules; other carts skip the read.
+    const sampleDraftIds = loaded.client_cart_lines.map(row => row.sample_batch_draft_id).filter(Boolean);
+    if (sampleDraftIds.length) await read('sample_batch_drafts', 'WHERE id = ANY($1::text[]) AND client_id = $2', [sampleDraftIds, cart.client_id]);
+    await read('organization_accounts', 'WHERE user_id = $1', [cart.client_id]);
+    await read('vouchers', 'WHERE client_id = $1', [cart.client_id]);
+    await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+    await read('voucher_reservations', 'WHERE voucher_id = ANY($1::text[])', [loaded.vouchers.map(row => row.id)]);
+    await read('voucher_cart_choices', 'WHERE id = $1', [cartId]);
+    await read('order_basket_groups', 'WHERE basket_id IN (SELECT basket_id FROM order_basket_groups WHERE order_id = $1)', [cart.checked_out_order_id]);
+    await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
+    // Preserve catalogue files and references while adding every artwork/preview
+    // used by guidance, layout and colour checks. Snapshots may carry old photos.
+    const fileIds = new Set(loaded.files.map(row => row.file_id));
+    for (const line of graph.finish().cartLines) {
+      for (const fileId of artworkFileIdsFor(line)) fileIds.add(fileId);
+      if (line.mockupFileId) fileIds.add(line.mockupFileId);
+    }
+    await read('files', 'WHERE file_id = ANY($1::text[])', [[...fileIds]]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [[...fileIds]]);
+  }
+  return graph.finish();
+}
+
+const sqlReadText = value => value && !value.includes('\0') ? value : null;
+const MATCH_READ_PATHS = new Set(['/me/deadline-days', '/me/print-layout-check']);
+async function readMatchGraph(graph, actorIds, pathname, params) {
+  const { loaded, read } = graph;
+  if (pathname === '/me/deadline-days') {
+    await readCatalogueGraph(graph, actorIds, { subcategoryCode: sqlReadText(params.get('subcategoryCode')?.trim()) });
+    await readShopWork(graph, loaded.supplier_profiles.map(row => row.user_id));
+  } else {
+    await readCatalogueGraph(graph, actorIds, { itemIds: [sqlReadText(params.get('catalogItemId')?.trim())] });
+    const fileIds = [...new Set([...loaded.files.map(row => row.file_id), ...params.getAll('fileIds')
+      .flatMap(value => value.split(',')).map(value => sqlReadText(value.trim())).filter(Boolean)])];
+    await read('files', 'WHERE file_id = ANY($1::text[])', [fileIds]);
+    await read('file_references', 'WHERE file_id = ANY($1::text[])', [fileIds]);
+  }
+  return graph.finish();
+}
+
+const FILE_READ = /^\/files\/[^/]+(?:\/(?:download-url|content))?$/;
+
+/** Authorize one ready file using the unchanged purpose/reference policies.
+ * Chat references snapshot their orderId separately from their message id.
+ * Load all references, including legacy line scope and refund ownership.
+ */
+async function readFileGraph(graph, actorIds, pathname) {
+  const { loaded, read } = graph;
+  const fileId = pathname.split('/')[2];
+  await read('files', 'WHERE file_id = $1', [fileId]);
+  await read('file_references', 'WHERE file_id = $1', [fileId]);
+  const files = loaded.files, references = loaded.file_references;
+  const referenceIds = references.map(row => row.reference_id);
+  const catalogIds = references.filter(row => row.reference_type === 'supplier_catalog_item').map(row => row.reference_id);
+  const shopIds = references.filter(row => row.reference_type === 'supplier_shop_media').map(row => row.reference_id);
+  if (catalogIds.length || shopIds.length) {
+    await read('supplier_catalog_items', 'WHERE id = ANY($1::text[])', [catalogIds]);
+    await readCatalogueGraph(graph, actorIds, { fileId, supplierIds: [...shopIds, ...loaded.supplier_catalog_items.map(row => row.supplier_id)] });
+  }
+  const ratingOrders = loaded.orders.map(row => row.id);
+  await read('orders', 'WHERE id = ANY($1::text[])', [[...referenceIds, ...ratingOrders, ...references.map(row => row.data?.orderId).filter(Boolean)]]);
+  const orderIds = loaded.orders.map(row => row.id);
+  for (const name of ['order_jobs', 'order_line_items', 'delivery_reminders']) await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  await read('refund_requests', 'WHERE id = ANY($1::text[])', [referenceIds]);
+  // A supplier_service reference has its own live/owner policy, independent of
+  // the catalogue item's public eligibility.
+  await read('supplier_services', 'WHERE id = ANY($1::text[])', [[...referenceIds, ...loaded.supplier_services.map(row => row.id)]]);
+  await read('approval_cases', 'WHERE id = ANY($1::text[])', [referenceIds]);
+  const userIds = new Set([...actorIds, ...loaded.users.map(row => row.id), ...files.map(row => row.owner_id),
+    ...loaded.approval_cases.map(row => row.user_id),
+    ...references.filter(row => row.reference_type === 'user').map(row => row.reference_id)]);
+  // Review-only views filter child owners as well as the parent review mark.
+  const userFields = ['userId', 'clientId', 'supplierId', 'riderId', 'ownerId', 'partyUserId', 'createdBy', 'originalSupplierId'];
+  for (const rows of Object.values(graph.finish())) if (Array.isArray(rows)) for (const row of rows) {
+    for (const field of userFields) if (row[field]) userIds.add(row[field]);
+  }
+  for (const row of references) for (const field of userFields) if (row.data?.[field]) userIds.add(row.data[field]);
+  await readIdentity(graph, [...userIds].filter(Boolean));
+  // Retain supporting photos: a shop-media reference is public only when the
+  // shop still has a complete listing with a ready sample photo.
+  loaded.files = [...files, ...loaded.files.filter(row => row.file_id !== fileId)];
+  loaded.file_references = [...references, ...loaded.file_references.filter(row => row.file_id !== fileId)];
+  return graph.finish();
+}
+
+const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname); }
+const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
+export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1116,15 +1372,59 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
 }
 
 /** Explicit route graphs. Other routes retain the complete transactional adapter. */
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false } = {}) {
+/**
+ * Quote requests (docs/QUOTE_REQUESTS_API.md): the caller's own requests, or
+ * one bounded Operations queue page, their shop replies and the named parties.
+ * Published options are snapshots on the request, so no catalogue is read.
+ */
+async function readQuoteGraph(graph, ids, pathname, status) {
+  const { loaded, read } = graph;
+  const [, scope, rawId] = QUOTE_READ.exec(pathname);
+  let requestId = null;
+  if (rawId) {
+    try { requestId = decodeURIComponent(rawId); } catch { return graph.finish(); }
+    if (requestId.includes('\0')) return graph.finish();
+  }
+  if (status?.includes('\0')) return graph.finish();
+  const at = new Date().toISOString();
+  if (requestId) await read('quote_requests', 'WHERE id = $1', [requestId]);
+  else if (scope === 'me') await read('quote_requests', 'WHERE client_id = ANY($1::text[])', [ids]);
+  else {
+    const due = "status IN ('published','accepted') AND valid_until <= $1";
+    const where = status === 'open' ? `status IN ('requested','quoting') OR (status IN ('published','accepted') AND valid_until > $1)`
+      : status === 'expired' ? `status = 'expired' OR (${due})`
+      : ['published', 'accepted'].includes(status) ? `status = $2 AND valid_until > $1`
+      : status ? 'status = $2 AND $1::timestamptz IS NOT NULL' : '$1::timestamptz IS NOT NULL';
+    const values = ['published', 'accepted'].includes(status) || (status && !['open', 'expired'].includes(status)) ? [at, status] : [at];
+    await read('quote_requests', `WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT 200`, values);
+  }
+  if (scope === 'ops') {
+    const requestIds = loaded.quote_requests.map(row => row.id);
+    await read('quote_replies', 'WHERE quote_request_id = ANY($1::text[])', [requestIds]);
+    const suppliers = [...new Set([...loaded.quote_replies.map(row => row.supplier_id),
+      ...loaded.quote_requests.flatMap(row => (row.data?.options || []).map(option => option.supplierId))])];
+    await read('users', 'WHERE id = ANY($1::text[])', [[...new Set([...ids, ...loaded.quote_requests.map(row => row.client_id), ...suppliers])]]);
+    await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  }
+  return graph.finish();
+}
+
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (FILE_READ.test(pathname)) return readFileGraph(graph, ids, pathname);
+    if (MATCH_READ_PATHS.has(pathname)) return readMatchGraph(graph, ids, pathname, searchParams);
+    if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
+    if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
+    if (QUOTE_READ.test(pathname)) return readQuoteGraph(graph, ids, pathname, status);
     if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
+    } else if (pathname === '/me/home-summary') {
+      await readClientHomeGraph(graph, ids);
     } else if (pathname.startsWith('/auth/me') || pathname === '/me') {
       await read('platform_settings', 'WHERE singleton');
       for (const name of ['client_profiles', 'supplier_profiles', 'rider_profiles', 'organization_accounts']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
@@ -1168,6 +1468,31 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     }
     return graph.finish();
   });
+}
+
+/** Client Home smart tile (docs/CLIENT_HOME_API.md): the caller's own orders and
+ * mission facts plus the vouchers their tester rewards reference. No inbox, audit,
+ * ping, push or other clients' history; constant under unrelated growth.
+ */
+async function readClientHomeGraph(graph, ids) {
+  const { loaded, read } = graph;
+  await read('platform_settings', 'WHERE singleton');
+  await read('client_profiles', 'WHERE user_id = ANY($1::text[])', [ids]);
+  await read('founding_testers', 'WHERE client_id = ANY($1::text[])', [ids]);
+  await read('tester_rewards', 'WHERE client_id = ANY($1::text[]) OR inviter_id = ANY($1::text[])', [ids]);
+  await read('tester_tracking', 'WHERE client_id = ANY($1::text[])', [ids]);
+  await read('orders', 'WHERE client_id = ANY($1::text[])', [ids]);
+  const orders = loaded.orders.map(row => row.id);
+  for (const name of ['order_payments', 'order_line_items', 'issues', 'refund_settlements', 'order_surveys']) await read(name, 'WHERE order_id = ANY($1::text[])', [orders]);
+  await read('client_carts', 'WHERE client_id = ANY($1::text[])', [ids]);
+  await read('client_cart_lines', 'WHERE cart_id = ANY($1::text[])', [loaded.client_carts.map(row => row.id)]);
+  const voucherIds = [...new Set([
+    ...loaded.tester_rewards.flatMap(row => [row.voucher_id, row.inviter_voucher_id]),
+    ...loaded.founding_testers.map(row => row.reward_voucher_id),
+  ].filter(Boolean))];
+  await read('vouchers', 'WHERE id = ANY($1::text[]) AND client_id = ANY($2::text[])', [voucherIds, ids]);
+  await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+  await read('voucher_reservations', "WHERE voucher_id = ANY($1::text[]) AND status = 'reserved'", [loaded.vouchers.map(row => row.id)]);
 }
 
 /** Client bootstrap's read/probe facts, never a writable compatibility graph.
@@ -1299,7 +1624,9 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadFoundingTesterRows(store, loaded);
   loadTesterProgramRows(store, loaded);
   loadCheckoutExitRows(store, loaded);
+  loadQuoteRequestRows(store, loaded);
   loadSupplierInvoiceRows(store, loaded);
+  loadSampleBatchRows(store, loaded);
   store.surveyLaunchedAt = surveyLaunchedAt;
   store.supplierPerformanceLaunchedAt = supplierPerformanceLaunchedAt;
   store.organizationAccounts = loaded.organization_accounts.map((row) => ({ ...row.data, userId: row.user_id, nameKey: row.name_key, schoolKey: row.school_key }));
@@ -1339,7 +1666,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     return item;
   });
   store.clientProfiles = orderedBy(loaded.client_profiles, "user_id").map((row) => {
-    const item = { userId: row.user_id, clientKind: row.client_kind, updatedAt: row.updated_at };
+    const item = { userId: row.user_id, clientKind: row.client_kind, themePreference: row.theme_preference ?? "system", updatedAt: row.updated_at };
     present(item, "businessName", row.business_name);
     present(item, "businessNature", row.business_nature);
     return item;
@@ -1464,6 +1791,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
       colourPricing: colourPricingFromRows(loaded,row.id),
       express: row.express === true,
+      sampleAvailable: row.sample_available === true,
+      samplePriceMinor: row.sample_price_minor ?? null,
       productionTimeReviewReasons: row.production_time_review_reasons || [],
       turnaroundMode: row.turnaround_mode, ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
       minimumTurnaroundDays: row.minimum_turnaround_days ?? undefined, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
@@ -1473,6 +1802,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     present(item, "suspendReason", row.suspend_reason);
     present(item, "suspendedAt", row.suspended_at);
     present(item, "suspendedBy", row.suspended_by);
+    present(item, "quoteRequestId", row.quote_request_id);
+    present(item, "quoteClientId", row.quote_client_id);
     return item;
   });
   store.catalogOptionGroups = orderedBy(loaded.supplier_catalog_option_groups, "catalog_item_id", "sort_order", "id").map((row) => ({
@@ -1549,6 +1880,10 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     if (row.special_instructions) item.specialInstructions = row.special_instructions;
     present(item, "matchDeadline", row.match_deadline);
     present(item, "deadline", row.deadline);
+    present(item, "deliveryKey", row.delivery_key);
+    present(item, "sample", row.sample);
+    present(item, "sampleBatchDraftId", row.sample_batch_draft_id);
+    present(item, "sampleBatchPricing", row.sample_batch_pricing);
     present(item, "artworkFileId", row.artwork_file_id);
     present(item, "documentPages", row.document_pages);
     if (row.artwork_links?.length) item.artworkLinks = row.artwork_links;
@@ -1980,7 +2315,9 @@ function catalogHitsCte() {
     filtered AS (
       SELECT item.id, item.supplier_id, item.supplier_service_id, item.subcategory_code,
              item.name, item.description, item.base_price_minor, item.pricing_unit,
-             item.package_qty, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.turnaround_minutes, item.minimum_turnaround_minutes, item.minimum_turnaround_days, item.minimum_turnaround_hours,
+             item.package_qty, item.measure_unit, item.minimum_width_milli, item.minimum_height_milli,
+             item.minimum_length_milli, item.minimum_order_quantity, item.priced_by_colour, item.one_colour,
+             item.sample_available, item.sample_price_minor, item.turnaround_mode, item.turnaround_hours, item.turnaround_days, item.turnaround_minutes, item.minimum_turnaround_minutes, item.minimum_turnaround_days, item.minimum_turnaround_hours,
              item.file_format_mode, item.active, item.sort_order, item.version,
              item.created_at, item.updated_at, item.search_text, item.search_tsv,
              item.printer_max_width_feet, item.print_layouts, item.express, item.production_time_review_reasons, item.review_status, item.review_reason, item.reviewed_at, item.reviewed_by, item.approved_snapshot,
@@ -1991,6 +2328,7 @@ function catalogHitsCte() {
         JOIN supplier_services service ON service.id = item.supplier_service_id
         CROSS JOIN params
        WHERE item.supplier_id = params.supplier_id
+         AND item.quote_request_id IS NULL
          AND ($3::text IS NULL OR item.subcategory_code = $3)
          AND ($4::boolean IS NULL OR item.active = $4)
     ),
@@ -2030,9 +2368,10 @@ function colourPricingFromRows(loaded,id) {
   const sizes = (loaded.supplier_catalog_colour_sizes || []).filter(row => row.catalog_item_id === id).map(size => ({
     paperSize:size.paper_size,widthMilli:size.width_milli,heightMilli:size.height_milli,
     pageSize:parsePaperSize(size.paper_size)?.pageSize ?? null,tierSet:size.tier_set,
-    prices:Object.fromEntries((loaded.supplier_catalog_colour_prices || []).filter(row => row.catalog_item_id === id && row.size_key === size.size_key).map(row => [row.tier_code,row.price_minor])),
+    prices:Object.fromEntries((loaded.supplier_catalog_colour_prices || []).filter(row => row.catalog_item_id === id && row.size_key === size.size_key)
+      .map(row => [row.tier_code,row.price_minor])),
   }));
-  return sizes.length ? {sizes} : null;
+  return sizes.length ? canonicalColourPricing({sizes}) : null;
 }
 
 function catalogItemFromListRow(row) {
@@ -2048,6 +2387,11 @@ function catalogItemFromListRow(row) {
     basePriceMinor: row.base_price_minor,
     pricingUnit: row.pricing_unit,
     packageQty: row.package_qty,
+    measureUnit: row.measure_unit ?? null,
+    minimumWidthMilli: row.minimum_width_milli ?? null,
+    minimumHeightMilli: row.minimum_height_milli ?? null,
+    minimumLengthMilli: row.minimum_length_milli ?? null,
+    minimumOrderQuantity: row.minimum_order_quantity ?? null,
     turnaroundMode: row.turnaround_mode,
     ...(row.turnaround_days == null ? {} : { turnaroundDays: row.turnaround_days }), ...(row.turnaround_minutes == null ? {} : { turnaroundMinutes: row.turnaround_minutes }), turnaroundHours: row.turnaround_hours,
     minimumTurnaroundDays: row.minimum_turnaround_days ?? null, ...(row.minimum_turnaround_minutes == null ? {} : { minimumTurnaroundMinutes: row.minimum_turnaround_minutes }), minimumTurnaroundHours: row.minimum_turnaround_hours ?? null,
@@ -2063,6 +2407,9 @@ function catalogItemFromListRow(row) {
     printLayouts: row.print_layouts || [],
     pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
     express: row.express === true,
+    // Sample First (docs/SAMPLE_FIRST_API.md): the shop's raw offer, same as the single read.
+    sampleAvailable: row.sample_available === true,
+    samplePriceMinor: row.sample_price_minor ?? null,
     productionTimeReviewReasons: row.production_time_review_reasons || [],
   };
 }

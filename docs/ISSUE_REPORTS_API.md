@@ -21,6 +21,7 @@ Every path is also served under `/api`.
 - `category` is optional: `bug` (bug, issue or concern), `feature` (feature or change request), or `other`.
 - `screenshots` is optional: up to 6 base64 strings (a `data:` prefix is fine), each at most 8 MB decoded.
   The type is read from the bytes; only PNG, JPEG, WebP and GIF are kept (no SVG).
+- Optional `Authorization: Bearer <Clerk session>`: the client app sends it so the report records its reporter (for the [bug-report voucher](CLIENT_HOME_API.md#one-time-bug-report-voucher)). An invalid or expired session is `401 unauthorized`; a valid session without a GRIDGO account files anonymously. The landing page sends none.
 - 10 reports per sender per 10 minutes, then `429 too_many_requests`. The sender is Cloudflare's `CF-Connecting-IP` (the edge proxy replaces `X-Forwarded-For`).
 - Site-wide over the last 24 hours: at most `ISSUE_REPORTS_DAILY_LIMIT` reports (default 200) and `ISSUE_REPORTS_DAILY_BYTES` of screenshots (default 1 GiB), then `429 report_capacity_reached`.
 
@@ -51,7 +52,7 @@ Send a Clerk session token as `Authorization: Bearer <token>`. The account's ver
 - `GET /issue-reports/:id` returns one report.
 - `PATCH /issue-reports/:id` with `{ "status": "published", "publishedIn": "09-24-2026" }` marks it handled. `publishedIn` is kept only for `published`.
 
-The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities }, triageCounts }`. Each support desk report is `{ id, issue, category, status, priority, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }], triage, aiReview }` (see [Triage and AI review](#triage-and-ai-review)).
+The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities }, triageCounts }`. Each support desk report is `{ id, issue, category, status, priority, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }], triage, aiReview, bugConfirmation }` (see [Triage and AI review](#triage-and-ai-review) and [Confirm real bug](#confirm-real-bug)).
 Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL_SECONDS`, default 5 minutes), so download them right after listing.
 
 ## Statuses and the tracker issue link
@@ -150,3 +151,7 @@ An unknown value is `400 invalid_request`. The list response adds `triageCounts`
 ```
 
 `aiAwaitingHuman` counts reports that have an AI review but are still `unreviewed`. `labels` is sorted by most used, then by name. Status `counts` still include spam, so the existing paging contract keeps working. Only authenticated staff and firstmate receive counts. The public `POST /issue-reports` response returns no counts, and anything counted publicly, such as the reports site, should use `validity` to leave spam out.
+
+## Confirm real bug
+
+Operations and Super Admin confirm a report is a real bug with `POST /ops/issue-reports/:id/confirm-bug`. When the reporter is a tester, it grants the tester's one-time ₱15 voucher. Dashboard reports also carry `reporter` (staff only) and `bugConfirmation`. Support desk and firstmate reads get `bugConfirmation` without its `reward` and never `reporter`. Contract: [Client Home API](CLIENT_HOME_API.md#confirm-real-bug-dashboard).

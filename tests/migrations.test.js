@@ -1452,3 +1452,108 @@ test("issue-report triage migration defaults reports to unreviewed, constrains t
       { status: "published", priority: true, tracker_issue_url: "https://github.com/gridgoph/gridgo-web/issues/1" });
   });
 });
+
+test('separate shop deliveries keep every existing cart grouped as it was by shop and date', { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner({ ...migrationOptions(schema, 'up', 1793610000000, client), timestamp: true });
+    await client.query(`
+      INSERT INTO users(id,clerk_user_id,email,name,role,account_type,verification_status,created_at,position) VALUES
+        ('dl_client','dl_c','dl_c@test.invalid','Client','client','individual',NULL,now(),0),
+        ('dl_shop','dl_s','dl_s@test.invalid','Shop','supplier',NULL,'approved',now(),1),
+        ('dl_shop2','dl_s2','dl_s2@test.invalid','Shop 2','supplier',NULL,'approved',now(),2);
+      INSERT INTO taxonomy_categories(id,code,name,active,sort_order,position) VALUES('dl_cat','dl_cat','Category',true,0,0);
+      INSERT INTO taxonomy_subcategories(id,code,category_code,name,active,sort_order,position) VALUES('dl_sub','dl_sub','dl_cat','Subcategory',true,0,0);
+      INSERT INTO supplier_services(id,supplier_id,category_code,state,reference_rate_minor,turnaround_hours,created_at,updated_at,position) VALUES
+        ('dl_service','dl_shop','dl_cat','live',1000,24,now(),now(),0),('dl_service2','dl_shop2','dl_cat','live',1000,24,now(),now(),1);
+      INSERT INTO supplier_catalog_items(id,supplier_id,supplier_service_id,subcategory_code,name,base_price_minor,sort_order,created_at,updated_at) VALUES
+        ('dl_item','dl_shop','dl_service','dl_sub','Item',1000,0,now(),now()),('dl_item2','dl_shop2','dl_service2','dl_sub','Item',1000,0,now(),now());
+      INSERT INTO orders(id,client_id,state,created_at,updated_at,position,data)
+        VALUES('dl_order','dl_client','awaiting_checkout',now(),now(),0,'{}');
+      INSERT INTO client_carts(id,client_id,state,created_at,updated_at,deadline,checked_out_order_id,checked_out_at) VALUES
+        ('dl_mixed','dl_client','draft',now(),now(),NULL,NULL,NULL),('dl_paid','dl_client','checked_out',now(),now(),NULL,'dl_order',now()),
+        ('dl_default','dl_client','draft',now(),now(),'2026-12-01T00:00:00Z',NULL,NULL);
+      INSERT INTO client_cart_lines(id,cart_id,supplier_id,catalog_item_id,quantity,sort_order,created_at,updated_at,deadline) VALUES
+        ('m1','dl_mixed','dl_shop','dl_item',1,0,now(),now(),'2026-12-05T00:00:00Z'),
+        ('m2','dl_mixed','dl_shop','dl_item',1,1,now(),now(),'2026-12-03T00:00:00Z'),
+        ('m3','dl_mixed','dl_shop','dl_item',1,2,now(),now(),'2026-12-05T00:00:00Z'),
+        ('m4','dl_mixed','dl_shop','dl_item',1,3,now(),now(),NULL),
+        ('m5','dl_mixed','dl_shop2','dl_item2',1,4,now(),now(),'2026-12-09T00:00:00Z'),
+        ('p1','dl_paid','dl_shop','dl_item',1,0,now(),now(),'2026-12-03T00:00:00Z'),
+        ('p2','dl_paid','dl_shop','dl_item',1,1,now(),now(),'2026-12-04T00:00:00Z'),
+        ('d1','dl_default','dl_shop','dl_item',1,0,now(),now(),NULL),
+        ('d2','dl_default','dl_shop','dl_item',1,1,now(),now(),'2026-12-01T00:00:00Z');
+    `);
+    await runner({ ...migrationOptions(schema, 'up', 1793630000000, client), timestamp: true });
+    const rows = (await client.query('SELECT id,cart_id,supplier_id,deadline,delivery_key FROM client_cart_lines ORDER BY cart_id,sort_order')).rows;
+    const key = Object.fromEntries(rows.map(row => [row.id, row.delivery_key]));
+    // The earliest-dated group at each shop stays the main delivery.
+    assert.equal(key.m2, null);
+    assert.equal(key.m5, null);
+    assert.equal(key.p1, null);
+    assert.equal(key.d1, null);
+    assert.equal(key.d2, null, 'the cart default date and an equal explicit date were one group');
+    assert.match(key.m1, /^dlv_m[0-9a-f]{24}$/);
+    assert.equal(key.m3, key.m1);
+    assert.match(key.m4, /^dlv_m/);
+    assert.notEqual(key.m4, key.m1);
+    assert.match(key.p2, /^dlv_m/, 'checked-out carts read back as they were paid');
+    const { cartGroups } = await import('../src/cart-groups.js');
+    const regroup = (cartId) => cartGroups({ deadline: cartId === 'dl_default' ? '2026-12-01T00:00:00Z' : null },
+      rows.filter(row => row.cart_id === cartId).map(row => ({ id: row.id, supplierId: row.supplier_id, deadline: row.deadline,
+        ...(row.delivery_key ? { deliveryKey: row.delivery_key } : {}) }))).map(group => group.lines.map(line => line.id));
+    assert.deepEqual(regroup('dl_mixed'), [['m1', 'm3'], ['m2'], ['m4'], ['m5']]);
+    assert.deepEqual(regroup('dl_paid'), [['p1'], ['p2']]);
+    assert.deepEqual(regroup('dl_default'), [['d1', 'd2']]);
+    await assert.rejects(client.query("UPDATE client_cart_lines SET delivery_key='bad key' WHERE id='m1'"), { code: '23514' });
+    await client.query("UPDATE client_cart_lines SET delivery_key='dlv_0a1b2c3d4e5f' WHERE id='d2'");
+    await assert.rejects(runner(migrationOptions(schema, 'down', 1, client)), /separate deliveries/);
+    await client.query('ROLLBACK');
+    await client.query("UPDATE client_cart_lines SET delivery_key=NULL WHERE id='d2'");
+    await runner(migrationOptions(schema, 'down', 1, client));
+    assert.equal((await client.query("SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name='client_cart_lines' AND column_name='delivery_key'", [schema])).rowCount, 0);
+  });
+});
+
+test('sample first starts every listing without a sample and keeps a held batch price immutable', { skip: !DATABASE_URL }, async t => {
+  await withMigrationSchema(t, async ({ schema, client }) => {
+    await runner({ ...migrationOptions(schema, 'up', 1793630000000, client), timestamp: true });
+    await client.query(`
+      INSERT INTO users(id,clerk_user_id,email,name,role,account_type,verification_status,created_at,position) VALUES
+        ('sf_client','sf_c','sf_c@test.invalid','Client','client','individual',NULL,now(),0),
+        ('sf_shop','sf_s','sf_s@test.invalid','Shop','supplier',NULL,'approved',now(),1);
+      INSERT INTO taxonomy_categories(id,code,name,active,sort_order,position) VALUES('sf_cat','sf_cat','Category',true,0,0);
+      INSERT INTO taxonomy_subcategories(id,code,category_code,name,active,sort_order,position) VALUES('sf_sub','sf_sub','sf_cat','Subcategory',true,0,0);
+      INSERT INTO supplier_services(id,supplier_id,category_code,state,reference_rate_minor,turnaround_hours,created_at,updated_at,position) VALUES
+        ('sf_service','sf_shop','sf_cat','live',1000,24,now(),now(),0);
+      INSERT INTO supplier_catalog_items(id,supplier_id,supplier_service_id,subcategory_code,name,base_price_minor,sort_order,created_at,updated_at) VALUES
+        ('sf_item','sf_shop','sf_service','sf_sub','Item',1000,0,now(),now());
+      INSERT INTO orders(id,client_id,state,created_at,updated_at,position,data) VALUES
+        ('sf_sample','sf_client','delivered',now(),now(),0,'{}'),('sf_batch','sf_client','awaiting_checkout',now(),now(),1,'{}');
+    `);
+    await runner({ ...migrationOptions(schema, 'up', 1793650000000, client), timestamp: true });
+    assert.deepEqual((await client.query("SELECT sample_available, sample_price_minor FROM supplier_catalog_items WHERE id='sf_item'")).rows[0],
+      { sample_available: false, sample_price_minor: null });
+    await assert.rejects(client.query("UPDATE supplier_catalog_items SET sample_available=true WHERE id='sf_item'"), { code: '23514' });
+    await assert.rejects(client.query("UPDATE supplier_catalog_items SET sample_price_minor=0 WHERE id='sf_item'"), { code: '23514' });
+    await client.query("UPDATE supplier_catalog_items SET sample_available=true, sample_price_minor=5000 WHERE id='sf_item'");
+    await client.query(`INSERT INTO sample_batch_drafts(id,client_id,supplier_id,catalog_item_id,sample_order_id,status,hold_days,batch,held_pricing,created_at,updated_at)
+      VALUES('sbd_one','sf_client','sf_shop','sf_item','sf_sample','awaiting_sample',14,'{"quantity":100}','{"basePriceMinor":1000}',now(),now())`);
+    await assert.rejects(client.query(`UPDATE sample_batch_drafts SET held_pricing='{"basePriceMinor":900}' WHERE id='sbd_one'`), /held pricing/);
+    await assert.rejects(client.query("UPDATE sample_batch_drafts SET status='ordered', batch_order_id=NULL WHERE id='sbd_one'"), { code: '23514' });
+    await assert.rejects(client.query("UPDATE sample_batch_drafts SET status='approved' WHERE id='sbd_one'"), { code: '23514' });
+    await client.query(`UPDATE sample_batch_drafts SET status='approved', approval='{"method":"tick"}',
+      sample_delivered_at='2026-11-01T00:00:00Z', held_until='2026-11-15T00:00:00Z' WHERE id='sbd_one'`);
+    await assert.rejects(client.query("UPDATE sample_batch_drafts SET held_until='2026-12-15T00:00:00Z' WHERE id='sbd_one'"), /written once/);
+    await client.query("UPDATE sample_batch_drafts SET status='ordered', batch_order_id='sf_batch' WHERE id='sbd_one'");
+    await assert.rejects(client.query(`INSERT INTO client_carts(id,client_id,state,created_at,updated_at) VALUES('sf_cart','sf_client','draft',now(),now());
+      INSERT INTO client_cart_lines(id,cart_id,supplier_id,catalog_item_id,quantity,sort_order,created_at,updated_at,sample_batch_draft_id)
+      VALUES('sf_line','sf_cart','sf_shop','sf_item',1,0,now(),now(),'sbd_one')`), { code: '23514' });
+    await client.query('BEGIN');
+    await assert.rejects(runner(migrationOptions(schema, 'down', 1, client)), /samples are offered/);
+    await client.query('ROLLBACK');
+    await client.query("DELETE FROM sample_batch_drafts; UPDATE supplier_catalog_items SET sample_available=false");
+    await runner(migrationOptions(schema, 'down', 1, client));
+    assert.equal((await client.query("SELECT to_regclass($1) AS t", [`${schema}.sample_batch_drafts`])).rows[0].t, null);
+    assert.equal((await client.query("SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name='supplier_catalog_items' AND column_name LIKE 'sample%'", [schema])).rowCount, 0);
+  });
+});

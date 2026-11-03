@@ -1,4 +1,5 @@
 import { voidTesterReward } from './tester-rewards.js';
+import { TESTER_CAMPAIGN_PURPOSES } from './tester-campaigns.js';
 import { identityHasMembership } from './authorization-context.js';
 import { initVouchers, voucherFail as fail, normalizeVoucherCode, generatedVoucherCode, issueVoucher, addVoucherCode,
   publicVoucher, voucherEvent, releaseVoucherReservations } from './vouchers.js';
@@ -92,7 +93,7 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
       return result({ campaign: created }, true, 201);
     }
     if (!campaign) fail(404, 'voucher_campaign_not_found');
-    if (['survey', 'founding_tester', 'tester_referral', 'founding_launch', 'friend_pass'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
+    if (['survey', ...TESTER_CAMPAIGN_PURPOSES, 'founding_launch', 'friend_pass'].includes(campaign.purpose)) fail(409, campaign.purpose === 'survey' ? 'survey_campaign_managed' : 'founding_tester_campaign_managed');
     if (req.method === 'PATCH' && !campaigns[2]) {
       if (campaign.status !== 'draft' || store.vouchers.some(v => v.campaignId === campaign.id)) fail(409, 'voucher_campaign_immutable');
       const input = campaignInput({ ...campaign, ...object(await readBody(req)) }, at);
