@@ -22,6 +22,10 @@ Every path is also served under `/api`.
 - `screenshots` is optional: up to 6 base64 strings (a `data:` prefix is fine), each at most 8 MB decoded.
   The type is read from the bytes; only PNG, JPEG, WebP and GIF are kept (no SVG).
 - Optional `Authorization: Bearer <Clerk session>`: the client app sends it so the report records its reporter (for the [bug-report voucher](CLIENT_HOME_API.md#one-time-bug-report-voucher)). An invalid or expired session is `401 unauthorized`; a valid session without a GRIDGO account files anonymously. The landing page sends none.
+- `supportThreadId` is an optional support chat thread UUID for session-filed reports.
+  It is stored only when the session maps to a GRIDGO reporter; anonymous submissions
+  ignore it. A malformed non-null value is `400 invalid_request`. It never changes
+  the submitted issue text or attaches, copies, or modifies chat files.
 - 10 reports per sender per 10 minutes, then `429 too_many_requests`. The sender is Cloudflare's `CF-Connecting-IP` (the edge proxy replaces `X-Forwarded-For`).
 - Site-wide over the last 24 hours: at most `ISSUE_REPORTS_DAILY_LIMIT` reports (default 200) and `ISSUE_REPORTS_DAILY_BYTES` of screenshots (default 1 GiB), then `429 report_capacity_reached`.
 
@@ -54,6 +58,29 @@ Send a Clerk session token as `Authorization: Bearer <token>`. The account's ver
 
 The list response is `{ reports, counts: { new, tracked, published, dismissed, priorities }, triageCounts }`. Each support desk report is `{ id, issue, category, status, priority, publishedIn, createdAt, updatedAt, screenshots: [{ position, contentType, size, url, expiresAt }], triage, aiReview, bugConfirmation }` (see [Triage and AI review](#triage-and-ai-review) and [Confirm real bug](#confirm-real-bug)).
 Screenshot `url`s are presigned MinIO links that expire (`MINIO_DOWNLOAD_URL_TTL_SECONDS`, default 5 minutes), so download them right after listing.
+
+### Screenshots from in-app support chat
+
+All staff read projections (dashboard, support desk, and firstmate, including PATCH
+responses) also return `supportThreadId`: the linked thread UUID, or `null` when no
+owned thread resolves. The explicit stored ID takes precedence over the legacy
+`Support chat thread: <uuid>` line in the issue text. Only a thread whose
+`party_user_id` equals the report's recorded `reporterId` can resolve; anonymous
+reports and references to another user's thread expose neither its ID nor images.
+
+When the report has no directly submitted screenshots, its `screenshots` list uses
+the opening chat message's ready JPEG, PNG, and WebP attachments, in attachment
+order. Each uses the existing `{ position, contentType, size, url, expiresAt }`
+shape with `source: "support_chat"` added. Deleted/pending files, non-images,
+and attachments from subsequent messages are omitted. Directly submitted landing
+screenshots keep their existing shape and take precedence over chat images.
+Only staff routes expose these signed links; public filing responses stay unchanged.
+
+Migration `1793785200000_issue_report_support_thread` adds the optional UUID hint.
+It deliberately survives deletion of a chat thread so the explicit ID cannot
+silently fall back to another ID in the original text. Ownership and existence are
+checked on every read. Legacy reports gain screenshots at read time without a
+backfill or changes to chat messages, file metadata, or stored bytes.
 
 ## Statuses and the tracker issue link
 

@@ -71,6 +71,9 @@ test("validateIssueReport accepts data URLs and rejects unknown categories, non-
     screenshots: Array.from({ length: MAX_SCREENSHOTS + 1 }, () => PNG.toString("base64")),
   });
   assert.equal(many.ok, false);
+  for (const supportThreadId of ["not-a-uuid", "", 12, {}]) {
+    assert.equal(validateIssueReport({ issue: "x", supportThreadId }).ok, false);
+  }
 });
 
 function fakeStorage() {
@@ -93,7 +96,7 @@ function fakeStorage() {
   };
 }
 
-async function startRouter(database, storage, env = DESK_ENV) {
+async function startRouter(database, storage, env = DESK_ENV, staffUser = null) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const send = (response, status, body) => {
@@ -101,6 +104,11 @@ async function startRouter(database, storage, env = DESK_ENV) {
       response.end(JSON.stringify(body));
     };
     try {
+      if (await routeFirstmateIssueReports({ req, res, pathname: url.pathname, url, send, database, storage, env })) return;
+      if (await routeStaffIssueReports({
+        req, res, pathname: url.pathname, url, send, database, storage,
+        user: req.headers.authorization === `Bearer ${OTHER_TOKEN}` ? staffUser : null,
+      })) return;
       const handled = await routeIssueReports({
         req, res, pathname: url.pathname, url, send, database, storage, env, verifyClerk, loadClerkUser,
       });
@@ -126,6 +134,144 @@ async function call(base, pathname, { method = "GET", body, token, forwardedFor,
   });
   return { status: response.status, body: await response.json() };
 }
+
+test("staff report screenshots resolve only the reporter's opening support chat images", { skip: !DATABASE_URL }, async (t) => {
+  const database = createDatabase({ DATABASE_URL });
+  const storage = fakeStorage();
+  const prefix = `report_chat_${process.pid}`;
+  const owner = `${prefix}_owner`;
+  const other = `${prefix}_other`;
+  const staffUser = { id: "u_ops", role: "ops_admin" };
+  resolveAuthorizationContext({ userRoleMemberships: [{ userId: staffUser.id, role: "ops_admin" }] }, staffUser);
+  const env = { ...DESK_ENV, FIRSTMATE_TRACKER_TOKEN: "report-chat-firstmate" };
+  const { server, base } = await startRouter(database, storage, env, staffUser);
+  t.after(async () => {
+    server.close();
+    await database.query("TRUNCATE issue_reports CASCADE");
+    await database.query("DELETE FROM support_chat_threads WHERE party_user_id = ANY($1)", [[owner, other]]);
+    await database.query("DELETE FROM files WHERE owner_id = ANY($1)", [[owner, other]]);
+    await database.query("DELETE FROM users WHERE id = ANY($1)", [[owner, other]]);
+    await database.close();
+  });
+  await database.query("TRUNCATE issue_reports CASCADE");
+  for (const [id, clerkId] of [[owner, "user_ops"], [other, `${prefix}_clerk`]]) {
+    await database.query(
+      `INSERT INTO users (id, clerk_user_id, email, name, role, account_type, created_at, position)
+       VALUES ($1, $2, $3, 'Reporter', 'client', 'individual', now(), 0)`, [id, clerkId, `${id}@gridgo.test`],
+    );
+  }
+  async function file(name, { userId = owner, type = "image/png", state = "ready" } = {}) {
+    const id = `${prefix}_${name}`;
+    await database.query(
+      `INSERT INTO files (file_id, owner_id, purpose, original_filename, declared_content_type,
+         detected_content_type, size_bytes, state, object_key, created_at, position)
+       VALUES ($1, $2, 'support_chat_image', $1, $3, $3, 32, $4, $5, now(), 0)`,
+      [id, userId, type, state, `chat/${id}`],
+    );
+    return id;
+  }
+  const png = await file("png");
+  const jpeg = await file("jpeg", { type: "image/jpeg" });
+  const pdf = await file("pdf", { type: "application/pdf" });
+  const pending = await file("pending", { state: "pending_upload" });
+  const foreign = await file("foreign", { userId: other });
+  async function thread(userId, attachments) {
+    const id = (await database.query(
+      "INSERT INTO support_chat_threads (party_user_id, party_role) VALUES ($1, 'client') RETURNING id", [userId],
+    )).rows[0].id;
+    await database.query(
+      `INSERT INTO support_chat_messages (thread_id, sender_user_id, sender_role, body, attachment_file_ids, created_at)
+       VALUES ($1, $2, 'client', 'Opening report', $3, now() - interval '1 minute')`, [id, userId, attachments],
+    );
+    await database.query(
+      `INSERT INTO support_chat_messages (thread_id, sender_user_id, sender_role, body, attachment_file_ids)
+       VALUES ($1, $2, 'client', 'Later image', $3)`, [id, userId, [jpeg]],
+    );
+    return id;
+  }
+  const ownThread = await thread(owner, [png, pdf, pending, foreign]);
+  const explicitThread = await thread(owner, [jpeg]);
+  const otherThread = await thread(other, [foreign]);
+  const emptyOpening = await thread(owner, []);
+  let ip = 40;
+  async function submit(body, token = OTHER_TOKEN) {
+    const response = await call(base, "/issue-reports", {
+      method: "POST", token, cfIp: `192.0.2.${ip++}`, body,
+    });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    return response.body.id;
+  }
+  const issue = `The app has a problem\nSupport chat thread: ${ownThread}\nScreenshots: 1, in that thread`;
+  const legacy = await submit({ issue });
+  const explicit = await submit({ issue, supportThreadId: explicitThread });
+  const explicitOnly = await submit({ issue: "Explicit link", supportThreadId: ownThread });
+  const noLinks = [
+    await submit({ issue: `Support chat thread: ${otherThread}` }),
+    await submit({ issue: "No thread line" }),
+    await submit({ issue }, null),
+    await submit({ issue, supportThreadId: ownThread }, null),
+    await submit({ issue, supportThreadId: otherThread }),
+    await submit({ issue, supportThreadId: crypto.randomUUID() }),
+  ];
+  const noImages = await submit({ issue: `Support chat thread: ${emptyOpening}` });
+  const landing = await submit({ issue, screenshots: [PNG.toString("base64")] });
+  const stored = (await database.query("SELECT support_thread_id, issue FROM issue_reports WHERE id = $1", [explicit])).rows[0];
+  assert.equal(stored.support_thread_id, explicitThread);
+  assert.equal(stored.issue, issue);
+  assert.equal((await database.query("SELECT support_thread_id FROM issue_reports WHERE id = $1", [legacy])).rows[0].support_thread_id, null);
+  const chatBefore = (await database.query("SELECT * FROM support_chat_messages ORDER BY id")).rows;
+  const filesBefore = (await database.query("SELECT * FROM files WHERE owner_id = ANY($1) ORDER BY file_id", [[owner, other]])).rows;
+  for (const [path, token] of [["/ops/issue-reports", OTHER_TOKEN], ["/issue-reports", DESK_TOKEN], ["/firstmate/issue-reports", env.FIRSTMATE_TRACKER_TOKEN]]) {
+    const listed = await call(base, path, { token });
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    for (const id of [legacy, explicitOnly]) {
+      const detail = await call(base, `${path}/${id}`, { token });
+      assert.equal(detail.status, 200);
+      const report = detail.body;
+      assert.equal(report.supportThreadId, ownThread);
+      assert.deepEqual(report.screenshots, [{
+        position: 0, contentType: "image/png", size: 32,
+        url: `https://files.example/chat/${png}?sig=1`, expiresAt: "2026-09-24T00:05:00.000Z", source: "support_chat",
+      }]);
+      assert.deepEqual(listed.body.reports.find(row => row.id === id).screenshots, report.screenshots);
+    }
+    const explicitReport = listed.body.reports.find(row => row.id === explicit);
+    assert.equal(explicitReport.supportThreadId, explicitThread);
+    assert.equal(explicitReport.screenshots[0].contentType, "image/jpeg");
+    for (const id of noLinks) {
+      const report = listed.body.reports.find(row => row.id === id);
+      assert.equal(report.supportThreadId, null);
+      assert.deepEqual(report.screenshots, []);
+    }
+    assert.deepEqual(listed.body.reports.find(row => row.id === noImages).screenshots, []);
+    const landingShot = listed.body.reports.find(row => row.id === landing).screenshots[0];
+    assert.equal(Object.hasOwn(landingShot, "source"), false);
+    assert.equal(landingShot.position, 0);
+    assert.match(landingShot.url, /\/issue_reports\//);
+  }
+  // Exercise the real server and MinIO signer on a free port as well as the
+  // role-gated router projections above; no shared development API is touched.
+  const live = await startApi({ FIRSTMATE_TRACKER_TOKEN: env.FIRSTMATE_TRACKER_TOKEN });
+  try {
+    const response = await call(live.api, `/firstmate/issue-reports/${legacy}`, { token: env.FIRSTMATE_TRACKER_TOKEN });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.supportThreadId, ownThread);
+    const [shot] = response.body.screenshots;
+    assert.equal(shot.source, "support_chat");
+    assert.equal(shot.contentType, "image/png");
+    assert.match(shot.url, new RegExp(`/chat/${png}\\?`));
+    assert.match(shot.url, /X-Amz-Signature=/);
+    assert.ok(Date.parse(shot.expiresAt) > Date.now());
+  } finally {
+    await stopApi(live);
+  }
+  assert.deepEqual((await database.query("SELECT * FROM support_chat_messages ORDER BY id")).rows, chatBefore);
+  assert.deepEqual((await database.query("SELECT * FROM files WHERE owner_id = ANY($1) ORDER BY file_id", [[owner, other]])).rows, filesBefore);
+  await database.query("DELETE FROM support_chat_threads WHERE id = $1", [explicitThread]);
+  const deleted = await call(base, `/ops/issue-reports/${explicit}`, { token: OTHER_TOKEN });
+  assert.equal(deleted.body.supportThreadId, null);
+  assert.deepEqual(deleted.body.screenshots, [], "a deleted explicit link must not fall back to the text link");
+});
 
 test("a public report with screenshots is stored and read back by the desk", { skip: !DATABASE_URL }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
