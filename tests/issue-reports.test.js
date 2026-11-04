@@ -196,7 +196,7 @@ test("staff report screenshots resolve only the reporter's opening support chat 
   let ip = 40;
   async function submit(body, token = OTHER_TOKEN) {
     const response = await call(base, "/issue-reports", {
-      method: "POST", token, cfIp: `192.0.2.${ip++}`, body,
+      method: "POST", token, cfIp: `2001:db8:1104::${ip++}`, body,
     });
     assert.equal(response.status, 201, JSON.stringify(response.body));
     return response.body.id;
