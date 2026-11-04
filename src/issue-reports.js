@@ -101,6 +101,10 @@ export function validateIssueReport(body) {
   if (category && !ISSUE_CATEGORIES.includes(category)) {
     return { ok: false, message: `Category must be one of: ${ISSUE_CATEGORIES.join(", ")}.` };
   }
+  const supportThreadId = body.supportThreadId;
+  if (supportThreadId != null && (typeof supportThreadId !== "string" || !UUID_RE.test(supportThreadId))) {
+    return { ok: false, message: "supportThreadId must be a support chat thread UUID." };
+  }
   const screenshotsInput = body.screenshots ?? [];
   if (!Array.isArray(screenshotsInput)) return { ok: false, message: "Screenshots must be a list." };
   if (screenshotsInput.length > MAX_SCREENSHOTS) {
@@ -108,7 +112,7 @@ export function validateIssueReport(body) {
   }
   try {
     const screenshots = screenshotsInput.map(decodeScreenshot);
-    return { ok: true, value: { issue, category, screenshots } };
+    return { ok: true, value: { issue, category, screenshots, ...(supportThreadId != null ? { supportThreadId } : {}) } };
   } catch (error) {
     if (error instanceof ReportError) return { ok: false, status: error.status, code: error.code, message: error.message };
     throw error;
@@ -210,8 +214,9 @@ export async function createIssueReport(database, storage, input, { now = new Da
     }
     return await database.transaction(async () => {
       const result = await database.query(
-        `INSERT INTO issue_reports (id, issue, category, reporter_id) VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-        [reportId, input.issue, input.category, input.reporterId ?? null],
+        `INSERT INTO issue_reports (id, issue, category, reporter_id, support_thread_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+        [reportId, input.issue, input.category, input.reporterId ?? null, input.reporterId ? input.supportThreadId ?? null : null],
       );
       for (const object of objects) {
         await database.query(
@@ -238,6 +243,37 @@ export async function createIssueReport(database, storage, input, { now = new Da
   }
 }
 
+// Older app builds name the newly opened thread in the issue text. Resolve this
+// at read time so already-filed reports gain their screenshots without a backfill.
+function reportSupportThreadId(row) {
+  if (!row.reporter_id) return null;
+  return row.support_thread_id ?? /^Support chat thread: ([0-9a-f-]{36})[ \t]*\r?$/im.exec(row.issue)?.[1] ?? null;
+}
+
+async function supportChatScreenshots(database, rows) {
+  const candidates = rows.map(row => ({ row, threadId: reportSupportThreadId(row) }))
+    .filter(({ threadId }) => threadId && UUID_RE.test(threadId));
+  if (!candidates.length) return [];
+  const result = await database.query(
+    `SELECT requested.report_id, t.id AS thread_id, attachment.position - 1 AS position,
+       f.object_key, f.detected_content_type AS content_type, f.size_bytes
+     FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS requested(report_id, thread_id, reporter_id)
+     JOIN support_chat_threads t ON t.id = requested.thread_id AND t.party_user_id = requested.reporter_id
+     LEFT JOIN LATERAL (
+       SELECT m.attachment_file_ids FROM support_chat_messages m
+       WHERE m.thread_id = t.id ORDER BY m.created_at, m.id LIMIT 1
+     ) opening ON true
+     LEFT JOIN LATERAL unnest(opening.attachment_file_ids) WITH ORDINALITY AS attachment(file_id, position) ON true
+     LEFT JOIN files f ON f.file_id = attachment.file_id AND f.owner_id = requested.reporter_id
+       AND f.state = 'ready' AND f.purpose = 'support_chat_image'
+       AND f.detected_content_type IN ('image/png', 'image/jpeg', 'image/webp')
+     ORDER BY requested.report_id, attachment.position`,
+    [candidates.map(({ row }) => row.id), candidates.map(({ threadId }) => threadId),
+      candidates.map(({ row }) => row.reporter_id)],
+  );
+  return result.rows;
+}
+
 async function projectReports(database, storage, rows) {
   if (!rows.length) return [];
   const shots = await database.query(
@@ -260,6 +296,24 @@ async function projectReports(database, storage, rows) {
     });
     byReport.set(shot.report_id, list);
   }
+  const supportThreads = new Map();
+  const directReports = new Set(byReport.keys());
+  for (const shot of await supportChatScreenshots(database, rows)) {
+    supportThreads.set(shot.report_id, shot.thread_id);
+    // Direct landing uploads keep their existing screenshot projection.
+    if (!shot.object_key || directReports.has(shot.report_id)) continue;
+    const signed = await storage.presignGet(shot.object_key);
+    const list = byReport.get(shot.report_id) ?? [];
+    list.push({
+      position: Number(shot.position),
+      contentType: shot.content_type,
+      size: shot.size_bytes,
+      url: signed.url,
+      expiresAt: signed.expiresAt,
+      source: "support_chat",
+    });
+    byReport.set(shot.report_id, list);
+  }
   return rows.map((row) => ({
     id: row.id,
     issue: row.issue,
@@ -271,6 +325,7 @@ async function projectReports(database, storage, rows) {
     createdAt: asIso(row.created_at),
     updatedAt: asIso(row.updated_at),
     screenshots: byReport.get(row.id) ?? [],
+    supportThreadId: supportThreads.get(row.id) ?? null,
     reporter: row.reporter_id ? { id: row.reporter_id, name: row.reporter_name ?? null } : null,
     bugConfirmation: row.bug_confirmed_at ? {
       confirmedAt: asIso(row.bug_confirmed_at),
@@ -321,7 +376,7 @@ function aiReviewOutcome(row) {
 const REPORT_COLUMNS = `r.id, r.issue, r.category, r.status, r.published_in, r.tracker_issue_url, r.priority, r.created_at, r.updated_at,
   r.validity, r.triage_category, r.labels, r.duplicate_of, r.triaged_by, triager.name AS triaged_by_name, r.triaged_at,
   r.ai_reviewed_at, r.ai_validity, r.ai_category, r.ai_labels, r.ai_duplicate_of, r.ai_note,
-  r.reporter_id, reporter.name AS reporter_name, r.bug_confirmed_at, r.bug_confirmed_by, confirmer.name AS bug_confirmed_by_name,
+  r.reporter_id, r.support_thread_id, reporter.name AS reporter_name, r.bug_confirmed_at, r.bug_confirmed_by, confirmer.name AS bug_confirmed_by_name,
   r.bug_reward_outcome, r.bug_reward_id, reward.status AS bug_reward_status, reward.amount_minor AS bug_reward_amount_minor,
   reward.voucher_id AS bug_reward_voucher_id, reward.issued_at AS bug_reward_issued_at`;
 const REPORT_FROM = `issue_reports r LEFT JOIN users triager ON triager.id = r.triaged_by
