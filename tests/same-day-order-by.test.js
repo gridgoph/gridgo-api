@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { fixture, caller } from './fixtures/scheduling.js';
 import { deadlineDays, projectShopFinish, schedulingCalendar, shopFinishProjector } from '../src/order-match.js';
 import { previewProductionTime } from '../src/production-time-preview.js';
+import { productionTimeFields } from '../src/production-time.js';
 
 const DAY = '2026-11-05';
 const local = time => `${DAY}T${time}+08:00`;
@@ -147,4 +148,44 @@ test('cutoff computation is bounded independently of display horizon and reuses 
     assert.deepEqual(result.sameDayOrderBy, { at: iso('12:30:00'), passed: false });
     assert.ok(probes <= 28, `probes=${probes}`);
   }
+});
+
+function sparseCandidates() {
+  const { store, client } = setup();
+  const second = fixture().store.catalogItems[1];
+  Object.assign(second, productionTimeFields({ mode: 'days', minDays: 53, maxDays: 53 }, 60));
+  store.catalogItems.push(second);
+  store.supplierProfiles[1].schedule = { utcOffsetMinutes: 480,
+    week: [{ weekday: 4, opensMinute: 780, closesMinute: 840 }], closures: [] };
+  return { store, client, second };
+}
+
+test('a probe-only sparse-calendar horizon failure preserves the successful calendar and route', async () => {
+  const { store, client } = sparseCandidates();
+  const now = local('08:00:00');
+  const input = { subcategoryCode: 'flyers', now, days: 7 };
+  const expected = deadlineDays({ ...store, catalogItems: store.catalogItems.slice(0, 1) }, input);
+  assert.deepEqual(expected.sameDayOrderBy, { at: iso('12:30:00'), passed: false });
+  assert.deepEqual(deadlineDays(store, input), expected);
+  const response = await caller(store, client, now)('GET', '/me/deadline-days?subcategoryCode=flyers&days=7');
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, expected);
+});
+
+test('a failing ordinary probe still allows that listing\'s rush tier to contribute its later cutoff', () => {
+  const { store, second } = sparseCandidates();
+  store.catalogSpeedTiers = [{ id: 'sparse_rush', catalogItemId: second.id, label: 'Fast', turnaroundHours: 0.5, priceMinor: 12345 }];
+  assert.deepEqual(answer(store, '08:00:00').sameDayOrderBy, { at: iso('13:00:00'), passed: false });
+  const preview = previewProductionTime(store, second, { mode: 'days', minDays: 53, maxDays: 53 }, { now: local('08:00:00'), days: 7 });
+  assert.deepEqual(preview.calendar.sameDayOrderBy, { at: iso('13:00:00'), passed: false });
+  assert.equal(preview.calendar.days[0].status, 'rush');
+});
+
+test('sparse-calendar horizon failures on the real request still propagate from calendar, route and preview', async () => {
+  const { store, client, second } = sparseCandidates();
+  const now = local('12:30:00');
+  const horizonFailure = error => error.code === 'shop_never_open' && error.status === 409;
+  assert.throws(() => deadlineDays(store, { subcategoryCode: 'flyers', now, days: 7 }), horizonFailure);
+  await assert.rejects(caller(store, client, now)('GET', '/me/deadline-days?subcategoryCode=flyers&days=7'), horizonFailure);
+  assert.throws(() => previewProductionTime(store, second, { mode: 'days', minDays: 53, maxDays: 53 }, { now, days: 7 }), horizonFailure);
 });

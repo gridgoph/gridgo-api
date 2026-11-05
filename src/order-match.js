@@ -11,7 +11,7 @@ import { riderPackingFlow } from './shop-handover.js';
 import { recentLapseQualityPenalty, productionTiming } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
-import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
+import { AvailabilityError, defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
 import { listingExpress } from "./express.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
@@ -279,6 +279,22 @@ export function shopFinishProjector(store, { supplierId, turnaroundHours, turnar
   };
 }
 
+/** Probe failures mean no same-day option; real request projections still throw. */
+export function calendarProbeProjector(ordinary, rushProjects) {
+  const probe = project => {
+    try { return project(); }
+    catch (error) {
+      if (!(error instanceof AvailabilityError) || error.status !== 409) throw error;
+      return null;
+    }
+  };
+  return at => ({
+    projection: probe(() => ordinary(at).projection),
+    // An ordinary horizon failure must not hide a faster tier that can finish.
+    rushChoices: rushProjects.map(project => probe(() => project(at))).filter(Boolean),
+  });
+}
+
 /** Selected tiers are resolved from the approved catalogue, never request money. */
 export function listingTiming(store, item, line = {}) {
   const listing = publicCatalogItem(store, item);
@@ -395,7 +411,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       }
       return {
         supplierId, listing, projection, rushChoices, distance, distanceZone,
-        projectAt: at => ({ projection: project(at).projection, rushChoices: rushProjects.map(project => project(at)) }),
+        projectAt: calendarProbeProjector(project, rushProjects),
         queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
           Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
         quality: Math.max(0, capabilityScore(store, supplierId, [listing]) - recentLapseQualityPenalty(store, supplierId, now)),
@@ -554,7 +570,7 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
 
 function calendarDay(store, choices, end, at) {
   const day = schedulingDay(end), closed = deadlineDayReason(store.settings, end, at);
-  const ordinary = choices.filter(row => Date.parse(row.projection.scheduling.earliestReadyBy) <= Date.parse(end));
+  const ordinary = choices.filter(row => Date.parse(row.projection?.scheduling.earliestReadyBy) <= Date.parse(end));
   const secured = ordinary.filter(row => Date.parse(row.projection.scheduling.securedReadyBy) <= Date.parse(end));
   const rush = choices.flatMap(row => row.rushChoices).filter(row => Date.parse(row.promiseBy) <= Date.parse(end))
     .sort((a,b) => a.promiseBy.localeCompare(b.promiseBy));

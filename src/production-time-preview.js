@@ -1,5 +1,5 @@
 import { approvedCatalogView } from './catalog-review-state.js';
-import { shopFinishProjector, schedulingCalendar } from './order-match.js';
+import { shopFinishProjector, schedulingCalendar, calendarProbeProjector } from './order-match.js';
 import { effectiveProductionTime, productionTimeFields } from './production-time.js';
 import { shopProductionDayMinutes } from './production-days.js';
 import { clientSpeedTiersFor } from './supplier-catalog.js';
@@ -21,8 +21,8 @@ export function previewProductionTime(store, item, choice, { now, days }) {
         return fast;
       };
     });
-  const projectAt = at => ({ projection: ordinary(at).projection, rushChoices: rushProjects.map(project => project(at)) });
-  const { projection, rushChoices } = projectAt(now);
+  const projectAt = calendarProbeProjector(ordinary, rushProjects);
+  const projection = ordinary(now).projection, rushChoices = rushProjects.map(project => project(now));
   return { productionTime: timing.choice, scheduling: projection.scheduling,
     calendar: schedulingCalendar(store, [{ projection, rushChoices, projectAt, listing: { express: false } }], { now, days }) };
 }
