@@ -11,7 +11,7 @@ import { riderPackingFlow } from './shop-handover.js';
 import { recentLapseQualityPenalty, productionTiming } from './production-penalties.js';
 import { distanceMetersBetween, distanceZoneForDistance } from "./operational-model.js";
 import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from "./supplier-catalog.js";
-import { defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
+import { AvailabilityError, defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
 import { listingExpress } from "./express.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
@@ -231,6 +231,13 @@ function allowanceMinutesFrom(settings) {
 /** One ready-by rule for every new quote, including Express and listed tiers. */
 export function projectShopFinish(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes,
   minimumTurnaroundHours = null, units, now, express = false, deadline = null }) {
+  return shopFinishProjector(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes,
+    minimumTurnaroundHours, units, express, deadline })(now);
+}
+
+/** Freeze queue/capacity inputs once; calendar probes rerun the actual ready-by rule. */
+export function shopFinishProjector(store, { supplierId, turnaroundHours, turnaroundDays, turnaroundMinutes,
+  minimumTurnaroundHours = null, units, express = false, deadline = null }) {
   const hours = Number.isSafeInteger(turnaroundDays) && turnaroundDays > 0
     ? turnaroundDays * shopProductionDayMinutes(store, supplierId) / 60
     : Number.isSafeInteger(turnaroundMinutes) && turnaroundMinutes > 0 ? turnaroundMinutes / 60
@@ -240,31 +247,52 @@ export function projectShopFinish(store, { supplierId, turnaroundHours, turnarou
   const queue = queueMinutesFor(store, supplierId, hours);
   const capacityDaily = (store.supplierServices || []).filter(row => row.supplierId === supplierId && row.state === 'live')
     .reduce((best, row) => Number.isSafeInteger(row.capacityDaily) ? Math.max(best, row.capacityDaily) : best, 0);
-  const project = duration => {
-    const sameDay = duration * 60 < (displayProductionDayMinutes(store, supplierId) ?? 600);
-    const review = reviewTiming(store.settings, now, { sameDay });
-    const projection = projectFinish({ schedule: scheduleFor(profile), now: review.reviewCompletesAt,
-      preserveSeconds: true, queueMinutes: queue.minutes, turnaroundMinutes: duration * 60,
-      units: Number.isSafeInteger(units) && units > 0 ? units : null, capacityDaily: capacityDaily || null });
-    projection.review = review;
-    projection.promiseBy = dispatchReadyAt(store.settings, addOpeningMilliseconds(operatingHours(store.settings).schedule,
-      projection.readyBy, (sameDay ? operatingHours(store.settings).sameDayPromiseAllowanceMinutes : allowanceMinutesFrom(store.settings)) * 60000));
-    if (schedulingDay(projection.promiseBy) === schedulingDay(now) && deadlineDayReason(store.settings, projection.promiseBy, now)) {
-      const tomorrow = new Date(Date.parse(`${schedulingDay(now)}T00:00:00+08:00`) + 86400000).toISOString();
-      projection.promiseBy = dispatchReadyAt(store.settings, tomorrow);
-    }
-    return { ...projection, sameDay };
+  const dayMinutes = displayProductionDayMinutes(store, supplierId) ?? 600;
+  const schedule = scheduleFor(profile);
+  const policy = operatingHours(store.settings);
+  return now => {
+    const project = duration => {
+      const sameDay = duration * 60 < dayMinutes;
+      const review = reviewTiming(store.settings, now, { sameDay });
+      const projection = projectFinish({ schedule, now: review.reviewCompletesAt,
+        preserveSeconds: true, queueMinutes: queue.minutes, turnaroundMinutes: duration * 60,
+        units: Number.isSafeInteger(units) && units > 0 ? units : null, capacityDaily: capacityDaily || null });
+      projection.review = review;
+      projection.promiseBy = dispatchReadyAt(store.settings, addOpeningMilliseconds(policy.schedule,
+        projection.readyBy, (sameDay ? policy.sameDayPromiseAllowanceMinutes : allowanceMinutesFrom(store.settings)) * 60000));
+      if (schedulingDay(projection.promiseBy) === schedulingDay(now) && deadlineDayReason(store.settings, projection.promiseBy, now)) {
+        const tomorrow = new Date(Date.parse(`${schedulingDay(now)}T00:00:00+08:00`) + 86400000).toISOString();
+        projection.promiseBy = dispatchReadyAt(store.settings, tomorrow);
+      }
+      return { ...projection, sameDay };
+    };
+    const earliest = project(shortest), secured = shortest === hours ? earliest : project(hours);
+    const reason = deadline ? deadlineDayReason(store.settings, deadline, now)
+      || (Date.parse(earliest.promiseBy) > Date.parse(deadline) ? 'before_shortest_time' : null) : null;
+    const tight = !reason && Date.parse(secured.promiseBy) > Date.parse(deadline ?? earliest.promiseBy);
+    const projection = deadline && !tight ? secured : earliest;
+    return { queue, projection: { ...projection, express: false,
+      scheduling: { version: 1, status: reason ? 'not_possible' : tight ? 'tight' : 'secured', reason,
+        earliestReadyBy: earliest.promiseBy, securedReadyBy: secured.promiseBy, readyBy: projection.promiseBy,
+        sameDay: projection.sameDay, tightDeadline: tight, label: tight ? 'Tight deadline' : null,
+        rushTier: null, expressListing: express } } };
   };
-  const earliest = project(shortest), secured = shortest === hours ? earliest : project(hours);
-  const reason = deadline ? deadlineDayReason(store.settings, deadline, now)
-    || (Date.parse(earliest.promiseBy) > Date.parse(deadline) ? 'before_shortest_time' : null) : null;
-  const tight = !reason && Date.parse(secured.promiseBy) > Date.parse(deadline ?? earliest.promiseBy);
-  const projection = deadline && !tight ? secured : earliest;
-  return { queue, projection: { ...projection, express: false,
-    scheduling: { version: 1, status: reason ? 'not_possible' : tight ? 'tight' : 'secured', reason,
-      earliestReadyBy: earliest.promiseBy, securedReadyBy: secured.promiseBy, readyBy: projection.promiseBy,
-      sameDay: projection.sameDay, tightDeadline: tight, label: tight ? 'Tight deadline' : null,
-      rushTier: null, expressListing: express } } };
+}
+
+/** Probe failures mean no same-day option; real request projections still throw. */
+export function calendarProbeProjector(ordinary, rushProjects) {
+  const probe = project => {
+    try { return project(); }
+    catch (error) {
+      if (!(error instanceof AvailabilityError) || error.status !== 409) throw error;
+      return null;
+    }
+  };
+  return at => ({
+    projection: probe(() => ordinary(at).projection),
+    // An ordinary horizon failure must not hide a faster tier that can finish.
+    rushChoices: rushProjects.map(project => probe(() => project(at))).filter(Boolean),
+  });
 }
 
 /** Selected tiers are resolved from the approved catalogue, never request money. */
@@ -357,27 +385,33 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
       // Use the same combined quantity and slowest turnaround as checkout.
       const combinedUnits = groupUnits + BigInt(units ?? listing.minimumOrderQuantity ?? 1);
       if (combinedUnits > MAX_SAFE_MINOR) fail(400, "invalid_quantity", "The group's quantity exceeds the supported range.");
-      let { projection, queue } = projectShopFinish(projectionStore, {
+      const project = shopFinishProjector(projectionStore, {
         supplierId, turnaroundHours: Math.max(listing.turnaroundHours, ...groupHours),
-        minimumTurnaroundHours: Math.max(listing.minimumTurnaroundHours ?? listing.turnaroundHours, ...groupMinimumHours), now,
+        minimumTurnaroundHours: Math.max(listing.minimumTurnaroundHours ?? listing.turnaroundHours, ...groupMinimumHours),
         units: Number(combinedUnits),
         express: listing.express === true && groupExpress, deadline,
       });
-      const rushChoices = listing.pricedByColour ? [] : listing.speedTiers.filter(tier => tier.turnaroundHours < (listing.minimumTurnaroundHours ?? listing.turnaroundHours)).map(tier => {
-        const fast = projectShopFinish(projectionStore, { supplierId, now, deadline,
+      let { projection, queue } = project(now);
+      const rushProjects = listing.pricedByColour ? [] : listing.speedTiers.filter(tier => tier.turnaroundHours < (listing.minimumTurnaroundHours ?? listing.turnaroundHours)).map(tier => {
+        const projectFast = shopFinishProjector(projectionStore, { supplierId, deadline,
           turnaroundHours: Math.max(tier.turnaroundHours, ...groupHours),
           minimumTurnaroundHours: Math.max(tier.turnaroundHours, ...groupMinimumHours),
-          units: Number(combinedUnits) }).projection;
-        fast.scheduling.rushTier = tier;
-        if (!fast.scheduling.reason) fast.scheduling.status = 'rush';
-        return fast;
+          units: Number(combinedUnits) });
+        return at => {
+          const fast = projectFast(at).projection;
+          fast.scheduling.rushTier = tier;
+          if (!fast.scheduling.reason) fast.scheduling.status = 'rush';
+          return fast;
+        };
       });
+      const rushChoices = rushProjects.map(project => project(now));
       if (deadline && !fitsDeadline(projection, deadline)) {
         const fast = rushChoices.find(row => fitsDeadline(row, deadline));
         if (fast) projection = fast;
       }
       return {
         supplierId, listing, projection, rushChoices, distance, distanceZone,
+        projectAt: calendarProbeProjector(project, rushProjects),
         queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
           Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
         quality: Math.max(0, capabilityScore(store, supplierId, [listing]) - recentLapseQualityPenalty(store, supplierId, now)),
@@ -534,26 +568,56 @@ export function deadlineDays(store, { subcategoryCode, dropoff = null, now, days
   return schedulingCalendar(store, choices, { now: at, days });
 }
 
+function calendarDay(store, choices, end, at) {
+  const day = schedulingDay(end), closed = deadlineDayReason(store.settings, end, at);
+  const ordinary = choices.filter(row => Date.parse(row.projection?.scheduling.earliestReadyBy) <= Date.parse(end));
+  const secured = ordinary.filter(row => Date.parse(row.projection.scheduling.securedReadyBy) <= Date.parse(end));
+  const rush = choices.flatMap(row => row.rushChoices).filter(row => Date.parse(row.promiseBy) <= Date.parse(end))
+    .sort((a,b) => a.promiseBy.localeCompare(b.promiseBy));
+  const status = closed ? 'not_possible' : secured.length ? 'secured' : ordinary.length ? 'tight' : rush.length ? 'rush' : 'not_possible';
+  const reason = closed || (status === 'not_possible' ? choices.length ? 'before_shortest_time' : 'no_eligible_listing' : null);
+  const readyBy = status === 'not_possible' ? null : status === 'rush' ? rush[0].promiseBy
+    : status === 'secured' ? secured.map(row => row.projection.scheduling.securedReadyBy).sort()[0]
+      : ordinary.map(row => row.projection.scheduling.earliestReadyBy).sort()[0];
+  return { day, state: status === 'not_possible' ? 'cannot' : status === 'tight' || status === 'rush' ? 'tight' : 'open',
+    status, reason, readyBy, rushTier: status === 'rush' ? rush[0].scheduling.rushTier : null };
+}
+
+function sameDayOrderBy(store, choices, at, start) {
+  if (!choices.length) return null;
+  const end = new Date(start + 86400000 - 1).toISOString();
+  // Today is deliberately unavailable before opening. Start the search at the
+  // first opening today, including when the caller is already past closing.
+  let low = Date.parse(reviewTiming(store.settings, new Date(start).toISOString()).scheduledReviewAt);
+  let high = start + 86400000;
+  if (low >= high) return null;
+  const offered = instant => {
+    const now = new Date(instant).toISOString();
+    if (deadlineDayReason(store.settings, end, now)) return false;
+    return calendarDay(store, choices.map(row => row.projectAt(now)), end, now).state !== 'cannot';
+  };
+  if (!offered(low)) return null;
+  // Fixed queues and a single daytime opening make readiness monotone from
+  // opening onward. At most 27 bisections cover one day to the millisecond;
+  // candidates/queues are never reloaded or rescanned during these probes.
+  while (high - low > 1) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (offered(middle)) low = middle;
+    else high = middle;
+  }
+  return { at: new Date(high).toISOString(), passed: Date.parse(at) >= high };
+}
+
 /** Shared calendar projection for client search and the shop editor preview. */
 export function schedulingCalendar(store, choices, { now: at, days }) {
   const manilaDay = schedulingDay(at), start = Date.parse(`${manilaDay}T00:00:00+08:00`);
   const out = [];
   for (let index = 0; index < days; index++) {
     const end = new Date(start + (index + 1) * 86400000 - 1).toISOString();
-    const day = schedulingDay(end), closed = deadlineDayReason(store.settings, end, at);
-    const ordinary = choices.filter(row => Date.parse(row.projection.scheduling.earliestReadyBy) <= Date.parse(end));
-    const secured = ordinary.filter(row => Date.parse(row.projection.scheduling.securedReadyBy) <= Date.parse(end));
-    const rush = choices.flatMap(row => row.rushChoices).filter(row => Date.parse(row.promiseBy) <= Date.parse(end))
-      .sort((a,b) => a.promiseBy.localeCompare(b.promiseBy));
-    const status = closed ? 'not_possible' : secured.length ? 'secured' : ordinary.length ? 'tight' : rush.length ? 'rush' : 'not_possible';
-    const reason = closed || (status === 'not_possible' ? choices.length ? 'before_shortest_time' : 'no_eligible_listing' : null);
-    const readyBy = status === 'not_possible' ? null : status === 'rush' ? rush[0].promiseBy
-      : status === 'secured' ? secured.map(row => row.projection.scheduling.securedReadyBy).sort()[0]
-        : ordinary.map(row => row.projection.scheduling.earliestReadyBy).sort()[0];
-    out.push({ day, state: status === 'not_possible' ? 'cannot' : status === 'tight' || status === 'rush' ? 'tight' : 'open',
-      status, reason, readyBy, rushTier: status === 'rush' ? rush[0].scheduling.rushTier : null });
+    out.push(calendarDay(store, choices, end, at));
   }
   return { days: out, operatingStatus: reviewTiming(store.settings, at),
+    sameDayOrderBy: sameDayOrderBy(store, choices, at, start),
     earliest: choices.flatMap(row => [row.projection.scheduling.earliestReadyBy, ...row.rushChoices.map(fast => fast.promiseBy)]).sort()[0] ?? null,
     expressAvailable: choices.some(row => row.listing.express === true) };
 
