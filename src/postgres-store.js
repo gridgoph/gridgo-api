@@ -21,7 +21,8 @@ import { loadLegalPenaltyGate } from './legal.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
-import { deliverySplit } from "./operational-model.js";
+import { availableDispatch, dispatchWorkHeld } from './dispatch-policy.js';
+import { deliverySplit, isContainedPickup } from "./operational-model.js";
 import { listingPrintLayouts } from "./print-layout.js";
 import { quoteRequestTables, emptyQuoteRequestStore, quoteRequestRows, loadQuoteRequestRows } from './quote-request-store.js';
 
@@ -1324,9 +1325,107 @@ async function readFileGraph(graph, actorIds, pathname) {
 }
 
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
+const OPS_QUEUE_READ = /^\/(claims|issues)(?:\/[^/]+)?$|^\/escalations$/;
+const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-account))?)?$/;
+const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
+const STAFF_ITEM_READ = /^\/ops\/catalog-items\/[^/]+$/;
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
 const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
-export function isHotReadPath(pathname) { return pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
+export function isHotReadPath(pathname) { return pathname === '/dispatch/offers' || OPS_QUEUE_READ.test(pathname) || USER_READ.test(pathname) || AUDIT_READ.test(pathname) || STAFF_ITEM_READ.test(pathname) || pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
+
+/** Queue SQL narrows candidates only; the existing role/review views and
+ * handlers remain authoritative for visibility, ordering and errors.
+ */
+async function readOperationsQueue(graph, ids, pathname, params, role) {
+  const { loaded, read } = graph;
+  const identity = graph.finish(), raw = identity.users[0];
+  if (!raw || (role && !hasRole(identity, raw.id, role))) return identity;
+  const actor = selectActorRole(identity, raw, role || raw.role, { restrictMemberships: Boolean(role) });
+  const staff = ['ops_admin', 'super_admin'].some(role => identityHasMembership(actor, role));
+  const table = pathname.split('/')[1], detail = pathname.split('/')[2];
+  if (table !== 'issues' && !staff) return identity;
+  if (table === 'issues' && !detail && !staff && !['client', 'supplier'].includes(actor.role)) return identity;
+  const values = [], clauses = [];
+  const add = (column, value) => { values.push(sqlReadText(value)); clauses.push(`${column} = $${values.length}`); };
+  if (detail) add('id', detail);
+  else {
+    for (const key of ['orderId', 'status']) if (params.get(key)) add(key === 'orderId' ? 'order_id' : key, params.get(key));
+    if (table === 'issues' && actor.role === 'client') add('client_id', raw.id);
+    if (table === 'issues' && actor.role === 'supplier') {
+      values.push(raw.id);
+      clauses.push(`order_id IN (SELECT id FROM orders WHERE supplier_id = $${values.length})`);
+    }
+    if (staff && !isTestOperationsUser(identity, raw.id) && params.get('includeReviewData') !== '1') {
+      clauses.push('order_id IN (SELECT id FROM orders WHERE NOT review_data)');
+    }
+  }
+  if (isTestOperationsUser(identity, raw.id)) clauses.push('order_id IN (SELECT id FROM orders WHERE review_data)');
+  await read(table, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
+  if (table === 'issues') await read('claims', 'WHERE id = ANY($1::text[])', [loaded.issues.map(row => row.claim_id).filter(Boolean)]);
+  const rows = [...loaded[table], ...loaded.claims];
+  await read('orders', 'WHERE id = ANY($1::text[])', [[...new Set(rows.flatMap(row => [row.order_id, ...(row.data?.orderIds || [])]))]]);
+  // Only test-operations views inspect party/creator marks on child rows.
+  if (isTestOperationsUser(identity, raw.id)) {
+    const userFields = ['userId', 'clientId', 'supplierId', 'riderId', 'ownerId', 'staffId', 'partyUserId', 'originalSupplierId', 'redeemedBy', 'createdBy'];
+    const users = new Set(ids);
+    for (const key of [table, 'claims', 'orders']) for (const row of graph.finish()[key]) {
+      for (const field of userFields) if (row[field]) users.add(row[field]);
+    }
+    await readIdentity(graph, [...users]);
+  }
+  return graph.finish();
+}
+
+/** Directory responses remain unpaginated as contracted. Only matching users,
+ * their role profiles and the exact detail's private files are hydrated.
+ */
+async function readUserDirectory(graph, ids, pathname, params, role) {
+  const { loaded, read } = graph;
+  const identity = graph.finish(), raw = identity.users[0];
+  if (!raw || (role && !hasRole(identity, raw.id, role))) return identity;
+  const actor = selectActorRole(identity, raw, role || raw.role, { restrictMemberships: Boolean(role) });
+  const staff = ['ops_admin', 'super_admin'].some(role => identityHasMembership(actor, role));
+  const reviewOnly = isTestOperationsUser(identity, raw.id);
+  const target = pathname.split('/')[2];
+  if (!staff && (!target || !/\/(verification-documents|payout-account)$/.test(pathname))) return identity;
+  const directoryRole = params.get('role');
+  if (target) await read('users', 'WHERE id = ANY($1::text[])', [[...ids, target]]);
+  else await read('users', `WHERE (id = ANY($1::text[]) OR ${directoryRole ? 'id IN (SELECT user_id FROM user_role_memberships WHERE role = $2)' : 'TRUE'})
+    ${reviewOnly ? 'AND (review_data OR id = ANY($1::text[]))' : ''}`, directoryRole ? [ids, sqlReadText(directoryRole)] : [ids]);
+  const users = loaded.users.map(row => row.id);
+  await readIdentity(graph, users);
+  if (!target) {
+    if (directoryRole === 'supplier') await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [users]);
+    if (directoryRole === 'rider') await read('rider_profiles', 'WHERE user_id = ANY($1::text[])', [users]);
+    await read('founding_testers', 'WHERE client_id = ANY($1::text[])', [users]);
+  } else if (pathname.endsWith('/payout-account')) {
+    await read('supplier_profiles', 'WHERE user_id = $1', [target]);
+    await read('supplier_payout_accounts', 'WHERE supplier_id = $1', [target]);
+    await read('files', 'WHERE file_id = ANY($1::text[])', [loaded.supplier_payout_accounts.map(row => row.qr_file_id)]);
+  } else {
+    const record = graph.finish().users.find(row => row.id === target);
+    if (record?.role === 'supplier') {
+      await read('files', 'WHERE file_id = ANY($1::text[])', [record.verificationDocumentFileIds || []]);
+      await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+    }
+    if (record?.role === 'client' && !pathname.endsWith('/verification-documents')) {
+      await readClientHomeGraph(graph, [target]);
+      if (reviewOnly) {
+        // Mission progress uses approved issue decisions, whose review view
+        // also depends on the linked claim and each row's party marks.
+        await read('claims', 'WHERE id = ANY($1::text[])', [loaded.issues.map(row => row.claim_id).filter(Boolean)]);
+        await read('orders', 'WHERE id = ANY($1::text[])', [[...new Set([...loaded.orders.map(row => row.id), ...loaded.claims.map(row => row.order_id)])]]);
+        const userFields = ['userId', 'clientId', 'supplierId', 'riderId', 'ownerId', 'staffId', 'partyUserId', 'originalSupplierId', 'redeemedBy', 'createdBy'];
+        const relatedUsers = new Set(users);
+        for (const rows of Object.values(graph.finish())) if (Array.isArray(rows)) for (const row of rows) {
+          for (const field of userFields) if (row[field]) relatedUsers.add(row[field]);
+        }
+        await readIdentity(graph, [...relatedUsers]);
+      }
+    }
+  }
+  return graph.finish();
+}
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1337,7 +1436,9 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   const identityStore = graph.finish();
   const raw = identityStore.users[0];
   if (!raw || (role && !hasRole(identityStore, raw.id, role))) return identityStore;
-  const selected = role || (pathname === '/jobs' && hasRole(identityStore, raw.id, 'supplier') ? 'supplier' : raw.role);
+  const dispatch = pathname === '/dispatch/offers';
+  const selected = role || (dispatch && !['ops_admin', 'super_admin'].some(role => hasRole(identityStore, raw.id, role)) && hasRole(identityStore, raw.id, 'rider') ? 'rider' : pathname === '/jobs' && hasRole(identityStore, raw.id, 'supplier') ? 'supplier' : raw.role);
+  if (dispatch && (!hasRole(identityStore, raw.id, selected) || !['rider', 'ops_admin', 'super_admin'].includes(selected))) return identityStore;
   const actor = selectActorRole(identityStore, raw, selected, { restrictMemberships: Boolean(role) });
   const staff = ['ops_admin', 'super_admin'].some(role => identityHasMembership(actor, role));
   const reviewOnly = isTestOperationsUser(identityStore, raw.id);
@@ -1345,7 +1446,9 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   const values = [raw.id];
   let ownership = 'FALSE';
   if (hasRole(identityStore, raw.id, selected)) {
-    if (pathname === '/jobs') ownership = selected === 'supplier' ? 'supplier_id = $1' : 'FALSE';
+    if (dispatch) ownership = `((state = 'ready_for_dispatch' AND rider_id IS NULL AND review_data = $2)
+      OR (state = 'rider_assigned' AND rider_id = $1))`;
+    else if (pathname === '/jobs') ownership = selected === 'supplier' ? 'supplier_id = $1' : 'FALSE';
     else if (['ops_admin', 'super_admin'].includes(selected)) ownership = 'TRUE';
     else if (selected === 'client') ownership = 'client_id = $1';
     else if (selected === 'supplier') ownership = `(supplier_id = $1 OR (supplier_id IS NULL AND id IN
@@ -1354,8 +1457,8 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   // Keep $1 typed even on a staff/empty read, where ownership uses no parameter.
   let where = `WHERE $1::text IS NOT NULL AND (${ownership})`;
-  if (selected === 'rider' && pathname !== '/jobs' && hasRole(identityStore, raw.id, selected)) values.push(raw.reviewData === true);
-  const reviewScope = reviewOnly ? 'AND review_data' : staff && !detail && !includeReviewData ? 'AND NOT review_data' : '';
+  if (dispatch || (selected === 'rider' && pathname !== '/jobs' && hasRole(identityStore, raw.id, selected))) values.push(raw.reviewData === true);
+  const reviewScope = dispatch ? '' : reviewOnly ? 'AND review_data' : staff && !detail && !includeReviewData ? 'AND NOT review_data' : '';
   where += ` ${reviewScope}`;
   if (detail) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
   await read('orders', where, values);
@@ -1371,7 +1474,10 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   const candidates = graph.finish();
   const policyStore = reviewOnly ? testOperationsView(candidates, actor) : candidates;
-  const visible = new Set(policyStore.orders.filter(order => pathname === '/jobs'
+  const visible = new Set(policyStore.orders.filter(order => dispatch
+    ? (order.reviewData === (raw.reviewData === true) && availableDispatch(order, policyStore))
+      || (!isContainedPickup(order) && !dispatchWorkHeld(policyStore, order) && order.state === 'rider_assigned' && order.riderId === raw.id)
+    : pathname === '/jobs'
     ? order.supplierId === raw.id && supplierArtworkReleased(order)
     : canAccessOrder(policyStore, raw.id, order, { role: selected, offer: true })).map(order => order.id));
   loaded.orders = loaded.orders.filter(row => visible.has(row.id));
@@ -1441,16 +1547,19 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     let fileStore = { ...store, orders: [...store.orders, ...referenceContext.orders],
       orderJobs: [...store.orderJobs, ...referenceContext.orderJobs], orderLineItems: [...store.orderLineItems, ...referenceContext.orderLineItems] };
     if (reviewOnly) fileStore = testOperationsView(fileStore, actor);
-    else if (staff && !detail) fileStore = reviewReportView(fileStore, includeReviewData);
+    else if (staff && !detail && !dispatch) fileStore = reviewReportView(fileStore, includeReviewData);
     store.orderFileReadContext = { orders: fileStore.orders, orderJobs: fileStore.orderJobs, orderLineItems: fileStore.orderLineItems };
   }
-  if (detail && ['ops_admin', 'super_admin'].includes(selected)) {
+  if ((detail || dispatch) && ['ops_admin', 'super_admin'].includes(selected)) {
     // This existing staff-only field counts events across the reporting view,
     // not merely the opened order. Return only counts for the visible shops.
     const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
       FROM orders CROSS JOIN LATERAL jsonb_array_elements(COALESCE(NULLIF(data#>'{shopHandover,arrivedPacked}', 'null'::jsonb), '[]'::jsonb)) event
-      WHERE event->'supplierId' = ANY($1::jsonb[]) ${reviewScope}
-      GROUP BY event->'supplierId'`, [[...new Set(loaded.orders.map(row => JSON.stringify(row.supplier_id)))]]);
+      WHERE data#>'{shopHandover,arrivedPacked}' IS NOT NULL
+        AND data#>'{shopHandover,arrivedPacked}' @> ANY($2::jsonb[])
+        AND event->'supplierId' = ANY($1::jsonb[]) ${dispatch && reviewOnly ? 'AND review_data' : reviewScope}
+      GROUP BY event->'supplierId'`, [[...new Set(loaded.orders.map(row => JSON.stringify(row.supplier_id)))],
+        [...new Set(loaded.orders.map(row => JSON.stringify([{ supplierId: row.supplier_id }])))] ]);
     store.shopArrivedPackedCounts = new Map(counts.rows.map(row => [row.supplier, row.count]));
   }
   return store;
@@ -1501,6 +1610,26 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (OPS_QUEUE_READ.test(pathname)) return readOperationsQueue(graph, ids, pathname, searchParams, role);
+    if (USER_READ.test(pathname)) return readUserDirectory(graph, ids, pathname, searchParams, role);
+    if (AUDIT_READ.test(pathname)) {
+      if (pathname !== '/audit') await read('orders', 'WHERE id = $1', [pathname.split('/')[2]]);
+      return graph.finish();
+    }
+    if (STAFF_ITEM_READ.test(pathname)) {
+      let itemId;
+      try { itemId = decodeURIComponent(pathname.split('/')[3]); } catch {
+        // The legacy handler decodes inside find(): an empty catalogue returns
+        // 404, a populated one validates the path after staff authorization.
+        await read('supplier_catalog_items', 'LIMIT 1');
+        return graph.finish();
+      }
+      await read('supplier_catalog_items', 'WHERE id = $1', [sqlReadText(itemId)]);
+      await readCatalogItemContext(graph, ids);
+      // Review-only views test service and child-owner references too.
+      await readIdentity(graph, loaded.users.map(row => row.id));
+      return graph.finish();
+    }
     if (pathname === '/me/files') return readSavedFilesGraph(database, graph, ids, searchParams);
     if (isOwnCatalogReadPath(pathname)) return readOwnCatalogueRoute(database, graph, ids, pathname, searchParams, role);
     if (FILE_READ.test(pathname)) return readFileGraph(graph, ids, pathname);
@@ -1508,7 +1637,7 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (QUOTE_READ.test(pathname)) return readQuoteGraph(graph, ids, pathname, status);
-    if (pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
+    if (pathname === '/dispatch/offers' || pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
       return readOrderGraph(database, graph, pathname, { role, includeReviewData });
     } else if (pathname === '/me/home-summary') {
       await readClientHomeGraph(graph, ids);
