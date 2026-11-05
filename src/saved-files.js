@@ -16,7 +16,7 @@ export function assertLibraryClient(user) {
 }
 export function savedFilesUsage(store, user) {
   assertLibraryClient(user);
-  return { usedBytes: (store.files || []).filter(file => file.ownerId === user.id && reserved(file) && LIVE.has(file.state))
+  return { usedBytes: store.savedFilesPage?.ownerId === user.id ? store.savedFilesPage.usedBytes : (store.files || []).filter(file => file.ownerId === user.id && reserved(file) && LIVE.has(file.state))
     .reduce((sum, file) => sum + file.size, 0), limitBytes: store.settings?.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES };
 }
 export function ownLibraryFile(store, user, fileId, { savedOnly = false } = {}) {
@@ -52,7 +52,8 @@ export async function listSavedFiles({ store, user, offset = 0, storage }) {
   if (!Number.isSafeInteger(offset) || offset < 0) fail(400, 'invalid_offset', 'Use a nonnegative whole-number offset.');
   const all = (store.files || []).filter(file => file.ownerId === user.id && isSavedArtwork(file) && file.state === 'ready')
     .sort((a, b) => b.savedAt.localeCompare(a.savedAt) || a.fileId.localeCompare(b.fileId));
-  const files = await Promise.all(all.slice(offset, offset + 50).map(async file => {
+  const page = store.savedFilesPage?.ownerId === user.id && store.savedFilesPage.offset === offset ? store.savedFilesPage : null;
+  const files = await Promise.all((page ? all : all.slice(offset, offset + 50)).map(async file => {
     const result = { fileId: file.fileId, purpose: file.purpose, originalFilename: displayFilename(file.originalFilename),
       size: file.size, detectedContentType: file.detectedContentType, savedAt: file.savedAt,
       preview: publicArtworkPreview(file) ?? null, previewUrl: null, downloadUrl: null, expiresAt: null };
@@ -74,7 +75,7 @@ export async function listSavedFiles({ store, user, offset = 0, storage }) {
     }
     return result;
   }));
-  return { files, usage: savedFilesUsage(store, user), nextOffset: all.length > offset + 50 ? offset + 50 : null };
+  return { files, usage: savedFilesUsage(store, user), nextOffset: page ? page.nextOffset : all.length > offset + 50 ? offset + 50 : null };
 }
 
 export function requestAccountSavedFileDeletion(store, userId, { at, actor = null, audit }) {

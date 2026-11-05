@@ -1,4 +1,5 @@
 import { artworkFileIdsFor } from './artwork-attachments.js';
+import { parseCatalogListQuery } from './catalog-routes.js';
 import { notificationVisible, parseNotificationListLimit, canAccessOrder, hasRole } from './notifications.js';
 import { isTestOperationsUser, testOperationsView } from './test-operations.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
@@ -1049,11 +1050,72 @@ function isCatalogReadPath(pathname) {
   return CATALOG_READ.test(pathname) || ['/accepted-file-formats', '/me/catalog-preview'].includes(pathname);
 }
 
+const OWN_CATALOG_PATHS = new Set(['/listing-starters', '/me/supplier-readiness', '/me/supplier-profile',
+  '/me/shop-hours', '/me/supplier-payment-terms', '/me/supplier-services', '/me/catalog-items']);
+const OWN_SERVICE_READ = /^\/me\/supplier-services\/[^/]+(?:\/pricing)?$/;
+const OWN_ITEM_READ = /^\/me\/catalog-items\/[^/]+(?:\/(?:prep-steps|production-time-preview))?$/;
+function isOwnCatalogReadPath(pathname) {
+  return OWN_CATALOG_PATHS.has(pathname) || OWN_SERVICE_READ.test(pathname) || OWN_ITEM_READ.test(pathname);
+}
+
+/** Management uses private drafts; only readiness also evaluates approved snapshots
+ * and the shop's queue. Board search and child hydration share one snapshot.
+ */
+async function readOwnCatalogueRoute(database, graph, ids, pathname, searchParams, role) {
+  const { loaded, read } = graph;
+  if (!loaded.user_role_memberships.some(row => row.role === 'supplier') || (role && role !== 'supplier')
+      || ['suspended', 'removed'].includes(loaded.users[0]?.account_status)) return graph.finish();
+  if (pathname === '/listing-starters') {
+    const code = sqlReadText(searchParams.get('subcategoryCode'));
+    await read('taxonomy_subcategories', 'WHERE code = $1', [code]);
+    await read('listing_starters', 'WHERE subcategory_code = $1', [code]);
+    await read('listing_starter_groups', 'WHERE starter_id = ANY($1::text[])', [loaded.listing_starters.map(row => row.id)]);
+    await read('listing_starter_options', 'WHERE starter_group_id = ANY($1::text[])', [loaded.listing_starter_groups.map(row => row.id)]);
+    return graph.finish();
+  }
+  if (pathname === '/me/supplier-readiness') {
+    await readCatalogueGraph(graph, ids, { supplierIds: ids, ratings: false });
+    await read('supplier_payment_terms', 'WHERE supplier_id = ANY($1::text[])', [ids]);
+    if (['units', 'widthFeet', 'deadline'].some(key => searchParams.has(key))) await readShopWork(graph, ids);
+    return graph.finish();
+  }
+  let id;
+  try { id = decodeURIComponent(pathname.split('/')[3] || ''); } catch { return graph.finish(); }
+  if (id.includes('\0')) return graph.finish();
+  if (pathname === '/me/catalog-items' || OWN_ITEM_READ.test(pathname)) {
+    let listed;
+    if (pathname === '/me/catalog-items') {
+      let params;
+      // Route authorization must precede query-validation errors. The unchanged
+      // handler will validate again after authenticating/selecting the actor.
+      try { params = parseCatalogListQuery({ searchParams }); } catch { return graph.finish(); }
+      listed = await listOwnCatalogItems(database, { supplierId: ids[0] || null, ...params });
+    }
+    await readCatalogueGraph(graph, ids, { itemIds: listed ? listed.items.map(item => item.id) : [id], ratings: false });
+    if (pathname.endsWith('/production-time-preview')) await readShopWork(graph, loaded.supplier_profiles.map(row => row.user_id));
+    const store = graph.finish();
+    if (listed) Object.defineProperty(store, 'listOwnCatalogItems', { value: async () => listed });
+    return store;
+  }
+  const serviceDetail = OWN_SERVICE_READ.test(pathname);
+  if (pathname === '/me/supplier-services' || serviceDetail) {
+    await read('supplier_services', serviceDetail ? 'WHERE id = $1' : 'WHERE supplier_id = ANY($1::text[])', [serviceDetail ? id : ids]);
+    for (const name of ['supplier_service_file_formats', 'supplier_service_price_tiers']) {
+      await read(name, 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
+    }
+  }
+  await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [[...ids, ...loaded.supplier_services.map(row => row.supplier_id)]]);
+  await read('platform_settings', 'WHERE singleton');
+  if (pathname === '/me/supplier-profile') await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [ids]);
+  if (pathname === '/me/supplier-payment-terms') await read('supplier_payment_terms', 'WHERE supplier_id = ANY($1::text[])', [ids]);
+  return graph.finish();
+}
+
 /** Only catalogue composites and their eligibility, rating and photo facts.
  * Approved snapshots can retain photos and a service absent from the draft.
  * Keep JS visibility/cursor policy authoritative, including review-only shops.
  */
-async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null } = {}) {
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null, ratings = true } = {}) {
   const { loaded, read } = graph;
   if (fileId) {
     await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
@@ -1086,9 +1148,11 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
     ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
   await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
-  await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
-  // Ratings exclude marked orders even if the supplier itself is unmarked.
-  await read('orders', 'WHERE id = ANY($1::text[])', [loaded.shop_reviews.map(row => row.order_id)]);
+  if (ratings) {
+    await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+    // Ratings exclude marked orders even if the supplier itself is unmarked.
+    await read('orders', 'WHERE id = ANY($1::text[])', [loaded.shop_reviews.map(row => row.order_id)]);
+  }
   await readIdentity(graph, [...new Set([...owners, ...loaded.shop_reviews.map(row => row.client_id)])]);
   for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories',
     'taxonomy_materials', 'taxonomy_finishes', 'accepted_file_formats']) await read(name, '');
@@ -1195,6 +1259,27 @@ async function readMatchGraph(graph, actorIds, pathname, params) {
 
 const FILE_READ = /^\/files\/[^/]+(?:\/(?:download-url|content))?$/;
 
+// Match Boolean(jsonValue) for the retained JSONB flags, including legacy false,
+// zero and empty-string values. The route remains responsible for authorization.
+const jsonTruthy = field => `(data->'${field}' IS NOT NULL AND data->'${field}' NOT IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '\"\"'::jsonb))`;
+async function readSavedFilesGraph(database, graph, ids, searchParams) {
+  const offset = Number(searchParams.get('offset') || 0);
+  if (!Number.isSafeInteger(offset) || offset < 0 || !ids.length) return graph.finish();
+  await graph.read('platform_settings', 'WHERE singleton');
+  const saved = jsonTruthy('savedAt');
+  const ownArtwork = "owner_id = $1 AND purpose IN ('artwork', 'mockup')";
+  const usage = await database.query(`SELECT COALESCE(sum(size_bytes), 0) AS bytes FROM files
+    WHERE ${ownArtwork} AND state IN ('pending_upload', 'ready', 'delete_pending')
+    AND (${saved} OR ${jsonTruthy('saveToMyFilesRequestedAt')})`, [ids[0]]);
+  await graph.read('files', `WHERE ${ownArtwork} AND state = 'ready' AND ${saved}
+    ORDER BY (data->>'savedAt') COLLATE "en-x-icu" DESC, file_id COLLATE "en-x-icu" ASC LIMIT 51 OFFSET $2`, [ids[0], offset]);
+  const hasMore = graph.loaded.files.length > 50;
+  graph.loaded.files = graph.loaded.files.slice(0, 50);
+  const store = graph.finish();
+  store.savedFilesPage = { ownerId: ids[0], offset, nextOffset: hasMore ? offset + 50 : null, usedBytes: Number(usage.rows[0].bytes) };
+  return store;
+}
+
 /** Authorize one ready file using the unchanged purpose/reference policies.
  * Chat references snapshot their orderId separately from their message id.
  * Load all references, including legacy line scope and refund ownership.
@@ -1241,7 +1326,7 @@ async function readFileGraph(graph, actorIds, pathname) {
 const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
 const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
-export function isHotReadPath(pathname) { return HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
+export function isHotReadPath(pathname) { return pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
 
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
@@ -1416,6 +1501,8 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (pathname === '/me/files') return readSavedFilesGraph(database, graph, ids, searchParams);
+    if (isOwnCatalogReadPath(pathname)) return readOwnCatalogueRoute(database, graph, ids, pathname, searchParams, role);
     if (FILE_READ.test(pathname)) return readFileGraph(graph, ids, pathname);
     if (MATCH_READ_PATHS.has(pathname)) return readMatchGraph(graph, ids, pathname, searchParams);
     if (isCartReadPath(pathname)) return readCartGraph(graph, ids, pathname);
