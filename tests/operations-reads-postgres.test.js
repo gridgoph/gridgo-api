@@ -7,6 +7,17 @@ import { parityApiForTest } from './fixtures/read-parity.js';
 import { setupOperationsReads } from './fixtures/operations-reads.js';
 const skip = !process.env.DATABASE_URL;
 
+// ANY array binds describe membership, not order. Keep every other bind and
+// SQL/row-count field strict, and sort copies so instrumentation is unchanged.
+function comparableQueries(queries) {
+  return queries.map(query => {
+    const setParameters = new Set([...query.sql.matchAll(/\bANY\(\$(\d+)::(?:text|jsonb)\[\]\)/g)]
+      .map(match => Number(match[1])));
+    return { ...query, values: query.values?.map((value, index) =>
+      setParameters.has(index + 1) && Array.isArray(value) ? [...value].sort() : value) };
+  });
+}
+
 test('Operations reads preserve exact HTTP bytes and headers across roles, filters, private evidence and review views', { skip }, async t => {
   const database = createDatabase(process.env); t.after(() => database.close());
   const fixture = await setupOperationsReads(database);
@@ -88,17 +99,35 @@ test('Operations scoped reads reject saves and keep identical SQL/rows under unr
   const paths = ['/dispatch/offers', '/claims?orderId=a_active', '/claims/claim_a_active', '/issues?orderId=a_active', '/issues/issue_a_active',
     '/escalations?orderId=a_active', '/users?role=supplier', '/users/client', '/users/supplier/verification-documents', '/users/supplier/payout-account', '/audit', '/orders/a_active/audit', '/ops/catalog-items/item_supplier'];
   const budgets = [34, 6, 6, 7, 7, 6, 10, 24, 10, 11, 4, 5, 27];
-  async function sample() {
+  let beforeClientOrderIds;
+  async function sample(reverseClientOrders = false) {
     const out = {};
+    let reordered = 0;
+    const sampledDatabase = { ...database, query: async (sql, values) => {
+      const result = await database.query(sql, values);
+      if (!sql.includes('FROM orders WHERE client_id = ANY($1::text[])')) return result;
+      // SQL has no ORDER BY here. Force opposite valid result orders so the
+      // growth proof cannot depend on PostgreSQL choosing the same scan plan.
+      const rows = [...result.rows].sort((a, b) => a.id.localeCompare(b.id));
+      if (reverseClientOrders) rows.reverse();
+      const ids = rows.map(row => row.id);
+      assert.ok(ids.length > 1);
+      if (reverseClientOrders) assert.notDeepEqual(ids, beforeClientOrderIds);
+      else beforeClientOrderIds = ids;
+      reordered++;
+      return { ...result, rows };
+    } };
+
     for (const path of paths) {
       const url = new URL(path, 'http://api.test'); assert.ok(isHotReadPath(url.pathname));
-      const { db, queries } = instrument(database);
+      const { db, queries } = instrument(sampledDatabase);
       const store = await loadHotReadStore(db, 'clerk_ops', url.pathname, { searchParams: url.searchParams });
       await assert.rejects(database.transaction(() => saveStore(database, store)), /read-only/);
       assert.ok(queries.length <= budgets[paths.indexOf(path)], `${path}: query budget`);
       assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox)\b/.test(q.sql)));
-      out[path] = { queries, projection: JSON.stringify(store, (_, value) => value instanceof Map ? [...value] : value) };
+      out[path] = { queries: comparableQueries(queries), projection: JSON.stringify(store, (_, value) => value instanceof Map ? [...value] : value) };
     }
+    assert.equal(reordered, 1, 'forced the client order selection once per sample');
     return out;
   }
   const before = await sample();
@@ -110,7 +139,7 @@ test('Operations scoped reads reject saves and keep identical SQL/rows under unr
   for (const table of ['claims', 'issues', 'escalations']) await database.query(`INSERT INTO ${table} SELECT
     (jsonb_populate_record(NULL::${table}, to_jsonb(q) || jsonb_build_object('id','growth_'||i,'order_id','growth_'||i,'claim_id',NULL,'position',1000+i))).*
     FROM ${table} q CROSS JOIN generate_series(1,1000) i WHERE q.id=$1`, [`${table === 'claims' ? 'claim' : table === 'issues' ? 'issue' : 'escalation'}_unrelated`]);
-  assert.deepEqual(await sample(), before);
+  assert.deepEqual(await sample(true), before);
   for (const [path, { queries }] of Object.entries(before)) t.diagnostic(`${path}: ${queries.length} SELECTs / ${queries.reduce((n,q) => n+q.rows,0)} rows`);
 });
 
