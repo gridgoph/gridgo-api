@@ -49,6 +49,20 @@ async function fixture() {
     // Active shop work for the production lifecycle probe; reminders and lapses stay not yet due.
     store.users.push({ id: 'perf_supplier', clerkUserId: 'clerk_perf_supplier', email: 'perf_supplier@example.test', name: 'perf_supplier', role: 'supplier', verificationStatus: 'approved', createdAt: at });
     store.userRoleMemberships.push({ userId: 'perf_supplier', role: 'supplier', createdAt: at });
+    const example = committedOrderFixture();
+    store.supplierProfiles.push({ ...example.supplierProfiles[0], userId: 'perf_supplier' });
+    store.approvalCases.push({ ...example.approvalCases[0], id: 'perf_approval', userId: 'perf_supplier' });
+    store.supplierServices.push({ ...example.supplierServices[0], id: 'perf_service', supplierId: 'perf_supplier' });
+    store.supplierServiceFileFormats.push({ supplierServiceId: 'perf_service', formatCode: 'pdf' });
+    const subcategory = store.taxonomy.subcategories.find(row => row.categoryCode === example.supplierServices[0].categoryCode).code;
+    for (let i = 0; i < 60; i++) {
+      store.files.push({ ...example.files[0], fileId: `perf_photo_${i}`, ownerId: 'perf_supplier', objectKey: `private/perf_photo_${i}` });
+      store.catalogItems.push({ ...example.catalogItems[0], id: `perf_item_${i}`, supplierId: 'perf_supplier',
+        supplierServiceId: 'perf_service', subcategoryCode: subcategory, sortOrder: i });
+      store.catalogItemPhotos.push({ catalogItemId: `perf_item_${i}`, fileId: `perf_photo_${i}`, sortOrder: 0, createdAt: at });
+      store.files.push({ ...example.files[0], fileId: `perf_saved_${i}`, ownerId: 'perf_client', purpose: 'artwork',
+        savedAt: at, objectKey: `private/perf_saved_${i}` });
+    }
     const ahead = new Date(Date.parse(at) + 7 * 86400000).toISOString();
     const committed = committedOrderFixture().orders[0];
     for (let i = 0; i < 20; i++) {
@@ -84,6 +98,9 @@ async function readerRows() {
     realtime: await count(db => loadDeliveryStore(db, { userIds: ['perf_ops'] })),
     push: await count(db => loadPushDeliveryStore(db, [{ user_id: 'perf_ops', notification_id: 'perf_notice_1', device_id: 'perf_device' }])),
     productionSweep: await count(loadProductionSweepStore),
+    supplierBoard: await count(db => loadHotReadStore(db, 'clerk_perf_supplier', '/me/catalog-items')),
+    supplierReadiness: await count(db => loadHotReadStore(db, 'clerk_perf_supplier', '/me/supplier-readiness')),
+    savedFiles: await count(db => loadHotReadStore(db, 'clerk_perf_client', '/me/files')),
   };
 }
 /** The production penalty and inactivity sweeps' per-tick decision, before
@@ -113,6 +130,11 @@ async function measure(scale) {
   // real RSA/issuer/azp verification. Never contact a real identity provider.
   const clerk = http.createServer((req, res) => { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end('{"errors":[{"code":"not_found"}]}'); });
   clerk.listen(0, '127.0.0.1'); await once(clerk, 'listening');
+  const storage = http.createServer((req, res) => {
+    res.writeHead(req.method === 'HEAD' ? 200 : 404, { 'Content-Length': req.method === 'HEAD' ? '100' : '0', ETag: 'benchmark' });
+    res.end();
+  });
+  storage.listen(0, '127.0.0.1'); await once(storage, 'listening');
   // Optional baseline application, loaded from Git without another checkout or
   // modifying the worktree. Load all src modules at that ref, including readers.
   const hook = `import { registerHooks } from 'node:module';
@@ -127,7 +149,10 @@ async function measure(scale) {
       return {format:'module',source,shortCircuit:true};
     }});`;
   const args = process.env.PERF_SERVER_REF ? ['--import', `data:text/javascript,${encodeURIComponent(hook)}`, 'src/server.js'] : ['src/server.js'];
-  const child = spawn(process.execPath, args, { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test', CLERK_SECRET_KEY: 'test-only-placeholder', CLERK_ISSUER: issuer, CLERK_AUTHORIZED_PARTIES: party, CLERK_JWT_KEY: publicKey.export({ type: 'spki', format: 'pem' }), CLERK_API_URL: `http://127.0.0.1:${clerk.address().port}`, GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000', GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: '0', GRIDGO_FCM_SERVICE_ACCOUNT_FILE: '', GRIDGO_APNS_KEY_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, args, { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test', CLERK_SECRET_KEY: 'test-only-placeholder', CLERK_ISSUER: issuer, CLERK_AUTHORIZED_PARTIES: party, CLERK_JWT_KEY: publicKey.export({ type: 'spki', format: 'pem' }), CLERK_API_URL: `http://127.0.0.1:${clerk.address().port}`, GRIDGO_LIFECYCLE_INTERVAL_MS: '3600000', GRIDGO_PUSH_TOKEN_CHECK_INTERVAL_MS: '0', GRIDGO_FCM_SERVICE_ACCOUNT_FILE: '', GRIDGO_APNS_KEY_FILE: '',
+    MINIO_ENDPOINT: `http://127.0.0.1:${storage.address().port}`, MINIO_PUBLIC_URL: 'https://storage.example.invalid',
+    MINIO_ACCESS_KEY: 'benchmark', MINIO_SECRET_KEY: 'benchmark-test-only', MINIO_BUCKET: 'benchmark',
+  }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   try {
     for (let i = 0; ; i++) {
@@ -137,8 +162,10 @@ async function measure(scale) {
     }
     // Wait for startup lifecycle work so the sample excludes startup contention.
     await new Promise(resolve => setTimeout(resolve, 1000));
-    const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/me', '/auth/me/client', '/auth/me?client'];
-    const subjectFor = path => ['/me', '/auth/me/client', '/auth/me?client'].includes(path) ? 'clerk_perf_client' : 'clerk_perf_ops';
+    const supplierPaths = ['/me/catalog-items', '/me/supplier-readiness', '/me/supplier-profile', '/me/shop-hours', '/me/supplier-services'];
+    const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/me', '/auth/me/client', '/auth/me?client', '/me/files', ...supplierPaths];
+    const subjectFor = path => supplierPaths.includes(path) ? 'clerk_perf_supplier'
+      : ['/me', '/auth/me/client', '/auth/me?client', '/me/files'].includes(path) ? 'clerk_perf_client' : 'clerk_perf_ops';
     for (const path of paths) {
       const warm = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token(subjectFor(path))}` } });
       assert.equal(warm.status, 200, `${path}: ${await warm.text()}`);
@@ -155,15 +182,22 @@ async function measure(scale) {
       assert.equal(values.length, samples, `request log samples ${path}`);
       timings[path] = { medianMs: values[Math.floor(values.length / 2)], p95Ms: values[Math.ceil(values.length * .95) - 1] };
     }
-    console.log(JSON.stringify({ label: process.env.PERF_LABEL || 'current', serverRef: process.env.PERF_SERVER_REF || 'working-tree', scale, rowsPerHistoryTable: baseRows * scale, timings, lifecycleDecision: await lifecycleTimings(), readerRef: 'working-tree', reads: await readerRows() }));
+    const report = { label: process.env.PERF_LABEL || 'current', serverRef: process.env.PERF_SERVER_REF || 'working-tree', scale,
+      rowsPerHistoryTable: baseRows * scale, timings, lifecycleDecision: await lifecycleTimings(), readerRef: 'working-tree', reads: await readerRows() };
+    console.log(JSON.stringify(report));
     if (process.env.PERF_PRINT_LOGS === '1') console.log(output);
+    return report;
   } finally {
     // Only the child PID created by this process is signalled.
     if (child.exitCode == null && child.signalCode == null) { child.kill('SIGTERM'); await once(child, 'exit'); }
     await new Promise(resolve => clerk.close(resolve));
+    await new Promise(resolve => storage.close(resolve));
   }
 }
 try {
-  await fixture(); await grow(1, baseRows); await measure(1);
-  await grow(baseRows + 1, baseRows * 10); await measure(10);
+  await fixture(); await grow(1, baseRows); const before = await measure(1);
+  await grow(baseRows + 1, baseRows * 10); const after = await measure(10);
+  for (const name of Object.keys(before.reads).filter(name => name !== 'full')) {
+    assert.deepEqual(after.reads[name], before.reads[name], `${name}: history growth changed query/row budget`);
+  }
 } finally { await database.close(); }

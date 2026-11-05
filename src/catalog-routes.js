@@ -290,7 +290,7 @@ function parseHuntCursor(value) {
   }
 }
 
-function parseCatalogListQuery(url) {
+export function parseCatalogListQuery(url) {
   let q = url.searchParams.has("q") ? String(url.searchParams.get("q") ?? "") : "";
   if (q.includes("\0")) fail(400, "invalid_catalog_query", "q cannot contain a NUL character.", { field: "q" });
   q = q.trim();
