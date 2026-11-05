@@ -23,6 +23,9 @@ const database = createDatabase(process.env);
 const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const issuer = 'https://benchmark.clerk.accounts.dev', party = 'http://localhost:19006';
 const samples = Number(process.env.PERF_SAMPLES || 10);
+const operationsPaths = ['/dispatch/offers', '/claims', '/claims/perf_claim', '/issues', '/issues/perf_issue', '/escalations',
+  '/users', '/users?role=supplier', '/users/perf_client', '/users/perf_supplier/verification-documents', '/users/perf_supplier/payout-account',
+  '/audit?action=order.production_override', '/orders/perf_offer/audit', '/ops/catalog-items/perf_item_0'];
 const baseRows = Number(process.env.PERF_BASE_ROWS || 10000);
 function token(subject = 'clerk_perf_ops') {
   const now = Math.floor(Date.now() / 1000);
@@ -69,6 +72,15 @@ async function fixture() {
       store.orders.push({ ...structuredClone(committed), id: `perf_active_${i}`, clientId: 'perf_client', supplierId: 'perf_supplier',
         commercialCommittedAt: at, readyBy: ahead, createdAt: at, updatedAt: at, timeline: [{ at, state: 'production', by: 'perf_supplier' }] });
     }
+    store.orders.push({ ...structuredClone(committed), id: 'perf_offer', clientId: 'perf_client', supplierId: 'perf_supplier',
+      state: 'ready_for_dispatch', createdAt: at, updatedAt: at, readyBy: ahead });
+    store.orderJobs.push({ ...example.orderJobs[0], id: 'perf_job', orderId: 'perf_offer', supplierId: 'perf_supplier', state: 'ready_for_dispatch' });
+    store.orderLineItems.push({ ...example.orderLineItems[0], id: 'perf_line', jobId: 'perf_job', orderId: 'perf_offer',
+      sourceCatalogItemId: 'perf_item_0', sourceSupplierServiceId: 'perf_service' });
+    store.claims.push({ id: 'perf_claim', orderId: 'perf_active_0', status: 'open', reason: 'Synthetic claim', createdAt: at, updatedAt: at });
+    store.issues.push({ id: 'perf_issue', orderId: 'perf_active_0', clientId: 'perf_client', claimId: 'perf_claim',
+      kind: 'material', status: 'open', description: 'Synthetic issue', createdAt: at, updatedAt: at });
+    store.escalations.push({ id: 'perf_escalation', orderId: 'perf_active_0', riderId: 'perf_rider', status: 'open', createdAt: at, updatedAt: at });
     store.deviceTokens.push({ id: 'perf_device', userId: 'perf_ops', token: 'perf_token', platform: 'android', createdAt: at, updatedAt: at });
     await saveStore(database, store);
   });
@@ -90,6 +102,11 @@ async function readerRows() {
     const db = { ...database, query: async (...args) => { const r = await database.query(...args); rows += r.rows.length; queries++; return r; } };
     await fn(db); return { rows, queries };
   }
+  const operations = {};
+  for (const path of operationsPaths) {
+    const url = new URL(path, 'http://benchmark.invalid');
+    operations[path] = await count(db => loadHotReadStore(db, 'clerk_perf_ops', url.pathname, { searchParams: url.searchParams }));
+  }
   return {
     full: await count(loadStore),
     settings: await count(db => loadHotReadStore(db, 'clerk_perf_ops', '/settings')),
@@ -100,6 +117,7 @@ async function readerRows() {
     productionSweep: await count(loadProductionSweepStore),
     supplierBoard: await count(db => loadHotReadStore(db, 'clerk_perf_supplier', '/me/catalog-items')),
     supplierReadiness: await count(db => loadHotReadStore(db, 'clerk_perf_supplier', '/me/supplier-readiness')),
+    ...operations,
     savedFiles: await count(db => loadHotReadStore(db, 'clerk_perf_client', '/me/files')),
   };
 }
@@ -163,7 +181,7 @@ async function measure(scale) {
     // Wait for startup lifecycle work so the sample excludes startup contention.
     await new Promise(resolve => setTimeout(resolve, 1000));
     const supplierPaths = ['/me/catalog-items', '/me/supplier-readiness', '/me/supplier-profile', '/me/shop-hours', '/me/supplier-services'];
-    const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/me', '/auth/me/client', '/auth/me?client', '/me/files', ...supplierPaths];
+    const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/me', '/auth/me/client', '/auth/me?client', '/me/files', ...supplierPaths, ...operationsPaths];
     const subjectFor = path => supplierPaths.includes(path) ? 'clerk_perf_supplier'
       : ['/me', '/auth/me/client', '/auth/me?client', '/me/files'].includes(path) ? 'clerk_perf_client' : 'clerk_perf_ops';
     for (const path of paths) {
